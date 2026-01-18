@@ -54,4 +54,4 @@
 
 | ID   | Title | Status | Plan | Last | Notes |
 |-----:|-------|--------|------|------|-------|
-| 0001 | TelevyBackup MVP（Telegram 存储 + 差异备份） | 已完成 | `0001:telegram-backup-mvp/PLAN.md` | 2026-01-19 | 实现分支：`feat/0001-m3-backup-pipeline` |
+| 0001 | TelevyBackup MVP（Telegram 存储 + 差异备份） | 已完成 | `0001:telegram-backup-mvp/PLAN.md` | 2026-01-19 | 实现分支：`feat/0001-telegram-backup-mvp` |
