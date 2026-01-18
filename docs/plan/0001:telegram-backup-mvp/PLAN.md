@@ -90,7 +90,6 @@
 - 断点续传：任务中断/重启后可继续（至少做到“已上传 chunk 不重复上传”）。
 - 限速与并发：可配置并发数与节流（避免触发 Telegram 风控）。
 - 保留策略：必须提供可配置的“保留最近 N 个快照”策略；删除快照不做远端 chunk GC（只影响本地可见性）。
- - 保留策略：必须提供可配置的“保留最近 N 个快照”策略；删除快照不做远端 chunk GC（只影响本地可见性）。
 
 ### Non-goals（明确不做）
 
@@ -143,7 +142,9 @@
 - Given 网络波动或 Telegram 限速，When 备份进行中发生失败，Then 任务可重试并在 UI 展示“可重试/不可重试”的错误原因。
 - Given 任务被用户取消，When 点击取消，Then 任务进入 `Cancelled` 状态并释放资源；再次运行不会重复上传已存在 chunk。
 - Given 索引缺失或损坏，When 进行恢复/校验，Then 明确报错并提供可操作的修复动作（例如“重新下载索引”或“从另一个 snapshot 恢复”）。
-- Given 索引缺失或损坏，When 进行恢复/校验，Then 明确报错并提供可操作的修复动作（例如“重新下载索引”或“从另一个 snapshot 恢复”）。
+- Given 缺失任意一个 index part，When 执行 verify，Then 报错包含可定位信息（至少包含 `snapshot_id` 与缺失的 `part_no`），并标记为不可自动修复。
+- Given 任意一个 chunk 缺失，When 执行 verify，Then 报错包含缺失的 `chunk_hash`，并标记为可重试（网络/限速）或不可重试（远端确实缺失）两类之一。
+- Given chunk hash 不一致（密钥不匹配或数据损坏），When 执行 verify，Then 报错并标记为不可重试。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -182,7 +183,7 @@
 - [ ] M4: 恢复/校验 MVP（fetch index → fetch chunks → reassemble → verify）
 - [ ] M5: UI MVP（任务列表、进度、错误、统计、基础设置）
 - [ ] M6: 调度与保留策略（小时/天触发；GC/保留）
-- [ ] M7: 打包与发布准备（签名/更新策略另起计划或在此补齐）
+- [ ] M7: 打包与发布（brew 安装 + `brew services` 管理 + 升级不丢数据）
 
 ## 方案概述（Approach, high-level）
 
@@ -207,6 +208,17 @@
 落地方式（A, chosen）：
 
 - A) `brew services start televybackupd`：常驻 daemon 进程，进程内用定时器触发备份（优点：统一管理/状态可查询；缺点：需要常驻）。
+
+## 安装与发布（Homebrew, required）
+
+目标：提供一个最小可用的“安装 + 服务管理 + 升级不破坏数据”的闭环，与本计划的调度选型一致（用户级 `brew services` / LaunchAgent）。
+
+### MUST
+
+- 提供 brew 安装方式：formula（后台 daemon）+ cask（GUI app）。
+- `brew services start` 能启动后台（用户级），并能按 schedule 触发一次备份（以本地 tasks/snapshots 可追溯为准）。
+- 升级后不丢数据：SQLite / config 保持可读；Keychain secrets 不需要重新输入（除非用户主动擦除）。
+- 日志路径与数据目录路径固定且可在文档中明确（不得泄露 secrets）。
 
 ## 风险与开放问题（Risks & Open Questions）
 
