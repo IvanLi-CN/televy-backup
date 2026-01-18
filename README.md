@@ -1,24 +1,14 @@
 # TelevyBackup
 
-Tauri desktop app for backup indexing and sync.
+macOS menu bar backup app + Rust backend (work in progress).
 
 ## Prerequisites
 
 - Rust (stable)
-- Bun
+- Xcode (for macOS GUI)
 
 ## Development
 
-Install JS deps:
+This repo currently contains an early Tauri scaffold (`web/`, `src-tauri/`). The current direction is **native macOS GUI** + **Rust daemon/CLI**.
 
-```bash
-bun install
-```
-
-Run desktop app (starts Vite dev server automatically):
-
-```bash
-bunx tauri dev
-```
-
-Dev server default URL: `http://localhost:51731`
+Docs: `docs/requirements.md`, `docs/design/ui/README.md`
