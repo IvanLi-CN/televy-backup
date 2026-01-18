@@ -54,4 +54,4 @@
 
 | ID   | Title | Status | Plan | Last | Notes |
 |-----:|-------|--------|------|------|-------|
-| 0001 | TelevyBackup MVP（Telegram 存储 + 差异备份） | 部分完成（5/7） | `0001:telegram-backup-mvp/PLAN.md` | 2026-01-19 | 已冻结：Bot API + 私聊 Bot + 索引分片加密上传 + macOS Keychain + `brew services`（用户级） |
+| 0001 | TelevyBackup MVP（Telegram 存储 + 差异备份） | 部分完成（6/7） | `0001:telegram-backup-mvp/PLAN.md` | 2026-01-19 | 已冻结：Bot API + 私聊 Bot + 索引分片加密上传 + macOS Keychain + `brew services`（用户级） |

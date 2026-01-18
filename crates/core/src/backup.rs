@@ -57,6 +57,7 @@ pub struct BackupConfig {
     pub chunking: ChunkingConfig,
     pub master_key: [u8; 32],
     pub snapshot_id: Option<String>,
+    pub keep_last_snapshots: u32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -88,6 +89,11 @@ pub async fn run_backup_with<S: Storage>(
     options: BackupOptions<'_>,
 ) -> Result<BackupResult> {
     config.chunking.validate()?;
+    if config.keep_last_snapshots < 1 {
+        return Err(Error::InvalidConfig {
+            message: "keep_last_snapshots must be >= 1".to_string(),
+        });
+    }
     if !config.source_path.is_dir() {
         return Err(Error::InvalidConfig {
             message: "source_path must be an existing directory".to_string(),
@@ -332,7 +338,78 @@ pub async fn run_backup_with<S: Storage>(
     let manifest = upload_index(&pool, storage, &config, &snapshot_id).await?;
     result.index_parts = manifest.parts.len() as u64;
 
+    apply_retention(&pool, &config.source_path, config.keep_last_snapshots).await?;
+
     Ok(result)
+}
+
+async fn apply_retention(pool: &SqlitePool, source_path: &Path, keep_last_snapshots: u32) -> Result<()> {
+    let source = path_to_utf8(source_path)?;
+    let rows = sqlx::query(
+        r#"
+        SELECT snapshot_id
+        FROM snapshots
+        WHERE source_path = ?
+        ORDER BY created_at DESC
+        LIMIT -1 OFFSET ?
+        "#,
+    )
+    .bind(source)
+    .bind(keep_last_snapshots as i64)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    for row in rows {
+        let snapshot_id: String = row.get("snapshot_id");
+
+        sqlx::query(
+            r#"
+            DELETE FROM file_chunks
+            WHERE file_id IN (SELECT file_id FROM files WHERE snapshot_id = ?)
+            "#,
+        )
+        .bind(&snapshot_id)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query("DELETE FROM files WHERE snapshot_id = ?")
+            .bind(&snapshot_id)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM remote_index_parts WHERE snapshot_id = ?")
+            .bind(&snapshot_id)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM remote_indexes WHERE snapshot_id = ?")
+            .bind(&snapshot_id)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM tasks WHERE snapshot_id = ?")
+            .bind(&snapshot_id)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM snapshots WHERE snapshot_id = ?")
+            .bind(&snapshot_id)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("UPDATE snapshots SET base_snapshot_id = NULL WHERE base_snapshot_id = ?")
+            .bind(&snapshot_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+
+    Ok(())
 }
 
 async fn latest_snapshot_for_source(

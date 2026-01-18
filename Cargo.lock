@@ -4327,6 +4327,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "televybackupd"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "keyring",
+ "serde",
+ "televy_backup_core",
+ "tokio",
+ "toml 0.8.2",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -41,6 +41,7 @@ async fn restore_and_verify_snapshot_from_remote_index() {
             },
             master_key,
             snapshot_id: None,
+            keep_last_snapshots: 10,
         },
     )
     .await
@@ -128,6 +129,7 @@ async fn verify_fails_when_any_chunk_missing() {
             },
             master_key,
             snapshot_id: None,
+            keep_last_snapshots: 10,
         },
     )
     .await

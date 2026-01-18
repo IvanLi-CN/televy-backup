@@ -335,6 +335,7 @@ async fn backup_start(
             },
             master_key,
             snapshot_id: Some(snapshot_id2.clone()),
+            keep_last_snapshots: settings.retention.keep_last_snapshots,
         };
 
         let res = televy_backup_core::run_backup_with(
