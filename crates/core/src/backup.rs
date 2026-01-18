@@ -2,12 +2,12 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use fastcdc::v2020::StreamCDC;
-use serde::Serialize;
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use walkdir::WalkDir;
 
 use crate::crypto::encrypt_framed;
 use crate::index_db::open_index_db;
+use crate::index_manifest::{IndexManifest, IndexManifestPart, index_part_aad};
 use crate::storage::Storage;
 use crate::{Error, Result};
 
@@ -288,24 +288,6 @@ async fn chunk_object_exists(pool: &SqlitePool, provider: &str, chunk_hash: &str
     Ok(row.is_some())
 }
 
-#[derive(Debug, Serialize)]
-struct IndexManifest {
-    version: u8,
-    snapshot_id: String,
-    hash_alg: &'static str,
-    enc_alg: &'static str,
-    compression: &'static str,
-    parts: Vec<IndexManifestPart>,
-}
-
-#[derive(Debug, Serialize)]
-struct IndexManifestPart {
-    no: u32,
-    size: usize,
-    hash: String,
-    object_id: String,
-}
-
 async fn upload_index<S: Storage>(
     pool: &SqlitePool,
     storage: &S,
@@ -316,14 +298,15 @@ async fn upload_index<S: Storage>(
     // Note: remote_index_* tables are local cache and may be written after upload.
     let db_bytes = std::fs::read(&config.db_path)?;
     let compressed = zstd::stream::encode_all(db_bytes.as_slice(), 0)?;
-    let encrypted = encrypt_framed(&config.master_key, snapshot_id.as_bytes(), &compressed)?;
 
     let mut parts = Vec::new();
-    for (no, part) in encrypted.chunks(INDEX_PART_BYTES).enumerate() {
+    for (no, part_plain) in compressed.chunks(INDEX_PART_BYTES).enumerate() {
         let part_no = no as u32;
-        let part_hash = blake3::hash(part).to_hex().to_string();
+        let aad = index_part_aad(snapshot_id, part_no);
+        let part_enc = encrypt_framed(&config.master_key, aad.as_bytes(), part_plain)?;
+        let part_hash = blake3::hash(&part_enc).to_hex().to_string();
         let filename = format!("index-{snapshot_id}.sqlite.zst.enc.part-{part_no:06}.bin");
-        let object_id = storage.upload_document(&filename, part.to_vec()).await?;
+        let object_id = storage.upload_document(&filename, part_enc.clone()).await?;
 
         sqlx::query(
             r#"
@@ -335,14 +318,14 @@ async fn upload_index<S: Storage>(
         .bind(part_no as i64)
         .bind(storage.provider())
         .bind(&object_id)
-        .bind(part.len() as i64)
+        .bind(part_enc.len() as i64)
         .bind(&part_hash)
         .execute(pool)
         .await?;
 
         parts.push(IndexManifestPart {
             no: part_no,
-            size: part.len(),
+            size: part_enc.len(),
             hash: part_hash,
             object_id,
         });
@@ -351,9 +334,9 @@ async fn upload_index<S: Storage>(
     let manifest = IndexManifest {
         version: 1,
         snapshot_id: snapshot_id.to_string(),
-        hash_alg: "blake3",
-        enc_alg: "xchacha20poly1305",
-        compression: "zstd",
+        hash_alg: "blake3".to_string(),
+        enc_alg: "xchacha20poly1305".to_string(),
+        compression: "zstd".to_string(),
         parts,
     };
     let manifest_json = serde_json::to_vec(&manifest).map_err(|_| Error::InvalidConfig {

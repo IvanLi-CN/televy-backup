@@ -16,6 +16,11 @@ pub trait Storage {
         filename: &'a str,
         bytes: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
+
+    fn download_document<'a>(
+        &'a self,
+        object_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +108,80 @@ impl Storage for TelegramBotApiStorage {
             Ok(file_id)
         })
     }
+
+    fn download_document<'a>(
+        &'a self,
+        object_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        Box::pin(async move {
+            let url = format!(
+                "https://api.telegram.org/bot{}/getFile",
+                self.config.bot_token
+            );
+            let res = self
+                .client
+                .get(url)
+                .query(&[("file_id", object_id)])
+                .send()
+                .await
+                .map_err(|e| Error::Telegram {
+                    message: format!("getFile request failed: {e}"),
+                })?;
+
+            let status = res.status();
+            let body = res.text().await.map_err(|e| Error::Telegram {
+                message: format!("getFile read response failed: {e}"),
+            })?;
+
+            if !status.is_success() {
+                return Err(Error::Telegram {
+                    message: format!("getFile http {status}: {body}"),
+                });
+            }
+
+            let parsed: TelegramResponse<TelegramGetFileResult> = serde_json::from_str(&body)
+                .map_err(|e| Error::Telegram {
+                    message: format!("getFile invalid json: {e}; body={body}"),
+                })?;
+
+            if !parsed.ok {
+                return Err(Error::Telegram {
+                    message: parsed
+                        .description
+                        .unwrap_or_else(|| "telegram returned ok=false".to_string()),
+                });
+            }
+
+            let file_path = parsed.result.file_path.ok_or_else(|| Error::Telegram {
+                message: "getFile missing result.file_path".to_string(),
+            })?;
+
+            let download_url = format!(
+                "https://api.telegram.org/file/bot{}/{}",
+                self.config.bot_token, file_path
+            );
+            let res = self
+                .client
+                .get(download_url)
+                .send()
+                .await
+                .map_err(|e| Error::Telegram {
+                    message: format!("file download failed: {e}"),
+                })?;
+
+            let status = res.status();
+            let bytes = res.bytes().await.map_err(|e| Error::Telegram {
+                message: format!("file download read failed: {e}"),
+            })?;
+            if !status.is_success() {
+                return Err(Error::Telegram {
+                    message: format!("file download http {status}"),
+                });
+            }
+
+            Ok(bytes.to_vec())
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -118,6 +197,10 @@ impl InMemoryStorage {
 
     pub async fn get(&self, object_id: &str) -> Option<Vec<u8>> {
         self.inner.lock().await.get(object_id).cloned()
+    }
+
+    pub async fn remove(&self, object_id: &str) -> Option<Vec<u8>> {
+        self.inner.lock().await.remove(object_id)
     }
 
     pub async fn object_count(&self) -> usize {
@@ -142,6 +225,22 @@ impl Storage for InMemoryStorage {
             Ok(object_id)
         })
     }
+
+    fn download_document<'a>(
+        &'a self,
+        object_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        Box::pin(async move {
+            self.inner
+                .lock()
+                .await
+                .get(object_id)
+                .cloned()
+                .ok_or_else(|| Error::InvalidConfig {
+                    message: format!("object not found: {object_id}"),
+                })
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,4 +258,9 @@ struct TelegramMessage {
 #[derive(Debug, Deserialize)]
 struct TelegramDocument {
     file_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramGetFileResult {
+    file_path: Option<String>,
 }
