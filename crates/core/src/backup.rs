@@ -343,7 +343,11 @@ pub async fn run_backup_with<S: Storage>(
     Ok(result)
 }
 
-async fn apply_retention(pool: &SqlitePool, source_path: &Path, keep_last_snapshots: u32) -> Result<()> {
+async fn apply_retention(
+    pool: &SqlitePool,
+    source_path: &Path,
+    keep_last_snapshots: u32,
+) -> Result<()> {
     let source = path_to_utf8(source_path)?;
     let rows = sqlx::query(
         r#"

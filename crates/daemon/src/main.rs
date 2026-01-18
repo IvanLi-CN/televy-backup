@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use chrono::{Datelike, Timelike};
 use serde::Deserialize;
-use televy_backup_core::{BackupConfig, BackupOptions, ChunkingConfig, TelegramBotApiStorage, TelegramBotApiStorageConfig};
+use televy_backup_core::{
+    BackupConfig, BackupOptions, ChunkingConfig, TelegramBotApiStorage, TelegramBotApiStorageConfig,
+};
 use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,8 +57,12 @@ struct TelegramRateLimit {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config_dir = std::env::var("TELEVYBACKUP_CONFIG_DIR").ok().map(PathBuf::from);
-    let data_dir = std::env::var("TELEVYBACKUP_DATA_DIR").ok().map(PathBuf::from);
+    let config_dir = std::env::var("TELEVYBACKUP_CONFIG_DIR")
+        .ok()
+        .map(PathBuf::from);
+    let data_dir = std::env::var("TELEVYBACKUP_DATA_DIR")
+        .ok()
+        .map(PathBuf::from);
 
     let config_path = config_dir
         .unwrap_or_else(default_config_dir)
@@ -71,8 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("telegram.mode must be botapi".into());
     }
 
-    let bot_token = get_secret(&settings.telegram.bot_token_key)?
-        .ok_or("telegram bot token missing")?;
+    let bot_token =
+        get_secret(&settings.telegram.bot_token_key)?.ok_or("telegram bot token missing")?;
     let master_key = load_master_key()?;
 
     let storage = TelegramBotApiStorage::new(TelegramBotApiStorageConfig {
@@ -126,7 +132,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         keep_last_snapshots: settings.retention.keep_last_snapshots,
                     };
 
-                    let _ = televy_backup_core::run_backup_with(&storage, cfg, BackupOptions::default()).await;
+                    let _ = televy_backup_core::run_backup_with(
+                        &storage,
+                        cfg,
+                        BackupOptions::default(),
+                    )
+                    .await;
                 }
             }
         }
@@ -142,9 +153,7 @@ fn load_settings(path: &Path) -> Result<Settings, Box<dyn std::error::Error>> {
 }
 
 fn parse_hhmm(s: &str) -> Result<(u8, u8), Box<dyn std::error::Error>> {
-    let (hh, mm) = s
-        .split_once(':')
-        .ok_or("daily_at must be HH:MM")?;
+    let (hh, mm) = s.split_once(':').ok_or("daily_at must be HH:MM")?;
     let hh: u8 = hh.parse()?;
     let mm: u8 = mm.parse()?;
     Ok((hh, mm))

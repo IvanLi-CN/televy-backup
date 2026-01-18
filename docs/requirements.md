@@ -70,32 +70,23 @@
 
 ## 7.1) Proposed architecture & tech stack
 
-目标从 “Tauri 桌面应用” 调整为 **macOS 原生状态栏应用** + **Rust（async）后端/CLI**，以获得系统级外观（Liquid Glass / system material）、更稳定的后台调度与更好的 Keychain 集成。
+本阶段采用 **Tauri v2 桌面应用** + **Rust（async）后端与常驻 daemon** 的组合：
 
-- **GUI（macOS 原生）**
-  - SwiftUI 为主，必要处用 AppKit（`NSStatusItem` + `NSPopover`）实现状态栏 popover 形态。
-  - UI 主要依赖系统材质与系统控件风格（减少自绘与跨平台样式成本），设计参考：`docs/design/ui/liquid-glass-popover-overview.png`、`docs/design/ui/liquid-glass-popover-settings.png`。
-- **Backend（Rust，async）**
-  - `televy-daemon`：长驻用户会话的后台进程（负责扫描/分块/加密/上传/索引写入与同步）。
-  - 以本地 IPC 暴露最小控制面（状态/触发备份/查看任务进度/读取日志摘要），供 GUI/CLI 调用。
-  - 推荐 IPC：Unix domain socket（避免端口冲突；路径在 `~/Library/Application Support/...`）。
-- **CLI（Rust，async）**
-  - `televy`：提供脚本化入口（例如 `backup run`、`backup status`、`restore ...`）。
-  - CLI 与 GUI 共用同一套后端协议（与 `televy-daemon` 通信）或共用核心库（`televy-core`）。
+- **GUI（Tauri v2）**
+  - Vite + React 前端（WebView UI），通过 Tauri commands/events 与后端交互。
+  - UI 负责设置引导、任务发起、进度与错误展示。
+- **Core（Rust library）**
+  - `scan → chunk → encrypt → upload → index` 备份管线
+  - `fetch index → fetch chunks → reassemble → verify` 恢复/校验管线
+- **Daemon（Rust, scheduled runner）**
+  - 由 `brew services`（用户级 LaunchAgent）常驻启动。
+  - 进程内定时触发（hourly/daily），并在备份成功后执行快照保留策略（仅本地索引裁剪，不做远端 GC）。
 - **Data**
-  - SQLite：索引数据库（加密后也会被分片上传作为恢复入口）。
-  - Keychain：保存 Telegram 凭据/加密密钥材料（GUI 负责引导配置；后端/CLI 读取）。
-- **Scheduling（最小传输成本的前提）**
-  - 以用户级 `launchd`（LaunchAgent）拉起 `televy-daemon` 并负责周期触发（hourly/daily）。
-  - 说明：`brew services` 本质上是对 `launchd` 的封装；若后续仍支持 Homebrew 安装，可沿用同一套 LaunchAgent 机制。
-  - 触发策略：`StartInterval`（例如每 3600 秒）。
-- **Packaging（整体发布）**
-  - 一个安装产物（`.dmg` 或 `.pkg`）：安装 `.app`（状态栏 GUI）+ Rust 可执行文件（daemon + CLI）+ LaunchAgent plist，并完成签名/公证。
-  - 运行时：GUI 与 Rust daemon 为不同进程；GUI 通过 IPC 控制 daemon。
-- **Distribution（分发渠道）**
-  - 渠道 A：直接提供可下载的安装包（`.dmg` 或 `.pkg`），包含完整 `.app`。
-  - 渠道 B：Homebrew **cask** 安装同一份完整 `.app`（可选将内置 `televy` 暴露到 PATH）。
-  - 两个渠道均以“完整软件（GUI + 后端 + 调度）”为交付单位，不拆分半套组件分发。
+  - SQLite：本地索引数据库（索引本身也会加密分片上传以支持恢复）。
+  - Keychain：保存 Telegram Bot token 与主密钥材料；配置文件不落 secret 明文。
+- **Packaging**
+  - Homebrew：formula（daemon）+ cask（GUI app）。
+  - 升级不丢数据：配置与 SQLite 目录固定，Keychain secrets 不需要重新输入（除非用户主动清除）。
 
 ## 8) Data & interfaces (if applicable)
 
@@ -111,10 +102,9 @@
 
 ## 9) UX / UI (if applicable)
 
-- **UI form factor:** macOS 状态栏应用，点击后出现 popover（小尺寸悬浮面板）。
-- **Views:** Overview / Logs / Settings（segmented control 切换）。
-- **Copy:** 清晰显示已上传块数、去重率、耗时与失败重试次数；错误提供可操作引导。
-- **Design:** `docs/design/ui/liquid-glass-popover-overview.png`、`docs/design/ui/liquid-glass-popover-settings.png`。
+- **UI form factor:** Tauri 桌面窗口（MVP 以“可用+可观察”为主）。
+- **Views:** Settings / Backup / Restore / Verify / Tasks。
+- **Copy:** 清晰显示状态/阶段、上传统计与失败原因；错误提供可操作引导。
 - **Edge states:** 无变更、网络中断、索引损坏、块缺失、Keychain 未配置。
 
 ## 10) Acceptance criteria
