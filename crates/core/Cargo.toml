@@ -15,6 +15,7 @@ serde_json = "1"
 sqlx = { version = "0.8", features = ["macros", "migrate", "runtime-tokio-rustls", "sqlite"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 zstd = "0.13"

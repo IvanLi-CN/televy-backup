@@ -8,8 +8,10 @@ use walkdir::WalkDir;
 use crate::crypto::encrypt_framed;
 use crate::index_db::open_index_db;
 use crate::index_manifest::{IndexManifest, IndexManifestPart, index_part_aad};
+use crate::progress::{ProgressSink, TaskProgress};
 use crate::storage::Storage;
 use crate::{Error, Result};
+use tokio_util::sync::CancellationToken;
 
 const TELEGRAM_BOTAPI_MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 const INDEX_PART_BYTES: usize = 32 * 1024 * 1024;
@@ -54,6 +56,7 @@ pub struct BackupConfig {
     pub label: String,
     pub chunking: ChunkingConfig,
     pub master_key: [u8; 32],
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -70,6 +73,20 @@ pub struct BackupResult {
 }
 
 pub async fn run_backup<S: Storage>(storage: &S, config: BackupConfig) -> Result<BackupResult> {
+    run_backup_with(storage, config, BackupOptions::default()).await
+}
+
+#[derive(Default)]
+pub struct BackupOptions<'a> {
+    pub cancel: Option<&'a CancellationToken>,
+    pub progress: Option<&'a dyn ProgressSink>,
+}
+
+pub async fn run_backup_with<S: Storage>(
+    storage: &S,
+    config: BackupConfig,
+    options: BackupOptions<'_>,
+) -> Result<BackupResult> {
     config.chunking.validate()?;
     if !config.source_path.is_dir() {
         return Err(Error::InvalidConfig {
@@ -81,7 +98,10 @@ pub async fn run_backup<S: Storage>(storage: &S, config: BackupConfig) -> Result
     let provider = storage.provider();
 
     let base_snapshot_id = latest_snapshot_for_source(&pool, &config.source_path).await?;
-    let snapshot_id = format!("snp_{}", uuid::Uuid::new_v4());
+    let snapshot_id = config
+        .snapshot_id
+        .clone()
+        .unwrap_or_else(|| format!("snp_{}", uuid::Uuid::new_v4()));
 
     sqlx::query(
         r#"
@@ -101,7 +121,26 @@ pub async fn run_backup<S: Storage>(storage: &S, config: BackupConfig) -> Result
         ..BackupResult::default()
     };
 
+    if let Some(sink) = options.progress {
+        sink.on_progress(TaskProgress {
+            phase: "scan".to_string(),
+            files_total: None,
+            files_done: Some(0),
+            chunks_total: Some(0),
+            chunks_done: Some(0),
+            bytes_read: Some(0),
+            bytes_uploaded: Some(0),
+            bytes_deduped: Some(0),
+        });
+    }
+
     for entry in WalkDir::new(&config.source_path).follow_links(false) {
+        if let Some(cancel) = options.cancel
+            && cancel.is_cancelled()
+        {
+            return Err(Error::Cancelled);
+        }
+
         let entry = entry.map_err(|e| Error::InvalidConfig {
             message: format!("walkdir error: {e}"),
         })?;
@@ -171,6 +210,19 @@ pub async fn run_backup<S: Storage>(storage: &S, config: BackupConfig) -> Result
 
         result.files_indexed += 1;
 
+        if let Some(sink) = options.progress {
+            sink.on_progress(TaskProgress {
+                phase: "scan".to_string(),
+                files_total: None,
+                files_done: Some(result.files_indexed),
+                chunks_total: Some(result.chunks_total),
+                chunks_done: Some(result.chunks_total),
+                bytes_read: Some(result.bytes_read),
+                bytes_uploaded: Some(result.bytes_uploaded),
+                bytes_deduped: Some(result.bytes_deduped),
+            });
+        }
+
         if kind != "file" {
             continue;
         }
@@ -184,6 +236,12 @@ pub async fn run_backup<S: Storage>(storage: &S, config: BackupConfig) -> Result
         );
 
         for (seq, chunk) in chunker.enumerate() {
+            if let Some(cancel) = options.cancel
+                && cancel.is_cancelled()
+            {
+                return Err(Error::Cancelled);
+            }
+
             let chunk = chunk.map_err(|_| Error::InvalidConfig {
                 message: "chunking failed".to_string(),
             })?;
@@ -242,7 +300,33 @@ pub async fn run_backup<S: Storage>(storage: &S, config: BackupConfig) -> Result
             .bind(chunk.length as i64)
             .execute(&pool)
             .await?;
+
+            if let Some(sink) = options.progress {
+                sink.on_progress(TaskProgress {
+                    phase: "upload".to_string(),
+                    files_total: None,
+                    files_done: Some(result.files_indexed),
+                    chunks_total: Some(result.chunks_total),
+                    chunks_done: Some(result.chunks_total),
+                    bytes_read: Some(result.bytes_read),
+                    bytes_uploaded: Some(result.bytes_uploaded),
+                    bytes_deduped: Some(result.bytes_deduped),
+                });
+            }
         }
+    }
+
+    if let Some(sink) = options.progress {
+        sink.on_progress(TaskProgress {
+            phase: "index".to_string(),
+            files_total: None,
+            files_done: Some(result.files_indexed),
+            chunks_total: Some(result.chunks_total),
+            chunks_done: Some(result.chunks_total),
+            bytes_read: Some(result.bytes_read),
+            bytes_uploaded: Some(result.bytes_uploaded),
+            bytes_deduped: Some(result.bytes_deduped),
+        });
     }
 
     let manifest = upload_index(&pool, storage, &config, &snapshot_id).await?;

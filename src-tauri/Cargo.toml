@@ -6,11 +6,22 @@ build = "build.rs"
 publish = false
 
 [dependencies]
+base64 = "0.22"
+getrandom = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-store = "2"
 televy_backup_core = { path = "../crates/core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-util = "0.7"
+toml = "0.8"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = "3"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

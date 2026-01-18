@@ -36,6 +36,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
         label: "t1".to_string(),
         chunking: chunking.clone(),
         master_key: [7u8; 32],
+        snapshot_id: None,
     };
 
     let r1 = run_backup(&storage, cfg1).await.unwrap();
@@ -54,6 +55,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
         label: "t2".to_string(),
         chunking,
         master_key: [7u8; 32],
+        snapshot_id: None,
     };
 
     let r2 = run_backup(&storage, cfg2).await.unwrap();

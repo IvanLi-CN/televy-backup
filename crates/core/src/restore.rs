@@ -7,8 +7,10 @@ use sqlx::{Row, SqlitePool};
 use crate::crypto::decrypt_framed;
 use crate::index_db::open_existing_index_db;
 use crate::index_manifest::{IndexManifest, index_part_aad};
+use crate::progress::{ProgressSink, TaskProgress};
 use crate::storage::Storage;
 use crate::{Error, Result};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
 pub struct RestoreConfig {
@@ -44,12 +46,27 @@ pub async fn restore_snapshot<S: Storage>(
     storage: &S,
     config: RestoreConfig,
 ) -> Result<RestoreResult> {
+    restore_snapshot_with(storage, config, RestoreOptions::default()).await
+}
+
+#[derive(Default)]
+pub struct RestoreOptions<'a> {
+    pub cancel: Option<&'a CancellationToken>,
+    pub progress: Option<&'a dyn ProgressSink>,
+}
+
+pub async fn restore_snapshot_with<S: Storage>(
+    storage: &S,
+    config: RestoreConfig,
+    options: RestoreOptions<'_>,
+) -> Result<RestoreResult> {
     let _manifest = download_and_write_index_db(
         storage,
         &config.snapshot_id,
         &config.manifest_object_id,
         &config.master_key,
         &config.index_db_path,
+        options.cancel,
     )
     .await?;
 
@@ -65,6 +82,8 @@ pub async fn restore_snapshot<S: Storage>(
         &config.snapshot_id,
         &config.target_path,
         &config.master_key,
+        options.cancel,
+        options.progress,
     )
     .await
 }
@@ -73,19 +92,42 @@ pub async fn verify_snapshot<S: Storage>(
     storage: &S,
     config: VerifyConfig,
 ) -> Result<VerifyResult> {
+    verify_snapshot_with(storage, config, VerifyOptions::default()).await
+}
+
+#[derive(Default)]
+pub struct VerifyOptions<'a> {
+    pub cancel: Option<&'a CancellationToken>,
+    pub progress: Option<&'a dyn ProgressSink>,
+}
+
+pub async fn verify_snapshot_with<S: Storage>(
+    storage: &S,
+    config: VerifyConfig,
+    options: VerifyOptions<'_>,
+) -> Result<VerifyResult> {
     let _manifest = download_and_write_index_db(
         storage,
         &config.snapshot_id,
         &config.manifest_object_id,
         &config.master_key,
         &config.index_db_path,
+        options.cancel,
     )
     .await?;
 
     let pool = open_existing_index_db(&config.index_db_path).await?;
     ensure_snapshot_present(&pool, &config.snapshot_id).await?;
 
-    verify_chunks(storage, &pool, &config.snapshot_id, &config.master_key).await
+    verify_chunks(
+        storage,
+        &pool,
+        &config.snapshot_id,
+        &config.master_key,
+        options.cancel,
+        options.progress,
+    )
+    .await
 }
 
 async fn download_and_write_index_db<S: Storage>(
@@ -94,7 +136,13 @@ async fn download_and_write_index_db<S: Storage>(
     manifest_object_id: &str,
     master_key: &[u8; 32],
     index_db_path: &Path,
+    cancel: Option<&CancellationToken>,
 ) -> Result<IndexManifest> {
+    if let Some(cancel) = cancel
+        && cancel.is_cancelled()
+    {
+        return Err(Error::Cancelled);
+    }
     let manifest_enc = storage.download_document(manifest_object_id).await?;
     let manifest_json = decrypt_framed(master_key, snapshot_id.as_bytes(), &manifest_enc)?;
 
@@ -129,6 +177,11 @@ async fn download_and_write_index_db<S: Storage>(
 
     let mut compressed = Vec::new();
     for part in parts {
+        if let Some(cancel) = cancel
+            && cancel.is_cancelled()
+        {
+            return Err(Error::Cancelled);
+        }
         let part_enc = storage
             .download_document(&part.object_id)
             .await
@@ -206,6 +259,8 @@ async fn restore_files<S: Storage>(
     snapshot_id: &str,
     target: &Path,
     master_key: &[u8; 32],
+    cancel: Option<&CancellationToken>,
+    progress: Option<&dyn ProgressSink>,
 ) -> Result<RestoreResult> {
     let mut result = RestoreResult::default();
 
@@ -217,6 +272,12 @@ async fn restore_files<S: Storage>(
     .await?;
 
     for row in rows {
+        if let Some(cancel) = cancel
+            && cancel.is_cancelled()
+        {
+            return Err(Error::Cancelled);
+        }
+
         let kind: String = row.get("kind");
         if kind != "file" {
             continue;
@@ -240,6 +301,12 @@ async fn restore_files<S: Storage>(
         .await?;
 
         for chunk_row in chunks {
+            if let Some(cancel) = cancel
+                && cancel.is_cancelled()
+            {
+                return Err(Error::Cancelled);
+            }
+
             let chunk_hash: String = chunk_row.get("chunk_hash");
             let offset: i64 = chunk_row.get("offset");
             let len: i64 = chunk_row.get("len");
@@ -286,6 +353,19 @@ async fn restore_files<S: Storage>(
 
             result.chunks_downloaded += 1;
             result.bytes_written += plain.len() as u64;
+
+            if let Some(sink) = progress {
+                sink.on_progress(TaskProgress {
+                    phase: "download".to_string(),
+                    files_total: None,
+                    files_done: Some(result.files_restored),
+                    chunks_total: None,
+                    chunks_done: Some(result.chunks_downloaded),
+                    bytes_read: Some(result.bytes_written),
+                    bytes_uploaded: None,
+                    bytes_deduped: None,
+                });
+            }
         }
 
         out.flush()?;
@@ -300,6 +380,19 @@ async fn restore_files<S: Storage>(
         }
 
         result.files_restored += 1;
+
+        if let Some(sink) = progress {
+            sink.on_progress(TaskProgress {
+                phase: "verify".to_string(),
+                files_total: None,
+                files_done: Some(result.files_restored),
+                chunks_total: None,
+                chunks_done: Some(result.chunks_downloaded),
+                bytes_read: Some(result.bytes_written),
+                bytes_uploaded: None,
+                bytes_deduped: None,
+            });
+        }
     }
 
     Ok(result)
@@ -310,6 +403,8 @@ async fn verify_chunks<S: Storage>(
     pool: &SqlitePool,
     snapshot_id: &str,
     master_key: &[u8; 32],
+    cancel: Option<&CancellationToken>,
+    progress: Option<&dyn ProgressSink>,
 ) -> Result<VerifyResult> {
     let mut result = VerifyResult::default();
 
@@ -327,6 +422,12 @@ async fn verify_chunks<S: Storage>(
     .await?;
 
     for row in rows {
+        if let Some(cancel) = cancel
+            && cancel.is_cancelled()
+        {
+            return Err(Error::Cancelled);
+        }
+
         let chunk_hash: String = row.get("chunk_hash");
         let object_row = sqlx::query(
             "SELECT object_id FROM chunk_objects WHERE provider = ? AND chunk_hash = ? LIMIT 1",
@@ -361,6 +462,19 @@ async fn verify_chunks<S: Storage>(
 
         result.chunks_checked += 1;
         result.bytes_checked += plain.len() as u64;
+
+        if let Some(sink) = progress {
+            sink.on_progress(TaskProgress {
+                phase: "chunks".to_string(),
+                files_total: None,
+                files_done: None,
+                chunks_total: None,
+                chunks_done: Some(result.chunks_checked),
+                bytes_read: Some(result.bytes_checked),
+                bytes_uploaded: None,
+                bytes_deduped: None,
+            });
+        }
     }
 
     Ok(result)

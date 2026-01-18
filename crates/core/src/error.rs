@@ -22,6 +22,9 @@ pub enum Error {
     #[error("crypto error")]
     Crypto,
 
+    #[error("cancelled")]
+    Cancelled,
+
     #[error("telegram bot api error: {message}")]
     Telegram { message: String },
 

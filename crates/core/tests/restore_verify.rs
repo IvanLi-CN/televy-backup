@@ -40,6 +40,7 @@ async fn restore_and_verify_snapshot_from_remote_index() {
                 max_bytes: 1024,
             },
             master_key,
+            snapshot_id: None,
         },
     )
     .await
@@ -126,6 +127,7 @@ async fn verify_fails_when_any_chunk_missing() {
                 max_bytes: 4096,
             },
             master_key,
+            snapshot_id: None,
         },
     )
     .await

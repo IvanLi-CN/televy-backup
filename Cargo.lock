@@ -1859,6 +1859,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyring"
+version = "3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
+dependencies = [
+ "log",
+ "zeroize",
+]
+
+[[package]]
 name = "kuchikiki"
 version = "0.8.8-speedreader"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4278,12 +4288,21 @@ dependencies = [
 name = "televy_backup"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "keyring",
+ "reqwest",
  "serde",
+ "serde_json",
+ "sqlx",
  "tauri",
  "tauri-build",
  "tauri-plugin-store",
  "televy_backup_core",
  "tokio",
+ "tokio-util",
+ "toml 0.8.2",
+ "uuid",
 ]
 
 [[package]]
@@ -4301,6 +4320,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.17",
  "tokio",
+ "tokio-util",
  "uuid",
  "walkdir",
  "zstd",
