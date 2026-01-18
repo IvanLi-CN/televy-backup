@@ -1,0 +1,14 @@
+html,
+body {
+	height: 100%;
+}
+
+body {
+	margin: 0;
+	font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+		sans-serif;
+}
+
+.container {
+	padding: 24px;
+}

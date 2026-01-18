@@ -1,0 +1,14 @@
+{
+	"$schema": "https://biomejs.dev/schemas/latest/schema.json",
+	"files": {
+		"ignore": [
+			"target/**",
+			"src-tauri/target/**",
+			"src-tauri/gen/**",
+			"web/dist/**"
+		]
+	},
+	"organizeImports": { "enabled": true },
+	"linter": { "enabled": true },
+	"formatter": { "enabled": true }
+}

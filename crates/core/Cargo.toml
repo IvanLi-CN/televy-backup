@@ -1,0 +1,11 @@
+[package]
+name = "televy_backup_core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+blake3 = "1"
+fastcdc = "3"
+sqlx = { version = "0.8", features = ["macros", "migrate", "runtime-tokio-rustls", "sqlite"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -1,0 +1,14 @@
+/target
+/node_modules
+
+# Tauri
+/src-tauri/target
+
+# Vite output
+/web/dist
+
+# Local dev artifacts
+.dev/
+
+# OS
+.DS_Store
