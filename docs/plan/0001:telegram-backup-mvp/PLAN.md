@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 部分完成（3/7）
 - Created: 2026-01-18
-- Last: 2026-01-18
+- Last: 2026-01-19
 
 ## 已冻结决策（Decisions, frozen）
 
@@ -179,7 +179,7 @@
 
 - [x] M1: 冻结 Telegram 存储路径与鉴权方案（Bot API + 私聊 Bot）并在契约中固化
 - [x] M2: 冻结 SQLite schema 与索引上传策略（索引加密分片上传 + manifest）
-- [ ] M3: 备份管线 MVP（scan → chunk → encrypt → upload → index）
+- [x] M3: 备份管线 MVP（scan → chunk → encrypt → upload → index）
 - [ ] M4: 恢复/校验 MVP（fetch index → fetch chunks → reassemble → verify）
 - [ ] M5: UI MVP（任务列表、进度、错误、统计、基础设置）
 - [ ] M6: 调度与保留策略（小时/天触发；GC/保留）
