@@ -13,18 +13,6 @@
 - 索引上传：分片上传（加密）
 - 密钥管理：macOS Keychain
 
-## 交付拆分（Delivery plan list）
-
-本计划（#0001）冻结端到端范围、验收与接口契约；实现阶段按以下交付计划逐步落地：
-
-- `#0002` Telegram Bot API 存储适配层：`docs/plan/0002:storage-telegram-botapi/PLAN.md`
-- `#0003` 索引分片与 manifest：`docs/plan/0003:index-manifest-upload/PLAN.md`
-- `#0004` Keychain secrets：`docs/plan/0004:keychain-secrets/PLAN.md`
-- `#0005` 调度与后台常驻（brew services）：`docs/plan/0005:scheduler-brew-services/PLAN.md`
-- `#0006` UI MVP：`docs/plan/0006:ui-mvp/PLAN.md`
-- `#0007` Restore/Verify MVP：`docs/plan/0007:restore-verify-mvp/PLAN.md`
-- `#0008` Brew 安装与发布：`docs/plan/0008:brew-distribution/PLAN.md`
-
 ## 背景 / 问题陈述
 
 - 需要一个运行在 macOS 的桌面应用，用 Telegram 作为远端存储，把 Time Machine 备份盘的数据做“差异同步 + 去重 + 加密”，以尽量小的增量传输成本完成周期性备份。

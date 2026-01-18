@@ -55,10 +55,3 @@
 | ID   | Title | Status | Plan | Last | Notes |
 |-----:|-------|--------|------|------|-------|
 | 0001 | TelevyBackup MVP（Telegram 存储 + 差异备份） | 待实现 | `0001:telegram-backup-mvp/PLAN.md` | 2026-01-18 | 已冻结：Bot API + 私聊 Bot + 索引分片加密上传 + macOS Keychain + `brew services`（用户级） |
-| 0002 | Telegram Bot API 存储适配层（上传/下载/限速/复用） | 待实现 | `0002:storage-telegram-botapi/PLAN.md` | 2026-01-18 | 从 #0001 拆分交付项；不改变接口契约 |
-| 0003 | 索引分片与 manifest（加密、上传、定位、下载、重组） | 待实现 | `0003:index-manifest-upload/PLAN.md` | 2026-01-18 | 从 #0001 拆分交付项；不改变接口契约 |
-| 0004 | macOS Keychain 密钥与凭据管理（写入/读取/擦除） | 待实现 | `0004:keychain-secrets/PLAN.md` | 2026-01-18 | 从 #0001 拆分交付项；按 #0001 RPC 契约实现 |
-| 0005 | 调度与后台常驻（brew services + 用户级 LaunchAgent） | 待实现 | `0005:scheduler-brew-services/PLAN.md` | 2026-01-18 | 从 #0001 拆分交付项；后台进程触发，App 不必常驻 |
-| 0006 | UI MVP（任务、进度、统计、设置、错误） | 待实现 | `0006:ui-mvp/PLAN.md` | 2026-01-18 | 从 #0001 拆分交付项；按 #0001 RPC/Event 契约实现 |
-| 0007 | 恢复与校验 MVP（下载索引→下载块→重组→校验） | 待实现 | `0007:restore-verify-mvp/PLAN.md` | 2026-01-18 | 从 #0001 拆分交付项；按 #0001 DB/format 口径实现 |
-| 0008 | Brew 安装与发布最小闭环（安装、服务管理、升级） | 待实现 | `0008:brew-distribution/PLAN.md` | 2026-01-18 | 从 #0001 拆分交付项；不做自动更新与签名复杂度扩展 |
