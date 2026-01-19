@@ -133,7 +133,7 @@ final class AppModel: ObservableObject {
         }
         runProcess(
             exe: cli,
-            args: ["secrets", "set-telegram-bot-token", "--json"],
+            args: ["--json", "secrets", "set-telegram-bot-token"],
             stdin: token + "\n",
             onExit: { status in
                 if status == 0 {
@@ -152,7 +152,7 @@ final class AppModel: ObservableObject {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
-        runProcess(exe: cli, args: ["secrets", "init-master-key", "--json"])
+        runProcess(exe: cli, args: ["--json", "secrets", "init-master-key"])
     }
 
     func testConnection() {
@@ -160,7 +160,7 @@ final class AppModel: ObservableObject {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
-        runProcess(exe: cli, args: ["telegram", "validate", "--json"])
+        runProcess(exe: cli, args: ["--json", "telegram", "validate"])
     }
 
     func runBackupNow() {
@@ -172,7 +172,7 @@ final class AppModel: ObservableObject {
             appendLog("ERROR: source path is empty")
             return
         }
-        runProcess(exe: cli, args: ["backup", "run", "--source", sourcePath, "--label", label, "--events"])
+        runProcess(exe: cli, args: ["--events", "backup", "run", "--source", sourcePath, "--label", label])
     }
 
     func openLogs() {
@@ -215,7 +215,7 @@ final class AppModel: ObservableObject {
 
     private func refreshSecrets() {
         guard let cli = cliPath() else { return }
-        let output = runCommandCapture(exe: cli, args: ["settings", "get", "--json"])
+        let output = runCommandCapture(exe: cli, args: ["--json", "settings", "get"])
         guard let data = output.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
