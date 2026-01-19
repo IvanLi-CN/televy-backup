@@ -515,20 +515,6 @@ struct PopoverRootView: View {
             .padding(12)
         }
         .frame(width: 360, height: 460)
-        .background(Color.white.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 17, style: .continuous)
-                .inset(by: 1)
-                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-        )
-        .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 18)
-        .shadow(color: Color.black.opacity(0.14), radius: 6, x: 0, y: 4)
-        .preferredColorScheme(.light)
         .onAppear { model.refresh() }
     }
 
@@ -770,9 +756,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.animates = true
         popover.contentSize = NSSize(width: 360, height: 460)
-        popover.contentViewController = NSHostingController(
-            rootView: PopoverRootView().environmentObject(ModelStore.shared)
-        )
+        popover.appearance = NSAppearance(named: .vibrantLight)
+        let host = NSHostingController(rootView: PopoverRootView().environmentObject(ModelStore.shared))
+        host.view.wantsLayer = true
+        host.view.layer?.backgroundColor = NSColor.clear.cgColor
+        popover.contentViewController = host
 
         if ProcessInfo.processInfo.environment["TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH"] != "0" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
