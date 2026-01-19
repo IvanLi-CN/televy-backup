@@ -289,6 +289,7 @@ struct ContentView: View {
                 .font(.footnote)
         }
         .padding(12)
+        .frame(width: 520, height: 560)
     }
 }
 
@@ -297,10 +298,10 @@ struct TelevyBackupApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        MenuBarExtra("TelevyBackup", systemImage: "externaldrive") {
+        WindowGroup("TelevyBackup") {
             ContentView().environmentObject(model)
         }
-        Settings {
+        MenuBarExtra("TelevyBackup", systemImage: "externaldrive") {
             ContentView().environmentObject(model)
         }
     }
