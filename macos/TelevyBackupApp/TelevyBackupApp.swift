@@ -1011,15 +1011,20 @@ struct ToastPill: View {
     let isError: Bool
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 12, weight: .heavy))
-            .foregroundStyle(isError ? Color.red : Color.green)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.white.opacity(0.22), in: Capsule())
-            .overlay(
-                Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
-            )
+        HStack(spacing: 8) {
+            Circle()
+                .fill(isError ? Color.red : Color.green)
+                .frame(width: 8, height: 8)
+                .opacity(0.95)
+            Text(text)
+                .font(.system(size: 12, weight: .heavy))
+                .foregroundStyle(Color.primary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.28), lineWidth: 1))
+        .shadow(color: Color.black.opacity(0.14), radius: 10, x: 0, y: 4)
     }
 }
 
