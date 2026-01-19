@@ -98,6 +98,10 @@ enum SnapshotsCmd {
 #[derive(Subcommand)]
 enum StatsCmd {
     Get,
+    Last {
+        #[arg(long)]
+        source: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -315,6 +319,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         },
         Command::Stats { cmd } => match cmd {
             StatsCmd::Get => stats_get(&data_dir, cli.json).await,
+            StatsCmd::Last { source } => stats_last(&data_dir, source, cli.json).await,
         },
         Command::Backup { cmd } => match cmd {
             BackupCmd::Run { source, label } => {
@@ -444,7 +449,12 @@ async fn telegram_validate(config_dir: &Path, json: bool) -> Result<(), CliError
         .get(format!("{base}/getMe"))
         .send()
         .await
-        .map_err(|e| CliError::retryable("telegram.unavailable", format!("getMe failed: {e}")))?
+        .map_err(|e| {
+            CliError::retryable(
+                "telegram.unavailable",
+                format!("getMe failed: {}", redact_secret(e.to_string(), &token)),
+            )
+        })?
         .json()
         .await
         .map_err(|e| CliError::new("telegram.unavailable", format!("getMe json failed: {e}")))?;
@@ -462,7 +472,12 @@ async fn telegram_validate(config_dir: &Path, json: bool) -> Result<(), CliError
         .query(&[("chat_id", settings.telegram.chat_id.clone())])
         .send()
         .await
-        .map_err(|e| CliError::retryable("telegram.unavailable", format!("getChat failed: {e}")))?
+        .map_err(|e| {
+            CliError::retryable(
+                "telegram.unavailable",
+                format!("getChat failed: {}", redact_secret(e.to_string(), &token)),
+            )
+        })?
         .json()
         .await
         .map_err(|e| CliError::new("telegram.unavailable", format!("getChat json failed: {e}")))?;
@@ -581,6 +596,173 @@ async fn stats_get(data_dir: &Path, json: bool) -> Result<(), CliError> {
         println!("chunksTotal={chunks_total}");
         println!("chunksBytesTotal={chunks_bytes_total}");
     }
+    Ok(())
+}
+
+async fn stats_last(data_dir: &Path, source: Option<PathBuf>, json: bool) -> Result<(), CliError> {
+    let db_path = data_dir.join("index").join("index.sqlite");
+    if !db_path.exists() {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "snapshot": serde_json::Value::Null })
+            );
+        }
+        return Ok(());
+    }
+
+    let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
+        .await
+        .map_err(map_core_err)?;
+
+    let snapshot_row: Option<sqlx::sqlite::SqliteRow> = if let Some(source) = &source {
+        let source = source
+            .to_str()
+            .ok_or_else(|| CliError::new("config.invalid", "source path is not valid utf-8"))?
+            .to_string();
+        sqlx::query(
+            r#"
+            SELECT snapshot_id, created_at, base_snapshot_id
+            FROM snapshots
+            WHERE source_path = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(source)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| CliError::new("db.failed", e.to_string()))?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT snapshot_id, created_at, base_snapshot_id
+            FROM snapshots
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| CliError::new("db.failed", e.to_string()))?
+    };
+
+    let Some(row) = snapshot_row else {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "snapshot": serde_json::Value::Null })
+            );
+        }
+        return Ok(());
+    };
+
+    let snapshot_id: String = row
+        .try_get("snapshot_id")
+        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+    let created_at: String = row
+        .try_get("created_at")
+        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+    let base_snapshot_id: Option<String> = row
+        .try_get("base_snapshot_id")
+        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+
+    let cur_bytes_unique: i64 = sqlx::query(
+        r#"
+        SELECT COALESCE(SUM(c.size), 0) AS s
+        FROM chunks c
+        JOIN (
+          SELECT DISTINCT fc.chunk_hash AS chunk_hash
+          FROM file_chunks fc
+          JOIN files f ON f.file_id = fc.file_id
+          WHERE f.snapshot_id = ?
+        ) x ON x.chunk_hash = c.chunk_hash
+        "#,
+    )
+    .bind(&snapshot_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|e| CliError::new("db.failed", e.to_string()))?
+    .get("s");
+
+    let bytes_new: i64 = if let Some(base_id) = &base_snapshot_id {
+        sqlx::query(
+            r#"
+            WITH cur AS (
+              SELECT DISTINCT fc.chunk_hash AS chunk_hash
+              FROM file_chunks fc
+              JOIN files f ON f.file_id = fc.file_id
+              WHERE f.snapshot_id = ?
+            ),
+            base AS (
+              SELECT DISTINCT fc.chunk_hash AS chunk_hash
+              FROM file_chunks fc
+              JOIN files f ON f.file_id = fc.file_id
+              WHERE f.snapshot_id = ?
+            ),
+            new_only AS (
+              SELECT cur.chunk_hash AS chunk_hash
+              FROM cur
+              LEFT JOIN base ON base.chunk_hash = cur.chunk_hash
+              WHERE base.chunk_hash IS NULL
+            )
+            SELECT COALESCE(SUM(c.size), 0) AS s
+            FROM chunks c
+            JOIN new_only n ON n.chunk_hash = c.chunk_hash
+            "#,
+        )
+        .bind(&snapshot_id)
+        .bind(base_id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| CliError::new("db.failed", e.to_string()))?
+        .get("s")
+    } else {
+        cur_bytes_unique
+    };
+
+    let bytes_reused = (cur_bytes_unique - bytes_new).max(0);
+
+    let duration_seconds: Option<f64> = sqlx::query(
+        r#"
+        SELECT (julianday(ri.created_at) - julianday(s.created_at)) * 86400.0 AS seconds
+        FROM snapshots s
+        JOIN remote_indexes ri ON ri.snapshot_id = s.snapshot_id
+        WHERE s.snapshot_id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(&snapshot_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| CliError::new("db.failed", e.to_string()))?
+    .map(|r| r.get::<f64, _>("seconds"));
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "snapshot": {
+                    "snapshotId": snapshot_id,
+                    "createdAt": created_at,
+                    "baseSnapshotId": base_snapshot_id,
+                    "bytesUploaded": bytes_new,
+                    "bytesDeduped": bytes_reused,
+                    "durationSeconds": duration_seconds,
+                    "approx": true
+                }
+            })
+        );
+    } else {
+        println!("snapshotId={snapshot_id}");
+        println!("createdAt={created_at}");
+        println!("bytesUploaded={bytes_new}");
+        println!("bytesDeduped={bytes_reused}");
+        if let Some(s) = duration_seconds {
+            println!("durationSeconds={s}");
+        }
+    }
+
     Ok(())
 }
 
@@ -980,6 +1162,15 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(tmp, path)?;
     Ok(())
+}
+
+fn redact_secret(s: impl Into<String>, secret: &str) -> String {
+    let s = s.into();
+    if secret.is_empty() {
+        s
+    } else {
+        s.replace(secret, "[redacted]")
+    }
 }
 
 #[cfg(target_os = "macos")]

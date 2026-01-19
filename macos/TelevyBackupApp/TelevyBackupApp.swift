@@ -60,6 +60,9 @@ final class AppModel: ObservableObject {
     @Published var toastText: String? = nil
     @Published var toastIsError: Bool = false
 
+    @Published var lastRunOk: Bool? = nil
+    @Published var lastRunErrorCode: String? = nil
+
     @Published var isRunning: Bool = false
     @Published var phase: String = "idle"
 
@@ -351,7 +354,7 @@ final class AppModel: ObservableObject {
     }
 
     private func appendLog(_ line: String) {
-        let trimmed = line.trimmingCharacters(in: .newlines)
+        let trimmed = sanitizeLogLine(line.trimmingCharacters(in: .newlines))
         guard !trimmed.isEmpty else { return }
         appendFileLog(trimmed)
         DispatchQueue.main.async {
@@ -360,6 +363,16 @@ final class AppModel: ObservableObject {
                 self.logEntries.removeFirst(self.logEntries.count - 400)
             }
         }
+    }
+
+    private func sanitizeLogLine(_ line: String) -> String {
+        let needle = "api.telegram.org/bot"
+        guard let r = line.range(of: needle) else { return line }
+        let after = r.upperBound
+        guard let slash = line[after...].firstIndex(of: "/") else {
+            return line.replacingCharacters(in: after..<line.endIndex, with: "[redacted]")
+        }
+        return line.replacingCharacters(in: after..<slash, with: "[redacted]")
     }
 
     private func uiLogFileURL() -> URL {
@@ -424,6 +437,13 @@ final class AppModel: ObservableObject {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
 
+        if let code = obj["code"] as? String {
+            DispatchQueue.main.async {
+                self.lastRunErrorCode = code
+            }
+            return
+        }
+
         guard let type = obj["type"] as? String else { return }
 
         if type == "task.progress" {
@@ -448,6 +468,8 @@ final class AppModel: ObservableObject {
                     self.currentBytesUploaded = 0
                     self.currentBytesDeduped = 0
                     self.taskStartedAt = Date()
+                    self.lastRunOk = nil
+                    self.lastRunErrorCode = nil
                 } else {
                     self.isRunning = false
                     self.phase = "idle"
@@ -462,6 +484,8 @@ final class AppModel: ObservableObject {
                 let bytesDeduped = (result["bytesDeduped"] as? NSNumber)?.int64Value ?? 0
                 let duration = (result["durationSeconds"] as? NSNumber)?.doubleValue ?? 0
                 DispatchQueue.main.async {
+                    self.lastRunOk = true
+                    self.lastRunErrorCode = nil
                     self.lastBytesUploaded = bytesUploaded
                     self.lastBytesDeduped = bytesDeduped
                     self.lastDurationSeconds = duration
@@ -554,6 +578,17 @@ final class AppModel: ObservableObject {
                 if updateTaskState {
                     self.isRunning = false
                     self.phase = "idle"
+                    if status != 0 {
+                        self.lastRunOk = false
+                        self.lastBytesUploaded = self.currentBytesUploaded
+                        self.lastBytesDeduped = self.currentBytesDeduped
+                        if let startedAt = self.taskStartedAt {
+                            self.lastDurationSeconds = Date().timeIntervalSince(startedAt)
+                        }
+                        self.lastRunAt = Date()
+                        self.taskStartedAt = nil
+                        self.showToast("Backup failed", isError: true)
+                    }
                 }
                 out.fileHandleForReading.readabilityHandler = nil
                 err.fileHandleForReading.readabilityHandler = nil
@@ -816,9 +851,9 @@ struct OverviewView: View {
         VStack(alignment: .leading, spacing: 12) {
             GlassCard(title: "STATUS") {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(model.isRunning ? "Syncing" : "Idle")
+                    Text(statusTitle())
                         .font(.system(size: 16, weight: .heavy))
-                    Text(model.isRunning ? "(\(model.phase))" : lastRunText())
+                    Text(statusSubtitle())
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
@@ -916,6 +951,20 @@ struct OverviewView: View {
         if seconds < 60 { return "(last run just now)" }
         if seconds < 3600 { return "(last run \(Int(seconds / 60))m ago)" }
         return "(last run \(Int(seconds / 3600))h ago)"
+    }
+
+    private func statusTitle() -> String {
+        if model.isRunning { return "Syncing" }
+        if model.lastRunOk == false { return "Failed" }
+        return "Idle"
+    }
+
+    private func statusSubtitle() -> String {
+        if model.isRunning { return "(\(model.phase))" }
+        if model.lastRunOk == false {
+            return "(\(model.lastRunErrorCode ?? "error"))"
+        }
+        return lastRunText()
     }
 }
 

@@ -8,6 +8,15 @@ use tokio::sync::Mutex;
 
 use crate::{Error, Result};
 
+fn redact_secret(s: impl Into<String>, secret: &str) -> String {
+    let s = s.into();
+    if secret.is_empty() {
+        s
+    } else {
+        s.replace(secret, "[redacted]")
+    }
+}
+
 pub trait Storage {
     fn provider(&self) -> &'static str;
 
@@ -71,7 +80,10 @@ impl Storage for TelegramBotApiStorage {
                 .send()
                 .await
                 .map_err(|e| Error::Telegram {
-                    message: format!("request failed: {e}"),
+                    message: format!(
+                        "request failed: {}",
+                        redact_secret(e.to_string(), &self.config.bot_token)
+                    ),
                 })?;
 
             let status = res.status();
@@ -125,7 +137,10 @@ impl Storage for TelegramBotApiStorage {
                 .send()
                 .await
                 .map_err(|e| Error::Telegram {
-                    message: format!("getFile request failed: {e}"),
+                    message: format!(
+                        "getFile request failed: {}",
+                        redact_secret(e.to_string(), &self.config.bot_token)
+                    ),
                 })?;
 
             let status = res.status();
@@ -166,7 +181,10 @@ impl Storage for TelegramBotApiStorage {
                 .send()
                 .await
                 .map_err(|e| Error::Telegram {
-                    message: format!("file download failed: {e}"),
+                    message: format!(
+                        "file download failed: {}",
+                        redact_secret(e.to_string(), &self.config.bot_token)
+                    ),
                 })?;
 
             let status = res.status();
