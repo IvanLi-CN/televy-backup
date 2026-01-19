@@ -984,12 +984,22 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn get_secret(key: &str) -> Result<Option<String>, CliError> {
-    let entry = keyring::Entry::new(APP_NAME, key)
-        .map_err(|e| CliError::new("keychain.unavailable", e.to_string()))?;
-    match entry.get_password() {
-        Ok(v) => Ok(Some(v)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(CliError::new("keychain.unavailable", e.to_string())),
+    use security_framework::passwords::{PasswordOptions, generic_password};
+
+    let opts = PasswordOptions::new_generic_password(APP_NAME, key);
+    match generic_password(opts) {
+        Ok(bytes) => {
+            let s = String::from_utf8(bytes).map_err(|e| {
+                CliError::new("keychain.unavailable", format!("utf8 decode failed: {e}"))
+            })?;
+            Ok(Some(s))
+        }
+        Err(e) => {
+            if is_keychain_not_found(&e) {
+                return Ok(None);
+            }
+            Err(CliError::new("keychain.unavailable", e.to_string()))
+        }
     }
 }
 
@@ -1003,10 +1013,8 @@ fn get_secret(_key: &str) -> Result<Option<String>, CliError> {
 
 #[cfg(target_os = "macos")]
 fn set_secret(key: &str, value: &str) -> Result<(), CliError> {
-    let entry = keyring::Entry::new(APP_NAME, key)
-        .map_err(|e| CliError::new("keychain.unavailable", e.to_string()))?;
-    entry
-        .set_password(value)
+    use security_framework::passwords::set_generic_password;
+    set_generic_password(APP_NAME, key, value.as_bytes())
         .map_err(|e| CliError::new("keychain.write_failed", e.to_string()))?;
     Ok(())
 }
@@ -1017,6 +1025,12 @@ fn set_secret(_key: &str, _value: &str) -> Result<(), CliError> {
         "keychain.unavailable",
         "keychain only supported on macOS",
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
+    // errSecItemNotFound
+    e.code() == -25300
 }
 
 fn load_master_key() -> Result<[u8; 32], CliError> {
