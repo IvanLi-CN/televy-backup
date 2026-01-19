@@ -79,6 +79,7 @@ final class AppModel: ObservableObject {
 
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
+    private var didFetchSecretPresence: Bool = false
 
     func defaultConfigDir() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -124,7 +125,24 @@ final class AppModel: ObservableObject {
             didWriteStartupLog = true
             appendLog("UI started")
         }
-        refreshSecrets()
+        refreshSettings(withSecrets: false)
+    }
+
+    func refreshSecretsPresence(force: Bool = false) {
+        if didFetchSecretPresence && !force { return }
+        refreshSettings(withSecrets: true)
+    }
+
+    private func updateTelegramStatus() {
+        let configured = botTokenPresent && masterKeyPresent && !chatId.isEmpty
+        telegramOk = configured
+        if telegramValidateOk == true {
+            telegramStatusText = "Telegram Storage • Connected"
+        } else if configured {
+            telegramStatusText = "Telegram Storage • Not validated"
+        } else {
+            telegramStatusText = "Telegram Storage • Offline"
+        }
     }
 
     static func maskedTokenPlaceholder() -> String {
@@ -135,7 +153,7 @@ final class AppModel: ObservableObject {
         do {
             try writeConfigToml()
             appendLog("Saved: \(configTomlPath().path)")
-            refreshSecrets()
+            refreshSettings(withSecrets: false)
         } catch {
             appendLog("ERROR: save config failed: \(error)")
         }
@@ -167,7 +185,9 @@ final class AppModel: ObservableObject {
                     self.botTokenDraft = Self.maskedTokenPlaceholder()
                     self.botTokenDraftIsMasked = true
                     self.showToast("Saved in Keychain", isError: false)
-                    self.refreshSecrets()
+                    self.botTokenPresent = true
+                    self.didFetchSecretPresence = true
+                    self.updateTelegramStatus()
                 } else {
                     self.showToast("Failed to save token (see Logs)", isError: true)
                 }
@@ -188,7 +208,9 @@ final class AppModel: ObservableObject {
             onExit: { status in
                 if status == 0 {
                     self.showToast("Master key saved in Keychain", isError: false)
-                    self.refreshSecrets()
+                    self.masterKeyPresent = true
+                    self.didFetchSecretPresence = true
+                    self.updateTelegramStatus()
                 } else {
                     self.showToast("Failed to init master key (see Logs)", isError: true)
                 }
@@ -220,6 +242,7 @@ final class AppModel: ObservableObject {
                     self.telegramValidateText = "Failed (see Logs)"
                     self.showToast("Test failed (see Logs)", isError: true)
                 }
+                self.updateTelegramStatus()
             }
         )
     }
@@ -296,30 +319,24 @@ final class AppModel: ObservableObject {
         try toml.write(to: configTomlPath(), atomically: true, encoding: .utf8)
     }
 
-    private func refreshSecrets() {
+    private func refreshSettings(withSecrets: Bool) {
         guard let cli = cliPath() else { return }
-        let output = runCommandCapture(exe: cli, args: ["--json", "settings", "get"])
+        var args = ["--json", "settings", "get"]
+        if withSecrets { args.append("--with-secrets") }
+        let output = runCommandCapture(exe: cli, args: args)
         guard let data = output.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            DispatchQueue.main.async {
-                self.botTokenPresent = false
-                self.masterKeyPresent = false
-                self.telegramOk = false
-                self.telegramStatusText = "Offline"
-            }
+            appendLog("ERROR: settings get failed")
             return
         }
 
-        let secrets = obj["secrets"] as? [String: Any]
         let settings = obj["settings"] as? [String: Any]
         let sources = (settings?["sources"] as? [String]) ?? []
         let schedule = (settings?["schedule"] as? [String: Any]) ?? [:]
         let telegram = (settings?["telegram"] as? [String: Any]) ?? [:]
         let chatId = (telegram["chat_id"] as? String) ?? ""
 
-        let botPresent = (secrets?["telegramBotTokenPresent"] as? Bool) ?? false
-        let masterPresent = (secrets?["masterKeyPresent"] as? Bool) ?? false
         let scheduleEnabled = (schedule["enabled"] as? Bool) ?? false
         let scheduleKind = (schedule["kind"] as? String) ?? "hourly"
 
@@ -330,26 +347,41 @@ final class AppModel: ObservableObject {
             self.scheduleEnabled = scheduleEnabled
             self.scheduleKind = scheduleKind
 
-            self.botTokenPresent = botPresent
-            self.masterKeyPresent = masterPresent
             self.chatId = chatId
-            self.telegramOk = botPresent && masterPresent && !chatId.isEmpty
-            self.telegramStatusText = self.telegramOk ? "Telegram Storage • Online" : "Telegram Storage • Offline"
-            if !botPresent || chatId.isEmpty {
-                self.telegramValidateOk = false
-                self.telegramValidateText = "Missing token / chat id"
-            } else if self.telegramValidateText == "Missing token / chat id" {
-                self.telegramValidateOk = nil
-                self.telegramValidateText = "Not validated"
+            if withSecrets {
+                let secrets = obj["secrets"] as? [String: Any]
+                let botPresent = (secrets?["telegramBotTokenPresent"] as? Bool) ?? false
+                let masterPresent = (secrets?["masterKeyPresent"] as? Bool) ?? false
+                self.botTokenPresent = botPresent
+                self.masterKeyPresent = masterPresent
+                self.didFetchSecretPresence = true
             }
-            if botPresent && self.botTokenDraft.isEmpty {
+            if withSecrets {
+                if !self.botTokenPresent || self.chatId.isEmpty {
+                    self.telegramValidateOk = false
+                    self.telegramValidateText = "Missing token / chat id"
+                } else if self.telegramValidateText == "Missing token / chat id" {
+                    self.telegramValidateOk = nil
+                    self.telegramValidateText = "Not validated"
+                }
+            } else {
+                if self.chatId.isEmpty {
+                    self.telegramValidateOk = false
+                    self.telegramValidateText = "Missing chat id"
+                } else if self.telegramValidateText == "Missing token / chat id" || self.telegramValidateText == "Missing chat id" {
+                    self.telegramValidateOk = nil
+                    self.telegramValidateText = "Not validated"
+                }
+            }
+            if self.botTokenPresent && self.botTokenDraft.isEmpty {
                 self.botTokenDraft = Self.maskedTokenPlaceholder()
                 self.botTokenDraftIsMasked = true
             }
-            if !botPresent && self.botTokenDraftIsMasked {
+            if !self.botTokenPresent && self.botTokenDraftIsMasked {
                 self.botTokenDraft = ""
                 self.botTokenDraftIsMasked = false
             }
+            self.updateTelegramStatus()
         }
     }
 
@@ -493,7 +525,7 @@ final class AppModel: ObservableObject {
                     self.currentBytesUploaded = bytesUploaded
                     self.currentBytesDeduped = bytesDeduped
                 }
-                refreshSecrets()
+                refreshSettings(withSecrets: false)
             }
         }
     }
@@ -758,7 +790,6 @@ struct PopoverRootView: View {
         }
         .frame(width: 360, height: 460)
         .preferredColorScheme(.light)
-        .onAppear { model.refresh() }
         .overlay(alignment: .bottom) {
             if let toast = model.toastText {
                 ToastPill(text: toast, isError: model.toastIsError)
@@ -1085,6 +1116,9 @@ struct SettingsView: View {
                 model.botTokenDraft = ""
                 model.botTokenDraftIsMasked = false
             }
+        }
+        .onAppear {
+            model.refreshSecretsPresence()
         }
     }
 }

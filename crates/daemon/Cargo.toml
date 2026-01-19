@@ -13,4 +13,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 toml = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = "3"
+security-framework = "3.5.1"

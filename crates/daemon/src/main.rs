@@ -174,17 +174,30 @@ fn default_data_dir() -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let entry = keyring::Entry::new("TelevyBackup", key)?;
-    match entry.get_password() {
-        Ok(v) => Ok(Some(v)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e.into()),
+    use security_framework::passwords::{PasswordOptions, generic_password};
+
+    let opts = PasswordOptions::new_generic_password("TelevyBackup", key);
+    match generic_password(opts) {
+        Ok(bytes) => Ok(Some(String::from_utf8(bytes)?)),
+        Err(e) => {
+            if is_keychain_not_found(&e) {
+                Ok(None)
+            } else {
+                Err(Box::new(e))
+            }
+        }
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 fn get_secret(_key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
     Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
+    // errSecItemNotFound
+    e.code() == -25300
 }
 
 #[cfg(target_os = "macos")]
