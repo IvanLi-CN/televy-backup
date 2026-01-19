@@ -296,6 +296,9 @@ final class AppModel: ObservableObject {
             if !botPresent || chatId.isEmpty {
                 self.telegramValidateOk = false
                 self.telegramValidateText = "Missing token / chat id"
+            } else if self.telegramValidateText == "Missing token / chat id" {
+                self.telegramValidateOk = nil
+                self.telegramValidateText = "Not validated"
             }
             if botPresent && self.botTokenDraft.isEmpty {
                 self.botTokenDraft = Self.maskedTokenPlaceholder()
