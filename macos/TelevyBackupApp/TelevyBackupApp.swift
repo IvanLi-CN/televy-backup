@@ -68,6 +68,10 @@ final class AppModel: ObservableObject {
     @Published var lastDurationSeconds: Double = 0
     @Published var lastRunAt: Date?
 
+    @Published var currentBytesUploaded: Int64 = 0
+    @Published var currentBytesDeduped: Int64 = 0
+    @Published var taskStartedAt: Date?
+
     @Published var logEntries: [LogEntry] = []
 
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
@@ -424,7 +428,13 @@ final class AppModel: ObservableObject {
 
         if type == "task.progress" {
             let phase = obj["phase"] as? String ?? "running"
+            let bytesUploaded = (obj["bytesUploaded"] as? NSNumber)?.int64Value ?? 0
+            let bytesDeduped = (obj["bytesDeduped"] as? NSNumber)?.int64Value ?? 0
             DispatchQueue.main.async { self.phase = phase }
+            DispatchQueue.main.async {
+                self.currentBytesUploaded = bytesUploaded
+                self.currentBytesDeduped = bytesDeduped
+            }
             return
         }
 
@@ -435,9 +445,13 @@ final class AppModel: ObservableObject {
                 if state == "running" {
                     self.isRunning = true
                     self.phase = kind
+                    self.currentBytesUploaded = 0
+                    self.currentBytesDeduped = 0
+                    self.taskStartedAt = Date()
                 } else {
                     self.isRunning = false
                     self.phase = "idle"
+                    self.taskStartedAt = nil
                 }
             }
 
@@ -452,6 +466,8 @@ final class AppModel: ObservableObject {
                     self.lastBytesDeduped = bytesDeduped
                     self.lastDurationSeconds = duration
                     self.lastRunAt = Date()
+                    self.currentBytesUploaded = bytesUploaded
+                    self.currentBytesDeduped = bytesDeduped
                 }
                 refreshSecrets()
             }
@@ -812,9 +828,9 @@ struct OverviewView: View {
                     .opacity(model.isRunning ? 1 : 0)
 
                 HStack(spacing: 26) {
-                    statColumn("Uploaded", formatBytes(model.lastBytesUploaded), .blue)
-                    statColumn("Dedupe", formatBytes(model.lastBytesDeduped), .green)
-                    statColumn("Duration", formatDuration(model.lastDurationSeconds), .primary)
+                    statColumn("Uploaded", formatBytes(displayBytesUploaded()), .blue)
+                    statColumn("Dedupe", formatBytes(displayBytesDeduped()), .green)
+                    statColumn("Duration", formatDuration(displayDurationSeconds()), .primary)
                 }
             }
 
@@ -859,6 +875,21 @@ struct OverviewView: View {
                 .font(.system(.body, design: .monospaced).weight(.bold))
                 .foregroundStyle(color)
         }
+    }
+
+    private func displayBytesUploaded() -> Int64 {
+        model.isRunning ? model.currentBytesUploaded : model.lastBytesUploaded
+    }
+
+    private func displayBytesDeduped() -> Int64 {
+        model.isRunning ? model.currentBytesDeduped : model.lastBytesDeduped
+    }
+
+    private func displayDurationSeconds() -> Double {
+        if model.isRunning, let startedAt = model.taskStartedAt {
+            return Date().timeIntervalSince(startedAt)
+        }
+        return model.lastDurationSeconds
     }
 
     private func detailRow(label: String, value: String) -> some View {
