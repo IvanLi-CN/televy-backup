@@ -690,20 +690,18 @@ struct PopoverRootView: View {
                 }
             }
             .padding(12)
-
-            if let toast = model.toastText {
-                VStack {
-                    Spacer()
-                    ToastPill(text: toast, isError: model.toastIsError)
-                }
-                .padding(12)
-                .allowsHitTesting(false)
-                .transition(.opacity)
-            }
         }
         .frame(width: 360, height: 460)
         .preferredColorScheme(.light)
         .onAppear { model.refresh() }
+        .overlay(alignment: .bottom) {
+            if let toast = model.toastText {
+                ToastPill(text: toast, isError: model.toastIsError)
+                    .padding(12)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
     }
 
     private var header: some View {
