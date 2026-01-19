@@ -53,6 +53,8 @@ final class AppModel: ObservableObject {
     @Published var telegramStatusText: String = "Telegram Storage • Offline"
     @Published var botTokenPresent: Bool = false
     @Published var masterKeyPresent: Bool = false
+    @Published var telegramValidateOk: Bool? = nil
+    @Published var telegramValidateText: String = "Not validated"
 
     @Published var toastText: String? = nil
     @Published var toastIsError: Bool = false
@@ -131,10 +133,12 @@ final class AppModel: ObservableObject {
             showToast("Bot token is empty", isError: true)
             return
         }
+        showToast("Saving token…", isError: false)
         runProcess(
             exe: cli,
             args: ["--json", "secrets", "set-telegram-bot-token"],
             stdin: token + "\n",
+            updateTaskState: false,
             onExit: { status in
                 if status == 0 {
                     self.botTokenDraft = ""
@@ -152,7 +156,20 @@ final class AppModel: ObservableObject {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
-        runProcess(exe: cli, args: ["--json", "secrets", "init-master-key"])
+        showToast("Initializing master key…", isError: false)
+        runProcess(
+            exe: cli,
+            args: ["--json", "secrets", "init-master-key"],
+            updateTaskState: false,
+            onExit: { status in
+                if status == 0 {
+                    self.showToast("Master key saved in Keychain", isError: false)
+                    self.refreshSecrets()
+                } else {
+                    self.showToast("Failed to init master key (see Logs)", isError: true)
+                }
+            }
+        )
     }
 
     func testConnection() {
@@ -160,7 +177,27 @@ final class AppModel: ObservableObject {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
-        runProcess(exe: cli, args: ["--json", "telegram", "validate"])
+        showToast("Testing connection…", isError: false)
+        DispatchQueue.main.async {
+            self.telegramValidateOk = nil
+            self.telegramValidateText = "Testing…"
+        }
+        runProcess(
+            exe: cli,
+            args: ["--json", "telegram", "validate"],
+            updateTaskState: false,
+            onExit: { status in
+                if status == 0 {
+                    self.telegramValidateOk = true
+                    self.telegramValidateText = "Connected"
+                    self.showToast("Telegram OK", isError: false)
+                } else {
+                    self.telegramValidateOk = false
+                    self.telegramValidateText = "Failed (see Logs)"
+                    self.showToast("Test failed (see Logs)", isError: true)
+                }
+            }
+        )
     }
 
     func runBackupNow() {
@@ -242,6 +279,10 @@ final class AppModel: ObservableObject {
             self.chatId = chatId
             self.telegramOk = botPresent && masterPresent && !chatId.isEmpty
             self.telegramStatusText = self.telegramOk ? "Telegram Storage • Online" : "Telegram Storage • Offline"
+            if !botPresent || chatId.isEmpty {
+                self.telegramValidateOk = false
+                self.telegramValidateText = "Missing token / chat id"
+            }
         }
     }
 
@@ -340,10 +381,18 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func runProcess(exe: String, args: [String], stdin: String? = nil, onExit: ((Int32) -> Void)? = nil) {
-        DispatchQueue.main.async {
-            self.isRunning = true
-            self.phase = "running"
+    private func runProcess(
+        exe: String,
+        args: [String],
+        stdin: String? = nil,
+        updateTaskState: Bool = true,
+        onExit: ((Int32) -> Void)? = nil
+    ) {
+        if updateTaskState {
+            DispatchQueue.main.async {
+                self.isRunning = true
+                self.phase = "running"
+            }
         }
         appendLog("$ \(exe) \(args.joined(separator: " "))")
 
@@ -397,8 +446,10 @@ final class AppModel: ObservableObject {
                 self.handleOutputLine("ERROR: failed to run process: \(error)")
             }
             DispatchQueue.main.async {
-                self.isRunning = false
-                self.phase = "idle"
+                if updateTaskState {
+                    self.isRunning = false
+                    self.phase = "idle"
+                }
                 out.fileHandleForReading.readabilityHandler = nil
                 err.fileHandleForReading.readabilityHandler = nil
             }
@@ -806,8 +857,8 @@ struct SettingsView: View {
                     Button("Test connection") { model.testConnection() }
                         .buttonStyle(.bordered)
                     Spacer()
-                    StatusLED(ok: model.telegramOk)
-                    Text(model.telegramOk ? "OK" : "Offline")
+                    StatusLED(ok: model.telegramValidateOk ?? false)
+                    Text(model.telegramValidateText)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
