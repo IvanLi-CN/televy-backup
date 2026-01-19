@@ -263,8 +263,9 @@ pub async fn run_backup_with<S: Storage>(
             } else {
                 let encrypted =
                     encrypt_framed(&config.master_key, chunk_hash.as_bytes(), &chunk.data)?;
+                let filename = telegram_camouflaged_filename();
                 let object_id = storage
-                    .upload_document(&format!("chunk-{chunk_hash}.bin"), encrypted.clone())
+                    .upload_document(&filename, encrypted.clone())
                     .await?;
 
                 sqlx::query(
@@ -438,6 +439,11 @@ async fn latest_snapshot_for_source(
     Ok(row.map(|r| r.get::<String, _>("snapshot_id")))
 }
 
+fn telegram_camouflaged_filename() -> String {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    format!("file_{}.dat", &id[..12])
+}
+
 async fn chunk_object_exists(pool: &SqlitePool, provider: &str, chunk_hash: &str) -> Result<bool> {
     let row: Option<SqliteRow> = sqlx::query(
         r#"
@@ -471,7 +477,7 @@ async fn upload_index<S: Storage>(
         let aad = index_part_aad(snapshot_id, part_no);
         let part_enc = encrypt_framed(&config.master_key, aad.as_bytes(), part_plain)?;
         let part_hash = blake3::hash(&part_enc).to_hex().to_string();
-        let filename = format!("index-{snapshot_id}.sqlite.zst.enc.part-{part_no:06}.bin");
+        let filename = telegram_camouflaged_filename();
         let object_id = storage.upload_document(&filename, part_enc.clone()).await?;
 
         sqlx::query(
@@ -510,7 +516,7 @@ async fn upload_index<S: Storage>(
     })?;
 
     let manifest_enc = encrypt_framed(&config.master_key, snapshot_id.as_bytes(), &manifest_json)?;
-    let manifest_filename = format!("index-{snapshot_id}.manifest.json.enc");
+    let manifest_filename = telegram_camouflaged_filename();
     let manifest_object_id = storage
         .upload_document(&manifest_filename, manifest_enc)
         .await?;
