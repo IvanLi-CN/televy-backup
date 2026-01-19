@@ -74,6 +74,9 @@ final class AppModel: ObservableObject {
 
     @Published var logEntries: [LogEntry] = []
 
+    private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
+    private var didWriteStartupLog: Bool = false
+
     func defaultConfigDir() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home
@@ -114,6 +117,10 @@ final class AppModel: ObservableObject {
     }
 
     func refresh() {
+        if !didWriteStartupLog {
+            didWriteStartupLog = true
+            appendLog("UI started")
+        }
         refreshSecrets()
     }
 
@@ -314,10 +321,38 @@ final class AppModel: ObservableObject {
     private func appendLog(_ line: String) {
         let trimmed = line.trimmingCharacters(in: .newlines)
         guard !trimmed.isEmpty else { return }
+        appendFileLog(trimmed)
         DispatchQueue.main.async {
             self.logEntries.append(LogEntry(timestamp: Date(), message: trimmed))
             if self.logEntries.count > 400 {
                 self.logEntries.removeFirst(self.logEntries.count - 400)
+            }
+        }
+    }
+
+    private func uiLogFileURL() -> URL {
+        defaultConfigDir().appendingPathComponent("ui.log")
+    }
+
+    private func appendFileLog(_ message: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let line = "\(ts) \(message)\n"
+        let url = uiLogFileURL()
+        fileLogQueue.async {
+            do {
+                let dir = url.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    try Data().write(to: url, options: .atomic)
+                }
+                let handle = try FileHandle(forWritingTo: url)
+                try handle.seekToEnd()
+                if let data = line.data(using: .utf8) {
+                    try handle.write(contentsOf: data)
+                }
+                try handle.close()
+            } catch {
+                // Do not recurse into appendLog; ignore file logging failures.
             }
         }
     }
