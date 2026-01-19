@@ -1,6 +1,26 @@
 import AppKit
 import SwiftUI
 
+struct VisualEffectView: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
+    let blendingMode: NSVisualEffectView.BlendingMode
+    let state: NSVisualEffectView.State
+
+    func makeNSView(context _: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = material
+        v.blendingMode = blendingMode
+        v.state = state
+        return v
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context _: Context) {
+        nsView.material = material
+        nsView.blendingMode = blendingMode
+        nsView.state = state
+    }
+}
+
 enum Tab: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case logs = "Logs"
@@ -40,6 +60,7 @@ final class AppModel: ObservableObject {
     @Published var lastBytesUploaded: Int64 = 0
     @Published var lastBytesDeduped: Int64 = 0
     @Published var lastDurationSeconds: Double = 0
+    @Published var lastRunAt: Date?
 
     @Published var logEntries: [LogEntry] = []
 
@@ -284,6 +305,7 @@ final class AppModel: ObservableObject {
                     self.lastBytesUploaded = bytesUploaded
                     self.lastBytesDeduped = bytesDeduped
                     self.lastDurationSeconds = duration
+                    self.lastRunAt = Date()
                 }
                 refreshSecrets()
             }
@@ -420,37 +442,93 @@ struct GlassCard<Content: View>: View {
     }
 }
 
+struct SegmentedTabs: View {
+    @Binding var tab: Tab
+
+    var body: some View {
+        HStack(spacing: 0) {
+            tabButton(.overview)
+            divider
+            tabButton(.logs)
+            divider
+            tabButton(.settings)
+        }
+        .padding(1)
+        .background(Color.white.opacity(0.20), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+        )
+        .frame(height: 32)
+    }
+
+    private var divider: some View {
+        Rectangle()
+            .fill(Color.black.opacity(0.10))
+            .frame(width: 1)
+            .padding(.vertical, 3)
+    }
+
+    private func tabButton(_ t: Tab) -> some View {
+        Button {
+            tab = t
+        } label: {
+            Text(t.rawValue)
+                .font(.system(size: 12, weight: .bold))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .foregroundStyle(tab == t ? Color.primary : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .background(
+            Group {
+                if tab == t {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.white.opacity(0.38))
+                        .padding(1)
+                }
+            }
+        )
+    }
+}
+
 struct PopoverRootView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
+        ZStack {
+            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow, state: .active)
+                .ignoresSafeArea()
 
-            Picker("", selection: $model.tab) {
-                ForEach(Tab.allCases) { t in
-                    Text(t.rawValue).tag(t)
+            VStack(alignment: .leading, spacing: 12) {
+                header
+                SegmentedTabs(tab: $model.tab)
+
+                switch model.tab {
+                case .overview:
+                    OverviewView()
+                case .logs:
+                    LogsView()
+                case .settings:
+                    SettingsView()
                 }
             }
-            .pickerStyle(.segmented)
-
-            switch model.tab {
-            case .overview:
-                OverviewView()
-            case .logs:
-                LogsView()
-            case .settings:
-                SettingsView()
-            }
+            .padding(12)
         }
-        .padding(12)
         .frame(width: 360, height: 460)
-        .background(.regularMaterial)
+        .background(Color.white.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .inset(by: 1)
+                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.18), radius: 18, x: 0, y: 18)
+        .shadow(color: Color.black.opacity(0.14), radius: 6, x: 0, y: 4)
+        .preferredColorScheme(.light)
         .onAppear { model.refresh() }
     }
 
@@ -491,6 +569,7 @@ struct PopoverRootView: View {
             }
             .buttonStyle(.plain)
         }
+        .padding(.bottom, 2)
     }
 }
 
@@ -503,15 +582,14 @@ struct OverviewView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(model.isRunning ? "Syncing" : "Idle")
                         .font(.system(size: 16, weight: .heavy))
-                    Text(model.isRunning ? "(\(model.phase))" : "(ready)")
+                    Text(model.isRunning ? "(\(model.phase))" : lastRunText())
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
 
-                if model.isRunning {
-                    ProgressView()
-                        .progressViewStyle(.linear)
-                }
+                ProgressView(value: model.isRunning ? 0.2 : 0.0)
+                    .progressViewStyle(.linear)
+                    .opacity(model.isRunning ? 1 : 0)
 
                 HStack(spacing: 18) {
                     statColumn("Uploaded", formatBytes(model.lastBytesUploaded))
@@ -539,6 +617,8 @@ struct OverviewView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.blue)
+
+            Spacer(minLength: 0)
         }
     }
 
@@ -547,6 +627,14 @@ struct OverviewView: View {
             Text(label).foregroundStyle(.primary.opacity(0.9))
             Text(value).foregroundStyle(.primary.opacity(0.9))
         }
+    }
+
+    private func lastRunText() -> String {
+        guard let last = model.lastRunAt else { return "(ready)" }
+        let seconds = Date().timeIntervalSince(last)
+        if seconds < 60 { return "(last run just now)" }
+        if seconds < 3600 { return "(last run \(Int(seconds / 60))m ago)" }
+        return "(last run \(Int(seconds / 3600))h ago)"
     }
 }
 
@@ -688,6 +776,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
             win.title = "TelevyBackup"
             win.center()
+            win.isOpaque = false
+            win.backgroundColor = .clear
             win.contentView = hosting
             window = win
         }
