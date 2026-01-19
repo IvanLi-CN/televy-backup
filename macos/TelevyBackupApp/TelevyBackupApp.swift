@@ -454,10 +454,10 @@ struct SegmentedTabs: View {
             tabButton(.settings)
         }
         .padding(1)
-        .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
         )
         .frame(height: 32)
     }
@@ -483,7 +483,7 @@ struct SegmentedTabs: View {
             Group {
                 if tab == t {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.white.opacity(0.46))
+                        .fill(Color.white.opacity(0.30))
                         .padding(1)
                 }
             }
@@ -509,10 +509,6 @@ struct PopoverRootView: View {
                 .ignoresSafeArea()
             ContainerRelativeShape()
                 .strokeBorder(glassStroke, lineWidth: 1)
-                .ignoresSafeArea()
-            ContainerRelativeShape()
-                .strokeBorder(Color.white.opacity(0.20), lineWidth: 1)
-                .padding(1)
                 .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 12) {
@@ -578,8 +574,8 @@ struct PopoverRootView: View {
     private var glassFill: LinearGradient {
         LinearGradient(
             colors: [
-                Color.white.opacity(0.55),
-                Color.white.opacity(0.38),
+                Color.white.opacity(0.18),
+                Color.white.opacity(0.08),
             ],
             startPoint: .top,
             endPoint: .bottom
@@ -589,9 +585,9 @@ struct PopoverRootView: View {
     private var glassStroke: LinearGradient {
         LinearGradient(
             colors: [
-                Color.white.opacity(0.90),
-                Color.white.opacity(0.35),
-                Color.black.opacity(0.10),
+                Color.white.opacity(0.55),
+                Color.white.opacity(0.22),
+                Color.black.opacity(0.08),
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
@@ -601,7 +597,7 @@ struct PopoverRootView: View {
     private var glassHighlight: LinearGradient {
         LinearGradient(
             colors: [
-                Color.white.opacity(0.18),
+                Color.white.opacity(0.12),
                 Color.white.opacity(0.00),
             ],
             startPoint: .topLeading,
@@ -837,10 +833,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem?.button else { return }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        configurePopoverWindowIfNeeded()
     }
 
     private func closePopover(_ sender: Any?) {
         popover.performClose(sender)
+    }
+
+    private func configurePopoverWindowIfNeeded() {
+        guard let window = popover.contentViewController?.view.window else { return }
+        if window.isOpaque {
+            window.isOpaque = false
+        }
+        if window.backgroundColor != .clear {
+            window.backgroundColor = .clear
+        }
     }
 }
 
