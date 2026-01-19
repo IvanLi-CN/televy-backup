@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+final class ModelStore {
+    static let shared = AppModel()
+}
+
 final class AppModel: ObservableObject {
     @Published var sourcePath: String = ""
     @Published var label: String = "manual"
@@ -293,14 +297,45 @@ struct ContentView: View {
     }
 }
 
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var window: NSWindow?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        showMainWindow()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
+        return true
+    }
+
+    private func showMainWindow() {
+        if window == nil {
+            let view = ContentView().environmentObject(ModelStore.shared)
+            let hosting = NSHostingView(rootView: view)
+
+            let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
+                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                               backing: .buffered,
+                               defer: false)
+            win.title = "TelevyBackup"
+            win.center()
+            win.contentView = hosting
+            window = win
+        }
+
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
 @main
 struct TelevyBackupApp: App {
-    @StateObject private var model = AppModel()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @StateObject private var model = ModelStore.shared
 
     var body: some Scene {
-        WindowGroup("TelevyBackup") {
-            ContentView().environmentObject(model)
-        }
+        WindowGroup {}
         MenuBarExtra("TelevyBackup", systemImage: "externaldrive") {
             ContentView().environmentObject(model)
         }
