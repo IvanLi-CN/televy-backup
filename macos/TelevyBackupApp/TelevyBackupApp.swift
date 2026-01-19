@@ -60,10 +60,6 @@ final class AppModel: ObservableObject {
     @Published var toastText: String? = nil
     @Published var toastIsError: Bool = false
 
-    @Published var lastCommandText: String = "-"
-    @Published var lastExitStatus: Int32? = nil
-    @Published var lastErrorText: String? = nil
-
     @Published var isRunning: Bool = false
     @Published var phase: String = "idle"
 
@@ -392,13 +388,6 @@ final class AppModel: ObservableObject {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return }
 
-        if let code = obj["code"] as? String, let message = obj["message"] as? String {
-            DispatchQueue.main.async {
-                self.lastErrorText = "\(code): \(message)"
-            }
-            return
-        }
-
         guard let type = obj["type"] as? String else { return }
 
         if type == "task.progress" {
@@ -462,13 +451,7 @@ final class AppModel: ObservableObject {
                 self.phase = "running"
             }
         }
-        let cmdLine = "$ \(exe) \(args.joined(separator: " "))"
-        DispatchQueue.main.async {
-            self.lastCommandText = cmdLine
-            self.lastExitStatus = nil
-            self.lastErrorText = nil
-        }
-        appendLog(cmdLine)
+        appendLog("$ \(exe) \(args.joined(separator: " "))")
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: exe)
@@ -520,7 +503,6 @@ final class AppModel: ObservableObject {
                 self.handleOutputLine("ERROR: failed to run process: \(error)")
             }
             DispatchQueue.main.async {
-                self.lastExitStatus = status
                 if updateTaskState {
                     self.isRunning = false
                     self.phase = "idle"
@@ -949,29 +931,6 @@ struct SettingsView: View {
                     Text(model.masterKeyPresent ? "Master key: saved" : "Master key: missing")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(model.masterKeyPresent ? Color.secondary : Color.red)
-                }
-            }
-
-            GlassCard(title: "DIAGNOSTICS") {
-                Text(model.lastCommandText)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-
-                HStack {
-                    Text("Exit")
-                        .font(.system(size: 12, weight: .semibold))
-                    Spacer()
-                    Text(model.lastExitStatus.map(String.init) ?? "-")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(model.lastExitStatus == 0 ? Color.green : Color.secondary)
-                }
-
-                if let err = model.lastErrorText {
-                    Text(err)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color.red)
-                        .lineLimit(3)
                 }
             }
 
