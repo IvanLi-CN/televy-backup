@@ -46,6 +46,7 @@ final class AppModel: ObservableObject {
     @Published var label: String = "manual"
     @Published var chatId: String = ""
     @Published var botTokenDraft: String = ""
+    @Published var botTokenDraftIsMasked: Bool = false
     @Published var scheduleEnabled: Bool = false
     @Published var scheduleKind: String = "hourly"
 
@@ -116,6 +117,10 @@ final class AppModel: ObservableObject {
         refreshSecrets()
     }
 
+    static func maskedTokenPlaceholder() -> String {
+        String(repeating: "•", count: 18)
+    }
+
     func saveSettings() {
         do {
             try writeConfigToml()
@@ -129,6 +134,10 @@ final class AppModel: ObservableObject {
     func setBotToken() {
         guard let cli = cliPath() else {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        if botTokenDraftIsMasked {
+            showToast("Paste a new token to replace", isError: true)
             return
         }
         let token = botTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -145,7 +154,8 @@ final class AppModel: ObservableObject {
             updateTaskState: false,
             onExit: { status in
                 if status == 0 {
-                    self.botTokenDraft = ""
+                    self.botTokenDraft = Self.maskedTokenPlaceholder()
+                    self.botTokenDraftIsMasked = true
                     self.showToast("Saved in Keychain", isError: false)
                     self.refreshSecrets()
                 } else {
@@ -286,6 +296,14 @@ final class AppModel: ObservableObject {
             if !botPresent || chatId.isEmpty {
                 self.telegramValidateOk = false
                 self.telegramValidateText = "Missing token / chat id"
+            }
+            if botPresent && self.botTokenDraft.isEmpty {
+                self.botTokenDraft = Self.maskedTokenPlaceholder()
+                self.botTokenDraftIsMasked = true
+            }
+            if !botPresent && self.botTokenDraftIsMasked {
+                self.botTokenDraft = ""
+                self.botTokenDraftIsMasked = false
             }
         }
     }
@@ -837,6 +855,7 @@ struct LogsView: View {
 
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
+    @FocusState private var tokenFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -862,6 +881,7 @@ struct SettingsView: View {
 
                 HStack(spacing: 8) {
                     SecureField("Paste new bot token (not stored here)", text: $model.botTokenDraft)
+                        .focused($tokenFocused)
                     Button("Save token") { model.setBotToken() }
                         .buttonStyle(.bordered)
                 }
@@ -935,6 +955,12 @@ struct SettingsView: View {
                 Button("Save") { model.saveSettings() }
                     .buttonStyle(.borderedProminent)
                     .tint(.blue)
+            }
+        }
+        .onChange(of: tokenFocused) { _, isFocused in
+            if isFocused, model.botTokenDraftIsMasked {
+                model.botTokenDraft = ""
+                model.botTokenDraftIsMasked = false
             }
         }
     }
