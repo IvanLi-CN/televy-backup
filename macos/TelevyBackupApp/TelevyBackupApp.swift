@@ -50,7 +50,7 @@ final class AppModel: ObservableObject {
     @Published var scheduleKind: String = "hourly"
 
     @Published var telegramOk: Bool = false
-    @Published var telegramStatusText: String = "Offline"
+    @Published var telegramStatusText: String = "Telegram Storage • Offline"
     @Published var botTokenPresent: Bool = false
     @Published var masterKeyPresent: Bool = false
 
@@ -434,7 +434,7 @@ struct GlassCard<Content: View>: View {
             content
         }
         .padding(12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
@@ -620,27 +620,23 @@ struct OverviewView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                ProgressView(value: model.isRunning ? 0.2 : 0.0)
+                ProgressView()
                     .progressViewStyle(.linear)
                     .opacity(model.isRunning ? 1 : 0)
 
-                HStack(spacing: 18) {
-                    statColumn("Uploaded", formatBytes(model.lastBytesUploaded))
-                    statColumn("Dedupe", formatBytes(model.lastBytesDeduped))
-                    statColumn("Duration", formatDuration(model.lastDurationSeconds))
+                HStack(spacing: 26) {
+                    statColumn("Uploaded", formatBytes(model.lastBytesUploaded), .blue)
+                    statColumn("Dedupe", formatBytes(model.lastBytesDeduped), .green)
+                    statColumn("Duration", formatDuration(model.lastDurationSeconds), .primary)
                 }
-                .font(.system(.caption, design: .monospaced).weight(.semibold))
             }
 
-            Spacer(minLength: 0)
-
-            HStack(spacing: 10) {
-                Button("Open logs") { model.openLogs() }
-                    .buttonStyle(.bordered)
-                Spacer()
-                Text("Encrypted • Synced")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.secondary)
+            GlassCard(title: "DETAILS") {
+                detailRow(label: "Source", value: model.sourcePath.isEmpty ? "—" : model.sourcePath)
+                Divider().opacity(0.35)
+                detailRow(label: "Next schedule", value: nextScheduleText())
+                Divider().opacity(0.35)
+                detailRow(label: "Index", value: "Encrypted • Synced")
             }
 
             Button {
@@ -655,11 +651,33 @@ struct OverviewView: View {
         }
     }
 
-    private func statColumn(_ label: String, _ value: String) -> some View {
+    private func statColumn(_ label: String, _ value: String, _ color: Color) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label).foregroundStyle(.primary.opacity(0.9))
-            Text(value).foregroundStyle(.primary.opacity(0.9))
+            Text(label)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.primary.opacity(0.85))
+            Text(value)
+                .font(.system(.body, design: .monospaced).weight(.bold))
+                .foregroundStyle(color)
         }
+    }
+
+    private func detailRow(label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.system(size: 13, weight: .semibold))
+            Spacer()
+            Text(value)
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    private func nextScheduleText() -> String {
+        if !model.scheduleEnabled { return "—" }
+        return model.scheduleKind == "daily" ? "Daily 02:00" : "Hourly :00"
     }
 
     private func lastRunText() -> String {
@@ -831,6 +849,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPopover(_ sender: Any?) {
         guard let button = statusItem?.button else { return }
+        ModelStore.shared.refresh()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         configurePopoverWindowIfNeeded()
@@ -841,12 +860,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configurePopoverWindowIfNeeded() {
-        guard let window = popover.contentViewController?.view.window else { return }
-        if window.isOpaque {
-            window.isOpaque = false
-        }
-        if window.backgroundColor != .clear {
-            window.backgroundColor = .clear
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+            guard let window = self.popover.contentViewController?.view.window else { return }
+            if window.isOpaque {
+                window.isOpaque = false
+            }
+            if window.backgroundColor != .clear {
+                window.backgroundColor = .clear
+            }
         }
     }
 }
