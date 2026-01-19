@@ -2,8 +2,8 @@
 
 本目录记录本计划涉及的所有“跨边界接口契约”。实现必须以这里为准做增量变更。
 
-- `rpc.md`: Tauri `invoke()` commands（前端 ↔ 后端）
-- `events.md`: Tauri events（任务进度/状态推送）
+- `rpc.md`: CLI/IPC contracts（native macOS app ↔ `televybackup` CLI）
+- `events.md`: progress events（`televybackup` stdout NDJSON）
 - `db.md`: SQLite schema（索引与任务）
 - `file-formats.md`: 本地配置/缓存/索引打包的文件格式约定
 

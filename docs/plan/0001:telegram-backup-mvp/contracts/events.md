@@ -1,30 +1,35 @@
-# Event Contracts（Tauri events）
+# Event Contracts（`televybackup` stdout NDJSON）
 
 > Kind: Event（internal）
 >
-> Producer: Tauri backend（Rust）
+> Producer: `televybackup`（Rust CLI）
 >
-> Consumers: Web UI
+> Consumers: native macOS app
 >
-> Delivery semantics: at-least-once（前端应按 `taskId` 幂等更新 UI）
+> Delivery semantics: at-least-once（消费者应按 `taskId` 幂等更新 UI）
 
 ## Events
 
-### `task:state`
+All events are printed as one JSON object per line (NDJSON).
+
+Common fields:
+
+- `type`: string（event type）
+- `taskId`: string
+
+### `task.state`
 
 **Payload**
 
-- `taskId`: string
 - `kind`: `"backup" | "restore" | "verify"`
 - `state`: `"queued" | "running" | "succeeded" | "failed" | "cancelled"`
 - `error`?: `{ code: string, message: string }`
 
-### `task:progress`
+### `task.progress`
 
 **Payload**
 
-- `taskId`: string
-- `phase`: string（见 RPC `phase` 约定）
+- `phase`: string（见 core 的 `phase` 约定）
 - `filesTotal`?: number
 - `filesDone`?: number
 - `chunksTotal`?: number
@@ -39,4 +44,3 @@
 
 - 允许新增字段（前端忽略未知字段）。
 - 禁止删除/重命名字段；如需变更，必须新增字段并走弃用周期。
-

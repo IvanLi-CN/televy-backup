@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Compute effective semver from src-tauri/Cargo.toml, auto-increment patch if tag exists.
+# Compute effective semver from crates/daemon/Cargo.toml, auto-increment patch if tag exists.
 
 root_dir="$(git rev-parse --show-toplevel)"
 
 git fetch --tags --force >/dev/null 2>&1 || true
 
 cargo_ver="$(
-  grep -m1 '^version[[:space:]]*=[[:space:]]*"' "$root_dir/src-tauri/Cargo.toml" \
+  grep -m1 '^version[[:space:]]*=[[:space:]]*"' "$root_dir/crates/daemon/Cargo.toml" \
     | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/'
 )"
 
 if [[ -z "${cargo_ver:-}" ]]; then
-  echo "Failed to detect version from src-tauri/Cargo.toml" >&2
+  echo "Failed to detect version from crates/daemon/Cargo.toml" >&2
   exit 1
 fi
 
@@ -30,4 +30,3 @@ effective="${base_major}.${base_minor}.${candidate}"
 
 echo "APP_EFFECTIVE_VERSION=${effective}" >> "${GITHUB_ENV:-/dev/stdout}"
 echo "Computed APP_EFFECTIVE_VERSION=${effective} (base ${cargo_ver})"
-

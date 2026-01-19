@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 
 use crate::crypto::decrypt_framed;
@@ -21,7 +22,7 @@ pub struct RestoreConfig {
     pub target_path: PathBuf,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RestoreResult {
     pub files_restored: u64,
     pub chunks_downloaded: u64,
@@ -36,7 +37,7 @@ pub struct VerifyConfig {
     pub index_db_path: PathBuf,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct VerifyResult {
     pub chunks_checked: u64,
     pub bytes_checked: u64,

@@ -70,11 +70,11 @@
 
 ## 7.1) Proposed architecture & tech stack
 
-本阶段采用 **Tauri v2 桌面应用** + **Rust（async）后端与常驻 daemon** 的组合：
+本阶段采用 **原生 macOS 应用（SwiftUI/AppKit）** + **Rust（async）后端与常驻 daemon** 的组合：
 
-- **GUI（Tauri v2）**
-  - Vite + React 前端（WebView UI），通过 Tauri commands/events 与后端交互。
-  - UI 负责设置引导、任务发起、进度与错误展示。
+- **GUI（native macOS）**
+  - SwiftUI/AppKit UI（状态栏 popover + 设置页）。
+  - UI 通过本地 `televybackup` CLI 发起任务，并读取 stdout 的进度/结果；避免把 secrets 通过 argv 传递。
 - **Core（Rust library）**
   - `scan → chunk → encrypt → upload → index` 备份管线
   - `fetch index → fetch chunks → reassemble → verify` 恢复/校验管线
@@ -102,8 +102,8 @@
 
 ## 9) UX / UI (if applicable)
 
-- **UI form factor:** Tauri 桌面窗口（MVP 以“可用+可观察”为主）。
-- **Views:** Settings / Backup / Restore / Verify / Tasks。
+- **UI form factor:** 原生 macOS 状态栏窗口（MVP 以“可用+可观察”为主）。
+- **Views:** Settings / Backup / Restore / Verify / Logs（以及最小 Tasks 视图）。
 - **Copy:** 清晰显示状态/阶段、上传统计与失败原因；错误提供可操作引导。
 - **Edge states:** 无变更、网络中断、索引损坏、块缺失、Keychain 未配置。
 

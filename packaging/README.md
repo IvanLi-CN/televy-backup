@@ -18,3 +18,4 @@ The service expects:
 
 The cask assumes a `.dmg` will be uploaded to GitHub Releases.
 
+The GUI app is a native macOS `.app` bundle (SwiftUI/AppKit), built via `scripts/macos/build-app.sh`.

@@ -2,6 +2,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use fastcdc::v2020::StreamCDC;
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use walkdir::WalkDir;
 
@@ -60,7 +61,7 @@ pub struct BackupConfig {
     pub keep_last_snapshots: u32,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BackupResult {
     pub snapshot_id: String,
     pub files_total: u64,

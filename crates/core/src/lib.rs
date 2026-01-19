@@ -1,7 +1,7 @@
 mod backup;
 mod crypto;
 mod error;
-mod index_db;
+pub mod index_db;
 mod index_manifest;
 mod progress;
 mod restore;

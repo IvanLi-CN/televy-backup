@@ -49,7 +49,7 @@
 
 ### 约束（Constraints）
 
-- 平台：macOS（桌面端 Tauri）。
+- 平台：macOS（原生桌面端，SwiftUI/AppKit）。
 - 存储：Telegram Bot API（官方服务器）+ 与 Bot 私聊。
 - 上传限制（Bot API）：通过 `multipart/form-data` 上传“其他文件”最大 50MB；通过 `file_id` 复用发送无限制；通过 HTTP URL 方式有更小限制（不作为主路径）。该限制约束 chunk 与索引 part 的体积（需要考虑压缩/加密开销）。
 - 隐私：任何敏感凭据不得进入仓库；日志与索引不得泄露明文敏感数据。
@@ -68,7 +68,7 @@
 - 恢复（Restore）：拉取索引 → 拉取缺失块 → 重组文件 → 校验。
 - 校验（Verify）：对快照进行一致性/完整性检查（块存在性、哈希匹配、可重组）。
 - 存储适配层（Storage Adapter）：面向 Telegram 的上传/下载/复用接口（MVP 先实现一个明确路径）。
-- Tauri 桌面 UI：任务发起、进度、统计、错误、设置入口（MVP 重点是可用与可观察）。
+- 原生 macOS UI：任务发起、进度、统计、错误、设置入口（MVP 重点是可用与可观察）。
 
 ### Out of scope
 
@@ -97,9 +97,8 @@
 
 ## 技术选型（Tech Stack, frozen）
 
-- Desktop：Tauri v2（macOS）
-- Frontend：Vite + React + TypeScript（Tauri WebView UI）
-- Backend（Rust）：async（Tokio），并通过 Tauri commands/events 与前端交互
+- Desktop：native macOS app（SwiftUI/AppKit）
+- Backend（Rust）：async（Tokio），通过本地 `televybackup` CLI 与 UI 进程交互（stdin/stdout；避免 secrets 通过 argv 传递）
 - Index：SQLite（本地索引与任务状态）
 - Chunking：CDC（`min/avg/max` 可配；chunk 上限受 Bot API 50MB 约束）
 - Hash：BLAKE3（内容寻址）
@@ -115,8 +114,8 @@
 
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Tauri commands（invoke） | RPC | internal | New | ./contracts/rpc.md | app | web | 前端通过 `invoke()` 调后端 |
-| Tauri events（progress） | Event | internal | New | ./contracts/events.md | app | web | 进度/状态推送 |
+| CLI commands（local process） | IPC | internal | Update | ./contracts/rpc.md | app | app | UI 通过本地进程交互（stdin/stdout） |
+| Progress events（stdout NDJSON） | Event | internal | Update | ./contracts/events.md | app | app | 进度/状态推送 |
 | SQLite schema（index） | DB | internal | New | ./contracts/db.md | core | app | 索引与任务状态 |
 | Local config & cache layout | File format | internal | New | ./contracts/file-formats.md | core | app | 配置/缓存/密钥不落盘约定 |
 
@@ -153,8 +152,7 @@
 - Unit tests: CDC 切分稳定性、hash 计算、加密/解密 round-trip、SQLite 基础 CRUD 与约束。
 - Integration tests: 使用“本地假存储（in-memory / fs mock）”模拟上传/下载，跑一次端到端备份→恢复→校验。
 - E2E tests (required): 必须覆盖 UI 基本流程（设置 → 发起任务 → 展示进度 → 展示结果/错误）。
-  - Desktop E2E 的首选方案为 WebDriver（`tauri-driver`）。但按 Tauri 官方文档：桌面端 WebDriver 目前仅支持 Windows/Linux，macOS 桌面因缺少 WKWebView driver 暂不支持。
-  - 本项目固定采用 WebdriverIO + `tauri-driver` 作为 E2E 测试栈；E2E 固定在 CI（Linux runner）上执行；macOS 本机必须执行手工冒烟清单（不引入额外 UI 自动化）。
+  - 本计划不引入 UI 自动化；以“macOS 手工冒烟清单”作为 E2E 验收口径。
 
 ### macOS 手工冒烟清单（required）
 
@@ -167,7 +165,6 @@
 ### Quality checks
 
 - Rust: `cargo fmt` / `cargo clippy -D warnings` / `cargo test`
-- Web: `biome check` / `vite build`
 
 ## 文档更新（Docs to Update）
 
@@ -181,13 +178,13 @@
 - [x] M2: 冻结 SQLite schema 与索引上传策略（索引加密分片上传 + manifest）
 - [x] M3: 备份管线 MVP（scan → chunk → encrypt → upload → index）
 - [x] M4: 恢复/校验 MVP（fetch index → fetch chunks → reassemble → verify）
-- [x] M5: UI MVP（任务列表、进度、错误、统计、基础设置）
+- [x] M5: UI MVP（native macOS：任务列表/进度/错误/统计/基础设置）
 - [x] M6: 调度与保留策略（小时/天触发；GC/保留）
 - [x] M7: 打包与发布（brew 安装 + `brew services` 管理 + 升级不丢数据）
 
 ## 方案概述（Approach, high-level）
 
-- 分层：`core`（chunk/encrypt/index）与 `app`（Tauri commands + UI）解耦；存储通过 `Storage Adapter` 抽象以降低切换成本。
+- 分层：`core`（chunk/encrypt/index）与 `app`（native macOS UI + `televybackup` CLI）解耦；存储通过 `Storage Adapter` 抽象以降低切换成本。
 - 最小传输：chunk 级去重优先；如果 Telegram 支持通过 `file_id` 复用对象，则实现“零上传复用”路径。
 - 一致性口径：以“扫描时刻的一致性”为目标（不做 APFS snapshot）。
 
@@ -234,6 +231,4 @@ None（本计划的关键决策已冻结，可进入实现阶段）。
 ## 参考（References）
 
 - Telegram Bot API “Sending files” / `file_id` 复用与上传限制（用于 chunk/索引体积约束）：https://core.telegram.org/bots/api#sending-files
-- Tauri v2 commands / capabilities（用于 RPC/Event 安全模型）
-- Tauri WebDriver tests / `tauri-driver`（用于 E2E 方案与平台限制）：https://tauri.app/develop/tests/webdriver/
 - Homebrew `brew services`（用于 `launchd` / `LaunchAgents` 的调度与常驻管理）：https://docs.brew.sh/Manpage#services-subcommand

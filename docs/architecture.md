@@ -2,9 +2,9 @@
 
 ## Components
 
-- **GUI app**: Tauri v2 (`src-tauri/` + `web/`).
+- **GUI app**: native macOS app (SwiftUI/AppKit; built via `scripts/macos/*`).
   - Provides Settings UI and task controls (backup/restore/verify).
-  - Talks to the Rust backend via Tauri commands and listens to task events.
+  - Spawns the local `televybackup` CLI for long-running operations and streams progress from stdout.
 - **Core library**: `televy_backup_core` (`crates/core/`).
   - Implements scan → CDC chunking → hash → encrypt framing → upload → SQLite index.
   - Implements restore/verify using remote index manifest + chunk downloads.
@@ -19,7 +19,7 @@ The app and daemon can share the same data locations via env vars:
 - `TELEVYBACKUP_CONFIG_DIR`: config directory (contains `config.toml`)
 - `TELEVYBACKUP_DATA_DIR`: data directory (contains `index/index.sqlite`)
 
-When env vars are not set, the GUI uses Tauri-provided OS dirs.
+When env vars are not set, the GUI uses `~/Library/Application Support/TelevyBackup`.
 
 ## Secrets (macOS Keychain)
 
@@ -74,4 +74,3 @@ Key tables:
 - No APFS snapshot: backups are best-effort consistent at scan time.
 - No remote search for manifests in Telegram history: restore assumes local DB knows `manifest_object_id`.
 - No remote chunk GC: Telegram chat storage can grow over time.
-

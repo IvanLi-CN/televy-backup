@@ -1,14 +1,19 @@
-# RPC Contracts（Tauri commands / invoke）
+# IPC Contracts（native macOS app ↔ `televybackup` CLI）
 
-> Kind: RPC（internal）
+> Kind: IPC（internal）
 >
-> Transport: Tauri `@tauri-apps/api/core` `invoke()`
+> Transport: local process (`televybackup`), argv + stdin/stdout/stderr
 >
-> Error shape: 统一返回 `Result<T, RpcError>`
+> Error shape: JSON on stdout in `--json` mode + non-zero exit code
+
+## Common flags
+
+- `--json`: 输出机器可读 JSON（单个对象）到 stdout
+- `--events`: 在长任务中输出 NDJSON events 到 stdout（见 `events.md`）
 
 ## Common types
 
-### RpcError
+### Error JSON (`CliError`)
 
 - `code`: string（稳定枚举，便于前端判断）
 - `message`: string（面向用户的错误信息）
@@ -21,9 +26,9 @@
 { "code": "telegram.rate_limited", "message": "Too many requests", "retryable": true }
 ```
 
-## Commands
+## Commands (argv)
 
-### `ping`（已存在）
+### `ping`
 
 **Request**
 
@@ -37,7 +42,7 @@
 
 - None
 
-### `backup_start`
+### `backup run`
 
 **Request**
 
@@ -46,7 +51,6 @@
 
 **Response**
 
-- `taskId`: string
 - `snapshotId`: string（创建后即可返回；或在任务完成时填充，见实现决策）
 
 **Errors**
@@ -54,39 +58,8 @@
 - `config.invalid`
 - `source.not_found`
 - `source.not_readable`
-- `task.already_running`
 
-### `backup_status`
-
-**Request**
-
-- `taskId`: string
-
-**Response**
-
-- `state`: `"queued" | "running" | "succeeded" | "failed" | "cancelled"`
-- `phase`: `"scan" | "chunk" | "upload" | "index" | "finalize" | "idle"`
-- `progress`: object（见 events 的 payload 形状；无进度时返回 `{}`）
-
-**Errors**
-
-- `task.not_found`
-
-### `backup_cancel`
-
-**Request**
-
-- `taskId`: string
-
-**Response**
-
-- `ok`: boolean
-
-**Errors**
-
-- `task.not_found`
-
-### `restore_start`
+### `restore run`
 
 **Request**
 
@@ -95,7 +68,7 @@
 
 **Response**
 
-- `taskId`: string
+- `ok`: boolean
 
 **Errors**
 
@@ -103,15 +76,7 @@
 - `target.not_empty`
 - `target.not_writable`
 
-### `restore_status`
-
-同 `backup_status`（phase 不同：`download`/`reassemble`/`verify`）。
-
-### `restore_cancel`
-
-同 `backup_cancel`。
-
-### `verify_start`
+### `verify run`
 
 **Request**
 
@@ -119,13 +84,9 @@
 
 **Response**
 
-- `taskId`: string
+- `ok`: boolean
 
-### `verify_status`
-
-同 `backup_status`（phase：`index`/`chunks`/`reassemble`）。
-
-### `settings_get`
+### `settings get`
 
 **Request**: none
 
@@ -136,14 +97,11 @@
   - `telegramBotTokenPresent`: boolean
   - `masterKeyPresent`: boolean
 
-### `settings_set`
+### `settings set`
 
 **Request**
 
 - `settings`: object（完整设置）
-- `secrets`: object（仅用于写入/更新 Keychain，不会被原样回显）
-  - `telegramBotToken`: string | null（为 null 表示不变更）
-  - `rotateMasterKey`: boolean（固定 false；MVP 不做轮换）
 
 **Response**
 
@@ -152,12 +110,30 @@
 **Errors**
 
 - `config.invalid`
-- `keychain.unavailable`
-- `keychain.write_failed`
 
-### `telegram_validate`
+### `secrets set-telegram-bot-token`
 
-用于验证 Bot API token 与目标私聊 `chat_id` 是否可用（例如能否 `getMe`、能否发消息/上传文件到目标 chat）。
+用于写入/更新 Keychain 中的 Telegram bot token。
+
+**Request**
+
+- 从 stdin 读取 token（UTF-8 文本，去除首尾空白）
+
+**Response**: `{ "ok": true }`
+
+**Errors**: `keychain.unavailable` / `keychain.write_failed`
+
+### `secrets init-master-key`
+
+生成 32-byte master key 并写入 Keychain（Base64 编码）。
+
+**Response**: `{ "ok": true }`
+
+**Errors**: `keychain.unavailable` / `keychain.write_failed`
+
+### `telegram validate`
+
+用于验证 Bot API token 与目标私聊 `chat_id` 是否可用（例如能否 `getMe`、能否 `getChat`）。
 
 **Request**: none
 
@@ -172,14 +148,3 @@
 - `telegram.chat_not_found`
 - `telegram.forbidden`
 - `telegram.rate_limited`（retryable）
-
-### `stats_get`
-
-**Request**: none
-
-**Response**
-
-- `snapshotsTotal`: number
-- `chunksTotal`: number
-- `bytesUploadedTotal`: number
-- `bytesDedupedTotal`: number

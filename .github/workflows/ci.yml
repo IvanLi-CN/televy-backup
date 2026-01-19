@@ -28,30 +28,9 @@ jobs:
           sudo apt update
           sudo apt install -y \
             build-essential \
-            curl \
-            file \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
             libsqlite3-dev \
             pkg-config \
-            wget
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.6"
-
-      - name: Install JS dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Check (Biome)
-        run: bun run check
-
-      - name: Build (Vite)
-        run: bun run build
+            curl
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@v1
@@ -126,4 +105,3 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
