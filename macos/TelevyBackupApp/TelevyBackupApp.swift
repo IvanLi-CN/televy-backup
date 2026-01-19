@@ -454,7 +454,7 @@ struct SegmentedTabs: View {
             tabButton(.settings)
         }
         .padding(1)
-        .background(Color.white.opacity(0.20), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
@@ -483,7 +483,7 @@ struct SegmentedTabs: View {
             Group {
                 if tab == t {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.white.opacity(0.38))
+                        .fill(Color.white.opacity(0.46))
                         .padding(1)
                 }
             }
@@ -496,7 +496,23 @@ struct PopoverRootView: View {
 
     var body: some View {
         ZStack {
-            VisualEffectView(material: .popover, blendingMode: .withinWindow, state: .active)
+            VisualEffectView(material: .popover, blendingMode: .behindWindow, state: .active)
+                .ignoresSafeArea()
+
+            // Liquid-glass shell (one shape, no nested rounding)
+            ContainerRelativeShape()
+                .fill(glassFill)
+                .ignoresSafeArea()
+            ContainerRelativeShape()
+                .fill(glassHighlight)
+                .blendMode(.screen)
+                .ignoresSafeArea()
+            ContainerRelativeShape()
+                .strokeBorder(glassStroke, lineWidth: 1)
+                .ignoresSafeArea()
+            ContainerRelativeShape()
+                .strokeBorder(Color.white.opacity(0.20), lineWidth: 1)
+                .padding(1)
                 .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 12) {
@@ -515,6 +531,7 @@ struct PopoverRootView: View {
             .padding(12)
         }
         .frame(width: 360, height: 460)
+        .preferredColorScheme(.light)
         .onAppear { model.refresh() }
     }
 
@@ -556,6 +573,40 @@ struct PopoverRootView: View {
             .buttonStyle(.plain)
         }
         .padding(.bottom, 2)
+    }
+
+    private var glassFill: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color.white.opacity(0.55),
+                Color.white.opacity(0.38),
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+
+    private var glassStroke: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color.white.opacity(0.90),
+                Color.white.opacity(0.35),
+                Color.black.opacity(0.10),
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private var glassHighlight: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color.white.opacity(0.18),
+                Color.white.opacity(0.00),
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
     }
 }
 
