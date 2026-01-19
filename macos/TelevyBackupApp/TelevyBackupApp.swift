@@ -224,9 +224,31 @@ final class AppModel: ObservableObject {
         }
         guard !sourcePath.isEmpty else {
             appendLog("ERROR: source path is empty")
+            showToast("Choose a source folder first", isError: true)
             return
         }
         runProcess(exe: cli, args: ["--events", "backup", "run", "--source", sourcePath, "--label", label])
+    }
+
+    func chooseSourceFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Choose"
+        panel.message = "Choose a folder to back up"
+        if !sourcePath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: sourcePath)
+        }
+        let response = panel.runModal()
+        if response == .OK, let url = panel.url {
+            DispatchQueue.main.async {
+                self.sourcePath = url.path
+            }
+            showToast("Source selected", isError: false)
+            saveSettings()
+        }
     }
 
     func openLogs() {
@@ -284,13 +306,23 @@ final class AppModel: ObservableObject {
 
         let secrets = obj["secrets"] as? [String: Any]
         let settings = obj["settings"] as? [String: Any]
+        let sources = (settings?["sources"] as? [String]) ?? []
+        let schedule = (settings?["schedule"] as? [String: Any]) ?? [:]
         let telegram = (settings?["telegram"] as? [String: Any]) ?? [:]
         let chatId = (telegram["chat_id"] as? String) ?? ""
 
         let botPresent = (secrets?["telegramBotTokenPresent"] as? Bool) ?? false
         let masterPresent = (secrets?["masterKeyPresent"] as? Bool) ?? false
+        let scheduleEnabled = (schedule["enabled"] as? Bool) ?? false
+        let scheduleKind = (schedule["kind"] as? String) ?? "hourly"
 
         DispatchQueue.main.async {
+            if let first = sources.first {
+                self.sourcePath = first
+            }
+            self.scheduleEnabled = scheduleEnabled
+            self.scheduleKind = scheduleKind
+
             self.botTokenPresent = botPresent
             self.masterKeyPresent = masterPresent
             self.chatId = chatId
@@ -787,7 +819,19 @@ struct OverviewView: View {
             }
 
             GlassCard(title: "DETAILS") {
-                detailRow(label: "Source", value: model.sourcePath.isEmpty ? "—" : model.sourcePath)
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Source")
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Text(model.sourcePath.isEmpty ? "—" : model.sourcePath)
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button("Choose…") { model.chooseSourceFolder() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
                 Divider().opacity(0.35)
                 detailRow(label: "Next schedule", value: nextScheduleText())
                 Divider().opacity(0.35)
