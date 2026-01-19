@@ -496,7 +496,7 @@ struct PopoverRootView: View {
 
     var body: some View {
         ZStack {
-            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow, state: .active)
+            VisualEffectView(material: .popover, blendingMode: .withinWindow, state: .active)
                 .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 12) {
@@ -599,6 +599,8 @@ struct OverviewView: View {
                 .font(.system(.caption, design: .monospaced).weight(.semibold))
             }
 
+            Spacer(minLength: 0)
+
             HStack(spacing: 10) {
                 Button("Open logs") { model.openLogs() }
                     .buttonStyle(.bordered)
@@ -617,8 +619,6 @@ struct OverviewView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.blue)
-
-            Spacer(minLength: 0)
         }
     }
 
@@ -752,38 +752,56 @@ struct SettingsView: View {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var window: NSWindow?
+    private let popover = NSPopover()
+    private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        showMainWindow()
+        let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = status.button {
+            button.image = NSImage(
+                systemSymbolName: "externaldrive",
+                accessibilityDescription: "TelevyBackup"
+            )
+            button.action = #selector(togglePopover(_:))
+            button.target = self
+        }
+        statusItem = status
+
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentSize = NSSize(width: 360, height: 460)
+        popover.contentViewController = NSHostingController(
+            rootView: PopoverRootView().environmentObject(ModelStore.shared)
+        )
+
+        if ProcessInfo.processInfo.environment["TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH"] != "0" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.showPopover(nil)
+            }
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showMainWindow()
+        showPopover(nil)
         return true
     }
 
-    private func showMainWindow() {
-        if window == nil {
-            let view = PopoverRootView().environmentObject(ModelStore.shared)
-            let hosting = NSHostingView(rootView: view)
-
-            let win = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 360, height: 460),
-                styleMask: [.titled, .closable, .miniaturizable],
-                backing: .buffered,
-                defer: false
-            )
-            win.title = "TelevyBackup"
-            win.center()
-            win.isOpaque = false
-            win.backgroundColor = .clear
-            win.contentView = hosting
-            window = win
+    @objc private func togglePopover(_ sender: Any?) {
+        if popover.isShown {
+            closePopover(sender)
+        } else {
+            showPopover(sender)
         }
+    }
 
-        window?.makeKeyAndOrderFront(nil)
+    private func showPopover(_ sender: Any?) {
+        guard let button = statusItem?.button else { return }
         NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    private func closePopover(_ sender: Any?) {
+        popover.performClose(sender)
     }
 }
 
@@ -793,9 +811,8 @@ struct TelevyBackupApp: App {
     @StateObject private var model = ModelStore.shared
 
     var body: some Scene {
-        WindowGroup {}
-        MenuBarExtra("TelevyBackup", systemImage: "externaldrive") {
-            PopoverRootView().environmentObject(model)
+        Settings {
+            EmptyView()
         }
     }
 }
