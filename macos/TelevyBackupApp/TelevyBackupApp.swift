@@ -690,6 +690,16 @@ struct PopoverRootView: View {
                 }
             }
             .padding(12)
+
+            if let toast = model.toastText {
+                VStack {
+                    Spacer()
+                    ToastPill(text: toast, isError: model.toastIsError)
+                }
+                .padding(12)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+            }
         }
         .frame(width: 360, height: 460)
         .preferredColorScheme(.light)
@@ -923,12 +933,6 @@ struct SettingsView: View {
                     Button("Save token") { model.setBotToken() }
                         .buttonStyle(.bordered)
                 }
-                if let toast = model.toastText {
-                    Text(toast)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(model.toastIsError ? Color.red : Color.green)
-                        .padding(.top, 2)
-                }
 
                 HStack {
                     Button("Test connection") { model.testConnection() }
@@ -1001,6 +1005,23 @@ struct SettingsView: View {
                 model.botTokenDraftIsMasked = false
             }
         }
+    }
+}
+
+struct ToastPill: View {
+    let text: String
+    let isError: Bool
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 12, weight: .heavy))
+            .foregroundStyle(isError ? Color.red : Color.green)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.white.opacity(0.22), in: Capsule())
+            .overlay(
+                Capsule().strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+            )
     }
 }
 
