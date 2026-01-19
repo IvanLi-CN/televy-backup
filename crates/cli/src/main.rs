@@ -633,6 +633,7 @@ async fn backup_run(
         cancel: None,
         progress: if events { Some(&sink) } else { None },
     };
+    let started = std::time::Instant::now();
     let res = run_backup_with(
         &storage,
         BackupConfig {
@@ -652,6 +653,7 @@ async fn backup_run(
     )
     .await
     .map_err(map_core_err)?;
+    let duration_seconds = started.elapsed().as_secs_f64();
 
     if events {
         println!(
@@ -662,6 +664,14 @@ async fn backup_run(
                 "kind": "backup",
                 "state": "succeeded",
                 "snapshotId": res.snapshot_id,
+                "result": {
+                    "filesIndexed": res.files_indexed,
+                    "chunksUploaded": res.chunks_uploaded,
+                    "bytesUploaded": res.bytes_uploaded,
+                    "bytesDeduped": res.bytes_deduped,
+                    "indexParts": res.index_parts,
+                    "durationSeconds": duration_seconds,
+                }
             })
         );
         return Ok(());
@@ -738,7 +748,8 @@ async fn restore_run(
         cancel: None,
         progress: if events { Some(&sink) } else { None },
     };
-    let _res = restore_snapshot_with(
+    let started = std::time::Instant::now();
+    let res = restore_snapshot_with(
         &storage,
         RestoreConfig {
             snapshot_id: snapshot_id.clone(),
@@ -751,6 +762,7 @@ async fn restore_run(
     )
     .await
     .map_err(map_core_err)?;
+    let duration_seconds = started.elapsed().as_secs_f64();
 
     if events {
         println!(
@@ -761,6 +773,12 @@ async fn restore_run(
                 "kind": "restore",
                 "state": "succeeded",
                 "snapshotId": snapshot_id,
+                "result": {
+                    "filesRestored": res.files_restored,
+                    "chunksDownloaded": res.chunks_downloaded,
+                    "bytesWritten": res.bytes_written,
+                    "durationSeconds": duration_seconds,
+                }
             })
         );
         return Ok(());
@@ -828,7 +846,8 @@ async fn verify_run(
         cancel: None,
         progress: if events { Some(&sink) } else { None },
     };
-    let _res = verify_snapshot_with(
+    let started = std::time::Instant::now();
+    let res = verify_snapshot_with(
         &storage,
         VerifyConfig {
             snapshot_id: snapshot_id.clone(),
@@ -840,6 +859,7 @@ async fn verify_run(
     )
     .await
     .map_err(map_core_err)?;
+    let duration_seconds = started.elapsed().as_secs_f64();
 
     if events {
         println!(
@@ -850,6 +870,11 @@ async fn verify_run(
                 "kind": "verify",
                 "state": "succeeded",
                 "snapshotId": snapshot_id,
+                "result": {
+                    "chunksChecked": res.chunks_checked,
+                    "bytesChecked": res.bytes_checked,
+                    "durationSeconds": duration_seconds,
+                }
             })
         );
         return Ok(());

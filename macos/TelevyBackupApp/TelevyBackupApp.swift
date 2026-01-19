@@ -1,26 +1,47 @@
 import AppKit
 import SwiftUI
 
+enum Tab: String, CaseIterable, Identifiable {
+    case overview = "Overview"
+    case logs = "Logs"
+    case settings = "Settings"
+
+    var id: String { rawValue }
+}
+
+struct LogEntry: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let message: String
+}
+
 final class ModelStore {
     static let shared = AppModel()
 }
 
 final class AppModel: ObservableObject {
+    @Published var tab: Tab = .overview
+
     @Published var sourcePath: String = ""
     @Published var label: String = "manual"
-    @Published var snapshotId: String = ""
-    @Published var restoreTargetPath: String = ""
     @Published var chatId: String = ""
-    @Published var botToken: String = ""
-    @Published var logs: String = ""
-    @Published var status: String = "idle"
+    @Published var botTokenDraft: String = ""
+    @Published var scheduleEnabled: Bool = false
+    @Published var scheduleKind: String = "hourly"
 
-    func appendLog(_ line: String) {
-        DispatchQueue.main.async {
-            if !self.logs.isEmpty { self.logs += "\n" }
-            self.logs += line
-        }
-    }
+    @Published var telegramOk: Bool = false
+    @Published var telegramStatusText: String = "Offline"
+    @Published var botTokenPresent: Bool = false
+    @Published var masterKeyPresent: Bool = false
+
+    @Published var isRunning: Bool = false
+    @Published var phase: String = "idle"
+
+    @Published var lastBytesUploaded: Int64 = 0
+    @Published var lastBytesDeduped: Int64 = 0
+    @Published var lastDurationSeconds: Double = 0
+
+    @Published var logEntries: [LogEntry] = []
 
     func defaultConfigDir() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -53,14 +74,75 @@ final class AppModel: ObservableObject {
             try task.run()
             task.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let out = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            let out = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             return out.isEmpty ? nil : out
         } catch {
             return nil
         }
     }
 
-    func writeConfigToml() throws {
+    func refresh() {
+        refreshSecrets()
+    }
+
+    func saveSettings() {
+        do {
+            try writeConfigToml()
+            appendLog("Saved: \(configTomlPath().path)")
+            refreshSecrets()
+        } catch {
+            appendLog("ERROR: save config failed: \(error)")
+        }
+    }
+
+    func setBotToken() {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        let token = botTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            appendLog("ERROR: bot token is empty")
+            return
+        }
+        runProcess(exe: cli, args: ["secrets", "set-telegram-bot-token", "--json"], stdin: token + "\n")
+        botTokenDraft = ""
+    }
+
+    func initMasterKey() {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        runProcess(exe: cli, args: ["secrets", "init-master-key", "--json"])
+    }
+
+    func testConnection() {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        runProcess(exe: cli, args: ["telegram", "validate", "--json"])
+    }
+
+    func runBackupNow() {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        guard !sourcePath.isEmpty else {
+            appendLog("ERROR: source path is empty")
+            return
+        }
+        runProcess(exe: cli, args: ["backup", "run", "--source", sourcePath, "--label", label, "--events"])
+    }
+
+    func openLogs() {
+        tab = .logs
+    }
+
+    private func writeConfigToml() throws {
         let dir = configTomlPath().deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -68,8 +150,8 @@ final class AppModel: ObservableObject {
         sources = [\(tomlStringArray([sourcePath].filter { !$0.isEmpty }))]
 
         [schedule]
-        enabled = false
-        kind = "hourly"
+        enabled = \(scheduleEnabled ? "true" : "false")
+        kind = \(tomlString(scheduleKind))
         hourly_minute = 0
         daily_at = "02:00"
         timezone = "local"
@@ -94,93 +176,125 @@ final class AppModel: ObservableObject {
         try toml.write(to: configTomlPath(), atomically: true, encoding: .utf8)
     }
 
-    func setBotToken() {
-        guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
-            return
-        }
-        guard !botToken.isEmpty else {
-            appendLog("ERROR: bot token is empty")
+    private func refreshSecrets() {
+        guard let cli = cliPath() else { return }
+        let output = runCommandCapture(exe: cli, args: ["settings", "get", "--json"])
+        guard let data = output.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            DispatchQueue.main.async {
+                self.botTokenPresent = false
+                self.masterKeyPresent = false
+                self.telegramOk = false
+                self.telegramStatusText = "Offline"
+            }
             return
         }
 
-        runProcess(exe: cli, args: ["secrets", "set-telegram-bot-token", "--json"], stdin: botToken + "\n")
+        let secrets = obj["secrets"] as? [String: Any]
+        let settings = obj["settings"] as? [String: Any]
+        let telegram = (settings?["telegram"] as? [String: Any]) ?? [:]
+        let chatId = (telegram["chat_id"] as? String) ?? ""
+
+        let botPresent = (secrets?["telegramBotTokenPresent"] as? Bool) ?? false
+        let masterPresent = (secrets?["masterKeyPresent"] as? Bool) ?? false
+
+        DispatchQueue.main.async {
+            self.botTokenPresent = botPresent
+            self.masterKeyPresent = masterPresent
+            self.chatId = chatId
+            self.telegramOk = botPresent && masterPresent && !chatId.isEmpty
+            self.telegramStatusText = self.telegramOk ? "Telegram Storage • Online" : "Telegram Storage • Offline"
+        }
     }
 
-    func initMasterKey() {
-        guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
-            return
+    private func appendLog(_ line: String) {
+        let trimmed = line.trimmingCharacters(in: .newlines)
+        guard !trimmed.isEmpty else { return }
+        DispatchQueue.main.async {
+            self.logEntries.append(LogEntry(timestamp: Date(), message: trimmed))
+            if self.logEntries.count > 400 {
+                self.logEntries.removeFirst(self.logEntries.count - 400)
+            }
         }
-        runProcess(exe: cli, args: ["secrets", "init-master-key", "--json"])
     }
 
-    func validateTelegram() {
-        guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
-            return
+    private func runCommandCapture(exe: String, args: [String], stdin: String? = nil) -> String {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: exe)
+        task.arguments = args
+
+        let out = Pipe()
+        let err = Pipe()
+        task.standardOutput = out
+        task.standardError = err
+
+        if let stdin {
+            let input = Pipe()
+            task.standardInput = input
+            input.fileHandleForWriting.write(stdin.data(using: .utf8) ?? Data())
+            try? input.fileHandleForWriting.close()
         }
-        runProcess(exe: cli, args: ["telegram", "validate", "--json"])
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return ""
+        }
+
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func runBackup() {
-        guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
-            return
-        }
-        guard !sourcePath.isEmpty else {
-            appendLog("ERROR: source path is empty")
-            return
-        }
-        runProcess(exe: cli, args: ["backup", "run", "--source", sourcePath, "--label", label, "--events"])
-    }
+    private func handleOutputLine(_ line: String) {
+        appendLog(line)
 
-    func listSnapshots() {
-        guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
-            return
-        }
-        runProcess(exe: cli, args: ["snapshots", "list", "--json"])
-    }
+        guard let data = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = obj["type"] as? String
+        else { return }
 
-    func getStats() {
-        guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+        if type == "task.progress" {
+            let phase = obj["phase"] as? String ?? "running"
+            DispatchQueue.main.async { self.phase = phase }
             return
         }
-        runProcess(exe: cli, args: ["stats", "get", "--json"])
-    }
 
-    func runRestore() {
-        guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
-            return
-        }
-        guard !snapshotId.isEmpty else {
-            appendLog("ERROR: snapshot id is empty")
-            return
-        }
-        guard !restoreTargetPath.isEmpty else {
-            appendLog("ERROR: restore target path is empty")
-            return
-        }
-        runProcess(exe: cli, args: ["restore", "run", "--snapshot-id", snapshotId, "--target", restoreTargetPath, "--events"])
-    }
+        if type == "task.state" {
+            let state = obj["state"] as? String ?? ""
+            let kind = obj["kind"] as? String ?? ""
+            DispatchQueue.main.async {
+                if state == "running" {
+                    self.isRunning = true
+                    self.phase = kind
+                } else {
+                    self.isRunning = false
+                    self.phase = "idle"
+                }
+            }
 
-    func runVerify() {
-        guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
-            return
+            if state == "succeeded",
+               let result = obj["result"] as? [String: Any]
+            {
+                let bytesUploaded = (result["bytesUploaded"] as? NSNumber)?.int64Value ?? 0
+                let bytesDeduped = (result["bytesDeduped"] as? NSNumber)?.int64Value ?? 0
+                let duration = (result["durationSeconds"] as? NSNumber)?.doubleValue ?? 0
+                DispatchQueue.main.async {
+                    self.lastBytesUploaded = bytesUploaded
+                    self.lastBytesDeduped = bytesDeduped
+                    self.lastDurationSeconds = duration
+                }
+                refreshSecrets()
+            }
         }
-        guard !snapshotId.isEmpty else {
-            appendLog("ERROR: snapshot id is empty")
-            return
-        }
-        runProcess(exe: cli, args: ["verify", "run", "--snapshot-id", snapshotId, "--events"])
     }
 
     private func runProcess(exe: String, args: [String], stdin: String? = nil) {
-        status = "running"
+        DispatchQueue.main.async {
+            self.isRunning = true
+            self.phase = "running"
+        }
         appendLog("$ \(exe) \(args.joined(separator: " "))")
 
         let task = Process()
@@ -199,15 +313,28 @@ final class AppModel: ObservableObject {
             try? input.fileHandleForWriting.close()
         }
 
+        var stdoutBuf = ""
+        var stderrBuf = ""
+
         out.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
-            self.appendLog(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .newlines))
+            stdoutBuf += String(decoding: data, as: UTF8.self)
+            while let idx = stdoutBuf.firstIndex(of: "\n") {
+                let line = String(stdoutBuf[..<idx])
+                stdoutBuf.removeSubrange(...idx)
+                self.handleOutputLine(line)
+            }
         }
         err.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
-            self.appendLog(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .newlines))
+            stderrBuf += String(decoding: data, as: UTF8.self)
+            while let idx = stderrBuf.firstIndex(of: "\n") {
+                let line = String(stderrBuf[..<idx])
+                stderrBuf.removeSubrange(...idx)
+                self.handleOutputLine(line)
+            }
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -215,10 +342,11 @@ final class AppModel: ObservableObject {
                 try task.run()
                 task.waitUntilExit()
             } catch {
-                self.appendLog("ERROR: failed to run process: \(error)")
+                self.handleOutputLine("ERROR: failed to run process: \(error)")
             }
             DispatchQueue.main.async {
-                self.status = "idle"
+                self.isRunning = false
+                self.phase = "idle"
                 out.fileHandleForReading.readabilityHandler = nil
                 err.fileHandleForReading.readabilityHandler = nil
             }
@@ -234,66 +362,304 @@ private func tomlStringArray(_ items: [String]) -> String {
     items.map(tomlString).joined(separator: ", ")
 }
 
-struct ContentView: View {
+private func formatBytes(_ bytes: Int64) -> String {
+    let units = ["B", "KB", "MB", "GB", "TB"]
+    var value = Double(bytes)
+    var idx = 0
+    while value >= 1024 && idx < units.count - 1 {
+        value /= 1024
+        idx += 1
+    }
+    if idx == 0 { return "\(Int(value)) \(units[idx])" }
+    return String(format: "%.1f %@", value, units[idx])
+}
+
+private func formatDuration(_ seconds: Double) -> String {
+    if seconds <= 0 { return "-" }
+    if seconds < 60 { return String(format: "%.0fs", seconds) }
+    let m = Int(seconds) / 60
+    let s = Int(seconds) % 60
+    return String(format: "%dm%02ds", m, s)
+}
+
+struct StatusLED: View {
+    let ok: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(ok ? Color.green : Color.red)
+                .opacity(0.95)
+                .frame(width: 10, height: 10)
+            Circle()
+                .fill(ok ? Color.green : Color.red)
+                .opacity(0.16)
+                .frame(width: 18, height: 18)
+        }
+    }
+}
+
+struct GlassCard<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: 11, weight: .heavy))
+                .foregroundStyle(.secondary)
+                .tracking(0.8)
+            content
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+        )
+    }
+}
+
+struct PopoverRootView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            GroupBox("Settings (write config.toml)") {
-                VStack(alignment: .leading) {
-                    TextField("Source path", text: $model.sourcePath)
-                    TextField("Telegram chat_id", text: $model.chatId)
-                    SecureField("Telegram bot token", text: $model.botToken)
-                    HStack {
-                        Button("Save config") {
-                            do {
-                                try model.writeConfigToml()
-                                model.appendLog("Saved: \(model.configTomlPath().path)")
-                            } catch {
-                                model.appendLog("ERROR: save config failed: \(error)")
-                            }
-                        }
-                        Button("Set bot token") { model.setBotToken() }
-                        Button("Init master key") { model.initMasterKey() }
-                        Button("Validate") { model.validateTelegram() }
-                    }
+            header
+
+            Picker("", selection: $model.tab) {
+                ForEach(Tab.allCases) { t in
+                    Text(t.rawValue).tag(t)
                 }
             }
+            .pickerStyle(.segmented)
 
-            GroupBox("Actions") {
-                VStack(alignment: .leading) {
-                    TextField("Label", text: $model.label)
-                    HStack {
-                        Button("List snapshots") { model.listSnapshots() }
-                        Button("Stats") { model.getStats() }
-                        Button("Run backup") { model.runBackup() }
-                    }
-
-                    Divider()
-
-                    TextField("Snapshot id", text: $model.snapshotId)
-                    TextField("Restore target path (empty dir)", text: $model.restoreTargetPath)
-                    HStack {
-                        Button("Restore") { model.runRestore() }
-                        Button("Verify") { model.runVerify() }
-                    }
-                }
+            switch model.tab {
+            case .overview:
+                OverviewView()
+            case .logs:
+                LogsView()
+            case .settings:
+                SettingsView()
             }
-
-            GroupBox("Logs") {
-                ScrollView {
-                    Text(model.logs)
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(width: 420, height: 240)
-            }
-
-            Text("Status: \(model.status)")
-                .font(.footnote)
         }
         .padding(12)
-        .frame(width: 520, height: 560)
+        .frame(width: 360, height: 460)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+        )
+        .onAppear { model.refresh() }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.white.opacity(0.25))
+                    .frame(width: 28, height: 28)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+                    )
+                Circle()
+                    .fill(Color.blue)
+                    .frame(width: 12, height: 12)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("TelevyBackup")
+                    .font(.system(size: 15, weight: .bold))
+                Text(model.tab == .settings ? "Settings" : model.telegramStatusText)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            StatusLED(ok: model.telegramOk)
+
+            Button {
+                model.refresh()
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
+struct OverviewView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            GlassCard(title: "STATUS") {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(model.isRunning ? "Syncing" : "Idle")
+                        .font(.system(size: 16, weight: .heavy))
+                    Text(model.isRunning ? "(\(model.phase))" : "(ready)")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                if model.isRunning {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                }
+
+                HStack(spacing: 18) {
+                    statColumn("Uploaded", formatBytes(model.lastBytesUploaded))
+                    statColumn("Dedupe", formatBytes(model.lastBytesDeduped))
+                    statColumn("Duration", formatDuration(model.lastDurationSeconds))
+                }
+                .font(.system(.caption, design: .monospaced).weight(.semibold))
+            }
+
+            HStack(spacing: 10) {
+                Button("Open logs") { model.openLogs() }
+                    .buttonStyle(.bordered)
+                Spacer()
+                Text("Encrypted • Synced")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                model.runBackupNow()
+            } label: {
+                Text("Run backup now")
+                    .font(.system(size: 13, weight: .heavy))
+                    .frame(maxWidth: .infinity, minHeight: 34)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+        }
+    }
+
+    private func statColumn(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).foregroundStyle(.primary.opacity(0.9))
+            Text(value).foregroundStyle(.primary.opacity(0.9))
+        }
+    }
+}
+
+struct LogsView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            List(model.logEntries.reversed()) { item in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.message)
+                        .font(.system(size: 12, design: .monospaced))
+                        .lineLimit(3)
+                    Text(item.timestamp.formatted(date: .omitted, time: .standard))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 3)
+            }
+            .listStyle(.plain)
+
+            HStack {
+                Button("Copy") { copyLogs() }
+                    .buttonStyle(.bordered)
+                Spacer()
+                Button("Refresh") { model.refresh() }
+                    .buttonStyle(.bordered)
+            }
+        }
+    }
+
+    private func copyLogs() {
+        let text = model.logEntries
+            .map { "\($0.timestamp.formatted(date: .omitted, time: .standard)) \($0.message)" }
+            .joined(separator: "\n")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+struct SettingsView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            GlassCard(title: "TELEGRAM") {
+                HStack {
+                    Text("Bot Token")
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Text(model.botTokenPresent ? "Saved in Keychain" : "Not set")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(model.botTokenPresent ? Color.green : Color.secondary)
+                }
+                Divider().opacity(0.4)
+
+                HStack {
+                    Text("Chat ID")
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    TextField("-100123…", text: $model.chatId)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 170)
+                }
+
+                HStack(spacing: 8) {
+                    SecureField("Paste new bot token (not stored here)", text: $model.botTokenDraft)
+                    Button("Set") { model.setBotToken() }
+                        .buttonStyle(.bordered)
+                }
+
+                HStack {
+                    Button("Test connection") { model.testConnection() }
+                        .buttonStyle(.bordered)
+                    Spacer()
+                    StatusLED(ok: model.telegramOk)
+                    Text(model.telegramOk ? "OK" : "Offline")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Button("Init master key") { model.initMasterKey() }
+                        .buttonStyle(.bordered)
+                    Spacer()
+                    Text(model.masterKeyPresent ? "Master key: saved" : "Master key: missing")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(model.masterKeyPresent ? Color.secondary : Color.red)
+                }
+            }
+
+            GlassCard(title: "SCHEDULE") {
+                Toggle("Enable", isOn: $model.scheduleEnabled)
+                HStack {
+                    Text("Frequency")
+                    Spacer()
+                    Picker("", selection: $model.scheduleKind) {
+                        Text("Hourly").tag("hourly")
+                        Text("Daily").tag("daily")
+                    }
+                    .pickerStyle(.menu)
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button("Open logs") { model.openLogs() }
+                    .buttonStyle(.bordered)
+                Spacer()
+                Button("Save") { model.saveSettings() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+            }
+        }
     }
 }
 
@@ -311,13 +677,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showMainWindow() {
         if window == nil {
-            let view = ContentView().environmentObject(ModelStore.shared)
+            let view = PopoverRootView().environmentObject(ModelStore.shared)
             let hosting = NSHostingView(rootView: view)
 
-            let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
-                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                               backing: .buffered,
-                               defer: false)
+            let win = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 360, height: 460),
+                styleMask: [.titled, .closable, .miniaturizable],
+                backing: .buffered,
+                defer: false
+            )
             win.title = "TelevyBackup"
             win.center()
             win.contentView = hosting
@@ -337,7 +705,7 @@ struct TelevyBackupApp: App {
     var body: some Scene {
         WindowGroup {}
         MenuBarExtra("TelevyBackup", systemImage: "externaldrive") {
-            ContentView().environmentObject(model)
+            PopoverRootView().environmentObject(model)
         }
     }
 }
