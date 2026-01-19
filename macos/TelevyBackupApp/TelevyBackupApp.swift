@@ -54,6 +54,9 @@ final class AppModel: ObservableObject {
     @Published var botTokenPresent: Bool = false
     @Published var masterKeyPresent: Bool = false
 
+    @Published var toastText: String? = nil
+    @Published var toastIsError: Bool = false
+
     @Published var isRunning: Bool = false
     @Published var phase: String = "idle"
 
@@ -125,10 +128,23 @@ final class AppModel: ObservableObject {
         let token = botTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !token.isEmpty else {
             appendLog("ERROR: bot token is empty")
+            showToast("Bot token is empty", isError: true)
             return
         }
-        runProcess(exe: cli, args: ["secrets", "set-telegram-bot-token", "--json"], stdin: token + "\n")
-        botTokenDraft = ""
+        runProcess(
+            exe: cli,
+            args: ["secrets", "set-telegram-bot-token", "--json"],
+            stdin: token + "\n",
+            onExit: { status in
+                if status == 0 {
+                    self.botTokenDraft = ""
+                    self.showToast("Saved in Keychain", isError: false)
+                    self.refreshSecrets()
+                } else {
+                    self.showToast("Failed to save token (see Logs)", isError: true)
+                }
+            }
+        )
     }
 
     func initMasterKey() {
@@ -312,7 +328,19 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func runProcess(exe: String, args: [String], stdin: String? = nil) {
+    private func showToast(_ text: String, isError: Bool) {
+        DispatchQueue.main.async {
+            self.toastText = text
+            self.toastIsError = isError
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+            if self.toastText == text {
+                self.toastText = nil
+            }
+        }
+    }
+
+    private func runProcess(exe: String, args: [String], stdin: String? = nil, onExit: ((Int32) -> Void)? = nil) {
         DispatchQueue.main.async {
             self.isRunning = true
             self.phase = "running"
@@ -360,9 +388,11 @@ final class AppModel: ObservableObject {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
+            var status: Int32 = 1
             do {
                 try task.run()
                 task.waitUntilExit()
+                status = task.terminationStatus
             } catch {
                 self.handleOutputLine("ERROR: failed to run process: \(error)")
             }
@@ -371,6 +401,15 @@ final class AppModel: ObservableObject {
                 self.phase = "idle"
                 out.fileHandleForReading.readabilityHandler = nil
                 err.fileHandleForReading.readabilityHandler = nil
+            }
+            if !stdoutBuf.isEmpty {
+                self.handleOutputLine(stdoutBuf.trimmingCharacters(in: .newlines))
+            }
+            if !stderrBuf.isEmpty {
+                self.handleOutputLine(stderrBuf.trimmingCharacters(in: .newlines))
+            }
+            if let onExit {
+                DispatchQueue.main.async { onExit(status) }
             }
         }
     }
@@ -753,8 +792,14 @@ struct SettingsView: View {
 
                 HStack(spacing: 8) {
                     SecureField("Paste new bot token (not stored here)", text: $model.botTokenDraft)
-                    Button("Set") { model.setBotToken() }
+                    Button("Save token") { model.setBotToken() }
                         .buttonStyle(.bordered)
+                }
+                if let toast = model.toastText {
+                    Text(toast)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(model.toastIsError ? Color.red : Color.green)
+                        .padding(.top, 2)
                 }
 
                 HStack {
