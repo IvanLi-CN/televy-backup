@@ -55,3 +55,4 @@
 | ID   | Title | Status | Plan | Last | Notes |
 |-----:|-------|--------|------|------|-------|
 | 0001 | TelevyBackup MVP（Telegram 存储 + 差异备份） | 待实现 | `0001:telegram-backup-mvp/PLAN.md` | 2026-01-18 | 已冻结：Bot API + 私聊 Bot + 索引分片加密上传 + macOS Keychain + `brew services`（用户级） |
+| 0002 | 小对象打包降低 Bot API 调用频率（Pack） | 待实现 | `0002:small-object-packing/PLAN.md` | 2026-01-19 | 已冻结：启用阈值（>10 或 >32MiB）+ pack 目标 32MiB + hard max 49MiB |
