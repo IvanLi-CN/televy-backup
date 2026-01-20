@@ -60,6 +60,25 @@
 - PRIMARY KEY (`provider`, `object_id`)
 - UNIQUE (`provider`, `chunk_hash`)
 
+#### `object_id` 编码（#0002 增量）
+
+`object_id` 允许两种形状（字符串编码，便于兼容与迁移）：
+
+1) 独立对象（兼容 #0001）：
+
+- `tgfile:<file_id>`
+- 迁移期内也允许裸 `<file_id>`（无前缀）
+
+2) pack 内切片（#0002 新增）：
+
+- `tgpack:<file_id>@<offset>+<len>`
+
+字段语义：
+
+- `<file_id>`：存储后端返回的对象 id（Telegram Bot API 为 `file_id`；测试存储可能为 `mem:...`）
+- `<offset>`：十进制字节偏移（从 pack 文件起始算起；指向该 chunk 的“加密 blob”）
+- `<len>`：十进制字节长度（该 chunk 的“加密 blob”长度）
+
 ### `remote_indexes`
 
 记录每次备份完成后上传的“索引 manifest”（加密）的远端引用。

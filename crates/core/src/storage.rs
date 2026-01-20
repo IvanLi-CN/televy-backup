@@ -8,6 +8,72 @@ use tokio::sync::Mutex;
 
 use crate::{Error, Result};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkObjectRef {
+    Direct {
+        object_id: String,
+    },
+    PackSlice {
+        pack_object_id: String,
+        offset: u64,
+        len: u64,
+    },
+}
+
+pub fn encode_tgfile_object_id(object_id: &str) -> String {
+    format!("tgfile:{object_id}")
+}
+
+pub fn encode_tgpack_object_id(pack_object_id: &str, offset: u64, len: u64) -> String {
+    format!("tgpack:{pack_object_id}@{offset}+{len}")
+}
+
+pub fn parse_chunk_object_ref(encoded: &str) -> Result<ChunkObjectRef> {
+    if let Some(rest) = encoded.strip_prefix("tgfile:") {
+        if rest.is_empty() {
+            return Err(Error::Integrity {
+                message: "invalid tgfile object_id (empty)".to_string(),
+            });
+        }
+        return Ok(ChunkObjectRef::Direct {
+            object_id: rest.to_string(),
+        });
+    }
+
+    if let Some(rest) = encoded.strip_prefix("tgpack:") {
+        let (left, len_str) = rest.rsplit_once('+').ok_or_else(|| Error::Integrity {
+            message: "invalid tgpack object_id (missing '+')".to_string(),
+        })?;
+        let (pack_object_id, offset_str) =
+            left.rsplit_once('@').ok_or_else(|| Error::Integrity {
+                message: "invalid tgpack object_id (missing '@')".to_string(),
+            })?;
+
+        if pack_object_id.is_empty() {
+            return Err(Error::Integrity {
+                message: "invalid tgpack object_id (empty pack_object_id)".to_string(),
+            });
+        }
+
+        let offset = offset_str.parse::<u64>().map_err(|_| Error::Integrity {
+            message: "invalid tgpack object_id (bad offset)".to_string(),
+        })?;
+        let len = len_str.parse::<u64>().map_err(|_| Error::Integrity {
+            message: "invalid tgpack object_id (bad len)".to_string(),
+        })?;
+
+        return Ok(ChunkObjectRef::PackSlice {
+            pack_object_id: pack_object_id.to_string(),
+            offset,
+            len,
+        });
+    }
+
+    Ok(ChunkObjectRef::Direct {
+        object_id: encoded.to_string(),
+    })
+}
+
 fn redact_secret(s: impl Into<String>, secret: &str) -> String {
     let s = s.into();
     if secret.is_empty() {

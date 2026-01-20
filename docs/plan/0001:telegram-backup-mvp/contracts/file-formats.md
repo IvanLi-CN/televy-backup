@@ -127,3 +127,11 @@ Bot API 发送文件的约束会影响 chunk 的 `max_bytes`：
   - chunk blob：`chunk_hash`（hex 字符串的 UTF-8 bytes）
   - index part：`snapshot_id + ":" + part_no`（UTF-8 bytes）
   - index manifest：`snapshot_id`（UTF-8 bytes）
+  - pack header（#0002）：`televy.pack.header.v1`（固定；用于绑定 header 的 framing）
+
+## 7) Pack 对象（#0002）
+
+当“待上传对象”数量或体积超过阈值时，会启用 pack：把多个 chunk 的加密 blob 聚合为更少的上传对象，以降低 Bot API 调用次数。
+
+- 远端存储对象：仍通过 Telegram `sendDocument` 上传一个 document
+- pack 文件格式：见 `docs/plan/0002:small-object-packing/contracts/file-formats.md`
