@@ -56,3 +56,4 @@
 |-----:|-------|--------|------|------|-------|
 | 0001 | TelevyBackup MVP（Telegram 存储 + 差异备份） | 已完成 | `0001:telegram-backup-mvp/PLAN.md` | 2026-01-20 | PR #4；实现分支：`feat/0001-telegram-backup-mvp` |
 | 0002 | 小对象打包降低 Bot API 调用频率（Pack） | 已完成 | `0002:small-object-packing/PLAN.md` | 2026-01-20 | PR #7；已冻结：启用阈值（>10 或 >32MiB）+ pack 目标 32MiB + hard max 49MiB；实现分支：`feat/0002-small-object-packing` |
+| 0003 | Sync 日志落盘与可排查性（每轮独立日志 + env 配置日志等级） | 待实现 | `0003:sync-logging-durability/PLAN.md` | 2026-01-20 | 已冻结：每任务一份日志（NDJSON）+ 结束前 `flush+fsync` + `TELEVYBACKUP_LOG`→`RUST_LOG`→default(debug) |
