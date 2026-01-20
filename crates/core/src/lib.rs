@@ -6,6 +6,7 @@ mod index_manifest;
 mod pack;
 mod progress;
 mod restore;
+pub mod run_log;
 mod storage;
 
 pub const APP_NAME: &str = "TelevyBackup";

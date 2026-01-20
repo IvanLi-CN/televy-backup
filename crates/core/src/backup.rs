@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use fastcdc::v2020::StreamCDC;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
+use tracing::{debug, error};
 use walkdir::WalkDir;
 
 use crate::crypto::encrypt_framed;
@@ -95,6 +97,17 @@ pub async fn run_backup_with<S: Storage>(
     config: BackupConfig,
     options: BackupOptions<'_>,
 ) -> Result<BackupResult> {
+    debug!(
+        event = "backup.prepare",
+        db_path = %config.db_path.display(),
+        source_path = %config.source_path.display(),
+        label = %config.label,
+        keep_last_snapshots = config.keep_last_snapshots,
+        "backup.prepare"
+    );
+    let scan_started = Instant::now();
+    debug!(event = "phase.start", phase = "scan", "phase.start");
+
     config.chunking.validate()?;
     if config.keep_last_snapshots < 1 {
         return Err(Error::InvalidConfig {
@@ -358,6 +371,19 @@ pub async fn run_backup_with<S: Storage>(
         }
     }
 
+    debug!(
+        event = "phase.finish",
+        phase = "scan",
+        duration_ms = scan_started.elapsed().as_millis() as u64,
+        files_total = result.files_total,
+        files_indexed = result.files_indexed,
+        chunks_total = result.chunks_total,
+        bytes_read = result.bytes_read,
+        "phase.finish"
+    );
+
+    let upload_started = Instant::now();
+    debug!(event = "phase.start", phase = "upload", "phase.start");
     if pack_enabled {
         flush_packer(
             storage,
@@ -373,7 +399,20 @@ pub async fn run_backup_with<S: Storage>(
             let blob_len = blob.blob.len() as u64;
             let chunk_hash = blob.chunk_hash;
             let filename = telegram_camouflaged_filename();
-            let object_id = storage.upload_document(&filename, blob.blob).await?;
+            let object_id = storage
+                .upload_document(&filename, blob.blob)
+                .await
+                .map_err(|e| {
+                    error!(
+                        event = "io.telegram.upload_failed",
+                        provider,
+                        chunk_hash,
+                        blob_bytes = blob_len,
+                        error = %e,
+                        "io.telegram.upload_failed"
+                    );
+                    e
+                })?;
             record_chunk_object(
                 &pool,
                 provider,
@@ -388,6 +427,16 @@ pub async fn run_backup_with<S: Storage>(
     }
 
     result.data_objects_estimated_without_pack = result.chunks_uploaded;
+    debug!(
+        event = "phase.finish",
+        phase = "upload",
+        duration_ms = upload_started.elapsed().as_millis() as u64,
+        chunks_uploaded = result.chunks_uploaded,
+        data_objects_uploaded = result.data_objects_uploaded,
+        bytes_uploaded = result.bytes_uploaded,
+        bytes_deduped = result.bytes_deduped,
+        "phase.finish"
+    );
 
     if let Some(sink) = options.progress {
         sink.on_progress(TaskProgress {
@@ -402,11 +451,20 @@ pub async fn run_backup_with<S: Storage>(
         });
     }
 
+    let index_started = Instant::now();
+    debug!(event = "phase.start", phase = "index", "phase.start");
     let manifest = upload_index(&pool, storage, &config, &snapshot_id).await?;
     result.index_parts = manifest.parts.len() as u64;
 
     apply_retention(&pool, &config.source_path, config.keep_last_snapshots).await?;
 
+    debug!(
+        event = "phase.finish",
+        phase = "index",
+        duration_ms = index_started.elapsed().as_millis() as u64,
+        index_parts = result.index_parts,
+        "phase.finish"
+    );
     Ok(result)
 }
 
@@ -425,7 +483,20 @@ async fn schedule_pack_or_direct_upload<S: Storage>(
     if blob.len() + SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES > PACK_MAX_BYTES {
         flush_packer(storage, pool, provider, master_key, packer, result).await?;
         let filename = telegram_camouflaged_filename();
-        let object_id = storage.upload_document(&filename, blob).await?;
+        let object_id = storage
+            .upload_document(&filename, blob)
+            .await
+            .map_err(|e| {
+                error!(
+                    event = "io.telegram.upload_failed",
+                    provider,
+                    chunk_hash,
+                    blob_bytes = blob_len,
+                    error = %e,
+                    "io.telegram.upload_failed"
+                );
+                e
+            })?;
         record_chunk_object(
             pool,
             provider,
@@ -464,7 +535,19 @@ async fn flush_packer<S: Storage>(
         let filename = telegram_camouflaged_filename();
         let pack_bytes_len = pack.bytes.len() as u64;
         let pack_bytes = pack.bytes;
-        let pack_object_id = storage.upload_document(&filename, pack_bytes).await?;
+        let pack_object_id = storage
+            .upload_document(&filename, pack_bytes)
+            .await
+            .map_err(|e| {
+                error!(
+                    event = "io.telegram.upload_failed",
+                    provider,
+                    blob_bytes = pack_bytes_len,
+                    error = %e,
+                    "io.telegram.upload_failed"
+                );
+                e
+            })?;
         result.data_objects_uploaded += 1;
         result.bytes_uploaded += pack_bytes_len;
 
@@ -628,6 +711,7 @@ async fn upload_index<S: Storage>(
     config: &BackupConfig,
     snapshot_id: &str,
 ) -> Result<IndexManifest> {
+    let provider = storage.provider();
     // Ensure all file/chunk rows are committed, then read the DB file.
     // Note: remote_index_* tables are local cache and may be written after upload.
     let db_bytes = std::fs::read(&config.db_path)?;
@@ -641,7 +725,21 @@ async fn upload_index<S: Storage>(
         let part_hash = blake3::hash(&part_enc).to_hex().to_string();
         let part_len = part_enc.len();
         let filename = telegram_camouflaged_filename();
-        let object_id = storage.upload_document(&filename, part_enc).await?;
+        let object_id = storage
+            .upload_document(&filename, part_enc)
+            .await
+            .map_err(|e| {
+                error!(
+                    event = "io.telegram.upload_failed",
+                    provider,
+                    snapshot_id,
+                    part_no,
+                    blob_bytes = part_len as u64,
+                    error = %e,
+                    "io.telegram.upload_failed"
+                );
+                e
+            })?;
 
         sqlx::query(
             r#"
@@ -651,7 +749,7 @@ async fn upload_index<S: Storage>(
         )
         .bind(snapshot_id)
         .bind(part_no as i64)
-        .bind(storage.provider())
+        .bind(provider)
         .bind(&object_id)
         .bind(part_len as i64)
         .bind(&part_hash)
@@ -679,10 +777,22 @@ async fn upload_index<S: Storage>(
     })?;
 
     let manifest_enc = encrypt_framed(&config.master_key, snapshot_id.as_bytes(), &manifest_json)?;
+    let manifest_bytes = manifest_enc.len() as u64;
     let manifest_filename = telegram_camouflaged_filename();
     let manifest_object_id = storage
         .upload_document(&manifest_filename, manifest_enc)
-        .await?;
+        .await
+        .map_err(|e| {
+            error!(
+                event = "io.telegram.upload_failed",
+                provider,
+                snapshot_id,
+                blob_bytes = manifest_bytes,
+                error = %e,
+                "io.telegram.upload_failed"
+            );
+            e
+        })?;
 
     sqlx::query(
         r#"
@@ -691,7 +801,7 @@ async fn upload_index<S: Storage>(
         "#,
     )
     .bind(snapshot_id)
-    .bind(storage.provider())
+    .bind(provider)
     .bind(&manifest_object_id)
     .execute(pool)
     .await?;

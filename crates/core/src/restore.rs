@@ -1,9 +1,11 @@
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use tracing::{debug, error};
 
 use crate::crypto::decrypt_framed;
 use crate::index_db::open_existing_index_db;
@@ -62,6 +64,9 @@ pub async fn restore_snapshot_with<S: Storage>(
     config: RestoreConfig,
     options: RestoreOptions<'_>,
 ) -> Result<RestoreResult> {
+    let restore_started = Instant::now();
+    debug!(event = "phase.start", phase = "restore", "phase.start");
+
     let _manifest = download_and_write_index_db(
         storage,
         &config.snapshot_id,
@@ -78,7 +83,7 @@ pub async fn restore_snapshot_with<S: Storage>(
     ensure_snapshot_present(&pool, &config.snapshot_id).await?;
 
     restore_dirs(&pool, &config.snapshot_id, &config.target_path).await?;
-    restore_files(
+    let result = restore_files(
         storage,
         &pool,
         &config.snapshot_id,
@@ -87,7 +92,19 @@ pub async fn restore_snapshot_with<S: Storage>(
         options.cancel,
         options.progress,
     )
-    .await
+    .await?;
+
+    debug!(
+        event = "phase.finish",
+        phase = "restore",
+        duration_ms = restore_started.elapsed().as_millis() as u64,
+        files_restored = result.files_restored,
+        chunks_downloaded = result.chunks_downloaded,
+        bytes_written = result.bytes_written,
+        "phase.finish"
+    );
+
+    Ok(result)
 }
 
 pub async fn verify_snapshot<S: Storage>(
@@ -108,6 +125,9 @@ pub async fn verify_snapshot_with<S: Storage>(
     config: VerifyConfig,
     options: VerifyOptions<'_>,
 ) -> Result<VerifyResult> {
+    let verify_started = Instant::now();
+    debug!(event = "phase.start", phase = "verify", "phase.start");
+
     let _manifest = download_and_write_index_db(
         storage,
         &config.snapshot_id,
@@ -121,7 +141,7 @@ pub async fn verify_snapshot_with<S: Storage>(
     let pool = open_existing_index_db(&config.index_db_path).await?;
     ensure_snapshot_present(&pool, &config.snapshot_id).await?;
 
-    verify_chunks(
+    let result = verify_chunks(
         storage,
         &pool,
         &config.snapshot_id,
@@ -129,7 +149,18 @@ pub async fn verify_snapshot_with<S: Storage>(
         options.cancel,
         options.progress,
     )
-    .await
+    .await?;
+
+    debug!(
+        event = "phase.finish",
+        phase = "verify",
+        duration_ms = verify_started.elapsed().as_millis() as u64,
+        chunks_checked = result.chunks_checked,
+        bytes_checked = result.bytes_checked,
+        "phase.finish"
+    );
+
+    Ok(result)
 }
 
 async fn download_and_write_index_db<S: Storage>(
@@ -145,7 +176,19 @@ async fn download_and_write_index_db<S: Storage>(
     {
         return Err(Error::Cancelled);
     }
-    let manifest_enc = storage.download_document(manifest_object_id).await?;
+    let manifest_enc = storage
+        .download_document(manifest_object_id)
+        .await
+        .map_err(|e| {
+            error!(
+                event = "io.telegram.download_failed",
+                snapshot_id,
+                object_id = manifest_object_id,
+                error = %e,
+                "io.telegram.download_failed"
+            );
+            e
+        })?;
     let manifest_json = decrypt_framed(master_key, snapshot_id.as_bytes(), &manifest_enc)?;
 
     let manifest: IndexManifest =
@@ -187,9 +230,19 @@ async fn download_and_write_index_db<S: Storage>(
         let part_enc = storage
             .download_document(&part.object_id)
             .await
-            .map_err(|_| Error::MissingIndexPart {
-                snapshot_id: snapshot_id.to_string(),
-                part_no: part.no,
+            .map_err(|e| {
+                error!(
+                    event = "io.telegram.download_failed",
+                    snapshot_id,
+                    part_no = part.no,
+                    object_id = %part.object_id,
+                    error = %e,
+                    "io.telegram.download_failed"
+                );
+                Error::MissingIndexPart {
+                    snapshot_id: snapshot_id.to_string(),
+                    part_no: part.no,
+                }
             })?;
 
         if part_enc.len() != part.size {
@@ -330,7 +383,15 @@ async fn restore_files<S: Storage>(
 
             let plain = match object_ref {
                 ChunkObjectRef::Direct { object_id } => {
-                    let framed = storage.download_document(&object_id).await.map_err(|_| {
+                    let framed = storage.download_document(&object_id).await.map_err(|e| {
+                        error!(
+                            event = "io.telegram.download_failed",
+                            snapshot_id,
+                            object_id,
+                            chunk_hash,
+                            error = %e,
+                            "io.telegram.download_failed"
+                        );
                         Error::MissingChunkObject {
                             chunk_hash: chunk_hash.clone(),
                         }
@@ -351,8 +412,18 @@ async fn restore_files<S: Storage>(
                                 storage
                                     .download_document(&pack_object_id)
                                     .await
-                                    .map_err(|_| Error::MissingChunkObject {
-                                        chunk_hash: chunk_hash.clone(),
+                                    .map_err(|e| {
+                                        error!(
+                                            event = "io.telegram.download_failed",
+                                            snapshot_id,
+                                            object_id = pack_object_id,
+                                            chunk_hash,
+                                            error = %e,
+                                            "io.telegram.download_failed"
+                                        );
+                                        Error::MissingChunkObject {
+                                            chunk_hash: chunk_hash.clone(),
+                                        }
                                     })?;
                             pack_cache = Some((pack_object_id.clone(), bytes));
                             pack_cache.as_ref().expect("just set").1.as_slice()
@@ -477,7 +548,15 @@ async fn verify_chunks<S: Storage>(
 
         let plain = match object_ref {
             ChunkObjectRef::Direct { object_id } => {
-                let framed = storage.download_document(&object_id).await.map_err(|_| {
+                let framed = storage.download_document(&object_id).await.map_err(|e| {
+                    error!(
+                        event = "io.telegram.download_failed",
+                        snapshot_id,
+                        object_id,
+                        chunk_hash,
+                        error = %e,
+                        "io.telegram.download_failed"
+                    );
                     Error::MissingChunkObject {
                         chunk_hash: chunk_hash.clone(),
                     }
@@ -498,8 +577,18 @@ async fn verify_chunks<S: Storage>(
                             storage
                                 .download_document(&pack_object_id)
                                 .await
-                                .map_err(|_| Error::MissingChunkObject {
-                                    chunk_hash: chunk_hash.clone(),
+                                .map_err(|e| {
+                                    error!(
+                                        event = "io.telegram.download_failed",
+                                        snapshot_id,
+                                        object_id = pack_object_id,
+                                        chunk_hash,
+                                        error = %e,
+                                        "io.telegram.download_failed"
+                                    );
+                                    Error::MissingChunkObject {
+                                        chunk_hash: chunk_hash.clone(),
+                                    }
                                 })?;
                         pack_cache = Some((pack_object_id.clone(), bytes));
                         pack_cache.as_ref().expect("just set").1.as_slice()
