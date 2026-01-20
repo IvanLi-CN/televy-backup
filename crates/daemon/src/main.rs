@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
 use base64::Engine;
 use chrono::{Datelike, Timelike};
 use serde::Deserialize;
