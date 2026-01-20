@@ -55,4 +55,4 @@
 | ID   | Title | Status | Plan | Last | Notes |
 |-----:|-------|--------|------|------|-------|
 | 0001 | TelevyBackup MVP（Telegram 存储 + 差异备份） | 已完成 | `0001:telegram-backup-mvp/PLAN.md` | 2026-01-20 | PR #4；实现分支：`feat/0001-telegram-backup-mvp` |
-| 0002 | 小对象打包降低 Bot API 调用频率（Pack） | 已完成 | `0002:small-object-packing/PLAN.md` | 2026-01-20 | 已冻结：启用阈值（>10 或 >32MiB）+ pack 目标 32MiB + hard max 49MiB；实现分支：`feat/0002-small-object-packing` |
+| 0002 | 小对象打包降低 Bot API 调用频率（Pack） | 已完成 | `0002:small-object-packing/PLAN.md` | 2026-01-20 | PR #7；已冻结：启用阈值（>10 或 >32MiB）+ pack 目标 32MiB + hard max 49MiB；实现分支：`feat/0002-small-object-packing` |
