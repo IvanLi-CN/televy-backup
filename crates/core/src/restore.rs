@@ -8,8 +8,9 @@ use sqlx::{Row, SqlitePool};
 use crate::crypto::decrypt_framed;
 use crate::index_db::open_existing_index_db;
 use crate::index_manifest::{IndexManifest, index_part_aad};
+use crate::pack::extract_pack_blob;
 use crate::progress::{ProgressSink, TaskProgress};
-use crate::storage::Storage;
+use crate::storage::{ChunkObjectRef, Storage, parse_chunk_object_ref};
 use crate::{Error, Result};
 use tokio_util::sync::CancellationToken;
 
@@ -264,6 +265,7 @@ async fn restore_files<S: Storage>(
     progress: Option<&dyn ProgressSink>,
 ) -> Result<RestoreResult> {
     let mut result = RestoreResult::default();
+    let mut pack_cache: Option<(String, Vec<u8>)> = None;
 
     let rows = sqlx::query(
         "SELECT file_id, path, size, kind FROM files WHERE snapshot_id = ? ORDER BY path",
@@ -295,8 +297,17 @@ async fn restore_files<S: Storage>(
         let mut out = fs::File::create(&out_path)?;
 
         let chunks = sqlx::query(
-            "SELECT seq, chunk_hash, offset, len FROM file_chunks WHERE file_id = ? ORDER BY seq",
+            r#"
+            SELECT fc.seq, fc.chunk_hash, fc.offset, fc.len, co.object_id as object_id
+            FROM file_chunks fc
+            LEFT JOIN chunk_objects co
+              ON co.chunk_hash = fc.chunk_hash
+             AND co.provider = ?
+            WHERE fc.file_id = ?
+            ORDER BY fc.seq
+            "#,
         )
+        .bind(storage.provider())
         .bind(&file_id)
         .fetch_all(pool)
         .await?;
@@ -311,28 +322,52 @@ async fn restore_files<S: Storage>(
             let chunk_hash: String = chunk_row.get("chunk_hash");
             let offset: i64 = chunk_row.get("offset");
             let len: i64 = chunk_row.get("len");
+            let encoded_object_id: Option<String> = chunk_row.get("object_id");
+            let encoded_object_id = encoded_object_id.ok_or_else(|| Error::MissingChunkObject {
+                chunk_hash: chunk_hash.clone(),
+            })?;
+            let object_ref = parse_chunk_object_ref(&encoded_object_id)?;
 
-            let object_row = sqlx::query(
-                "SELECT object_id FROM chunk_objects WHERE provider = ? AND chunk_hash = ? LIMIT 1",
-            )
-            .bind(storage.provider())
-            .bind(&chunk_hash)
-            .fetch_optional(pool)
-            .await?;
+            let plain = match object_ref {
+                ChunkObjectRef::Direct { object_id } => {
+                    let framed = storage.download_document(&object_id).await.map_err(|_| {
+                        Error::MissingChunkObject {
+                            chunk_hash: chunk_hash.clone(),
+                        }
+                    })?;
+                    decrypt_framed(master_key, chunk_hash.as_bytes(), &framed)?
+                }
+                ChunkObjectRef::PackSlice {
+                    pack_object_id,
+                    offset: pack_off,
+                    len: pack_len,
+                } => {
+                    let pack_bytes = match &pack_cache {
+                        Some((cached_id, cached_bytes)) if cached_id == &pack_object_id => {
+                            cached_bytes.as_slice()
+                        }
+                        _ => {
+                            let bytes =
+                                storage
+                                    .download_document(&pack_object_id)
+                                    .await
+                                    .map_err(|_| Error::MissingChunkObject {
+                                        chunk_hash: chunk_hash.clone(),
+                                    })?;
+                            pack_cache = Some((pack_object_id.clone(), bytes));
+                            pack_cache.as_ref().expect("just set").1.as_slice()
+                        }
+                    };
 
-            let object_id: String = match object_row {
-                Some(r) => r.get("object_id"),
-                None => {
-                    return Err(Error::MissingChunkObject { chunk_hash });
+                    if pack_len > usize::MAX as u64 {
+                        return Err(Error::Integrity {
+                            message: "pack slice too large".to_string(),
+                        });
+                    }
+                    let framed = extract_pack_blob(pack_bytes, pack_off, pack_len)?;
+                    decrypt_framed(master_key, chunk_hash.as_bytes(), framed)?
                 }
             };
-
-            let framed = storage.download_document(&object_id).await.map_err(|_| {
-                Error::MissingChunkObject {
-                    chunk_hash: chunk_hash.clone(),
-                }
-            })?;
-            let plain = decrypt_framed(master_key, chunk_hash.as_bytes(), &framed)?;
 
             let got_hash = blake3::hash(&plain).to_hex().to_string();
             if got_hash != chunk_hash {
@@ -408,17 +443,24 @@ async fn verify_chunks<S: Storage>(
     progress: Option<&dyn ProgressSink>,
 ) -> Result<VerifyResult> {
     let mut result = VerifyResult::default();
+    let mut pack_cache: Option<(String, Vec<u8>)> = None;
 
     let rows = sqlx::query(
         r#"
-        SELECT DISTINCT fc.chunk_hash as chunk_hash
-        FROM file_chunks fc
-        JOIN files f ON f.file_id = fc.file_id
-        WHERE f.snapshot_id = ?
-        ORDER BY fc.chunk_hash
+        SELECT co.chunk_hash as chunk_hash, co.object_id as object_id
+        FROM chunk_objects co
+        JOIN (
+          SELECT DISTINCT fc.chunk_hash as chunk_hash
+          FROM file_chunks fc
+          JOIN files f ON f.file_id = fc.file_id
+          WHERE f.snapshot_id = ?
+        ) used ON used.chunk_hash = co.chunk_hash
+        WHERE co.provider = ?
+        ORDER BY co.object_id, co.chunk_hash
         "#,
     )
     .bind(snapshot_id)
+    .bind(storage.provider())
     .fetch_all(pool)
     .await?;
 
@@ -430,29 +472,49 @@ async fn verify_chunks<S: Storage>(
         }
 
         let chunk_hash: String = row.get("chunk_hash");
-        let object_row = sqlx::query(
-            "SELECT object_id FROM chunk_objects WHERE provider = ? AND chunk_hash = ? LIMIT 1",
-        )
-        .bind(storage.provider())
-        .bind(&chunk_hash)
-        .fetch_optional(pool)
-        .await?;
+        let encoded_object_id: String = row.get("object_id");
+        let object_ref = parse_chunk_object_ref(&encoded_object_id)?;
 
-        let object_id: String = match object_row {
-            Some(r) => r.get("object_id"),
-            None => {
-                return Err(Error::MissingChunkObject { chunk_hash });
+        let plain = match object_ref {
+            ChunkObjectRef::Direct { object_id } => {
+                let framed = storage.download_document(&object_id).await.map_err(|_| {
+                    Error::MissingChunkObject {
+                        chunk_hash: chunk_hash.clone(),
+                    }
+                })?;
+                decrypt_framed(master_key, chunk_hash.as_bytes(), &framed)?
+            }
+            ChunkObjectRef::PackSlice {
+                pack_object_id,
+                offset: pack_off,
+                len: pack_len,
+            } => {
+                let pack_bytes = match &pack_cache {
+                    Some((cached_id, cached_bytes)) if cached_id == &pack_object_id => {
+                        cached_bytes.as_slice()
+                    }
+                    _ => {
+                        let bytes =
+                            storage
+                                .download_document(&pack_object_id)
+                                .await
+                                .map_err(|_| Error::MissingChunkObject {
+                                    chunk_hash: chunk_hash.clone(),
+                                })?;
+                        pack_cache = Some((pack_object_id.clone(), bytes));
+                        pack_cache.as_ref().expect("just set").1.as_slice()
+                    }
+                };
+
+                if pack_len > usize::MAX as u64 {
+                    return Err(Error::Integrity {
+                        message: "pack slice too large".to_string(),
+                    });
+                }
+                let framed = extract_pack_blob(pack_bytes, pack_off, pack_len)?;
+                decrypt_framed(master_key, chunk_hash.as_bytes(), framed)?
             }
         };
-
-        let framed =
-            storage
-                .download_document(&object_id)
-                .await
-                .map_err(|_| Error::MissingChunkObject {
-                    chunk_hash: chunk_hash.clone(),
-                })?;
-        let plain = decrypt_framed(master_key, chunk_hash.as_bytes(), &framed)?;
 
         let got_hash = blake3::hash(&plain).to_hex().to_string();
         if got_hash != chunk_hash {

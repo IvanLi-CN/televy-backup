@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use sqlx::Row;
 use televy_backup_core::{
-    BackupConfig, ChunkingConfig, InMemoryStorage, RestoreConfig, VerifyConfig, restore_snapshot,
-    run_backup, verify_snapshot,
+    BackupConfig, ChunkObjectRef, ChunkingConfig, InMemoryStorage, RestoreConfig, VerifyConfig,
+    parse_chunk_object_ref, restore_snapshot, run_backup, verify_snapshot,
 };
 use tempfile::TempDir;
 
@@ -156,7 +156,11 @@ async fn verify_fails_when_any_chunk_missing() {
     let chunk_hash: String = row.get("chunk_hash");
     let object_id: String = row.get("object_id");
 
-    storage.remove(&object_id).await;
+    let underlying_object_id = match parse_chunk_object_ref(&object_id).unwrap() {
+        ChunkObjectRef::Direct { object_id } => object_id,
+        ChunkObjectRef::PackSlice { pack_object_id, .. } => pack_object_id,
+    };
+    storage.remove(&underlying_object_id).await;
 
     let err = verify_snapshot(
         &storage,

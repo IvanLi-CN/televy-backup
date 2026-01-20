@@ -47,7 +47,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
     let uploads_after_r1 = storage.uploaded.load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
         uploads_after_r1 as u64,
-        r1.chunks_uploaded + r1.index_parts + 1
+        r1.data_objects_uploaded + r1.index_parts + 1
     );
 
     let cfg2 = BackupConfig {
@@ -67,7 +67,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
 
     let uploads_after_r2 = storage.uploaded.load(std::sync::atomic::Ordering::Relaxed);
     let delta = (uploads_after_r2 - uploads_after_r1) as u64;
-    assert_eq!(delta, r2.index_parts + 1);
+    assert_eq!(delta, r2.data_objects_uploaded + r2.index_parts + 1);
 
     let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
         .await

@@ -859,14 +859,16 @@ async fn backup_run(
                 "kind": "backup",
                 "state": "succeeded",
                 "snapshotId": res.snapshot_id,
-                "result": {
-                    "filesIndexed": res.files_indexed,
-                    "chunksUploaded": res.chunks_uploaded,
-                    "bytesUploaded": res.bytes_uploaded,
-                    "bytesDeduped": res.bytes_deduped,
-                    "indexParts": res.index_parts,
-                    "durationSeconds": duration_seconds,
-                }
+                    "result": {
+                        "filesIndexed": res.files_indexed,
+                        "chunksUploaded": res.chunks_uploaded,
+                        "dataObjectsUploaded": res.data_objects_uploaded,
+                        "dataObjectsEstimatedWithoutPack": res.data_objects_estimated_without_pack,
+                        "bytesUploaded": res.bytes_uploaded,
+                        "bytesDeduped": res.bytes_deduped,
+                        "indexParts": res.index_parts,
+                        "durationSeconds": duration_seconds,
+                    }
             })
         );
         return Ok(());
@@ -881,8 +883,13 @@ async fn backup_run(
     } else {
         println!("snapshotId={}", res.snapshot_id);
         println!(
-            "filesIndexed={} chunksUploaded={} bytesUploaded={} bytesDeduped={}",
-            res.files_indexed, res.chunks_uploaded, res.bytes_uploaded, res.bytes_deduped
+            "filesIndexed={} chunksUploaded={} dataObjectsUploaded={} dataObjectsEstimatedWithoutPack={} bytesUploaded={} bytesDeduped={}",
+            res.files_indexed,
+            res.chunks_uploaded,
+            res.data_objects_uploaded,
+            res.data_objects_estimated_without_pack,
+            res.bytes_uploaded,
+            res.bytes_deduped
         );
     }
     Ok(())

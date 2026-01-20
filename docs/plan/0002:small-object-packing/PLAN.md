@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-19
-- Last: 2026-01-19
+- Last: 2026-01-20
 
 ## 已冻结决策（Decisions, frozen）
 
@@ -110,11 +110,11 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: 实现 pack writer/reader（含 header）与单元测试
-- [ ] M2: 存储适配层支持 pack 上传/下载（`sendDocument`/`getFile`）
-- [ ] M3: SQLite schema / object_id 编码调整与迁移策略落地
-- [ ] M4: Backup 管线接入 pack（统计归并收益、失败重试路径）
-- [ ] M5: Restore/Verify 管线接入 pack（正确性与性能基线）
+- [x] M1: 实现 pack writer/reader（含 header）与单元测试
+- [x] M2: 存储适配层支持 pack 上传/下载（`sendDocument`/`getFile`）
+- [x] M3: SQLite schema / object_id 编码调整与迁移策略落地
+- [x] M4: Backup 管线接入 pack（统计归并收益、失败重试路径）
+- [x] M5: Restore/Verify 管线接入 pack（正确性与性能基线）
 
 ## 方案概述（Approach, high-level）
 

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -9,13 +10,16 @@ use walkdir::WalkDir;
 use crate::crypto::encrypt_framed;
 use crate::index_db::open_index_db;
 use crate::index_manifest::{IndexManifest, IndexManifestPart, index_part_aad};
+use crate::pack::{PACK_MAX_BYTES, PACK_TARGET_BYTES, PackBlob, PackBuilder};
 use crate::progress::{ProgressSink, TaskProgress};
-use crate::storage::Storage;
+use crate::storage::{Storage, encode_tgfile_object_id, encode_tgpack_object_id};
 use crate::{Error, Result};
 use tokio_util::sync::CancellationToken;
 
 const TELEGRAM_BOTAPI_MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 const INDEX_PART_BYTES: usize = 32 * 1024 * 1024;
+const PACK_ENABLE_MIN_OBJECTS: usize = 10;
+const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct ChunkingConfig {
@@ -68,6 +72,8 @@ pub struct BackupResult {
     pub files_indexed: u64,
     pub chunks_total: u64,
     pub chunks_uploaded: u64,
+    pub data_objects_uploaded: u64,
+    pub data_objects_estimated_without_pack: u64,
     pub bytes_read: u64,
     pub bytes_uploaded: u64,
     pub bytes_deduped: u64,
@@ -127,6 +133,12 @@ pub async fn run_backup_with<S: Storage>(
         snapshot_id: snapshot_id.clone(),
         ..BackupResult::default()
     };
+
+    let mut scheduled_new_chunks = HashSet::<String>::new();
+    let mut pack_enabled = false;
+    let mut pending_bytes: usize = 0;
+    let mut pending: Vec<PackBlob> = Vec::new();
+    let mut packer = PackBuilder::new();
 
     if let Some(sink) = options.progress {
         sink.on_progress(TaskProgress {
@@ -257,16 +269,15 @@ pub async fn run_backup_with<S: Storage>(
 
             let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
 
-            let exists = chunk_object_exists(&pool, provider, &chunk_hash).await?;
+            let exists = chunk_object_exists(&pool, provider, &chunk_hash).await?
+                || scheduled_new_chunks.contains(&chunk_hash);
             if exists {
                 result.bytes_deduped += chunk.data.len() as u64;
             } else {
+                scheduled_new_chunks.insert(chunk_hash.clone());
+
                 let encrypted =
                     encrypt_framed(&config.master_key, chunk_hash.as_bytes(), &chunk.data)?;
-                let filename = telegram_camouflaged_filename();
-                let object_id = storage
-                    .upload_document(&filename, encrypted.clone())
-                    .await?;
 
                 sqlx::query(
                     r#"
@@ -279,20 +290,43 @@ pub async fn run_backup_with<S: Storage>(
                 .execute(&pool)
                 .await?;
 
-                sqlx::query(
-                    r#"
-                    INSERT OR IGNORE INTO chunk_objects (chunk_hash, provider, object_id, created_at)
-                    VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-                    "#,
-                )
-                .bind(&chunk_hash)
-                .bind(provider)
-                .bind(&object_id)
-                .execute(&pool)
-                .await?;
+                let blob = PackBlob {
+                    chunk_hash: chunk_hash.clone(),
+                    blob: encrypted,
+                };
 
-                result.chunks_uploaded += 1;
-                result.bytes_uploaded += encrypted.len() as u64;
+                if !pack_enabled {
+                    pending_bytes = pending_bytes.saturating_add(blob.blob.len());
+                    pending.push(blob);
+                    if pending.len() > PACK_ENABLE_MIN_OBJECTS || pending_bytes > PACK_TARGET_BYTES
+                    {
+                        pack_enabled = true;
+                        for b in pending.drain(..) {
+                            schedule_pack_or_direct_upload(
+                                storage,
+                                &pool,
+                                provider,
+                                &config.master_key,
+                                &mut packer,
+                                b,
+                                &mut result,
+                            )
+                            .await?;
+                        }
+                        pending_bytes = 0;
+                    }
+                } else {
+                    schedule_pack_or_direct_upload(
+                        storage,
+                        &pool,
+                        provider,
+                        &config.master_key,
+                        &mut packer,
+                        blob,
+                        &mut result,
+                    )
+                    .await?;
+                }
             }
 
             sqlx::query(
@@ -324,6 +358,37 @@ pub async fn run_backup_with<S: Storage>(
         }
     }
 
+    if pack_enabled {
+        flush_packer(
+            storage,
+            &pool,
+            provider,
+            &config.master_key,
+            &mut packer,
+            &mut result,
+        )
+        .await?;
+    } else {
+        for blob in pending {
+            let blob_len = blob.blob.len() as u64;
+            let chunk_hash = blob.chunk_hash;
+            let filename = telegram_camouflaged_filename();
+            let object_id = storage.upload_document(&filename, blob.blob).await?;
+            record_chunk_object(
+                &pool,
+                provider,
+                &chunk_hash,
+                &encode_tgfile_object_id(&object_id),
+            )
+            .await?;
+            result.chunks_uploaded += 1;
+            result.data_objects_uploaded += 1;
+            result.bytes_uploaded += blob_len;
+        }
+    }
+
+    result.data_objects_estimated_without_pack = result.chunks_uploaded;
+
     if let Some(sink) = options.progress {
         sink.on_progress(TaskProgress {
             phase: "index".to_string(),
@@ -343,6 +408,103 @@ pub async fn run_backup_with<S: Storage>(
     apply_retention(&pool, &config.source_path, config.keep_last_snapshots).await?;
 
     Ok(result)
+}
+
+async fn schedule_pack_or_direct_upload<S: Storage>(
+    storage: &S,
+    pool: &SqlitePool,
+    provider: &str,
+    master_key: &[u8; 32],
+    packer: &mut PackBuilder,
+    blob: PackBlob,
+    result: &mut BackupResult,
+) -> Result<()> {
+    let blob_len = blob.blob.len() as u64;
+    let PackBlob { chunk_hash, blob } = blob;
+
+    if blob.len() + SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES > PACK_MAX_BYTES {
+        flush_packer(storage, pool, provider, master_key, packer, result).await?;
+        let filename = telegram_camouflaged_filename();
+        let object_id = storage.upload_document(&filename, blob).await?;
+        record_chunk_object(
+            pool,
+            provider,
+            &chunk_hash,
+            &encode_tgfile_object_id(&object_id),
+        )
+        .await?;
+        result.chunks_uploaded += 1;
+        result.data_objects_uploaded += 1;
+        result.bytes_uploaded += blob_len;
+        return Ok(());
+    }
+
+    if !packer.is_empty() && packer.blob_len() + blob.len() > PACK_MAX_BYTES {
+        flush_packer(storage, pool, provider, master_key, packer, result).await?;
+    }
+
+    packer.push_blob(PackBlob { chunk_hash, blob })?;
+    if packer.blob_len() >= PACK_TARGET_BYTES {
+        flush_packer(storage, pool, provider, master_key, packer, result).await?;
+    }
+
+    Ok(())
+}
+
+async fn flush_packer<S: Storage>(
+    storage: &S,
+    pool: &SqlitePool,
+    provider: &str,
+    master_key: &[u8; 32],
+    packer: &mut PackBuilder,
+    result: &mut BackupResult,
+) -> Result<()> {
+    while !packer.is_empty() {
+        let (pack, carry) = packer.finalize_fit(master_key, PACK_MAX_BYTES)?;
+        let filename = telegram_camouflaged_filename();
+        let pack_bytes_len = pack.bytes.len() as u64;
+        let pack_bytes = pack.bytes;
+        let pack_object_id = storage.upload_document(&filename, pack_bytes).await?;
+        result.data_objects_uploaded += 1;
+        result.bytes_uploaded += pack_bytes_len;
+
+        for entry in &pack.entries {
+            record_chunk_object(
+                pool,
+                provider,
+                &entry.chunk_hash,
+                &encode_tgpack_object_id(&pack_object_id, entry.offset, entry.len),
+            )
+            .await?;
+            result.chunks_uploaded += 1;
+        }
+
+        packer.reset();
+        for b in carry {
+            packer.push_blob(b)?;
+        }
+    }
+    Ok(())
+}
+
+async fn record_chunk_object(
+    pool: &SqlitePool,
+    provider: &str,
+    chunk_hash: &str,
+    object_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO chunk_objects (chunk_hash, provider, object_id, created_at)
+        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        "#,
+    )
+    .bind(chunk_hash)
+    .bind(provider)
+    .bind(object_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn apply_retention(
@@ -477,8 +639,9 @@ async fn upload_index<S: Storage>(
         let aad = index_part_aad(snapshot_id, part_no);
         let part_enc = encrypt_framed(&config.master_key, aad.as_bytes(), part_plain)?;
         let part_hash = blake3::hash(&part_enc).to_hex().to_string();
+        let part_len = part_enc.len();
         let filename = telegram_camouflaged_filename();
-        let object_id = storage.upload_document(&filename, part_enc.clone()).await?;
+        let object_id = storage.upload_document(&filename, part_enc).await?;
 
         sqlx::query(
             r#"
@@ -490,14 +653,14 @@ async fn upload_index<S: Storage>(
         .bind(part_no as i64)
         .bind(storage.provider())
         .bind(&object_id)
-        .bind(part_enc.len() as i64)
+        .bind(part_len as i64)
         .bind(&part_hash)
         .execute(pool)
         .await?;
 
         parts.push(IndexManifestPart {
             no: part_no,
-            size: part_enc.len(),
+            size: part_len,
             hash: part_hash,
             object_id,
         });
