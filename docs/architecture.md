@@ -1,0 +1,76 @@
+# Architecture: TelevyBackup
+
+## Components
+
+- **GUI app**: native macOS app (SwiftUI/AppKit; built via `scripts/macos/*`).
+  - Provides Settings UI and task controls (backup/restore/verify).
+  - Spawns the local `televybackup` CLI for long-running operations and streams progress from stdout.
+- **Core library**: `televy_backup_core` (`crates/core/`).
+  - Implements scan → CDC chunking → hash → encrypt framing → upload → SQLite index.
+  - Implements restore/verify using remote index manifest + chunk downloads.
+- **Daemon**: `televybackupd` (`crates/daemon/`).
+  - Runs scheduled backups (hourly/daily) and applies retention policy.
+  - Intended to be managed by `brew services` as a user-level LaunchAgent.
+
+## Data locations
+
+The app and daemon can share the same data locations via env vars:
+
+- `TELEVYBACKUP_CONFIG_DIR`: config directory (contains `config.toml`)
+- `TELEVYBACKUP_DATA_DIR`: data directory (contains `index/index.sqlite`)
+
+When env vars are not set, the GUI uses `~/Library/Application Support/TelevyBackup`.
+
+## Secrets (macOS Keychain)
+
+Secrets are not stored in `config.toml`.
+
+- Telegram Bot token: Keychain item key = `settings.telegram.botTokenKey` (default `telegram.bot_token`)
+- Master key: Keychain item key = `televybackup.master_key` (stored as Base64, 32 bytes)
+
+## Crypto and framing
+
+All binary objects uploaded to Telegram use the same framing:
+
+- `version` (1 byte, `0x01`)
+- `nonce` (24 bytes, random)
+- `ciphertext_and_tag` (AEAD output)
+
+AEAD: XChaCha20-Poly1305
+
+Associated Data (AD):
+
+- Chunk blob: `chunk_hash` (hex UTF-8)
+- Index part: `snapshot_id + ":" + part_no` (UTF-8)
+- Manifest: `snapshot_id` (UTF-8)
+
+## Storage model (Telegram Bot API)
+
+- Each encrypted chunk is uploaded as a Telegram `document`.
+- Each index part is uploaded as a Telegram `document`.
+- A manifest JSON (encrypted) is uploaded as a Telegram `document` and references all index parts by `file_id`.
+
+## SQLite index
+
+The local index database schema is defined in:
+
+- `docs/plan/0001:telegram-backup-mvp/contracts/db.md`
+
+Key tables:
+
+- `snapshots`, `files`, `file_chunks`
+- `chunks`, `chunk_objects`
+- `remote_index_parts`, `remote_indexes`
+
+## Retention policy
+
+`retention.keep_last_snapshots` prunes older snapshots from the local SQLite index only:
+
+- Deletes `snapshots`/`files`/`file_chunks`/`remote_index_*` for old snapshots.
+- Does not delete remote chunk objects (no remote GC in MVP).
+
+## Known limitations (MVP)
+
+- No APFS snapshot: backups are best-effort consistent at scan time.
+- No remote search for manifests in Telegram history: restore assumes local DB knows `manifest_object_id`.
+- No remote chunk GC: Telegram chat storage can grow over time.

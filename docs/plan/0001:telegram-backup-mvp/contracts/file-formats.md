@@ -6,7 +6,7 @@
 
 ### 位置
 
-- 配置目录：`$APP_CONFIG_DIR/`（由 Tauri `appConfigDir` 决定）
+- 配置目录：`$TELEVYBACKUP_CONFIG_DIR`（未设置时使用 `~/Library/Application Support/TelevyBackup/`）
 - 配置文件：`config.toml`
 
 ### `config.toml`（MVP shape）
@@ -53,12 +53,11 @@
 本计划约定：敏感信息只存 Keychain，不进 `config.toml`。
 
 - `telegram.bot_token`：存为 Keychain item（key 为 `telegram.bot_token_key` 对应值）
-- `crypto.master_key`：存为 Keychain item（固定 key，例如 `televybackup.master_key`；具体命名实现前再固化）
- - `crypto.master_key`：存为 Keychain item（固定 key：`televybackup.master_key`）
+- `crypto.master_key`：存为 Keychain item（固定 key：`televybackup.master_key`）
 
 ## 2) 索引（SQLite）
 
-- 索引文件：`index.sqlite`（位于 `$APP_DATA_DIR/index/`）
+- 索引文件：`index.sqlite`（位于 `$TELEVYBACKUP_DATA_DIR/index/`；未设置时同配置目录）
 - 备份时的索引上传策略（MVP）：
   - 策略：上传 `index.sqlite` 的压缩+加密文件，然后再做**分片上传**（每片 ≤ Bot API 限制），并上传一个加密的 `index-manifest` 用于恢复时重组
 

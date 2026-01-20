@@ -7,5 +7,18 @@ publish = false
 [dependencies]
 blake3 = "1"
 fastcdc = "3"
+chacha20poly1305 = "0.10"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sqlx = { version = "0.8", features = ["macros", "migrate", "runtime-tokio-rustls", "sqlite"] }
+thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
