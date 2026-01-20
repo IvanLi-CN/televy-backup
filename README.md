@@ -19,6 +19,8 @@ The app stores non-secret settings in `config.toml`, and secrets in macOS Keycha
 
 - `config.toml` location: `TELEVYBACKUP_CONFIG_DIR/config.toml` (default: `~/Library/Application Support/TelevyBackup/config.toml`)
 - Local index DB: `$APP_DATA_DIR/index/index.sqlite` or `TELEVYBACKUP_DATA_DIR/index/index.sqlite`
+- Per-run logs (NDJSON): `TELEVYBACKUP_LOG_DIR/` (override) or `TELEVYBACKUP_DATA_DIR/logs/` (default: `~/Library/Application Support/TelevyBackup/logs/`)
+  - Log level filter: `TELEVYBACKUP_LOG` → `RUST_LOG` → default `debug`
 - Keychain secrets:
   - Telegram bot token: key = `telegram.bot_token` (default)
   - Master key: key = `televybackup.master_key` (Base64 32 bytes)

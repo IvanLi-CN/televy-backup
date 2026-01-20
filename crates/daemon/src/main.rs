@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[cfg(target_os = "macos")]
 use base64::Engine;
@@ -8,6 +9,7 @@ use televy_backup_core::{
     BackupConfig, BackupOptions, ChunkingConfig, TelegramBotApiStorage, TelegramBotApiStorageConfig,
 };
 use tokio::time::{Duration, sleep};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Deserialize)]
 struct Settings {
@@ -65,13 +67,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .map(PathBuf::from);
 
-    let config_path = config_dir
-        .unwrap_or_else(default_config_dir)
-        .join("config.toml");
-    let db_path = data_dir
-        .unwrap_or_else(default_data_dir)
-        .join("index")
-        .join("index.sqlite");
+    let config_root = config_dir.unwrap_or_else(default_config_dir);
+    let data_root = data_dir.unwrap_or_else(default_data_dir);
+
+    let config_path = config_root.join("config.toml");
+    let db_path = data_root.join("index").join("index.sqlite");
 
     let settings = load_settings(&config_path)?;
     if settings.telegram.mode != "botapi" {
@@ -119,6 +119,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 for source in &settings.sources {
+                    let task_id = format!("tsk_{}", Uuid::new_v4());
+                    let run_log =
+                        televy_backup_core::run_log::start_run_log("backup", &task_id, &data_root)?;
+
+                    tracing::info!(
+                        event = "run.start",
+                        kind = "backup",
+                        run_id = %task_id,
+                        task_id = %task_id,
+                        source_path = %source,
+                        label = "scheduled",
+                        log_path = %run_log.path().display(),
+                        "run.start"
+                    );
+
                     let cfg = BackupConfig {
                         db_path: db_path.clone(),
                         source_path: PathBuf::from(source),
@@ -133,12 +148,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         keep_last_snapshots: settings.retention.keep_last_snapshots,
                     };
 
-                    let _ = televy_backup_core::run_backup_with(
+                    let started = Instant::now();
+                    let result = televy_backup_core::run_backup_with(
                         &storage,
                         cfg,
                         BackupOptions::default(),
                     )
                     .await;
+                    let duration_seconds = started.elapsed().as_secs_f64();
+
+                    match result {
+                        Ok(res) => {
+                            tracing::info!(
+                                event = "run.finish",
+                                kind = "backup",
+                                run_id = %task_id,
+                                task_id = %task_id,
+                                status = "succeeded",
+                                duration_seconds,
+                                snapshot_id = %res.snapshot_id,
+                                files_indexed = res.files_indexed,
+                                chunks_uploaded = res.chunks_uploaded,
+                                data_objects_uploaded = res.data_objects_uploaded,
+                                data_objects_estimated_without_pack = res
+                                    .data_objects_estimated_without_pack,
+                                bytes_uploaded = res.bytes_uploaded,
+                                bytes_deduped = res.bytes_deduped,
+                                index_parts = res.index_parts,
+                                "run.finish"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                event = "run.finish",
+                                kind = "backup",
+                                run_id = %task_id,
+                                task_id = %task_id,
+                                status = "failed",
+                                duration_seconds,
+                                error_code = e.code(),
+                                error_message = %e,
+                                "run.finish"
+                            );
+                        }
+                    }
                 }
             }
         }
