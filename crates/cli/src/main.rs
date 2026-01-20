@@ -72,7 +72,10 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SettingsCmd {
-    Get,
+    Get {
+        #[arg(long)]
+        with_secrets: bool,
+    },
     Set,
 }
 
@@ -302,7 +305,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             Ok(())
         }
         Command::Settings { cmd } => match cmd {
-            SettingsCmd::Get => settings_get(&config_dir, cli.json).await,
+            SettingsCmd::Get { with_secrets } => {
+                settings_get(&config_dir, cli.json, with_secrets).await
+            }
             SettingsCmd::Set => settings_set(&config_dir, cli.json).await,
         },
         Command::Secrets { cmd } => match cmd {
@@ -350,19 +355,23 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     }
 }
 
-async fn settings_get(config_dir: &Path, json: bool) -> Result<(), CliError> {
+async fn settings_get(config_dir: &Path, json: bool, with_secrets: bool) -> Result<(), CliError> {
     let settings = load_settings(config_dir)?;
-    let telegram_present = get_secret(&settings.telegram.bot_token_key)?.is_some();
-    let master_present = get_secret(MASTER_KEY_KEY)?.is_some();
 
     if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "settings": settings,
-                "secrets": { "telegramBotTokenPresent": telegram_present, "masterKeyPresent": master_present }
-            })
-        );
+        if with_secrets {
+            let telegram_present = get_secret(&settings.telegram.bot_token_key)?.is_some();
+            let master_present = get_secret(MASTER_KEY_KEY)?.is_some();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "settings": settings,
+                    "secrets": { "telegramBotTokenPresent": telegram_present, "masterKeyPresent": master_present }
+                })
+            );
+        } else {
+            println!("{}", serde_json::json!({ "settings": settings }));
+        }
     } else {
         let text = toml::to_string(&settings)
             .map_err(|e| CliError::new("config.invalid", e.to_string()))?;
@@ -370,9 +379,13 @@ async fn settings_get(config_dir: &Path, json: bool) -> Result<(), CliError> {
         if !text.ends_with('\n') {
             println!();
         }
-        println!();
-        println!("telegramBotTokenPresent={telegram_present}");
-        println!("masterKeyPresent={master_present}");
+        if with_secrets {
+            let telegram_present = get_secret(&settings.telegram.bot_token_key)?.is_some();
+            let master_present = get_secret(MASTER_KEY_KEY)?.is_some();
+            println!();
+            println!("telegramBotTokenPresent={telegram_present}");
+            println!("masterKeyPresent={master_present}");
+        }
     }
     Ok(())
 }
