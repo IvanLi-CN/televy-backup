@@ -58,4 +58,4 @@
 | 0002 | 小对象打包降低 Bot API 调用频率（Pack） | 已完成 | `0002:small-object-packing/PLAN.md` | 2026-01-20 | PR #7；已冻结：启用阈值（>10 或 >32MiB）+ pack 目标 32MiB + hard max 49MiB；实现分支：`feat/0002-small-object-packing` |
 | 0003 | Sync 日志落盘与可排查性（每轮独立日志 + env 配置日志等级） | 已完成 | `0003:sync-logging-durability/PLAN.md` | 2026-01-20 | 已落地：每任务一份日志（NDJSON）+ 结束前 `flush+fsync` + `TELEVYBACKUP_LOG`→`RUST_LOG`→default(debug)；实现分支：`feat/0003-sync-logging-durability` |
 | 0004 | Telegram 通信升级为 MTProto API（替代/并存 Bot API） | 待实现 | `0004:telegram-mtproto-storage/PLAN.md` | 2026-01-21 | 已冻结：纯 Rust MTProto（不 TDLib）+ `tgmtproto:v1` + 不兼容旧 botapi 数据 + vault/secrets store |
-| 0005 | 设置窗口独立化与多备份目录（多 Telegram Endpoint + 金钥恢复） | 待设计 | `0005:multi-backup-directories-keyed-restore/PLAN.md` | 2026-01-21 | 设计中：每目录 1 份 Bot 信息（可复用 `endpoint_id`）+ pinned bootstrap/catalog + per-target schedule（继承全局）+ TBK1 金钥；UI 需对齐现有视觉 |
+| 0005 | 设置窗口独立化与多备份目录（多 Telegram Endpoint + 金钥恢复） | 待实现 | `0005:multi-backup-directories-keyed-restore/PLAN.md` | 2026-01-21 | 已冻结：每目录 1 份 Bot 信息（可复用 `endpoint_id`）+ pinned bootstrap/catalog + per-target schedule（继承全局）+ TBK1 金钥；UI 对齐现有视觉 |

@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待设计
+- Status: 待实现
 - Created: 2026-01-20
 - Last: 2026-01-21
 
@@ -13,6 +13,10 @@
 - 调度（schedule）：每个 target 有独立 schedule；默认继承全局 schedule（可按字段 override）。
 - 金钥（recovery key）：以**字符串**形式导入/导出；允许在 Settings window 内展示与复制（默认隐藏，显式 reveal）。
 - endpoint 标识：使用稳定的 `endpoint_id`（不可变；用于 provider namespace），多个 target 可复用同一 endpoint。
+- Settings window 交互：采用**自动保存**语义（不提供 “Save” 按钮）。
+- Settings window 导航：采用 toolbar（三项：Targets / Recovery Key / Schedule）。
+- Settings 入口：popover 右上角齿轮按钮打开 Settings window；并要求支持快捷键打开 Settings（默认 `⌘,`）。
+- Recovery Key 导入：`Import…` 采用 **sheet（附着在窗口上的 modal 面板）+ 二次确认** 交互。
 - UI 图标：使用 Iconify 图标（本计划设计图采用 `tabler:*`），便于实现阶段与设计保持一致。
 - secrets 存储：对齐计划 #0004：Keychain **只存 1 条** vault key（`televybackup.vault_key`）；其余敏感信息
   写入本地加密 secrets store（`secrets.enc`）。
@@ -40,7 +44,7 @@
 ### Goals
 
 - 新增独立 Settings window（标准 macOS Preferences 样式：titlebar toolbar + 系统表单/列表控件），作为**主设置入口**，支持编辑全部设置项与列表型配置。
-- Popover 的 Settings tab 保持现有视觉与结构，**仅做最小必要改动**（例如增加打开 Settings window 的入口；必要时提供只读摘要/快捷操作）。
+- Popover **移除 Settings tab**，保留现有视觉与结构，**仅做最小必要改动**：导航调整为 `Overview / Logs`，并通过右上角齿轮按钮打开 Settings window。
 - 支持配置多个“backup target（备份条目）”，每个条目至少包含：`source_path`、`label`（可选）、绑定的 Telegram endpoint 引用。
 - 每个 backup target 的 **Bot 信息（bot token + chat_id）必须在该 target 的编辑界面中直接可见/可编辑**（允许选择/复用已有 `endpoint_id`，但不强制用户先去单独页面配置 endpoint）。
 - 支持配置多个 Telegram endpoint（bot token + chat_id），且允许多个 backup target 复用同一个 endpoint。
@@ -79,6 +83,7 @@
 
 - Settings window
   - 必须存在独立 Settings window（非 Popover 内 tab），可从 App 菜单/Popover 进入，且符合 macOS 常见“Preferences/Settings”体验。
+  - 必须支持快捷键打开 Settings window（默认 `⌘,`），并优先复用系统习惯（App 菜单项 `Settings…` / `Preferences…`）。
   - 必须支持在 Settings 中新增/删除/编辑多个 backup target。
   - 必须在“目录（target）编辑”界面中直接完成该目录对应的 Bot 配置：
     - Chat ID 可编辑
@@ -119,7 +124,10 @@
 
 - Given TelevyBackup App 运行，
   When 用户点击 “Settings…”（或等价入口），
-  Then 打开独立 Settings window；Popover 的 Settings tab 仍保持原有信息架构与视觉风格，仅新增一个打开 Settings window 的入口。
+  Then 打开独立 Settings window；Popover 保持现有视觉，仅将导航调整为 `Overview / Logs` 并通过右上角齿轮按钮打开 Settings window。
+- Given TelevyBackup App 运行，
+  When 用户按下 `⌘,`，
+  Then 打开（或聚焦）Settings window。
 - Given 配置中存在 2 个 backup target，
   When 用户在 Settings window 查看与编辑，
   Then 可以新增/删除并保存，且 CLI `settings get --json` 返回包含这 2 个 target 的结构化数据。
@@ -135,6 +143,20 @@
 - Given endpoint 的 chat 不可用（用户删号/ bot 被 block/ bot 被踢出群等），
   When 执行 backup 或恢复，
   Then 返回稳定错误码与用户可操作的提示（例如需更换 endpoint/重新 init bootstrap）。
+
+## Repo reconnaissance（关键实现触点）
+
+> 目的：在进入实现前，确认本计划将改动/影响的关键入口点与数据流，避免 impl 阶段才发现“找不到入口/形状不一致”。
+
+- macOS UI：
+  - `macos/TelevyBackupApp/TelevyBackupApp.swift`：当前 UI 仍是 popover 内 `Overview / Logs / Settings` 三 tab（`Tab.settings`），且写回的是 v1 `config.toml`（全局 `telegram` + `schedule` + `sources`）。本计划需要改为 popover `Overview / Logs` + gear 打开独立 Settings window，并实现 `⌘,` 打开设置。
+- CLI：
+  - `crates/cli/src/main.rs`：当前 `settings get/set`、`telegram validate`、`secrets set-telegram-bot-token/init-master-key` 为单 endpoint 形状；需要扩展为 settings v2（targets + telegram_endpoints）与按 `--endpoint-id` 的 secrets/validate/restore 入口（详见 `./contracts/cli.md`）。
+- Daemon：
+  - `crates/daemon/src/main.rs`：当前按全局 schedule 轮询并对 `settings.sources[]` 逐个跑 backup，且只支持单 `telegram` endpoint；本计划需要支持 per-target schedule（继承/override）与多 endpoint。
+- Core / storage / provider namespace：
+  - `crates/core/src/storage.rs`：当前 `Storage::provider() -> &'static str` 且 `TelegramBotApiStorage` 固定返回 `"telegram.botapi"`；本计划的 provider namespace 要包含 `endpoint_id`（`telegram.botapi/<endpoint_id>`），需要调整 trait/实现以支持动态 provider。
+  - `crates/core/src/backup.rs` / `crates/core/src/restore.rs`：读写 SQLite index 时会依赖 `provider` 字段用于对象引用与去重隔离；multi-endpoint 下将受 provider namespace 变更影响。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
@@ -173,14 +195,14 @@
 - [ ] M3: multi-endpoint secrets + validate：每个 endpoint 的 token 写入 secrets store、按 endpoint validate
 - [ ] M4: bootstrap/catalog：加密 catalog 文档上传 + pin root pointer + resolve latest（供 restore/verify 使用）
 - [ ] M5: restore/verify 新入口：`latest`（按 `target_id` 或 `source_path`）在新设备无旧 SQLite 下可恢复
-- [ ] M6: Settings window UI（targets/endpoints/schedule/recovery key）+ Popover Settings tab 最小改动（仅增加打开 window 的入口）
+- [ ] M6: Settings window UI（targets/endpoints/schedule/recovery key）+ Popover 导航最小改动（移除 Settings tab + gear 打开 Settings window）
 - [ ] M7: daemon 按 target schedule 触发（默认继承全局；override 生效）+ 多 endpoint 支持
 - [ ] M8: tests + docs updates（覆盖 config/crypto/bootstrap；更新 README/architecture）
 
 ## 约束与风险（Constraints & Risks）
 
 - Telegram Bot API 无法枚举历史文件：跨设备恢复必须依赖可发现的 bootstrap 指针（例如 pinned message）或用户手动提供指针。
-- UI 约束：Popover 现有视觉与信息架构不得做“超出合理范围”的改动；Settings window 采用标准 macOS Preferences 风格（避免在内容区自制 tabs/pills），Popover 内只做最小必要变更（例如新增一个打开 Settings window 的入口）。
+- UI 约束：Popover 现有视觉与信息架构不得做“超出合理范围”的改动；Settings window 采用标准 macOS Preferences 风格（避免在内容区自制 tabs/pills），Popover 内只做最小必要变更（移除 Settings tab + gear 打开 Settings window）。
 - endpoint/账号风险：
   - chat 失效（退群/踢出 bot/拉黑 bot/解散群/删号等）会导致无法继续上传；且若 pinned bootstrap/catalog 丢失，将阻断新设备恢复。
   - 若 endpoint 使用的是 **私聊（bot ↔ 用户）**：当该用户账号被删号/不可用时，该 chat 往往会变为不可访问（Bot API 层面可能表现为 `chat not found` 等），从而同时影响“上传”和“通过 pinned message 发现 bootstrap”的能力。
@@ -199,8 +221,9 @@ None
 
 ## UI 设计（Design）
 
-- Popover 现有 UI 基准：`docs/design/ui/liquid-glass-popover-settings.png`（及同名 `.svg`）
-- Settings window（Targets）：[design/settings-window-targets.svg](./design/settings-window-targets.svg)
-- Settings window（Security / 金钥）：[design/settings-window-security.svg](./design/settings-window-security.svg)
-- Settings window（Schedule）：[design/settings-window-schedule.svg](./design/settings-window-schedule.svg)
-- Popover（Settings tab 最小改动）：[design/popover-settings-minimal.svg](./design/popover-settings-minimal.svg)
+- Popover 现有 UI 基准：`docs/design/ui/liquid-glass-popover-overview.png`（及同名 `.svg`）
+- Settings window（Targets）：[design/settings-window-targets.png](./design/settings-window-targets.png)（source: [svg](./design/settings-window-targets.svg)）
+- Settings window（Recovery Key / 金钥）：[design/settings-window-security.png](./design/settings-window-security.png)（source: [svg](./design/settings-window-security.svg)）
+- Settings window（Schedule）：[design/settings-window-schedule.png](./design/settings-window-schedule.png)（source: [svg](./design/settings-window-schedule.svg)）
+- Popover（移除 Settings tab + gear 打开 Settings window）：[design/popover-minimal.png](./design/popover-minimal.png)（source: [svg](./design/popover-minimal.svg)）
+- 浏览器测量预览：`docs/plan/0005:multi-backup-directories-keyed-restore/design/_preview-settings-window.html` / `docs/plan/0005:multi-backup-directories-keyed-restore/design/_preview-popover-minimal.html`

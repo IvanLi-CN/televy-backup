@@ -2,7 +2,7 @@
   <defs>
     <style>
       .bg { fill: #ffffff; }
-      .win { fill: #ffffff; stroke: #d0d0d6; stroke-width: 1; }
+      .win { fill: #f7f7f9; stroke: #d0d0d6; stroke-width: 1; }
       .titlebar { fill: #f5f5f7; }
       .toolbar { fill: #f5f5f7; }
       .sep { stroke: #d7d7dd; stroke-width: 1; }
@@ -13,7 +13,7 @@
       .body { font-size: 12px; }
 
       .toolItem { fill: none; }
-      .toolItemSel { fill: #dfe8ff; stroke: #b8d3ff; stroke-width: 1; }
+      .toolItemSel { fill: #e5e5ea; stroke: #d1d1d6; stroke-width: 1; }
       .toolIcon { fill: #6e6e73; }
       .toolIconSel { fill: #0a84ff; }
 
@@ -46,25 +46,25 @@
   <!-- Toolbar items -->
   <rect class="toolItem" x="415" y="120" width="110" height="44" rx="8" ry="8" />
   <!-- Iconify: tabler:folder -->
-  <g transform="translate(460 128) scale(0.85)" color="#6e6e73" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+  <g transform="translate(460 124) scale(0.85)" color="#6e6e73" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
     <path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2" />
   </g>
-  <text class="muted body" x="470" y="160" text-anchor="middle">Targets</text>
+  <text class="muted body" x="470" y="155" text-anchor="middle">Targets</text>
 
   <rect class="toolItem" x="545" y="120" width="110" height="44" rx="8" ry="8" />
   <!-- Iconify: tabler:key -->
-  <g transform="translate(590 126) scale(0.85)" color="#6e6e73" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+  <g transform="translate(590 123) scale(0.85)" color="#6e6e73" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
     <path d="m16.555 3.843l3.602 3.602a2.877 2.877 0 0 1 0 4.069l-2.643 2.643a2.877 2.877 0 0 1-4.069 0l-.301-.301l-6.558 6.558a2 2 0 0 1-1.239.578L5.172 21H4a1 1 0 0 1-.993-.883L3 20v-1.172a2 2 0 0 1 .467-1.284l.119-.13L4 17h2v-2h2v-2l2.144-2.144l-.301-.301a2.877 2.877 0 0 1 0-4.069l2.643-2.643a2.877 2.877 0 0 1 4.069 0M15 9h.01" />
   </g>
-  <text class="muted body" x="600" y="160" text-anchor="middle">Recovery Key</text>
+  <text class="muted body" x="600" y="157" text-anchor="middle">Recovery Key</text>
 
   <rect class="toolItemSel" x="675" y="120" width="110" height="44" rx="8" ry="8" />
   <!-- Iconify: tabler:clock -->
-  <g transform="translate(720 126) scale(0.85)" color="#0a84ff" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+  <g transform="translate(720 125) scale(0.85)" color="#0a84ff" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
     <path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0-18 0" />
     <path d="M12 7v5l3 3" />
   </g>
-  <text class="text body" x="730" y="160" text-anchor="middle">Schedule</text>
+  <text class="text body" x="730" y="157" text-anchor="middle">Schedule</text>
 
   <!-- Content -->
   <text id="label-global" class="text label" x="140" y="212">Global schedule</text>
@@ -72,7 +72,7 @@
   <rect id="group-global" class="group" x="120" y="228" width="960" height="206" rx="8" ry="8" />
   <text id="row-enable" class="text body" x="140" y="263">Enable automatic backups</text>
   <!-- macOS-style switch (ON) -->
-  <rect id="toggle" x="1017" y="248" rx="12" ry="12" width="44" height="24" fill="#0a84ff" opacity="0.92"/>
+  <rect id="toggle" x="1017" y="248" rx="12" ry="12" width="44" height="24" fill="#34c759" opacity="0.92"/>
   <circle id="toggle-knob" cx="1049" cy="260" r="10" fill="#ffffff" opacity="0.98" stroke="#d1d1d6" stroke-width="1"/>
 
   <text class="muted body" x="140" y="312">Frequency</text>
@@ -91,6 +91,5 @@
   <text class="hint" x="140" y="534">- Schedule settings do not include secrets; bot tokens and master keys are stored encrypted locally.</text>
 
   <!-- Footer -->
-  <rect id="btn-save" class="btnPrimary" x="944" y="652" width="120" height="30" rx="8" ry="8" />
-  <text id="btn-save-text" class="btnTextOnPrimary" x="1004" y="672" text-anchor="middle">Save</text>
+  <text class="hint" x="140" y="664">Changes are saved automatically.</text>
 </svg>
