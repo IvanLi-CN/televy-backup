@@ -48,7 +48,7 @@
 - **Security:** 分块后加密；密钥仅本地保存；上传链路使用安全通道。
 - **Privacy/compliance:** 不上传明文敏感数据；索引中避免泄露敏感内容。
 - **Accessibility:** CLI 输出清晰可读。
-- **Observability:** 关键操作日志、失败原因、传输统计、校验结果。
+- **Observability:** 每轮 `backup|restore|verify` 生成一份独立的 NDJSON 日志文件（任务结束前 `flush+fsync`），可通过 `TELEVYBACKUP_LOG`/`TELEVYBACKUP_LOG_DIR` 配置；不混入 stdout/stderr 的机器可解析输出。
 
 ## 6.1) Crypto decision (frozen)
 

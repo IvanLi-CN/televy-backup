@@ -40,3 +40,22 @@ pub enum Error {
     #[error("unsupported path (must be UTF-8): {path:?}")]
     NonUtf8Path { path: PathBuf },
 }
+
+impl Error {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidConfig { .. } => "config.invalid",
+            Self::Io(_) => "io",
+            Self::Sqlite(_) => "sqlite",
+            Self::SqliteMigrate(_) => "sqlite.migrate",
+            Self::Walkdir(_) => "walkdir",
+            Self::Crypto => "crypto",
+            Self::Cancelled => "task.cancelled",
+            Self::Telegram { .. } => "telegram.unavailable",
+            Self::MissingIndexPart { .. } => "index.part_missing",
+            Self::MissingChunkObject { .. } => "chunk.missing",
+            Self::Integrity { .. } => "integrity",
+            Self::NonUtf8Path { .. } => "path.non_utf8",
+        }
+    }
+}

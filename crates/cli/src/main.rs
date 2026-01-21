@@ -787,112 +787,165 @@ async fn backup_run(
     json: bool,
     events: bool,
 ) -> Result<(), CliError> {
-    let settings = load_settings(config_dir)?;
-    validate_settings(&settings)?;
-
-    let token = get_secret(&settings.telegram.bot_token_key)?
-        .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
-    let master_key = load_master_key()?;
-
-    if settings.telegram.chat_id.is_empty() {
-        return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
-    }
-    let storage = TelegramBotApiStorage::new(TelegramBotApiStorageConfig {
-        bot_token: token,
-        chat_id: settings.telegram.chat_id.clone(),
-    });
-
-    let db_path = data_dir.join("index").join("index.sqlite");
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
-    }
-
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
-    if events {
-        println!(
-            "{}",
-            serde_json::json!({
-                "type": "task.state",
-                "taskId": task_id,
-                "kind": "backup",
-                "state": "running"
-            })
-        );
-    }
+    let run_log = televy_backup_core::run_log::start_run_log("backup", &task_id, data_dir)
+        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    let sink = NdjsonProgressSink {
-        task_id: task_id.clone(),
-    };
-    let opts = BackupOptions {
-        cancel: None,
-        progress: if events { Some(&sink) } else { None },
-    };
+    tracing::info!(
+        event = "run.start",
+        kind = "backup",
+        run_id = %task_id,
+        task_id = %task_id,
+        log_path = %run_log.path().display(),
+        "run.start"
+    );
+
     let started = std::time::Instant::now();
-    let res = run_backup_with(
-        &storage,
-        BackupConfig {
-            db_path,
-            source_path: source,
-            label,
-            chunking: ChunkingConfig {
-                min_bytes: settings.chunking.min_bytes,
-                avg_bytes: settings.chunking.avg_bytes,
-                max_bytes: settings.chunking.max_bytes,
+    let result: Result<televy_backup_core::BackupResult, CliError> = async {
+        let settings = load_settings(config_dir)?;
+        validate_settings(&settings)?;
+
+        let token = get_secret(&settings.telegram.bot_token_key)?
+            .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
+        let master_key = load_master_key()?;
+
+        if settings.telegram.chat_id.is_empty() {
+            return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
+        }
+        let storage = TelegramBotApiStorage::new(TelegramBotApiStorageConfig {
+            bot_token: token,
+            chat_id: settings.telegram.chat_id.clone(),
+        });
+
+        let db_path = data_dir.join("index").join("index.sqlite");
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+        }
+
+        if events {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "backup",
+                    "state": "running"
+                })
+            );
+        }
+
+        let sink = NdjsonProgressSink {
+            task_id: task_id.clone(),
+        };
+        let opts = BackupOptions {
+            cancel: None,
+            progress: if events { Some(&sink) } else { None },
+        };
+
+        run_backup_with(
+            &storage,
+            BackupConfig {
+                db_path,
+                source_path: source,
+                label,
+                chunking: ChunkingConfig {
+                    min_bytes: settings.chunking.min_bytes,
+                    avg_bytes: settings.chunking.avg_bytes,
+                    max_bytes: settings.chunking.max_bytes,
+                },
+                master_key,
+                snapshot_id: None,
+                keep_last_snapshots: settings.retention.keep_last_snapshots,
             },
-            master_key,
-            snapshot_id: None,
-            keep_last_snapshots: settings.retention.keep_last_snapshots,
-        },
-        opts,
-    )
-    .await
-    .map_err(map_core_err)?;
+            opts,
+        )
+        .await
+        .map_err(map_core_err)
+    }
+    .await;
+
     let duration_seconds = started.elapsed().as_secs_f64();
+    match result {
+        Ok(res) => {
+            tracing::info!(
+                event = "run.finish",
+                kind = "backup",
+                run_id = %task_id,
+                task_id = %task_id,
+                status = "succeeded",
+                duration_seconds,
+                snapshot_id = %res.snapshot_id,
+                files_indexed = res.files_indexed,
+                chunks_uploaded = res.chunks_uploaded,
+                data_objects_uploaded = res.data_objects_uploaded,
+                data_objects_estimated_without_pack = res.data_objects_estimated_without_pack,
+                bytes_uploaded = res.bytes_uploaded,
+                bytes_deduped = res.bytes_deduped,
+                index_parts = res.index_parts,
+                "run.finish"
+            );
 
-    if events {
-        println!(
-            "{}",
-            serde_json::json!({
-                "type": "task.state",
-                "taskId": task_id,
-                "kind": "backup",
-                "state": "succeeded",
-                "snapshotId": res.snapshot_id,
-                    "result": {
-                        "filesIndexed": res.files_indexed,
-                        "chunksUploaded": res.chunks_uploaded,
-                        "dataObjectsUploaded": res.data_objects_uploaded,
-                        "dataObjectsEstimatedWithoutPack": res.data_objects_estimated_without_pack,
-                        "bytesUploaded": res.bytes_uploaded,
-                        "bytesDeduped": res.bytes_deduped,
-                        "indexParts": res.index_parts,
-                        "durationSeconds": duration_seconds,
-                    }
-            })
-        );
-        return Ok(());
-    }
+            if events {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "task.state",
+                        "taskId": task_id,
+                        "kind": "backup",
+                        "state": "succeeded",
+                        "snapshotId": res.snapshot_id,
+                            "result": {
+                                "filesIndexed": res.files_indexed,
+                                "chunksUploaded": res.chunks_uploaded,
+                                "dataObjectsUploaded": res.data_objects_uploaded,
+                                "dataObjectsEstimatedWithoutPack": res.data_objects_estimated_without_pack,
+                                "bytesUploaded": res.bytes_uploaded,
+                                "bytesDeduped": res.bytes_deduped,
+                                "indexParts": res.index_parts,
+                                "durationSeconds": duration_seconds,
+                            }
+                    })
+                );
+                return Ok(());
+            }
 
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string(&res)
-                .map_err(|e| CliError::new("config.invalid", e.to_string()))?
-        );
-    } else {
-        println!("snapshotId={}", res.snapshot_id);
-        println!(
-            "filesIndexed={} chunksUploaded={} dataObjectsUploaded={} dataObjectsEstimatedWithoutPack={} bytesUploaded={} bytesDeduped={}",
-            res.files_indexed,
-            res.chunks_uploaded,
-            res.data_objects_uploaded,
-            res.data_objects_estimated_without_pack,
-            res.bytes_uploaded,
-            res.bytes_deduped
-        );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&res)
+                        .map_err(|e| CliError::new("config.invalid", e.to_string()))?
+                );
+            } else {
+                println!("snapshotId={}", res.snapshot_id);
+                println!(
+                    "filesIndexed={} chunksUploaded={} dataObjectsUploaded={} dataObjectsEstimatedWithoutPack={} bytesUploaded={} bytesDeduped={}",
+                    res.files_indexed,
+                    res.chunks_uploaded,
+                    res.data_objects_uploaded,
+                    res.data_objects_estimated_without_pack,
+                    res.bytes_uploaded,
+                    res.bytes_deduped
+                );
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(
+                event = "run.finish",
+                kind = "backup",
+                run_id = %task_id,
+                task_id = %task_id,
+                status = "failed",
+                duration_seconds,
+                error_code = e.code,
+                error_message = %e.message,
+                retryable = e.retryable,
+                "run.finish"
+            );
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 async fn restore_run(
@@ -903,95 +956,146 @@ async fn restore_run(
     json: bool,
     events: bool,
 ) -> Result<(), CliError> {
-    let settings = load_settings(config_dir)?;
-    validate_settings(&settings)?;
-
-    let token = get_secret(&settings.telegram.bot_token_key)?
-        .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
-    let master_key = load_master_key()?;
-    if settings.telegram.chat_id.is_empty() {
-        return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
-    }
-    let storage = TelegramBotApiStorage::new(TelegramBotApiStorageConfig {
-        bot_token: token,
-        chat_id: settings.telegram.chat_id.clone(),
-    });
-
-    let local_db_path = data_dir.join("index").join("index.sqlite");
-    let manifest_object_id = lookup_manifest_object_id(&local_db_path, &snapshot_id).await?;
-
-    let cache_db = data_dir
-        .join("cache")
-        .join("remote-index")
-        .join(format!("{snapshot_id}.sqlite"));
-    if let Some(parent) = cache_db.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
-    }
-
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
-    if events {
-        println!(
-            "{}",
-            serde_json::json!({
-                "type": "task.state",
-                "taskId": task_id,
-                "kind": "restore",
-                "state": "running",
-                "snapshotId": snapshot_id,
-            })
-        );
-    }
+    let run_log = televy_backup_core::run_log::start_run_log("restore", &task_id, data_dir)
+        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    let sink = NdjsonProgressSink {
-        task_id: task_id.clone(),
-    };
-    let opts = RestoreOptions {
-        cancel: None,
-        progress: if events { Some(&sink) } else { None },
-    };
+    tracing::info!(
+        event = "run.start",
+        kind = "restore",
+        run_id = %task_id,
+        task_id = %task_id,
+        snapshot_id = %snapshot_id,
+        log_path = %run_log.path().display(),
+        "run.start"
+    );
+
     let started = std::time::Instant::now();
-    let res = restore_snapshot_with(
-        &storage,
-        RestoreConfig {
-            snapshot_id: snapshot_id.clone(),
-            manifest_object_id,
-            master_key,
-            index_db_path: cache_db,
-            target_path: target,
-        },
-        opts,
-    )
-    .await
-    .map_err(map_core_err)?;
+    let result: Result<televy_backup_core::RestoreResult, CliError> = async {
+        let settings = load_settings(config_dir)?;
+        validate_settings(&settings)?;
+
+        let token = get_secret(&settings.telegram.bot_token_key)?
+            .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
+        let master_key = load_master_key()?;
+        if settings.telegram.chat_id.is_empty() {
+            return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
+        }
+        let storage = TelegramBotApiStorage::new(TelegramBotApiStorageConfig {
+            bot_token: token,
+            chat_id: settings.telegram.chat_id.clone(),
+        });
+
+        let local_db_path = data_dir.join("index").join("index.sqlite");
+        let manifest_object_id = lookup_manifest_object_id(&local_db_path, &snapshot_id).await?;
+
+        let cache_db = data_dir
+            .join("cache")
+            .join("remote-index")
+            .join(format!("{snapshot_id}.sqlite"));
+        if let Some(parent) = cache_db.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+        }
+
+        if events {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "restore",
+                    "state": "running",
+                    "snapshotId": snapshot_id,
+                })
+            );
+        }
+
+        let sink = NdjsonProgressSink {
+            task_id: task_id.clone(),
+        };
+        let opts = RestoreOptions {
+            cancel: None,
+            progress: if events { Some(&sink) } else { None },
+        };
+
+        restore_snapshot_with(
+            &storage,
+            RestoreConfig {
+                snapshot_id: snapshot_id.clone(),
+                manifest_object_id,
+                master_key,
+                index_db_path: cache_db,
+                target_path: target,
+            },
+            opts,
+        )
+        .await
+        .map_err(map_core_err)
+    }
+    .await;
+
     let duration_seconds = started.elapsed().as_secs_f64();
+    match result {
+        Ok(res) => {
+            tracing::info!(
+                event = "run.finish",
+                kind = "restore",
+                run_id = %task_id,
+                task_id = %task_id,
+                snapshot_id = %snapshot_id,
+                status = "succeeded",
+                duration_seconds,
+                files_restored = res.files_restored,
+                chunks_downloaded = res.chunks_downloaded,
+                bytes_written = res.bytes_written,
+                "run.finish"
+            );
 
-    if events {
-        println!(
-            "{}",
-            serde_json::json!({
-                "type": "task.state",
-                "taskId": task_id,
-                "kind": "restore",
-                "state": "succeeded",
-                "snapshotId": snapshot_id,
-                "result": {
-                    "filesRestored": res.files_restored,
-                    "chunksDownloaded": res.chunks_downloaded,
-                    "bytesWritten": res.bytes_written,
-                    "durationSeconds": duration_seconds,
-                }
-            })
-        );
-        return Ok(());
-    }
+            if events {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "task.state",
+                        "taskId": task_id,
+                        "kind": "restore",
+                        "state": "succeeded",
+                        "snapshotId": snapshot_id,
+                        "result": {
+                            "filesRestored": res.files_restored,
+                            "chunksDownloaded": res.chunks_downloaded,
+                            "bytesWritten": res.bytes_written,
+                            "durationSeconds": duration_seconds,
+                        }
+                    })
+                );
+                return Ok(());
+            }
 
-    if json {
-        println!("{}", serde_json::json!({ "ok": true }));
-    } else {
-        println!("ok");
+            if json {
+                println!("{}", serde_json::json!({ "ok": true }));
+            } else {
+                println!("ok");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(
+                event = "run.finish",
+                kind = "restore",
+                run_id = %task_id,
+                task_id = %task_id,
+                snapshot_id = %snapshot_id,
+                status = "failed",
+                duration_seconds,
+                error_code = e.code,
+                error_message = %e.message,
+                retryable = e.retryable,
+                "run.finish"
+            );
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 async fn verify_run(
@@ -1001,93 +1105,143 @@ async fn verify_run(
     json: bool,
     events: bool,
 ) -> Result<(), CliError> {
-    let settings = load_settings(config_dir)?;
-    validate_settings(&settings)?;
-
-    let token = get_secret(&settings.telegram.bot_token_key)?
-        .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
-    let master_key = load_master_key()?;
-    if settings.telegram.chat_id.is_empty() {
-        return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
-    }
-    let storage = TelegramBotApiStorage::new(TelegramBotApiStorageConfig {
-        bot_token: token,
-        chat_id: settings.telegram.chat_id.clone(),
-    });
-
-    let local_db_path = data_dir.join("index").join("index.sqlite");
-    let manifest_object_id = lookup_manifest_object_id(&local_db_path, &snapshot_id).await?;
-
-    let cache_db = data_dir
-        .join("cache")
-        .join("remote-index")
-        .join(format!("{snapshot_id}.sqlite"));
-    if let Some(parent) = cache_db.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
-    }
-
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
-    if events {
-        println!(
-            "{}",
-            serde_json::json!({
-                "type": "task.state",
-                "taskId": task_id,
-                "kind": "verify",
-                "state": "running",
-                "snapshotId": snapshot_id,
-            })
-        );
-    }
+    let run_log = televy_backup_core::run_log::start_run_log("verify", &task_id, data_dir)
+        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    let sink = NdjsonProgressSink {
-        task_id: task_id.clone(),
-    };
-    let opts = VerifyOptions {
-        cancel: None,
-        progress: if events { Some(&sink) } else { None },
-    };
+    tracing::info!(
+        event = "run.start",
+        kind = "verify",
+        run_id = %task_id,
+        task_id = %task_id,
+        snapshot_id = %snapshot_id,
+        log_path = %run_log.path().display(),
+        "run.start"
+    );
+
     let started = std::time::Instant::now();
-    let res = verify_snapshot_with(
-        &storage,
-        VerifyConfig {
-            snapshot_id: snapshot_id.clone(),
-            manifest_object_id,
-            master_key,
-            index_db_path: cache_db,
-        },
-        opts,
-    )
-    .await
-    .map_err(map_core_err)?;
+    let result: Result<televy_backup_core::VerifyResult, CliError> = async {
+        let settings = load_settings(config_dir)?;
+        validate_settings(&settings)?;
+
+        let token = get_secret(&settings.telegram.bot_token_key)?
+            .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
+        let master_key = load_master_key()?;
+        if settings.telegram.chat_id.is_empty() {
+            return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
+        }
+        let storage = TelegramBotApiStorage::new(TelegramBotApiStorageConfig {
+            bot_token: token,
+            chat_id: settings.telegram.chat_id.clone(),
+        });
+
+        let local_db_path = data_dir.join("index").join("index.sqlite");
+        let manifest_object_id = lookup_manifest_object_id(&local_db_path, &snapshot_id).await?;
+
+        let cache_db = data_dir
+            .join("cache")
+            .join("remote-index")
+            .join(format!("{snapshot_id}.sqlite"));
+        if let Some(parent) = cache_db.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+        }
+
+        if events {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "verify",
+                    "state": "running",
+                    "snapshotId": snapshot_id,
+                })
+            );
+        }
+
+        let sink = NdjsonProgressSink {
+            task_id: task_id.clone(),
+        };
+        let opts = VerifyOptions {
+            cancel: None,
+            progress: if events { Some(&sink) } else { None },
+        };
+
+        verify_snapshot_with(
+            &storage,
+            VerifyConfig {
+                snapshot_id: snapshot_id.clone(),
+                manifest_object_id,
+                master_key,
+                index_db_path: cache_db,
+            },
+            opts,
+        )
+        .await
+        .map_err(map_core_err)
+    }
+    .await;
+
     let duration_seconds = started.elapsed().as_secs_f64();
+    match result {
+        Ok(res) => {
+            tracing::info!(
+                event = "run.finish",
+                kind = "verify",
+                run_id = %task_id,
+                task_id = %task_id,
+                snapshot_id = %snapshot_id,
+                status = "succeeded",
+                duration_seconds,
+                chunks_checked = res.chunks_checked,
+                bytes_checked = res.bytes_checked,
+                "run.finish"
+            );
 
-    if events {
-        println!(
-            "{}",
-            serde_json::json!({
-                "type": "task.state",
-                "taskId": task_id,
-                "kind": "verify",
-                "state": "succeeded",
-                "snapshotId": snapshot_id,
-                "result": {
-                    "chunksChecked": res.chunks_checked,
-                    "bytesChecked": res.bytes_checked,
-                    "durationSeconds": duration_seconds,
-                }
-            })
-        );
-        return Ok(());
-    }
+            if events {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "task.state",
+                        "taskId": task_id,
+                        "kind": "verify",
+                        "state": "succeeded",
+                        "snapshotId": snapshot_id,
+                        "result": {
+                            "chunksChecked": res.chunks_checked,
+                            "bytesChecked": res.bytes_checked,
+                            "durationSeconds": duration_seconds,
+                        }
+                    })
+                );
+                return Ok(());
+            }
 
-    if json {
-        println!("{}", serde_json::json!({ "ok": true }));
-    } else {
-        println!("ok");
+            if json {
+                println!("{}", serde_json::json!({ "ok": true }));
+            } else {
+                println!("ok");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!(
+                event = "run.finish",
+                kind = "verify",
+                run_id = %task_id,
+                task_id = %task_id,
+                snapshot_id = %snapshot_id,
+                status = "failed",
+                duration_seconds,
+                error_code = e.code,
+                error_message = %e.message,
+                retryable = e.retryable,
+                "run.finish"
+            );
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 async fn lookup_manifest_object_id(db_path: &Path, snapshot_id: &str) -> Result<String, CliError> {

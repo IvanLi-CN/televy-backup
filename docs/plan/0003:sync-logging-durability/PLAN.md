@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-20
 - Last: 2026-01-20
 
@@ -144,10 +144,10 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: 引入 `tracing` 日志基础设施（cli/daemon 初始化 + env filter + file writer）
-- [ ] M2: 每轮同步 run 创建独立日志文件（命名/目录/元数据 + `flush+fsync` 策略落地）
-- [ ] M3: 在 core 同步流程中补齐关键日志点位（phase begin/end + error context + summary）
-- [ ] M4: 测试与文档对齐（tests + docs updates；确保不破坏 CLI 输出契约）
+- [x] M1: 引入 `tracing` 日志基础设施（cli/daemon 初始化 + env filter + file writer）
+- [x] M2: 每轮同步 run 创建独立日志文件（命名/目录/元数据 + `flush+fsync` 策略落地）
+- [x] M3: 在 core 同步流程中补齐关键日志点位（phase begin/end + error context + summary）
+- [x] M4: 测试与文档对齐（tests + docs updates；确保不破坏 CLI 输出契约）
 
 ## 方案概述（Approach, high-level）
 
@@ -170,3 +170,7 @@ None
 
 - `tracing-subscriber` 的 `EnvFilter`：支持从默认环境变量（`RUST_LOG`）或自定义 env var 解析过滤规则。
 - `tracing-appender` 的 `WorkerGuard`：用于在非阻塞写入场景下，在 drop 时 flush 缓冲日志（避免进程退出丢尾部日志）。
+
+## Change log
+
+- 2026-01-20: 落地每轮日志（NDJSON）+ `flush+fsync` + `TELEVYBACKUP_LOG`/`TELEVYBACKUP_LOG_DIR`；补齐 core phase/I/O 日志点位；补齐最小测试与 docs。

@@ -18,8 +18,11 @@ The app and daemon can share the same data locations via env vars:
 
 - `TELEVYBACKUP_CONFIG_DIR`: config directory (contains `config.toml`)
 - `TELEVYBACKUP_DATA_DIR`: data directory (contains `index/index.sqlite`)
+- `TELEVYBACKUP_LOG_DIR`: override per-run log directory (defaults to `TELEVYBACKUP_DATA_DIR/logs/`)
 
 When env vars are not set, the GUI uses `~/Library/Application Support/TelevyBackup`.
+
+Per-run logs are written to files as NDJSON and never mixed into stdout/stderr, so `televybackup --events` stdout remains NDJSON-only and stderr remains error-JSON-only.
 
 ## Secrets (macOS Keychain)
 

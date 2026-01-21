@@ -273,9 +273,7 @@ final class AppModel: ObservableObject {
         }
         let response = panel.runModal()
         if response == .OK, let url = panel.url {
-            DispatchQueue.main.async {
-                self.sourcePath = url.path
-            }
+            self.sourcePath = url.path
             showToast("Source selected", isError: false)
             saveSettings()
         }
