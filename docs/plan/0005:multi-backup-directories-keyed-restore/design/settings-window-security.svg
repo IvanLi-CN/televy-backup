@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
+  <defs>
+    <style>
+      .bg { fill: #ffffff; }
+      .win { fill: #ffffff; stroke: #d0d0d6; stroke-width: 1; }
+      .titlebar { fill: #f5f5f7; }
+      .toolbar { fill: #f5f5f7; }
+      .sep { stroke: #d7d7dd; stroke-width: 1; }
+      .text { fill: #1c1c1e; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif; }
+      .muted { fill: #6e6e73; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif; }
+      .h1 { font-size: 14px; font-weight: 700; }
+      .label { font-size: 12px; font-weight: 600; }
+      .body { font-size: 12px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 11px; }
+
+      .toolItem { fill: none; }
+      .toolItemSel { fill: #dfe8ff; stroke: #b8d3ff; stroke-width: 1; }
+      .toolIcon { fill: #6e6e73; }
+      .toolIconSel { fill: #0a84ff; }
+
+      .group { fill: #ffffff; stroke: #e6e6eb; stroke-width: 1; }
+      .field { fill: #ffffff; stroke: #cfcfd6; stroke-width: 1; }
+      .btn { fill: #ffffff; stroke: #cfcfd6; stroke-width: 1; }
+      .btnPrimary { fill: #0a84ff; stroke: #0a84ff; stroke-width: 1; }
+      .btnText { fill: #1c1c1e; font-size: 12px; font-weight: 600; }
+      .btnTextOnPrimary { fill: #ffffff; font-size: 12px; font-weight: 700; }
+      .hint { fill: #6e6e73; font-size: 11px; }
+      .warnBg { fill: #fff4e5; stroke: #ffd3a6; stroke-width: 1; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="760" />
+
+  <!-- Window (macOS Preferences-style toolbar; no in-content tabs) -->
+  <rect class="win" x="100" y="60" rx="12" ry="12" width="1000" height="640" />
+  <rect class="titlebar" x="100" y="60" rx="12" ry="12" width="1000" height="52" />
+  <rect class="toolbar" x="100" y="112" width="1000" height="60" />
+  <line class="sep" x1="100" y1="112" x2="1100" y2="112" />
+  <line class="sep" x1="100" y1="172" x2="1100" y2="172" />
+
+  <!-- Traffic lights -->
+  <circle cx="128" cy="86" r="6" fill="#ff5f57" />
+  <circle cx="146" cy="86" r="6" fill="#febc2e" />
+  <circle cx="164" cy="86" r="6" fill="#28c840" />
+
+  <text class="text h1" x="600" y="92" text-anchor="middle">TelevyBackup Settings</text>
+
+  <!-- Toolbar items -->
+  <rect id="tool-targets" class="toolItem" x="415" y="120" width="110" height="44" rx="8" ry="8" />
+  <!-- Iconify: tabler:folder -->
+  <g id="icon-targets" transform="translate(460 128) scale(0.85)" color="#6e6e73" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+    <path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2" />
+  </g>
+  <text id="label-targets" class="muted body" x="470" y="160" text-anchor="middle">Targets</text>
+
+  <rect id="tool-recovery" class="toolItemSel" x="545" y="120" width="110" height="44" rx="8" ry="8" />
+  <!-- Iconify: tabler:key -->
+  <g id="icon-recovery" transform="translate(590 126) scale(0.85)" color="#0a84ff" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+    <path d="m16.555 3.843l3.602 3.602a2.877 2.877 0 0 1 0 4.069l-2.643 2.643a2.877 2.877 0 0 1-4.069 0l-.301-.301l-6.558 6.558a2 2 0 0 1-1.239.578L5.172 21H4a1 1 0 0 1-.993-.883L3 20v-1.172a2 2 0 0 1 .467-1.284l.119-.13L4 17h2v-2h2v-2l2.144-2.144l-.301-.301a2.877 2.877 0 0 1 0-4.069l2.643-2.643a2.877 2.877 0 0 1 4.069 0M15 9h.01" />
+  </g>
+  <text id="label-recovery" class="text body" x="600" y="160" text-anchor="middle">Recovery Key</text>
+
+  <rect id="tool-schedule" class="toolItem" x="675" y="120" width="110" height="44" rx="8" ry="8" />
+  <!-- Iconify: tabler:clock -->
+  <g id="icon-schedule" transform="translate(720 126) scale(0.85)" color="#6e6e73" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+    <path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0-18 0" />
+    <path d="M12 7v5l3 3" />
+  </g>
+  <text id="label-schedule" class="muted body" x="730" y="160" text-anchor="middle">Schedule</text>
+
+  <!-- Content -->
+  <text class="text label" x="140" y="212">Recovery key</text>
+  <text class="hint" x="140" y="232">Treat this like a password. Reveal only when needed.</text>
+
+  <!-- Group: Secrets status -->
+  <rect class="group" x="120" y="246" width="960" height="92" rx="8" ry="8" />
+  <text class="muted body" x="140" y="272">Master key</text>
+  <circle cx="222" cy="268" r="6" fill="#34c759" />
+  <text class="text body" x="236" y="272">Present</text>
+  <text class="muted body" x="340" y="272">Secrets entry:</text>
+  <text class="text body mono" x="430" y="272">televybackup.master_key</text>
+
+  <!-- Group: Export -->
+  <rect class="group" x="120" y="356" width="960" height="168" rx="8" ry="8" />
+  <text class="text label" x="140" y="386">Export</text>
+  <text class="hint" x="200" y="386">Format: <tspan class="mono">TBK1:&lt;base64url_no_pad&gt;</tspan></text>
+
+  <rect class="warnBg" x="140" y="402" width="920" height="40" rx="8" ry="8" />
+  <text class="text body" x="160" y="427">Recovery key + bot token + chat_id enables download and decryption.</text>
+
+  <text class="muted body" x="140" y="468">Recovery key</text>
+  <rect class="field" x="240" y="450" width="560" height="30" rx="6" ry="6" />
+  <text class="muted body" x="254" y="470">••••••••••••••••••••••••••••••••••••</text>
+  <rect class="btn" x="810" y="450" width="110" height="30" rx="6" ry="6" />
+  <text class="text btnText" x="865" y="470" text-anchor="middle">Reveal</text>
+  <rect class="btn" x="930" y="450" width="110" height="30" rx="6" ry="6" />
+  <text class="text btnText" x="985" y="470" text-anchor="middle">Copy</text>
+
+  <rect class="btn" x="140" y="490" width="130" height="28" rx="6" ry="6" />
+  <text class="text btnText" x="205" y="509" text-anchor="middle">Export…</text>
+  <text class="hint" x="286" y="509">Runs: <tspan class="mono">televybackup --json secrets export-master-key</tspan></text>
+
+  <!-- Group: Import -->
+  <rect class="group" x="120" y="542" width="960" height="108" rx="8" ry="8" />
+  <text class="text label" x="140" y="572">Import</text>
+  <text class="hint" x="200" y="572">Paste <tspan class="mono">TBK1:…</tspan> to restore access on a new Mac.</text>
+  <rect class="field" x="140" y="586" width="760" height="30" rx="6" ry="6" />
+  <text class="muted body mono" x="154" y="606">TBK1:…</text>
+  <rect class="btnPrimary" x="910" y="586" width="150" height="30" rx="8" ry="8" />
+  <text class="btnTextOnPrimary" x="985" y="606" text-anchor="middle">Import</text>
+
+  <text class="hint" x="140" y="640">Default: do not overwrite an existing master key unless explicitly confirmed.</text>
+
+  <!-- Footer -->
+  <rect class="btnPrimary" x="944" y="652" width="120" height="30" rx="8" ry="8" />
+  <text class="btnTextOnPrimary" x="1004" y="672" text-anchor="middle">Save</text>
+</svg>
