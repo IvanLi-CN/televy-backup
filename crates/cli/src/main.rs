@@ -267,6 +267,7 @@ struct NdjsonProgressSink {
     task_id: String,
 }
 
+#[cfg(target_os = "macos")]
 static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
 
 impl ProgressSink for NdjsonProgressSink {
@@ -1798,14 +1799,6 @@ fn keychain_set_secret(key: &str, value: &str) -> Result<(), CliError> {
     set_generic_password(APP_NAME, key, value.as_bytes())
         .map_err(|e| CliError::new("keychain.unavailable", e.to_string()))?;
     Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn keychain_set_secret(_key: &str, _value: &str) -> Result<(), CliError> {
-    Err(CliError::new(
-        "keychain.unavailable",
-        "keychain only supported on macOS",
-    ))
 }
 
 #[cfg(target_os = "macos")]

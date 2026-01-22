@@ -362,11 +362,6 @@ fn keychain_set_secret(key: &str, value: &str) -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-fn keychain_set_secret(_key: &str, _value: &str) -> Result<(), Box<dyn std::error::Error>> {
-    Err("keychain only supported on macOS".into())
-}
-
 #[cfg(target_os = "macos")]
 fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
     // errSecItemNotFound
