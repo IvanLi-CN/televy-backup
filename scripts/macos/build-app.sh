@@ -14,9 +14,15 @@ resources_dir="$contents_dir/Resources"
 mkdir -p "$macos_dir"
 mkdir -p "$resources_dir"
 
+rm -f "$resources_dir/televybackup" "$resources_dir/televybackup-mtproto-helper" 2>/dev/null || true
+
 echo "Building CLI..."
 cargo build -p televybackup --release
-cp "$root_dir/target/release/televybackup" "$resources_dir/televybackup"
+cp "$root_dir/target/release/televybackup" "$macos_dir/televybackup-cli"
+
+echo "Building MTProto helper..."
+cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release
+cp "$root_dir/crates/mtproto-helper/target/release/televybackup-mtproto-helper" "$macos_dir/televybackup-mtproto-helper"
 
 sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
 
@@ -55,5 +61,25 @@ cat > "$contents_dir/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+codesign_identity="${TELEVYBACKUP_CODESIGN_IDENTITY:-}"
+if [[ -z "$codesign_identity" ]]; then
+  codesign_identity="$(
+    security find-identity -v -p codesigning 2>/dev/null \
+      | awk -F'"' '/Apple Development|Developer ID Application/ {print $2; exit}'
+  )"
+fi
+
+if [[ -n "$codesign_identity" ]]; then
+  echo "Codesigning with: $codesign_identity"
+  codesign --force --sign "$codesign_identity" -i com.ivan.televybackup.cli "$macos_dir/televybackup-cli" \
+    || echo "WARN: codesign CLI failed (Keychain prompts may repeat)"
+  codesign --force --sign "$codesign_identity" -i com.ivan.televybackup.mtproto-helper "$macos_dir/televybackup-mtproto-helper" \
+    || echo "WARN: codesign helper failed (Keychain prompts may repeat)"
+  codesign --force --sign "$codesign_identity" "$app_dir" \
+    || echo "WARN: codesign app failed"
+else
+  echo "Skipping codesign (set TELEVYBACKUP_CODESIGN_IDENTITY to reduce Keychain prompts)"
+fi
 
 echo "Built: $app_dir"

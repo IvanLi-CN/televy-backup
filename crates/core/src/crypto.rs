@@ -15,7 +15,9 @@ pub fn encrypt_framed(master_key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Re
     let mut buffer = plaintext.to_vec();
     cipher
         .encrypt_in_place(&nonce, aad, &mut buffer)
-        .map_err(|_| Error::Crypto)?;
+        .map_err(|_| Error::Crypto {
+            message: "encrypt failed".to_string(),
+        })?;
 
     let mut out = Vec::with_capacity(1 + NONCE_LEN + buffer.len());
     out.push(FRAMING_VERSION);
@@ -27,10 +29,14 @@ pub fn encrypt_framed(master_key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Re
 #[allow(dead_code)]
 pub fn decrypt_framed(master_key: &[u8; 32], aad: &[u8], framed: &[u8]) -> Result<Vec<u8>> {
     if framed.len() < 1 + NONCE_LEN {
-        return Err(Error::Crypto);
+        return Err(Error::Crypto {
+            message: "invalid framing (too small)".to_string(),
+        });
     }
     if framed[0] != FRAMING_VERSION {
-        return Err(Error::Crypto);
+        return Err(Error::Crypto {
+            message: "invalid framing (version mismatch)".to_string(),
+        });
     }
 
     let cipher = XChaCha20Poly1305::new(master_key.into());
@@ -39,7 +45,9 @@ pub fn decrypt_framed(master_key: &[u8; 32], aad: &[u8], framed: &[u8]) -> Resul
     let mut buffer = framed[1 + NONCE_LEN..].to_vec();
     cipher
         .decrypt_in_place(nonce, aad, &mut buffer)
-        .map_err(|_| Error::Crypto)?;
+        .map_err(|_| Error::Crypto {
+            message: "decrypt failed".to_string(),
+        })?;
     Ok(buffer)
 }
 

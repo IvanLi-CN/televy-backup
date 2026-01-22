@@ -1,3 +1,4 @@
 [workspace]
 members = ["crates/core", "crates/daemon", "crates/cli"]
+exclude = ["crates/mtproto-helper"]
 resolver = "2"

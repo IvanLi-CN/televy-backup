@@ -35,7 +35,8 @@
 - 使用 SQLite 记录：快照版本、文件元数据、块序列、块哈希与存储对象 ID。
 - 仅上传缺失/变化的块（基于哈希索引去重）。
 - 断点续传与失败重试（可配置重试策略）。
-- Telegram 存储接入使用 **Bot API**，并在与 Bot 的私聊中进行上传/下载。
+- Telegram 存储接入：**MTProto-only**（配置 `telegram.mode = "mtproto"`）。
+  - Telegram Bot API 已移除；历史 `telegram.botapi` snapshot/provider 不受支持，需要重新备份。
 - 存储映射：chunk 上传对象为 `tgfile` 或 `tgpack`（pack 聚合多个加密 chunk blob；启用条件：待上传对象数 `> 10` 或总字节数 `> 32MiB`；pack 目标 32MiB、hard max 49MiB）。
 - 每次备份完成后将 SQLite 索引文件上传到存储目标。
 - 在 GUI 未打开的情况下，仍能按小时/每天自动触发备份任务（用户级 `launchd`）。
@@ -83,10 +84,11 @@
   - 进程内定时触发（hourly/daily），并在备份成功后执行快照保留策略（仅本地索引裁剪，不做远端 GC）。
 - **Data**
   - SQLite：本地索引数据库（索引本身也会加密分片上传以支持恢复）。
-  - Keychain：保存 Telegram Bot token 与主密钥材料；配置文件不落 secret 明文。
+  - Keychain：仅保存 vault key（用于解密本地加密 secrets store）；配置文件不落 secret 明文。
+  - secrets store（`secrets.enc`）：保存 bot token / master key / MTProto 凭据与 session（加密落盘）。
 - **Packaging**
   - Homebrew：formula（daemon）+ cask（GUI app）。
-  - 升级不丢数据：配置与 SQLite 目录固定，Keychain secrets 不需要重新输入（除非用户主动清除）。
+  - 升级不丢数据：配置与 SQLite 目录固定，secrets store 不需要重新输入（除非用户主动清除）。
 
 ## 8) Data & interfaces (if applicable)
 
@@ -105,7 +107,7 @@
 - **UI form factor:** 原生 macOS 状态栏窗口（MVP 以“可用+可观察”为主）。
 - **Views:** Settings / Backup / Restore / Verify / Logs（以及最小 Tasks 视图）。
 - **Copy:** 清晰显示状态/阶段、上传统计与失败原因；错误提供可操作引导。
-- **Edge states:** 无变更、网络中断、索引损坏、块缺失、Keychain 未配置。
+- **Edge states:** 无变更、网络中断、索引损坏、块缺失、vault key / secrets store 未配置。
 
 ## 10) Acceptance criteria
 
@@ -130,7 +132,7 @@ None (v1 frozen)
 - 仅单用户使用；不需要多用户共享或权限隔离。
 - 本地磁盘可读取 Time Machine 备份盘且不会被同时写入导致不一致。
 - Telegram 存储目标可长期稳定访问。
-- AEAD 选择：**XChaCha20-Poly1305**（每块唯一 nonce；密钥材料存 Keychain）。
+- AEAD 选择：**XChaCha20-Poly1305**（每块唯一 nonce；密钥材料存 secrets store，vault key 存 Keychain）。
 - 快照保留策略：v1 **只追加不清理**。
 - 分发：可接受无 Apple 开发者账号的侧载体验（需要用户手动放行）。
 - CDC：v1 使用 FastCDC，默认参数 `min=1MiB, avg=4MiB, max=10MiB`。

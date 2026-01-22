@@ -24,12 +24,17 @@ When env vars are not set, the GUI uses `~/Library/Application Support/TelevyBac
 
 Per-run logs are written to files as NDJSON and never mixed into stdout/stderr, so `televybackup --events` stdout remains NDJSON-only and stderr remains error-JSON-only.
 
-## Secrets (macOS Keychain)
+## Secrets (vault key + local secrets store)
 
 Secrets are not stored in `config.toml`.
 
-- Telegram Bot token: Keychain item key = `settings.telegram.botTokenKey` (default `telegram.bot_token`)
-- Master key: Keychain item key = `televybackup.master_key` (stored as Base64, 32 bytes)
+- Keychain (macOS): vault key `televybackup.vault_key` (Base64 32 bytes)
+  - Used to encrypt/decrypt the local secrets store.
+- Local secrets store: `TELEVYBACKUP_CONFIG_DIR/secrets.enc`
+  - Telegram bot token: entry key = `telegram.bot_token` (default)
+  - Master key: entry key = `televybackup.master_key` (Base64 32 bytes)
+  - MTProto API hash: entry key = `telegram.mtproto.api_hash` (default)
+  - MTProto session: entry key = `telegram.mtproto.session` (Base64)
 
 ## Crypto and framing
 
@@ -47,11 +52,19 @@ Associated Data (AD):
 - Index part: `snapshot_id + ":" + part_no` (UTF-8)
 - Manifest: `snapshot_id` (UTF-8)
 
-## Storage model (Telegram Bot API)
+## Storage model (Telegram MTProto)
 
-- Each encrypted chunk is uploaded as a Telegram `document`.
-- Each index part is uploaded as a Telegram `document`.
-- A manifest JSON (encrypted) is uploaded as a Telegram `document` and references all index parts by `file_id`.
+The storage provider is **MTProto-only**:
+
+- `telegram.mode` is fixed to `"mtproto"`.
+- New snapshots persist `provider = "telegram.mtproto"` in the local DB.
+- Historical snapshots with `provider = "telegram.botapi"` are not supported and require a re-backup.
+
+### MTProto (`telegram.mtproto`)
+
+- Each encrypted chunk/index/manifest is uploaded as a Telegram `document` via MTProto.
+- `object_id` is versioned: `tgmtproto:v1:<base64url(json)>` (peer/msgId/docId/accessHash; does not store `file_reference`).
+- Downloads refresh `file_reference` by fetching the message by `peer+msgId` and are chunked/resumable via `TELEVYBACKUP_DATA_DIR/cache/mtproto/`.
 
 ## SQLite index
 
