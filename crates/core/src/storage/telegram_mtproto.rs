@@ -163,14 +163,22 @@ impl TelegramMtProtoStorage {
         let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
             message: "mtproto helper lock poisoned".to_string(),
         })?;
-        helper.get_pinned()
+        let out = helper.get_pinned()?;
+        *self.session.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper session lock poisoned".to_string(),
+        })? = helper.session_bytes();
+        Ok(out)
     }
 
     pub fn pin_message_id(&self, msg_id: i32) -> Result<()> {
         let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
             message: "mtproto helper lock poisoned".to_string(),
         })?;
-        helper.pin(msg_id)
+        helper.pin(msg_id)?;
+        *self.session.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper session lock poisoned".to_string(),
+        })? = helper.session_bytes();
+        Ok(())
     }
 }
 

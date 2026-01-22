@@ -332,6 +332,14 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
         });
     }
 
+    // Schedule: validate kind + time formats to avoid silently skipping runs.
+    validate_schedule_fields(
+        "schedule",
+        Some(&settings.schedule.kind),
+        Some(settings.schedule.hourly_minute),
+        Some(&settings.schedule.daily_at),
+    )?;
+
     // Endpoints: unique ids + minimal invariants.
     let mut endpoint_ids = std::collections::HashSet::<String>::new();
     for ep in &settings.telegram_endpoints {
@@ -406,6 +414,59 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
                     "targets[].endpoint_id references unknown endpoint_id={} (target_id={})",
                     t.endpoint_id, t.id
                 ),
+            });
+        }
+
+        if let Some(o) = &t.schedule {
+            validate_schedule_fields(
+                &format!("targets[].schedule (target_id={})", t.id),
+                o.kind.as_ref(),
+                o.hourly_minute,
+                o.daily_at.as_ref(),
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_schedule_fields(
+    ctx: &str,
+    kind: Option<&String>,
+    hourly_minute: Option<u8>,
+    daily_at: Option<&String>,
+) -> Result<()> {
+    if let Some(kind) = kind {
+        let k = kind.trim();
+        if k != "hourly" && k != "daily" {
+            return Err(Error::InvalidConfig {
+                message: format!("{ctx}.kind must be \"hourly\" or \"daily\" (got {k:?})"),
+            });
+        }
+    }
+
+    if let Some(minute) = hourly_minute
+        && minute >= 60
+    {
+        return Err(Error::InvalidConfig {
+            message: format!("{ctx}.hourly_minute must be 0..=59 (got {minute})"),
+        });
+    }
+
+    if let Some(daily_at) = daily_at {
+        let s = daily_at.trim();
+        let (hh, mm) = s.split_once(':').ok_or_else(|| Error::InvalidConfig {
+            message: format!("{ctx}.daily_at must be HH:MM (got {s:?})"),
+        })?;
+        let hh: u8 = hh.parse().map_err(|_| Error::InvalidConfig {
+            message: format!("{ctx}.daily_at must be HH:MM (got {s:?})"),
+        })?;
+        let mm: u8 = mm.parse().map_err(|_| Error::InvalidConfig {
+            message: format!("{ctx}.daily_at must be HH:MM (got {s:?})"),
+        })?;
+        if hh >= 24 || mm >= 60 {
+            return Err(Error::InvalidConfig {
+                message: format!("{ctx}.daily_at must be HH:MM (got {s:?})"),
             });
         }
     }
@@ -509,6 +570,27 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    fn base_settings_v2() -> SettingsV2 {
+        let input = r#"
+version = 2
+
+[[telegram_endpoints]]
+id = "e1"
+mode = "mtproto"
+chat_id = "-100123"
+bot_token_key = "telegram.bot_token.e1"
+
+[telegram_endpoints.mtproto]
+session_key = "telegram.mtproto.session.e1"
+
+[[targets]]
+id = "t1"
+source_path = "/tmp"
+endpoint_id = "e1"
+"#;
+        parse_settings_v2(input).unwrap()
+    }
+
     #[test]
     fn v1_is_migrated_to_v2() {
         let input = r#"
@@ -549,5 +631,47 @@ min_delay_ms = 250
         assert_eq!(s.telegram_endpoints[0].id, "default");
         assert_eq!(s.targets.len(), 2);
         assert_eq!(s.targets[0].endpoint_id, "default");
+    }
+
+    #[test]
+    fn v2_schedule_kind_is_validated() {
+        let mut s = base_settings_v2();
+        s.schedule.enabled = true;
+        s.schedule.kind = "weird".to_string();
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(err.to_string().contains("schedule.kind"));
+    }
+
+    #[test]
+    fn v2_hourly_minute_is_validated() {
+        let mut s = base_settings_v2();
+        s.schedule.enabled = true;
+        s.schedule.kind = "hourly".to_string();
+        s.schedule.hourly_minute = 60;
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(err.to_string().contains("hourly_minute"));
+    }
+
+    #[test]
+    fn v2_daily_at_is_validated() {
+        let mut s = base_settings_v2();
+        s.schedule.enabled = true;
+        s.schedule.kind = "daily".to_string();
+        s.schedule.daily_at = "99:99".to_string();
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(err.to_string().contains("daily_at"));
+    }
+
+    #[test]
+    fn v2_target_schedule_override_is_validated() {
+        let mut s = base_settings_v2();
+        s.targets[0].schedule = Some(TargetScheduleOverride {
+            enabled: Some(true),
+            kind: Some("hourly".to_string()),
+            hourly_minute: Some(60),
+            daily_at: None,
+        });
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(err.to_string().contains("targets[].schedule"));
     }
 }
