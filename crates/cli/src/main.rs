@@ -2578,24 +2578,30 @@ endpoint_id = "missing"
 
     #[test]
     fn select_endpoint_defaults_to_only_endpoint() {
-        let mut settings = Settings::default();
-        settings.telegram_endpoints = vec![endpoint("ep1")];
+        let settings = Settings {
+            telegram_endpoints: vec![endpoint("ep1")],
+            ..Default::default()
+        };
         let ep = select_endpoint(&settings, None).unwrap();
         assert_eq!(ep.id, "ep1");
     }
 
     #[test]
     fn select_endpoint_prefers_default_when_present() {
-        let mut settings = Settings::default();
-        settings.telegram_endpoints = vec![endpoint("ep1"), endpoint("default"), endpoint("ep2")];
+        let settings = Settings {
+            telegram_endpoints: vec![endpoint("ep1"), endpoint("default"), endpoint("ep2")],
+            ..Default::default()
+        };
         let ep = select_endpoint(&settings, None).unwrap();
         assert_eq!(ep.id, "default");
     }
 
     #[test]
     fn select_endpoint_errors_when_ambiguous() {
-        let mut settings = Settings::default();
-        settings.telegram_endpoints = vec![endpoint("ep1"), endpoint("ep2")];
+        let settings = Settings {
+            telegram_endpoints: vec![endpoint("ep1"), endpoint("ep2")],
+            ..Default::default()
+        };
         let err = select_endpoint(&settings, None).unwrap_err();
         assert_eq!(err.code, "config.invalid");
         assert!(err.message.contains("multiple endpoints configured"));
