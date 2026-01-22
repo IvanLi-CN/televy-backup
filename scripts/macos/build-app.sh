@@ -4,7 +4,7 @@ set -euo pipefail
 root_dir="$(git rev-parse --show-toplevel)"
 
 app_name="TelevyBackup"
-src="$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift"
+src_dir="$root_dir/macos/TelevyBackupApp"
 out_root="$root_dir/target/macos-app"
 app_dir="$out_root/${app_name}.app"
 contents_dir="$app_dir/Contents"
@@ -33,7 +33,7 @@ xcrun swiftc \
   -framework SwiftUI \
   -framework AppKit \
   -o "$macos_dir/$app_name" \
-  "$src"
+  "$src_dir"/*.swift
 
 cat > "$contents_dir/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

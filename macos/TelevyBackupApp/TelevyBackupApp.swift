@@ -25,7 +25,6 @@ struct VisualEffectView: NSViewRepresentable {
 enum Tab: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case logs = "Logs"
-    case settings = "Settings"
 
     var id: String { rawValue }
 }
@@ -64,6 +63,7 @@ final class AppModel: ObservableObject {
     @Published var secretPresenceFetchInFlight: Bool = false
     @Published var telegramValidateOk: Bool? = nil
     @Published var telegramValidateText: String = "Not validated"
+    @Published var refreshInFlight: Bool = false
 
     @Published var toastText: String? = nil
     @Published var toastIsError: Bool = false
@@ -87,6 +87,7 @@ final class AppModel: ObservableObject {
 
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
+    private var settingsWindow: NSWindow? = nil
 
     func defaultConfigDir() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -134,13 +135,24 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refresh() {
+    func refresh(userInitiated: Bool = false) {
         if !didWriteStartupLog {
             didWriteStartupLog = true
             appendLog("UI started")
         }
+        if userInitiated {
+            DispatchQueue.main.async {
+                if self.refreshInFlight { return }
+                self.refreshInFlight = true
+                self.showToast("Refreshing…", isError: false)
+            }
+        }
         DispatchQueue.global(qos: .utility).async {
-            self.refreshSettings(withSecrets: false)
+            self.refreshSettings(withSecrets: false) {
+                guard userInitiated else { return }
+                self.refreshInFlight = false
+                self.showToast("Refreshed", isError: false)
+            }
         }
     }
 
@@ -470,8 +482,11 @@ final class AppModel: ObservableObject {
         try toml.write(to: configTomlPath(), atomically: true, encoding: .utf8)
     }
 
-    private func refreshSettings(withSecrets: Bool) {
-        guard let cli = cliPath() else { return }
+    private func refreshSettings(withSecrets: Bool, completion: (() -> Void)? = nil) {
+        guard let cli = cliPath() else {
+            DispatchQueue.main.async { completion?() }
+            return
+        }
         var args = ["--json", "settings", "get"]
         if withSecrets { args.append("--with-secrets") }
         let timeout = withSecrets ? 180.0 : 10.0
@@ -500,26 +515,33 @@ final class AppModel: ObservableObject {
                     self.chatId = fallback.chatId
                     self.mtprotoApiId = fallback.apiId > 0 ? String(fallback.apiId) : ""
                     self.updateTelegramStatus()
+                    completion?()
                 }
+            } else {
+                DispatchQueue.main.async { completion?() }
             }
             return
         }
 
         let settings = obj["settings"] as? [String: Any]
-        let sources = (settings?["sources"] as? [String]) ?? []
+        let targets = (settings?["targets"] as? [[String: Any]]) ?? []
+        let endpoints = (settings?["telegram_endpoints"] as? [[String: Any]]) ?? []
         let schedule = (settings?["schedule"] as? [String: Any]) ?? [:]
         let telegram = (settings?["telegram"] as? [String: Any]) ?? [:]
-        let chatId = (telegram["chat_id"] as? String) ?? ""
         let mtproto = (telegram["mtproto"] as? [String: Any]) ?? [:]
         let apiIdNum = (mtproto["api_id"] as? NSNumber)?.intValue ?? 0
+
+        let selectedTarget = targets.first
+        let selectedSourcePath = (selectedTarget?["source_path"] as? String) ?? ""
+        let selectedEndpointId = (selectedTarget?["endpoint_id"] as? String) ?? ""
+        let selectedEndpoint = endpoints.first(where: { ($0["id"] as? String) == selectedEndpointId })
+        let chatId = (selectedEndpoint?["chat_id"] as? String) ?? ""
 
         let scheduleEnabled = (schedule["enabled"] as? Bool) ?? false
         let scheduleKind = (schedule["kind"] as? String) ?? "hourly"
 
         DispatchQueue.main.async {
-            if let first = sources.first {
-                self.sourcePath = first
-            }
+            self.sourcePath = selectedSourcePath
             self.scheduleEnabled = scheduleEnabled
             self.scheduleKind = scheduleKind
 
@@ -527,10 +549,19 @@ final class AppModel: ObservableObject {
             self.mtprotoApiId = apiIdNum > 0 ? String(apiIdNum) : ""
             if withSecrets {
                 let secrets = obj["secrets"] as? [String: Any]
-                let botPresent = (secrets?["telegramBotTokenPresent"] as? Bool) ?? false
                 let masterPresent = (secrets?["masterKeyPresent"] as? Bool) ?? false
                 let apiHashPresent = (secrets?["telegramMtprotoApiHashPresent"] as? Bool) ?? false
-                let sessionPresent = (secrets?["telegramMtprotoSessionPresent"] as? Bool) ?? false
+
+                let botByEndpoint = secrets?["telegramBotTokenPresentByEndpoint"] as? [String: Any]
+                let sessionByEndpoint =
+                    secrets?["telegramMtprotoSessionPresentByEndpoint"] as? [String: Any]
+                let botAny = botByEndpoint?[selectedEndpointId]
+                let sessionAny = sessionByEndpoint?[selectedEndpointId]
+                let botPresent =
+                    (botAny as? Bool) ?? ((botAny as? NSNumber)?.boolValue ?? false)
+                let sessionPresent =
+                    (sessionAny as? Bool) ?? ((sessionAny as? NSNumber)?.boolValue ?? false)
+
                 self.botTokenPresent = botPresent
                 self.masterKeyPresent = masterPresent
                 self.mtprotoApiHashPresent = apiHashPresent
@@ -586,6 +617,32 @@ final class AppModel: ObservableObject {
                 }
             }
             self.updateTelegramStatus()
+            completion?()
+        }
+    }
+
+    func openSettingsWindow() {
+        DispatchQueue.main.async {
+            let window: NSWindow
+            if let existing = self.settingsWindow {
+                window = existing
+            } else {
+                let root = SettingsWindowRootView()
+                    .environmentObject(self)
+                let controller = NSHostingController(rootView: root)
+                let w = NSWindow(contentViewController: controller)
+                w.title = "Settings"
+                w.setContentSize(NSSize(width: 820, height: 560))
+                w.minSize = NSSize(width: 760, height: 520)
+                w.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
+                w.isReleasedWhenClosed = false
+                w.center()
+                self.settingsWindow = w
+                window = w
+            }
+
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
         }
     }
 
@@ -743,7 +800,7 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func runCommandCapture(
+    func runCommandCapture(
         exe: String,
         args: [String],
         stdin: String? = nil,
@@ -1068,8 +1125,6 @@ struct SegmentedTabs: View {
             tabButton(.overview)
             divider
             tabButton(.logs)
-            divider
-            tabButton(.settings)
         }
         .padding(1)
         .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -1138,8 +1193,6 @@ struct PopoverRootView: View {
                     OverviewView()
                 case .logs:
                     LogsView()
-                case .settings:
-                    SettingsView()
                 }
             }
             .padding(12)
@@ -1174,7 +1227,7 @@ struct PopoverRootView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("TelevyBackup")
                     .font(.system(size: 15, weight: .bold))
-                Text(model.tab == .settings ? "Settings" : model.telegramStatusText)
+                Text(model.telegramStatusText)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
@@ -1184,14 +1237,32 @@ struct PopoverRootView: View {
             StatusLED(ok: model.telegramOk)
 
             Button {
-                model.refresh()
+                model.openSettingsWindow()
             } label: {
-                Image(systemName: "ellipsis")
+                Image(systemName: "gearshape.fill")
                     .font(.system(size: 13, weight: .semibold))
                     .frame(width: 22, height: 22)
                     .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 10))
             }
             .buttonStyle(.plain)
+
+            Button {
+                model.refresh(userInitiated: true)
+            } label: {
+                ZStack {
+                    if model.refreshInFlight {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 13, weight: .semibold))
+                    }
+                }
+                    .frame(width: 22, height: 22)
+                    .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .disabled(model.refreshInFlight)
         }
         .padding(.bottom, 2)
     }
@@ -1623,6 +1694,12 @@ struct TelevyBackupApp: App {
     var body: some Scene {
         Settings {
             EmptyView()
+        }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { model.openSettingsWindow() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
         }
     }
 }
