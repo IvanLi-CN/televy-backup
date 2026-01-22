@@ -2302,7 +2302,9 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn load_settings(config_dir: &Path) -> Result<Settings, CliError> {
-    settings_config::load_settings_v2(config_dir).map_err(map_core_err)
+    let settings = settings_config::load_settings_v2(config_dir).map_err(map_core_err)?;
+    settings_config::validate_settings_schema_v2(&settings).map_err(map_core_err)?;
+    Ok(settings)
 }
 
 fn redact_secret(s: impl Into<String>, secret: &str) -> String {
@@ -2500,4 +2502,76 @@ fn map_core_err(e: televy_backup_core::Error) -> CliError {
 fn emit_error(e: &CliError) {
     let json = serde_json::to_string(e).unwrap_or_else(|_| "{\"code\":\"unknown\",\"message\":\"json encode failed\",\"details\":{},\"retryable\":false}".to_string());
     let _ = writeln!(std::io::stderr(), "{json}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_config(dir: &Path, text: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(settings_config::config_path(dir), text).unwrap();
+    }
+
+    fn temp_config_dir(name: &str) -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "televybackup-cli-test-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        dir
+    }
+
+    #[test]
+    fn load_settings_rejects_duplicate_endpoint_ids() {
+        let dir = temp_config_dir("dup-endpoint");
+        write_config(
+            &dir,
+            r#"
+version = 2
+
+[[telegram_endpoints]]
+id = "ep1"
+mode = "mtproto"
+chat_id = "-1001"
+bot_token_key = "telegram.bot_token.ep1"
+
+[[telegram_endpoints]]
+id = "ep1"
+mode = "mtproto"
+chat_id = "-1002"
+bot_token_key = "telegram.bot_token.ep1b"
+"#,
+        );
+
+        let err = load_settings(&dir).unwrap_err();
+        assert_eq!(err.code, "config.invalid");
+        assert!(err.message.contains("duplicate telegram_endpoints id"));
+    }
+
+    #[test]
+    fn load_settings_rejects_target_unknown_endpoint_reference() {
+        let dir = temp_config_dir("unknown-endpoint");
+        write_config(
+            &dir,
+            r#"
+version = 2
+
+[[telegram_endpoints]]
+id = "ep1"
+mode = "mtproto"
+chat_id = "-1001"
+bot_token_key = "telegram.bot_token.ep1"
+
+[[targets]]
+id = "t1"
+source_path = "/tmp"
+endpoint_id = "missing"
+"#,
+        );
+
+        let err = load_settings(&dir).unwrap_err();
+        assert_eq!(err.code, "config.invalid");
+        assert!(err.message.contains("references unknown endpoint_id"));
+    }
 }
