@@ -20,6 +20,12 @@ struct TargetScheduleState {
     last_daily: Option<(i32, u32, u32)>,       // year, month, day
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ScheduleSlot {
+    Hourly((i32, u32, u32, u32)),
+    Daily((i32, u32, u32)),
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = std::env::var("TELEVYBACKUP_CONFIG_DIR")
@@ -77,40 +83,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .entry(target.id.clone())
                 .or_default();
 
-            let should_run = match eff.kind.as_str() {
+            let scheduled_slot = match eff.kind.as_str() {
                 "hourly" => {
                     if now.minute() != eff.hourly_minute as u32 {
-                        false
+                        None
                     } else {
                         let key = (now.year(), now.month(), now.day(), now.hour());
                         if state.last_hourly == Some(key) {
-                            false
+                            None
                         } else {
-                            state.last_hourly = Some(key);
-                            true
+                            Some(ScheduleSlot::Hourly(key))
                         }
                     }
                 }
                 "daily" => {
                     let (hh, mm) = parse_hhmm(&eff.daily_at)?;
                     if now.hour() != hh as u32 || now.minute() != mm as u32 {
-                        false
+                        None
                     } else {
                         let key = (now.year(), now.month(), now.day());
                         if state.last_daily == Some(key) {
-                            false
+                            None
                         } else {
-                            state.last_daily = Some(key);
-                            true
+                            Some(ScheduleSlot::Daily(key))
                         }
                     }
                 }
-                _ => false,
+                other => {
+                    return Err(format!("unsupported schedule.kind: {other}").into());
+                }
             };
 
-            if !should_run {
+            let Some(scheduled_slot) = scheduled_slot else {
                 continue;
-            }
+            };
 
             let Some(ep) = settings
                 .telegram_endpoints
@@ -191,6 +197,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(s) => s,
                 None => continue,
             };
+
+            // Only consume the schedule slot once all required config/secrets are available
+            // and the endpoint storage is ready.
+            match scheduled_slot {
+                ScheduleSlot::Hourly(key) => state.last_hourly = Some(key),
+                ScheduleSlot::Daily(key) => state.last_daily = Some(key),
+            }
 
             let task_id = format!("tsk_{}", Uuid::new_v4());
             let run_log =
