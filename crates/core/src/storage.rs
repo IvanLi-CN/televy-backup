@@ -80,7 +80,7 @@ pub fn parse_chunk_object_ref(encoded: &str) -> Result<ChunkObjectRef> {
 }
 
 pub trait Storage {
-    fn provider(&self) -> &'static str;
+    fn provider(&self) -> &str;
 
     fn upload_document<'a>(
         &'a self,
@@ -119,7 +119,7 @@ impl InMemoryStorage {
 }
 
 impl Storage for InMemoryStorage {
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> &str {
         "test.mem"
     }
 

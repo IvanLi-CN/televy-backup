@@ -29,7 +29,7 @@ impl<'a, S: Storage + Sync> FailOnUpload<'a, S> {
 }
 
 impl<'a, S: Storage + Sync> Storage for FailOnUpload<'a, S> {
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> &str {
         self.inner.provider()
     }
 
