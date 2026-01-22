@@ -4,14 +4,15 @@
 
 - 形态：点击状态栏图标后出现的 popover（悬浮、不可太大）
 - 建议尺寸：`360 × 460`（可根据内容在 `400–520` 高度内微调）
-- 导航：popover 顶部用 segmented control 在 `Overview / Logs / Settings` 三个视图间切换
+- 导航：popover 顶部用 segmented control 在 `Overview / Logs` 两个视图间切换；`Settings` 通过右上角齿轮按钮打开独立 Settings window
+- 快捷键：支持 `⌘,` 打开 Settings window（符合 macOS 习惯）
 
 ## Overview（主视图）
 
 - Header（固定）
   - App 标识 + 标题 `TelevyBackup`
   - 状态 LED（例如：Online/Offline/Syncing）
-  - 右侧：`Settings`/`…`（可选，若不放在 segmented 里）
+  - 右侧：齿轮（打开 Settings window）/`…`（可选）
 - 状态卡片
   - 当前任务状态：Idle / Uploading / Verifying / Error
   - 进度条（仅在运行时显示）
@@ -27,18 +28,10 @@
 - 以 `NSTableView`/macOS 列表行的语义呈现：时间 + 结果 + 可展开详情
 - 支持复制错误/导出日志（popover 内做“复制”优先，导出可跳到独立窗口）
 
-## Settings（轻量配置）
+## Settings window（独立窗口）
 
-- Telegram
-  - Bot Token（从 Keychain 读写；popover 里只展示 “已保存/未保存”，避免回显敏感内容）
-  - Chat ID / Target（可粘贴）
-  - “Test connection” 按钮 + 结果状态
-- Schedule
-  - 开关：启用定时
-  - 频率：Hourly / Daily（下拉）
-- Advanced（可折叠）
-  - Chunk size（如 `1–10MB`）
-  - Concurrency / Rate limit（如有）
+- Settings 不再作为 popover 的 tab；popover 通过右上角齿轮按钮打开独立 Settings window。
+- Settings window 承载：backup targets（多目录）、Telegram endpoint 绑定、schedule、安全（recovery key）等配置。
 
 ## Visual style（Liquid Glass / system material）
 
