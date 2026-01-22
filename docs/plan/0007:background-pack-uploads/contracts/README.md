@@ -4,5 +4,4 @@
 
 本计划包含：
 
-- `config.md`：`config.toml` 中 `telegram_endpoints.rate_limit.*` 的语义（并发/最小间隔/适用范围）
-
+- `config.md`：`config.toml` 中 `telegram.rate_limit.*` 的语义（并发/最小间隔/适用范围）
