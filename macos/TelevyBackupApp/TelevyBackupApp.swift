@@ -1495,7 +1495,7 @@ struct SettingsView: View {
                     }
 
                     HStack {
-                        SecureField("Paste new bot token (not stored here)", text: $model.botTokenDraft)
+                        SecureField("Paste new bot token", text: $model.botTokenDraft)
                             .focused($tokenFocused)
                         Button("Save token") { model.setBotToken() }
                             .buttonStyle(.bordered)
@@ -1522,7 +1522,7 @@ struct SettingsView: View {
                     }
 
                     HStack(spacing: 8) {
-                        SecureField("Paste api_hash (not stored here)", text: $model.mtprotoApiHashDraft)
+                        SecureField("Paste api_hash", text: $model.mtprotoApiHashDraft)
                             .focused($apiHashFocused)
                         Button("Save api_hash") { model.setMtprotoApiHash() }
                             .buttonStyle(.bordered)
