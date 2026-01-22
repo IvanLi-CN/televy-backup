@@ -225,7 +225,7 @@ struct SettingsWindowRootView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 320)
+        .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 320)
     }
 
     private var recoveryKeyView: some View {
@@ -653,7 +653,6 @@ private struct ImportRecoveryKeySheet: View {
                 Text("Import this recovery key?")
             }
         }
-        .navigationSplitViewColumnWidth(min: 240, ideal: 260, max: 320)
     }
 }
 
