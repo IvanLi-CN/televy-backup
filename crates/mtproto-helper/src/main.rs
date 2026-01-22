@@ -251,7 +251,23 @@ async fn main() {
                 let res = download_to_cache(s, &req.object_id).await;
                 match res {
                     Ok(bytes_path) => {
-                        let size = match std::fs::metadata(&bytes_path) {
+                        let mut f = match std::fs::File::open(&bytes_path) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                let _ = write_response(
+                                    &mut output,
+                                    Response {
+                                        ok: false,
+                                        error: Some(format!("cache file open failed: {e}")),
+                                        session_b64: Some(session_b64(&s.session)),
+                                        data: BTreeMap::new(),
+                                    },
+                                );
+                                continue;
+                            }
+                        };
+
+                        let size = match f.metadata() {
                             Ok(m) => m.len(),
                             Err(e) => {
                                 let _ = write_response(
@@ -279,25 +295,12 @@ async fn main() {
                             },
                         );
 
-                        let mut f = match std::fs::File::open(&bytes_path) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                let _ = write_response(
-                                    &mut output,
-                                    Response {
-                                        ok: false,
-                                        error: Some(format!("cache file open failed: {e}")),
-                                        session_b64: Some(session_b64(&s.session)),
-                                        data: BTreeMap::new(),
-                                    },
-                                );
-                                continue;
-                            }
-                        };
                         if let Err(e) = std::io::copy(&mut f, &mut output) {
                             let _ = output.flush();
                             eprintln!("stdout copy failed: {e}");
-                            continue;
+                            // Do not attempt to write another JSON line: the core side will
+                            // already be expecting raw bytes. Hard-exit so stdout closes.
+                            std::process::exit(1);
                         }
                         let _ = output.flush();
 
