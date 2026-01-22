@@ -36,6 +36,7 @@ framing 开销（当前实现）：`1(version) + 24(nonce) + 16(tag) = 41 bytes`
 #### MTProto（仓库为 MTProto-only）
 
 Telegram 客户端侧能力参考：非 Premium 用户单文件 2GB、Premium 用户单文件 4GB（由 Telegram 官方说明）。
+（参考：https://telegram.org/blog/700-million-and-premium#telegram-premium）
 
 但本项目当前实现（chunk→encrypt→upload）是以内存处理为主，并且 MTProto helper 会把上传 bytes 再读入一份缓冲；
 为控制内存峰值、上传超时与失败面，本计划引入一个 **MTProto 上传单文件工程上限**（显著小于 Telegram 理论上限）：

@@ -86,10 +86,10 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given `telegram.mode = "mtproto"` 且 `chunking.max_bytes` 大于 MTProto 上限
+- Given `telegram.mode = "mtproto"` 且 `chunking.max_bytes > (MTProtoEngineeredUploadMaxBytes - 41 bytes)`
   When 启动 `backup run`（或 daemon scheduled backup）
-  Then 立即失败为配置错误，错误信息包含 MTProto 上限与计算/来源说明
-- Given `telegram.mode = "mtproto"` 且 `chunking.max_bytes` 等于 MTProto 上限
+  Then 立即失败为配置错误，错误信息包含 `MTProtoEngineeredUploadMaxBytes` 与 `41 bytes` 开销及计算口径说明
+- Given `telegram.mode = "mtproto"` 且 `chunking.max_bytes == (MTProtoEngineeredUploadMaxBytes - 41 bytes)`
   When 启动 `backup run`
   Then 配置校验通过（不因 chunk size 被拒绝）
 - Given `min/avg/max` 不满足 `min <= avg <= max`
@@ -120,7 +120,7 @@
 
 ## 方案概述（Approach, high-level）
 
-- 在 `core` 层把 “上传单文件上限” 固化为 MTProto-only 的工程上限（建议默认：`128MiB`；备选 `100MiB`），并据此放开 `chunking.max_bytes` 上限（扣除 framing `41 bytes`）。
+- 在 `core` 层把 “上传单文件上限” 固化为 MTProto-only 的工程上限（`128MiB`，本计划已冻结），并据此放开 `chunking.max_bytes` 上限（扣除 framing `41 bytes`）。
 - 工程上限以“上传 document 的 bytes”定义，并显式纳入 framing 开销（`+41 bytes`）；因此可接受的 `chunking.max_bytes` = `engineered_upload_max_bytes - 41`。
 - pack 策略（兼顾“减少上传次数”与“不要一个 pack 塞太多小文件”）：
   - `PACK_MAX_BYTES = 128MiB`（与工程上限一致）
@@ -143,14 +143,12 @@
 - 上传超时：
   - helper 超时上限为 30 分钟；200MiB 在 30 分钟内完成需要约 114KiB/s 的有效上传速率（更慢会更易超时）
 
-### 合理性评估（128MiB / 100MiB）
+### 合理性评估（128MiB）
 
 - 内存峰值（粗估，跨进程合计）：
   - 128MiB：~400–500MiB+（core ~300MiB 量级 + helper ~128MiB + 开销）
-  - 100MiB：~320–420MiB+（core ~250MiB 量级 + helper ~100MiB + 开销）
 - 上传超时（30 分钟封顶）：
   - 128MiB：需要约 73KiB/s 的有效上传速率
-  - 100MiB：需要约 57KiB/s 的有效上传速率
 
 ### 抖动建议（jitter）
 
