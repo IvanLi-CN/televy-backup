@@ -31,10 +31,14 @@ Secrets are not stored in `config.toml`.
 - Keychain (macOS): vault key `televybackup.vault_key` (Base64 32 bytes)
   - Used to encrypt/decrypt the local secrets store.
 - Local secrets store: `TELEVYBACKUP_CONFIG_DIR/secrets.enc`
-  - Telegram bot token: entry key = `telegram.bot_token` (default)
+  - Telegram bot token: entry key = `[[telegram_endpoints]].bot_token_key` (per-endpoint)
   - Master key: entry key = `televybackup.master_key` (Base64 32 bytes)
-  - MTProto API hash: entry key = `telegram.mtproto.api_hash` (default)
-  - MTProto session: entry key = `telegram.mtproto.session` (Base64)
+  - MTProto API hash: entry key = `telegram.mtproto.api_hash` (default; key name configurable via `telegram.mtproto.api_hash_key`)
+  - MTProto session: entry key = `[[telegram_endpoints]].mtproto.session_key` (per-endpoint; Base64)
+
+Master key portability:
+
+- CLI can export/import a human-transferable recovery string `TBK1:<base64url_no_pad>` (aka “gold key”).
 
 ## Crypto and framing
 
@@ -57,7 +61,7 @@ Associated Data (AD):
 The storage provider is **MTProto-only**:
 
 - `telegram.mode` is fixed to `"mtproto"`.
-- New snapshots persist `provider = "telegram.mtproto"` in the local DB.
+- New snapshots persist `provider = "telegram.mtproto/<endpoint_id>"` in the local DB (to avoid cross-endpoint dedup/index pollution).
 - Historical snapshots with `provider = "telegram.botapi"` are not supported and require a re-backup.
 
 ### MTProto (`telegram.mtproto`)
@@ -65,6 +69,15 @@ The storage provider is **MTProto-only**:
 - Each encrypted chunk/index/manifest is uploaded as a Telegram `document` via MTProto.
 - `object_id` is versioned: `tgmtproto:v1:<base64url(json)>` (peer/msgId/docId/accessHash; does not store `file_reference`).
 - Downloads refresh `file_reference` by fetching the message by `peer+msgId` and are chunked/resumable via `TELEVYBACKUP_DATA_DIR/cache/mtproto/`.
+
+## Remote bootstrap/catalog (pinned)
+
+Cross-device restore (without the old local SQLite) uses a per-endpoint “bootstrap catalog”:
+
+- The catalog plaintext is JSON, encrypted via the same framing using AAD `televy.bootstrap.catalog.v1`.
+- The encrypted catalog is uploaded as a Telegram `document`.
+- A pinned message in the chat acts as a root pointer to the latest catalog document.
+- `restore latest` resolves `snapshot_id + manifest_object_id` from the pinned catalog.
 
 ## SQLite index
 
@@ -88,5 +101,5 @@ Key tables:
 ## Known limitations (MVP)
 
 - No APFS snapshot: backups are best-effort consistent at scan time.
-- No remote search for manifests in Telegram history: restore assumes local DB knows `manifest_object_id`.
+- Restore is not a full remote “search”: cross-device restore depends on the pinned bootstrap catalog, and only provides `latest` pointers recorded there.
 - No remote chunk GC: Telegram chat storage can grow over time.

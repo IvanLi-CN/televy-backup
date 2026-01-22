@@ -17,6 +17,7 @@
   - `schedule`（global default）
   - `retention`（global）
   - `chunking`（global）
+  - `telegram`（global Telegram settings）
 
 ### `[schedule]`（global default schedule）
 
@@ -74,7 +75,7 @@
   - 约束：稳定且不变；用于 provider namespace（见下文）
 - `mode`: string
   - 必填：是
-  - 取值：`"botapi"`（当前实现限定）
+  - 取值：`"mtproto"`（当前实现限定）
 - `chat_id`: string
   - 必填：是
   - 说明：必须用 string 存储以避免 int 溢出/序列化差异
@@ -98,7 +99,7 @@ timezone = "local"
 
 [[telegram_endpoints]]
 id = "default"
-mode = "botapi"
+mode = "mtproto"
 chat_id = "-100123..."
 bot_token_key = "telegram.bot_token.default"
 
@@ -142,7 +143,7 @@ v1（当前）形状（简化）：
 
 目的：避免多 endpoint 场景下 index/objects 混用导致的不可恢复。
 
-- 规则：`provider = "telegram.botapi/<endpoint_id>"`
+- 规则：`provider = "telegram.mtproto/<endpoint_id>"`
   - `<endpoint_id>` 来自 config；不得包含 bot token 明文
   - 作为 SQLite 中 `provider` 字段的值（remote_index_* / chunk_objects）
 - 约束：一旦 endpoint 投入使用（产生远端对象），`endpoint_id` 必须视为不可变（否则会导致 provider 断裂，影响 restore）。
