@@ -151,11 +151,13 @@ pub async fn resolve_remote_latest<S: PinnedStorage>(
         })?;
 
     if let Some(id) = target_id {
-        let t = cat.targets.into_iter().find(|t| t.target_id == id).ok_or_else(|| {
-            Error::InvalidConfig {
+        let t = cat
+            .targets
+            .into_iter()
+            .find(|t| t.target_id == id)
+            .ok_or_else(|| Error::InvalidConfig {
                 message: format!("bootstrap missing target_id: {id}"),
-            }
-        })?;
+            })?;
         return t.latest.ok_or_else(|| Error::InvalidConfig {
             message: format!("bootstrap missing latest for target_id: {id}"),
         });
@@ -183,9 +185,12 @@ pub async fn resolve_remote_latest<S: PinnedStorage>(
             message: format!("bootstrap source_path is ambiguous: {source}"),
         });
     }
-    matches[0].latest.clone().ok_or_else(|| Error::InvalidConfig {
-        message: format!("bootstrap missing latest for source_path: {source}"),
-    })
+    matches[0]
+        .latest
+        .clone()
+        .ok_or_else(|| Error::InvalidConfig {
+            message: format!("bootstrap missing latest for source_path: {source}"),
+        })
 }
 
 #[cfg(test)]
@@ -218,14 +223,16 @@ mod tests {
             &'a self,
             filename: &'a str,
             bytes: Vec<u8>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>>
+        {
             self.inner.upload_document(filename, bytes)
         }
 
         fn download_document<'a>(
             &'a self,
             object_id: &'a str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send + 'a>>
+        {
             self.inner.download_document(object_id)
         }
     }
@@ -236,12 +243,9 @@ mod tests {
         }
 
         fn set_pinned_object_id(&self, object_id: &str) -> Result<()> {
-            *self
-                .pinned
-                .lock()
-                .map_err(|_| Error::InvalidConfig {
-                    message: "lock poisoned".to_string(),
-                })? = Some(object_id.to_string());
+            *self.pinned.lock().map_err(|_| Error::InvalidConfig {
+                message: "lock poisoned".to_string(),
+            })? = Some(object_id.to_string());
             Ok(())
         }
     }
@@ -251,17 +255,9 @@ mod tests {
         let store = MemPinned::new();
         let key = [3u8; 32];
 
-        update_remote_latest(
-            &store,
-            &key,
-            "t1",
-            "/A",
-            "manual",
-            "snp_1",
-            "obj_1",
-        )
-        .await
-        .unwrap();
+        update_remote_latest(&store, &key, "t1", "/A", "manual", "snp_1", "obj_1")
+            .await
+            .unwrap();
 
         let latest = resolve_remote_latest(&store, &key, Some("t1"), None)
             .await
@@ -270,4 +266,3 @@ mod tests {
         assert_eq!(latest.manifest_object_id, "obj_1");
     }
 }
-

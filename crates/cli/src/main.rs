@@ -470,7 +470,11 @@ fn select_endpoint<'a>(
     if settings.telegram_endpoints.len() == 1 {
         return Ok(&settings.telegram_endpoints[0]);
     }
-    if let Some(ep) = settings.telegram_endpoints.iter().find(|e| e.id == "default") {
+    if let Some(ep) = settings
+        .telegram_endpoints
+        .iter()
+        .find(|e| e.id == "default")
+    {
         return Ok(ep);
     }
 
@@ -507,9 +511,9 @@ fn select_target<'a>(
         ));
     };
 
-    let source_str = source.to_str().ok_or_else(|| {
-        CliError::new("config.invalid", "source path is not valid utf-8")
-    })?;
+    let source_str = source
+        .to_str()
+        .ok_or_else(|| CliError::new("config.invalid", "source path is not valid utf-8"))?;
 
     let mut matches = settings
         .targets
@@ -807,8 +811,13 @@ async fn telegram_validate(
 
     let bot_token = get_secret(config_dir, &ep.bot_token_key)?
         .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
-    let api_hash = get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?
-        .ok_or_else(|| CliError::new("telegram.mtproto.missing_api_hash", "mtproto api_hash missing"))?;
+    let api_hash =
+        get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(|| {
+            CliError::new(
+                "telegram.mtproto.missing_api_hash",
+                "mtproto api_hash missing",
+            )
+        })?;
 
     let session = load_optional_base64_secret_bytes(
         config_dir,
@@ -1724,8 +1733,13 @@ async fn restore_list_latest(
     let bot_token = get_secret(config_dir, &ep.bot_token_key)?
         .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
     let master_key = load_master_key(config_dir)?;
-    let api_hash = get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?
-        .ok_or_else(|| CliError::new("telegram.mtproto.missing_api_hash", "mtproto api_hash missing"))?;
+    let api_hash =
+        get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(|| {
+            CliError::new(
+                "telegram.mtproto.missing_api_hash",
+                "mtproto api_hash missing",
+            )
+        })?;
     let session = load_optional_base64_secret_bytes(
         config_dir,
         &ep.mtproto.session_key,
@@ -1786,7 +1800,10 @@ async fn restore_list_latest(
                 t.target_id, t.source_path, latest.snapshot_id, latest.manifest_object_id
             );
         } else {
-            println!("targetId={} sourcePath={} latest=none", t.target_id, t.source_path);
+            println!(
+                "targetId={} sourcePath={} latest=none",
+                t.target_id, t.source_path
+            );
         }
     }
     Ok(())
@@ -1856,7 +1873,12 @@ async fn restore_latest(
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
         let master_key = load_master_key(config_dir)?;
         let api_hash = get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?
-            .ok_or_else(|| CliError::new("telegram.mtproto.missing_api_hash", "mtproto api_hash missing"))?;
+            .ok_or_else(|| {
+                CliError::new(
+                    "telegram.mtproto.missing_api_hash",
+                    "mtproto api_hash missing",
+                )
+            })?;
         let session = load_optional_base64_secret_bytes(
             config_dir,
             &ep.mtproto.session_key,
@@ -1929,7 +1951,9 @@ async fn restore_latest(
             target_path: target,
         };
 
-        let res = restore_snapshot_with(&storage, cfg, opts).await.map_err(map_core_err)?;
+        let res = restore_snapshot_with(&storage, cfg, opts)
+            .await
+            .map_err(map_core_err)?;
 
         if let Some(bytes) = storage.session_bytes() {
             let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -1985,7 +2009,10 @@ async fn restore_latest(
             }
 
             if json {
-                println!("{}", serde_json::json!({ "ok": true, "snapshotId": snapshot_id }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "ok": true, "snapshotId": snapshot_id })
+                );
             } else {
                 println!("ok");
                 println!("snapshotId={snapshot_id}");

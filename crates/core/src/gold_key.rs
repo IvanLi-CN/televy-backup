@@ -11,9 +11,12 @@ pub fn encode_gold_key(master_key: &[u8; 32]) -> String {
 }
 
 pub fn decode_gold_key(s: &str) -> Result<[u8; 32]> {
-    let rest = s.trim().strip_prefix(GOLD_KEY_PREFIX).ok_or_else(|| Error::InvalidConfig {
-        message: "invalid gold key (missing TBK1: prefix)".to_string(),
-    })?;
+    let rest = s
+        .trim()
+        .strip_prefix(GOLD_KEY_PREFIX)
+        .ok_or_else(|| Error::InvalidConfig {
+            message: "invalid gold key (missing TBK1: prefix)".to_string(),
+        })?;
 
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(rest.as_bytes())
@@ -39,4 +42,3 @@ mod tests {
         assert_eq!(parsed, key);
     }
 }
-

@@ -5,10 +5,11 @@ use std::time::Instant;
 use base64::Engine;
 use chrono::{Datelike, Timelike};
 use sqlx::Row;
-use televy_backup_core::{
-    BackupConfig, BackupOptions, ChunkingConfig, TelegramMtProtoStorage, TelegramMtProtoStorageConfig,
-};
 use televy_backup_core::Storage;
+use televy_backup_core::{
+    BackupConfig, BackupOptions, ChunkingConfig, TelegramMtProtoStorage,
+    TelegramMtProtoStorageConfig,
+};
 use televy_backup_core::{bootstrap, config as settings_config};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
@@ -66,7 +67,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let now = chrono::Local::now();
 
         for target in &settings.targets {
-            let eff = settings_config::effective_schedule(&settings.schedule, target.schedule.as_ref());
+            let eff =
+                settings_config::effective_schedule(&settings.schedule, target.schedule.as_ref());
             if !target.enabled || !eff.enabled {
                 continue;
             }
@@ -160,9 +162,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if !storage_by_endpoint.contains_key(&ep.id) {
                 let session = match get_secret_from_store(&secrets_store, &ep.mtproto.session_key) {
-                    Some(b64) if !b64.trim().is_empty() => Some(
-                        base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())?,
-                    ),
+                    Some(b64) if !b64.trim().is_empty() => {
+                        Some(base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())?)
+                    }
                     _ => None,
                 };
 
@@ -191,7 +193,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let task_id = format!("tsk_{}", Uuid::new_v4());
-            let run_log = televy_backup_core::run_log::start_run_log("backup", &task_id, &data_root)?;
+            let run_log =
+                televy_backup_core::run_log::start_run_log("backup", &task_id, &data_root)?;
 
             tracing::info!(
                 event = "run.start",
@@ -226,7 +229,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 keep_last_snapshots: settings.retention.keep_last_snapshots,
             };
 
-            let result = televy_backup_core::run_backup_with(storage, cfg, BackupOptions::default()).await;
+            let result =
+                televy_backup_core::run_backup_with(storage, cfg, BackupOptions::default()).await;
             let duration_seconds = started.elapsed().as_secs_f64();
 
             match result {
@@ -249,7 +253,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "run.finish"
                     );
 
-                    let pool = televy_backup_core::index_db::open_existing_index_db(&db_path).await?;
+                    let pool =
+                        televy_backup_core::index_db::open_existing_index_db(&db_path).await?;
                     let row = sqlx::query(
                         "SELECT manifest_object_id FROM remote_indexes WHERE snapshot_id = ? AND provider = ? LIMIT 1",
                     )

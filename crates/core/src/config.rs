@@ -386,12 +386,18 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
         }
         if t.source_path.trim().is_empty() {
             return Err(Error::InvalidConfig {
-                message: format!("targets[].source_path must not be empty (target_id={})", t.id),
+                message: format!(
+                    "targets[].source_path must not be empty (target_id={})",
+                    t.id
+                ),
             });
         }
         if t.endpoint_id.trim().is_empty() {
             return Err(Error::InvalidConfig {
-                message: format!("targets[].endpoint_id must not be empty (target_id={})", t.id),
+                message: format!(
+                    "targets[].endpoint_id must not be empty (target_id={})",
+                    t.id
+                ),
             });
         }
         if !endpoint_ids.contains(&t.endpoint_id) {
@@ -407,7 +413,10 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
     Ok(())
 }
 
-pub fn effective_schedule(global: &Schedule, override_: Option<&TargetScheduleOverride>) -> Schedule {
+pub fn effective_schedule(
+    global: &Schedule,
+    override_: Option<&TargetScheduleOverride>,
+) -> Schedule {
     let mut out = global.clone();
     let Some(o) = override_ else {
         return out;
