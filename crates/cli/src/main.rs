@@ -542,17 +542,7 @@ async fn secrets_set_telegram_bot_token(
     json: bool,
 ) -> Result<(), CliError> {
     let settings = load_settings(config_dir)?;
-    let endpoint_id = endpoint_id.unwrap_or_else(|| "default".to_string());
-    let ep = settings
-        .telegram_endpoints
-        .iter()
-        .find(|e| e.id == endpoint_id)
-        .ok_or_else(|| {
-            CliError::new(
-                "config.invalid",
-                format!("unknown endpoint_id: {endpoint_id}"),
-            )
-        })?;
+    let ep = select_endpoint(&settings, endpoint_id.as_deref())?;
 
     let mut token = String::new();
     std::io::stdin()
@@ -2508,6 +2498,17 @@ fn emit_error(e: &CliError) {
 mod tests {
     use super::*;
 
+    fn endpoint(id: &str) -> settings_config::TelegramEndpoint {
+        settings_config::TelegramEndpoint {
+            id: id.to_string(),
+            mode: "mtproto".to_string(),
+            chat_id: "-1001".to_string(),
+            bot_token_key: format!("telegram.bot_token.{id}"),
+            mtproto: settings_config::TelegramEndpointMtproto::default(),
+            rate_limit: settings_config::TelegramRateLimit::default(),
+        }
+    }
+
     fn write_config(dir: &Path, text: &str) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(settings_config::config_path(dir), text).unwrap();
@@ -2573,5 +2574,30 @@ endpoint_id = "missing"
         let err = load_settings(&dir).unwrap_err();
         assert_eq!(err.code, "config.invalid");
         assert!(err.message.contains("references unknown endpoint_id"));
+    }
+
+    #[test]
+    fn select_endpoint_defaults_to_only_endpoint() {
+        let mut settings = Settings::default();
+        settings.telegram_endpoints = vec![endpoint("ep1")];
+        let ep = select_endpoint(&settings, None).unwrap();
+        assert_eq!(ep.id, "ep1");
+    }
+
+    #[test]
+    fn select_endpoint_prefers_default_when_present() {
+        let mut settings = Settings::default();
+        settings.telegram_endpoints = vec![endpoint("ep1"), endpoint("default"), endpoint("ep2")];
+        let ep = select_endpoint(&settings, None).unwrap();
+        assert_eq!(ep.id, "default");
+    }
+
+    #[test]
+    fn select_endpoint_errors_when_ambiguous() {
+        let mut settings = Settings::default();
+        settings.telegram_endpoints = vec![endpoint("ep1"), endpoint("ep2")];
+        let err = select_endpoint(&settings, None).unwrap_err();
+        assert_eq!(err.code, "config.invalid");
+        assert!(err.message.contains("multiple endpoints configured"));
     }
 }
