@@ -7,6 +7,7 @@ mod pack;
 mod progress;
 mod restore;
 pub mod run_log;
+pub mod secrets;
 mod storage;
 
 pub const APP_NAME: &str = "TelevyBackup";
@@ -21,6 +22,7 @@ pub use restore::{
     restore_snapshot, restore_snapshot_with, verify_snapshot, verify_snapshot_with,
 };
 pub use storage::{
-    ChunkObjectRef, InMemoryStorage, Storage, TelegramBotApiStorage, TelegramBotApiStorageConfig,
-    encode_tgfile_object_id, encode_tgpack_object_id, parse_chunk_object_ref,
+    ChunkObjectRef, InMemoryStorage, Storage, TelegramMtProtoStorage, TelegramMtProtoStorageConfig,
+    TgMtProtoObjectIdV1, encode_tgfile_object_id, encode_tgmtproto_object_id_v1,
+    encode_tgpack_object_id, parse_chunk_object_ref, parse_tgmtproto_object_id_v1,
 };

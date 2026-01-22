@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 struct VisualEffectView: NSViewRepresentable {
@@ -47,6 +48,9 @@ final class AppModel: ObservableObject {
     @Published var chatId: String = ""
     @Published var botTokenDraft: String = ""
     @Published var botTokenDraftIsMasked: Bool = false
+    @Published var mtprotoApiId: String = ""
+    @Published var mtprotoApiHashDraft: String = ""
+    @Published var mtprotoApiHashDraftIsMasked: Bool = false
     @Published var scheduleEnabled: Bool = false
     @Published var scheduleKind: String = "hourly"
 
@@ -54,6 +58,10 @@ final class AppModel: ObservableObject {
     @Published var telegramStatusText: String = "Telegram Storage • Offline"
     @Published var botTokenPresent: Bool = false
     @Published var masterKeyPresent: Bool = false
+    @Published var mtprotoApiHashPresent: Bool = false
+    @Published var mtprotoSessionPresent: Bool = false
+    @Published var secretPresenceKnown: Bool = false
+    @Published var secretPresenceFetchInFlight: Bool = false
     @Published var telegramValidateOk: Bool? = nil
     @Published var telegramValidateText: String = "Not validated"
 
@@ -79,7 +87,6 @@ final class AppModel: ObservableObject {
 
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
-    private var didFetchSecretPresence: Bool = false
 
     func defaultConfigDir() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -97,6 +104,13 @@ final class AppModel: ObservableObject {
     }
 
     func cliPath() -> String? {
+        let bundledInMacOS = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("MacOS")
+            .appendingPathComponent("televybackup-cli")
+        if FileManager.default.isExecutableFile(atPath: bundledInMacOS.path) {
+            return bundledInMacOS.path
+        }
         if let url = Bundle.main.url(forResource: "televybackup", withExtension: nil) {
             return url.path
         }
@@ -125,16 +139,32 @@ final class AppModel: ObservableObject {
             didWriteStartupLog = true
             appendLog("UI started")
         }
-        refreshSettings(withSecrets: false)
+        DispatchQueue.global(qos: .utility).async {
+            self.refreshSettings(withSecrets: false)
+        }
     }
 
     func refreshSecretsPresence(force: Bool = false) {
-        if didFetchSecretPresence && !force { return }
-        refreshSettings(withSecrets: true)
+        DispatchQueue.main.async {
+            if self.secretPresenceFetchInFlight { return }
+            if self.secretPresenceKnown && !force { return }
+            self.secretPresenceFetchInFlight = true
+            DispatchQueue.global(qos: .utility).async {
+                self.refreshSettings(withSecrets: true)
+                DispatchQueue.main.async {
+                    self.secretPresenceFetchInFlight = false
+                }
+            }
+        }
     }
 
     private func updateTelegramStatus() {
-        let configured = botTokenPresent && masterKeyPresent && !chatId.isEmpty
+        let apiId = Int(mtprotoApiId.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+        let configured = botTokenPresent
+            && masterKeyPresent
+            && !chatId.isEmpty
+            && apiId > 0
+            && mtprotoApiHashPresent
         telegramOk = configured
         if telegramValidateOk == true {
             telegramStatusText = "Telegram Storage • Connected"
@@ -153,7 +183,9 @@ final class AppModel: ObservableObject {
         do {
             try writeConfigToml()
             appendLog("Saved: \(configTomlPath().path)")
-            refreshSettings(withSecrets: false)
+            DispatchQueue.global(qos: .utility).async {
+                self.refreshSettings(withSecrets: false)
+            }
         } catch {
             appendLog("ERROR: save config failed: \(error)")
         }
@@ -184,9 +216,9 @@ final class AppModel: ObservableObject {
                 if status == 0 {
                     self.botTokenDraft = Self.maskedTokenPlaceholder()
                     self.botTokenDraftIsMasked = true
-                    self.showToast("Saved in Keychain", isError: false)
+                    self.showToast("Saved (encrypted)", isError: false)
                     self.botTokenPresent = true
-                    self.didFetchSecretPresence = true
+                    self.secretPresenceKnown = true
                     self.updateTelegramStatus()
                 } else {
                     self.showToast("Failed to save token (see Logs)", isError: true)
@@ -200,20 +232,120 @@ final class AppModel: ObservableObject {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
-        showToast("Initializing master key…", isError: false)
+        showToast("Ensuring master key…", isError: false)
+
         runProcess(
             exe: cli,
-            args: ["--json", "secrets", "init-master-key"],
+            args: ["--json", "secrets", "migrate-keychain"],
             updateTaskState: false,
             onExit: { status in
-                if status == 0 {
-                    self.showToast("Master key saved in Keychain", isError: false)
-                    self.masterKeyPresent = true
-                    self.didFetchSecretPresence = true
+                self.refreshSecretsPresence(force: true)
+                if status != 0 {
+                    self.showToast("Migration failed (see Logs)", isError: true)
                     self.updateTelegramStatus()
-                } else {
-                    self.showToast("Failed to init master key (see Logs)", isError: true)
+                    return
                 }
+
+                if self.masterKeyPresent {
+                    self.showToast("Master key ready", isError: false)
+                    self.updateTelegramStatus()
+                    return
+                }
+
+                self.runProcess(
+                    exe: cli,
+                    args: ["--json", "secrets", "init-master-key"],
+                    updateTaskState: false,
+                    onExit: { status2 in
+                        self.refreshSecretsPresence(force: true)
+                        if status2 == 0 {
+                            self.showToast("Master key created (encrypted)", isError: false)
+                        } else {
+                            self.showToast("Failed to init master key (see Logs)", isError: true)
+                        }
+                        self.updateTelegramStatus()
+                    }
+                )
+            }
+        )
+    }
+
+    func migrateKeychainSecrets() {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        showToast("Migrating Keychain secrets…", isError: false)
+        runProcess(
+            exe: cli,
+            args: ["--json", "secrets", "migrate-keychain"],
+            updateTaskState: false,
+            onExit: { status in
+                self.refreshSecretsPresence(force: true)
+                if status == 0 {
+                    self.showToast("Migration complete", isError: false)
+                } else {
+                    self.showToast("Migration failed (see Logs)", isError: true)
+                }
+                self.updateTelegramStatus()
+            }
+        )
+    }
+
+    func setMtprotoApiHash() {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        if mtprotoApiHashDraftIsMasked {
+            showToast("Paste a new api_hash to replace", isError: true)
+            return
+        }
+        let apiHash = mtprotoApiHashDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiHash.isEmpty else {
+            appendLog("ERROR: mtproto api_hash is empty")
+            showToast("API hash is empty", isError: true)
+            return
+        }
+        showToast("Saving api_hash…", isError: false)
+        runProcess(
+            exe: cli,
+            args: ["--json", "secrets", "set-telegram-api-hash"],
+            stdin: apiHash + "\n",
+            updateTaskState: false,
+            onExit: { status in
+                self.refreshSecretsPresence(force: true)
+                if status == 0 {
+                    self.mtprotoApiHashDraft = Self.maskedTokenPlaceholder()
+                    self.mtprotoApiHashDraftIsMasked = true
+                    self.showToast("Saved (encrypted)", isError: false)
+                    self.mtprotoApiHashPresent = true
+                } else {
+                    self.showToast("Failed to save api_hash (see Logs)", isError: true)
+                }
+                self.updateTelegramStatus()
+            }
+        )
+    }
+
+    func clearMtprotoSession() {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        showToast("Clearing MTProto session…", isError: false)
+        runProcess(
+            exe: cli,
+            args: ["--json", "secrets", "clear-telegram-mtproto-session"],
+            updateTaskState: false,
+            onExit: { status in
+                self.refreshSecretsPresence(force: true)
+                if status == 0 {
+                    self.showToast("Session cleared", isError: false)
+                } else {
+                    self.showToast("Failed to clear session (see Logs)", isError: true)
+                }
+                self.updateTelegramStatus()
             }
         )
     }
@@ -221,6 +353,14 @@ final class AppModel: ObservableObject {
     func testConnection() {
         guard let cli = cliPath() else {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        do {
+            try writeConfigToml()
+            appendLog("Saved: \(configTomlPath().path)")
+        } catch {
+            appendLog("ERROR: save config failed: \(error)")
+            showToast("Save failed (see Logs)", isError: true)
             return
         }
         showToast("Testing connection…", isError: false)
@@ -231,6 +371,12 @@ final class AppModel: ObservableObject {
         runProcess(
             exe: cli,
             args: ["--json", "telegram", "validate"],
+            timeoutSeconds: 90,
+            onTimeout: {
+                self.telegramValidateOk = false
+                self.telegramValidateText = "Timed out"
+                self.showToast("Test timed out (check network)", isError: true)
+            },
             updateTaskState: false,
             onExit: { status in
                 if status == 0 {
@@ -242,6 +388,7 @@ final class AppModel: ObservableObject {
                     self.telegramValidateText = "Failed (see Logs)"
                     self.showToast("Test failed (see Logs)", isError: true)
                 }
+                self.refreshSecretsPresence(force: true)
                 self.updateTelegramStatus()
             }
         )
@@ -286,6 +433,7 @@ final class AppModel: ObservableObject {
     private func writeConfigToml() throws {
         let dir = configTomlPath().deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let apiId = Int(mtprotoApiId.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
 
         let toml = """
         sources = [\(tomlStringArray([sourcePath].filter { !$0.isEmpty }))]
@@ -306,9 +454,14 @@ final class AppModel: ObservableObject {
         max_bytes = 10485760
 
         [telegram]
-        mode = "botapi"
+        mode = "mtproto"
         chat_id = \(tomlString(chatId))
         bot_token_key = "telegram.bot_token"
+
+        [telegram.mtproto]
+        api_id = \(apiId)
+        api_hash_key = "telegram.mtproto.api_hash"
+        session_key = "telegram.mtproto.session"
 
         [telegram.rate_limit]
         max_concurrent_uploads = 2
@@ -321,11 +474,34 @@ final class AppModel: ObservableObject {
         guard let cli = cliPath() else { return }
         var args = ["--json", "settings", "get"]
         if withSecrets { args.append("--with-secrets") }
-        let output = runCommandCapture(exe: cli, args: args)
-        guard let data = output.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            appendLog("ERROR: settings get failed")
+        let timeout = withSecrets ? 180.0 : 10.0
+        let result = runCommandCapture(exe: cli, args: args, timeoutSeconds: timeout)
+        if result.status != 0 {
+            appendLog("ERROR: settings get failed: exit=\(result.status) reason=\(result.reason.rawValue)")
+            if !result.stderr.isEmpty {
+                appendLog("stderr: \(result.stderr.prefix(2000))")
+            }
+        }
+
+        let combined = (!result.stdout.isEmpty ? result.stdout : result.stderr)
+        guard let obj = parseJsonObject(combined) else {
+            appendLog("ERROR: settings get JSON parse failed")
+            if !result.stdout.isEmpty { appendLog("stdout: \(result.stdout.prefix(2000))") }
+            if !result.stderr.isEmpty { appendLog("stderr: \(result.stderr.prefix(2000))") }
+
+            if let fallback = readConfigTomlBasics() {
+                appendLog("WARN: falling back to config.toml parsing")
+                DispatchQueue.main.async {
+                    if let first = fallback.sources.first {
+                        self.sourcePath = first
+                    }
+                    self.scheduleEnabled = fallback.scheduleEnabled
+                    self.scheduleKind = fallback.scheduleKind
+                    self.chatId = fallback.chatId
+                    self.mtprotoApiId = fallback.apiId > 0 ? String(fallback.apiId) : ""
+                    self.updateTelegramStatus()
+                }
+            }
             return
         }
 
@@ -334,6 +510,8 @@ final class AppModel: ObservableObject {
         let schedule = (settings?["schedule"] as? [String: Any]) ?? [:]
         let telegram = (settings?["telegram"] as? [String: Any]) ?? [:]
         let chatId = (telegram["chat_id"] as? String) ?? ""
+        let mtproto = (telegram["mtproto"] as? [String: Any]) ?? [:]
+        let apiIdNum = (mtproto["api_id"] as? NSNumber)?.intValue ?? 0
 
         let scheduleEnabled = (schedule["enabled"] as? Bool) ?? false
         let scheduleKind = (schedule["kind"] as? String) ?? "hourly"
@@ -346,19 +524,37 @@ final class AppModel: ObservableObject {
             self.scheduleKind = scheduleKind
 
             self.chatId = chatId
+            self.mtprotoApiId = apiIdNum > 0 ? String(apiIdNum) : ""
             if withSecrets {
                 let secrets = obj["secrets"] as? [String: Any]
                 let botPresent = (secrets?["telegramBotTokenPresent"] as? Bool) ?? false
                 let masterPresent = (secrets?["masterKeyPresent"] as? Bool) ?? false
+                let apiHashPresent = (secrets?["telegramMtprotoApiHashPresent"] as? Bool) ?? false
+                let sessionPresent = (secrets?["telegramMtprotoSessionPresent"] as? Bool) ?? false
                 self.botTokenPresent = botPresent
                 self.masterKeyPresent = masterPresent
-                self.didFetchSecretPresence = true
+                self.mtprotoApiHashPresent = apiHashPresent
+                self.mtprotoSessionPresent = sessionPresent
+                self.secretPresenceKnown = true
             }
             if withSecrets {
                 if !self.botTokenPresent || self.chatId.isEmpty {
                     self.telegramValidateOk = false
                     self.telegramValidateText = "Missing token / chat id"
-                } else if self.telegramValidateText == "Missing token / chat id" {
+                } else if apiIdNum <= 0 && !self.mtprotoApiHashPresent {
+                    self.telegramValidateOk = false
+                    self.telegramValidateText = "Missing api_id / api_hash"
+                } else if apiIdNum <= 0 {
+                    self.telegramValidateOk = false
+                    self.telegramValidateText = "Missing api_id"
+                } else if !self.mtprotoApiHashPresent {
+                    self.telegramValidateOk = false
+                    self.telegramValidateText = "Missing api_hash"
+                } else if self.telegramValidateText == "Missing token / chat id"
+                    || self.telegramValidateText == "Missing api_id / api_hash"
+                    || self.telegramValidateText == "Missing api_id"
+                    || self.telegramValidateText == "Missing api_hash"
+                {
                     self.telegramValidateOk = nil
                     self.telegramValidateText = "Not validated"
                 }
@@ -371,13 +567,23 @@ final class AppModel: ObservableObject {
                     self.telegramValidateText = "Not validated"
                 }
             }
-            if self.botTokenPresent && self.botTokenDraft.isEmpty {
-                self.botTokenDraft = Self.maskedTokenPlaceholder()
-                self.botTokenDraftIsMasked = true
-            }
-            if !self.botTokenPresent && self.botTokenDraftIsMasked {
-                self.botTokenDraft = ""
-                self.botTokenDraftIsMasked = false
+            if self.secretPresenceKnown {
+                if self.botTokenPresent && self.botTokenDraft.isEmpty {
+                    self.botTokenDraft = Self.maskedTokenPlaceholder()
+                    self.botTokenDraftIsMasked = true
+                }
+                if !self.botTokenPresent && self.botTokenDraftIsMasked {
+                    self.botTokenDraft = ""
+                    self.botTokenDraftIsMasked = false
+                }
+                if self.mtprotoApiHashPresent && self.mtprotoApiHashDraft.isEmpty {
+                    self.mtprotoApiHashDraft = Self.maskedTokenPlaceholder()
+                    self.mtprotoApiHashDraftIsMasked = true
+                }
+                if !self.mtprotoApiHashPresent && self.mtprotoApiHashDraftIsMasked {
+                    self.mtprotoApiHashDraft = ""
+                    self.mtprotoApiHashDraftIsMasked = false
+                }
             }
             self.updateTelegramStatus()
         }
@@ -396,13 +602,15 @@ final class AppModel: ObservableObject {
     }
 
     private func sanitizeLogLine(_ line: String) -> String {
-        let needle = "api.telegram.org/bot"
+        // Redact any api.telegram.org URL segment to avoid leaking secrets.
+        let needle = "api.telegram.org"
         guard let r = line.range(of: needle) else { return line }
-        let after = r.upperBound
-        guard let slash = line[after...].firstIndex(of: "/") else {
-            return line.replacingCharacters(in: after..<line.endIndex, with: "[redacted]")
+        let start = r.lowerBound
+        var end = line.endIndex
+        if let ws = line[start...].firstIndex(where: { $0.isWhitespace }) {
+            end = ws
         }
-        return line.replacingCharacters(in: after..<slash, with: "[redacted]")
+        return line.replacingCharacters(in: start..<end, with: "[redacted_url]")
     }
 
     private func uiLogFileURL() -> URL {
@@ -432,7 +640,115 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func runCommandCapture(exe: String, args: [String], stdin: String? = nil) -> String {
+    private func parseJsonObject(_ output: String) -> [String: Any]? {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return nil }
+        if let data = trimmed.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        {
+            return obj
+        }
+        for line in trimmed.split(separator: "\n").reversed() {
+            let s = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !s.isEmpty else { continue }
+            if let data = s.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            {
+                return obj
+            }
+        }
+        return nil
+    }
+
+    private struct ConfigBasics {
+        let sources: [String]
+        let scheduleEnabled: Bool
+        let scheduleKind: String
+        let chatId: String
+        let apiId: Int
+    }
+
+    private func readConfigTomlBasics() -> ConfigBasics? {
+        let path = configTomlPath()
+        guard let text = try? String(contentsOf: path, encoding: .utf8) else { return nil }
+
+        var section: String? = nil
+        var sources: [String] = []
+        var scheduleEnabled: Bool = false
+        var scheduleKind: String = "hourly"
+        var chatId: String = ""
+        var apiId: Int = 0
+
+        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                let name = line.dropFirst().dropLast().trimmingCharacters(in: .whitespacesAndNewlines)
+                section = name.isEmpty ? nil : String(name)
+                continue
+            }
+
+            guard let eq = line.firstIndex(of: "=") else { continue }
+            let key = line[..<eq].trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if section == nil && key == "sources" {
+                if value.hasPrefix("[") && value.hasSuffix("]") {
+                    let inner = value.dropFirst().dropLast()
+                    let parts = inner.split(separator: ",")
+                    sources = parts.compactMap { part in
+                        let v = part.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard v.hasPrefix("\"") && v.hasSuffix("\"") else { return nil }
+                        return String(v.dropFirst().dropLast())
+                    }
+                }
+                continue
+            }
+
+            if section == "schedule" {
+                if key == "enabled" {
+                    scheduleEnabled = (value == "true")
+                } else if key == "kind" {
+                    if value.hasPrefix("\"") && value.hasSuffix("\"") {
+                        scheduleKind = String(value.dropFirst().dropLast())
+                    }
+                }
+                continue
+            }
+
+            if section == "telegram" {
+                if key == "chat_id" {
+                    if value.hasPrefix("\"") && value.hasSuffix("\"") {
+                        chatId = String(value.dropFirst().dropLast())
+                    }
+                }
+                continue
+            }
+
+            if section == "telegram.mtproto" {
+                if key == "api_id" {
+                    apiId = Int(value) ?? 0
+                }
+                continue
+            }
+        }
+
+        return ConfigBasics(
+            sources: sources,
+            scheduleEnabled: scheduleEnabled,
+            scheduleKind: scheduleKind,
+            chatId: chatId,
+            apiId: apiId
+        )
+    }
+
+    private func runCommandCapture(
+        exe: String,
+        args: [String],
+        stdin: String? = nil,
+        timeoutSeconds: Double? = nil
+    ) -> (stdout: String, stderr: String, status: Int32, reason: Process.TerminationReason) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
@@ -449,15 +765,38 @@ final class AppModel: ObservableObject {
             try? input.fileHandleForWriting.close()
         }
 
+        var status: Int32 = 1
+        var reason: Process.TerminationReason = .exit
+
         do {
             try task.run()
+
+            if let timeoutSeconds {
+                let pid = task.processIdentifier
+                DispatchQueue.global(qos: .userInitiated)
+                    .asyncAfter(deadline: .now() + timeoutSeconds) {
+                        guard task.isRunning, task.processIdentifier == pid else { return }
+                        self.appendLog("ERROR: command timed out after \(Int(timeoutSeconds))s")
+                        task.terminate()
+                        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) {
+                            guard task.isRunning, task.processIdentifier == pid else { return }
+                            _ = kill(pid_t(pid), SIGKILL)
+                        }
+                    }
+            }
+
             task.waitUntilExit()
+            status = task.terminationStatus
+            reason = task.terminationReason
         } catch {
-            return ""
+            return ("", "\(error)", 1, .exit)
         }
 
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let outData = out.fileHandleForReading.readDataToEndOfFile()
+        let errData = err.fileHandleForReading.readDataToEndOfFile()
+        let stdout = String(decoding: outData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let stderr = String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (stdout, stderr, status, reason)
     }
 
     private func handleOutputLine(_ line: String) {
@@ -544,6 +883,8 @@ final class AppModel: ObservableObject {
         exe: String,
         args: [String],
         stdin: String? = nil,
+        timeoutSeconds: Double? = nil,
+        onTimeout: (() -> Void)? = nil,
         updateTaskState: Bool = true,
         onExit: ((Int32) -> Void)? = nil
     ) {
@@ -599,6 +940,23 @@ final class AppModel: ObservableObject {
             var status: Int32 = 1
             do {
                 try task.run()
+
+                if let timeoutSeconds {
+                    let pid = task.processIdentifier
+                    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeoutSeconds) {
+                        guard task.isRunning, task.processIdentifier == pid else { return }
+                        self.handleOutputLine("ERROR: process timed out after \(Int(timeoutSeconds))s")
+                        if let onTimeout {
+                            DispatchQueue.main.async { onTimeout() }
+                        }
+                        task.terminate()
+                        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) {
+                            guard task.isRunning, task.processIdentifier == pid else { return }
+                            _ = kill(pid_t(pid), SIGKILL)
+                        }
+                    }
+                }
+
                 task.waitUntilExit()
                 status = task.terminationStatus
             } catch {
@@ -1016,98 +1374,139 @@ struct LogsView: View {
             .listStyle(.plain)
 
             HStack {
-                Button("Copy") { copyLogs() }
-                    .buttonStyle(.bordered)
-                Spacer()
                 Button("Refresh") { model.refresh() }
                     .buttonStyle(.bordered)
+                Spacer()
             }
         }
-    }
-
-    private func copyLogs() {
-        let text = model.logEntries
-            .map { "\($0.timestamp.formatted(date: .omitted, time: .standard)) \($0.message)" }
-            .joined(separator: "\n")
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
     }
 }
 
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @FocusState private var tokenFocused: Bool
+    @FocusState private var apiHashFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            GlassCard(title: "TELEGRAM") {
-                HStack {
-                    Text("Bot Token")
-                        .font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    Text(model.botTokenPresent ? "Saved in Keychain" : "Not set")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(model.botTokenPresent ? Color.green : Color.secondary)
-                }
-                Divider().opacity(0.4)
-
-                HStack {
-                    Text("Chat ID")
-                        .font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    TextField("-100123…", text: $model.chatId)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 170)
-                }
-
-                HStack(spacing: 8) {
-                    SecureField("Paste new bot token (not stored here)", text: $model.botTokenDraft)
-                        .focused($tokenFocused)
-                    Button("Save token") { model.setBotToken() }
-                        .buttonStyle(.bordered)
-                }
-
-                HStack {
-                    Button("Test connection") { model.testConnection() }
-                        .buttonStyle(.bordered)
-                    Spacer()
-                    StatusLED(ok: model.telegramValidateOk ?? false)
-                    Text(model.telegramValidateText)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-
-                HStack {
-                    Button("Init master key") { model.initMasterKey() }
-                        .buttonStyle(.bordered)
-                    Spacer()
-                    Text(model.masterKeyPresent ? "Master key: saved" : "Master key: missing")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(model.masterKeyPresent ? Color.secondary : Color.red)
-                }
-            }
-
-            GlassCard(title: "SCHEDULE") {
-                Toggle("Enable", isOn: $model.scheduleEnabled)
-                HStack {
-                    Text("Frequency")
-                    Spacer()
-                    Picker("", selection: $model.scheduleKind) {
-                        Text("Hourly").tag("hourly")
-                        Text("Daily").tag("daily")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                GlassCard(title: "TELEGRAM") {
+                    HStack {
+                        Text("Secrets")
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                        Text(model.secretPresenceFetchInFlight ? "Checking…" : (model.secretPresenceKnown ? "Checked" : "Not checked"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Button("Check") { model.refreshSecretsPresence(force: true) }
+                            .buttonStyle(.bordered)
+                            .disabled(model.secretPresenceFetchInFlight)
                     }
-                    .pickerStyle(.menu)
+                    Divider().opacity(0.4)
+
+                    HStack {
+                        Text("Bot Token")
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                        Text(model.secretPresenceKnown ? (model.botTokenPresent ? "Saved (encrypted)" : "Not set") : "Not checked")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(model.secretPresenceKnown && model.botTokenPresent ? Color.green : Color.secondary)
+                    }
+                    Divider().opacity(0.4)
+
+                    HStack {
+                        Text("Chat ID")
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                        TextField("-100123…", text: $model.chatId)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 170)
+                    }
+
+                    HStack {
+                        SecureField("Paste new bot token (not stored here)", text: $model.botTokenDraft)
+                            .focused($tokenFocused)
+                        Button("Save token") { model.setBotToken() }
+                            .buttonStyle(.bordered)
+                    }
+
+                    Divider().opacity(0.4)
+
+                    HStack {
+                        Text("API ID")
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                        TextField("123456", text: $model.mtprotoApiId)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 170)
+                    }
+
+                    HStack {
+                        Text("API hash")
+                            .font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                        Text(model.secretPresenceKnown ? (model.mtprotoApiHashPresent ? "Saved (encrypted)" : "Not set") : "Not checked")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(model.secretPresenceKnown && model.mtprotoApiHashPresent ? Color.green : Color.secondary)
+                    }
+
+                    HStack(spacing: 8) {
+                        SecureField("Paste api_hash (not stored here)", text: $model.mtprotoApiHashDraft)
+                            .focused($apiHashFocused)
+                        Button("Save api_hash") { model.setMtprotoApiHash() }
+                            .buttonStyle(.bordered)
+                    }
+
+                    HStack {
+                        Button("Clear session") { model.clearMtprotoSession() }
+                            .buttonStyle(.bordered)
+                        Spacer()
+                        Text(model.secretPresenceKnown ? (model.mtprotoSessionPresent ? "Session: saved" : "Session: none") : "Session: not checked")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Button("Test connection") { model.testConnection() }
+                            .buttonStyle(.bordered)
+                        Spacer()
+                    }
+
+                    HStack {
+                        Button("Migrate Keychain") { model.migrateKeychainSecrets() }
+                            .buttonStyle(.bordered)
+                        Button("Ensure master key") { model.initMasterKey() }
+                            .buttonStyle(.bordered)
+                        Spacer()
+                        Text(model.secretPresenceKnown ? (model.masterKeyPresent ? "Master key: ready" : "Master key: missing") : "Master key: not checked")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(model.secretPresenceKnown ? (model.masterKeyPresent ? Color.secondary : Color.red) : Color.secondary)
+                    }
+                }
+
+                GlassCard(title: "SCHEDULE") {
+                    Toggle("Enable", isOn: $model.scheduleEnabled)
+                    HStack {
+                        Text("Frequency")
+                        Spacer()
+                        Picker("", selection: $model.scheduleKind) {
+                            Text("Hourly").tag("hourly")
+                            Text("Daily").tag("daily")
+                        }
+                        .pickerStyle(.menu)
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    Button("Open logs") { model.openLogs() }
+                        .buttonStyle(.bordered)
+                    Spacer()
+                    Button("Save") { model.saveSettings() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.blue)
                 }
             }
-
-            HStack(spacing: 10) {
-                Button("Open logs") { model.openLogs() }
-                    .buttonStyle(.bordered)
-                Spacer()
-                Button("Save") { model.saveSettings() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onChange(of: tokenFocused) { _, isFocused in
             if isFocused, model.botTokenDraftIsMasked {
@@ -1115,8 +1514,11 @@ struct SettingsView: View {
                 model.botTokenDraftIsMasked = false
             }
         }
-        .onAppear {
-            model.refreshSecretsPresence()
+        .onChange(of: apiHashFocused) { _, isFocused in
+            if isFocused, model.mtprotoApiHashDraftIsMasked {
+                model.mtprotoApiHashDraft = ""
+                model.mtprotoApiHashDraftIsMasked = false
+            }
         }
     }
 }

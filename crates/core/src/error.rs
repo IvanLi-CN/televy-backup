@@ -19,13 +19,13 @@ pub enum Error {
     #[error("walkdir error: {0}")]
     Walkdir(#[from] walkdir::Error),
 
-    #[error("crypto error")]
-    Crypto,
+    #[error("crypto error: {message}")]
+    Crypto { message: String },
 
     #[error("cancelled")]
     Cancelled,
 
-    #[error("telegram bot api error: {message}")]
+    #[error("telegram error: {message}")]
     Telegram { message: String },
 
     #[error("missing index part: snapshot_id={snapshot_id} part_no={part_no}")]
@@ -49,7 +49,7 @@ impl Error {
             Self::Sqlite(_) => "sqlite",
             Self::SqliteMigrate(_) => "sqlite.migrate",
             Self::Walkdir(_) => "walkdir",
-            Self::Crypto => "crypto",
+            Self::Crypto { .. } => "crypto",
             Self::Cancelled => "task.cancelled",
             Self::Telegram { .. } => "telegram.unavailable",
             Self::MissingIndexPart { .. } => "index.part_missing",

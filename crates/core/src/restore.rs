@@ -189,7 +189,13 @@ async fn download_and_write_index_db<S: Storage>(
             );
             e
         })?;
-    let manifest_json = decrypt_framed(master_key, snapshot_id.as_bytes(), &manifest_enc)?;
+    let manifest_json = decrypt_framed(master_key, snapshot_id.as_bytes(), &manifest_enc).map_err(
+        |e| Error::Crypto {
+            message: format!(
+                "manifest decrypt failed: snapshot_id={snapshot_id} object_id={manifest_object_id}; {e}"
+            ),
+        },
+    )?;
 
     let manifest: IndexManifest =
         serde_json::from_slice(&manifest_json).map_err(|e| Error::InvalidConfig {
@@ -267,7 +273,14 @@ async fn download_and_write_index_db<S: Storage>(
         }
 
         let aad = index_part_aad(snapshot_id, part.no);
-        let part_plain = decrypt_framed(master_key, aad.as_bytes(), &part_enc)?;
+        let part_plain = decrypt_framed(master_key, aad.as_bytes(), &part_enc).map_err(|e| {
+            Error::Crypto {
+                message: format!(
+                    "index part decrypt failed: snapshot_id={snapshot_id} part_no={} object_id={}; {e}",
+                    part.no, part.object_id
+                ),
+            }
+        })?;
         compressed.extend_from_slice(&part_plain);
     }
 
@@ -387,7 +400,7 @@ async fn restore_files<S: Storage>(
                         error!(
                             event = "io.telegram.download_failed",
                             snapshot_id,
-                            object_id,
+                            object_id = %object_id,
                             chunk_hash,
                             error = %e,
                             "io.telegram.download_failed"
@@ -396,7 +409,13 @@ async fn restore_files<S: Storage>(
                             chunk_hash: chunk_hash.clone(),
                         }
                     })?;
-                    decrypt_framed(master_key, chunk_hash.as_bytes(), &framed)?
+                    decrypt_framed(master_key, chunk_hash.as_bytes(), &framed).map_err(|e| {
+                        Error::Crypto {
+                            message: format!(
+                                "chunk decrypt failed: snapshot_id={snapshot_id} chunk_hash={chunk_hash} object_id={object_id}; {e}"
+                            ),
+                        }
+                    })?
                 }
                 ChunkObjectRef::PackSlice {
                     pack_object_id,
@@ -416,7 +435,7 @@ async fn restore_files<S: Storage>(
                                         error!(
                                             event = "io.telegram.download_failed",
                                             snapshot_id,
-                                            object_id = pack_object_id,
+                                            object_id = %pack_object_id,
                                             chunk_hash,
                                             error = %e,
                                             "io.telegram.download_failed"
@@ -436,7 +455,13 @@ async fn restore_files<S: Storage>(
                         });
                     }
                     let framed = extract_pack_blob(pack_bytes, pack_off, pack_len)?;
-                    decrypt_framed(master_key, chunk_hash.as_bytes(), framed)?
+                    decrypt_framed(master_key, chunk_hash.as_bytes(), framed).map_err(|e| {
+                        Error::Crypto {
+                            message: format!(
+                                "chunk decrypt failed (pack slice): snapshot_id={snapshot_id} chunk_hash={chunk_hash} pack_object_id={pack_object_id} offset={pack_off} len={pack_len}; {e}"
+                            ),
+                        }
+                    })?
                 }
             };
 
@@ -552,7 +577,7 @@ async fn verify_chunks<S: Storage>(
                     error!(
                         event = "io.telegram.download_failed",
                         snapshot_id,
-                        object_id,
+                        object_id = %object_id,
                         chunk_hash,
                         error = %e,
                         "io.telegram.download_failed"
@@ -561,7 +586,13 @@ async fn verify_chunks<S: Storage>(
                         chunk_hash: chunk_hash.clone(),
                     }
                 })?;
-                decrypt_framed(master_key, chunk_hash.as_bytes(), &framed)?
+                decrypt_framed(master_key, chunk_hash.as_bytes(), &framed).map_err(|e| {
+                    Error::Crypto {
+                        message: format!(
+                            "chunk decrypt failed: snapshot_id={snapshot_id} chunk_hash={chunk_hash} object_id={object_id}; {e}"
+                        ),
+                    }
+                })?
             }
             ChunkObjectRef::PackSlice {
                 pack_object_id,
@@ -581,7 +612,7 @@ async fn verify_chunks<S: Storage>(
                                     error!(
                                         event = "io.telegram.download_failed",
                                         snapshot_id,
-                                        object_id = pack_object_id,
+                                        object_id = %pack_object_id,
                                         chunk_hash,
                                         error = %e,
                                         "io.telegram.download_failed"
@@ -601,7 +632,13 @@ async fn verify_chunks<S: Storage>(
                     });
                 }
                 let framed = extract_pack_blob(pack_bytes, pack_off, pack_len)?;
-                decrypt_framed(master_key, chunk_hash.as_bytes(), framed)?
+                decrypt_framed(master_key, chunk_hash.as_bytes(), framed).map_err(|e| {
+                    Error::Crypto {
+                        message: format!(
+                            "chunk decrypt failed (pack slice): snapshot_id={snapshot_id} chunk_hash={chunk_hash} pack_object_id={pack_object_id} offset={pack_off} len={pack_len}; {e}"
+                        ),
+                    }
+                })?
             }
         };
 

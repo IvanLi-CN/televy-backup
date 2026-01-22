@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
@@ -7,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use televy_backup_core::{
     APP_NAME, BackupConfig, BackupOptions, ChunkingConfig, ProgressSink, RestoreConfig,
-    RestoreOptions, TelegramBotApiStorage, TelegramBotApiStorageConfig, VerifyConfig,
+    RestoreOptions, Storage, TelegramMtProtoStorage, TelegramMtProtoStorageConfig, VerifyConfig,
     VerifyOptions, restore_snapshot_with, run_backup_with, verify_snapshot_with,
 };
 
@@ -82,6 +84,9 @@ enum SettingsCmd {
 #[derive(Subcommand)]
 enum SecretsCmd {
     SetTelegramBotToken,
+    SetTelegramApiHash,
+    ClearTelegramMtprotoSession,
+    MigrateKeychain,
     InitMasterKey,
 }
 
@@ -170,13 +175,32 @@ struct Telegram {
     mode: String,
     chat_id: String,
     bot_token_key: String,
+    #[serde(default)]
+    mtproto: TelegramMtproto,
     rate_limit: TelegramRateLimit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TelegramMtproto {
+    api_id: i32,
+    api_hash_key: String,
+    session_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TelegramRateLimit {
     max_concurrent_uploads: u32,
     min_delay_ms: u32,
+}
+
+impl Default for TelegramMtproto {
+    fn default() -> Self {
+        Self {
+            api_id: 0,
+            api_hash_key: "telegram.mtproto.api_hash".to_string(),
+            session_key: "telegram.mtproto.session".to_string(),
+        }
+    }
 }
 
 impl Default for Settings {
@@ -199,9 +223,10 @@ impl Default for Settings {
                 max_bytes: 10 * 1024 * 1024,
             },
             telegram: Telegram {
-                mode: "botapi".to_string(),
+                mode: "mtproto".to_string(),
                 chat_id: "".to_string(),
                 bot_token_key: "telegram.bot_token".to_string(),
+                mtproto: TelegramMtproto::default(),
                 rate_limit: TelegramRateLimit {
                     max_concurrent_uploads: 2,
                     min_delay_ms: 250,
@@ -242,6 +267,9 @@ impl CliError {
 struct NdjsonProgressSink {
     task_id: String,
 }
+
+#[cfg(target_os = "macos")]
+static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
 
 impl ProgressSink for NdjsonProgressSink {
     fn on_progress(&self, p: televy_backup_core::TaskProgress) {
@@ -314,10 +342,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             SecretsCmd::SetTelegramBotToken => {
                 secrets_set_telegram_bot_token(&config_dir, cli.json).await
             }
-            SecretsCmd::InitMasterKey => secrets_init_master_key(cli.json).await,
+            SecretsCmd::SetTelegramApiHash => {
+                secrets_set_telegram_api_hash(&config_dir, cli.json).await
+            }
+            SecretsCmd::ClearTelegramMtprotoSession => {
+                secrets_clear_telegram_mtproto_session(&config_dir, cli.json).await
+            }
+            SecretsCmd::MigrateKeychain => secrets_migrate_keychain(&config_dir, cli.json).await,
+            SecretsCmd::InitMasterKey => secrets_init_master_key(&config_dir, cli.json).await,
         },
         Command::Telegram { cmd } => match cmd {
-            TelegramCmd::Validate => telegram_validate(&config_dir, cli.json).await,
+            TelegramCmd::Validate => telegram_validate(&config_dir, &data_dir, cli.json).await,
         },
         Command::Snapshots { cmd } => match cmd {
             SnapshotsCmd::List { limit } => snapshots_list(&data_dir, limit, cli.json).await,
@@ -360,13 +395,23 @@ async fn settings_get(config_dir: &Path, json: bool, with_secrets: bool) -> Resu
 
     if json {
         if with_secrets {
-            let telegram_present = get_secret(&settings.telegram.bot_token_key)?.is_some();
-            let master_present = get_secret(MASTER_KEY_KEY)?.is_some();
+            let telegram_present =
+                get_secret(config_dir, &settings.telegram.bot_token_key)?.is_some();
+            let master_present = get_secret(config_dir, MASTER_KEY_KEY)?.is_some();
+            let mtproto_api_hash_present =
+                get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?.is_some();
+            let mtproto_session_present =
+                get_secret(config_dir, &settings.telegram.mtproto.session_key)?.is_some();
             println!(
                 "{}",
                 serde_json::json!({
                     "settings": settings,
-                    "secrets": { "telegramBotTokenPresent": telegram_present, "masterKeyPresent": master_present }
+                    "secrets": {
+                        "telegramBotTokenPresent": telegram_present,
+                        "masterKeyPresent": master_present,
+                        "telegramMtprotoApiHashPresent": mtproto_api_hash_present,
+                        "telegramMtprotoSessionPresent": mtproto_session_present
+                    }
                 })
             );
         } else {
@@ -380,11 +425,18 @@ async fn settings_get(config_dir: &Path, json: bool, with_secrets: bool) -> Resu
             println!();
         }
         if with_secrets {
-            let telegram_present = get_secret(&settings.telegram.bot_token_key)?.is_some();
-            let master_present = get_secret(MASTER_KEY_KEY)?.is_some();
+            let telegram_present =
+                get_secret(config_dir, &settings.telegram.bot_token_key)?.is_some();
+            let master_present = get_secret(config_dir, MASTER_KEY_KEY)?.is_some();
+            let mtproto_api_hash_present =
+                get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?.is_some();
+            let mtproto_session_present =
+                get_secret(config_dir, &settings.telegram.mtproto.session_key)?.is_some();
             println!();
             println!("telegramBotTokenPresent={telegram_present}");
             println!("masterKeyPresent={master_present}");
+            println!("telegramMtprotoApiHashPresent={mtproto_api_hash_present}");
+            println!("telegramMtprotoSessionPresent={mtproto_session_present}");
         }
     }
     Ok(())
@@ -416,7 +468,7 @@ async fn secrets_set_telegram_bot_token(config_dir: &Path, json: bool) -> Result
     if token.is_empty() {
         return Err(CliError::new("config.invalid", "token is empty"));
     }
-    set_secret(&settings.telegram.bot_token_key, &token)?;
+    set_secret(config_dir, &settings.telegram.bot_token_key, &token)?;
 
     if json {
         println!("{}", serde_json::json!({ "ok": true }));
@@ -426,94 +478,297 @@ async fn secrets_set_telegram_bot_token(config_dir: &Path, json: bool) -> Result
     Ok(())
 }
 
-async fn secrets_init_master_key(json: bool) -> Result<(), CliError> {
-    if get_secret(MASTER_KEY_KEY)?.is_some() {
-        return Err(CliError::new(
-            "keychain.write_failed",
-            "master key already exists",
-        ));
-    }
-    let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes)
-        .map_err(|e| CliError::new("keychain.write_failed", format!("getrandom failed: {e}")))?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    set_secret(MASTER_KEY_KEY, &b64)?;
-    if json {
-        println!("{}", serde_json::json!({ "ok": true }));
-    } else {
-        println!("ok");
-    }
-    Ok(())
-}
-
-async fn telegram_validate(config_dir: &Path, json: bool) -> Result<(), CliError> {
+async fn secrets_set_telegram_api_hash(config_dir: &Path, json: bool) -> Result<(), CliError> {
     let settings = load_settings(config_dir)?;
-    validate_settings(&settings)?;
-    if settings.telegram.chat_id.is_empty() {
-        return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
+    let mut api_hash = String::new();
+    std::io::stdin()
+        .read_to_string(&mut api_hash)
+        .map_err(|e| CliError::new("config.read_failed", e.to_string()))?;
+    let api_hash = api_hash.trim().to_string();
+    if api_hash.is_empty() {
+        return Err(CliError::new("config.invalid", "api_hash is empty"));
     }
-    let token = get_secret(&settings.telegram.bot_token_key)?
-        .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
 
-    let client = reqwest::Client::new();
-    let base = format!("https://api.telegram.org/bot{token}");
+    set_secret(
+        config_dir,
+        &settings.telegram.mtproto.api_hash_key,
+        &api_hash,
+    )?;
 
-    let me: TelegramResponse<TelegramMeResult> = client
-        .get(format!("{base}/getMe"))
-        .send()
-        .await
-        .map_err(|e| {
-            CliError::retryable(
-                "telegram.unavailable",
-                format!("getMe failed: {}", redact_secret(e.to_string(), &token)),
-            )
-        })?
-        .json()
-        .await
-        .map_err(|e| CliError::new("telegram.unavailable", format!("getMe json failed: {e}")))?;
-    if !me.ok {
-        return Err(CliError::new(
-            "telegram.unauthorized",
-            me.description
-                .unwrap_or_else(|| "telegram returned ok=false".to_string()),
-        ));
+    if json {
+        println!("{}", serde_json::json!({ "ok": true }));
+    } else {
+        println!("ok");
     }
-    let bot_username = me.result.username.unwrap_or_default();
+    Ok(())
+}
 
-    let chat: TelegramResponse<TelegramChatResult> = client
-        .get(format!("{base}/getChat"))
-        .query(&[("chat_id", settings.telegram.chat_id.clone())])
-        .send()
-        .await
-        .map_err(|e| {
-            CliError::retryable(
-                "telegram.unavailable",
-                format!("getChat failed: {}", redact_secret(e.to_string(), &token)),
-            )
-        })?
-        .json()
-        .await
-        .map_err(|e| CliError::new("telegram.unavailable", format!("getChat json failed: {e}")))?;
-    if !chat.ok {
-        let msg = chat
-            .description
-            .unwrap_or_else(|| "telegram returned ok=false".to_string());
-        return Err(CliError::new("telegram.chat_not_found", msg));
+async fn secrets_clear_telegram_mtproto_session(
+    config_dir: &Path,
+    json: bool,
+) -> Result<(), CliError> {
+    let settings = load_settings(config_dir)?;
+    delete_secret(config_dir, &settings.telegram.mtproto.session_key)?;
+
+    if json {
+        println!("{}", serde_json::json!({ "ok": true }));
+    } else {
+        println!("ok");
+    }
+    Ok(())
+}
+
+async fn secrets_migrate_keychain(config_dir: &Path, json: bool) -> Result<(), CliError> {
+    let settings = load_settings(config_dir)?;
+
+    let mut migrated = Vec::<String>::new();
+    let mut deleted = Vec::<String>::new();
+    let mut conflicts = Vec::<String>::new();
+
+    let bot_key = settings.telegram.bot_token_key.clone();
+    if let Some(token) = keychain_get_secret(&bot_key)? {
+        let store_val = get_secret(config_dir, &bot_key)?;
+        match store_val {
+            None => {
+                set_secret(config_dir, &bot_key, &token)?;
+                migrated.push(bot_key.clone());
+                if keychain_delete_secret(&bot_key)? {
+                    deleted.push(bot_key.clone());
+                }
+            }
+            Some(existing) => {
+                if existing == token {
+                    if keychain_delete_secret(&bot_key)? {
+                        deleted.push(bot_key.clone());
+                    }
+                } else {
+                    conflicts.push(bot_key.clone());
+                }
+            }
+        }
+    }
+
+    if let Some(master_key) = keychain_get_secret(MASTER_KEY_KEY)? {
+        let store_val = get_secret(config_dir, MASTER_KEY_KEY)?;
+        match store_val {
+            None => {
+                set_secret(config_dir, MASTER_KEY_KEY, &master_key)?;
+                migrated.push(MASTER_KEY_KEY.to_string());
+                if keychain_delete_secret(MASTER_KEY_KEY)? {
+                    deleted.push(MASTER_KEY_KEY.to_string());
+                }
+            }
+            Some(existing) => {
+                if existing == master_key {
+                    if keychain_delete_secret(MASTER_KEY_KEY)? {
+                        deleted.push(MASTER_KEY_KEY.to_string());
+                    }
+                } else {
+                    return Err(CliError::new(
+                        "secrets.migrate_conflict",
+                        "master key differs between secrets store and Keychain; refusing to delete Keychain item. Fix: decide which master key to keep, then re-run migration.",
+                    ));
+                }
+            }
+        }
     }
 
     if json {
         println!(
             "{}",
             serde_json::json!({
-                "botUsername": bot_username,
-                "chatId": settings.telegram.chat_id,
+                "ok": true,
+                "migrated": migrated,
+                "deletedKeychainItems": deleted,
+                "conflicts": conflicts,
             })
         );
     } else {
-        println!("botUsername={bot_username}");
-        println!("chatId={}", settings.telegram.chat_id);
+        println!("ok");
+        if !conflicts.is_empty() {
+            println!("conflicts={}", conflicts.join(","));
+        }
+    }
+
+    Ok(())
+}
+
+async fn secrets_init_master_key(config_dir: &Path, json: bool) -> Result<(), CliError> {
+    if get_secret(config_dir, MASTER_KEY_KEY)?.is_some() {
+        return Err(CliError::new(
+            "secrets.store_failed",
+            "master key already exists",
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if keychain_get_secret(MASTER_KEY_KEY)?.is_some() {
+            return Err(CliError::new(
+                "secrets.store_failed",
+                "master key exists in Keychain (old scheme). Fix: run `televybackup secrets migrate-keychain` instead of generating a new one.",
+            ));
+        }
+    }
+
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|e| CliError::new("secrets.store_failed", format!("getrandom failed: {e}")))?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    set_secret(config_dir, MASTER_KEY_KEY, &b64)?;
+    if json {
+        println!("{}", serde_json::json!({ "ok": true }));
+    } else {
+        println!("ok");
     }
     Ok(())
+}
+
+async fn telegram_validate(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
+    let settings = load_settings(config_dir)?;
+    validate_settings(&settings)?;
+    if settings.telegram.chat_id.is_empty() {
+        return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
+    }
+
+    let bot_token = get_secret(config_dir, &settings.telegram.bot_token_key)?
+        .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
+    let api_hash =
+        get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(|| {
+            CliError::new(
+                "telegram.mtproto.missing_api_hash",
+                "mtproto api_hash missing",
+            )
+        })?;
+
+    let session = load_optional_base64_secret_bytes(
+        config_dir,
+        &settings.telegram.mtproto.session_key,
+        "telegram.mtproto.session_invalid",
+        "invalid mtproto session (try: `televybackup secrets clear-telegram-mtproto-session`)",
+    )?;
+
+    let cache_dir = data_dir.join("cache").join("mtproto");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+    let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+        api_id: settings.telegram.mtproto.api_id,
+        api_hash: api_hash.clone(),
+        bot_token: bot_token.clone(),
+        chat_id: settings.telegram.chat_id.clone(),
+        session,
+        cache_dir,
+        helper_path: None,
+    })
+    .await
+    .map_err(|e| map_mtproto_validate_err(e, &bot_token, &api_hash))?;
+
+    let mut sample = vec![0u8; 1024];
+    getrandom::getrandom(&mut sample)
+        .map_err(|e| CliError::new("config.invalid", format!("getrandom failed: {e}")))?;
+
+    let sample_name = "televybackup-validate.bin";
+    let object_id = storage
+        .upload_document(sample_name, sample.clone())
+        .await
+        .map_err(|e| map_mtproto_validate_err(e, &bot_token, &api_hash))?;
+    let downloaded = storage
+        .download_document(&object_id)
+        .await
+        .map_err(|e| map_mtproto_validate_err(e, &bot_token, &api_hash))?;
+    if downloaded != sample {
+        return Err(CliError::new(
+            "telegram.roundtrip_failed",
+            format!(
+                "roundtrip mismatch: uploaded_len={} downloaded_len={}",
+                sample.len(),
+                downloaded.len()
+            ),
+        ));
+    }
+
+    let session = storage.session_bytes();
+    if let Some(bytes) = session {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        set_secret(config_dir, &settings.telegram.mtproto.session_key, &b64)?;
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "mode": "mtproto",
+                "chatId": settings.telegram.chat_id,
+                "roundTripOk": true,
+                "sampleObjectId": object_id,
+            })
+        );
+    } else {
+        println!("mode=mtproto");
+        println!("chatId={}", settings.telegram.chat_id);
+        println!("roundTripOk=true");
+        println!("sampleObjectId={object_id}");
+    }
+    Ok(())
+}
+
+fn load_optional_base64_secret_bytes(
+    config_dir: &Path,
+    key: &str,
+    error_code: &'static str,
+    error_message: &str,
+) -> Result<Option<Vec<u8>>, CliError> {
+    let Some(b64) = get_secret(config_dir, key)? else {
+        return Ok(None);
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .map_err(|e| CliError::new(error_code, format!("{error_message}: {e}")))?;
+    Ok(Some(bytes))
+}
+
+fn map_mtproto_validate_err(
+    e: televy_backup_core::Error,
+    bot_token: &str,
+    api_hash: &str,
+) -> CliError {
+    let msg = redact_secret(redact_secret(e.to_string(), bot_token), api_hash);
+    let msg_lc = msg.to_ascii_lowercase();
+
+    if msg_lc.contains("invalid session base64") || msg_lc.contains("session load failed") {
+        return CliError::new("telegram.mtproto.session_invalid", msg);
+    }
+    if msg_lc.contains("bot_sign_in failed") {
+        return CliError::new("telegram.unauthorized", msg);
+    }
+    if msg_lc.contains("chat not found") || msg_lc.contains("resolve chat failed") {
+        return CliError::new("telegram.chat_not_found", msg);
+    }
+    if msg_lc.contains("message not found") || msg_lc.contains("document mismatch") {
+        return CliError::new("telegram.roundtrip_failed", msg);
+    }
+
+    match e {
+        televy_backup_core::Error::Telegram { .. } => {
+            CliError::retryable("telegram.unavailable", msg)
+        }
+        televy_backup_core::Error::InvalidConfig { .. } => {
+            if msg_lc.contains("failed to start mtproto helper")
+                || msg_lc.contains("mtproto helper missing stdin")
+                || msg_lc.contains("mtproto helper missing stdout")
+                || msg_lc.contains("cache dir create failed")
+            {
+                CliError::new("config.invalid", msg)
+            } else {
+                CliError::retryable("telegram.unavailable", msg)
+            }
+        }
+        televy_backup_core::Error::Integrity { .. } => {
+            CliError::new("telegram.roundtrip_failed", msg)
+        }
+        _ => CliError::new("telegram.roundtrip_failed", msg),
+    }
 }
 
 async fn snapshots_list(data_dir: &Path, limit: u32, json: bool) -> Result<(), CliError> {
@@ -805,17 +1060,13 @@ async fn backup_run(
         let settings = load_settings(config_dir)?;
         validate_settings(&settings)?;
 
-        let token = get_secret(&settings.telegram.bot_token_key)?
+        let bot_token = get_secret(config_dir, &settings.telegram.bot_token_key)?
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
-        let master_key = load_master_key()?;
+        let master_key = load_master_key(config_dir)?;
 
         if settings.telegram.chat_id.is_empty() {
             return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
         }
-        let storage = TelegramBotApiStorage::new(TelegramBotApiStorageConfig {
-            bot_token: token,
-            chat_id: settings.telegram.chat_id.clone(),
-        });
 
         let db_path = data_dir.join("index").join("index.sqlite");
         if let Some(parent) = db_path.parent() {
@@ -843,25 +1094,67 @@ async fn backup_run(
             progress: if events { Some(&sink) } else { None },
         };
 
-        run_backup_with(
-            &storage,
-            BackupConfig {
-                db_path,
-                source_path: source,
-                label,
-                chunking: ChunkingConfig {
-                    min_bytes: settings.chunking.min_bytes,
-                    avg_bytes: settings.chunking.avg_bytes,
-                    max_bytes: settings.chunking.max_bytes,
-                },
-                master_key,
-                snapshot_id: None,
-                keep_last_snapshots: settings.retention.keep_last_snapshots,
+        let cfg = BackupConfig {
+            db_path,
+            source_path: source,
+            label,
+            chunking: ChunkingConfig {
+                min_bytes: settings.chunking.min_bytes,
+                avg_bytes: settings.chunking.avg_bytes,
+                max_bytes: settings.chunking.max_bytes,
             },
-            opts,
-        )
+            master_key,
+            snapshot_id: None,
+            keep_last_snapshots: settings.retention.keep_last_snapshots,
+        };
+
+        let api_hash = get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?
+            .ok_or_else(|| {
+                CliError::new(
+                    "telegram.mtproto.missing_api_hash",
+                    "mtproto api_hash missing",
+                )
+            })?;
+        let session = load_optional_base64_secret_bytes(
+            config_dir,
+            &settings.telegram.mtproto.session_key,
+            "telegram.mtproto.session_invalid",
+            "invalid mtproto session (try: `televybackup secrets clear-telegram-mtproto-session`)",
+        )?;
+
+        let cache_dir = data_dir.join("cache").join("mtproto");
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+        let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+            api_id: settings.telegram.mtproto.api_id,
+            api_hash: api_hash.clone(),
+            bot_token: bot_token.clone(),
+            chat_id: settings.telegram.chat_id.clone(),
+            session,
+            cache_dir,
+            helper_path: None,
+        })
         .await
-        .map_err(map_core_err)
+        .map_err(map_core_err)?;
+
+        let res = run_backup_with(&storage, cfg, opts)
+            .await
+            .map_err(map_core_err)?;
+
+        if let Some(bytes) = storage.session_bytes() {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            if let Err(e) = set_secret(config_dir, &settings.telegram.mtproto.session_key, &b64) {
+                tracing::warn!(
+                    event = "secrets.session_persist_failed",
+                    error_code = e.code,
+                    error_message = %e.message,
+                    "failed to persist mtproto session"
+                );
+            }
+        }
+
+        Ok(res)
     }
     .await;
 
@@ -975,19 +1268,26 @@ async fn restore_run(
         let settings = load_settings(config_dir)?;
         validate_settings(&settings)?;
 
-        let token = get_secret(&settings.telegram.bot_token_key)?
-            .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
-        let master_key = load_master_key()?;
         if settings.telegram.chat_id.is_empty() {
             return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
         }
-        let storage = TelegramBotApiStorage::new(TelegramBotApiStorageConfig {
-            bot_token: token,
-            chat_id: settings.telegram.chat_id.clone(),
-        });
 
         let local_db_path = data_dir.join("index").join("index.sqlite");
-        let manifest_object_id = lookup_manifest_object_id(&local_db_path, &snapshot_id).await?;
+        let (manifest_object_id, snapshot_provider) =
+            lookup_manifest_meta(&local_db_path, &snapshot_id).await?;
+
+        if snapshot_provider != "telegram.mtproto" {
+            return Err(CliError::new(
+                "snapshot.unsupported_provider",
+                format!(
+                    "unsupported snapshot provider: snapshot_id={snapshot_id} provider={snapshot_provider}. TelevyBackup is MTProto-only now. Fix: run a new backup with MTProto."
+                ),
+            ));
+        }
+
+        let bot_token = get_secret(config_dir, &settings.telegram.bot_token_key)?
+            .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
+        let master_key = load_master_key(config_dir)?;
 
         let cache_db = data_dir
             .join("cache")
@@ -1019,19 +1319,55 @@ async fn restore_run(
             progress: if events { Some(&sink) } else { None },
         };
 
-        restore_snapshot_with(
-            &storage,
-            RestoreConfig {
-                snapshot_id: snapshot_id.clone(),
-                manifest_object_id,
-                master_key,
-                index_db_path: cache_db,
-                target_path: target,
-            },
-            opts,
-        )
+        let cfg = RestoreConfig {
+            snapshot_id: snapshot_id.clone(),
+            manifest_object_id,
+            master_key,
+            index_db_path: cache_db,
+            target_path: target,
+        };
+
+        let api_hash = get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(
+            || CliError::new("telegram.mtproto.missing_api_hash", "mtproto api_hash missing"),
+        )?;
+        let session = load_optional_base64_secret_bytes(
+            config_dir,
+            &settings.telegram.mtproto.session_key,
+            "telegram.mtproto.session_invalid",
+            "invalid mtproto session (try: `televybackup secrets clear-telegram-mtproto-session`)",
+        )?;
+
+        let cache_dir = data_dir.join("cache").join("mtproto");
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+        let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+            api_id: settings.telegram.mtproto.api_id,
+            api_hash: api_hash.clone(),
+            bot_token: bot_token.clone(),
+            chat_id: settings.telegram.chat_id.clone(),
+            session,
+            cache_dir,
+            helper_path: None,
+        })
         .await
-        .map_err(map_core_err)
+        .map_err(map_core_err)?;
+
+        let res = restore_snapshot_with(&storage, cfg, opts).await.map_err(map_core_err)?;
+
+        if let Some(bytes) = storage.session_bytes() {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            if let Err(e) = set_secret(config_dir, &settings.telegram.mtproto.session_key, &b64) {
+                tracing::warn!(
+                    event = "secrets.session_persist_failed",
+                    error_code = e.code,
+                    error_message = %e.message,
+                    "failed to persist mtproto session"
+                );
+            }
+        }
+
+        Ok(res)
     }
     .await;
 
@@ -1124,19 +1460,26 @@ async fn verify_run(
         let settings = load_settings(config_dir)?;
         validate_settings(&settings)?;
 
-        let token = get_secret(&settings.telegram.bot_token_key)?
-            .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
-        let master_key = load_master_key()?;
         if settings.telegram.chat_id.is_empty() {
             return Err(CliError::new("config.invalid", "telegram.chat_id is empty"));
         }
-        let storage = TelegramBotApiStorage::new(TelegramBotApiStorageConfig {
-            bot_token: token,
-            chat_id: settings.telegram.chat_id.clone(),
-        });
 
         let local_db_path = data_dir.join("index").join("index.sqlite");
-        let manifest_object_id = lookup_manifest_object_id(&local_db_path, &snapshot_id).await?;
+        let (manifest_object_id, snapshot_provider) =
+            lookup_manifest_meta(&local_db_path, &snapshot_id).await?;
+
+        if snapshot_provider != "telegram.mtproto" {
+            return Err(CliError::new(
+                "snapshot.unsupported_provider",
+                format!(
+                    "unsupported snapshot provider: snapshot_id={snapshot_id} provider={snapshot_provider}. TelevyBackup is MTProto-only now. Fix: run a new backup with MTProto."
+                ),
+            ));
+        }
+
+        let bot_token = get_secret(config_dir, &settings.telegram.bot_token_key)?
+            .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
+        let master_key = load_master_key(config_dir)?;
 
         let cache_db = data_dir
             .join("cache")
@@ -1168,18 +1511,54 @@ async fn verify_run(
             progress: if events { Some(&sink) } else { None },
         };
 
-        verify_snapshot_with(
-            &storage,
-            VerifyConfig {
-                snapshot_id: snapshot_id.clone(),
-                manifest_object_id,
-                master_key,
-                index_db_path: cache_db,
-            },
-            opts,
-        )
+        let cfg = VerifyConfig {
+            snapshot_id: snapshot_id.clone(),
+            manifest_object_id,
+            master_key,
+            index_db_path: cache_db,
+        };
+
+        let api_hash = get_secret(config_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(
+            || CliError::new("telegram.mtproto.missing_api_hash", "mtproto api_hash missing"),
+        )?;
+        let session = load_optional_base64_secret_bytes(
+            config_dir,
+            &settings.telegram.mtproto.session_key,
+            "telegram.mtproto.session_invalid",
+            "invalid mtproto session (try: `televybackup secrets clear-telegram-mtproto-session`)",
+        )?;
+
+        let cache_dir = data_dir.join("cache").join("mtproto");
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+        let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+            api_id: settings.telegram.mtproto.api_id,
+            api_hash: api_hash.clone(),
+            bot_token: bot_token.clone(),
+            chat_id: settings.telegram.chat_id.clone(),
+            session,
+            cache_dir,
+            helper_path: None,
+        })
         .await
-        .map_err(map_core_err)
+        .map_err(map_core_err)?;
+
+        let res = verify_snapshot_with(&storage, cfg, opts).await.map_err(map_core_err)?;
+
+        if let Some(bytes) = storage.session_bytes() {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+            if let Err(e) = set_secret(config_dir, &settings.telegram.mtproto.session_key, &b64) {
+                tracing::warn!(
+                    event = "secrets.session_persist_failed",
+                    error_code = e.code,
+                    error_message = %e.message,
+                    "failed to persist mtproto session"
+                );
+            }
+        }
+
+        Ok(res)
     }
     .await;
 
@@ -1244,20 +1623,27 @@ async fn verify_run(
     }
 }
 
-async fn lookup_manifest_object_id(db_path: &Path, snapshot_id: &str) -> Result<String, CliError> {
+async fn lookup_manifest_meta(
+    db_path: &Path,
+    snapshot_id: &str,
+) -> Result<(String, String), CliError> {
     let pool = televy_backup_core::index_db::open_existing_index_db(db_path)
         .await
         .map_err(map_core_err)?;
 
-    let row =
-        sqlx::query("SELECT manifest_object_id FROM remote_indexes WHERE snapshot_id = ? LIMIT 1")
-            .bind(snapshot_id)
-            .fetch_optional(&pool)
-            .await
-            .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+    let row = sqlx::query(
+        "SELECT manifest_object_id, provider FROM remote_indexes WHERE snapshot_id = ? LIMIT 1",
+    )
+    .bind(snapshot_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| CliError::new("db.failed", e.to_string()))?;
 
     match row {
-        Some(r) => Ok(r.get::<String, _>("manifest_object_id")),
+        Some(r) => Ok((
+            r.get::<String, _>("manifest_object_id"),
+            r.get::<String, _>("provider"),
+        )),
         None => Err(CliError::new(
             "snapshot.not_found",
             "manifest not found in local db",
@@ -1290,8 +1676,16 @@ fn load_settings(config_dir: &Path) -> Result<Settings, CliError> {
     }
     let text = std::fs::read_to_string(&path)
         .map_err(|e| CliError::new("config.read_failed", e.to_string()))?;
-    let s: Settings =
+    let mut s: Settings =
         toml::from_str(&text).map_err(|e| CliError::new("config.invalid", e.to_string()))?;
+
+    // MTProto-only migration: transparently upgrade old botapi configs so UI/CLI stop showing botapi.
+    if s.telegram.mode.trim() != "mtproto" {
+        s.telegram.mode = "mtproto".to_string();
+        if let Ok(new_text) = toml::to_string(&s) {
+            let _ = atomic_write(&path, new_text.as_bytes());
+        }
+    }
     Ok(s)
 }
 
@@ -1310,11 +1704,35 @@ fn save_settings(config_dir: &Path, settings: &Settings) -> Result<(), CliError>
 }
 
 fn validate_settings(settings: &Settings) -> Result<(), CliError> {
-    if settings.telegram.mode != "botapi" {
-        return Err(CliError::new(
-            "config.invalid",
-            "telegram.mode must be \"botapi\"",
-        ));
+    match settings.telegram.mode.as_str() {
+        "mtproto" => {
+            if settings.telegram.mtproto.api_id <= 0 {
+                return Err(CliError::new(
+                    "config.invalid",
+                    "telegram.mtproto.api_id must be > 0",
+                ));
+            }
+            if settings.telegram.mtproto.api_hash_key.is_empty() {
+                return Err(CliError::new(
+                    "config.invalid",
+                    "telegram.mtproto.api_hash_key must not be empty",
+                ));
+            }
+            if settings.telegram.mtproto.session_key.is_empty() {
+                return Err(CliError::new(
+                    "config.invalid",
+                    "telegram.mtproto.session_key must not be empty",
+                ));
+            }
+        }
+        other => {
+            return Err(CliError::new(
+                "config.invalid",
+                format!(
+                    "telegram.mode must be \"mtproto\" (got {other:?}); Telegram Bot API is no longer supported"
+                ),
+            ));
+        }
     }
     if settings.telegram.bot_token_key.is_empty() {
         return Err(CliError::new(
@@ -1348,7 +1766,7 @@ fn redact_secret(s: impl Into<String>, secret: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn get_secret(key: &str) -> Result<Option<String>, CliError> {
+fn keychain_get_secret(key: &str) -> Result<Option<String>, CliError> {
     use security_framework::passwords::{PasswordOptions, generic_password};
 
     let opts = PasswordOptions::new_generic_password(APP_NAME, key);
@@ -1369,7 +1787,7 @@ fn get_secret(key: &str) -> Result<Option<String>, CliError> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn get_secret(_key: &str) -> Result<Option<String>, CliError> {
+fn keychain_get_secret(_key: &str) -> Result<Option<String>, CliError> {
     Err(CliError::new(
         "keychain.unavailable",
         "keychain only supported on macOS",
@@ -1377,15 +1795,30 @@ fn get_secret(_key: &str) -> Result<Option<String>, CliError> {
 }
 
 #[cfg(target_os = "macos")]
-fn set_secret(key: &str, value: &str) -> Result<(), CliError> {
+fn keychain_set_secret(key: &str, value: &str) -> Result<(), CliError> {
     use security_framework::passwords::set_generic_password;
     set_generic_password(APP_NAME, key, value.as_bytes())
-        .map_err(|e| CliError::new("keychain.write_failed", e.to_string()))?;
+        .map_err(|e| CliError::new("keychain.unavailable", e.to_string()))?;
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn keychain_delete_secret(key: &str) -> Result<bool, CliError> {
+    use security_framework::passwords::delete_generic_password;
+
+    match delete_generic_password(APP_NAME, key) {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            if is_keychain_not_found(&e) {
+                return Ok(false);
+            }
+            Err(CliError::new("keychain.unavailable", e.to_string()))
+        }
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
-fn set_secret(_key: &str, _value: &str) -> Result<(), CliError> {
+fn keychain_delete_secret(_key: &str) -> Result<bool, CliError> {
     Err(CliError::new(
         "keychain.unavailable",
         "keychain only supported on macOS",
@@ -1398,8 +1831,87 @@ fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
     e.code() == -25300
 }
 
-fn load_master_key() -> Result<[u8; 32], CliError> {
-    let b64 = get_secret(MASTER_KEY_KEY)?
+#[cfg(target_os = "macos")]
+fn load_or_create_vault_key() -> Result<[u8; 32], CliError> {
+    if let Some(key) = VAULT_KEY_CACHE.get() {
+        return Ok(*key);
+    }
+
+    let key = load_or_create_vault_key_uncached()?;
+    let _ = VAULT_KEY_CACHE.set(key);
+    Ok(key)
+}
+
+#[cfg(target_os = "macos")]
+fn load_or_create_vault_key_uncached() -> Result<[u8; 32], CliError> {
+    let existing = keychain_get_secret(televy_backup_core::secrets::VAULT_KEY_KEY)
+        .map_err(|e| CliError::new("secrets.vault_unavailable", e.message))?;
+
+    if let Some(b64) = existing {
+        return televy_backup_core::secrets::vault_key_from_base64(&b64)
+            .map_err(|e| CliError::new("secrets.vault_unavailable", e.to_string()));
+    }
+
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|e| {
+        CliError::new(
+            "secrets.vault_unavailable",
+            format!("getrandom failed: {e}"),
+        )
+    })?;
+    let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
+    keychain_set_secret(televy_backup_core::secrets::VAULT_KEY_KEY, &b64)
+        .map_err(|e| CliError::new("secrets.vault_unavailable", e.message))?;
+
+    Ok(bytes)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_or_create_vault_key() -> Result<[u8; 32], CliError> {
+    Err(CliError::new(
+        "keychain.unavailable",
+        "keychain only supported on macOS",
+    ))
+}
+
+fn get_secret(config_dir: &Path, key: &str) -> Result<Option<String>, CliError> {
+    let vault_key = load_or_create_vault_key()?;
+    let path = televy_backup_core::secrets::secrets_path(config_dir);
+    let store = televy_backup_core::secrets::load_secrets_store(&path, &vault_key)
+        .map_err(map_secrets_store_err)?;
+    Ok(store.get(key).map(|s| s.to_string()))
+}
+
+fn set_secret(config_dir: &Path, key: &str, value: &str) -> Result<(), CliError> {
+    let vault_key = load_or_create_vault_key()?;
+    let path = televy_backup_core::secrets::secrets_path(config_dir);
+    let mut store = televy_backup_core::secrets::load_secrets_store(&path, &vault_key)
+        .map_err(map_secrets_store_err)?;
+    store.set(key, value);
+    televy_backup_core::secrets::save_secrets_store(&path, &vault_key, &store)
+        .map_err(map_secrets_store_err)?;
+    Ok(())
+}
+
+fn delete_secret(config_dir: &Path, key: &str) -> Result<bool, CliError> {
+    let vault_key = load_or_create_vault_key()?;
+    let path = televy_backup_core::secrets::secrets_path(config_dir);
+    let mut store = televy_backup_core::secrets::load_secrets_store(&path, &vault_key)
+        .map_err(map_secrets_store_err)?;
+    let removed = store.remove(key);
+    if removed {
+        televy_backup_core::secrets::save_secrets_store(&path, &vault_key, &store)
+            .map_err(map_secrets_store_err)?;
+    }
+    Ok(removed)
+}
+
+fn map_secrets_store_err(e: televy_backup_core::secrets::SecretsStoreError) -> CliError {
+    CliError::new("secrets.store_failed", e.to_string())
+}
+
+fn load_master_key(config_dir: &Path) -> Result<[u8; 32], CliError> {
+    let b64 = get_secret(config_dir, MASTER_KEY_KEY)?
         .ok_or_else(|| CliError::new("config.invalid", "master key missing"))?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64.as_bytes())
@@ -1413,6 +1925,9 @@ fn map_core_err(e: televy_backup_core::Error) -> CliError {
     match e {
         televy_backup_core::Error::InvalidConfig { message } => {
             CliError::new("config.invalid", message)
+        }
+        televy_backup_core::Error::Crypto { message } => {
+            CliError::new("crypto", format!("crypto error: {message}"))
         }
         televy_backup_core::Error::Telegram { message } => {
             CliError::retryable("telegram.unavailable", message)
@@ -1437,18 +1952,3 @@ fn emit_error(e: &CliError) {
     let json = serde_json::to_string(e).unwrap_or_else(|_| "{\"code\":\"unknown\",\"message\":\"json encode failed\",\"details\":{},\"retryable\":false}".to_string());
     let _ = writeln!(std::io::stderr(), "{json}");
 }
-
-#[derive(Debug, Deserialize)]
-struct TelegramResponse<T> {
-    ok: bool,
-    result: T,
-    description: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramMeResult {
-    username: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TelegramChatResult {}

@@ -18,7 +18,6 @@ use crate::storage::{Storage, encode_tgfile_object_id, encode_tgpack_object_id};
 use crate::{Error, Result};
 use tokio_util::sync::CancellationToken;
 
-const TELEGRAM_BOTAPI_MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 const INDEX_PART_BYTES: usize = 32 * 1024 * 1024;
 const PACK_ENABLE_MIN_OBJECTS: usize = 10;
 const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
@@ -40,16 +39,6 @@ impl ChunkingConfig {
         if !(self.min_bytes <= self.avg_bytes && self.avg_bytes <= self.max_bytes) {
             return Err(Error::InvalidConfig {
                 message: "chunk sizes must satisfy min <= avg <= max".to_string(),
-            });
-        }
-
-        // Framing overhead: 1(version) + 24(nonce) + 16(tag)
-        let max_framed = (self.max_bytes as usize) + 1 + 24 + 16;
-        if max_framed > TELEGRAM_BOTAPI_MAX_FILE_BYTES {
-            return Err(Error::InvalidConfig {
-                message: format!(
-                    "max chunk too large for Telegram Bot API (max_framed={max_framed} > {TELEGRAM_BOTAPI_MAX_FILE_BYTES})"
-                ),
             });
         }
         Ok(())

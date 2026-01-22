@@ -13,8 +13,9 @@
 
 - `telegram.mode`: string
   - 必填：是
-  - 取值：`"botapi" | "mtproto"`
-  - 默认：`"botapi"`
+  - 取值：`"mtproto"`
+  - 默认：`"mtproto"`
+  - 备注：历史 `botapi` 值已废弃；实现会自动迁移为 `mtproto`（并把迁移结果写回 `config.toml`），但不会再提供 Bot API 行为分支。
 - `telegram.chat_id`: string
   - 必填：是
   - 语义：目标对话（与 bot 私聊/或指定 chat）定位；与既有语义一致
@@ -70,9 +71,11 @@
 
 ## 3) 兼容性与迁移（Compatibility / migration）
 
-- `telegram.mode = "botapi"`：忽略 `[telegram.mtproto]`（即使存在）；行为保持与现有一致。
+- `telegram.mode` 目前仅支持 `mtproto`。
+- 迁移：
+  - 旧版本 `telegram.mode = "botapi"`（或缺失该字段）会被实现自动迁移为 `mtproto`。
+  - 历史 snapshot/provider 为 `telegram.botapi` 的数据**不受支持**，需要重新备份。
 - `telegram.mode = "mtproto"`：
   - 缺失 `bot_token` / `api_hash` / `api_id` 时必须给出可操作的错误提示（例如提示先执行
     `telegram validate` 或对应 secrets 设置命令）。
   - `session` 缺失时可由 `telegram validate` 自动初始化并写回（仍需 vault key 可用）。
-  - `chat_id` 语义与 botapi 模式保持一致。
