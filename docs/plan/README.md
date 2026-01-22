@@ -59,3 +59,4 @@
 | 0003 | Sync 日志落盘与可排查性（每轮独立日志 + env 配置日志等级） | 已完成 | `0003:sync-logging-durability/PLAN.md` | 2026-01-20 | 已落地：每任务一份日志（NDJSON）+ 结束前 `flush+fsync` + `TELEVYBACKUP_LOG`→`RUST_LOG`→default(debug)；实现分支：`feat/0003-sync-logging-durability` |
 | 0004 | Telegram 通信升级为 MTProto API（MTProto-only，移除 Bot API） | 已完成 | `0004:telegram-mtproto-storage/PLAN.md` | 2026-01-22 | 实现分支：`feat/0004-telegram-mtproto-storage`；已落地：MTProto-only + `tgmtproto:v1` + vault/secrets store + mtproto helper（独立构建）；旧 `telegram.botapi` snapshot 不再支持（需重新备份） |
 | 0005 | 设置窗口独立化与多备份目录（多 Telegram Endpoint + 金钥恢复） | 待实现 | `0005:multi-backup-directories-keyed-restore/PLAN.md` | 2026-01-21 | 已冻结：每目录 1 份 Bot 信息（可复用 `endpoint_id`）+ pinned bootstrap/catalog + per-target schedule（继承全局）+ TBK1 金钥；UI 对齐现有视觉 |
+| 0006 | Chunking 分块上限调整（按存储模式 + 内存预算） | 待实现 | `0006:chunking-max-bytes/PLAN.md` | 2026-01-22 | 已冻结：upload max 128MiB；pack target 64MiB±8MiB；max entries/pack=32；`PACK_ENABLE_MIN_OBJECTS=10` 不变；暂不做 UI 可配 |
