@@ -137,9 +137,9 @@
 ### 对比：200MiB（不推荐作为默认）
 
 - 内存峰值（粗估）：
-  - `core` 进程：chunk data（≤200MiB）+ 加密后 blob（≤200MiB）+ packer（最坏可能接近 49MiB）→ ~450MiB 量级
+  - `core` 进程：chunk data（≤200MiB）+ 加密后 blob（≤200MiB）+ packer（通常约 56–72MiB；最坏上界为 `PACK_MAX_BYTES=128MiB`）→ ~450–530MiB 量级
   - `mtproto-helper` 进程：会再读入一份上传 bytes（≤200MiB）→ +200MiB
-  - 合计（两进程）：~650MiB+（不含 OS/运行时开销）
+  - 合计（两进程）：~650–730MiB+（不含 OS/运行时开销）
 - 上传超时：
   - helper 超时上限为 30 分钟；200MiB 在 30 分钟内完成需要约 114KiB/s 的有效上传速率（更慢会更易超时）
 
