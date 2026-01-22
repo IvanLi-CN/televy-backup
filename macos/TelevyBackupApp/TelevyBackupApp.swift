@@ -89,6 +89,17 @@ final class AppModel: ObservableObject {
     private var didWriteStartupLog: Bool = false
     private var settingsWindow: NSWindow? = nil
 
+    private enum LegacyConfigWriteError: LocalizedError {
+        case v2ConfigDetected
+
+        var errorDescription: String? {
+            switch self {
+            case .v2ConfigDetected:
+                return "This app view uses legacy settings. Open Settings (v2) to edit targets/endpoints."
+            }
+        }
+    }
+
     func defaultConfigDir() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home
@@ -200,6 +211,11 @@ final class AppModel: ObservableObject {
             }
         } catch {
             appendLog("ERROR: save config failed: \(error)")
+            if error is LegacyConfigWriteError {
+                showToast("Save disabled for settings v2 (open Settings)", isError: true)
+            } else {
+                showToast("Save failed (see Logs)", isError: true)
+            }
         }
     }
 
@@ -367,14 +383,6 @@ final class AppModel: ObservableObject {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
-        do {
-            try writeConfigToml()
-            appendLog("Saved: \(configTomlPath().path)")
-        } catch {
-            appendLog("ERROR: save config failed: \(error)")
-            showToast("Save failed (see Logs)", isError: true)
-            return
-        }
         showToast("Testing connection…", isError: false)
         DispatchQueue.main.async {
             self.telegramValidateOk = nil
@@ -443,6 +451,16 @@ final class AppModel: ObservableObject {
     }
 
     private func writeConfigToml() throws {
+        let path = configTomlPath()
+        if let existing = try? String(contentsOf: path, encoding: .utf8) {
+            if existing.contains("version = 2")
+                || existing.contains("[[targets]]")
+                || existing.contains("[[telegram_endpoints]]")
+            {
+                throw LegacyConfigWriteError.v2ConfigDetected
+            }
+        }
+
         let dir = configTomlPath().deletingLastPathComponent()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let apiId = Int(mtprotoApiId.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
@@ -479,7 +497,7 @@ final class AppModel: ObservableObject {
         max_concurrent_uploads = 2
         min_delay_ms = 250
         """
-        try toml.write(to: configTomlPath(), atomically: true, encoding: .utf8)
+        try toml.write(to: path, atomically: true, encoding: .utf8)
     }
 
     private func refreshSettings(withSecrets: Bool, completion: (() -> Void)? = nil) {
@@ -1337,7 +1355,7 @@ struct OverviewView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Button("Choose…") { model.chooseSourceFolder() }
+                    Button("Edit…") { model.openSettingsWindow() }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                 }
