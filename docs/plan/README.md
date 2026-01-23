@@ -61,3 +61,4 @@
 | 0005 | 设置窗口独立化与多备份目录（多 Telegram Endpoint + 金钥恢复） | 待实现 | `0005:multi-backup-directories-keyed-restore/PLAN.md` | 2026-01-21 | 已冻结：每目录 1 份 Bot 信息（可复用 `endpoint_id`）+ pinned bootstrap/catalog + per-target schedule（继承全局）+ TBK1 金钥；UI 对齐现有视觉 |
 | 0006 | Chunking 分块上限调整（按存储模式 + 内存预算） | 待实现 | `0006:chunking-max-bytes/PLAN.md` | 2026-01-22 | 已冻结：upload max 128MiB；pack target 64MiB±8MiB；max entries/pack=32；`PACK_ENABLE_MIN_OBJECTS=10` 不变；暂不做 UI 可配 |
 | 0007 | Pack 上传后台并发（scan 与 upload 解耦） | 待实现 | `0007:background-pack-uploads/PLAN.md` | 2026-01-22 | 已冻结：队列双阈值（jobs+bytes）+ 等待回压；`min_delay_ms` 全局节流；限速来源 `telegram.rate_limit.*`；覆盖所有 upload（pack/直传/index） |
+| 0008 | 状态弹出界面移除日志页（日志仅落盘） | 待实现 | `0008:status-popup-file-logging/PLAN.md` | 2026-01-23 | 已冻结：Popover 移除 Logs + 移除 UI 内存日志缓存；UI 日志 `ui.log` 与 per-run logs 同目录；Settings 提供 Open logs（单入口）。 |
