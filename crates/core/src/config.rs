@@ -157,7 +157,7 @@ impl Default for TelegramGlobal {
 impl Default for TelegramEndpointMtproto {
     fn default() -> Self {
         Self {
-            session_key: "telegram.mtproto.session".to_string(),
+            session_key: String::new(),
         }
     }
 }
@@ -253,7 +253,11 @@ pub fn parse_settings_v2(text: &str) -> std::result::Result<SettingsV2, toml::de
         .and_then(|v| u32::try_from(v).ok());
 
     match version {
-        Some(SETTINGS_SCHEMA_VERSION) => toml::from_str::<SettingsV2>(text),
+        Some(SETTINGS_SCHEMA_VERSION) => {
+            let mut s = toml::from_str::<SettingsV2>(text)?;
+            normalize_settings_v2(&mut s);
+            Ok(s)
+        }
         Some(other) => {
             let err = toml::de::Error::custom(format!(
                 "unsupported settings schema version: {other} (expected {SETTINGS_SCHEMA_VERSION})"
@@ -262,7 +266,19 @@ pub fn parse_settings_v2(text: &str) -> std::result::Result<SettingsV2, toml::de
         }
         None => {
             let v1: SettingsV1 = toml::from_str(text)?;
-            Ok(migrate_v1_to_v2(v1))
+            let mut s = migrate_v1_to_v2(v1);
+            normalize_settings_v2(&mut s);
+            Ok(s)
+        }
+    }
+}
+
+fn normalize_settings_v2(settings: &mut SettingsV2) {
+    let multi_endpoints = settings.telegram_endpoints.len() > 1;
+    for ep in &mut settings.telegram_endpoints {
+        let key = ep.mtproto.session_key.trim();
+        if key.is_empty() || (multi_endpoints && key == "telegram.mtproto.session") {
+            ep.mtproto.session_key = endpoint_session_key_default(&ep.id);
         }
     }
 }
@@ -673,5 +689,34 @@ min_delay_ms = 250
         });
         let err = validate_settings_schema_v2(&s).unwrap_err();
         assert!(err.to_string().contains("targets[].schedule"));
+    }
+
+    #[test]
+    fn v2_endpoint_mtproto_session_key_defaults_per_endpoint() {
+        let input = r#"
+version = 2
+
+[[telegram_endpoints]]
+id = "e1"
+mode = "mtproto"
+chat_id = "-100123"
+bot_token_key = "telegram.bot_token.e1"
+
+[[telegram_endpoints]]
+id = "e2"
+mode = "mtproto"
+chat_id = "-100456"
+bot_token_key = "telegram.bot_token.e2"
+
+[[targets]]
+id = "t1"
+source_path = "/tmp"
+endpoint_id = "e1"
+"#;
+        let s = parse_settings_v2(input).unwrap();
+        assert_eq!(s.telegram_endpoints.len(), 2);
+        assert_eq!(s.telegram_endpoints[0].mtproto.session_key, "telegram.mtproto.session.e1");
+        assert_eq!(s.telegram_endpoints[1].mtproto.session_key, "telegram.mtproto.session.e2");
+        validate_settings_schema_v2(&s).unwrap();
     }
 }

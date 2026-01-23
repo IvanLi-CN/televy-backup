@@ -114,6 +114,8 @@ struct SettingsWindowRootView: View {
     @State private var selectedTargetId: String?
     @State private var savePending: DispatchWorkItem?
     @State private var isSaving: Bool = false
+    @State private var saveSeq: Int = 0
+    @State private var reloadSeq: Int = 0
 
     @State private var goldKey: String?
     @State private var goldKeyRevealed: Bool = false
@@ -451,34 +453,59 @@ struct SettingsWindowRootView: View {
             return
         }
 
-        vaultKeyPresent = keychainHasGenericPassword(
+        let vaultPresent = keychainHasGenericPassword(
             service: "TelevyBackup",
             account: "televybackup.vault_key"
         )
 
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "settings", "get", "--with-secrets"],
-            timeoutSeconds: 30
-        )
-        if res.status != 0 {
-            loadError = "settings get failed: exit=\(res.status)"
-            return
-        }
-        guard let data = res.stdout.data(using: .utf8) else {
-            loadError = "settings get: bad output"
-            return
-        }
-        do {
-            let decoded = try JSONDecoder().decode(CliSettingsGetResponse.self, from: data)
-            settings = decoded.settings
-            secrets = decoded.secrets
-            loadError = nil
-            if selectedTargetId == nil {
-                selectedTargetId = decoded.settings.targets.first?.id
+        reloadSeq += 1
+        let seq = reloadSeq
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let res = model.runCommandCapture(
+                exe: cli,
+                args: ["--json", "settings", "get", "--with-secrets"],
+                timeoutSeconds: 30
+            )
+            if res.status != 0 {
+                DispatchQueue.main.async {
+                    guard seq == self.reloadSeq else { return }
+                    self.vaultKeyPresent = vaultPresent
+                    self.loadError = "settings get failed: exit=\(res.status)"
+                }
+                return
             }
-        } catch {
-            loadError = "settings get: JSON decode failed"
+            guard let data = res.stdout.data(using: .utf8) else {
+                DispatchQueue.main.async {
+                    guard seq == self.reloadSeq else { return }
+                    self.vaultKeyPresent = vaultPresent
+                    self.loadError = "settings get: bad output"
+                }
+                return
+            }
+
+            let decoded: CliSettingsGetResponse
+            do {
+                decoded = try JSONDecoder().decode(CliSettingsGetResponse.self, from: data)
+            } catch {
+                DispatchQueue.main.async {
+                    guard seq == self.reloadSeq else { return }
+                    self.vaultKeyPresent = vaultPresent
+                    self.loadError = "settings get: JSON decode failed"
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                guard seq == self.reloadSeq else { return }
+                self.vaultKeyPresent = vaultPresent
+                self.settings = decoded.settings
+                self.secrets = decoded.secrets
+                self.loadError = nil
+                if self.selectedTargetId == nil {
+                    self.selectedTargetId = decoded.settings.targets.first?.id
+                }
+            }
         }
     }
 
@@ -518,27 +545,35 @@ struct SettingsWindowRootView: View {
         savePending?.cancel()
         let work = DispatchWorkItem { saveNow() }
         savePending = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.35, execute: work)
     }
 
     private func saveNow() {
         guard let cli = model.cliPath(), let settings else { return }
-        isSaving = true
+        saveSeq += 1
+        let seq = saveSeq
+        DispatchQueue.main.async {
+            self.isSaving = true
+        }
 
         let toml = renderToml(settings: settings)
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "settings", "set"],
-            stdin: toml + "\n",
-            timeoutSeconds: 30
-        )
-        isSaving = false
-
-        if res.status != 0 {
-            loadError = "settings set failed: exit=\(res.status)"
-            return
+        DispatchQueue.global(qos: .userInitiated).async {
+            let res = model.runCommandCapture(
+                exe: cli,
+                args: ["--json", "settings", "set"],
+                stdin: toml + "\n",
+                timeoutSeconds: 30
+            )
+            DispatchQueue.main.async {
+                guard seq == self.saveSeq else { return }
+                self.isSaving = false
+                if res.status != 0 {
+                    self.loadError = "settings set failed: exit=\(res.status)"
+                    return
+                }
+                self.reload()
+            }
         }
-        reload()
     }
 
     private func renderToml(settings: SettingsV2) -> String {
