@@ -413,12 +413,13 @@ enum UploadOutcome {
 struct UploadQueue {
     sender: mpsc::Sender<UploadJob>,
     bytes_sem: Arc<Semaphore>,
+    bytes_budget: usize,
 }
 
 impl UploadQueue {
     async fn enqueue_direct(&self, chunk_hash: String, blob: Vec<u8>) -> Result<()> {
         let bytes = blob.len();
-        let permit = acquire_bytes(&self.bytes_sem, bytes).await?;
+        let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes).await?;
         let job = UploadJob::Direct {
             chunk_hash,
             blob,
@@ -432,7 +433,7 @@ impl UploadQueue {
 
     async fn enqueue_pack(&self, entries: Vec<PackEntryRef>, pack_bytes: Vec<u8>) -> Result<()> {
         let bytes = pack_bytes.len();
-        let permit = acquire_bytes(&self.bytes_sem, bytes).await?;
+        let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes).await?;
         let job = UploadJob::Pack {
             entries,
             pack_bytes,
@@ -445,7 +446,18 @@ impl UploadQueue {
     }
 }
 
-async fn acquire_bytes(bytes_sem: &Arc<Semaphore>, bytes: usize) -> Result<OwnedSemaphorePermit> {
+async fn acquire_bytes(
+    bytes_sem: &Arc<Semaphore>,
+    bytes_budget: usize,
+    bytes: usize,
+) -> Result<OwnedSemaphorePermit> {
+    if bytes > bytes_budget {
+        return Err(Error::InvalidConfig {
+            message: format!(
+                "upload bytes {bytes} exceeds queue budget {bytes_budget}; adjust rate_limit or chunking"
+            ),
+        });
+    }
     let bytes_u32 = u32::try_from(bytes).map_err(|_| Error::InvalidConfig {
         message: format!("upload bytes too large: {bytes}"),
     })?;
@@ -576,6 +588,7 @@ pub async fn run_backup_with<S: Storage>(
     let uploader = UploadQueue {
         sender: upload_tx.clone(),
         bytes_sem: bytes_sem.clone(),
+        bytes_budget,
     };
 
     let upload_rx = Arc::new(Mutex::new(upload_rx));
