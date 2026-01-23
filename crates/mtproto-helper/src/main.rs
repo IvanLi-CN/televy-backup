@@ -565,10 +565,17 @@ async fn get_pinned_object_id(state: &mut State) -> Result<Option<String>, Strin
     };
 
     let msg_id = msg.id();
-    let media = msg
-        .media()
-        .ok_or_else(|| "pinned message has no media".to_string())?;
-    let (doc_id, access_hash) = extract_document_id(&media)?;
+    let Some(media) = msg.media() else {
+        // Pinned message exists but isn't a document (e.g. a text message). Treat as no catalog.
+        return Ok(None);
+    };
+
+    let (doc_id, access_hash) = match extract_document_id(&media) {
+        Ok(v) => v,
+        // Common real-world case: the chat already has a pinned message that isn't a document.
+        // Treat this as "no bootstrap catalog", so the first run can create+pin ours.
+        Err(_) => return Ok(None),
+    };
     let object_id = encode_tgmtproto_object_id_v1(&state.chat_id, msg_id, doc_id, access_hash)?;
     Ok(Some(object_id))
 }
