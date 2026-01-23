@@ -273,4 +273,29 @@ mod tests {
         assert_eq!(latest.snapshot_id, "snp_1");
         assert_eq!(latest.manifest_object_id, "obj_1");
     }
+
+    #[tokio::test]
+    async fn update_overwrites_non_catalog_pinned_doc() {
+        let store = MemPinned::new();
+        let key = [3u8; 32];
+
+        let pinned_before = store
+            .upload_document("unrelated-pinned", b"not a catalog".to_vec())
+            .await
+            .unwrap();
+        store.set_pinned_object_id(&pinned_before).unwrap();
+
+        update_remote_latest(&store, &key, "t1", "/A", "manual", "snp_1", "obj_1")
+            .await
+            .unwrap();
+
+        let pinned_after = store.get_pinned_object_id().unwrap().unwrap();
+        assert_ne!(pinned_after, pinned_before);
+
+        let latest = resolve_remote_latest(&store, &key, Some("t1"), None)
+            .await
+            .unwrap();
+        assert_eq!(latest.snapshot_id, "snp_1");
+        assert_eq!(latest.manifest_object_id, "obj_1");
+    }
 }
