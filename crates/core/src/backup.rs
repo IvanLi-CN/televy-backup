@@ -12,9 +12,9 @@ use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use tracing::{debug, error};
 use walkdir::WalkDir;
 
+use crate::config::TelegramRateLimit;
 use crate::crypto::FRAMING_OVERHEAD_BYTES;
 use crate::crypto::encrypt_framed;
-use crate::config::TelegramRateLimit;
 use crate::index_db::open_index_db;
 use crate::index_manifest::{IndexManifest, IndexManifestPart, index_part_aad};
 use crate::pack::{

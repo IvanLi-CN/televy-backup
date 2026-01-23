@@ -49,8 +49,9 @@ impl Storage for TimedStorage {
         &'a self,
         _filename: &'a str,
         _bytes: Vec<u8>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = televy_backup_core::Result<String>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = televy_backup_core::Result<String>> + Send + 'a>,
+    > {
         Box::pin(async move {
             let current = self.concurrent.fetch_add(1, Ordering::Relaxed) + 1;
             loop {
@@ -79,8 +80,9 @@ impl Storage for TimedStorage {
     fn download_document<'a>(
         &'a self,
         _object_id: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = televy_backup_core::Result<Vec<u8>>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = televy_backup_core::Result<Vec<u8>>> + Send + 'a>,
+    > {
         Box::pin(async {
             Err(Error::InvalidConfig {
                 message: "download not supported in TimedStorage".to_string(),
