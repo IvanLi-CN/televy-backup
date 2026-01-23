@@ -4,6 +4,8 @@ use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
+use crate::crypto::FRAMING_OVERHEAD_BYTES;
+use crate::storage::MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES;
 
 pub const SETTINGS_SCHEMA_VERSION: u32 = 2;
 
@@ -340,6 +342,67 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
         });
     }
 
+    // Validate chunk sizes against FastCDC bounds (avoid runtime panics).
+    if settings.chunking.max_bytes <= fastcdc::v2020::MAXIMUM_MAX {
+        if settings.chunking.min_bytes < fastcdc::v2020::MINIMUM_MIN
+            || settings.chunking.min_bytes > fastcdc::v2020::MINIMUM_MAX
+            || settings.chunking.avg_bytes < fastcdc::v2020::AVERAGE_MIN
+            || settings.chunking.avg_bytes > fastcdc::v2020::AVERAGE_MAX
+            || settings.chunking.max_bytes < fastcdc::v2020::MAXIMUM_MIN
+        {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "chunk sizes out of bounds for fastcdc::v2020 (min={}..={}, avg={}..={}, max>={})",
+                    fastcdc::v2020::MINIMUM_MIN,
+                    fastcdc::v2020::MINIMUM_MAX,
+                    fastcdc::v2020::AVERAGE_MIN,
+                    fastcdc::v2020::AVERAGE_MAX,
+                    fastcdc::v2020::MAXIMUM_MIN,
+                ),
+            });
+        }
+    } else {
+        let min = settings.chunking.min_bytes as usize;
+        let avg = settings.chunking.avg_bytes as usize;
+        let max = settings.chunking.max_bytes as usize;
+        if min < fastcdc::ronomon::MINIMUM_MIN
+            || min > fastcdc::ronomon::MINIMUM_MAX
+            || avg < fastcdc::ronomon::AVERAGE_MIN
+            || avg > fastcdc::ronomon::AVERAGE_MAX
+            || max < fastcdc::ronomon::MAXIMUM_MIN
+            || max > fastcdc::ronomon::MAXIMUM_MAX
+        {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "chunk sizes out of bounds for fastcdc::ronomon (min={}..={}, avg={}..={}, max={}..={})",
+                    fastcdc::ronomon::MINIMUM_MIN,
+                    fastcdc::ronomon::MINIMUM_MAX,
+                    fastcdc::ronomon::AVERAGE_MIN,
+                    fastcdc::ronomon::AVERAGE_MAX,
+                    fastcdc::ronomon::MAXIMUM_MIN,
+                    fastcdc::ronomon::MAXIMUM_MAX,
+                ),
+            });
+        }
+    }
+
+    // MTProto-only: cap chunking.max_bytes to keep upload_document bytes <= engineered max.
+    // upload_bytes = chunk_plain_bytes + framing_overhead_bytes
+    let mtproto_max_plain_bytes = MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES
+        .checked_sub(FRAMING_OVERHEAD_BYTES)
+        .unwrap_or(0);
+    if settings.chunking.max_bytes as usize > mtproto_max_plain_bytes {
+        return Err(Error::InvalidConfig {
+            message: format!(
+                "chunking.max_bytes too large for telegram.mode=\"mtproto\": max_bytes={} must be <= {} (= MTProtoEngineeredUploadMaxBytes {} - framing_overhead {} bytes)",
+                settings.chunking.max_bytes,
+                mtproto_max_plain_bytes,
+                MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES,
+                FRAMING_OVERHEAD_BYTES,
+            ),
+        });
+    }
+
     // Schedule: validate kind + time formats to avoid silently skipping runs.
     validate_schedule_fields(
         "schedule",
@@ -577,6 +640,8 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::FRAMING_OVERHEAD_BYTES;
+    use crate::storage::MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES;
 
     fn base_settings_v2() -> SettingsV2 {
         let input = r#"
@@ -716,5 +781,47 @@ endpoint_id = "e1"
             "telegram.mtproto.session.e2"
         );
         validate_settings_schema_v2(&s).unwrap();
+    }
+
+    #[test]
+    fn v2_chunking_max_bytes_cap_is_validated() {
+        let mut s = base_settings_v2();
+        s.chunking.min_bytes = 64;
+        s.chunking.avg_bytes = 256;
+
+        let max_plain = MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES
+            .checked_sub(FRAMING_OVERHEAD_BYTES)
+            .unwrap_or(0) as u32;
+        s.chunking.max_bytes = max_plain + 1;
+
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("MTProtoEngineeredUploadMaxBytes"));
+        assert!(msg.contains("framing_overhead"));
+        assert!(msg.contains("41"));
+    }
+
+    #[test]
+    fn v2_chunking_max_bytes_cap_allows_exact_limit() {
+        let mut s = base_settings_v2();
+        s.chunking.min_bytes = 64;
+        s.chunking.avg_bytes = 256;
+
+        let max_plain = MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES
+            .checked_sub(FRAMING_OVERHEAD_BYTES)
+            .unwrap_or(0) as u32;
+        s.chunking.max_bytes = max_plain;
+
+        validate_settings_schema_v2(&s).unwrap();
+    }
+
+    #[test]
+    fn v2_chunking_min_avg_max_relation_is_validated() {
+        let mut s = base_settings_v2();
+        s.chunking.min_bytes = 1024 * 1024;
+        s.chunking.avg_bytes = 512 * 1024;
+        s.chunking.max_bytes = 2 * 1024 * 1024;
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(err.to_string().contains("min <= avg <= max"));
     }
 }
