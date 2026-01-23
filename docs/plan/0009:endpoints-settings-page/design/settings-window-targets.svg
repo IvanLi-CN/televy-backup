@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
+  <defs>
+    <linearGradient id="wallpaper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7f7ff" />
+      <stop offset="36%" stop-color="#d7f0ff" />
+      <stop offset="72%" stop-color="#ffe6f1" />
+      <stop offset="100%" stop-color="#e8e2ff" />
+    </linearGradient>
+    <filter id="softBlur" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="56" />
+    </filter>
+    <filter id="glassBackdropBlur" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="18" />
+    </filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14" result="blur" />
+      <feOffset in="blur" dx="0" dy="12" result="off" />
+      <feFlood flood-color="#000000" flood-opacity="0.22" result="flood" />
+      <feComposite in="flood" in2="off" operator="in" result="shadow" />
+      <feComposite in="shadow" in2="SourceAlpha" operator="out" result="outerShadow" />
+      <feMerge>
+        <feMergeNode in="outerShadow" />
+      </feMerge>
+    </filter>
+    <clipPath id="windowClip">
+      <rect x="100" y="60" rx="12" ry="12" width="1000" height="640" />
+    </clipPath>
+    <clipPath id="segClip">
+      <rect x="380" y="74" width="440" height="28" rx="8" ry="8" />
+    </clipPath>
+    <style>
+      .bg { fill: url(#wallpaper); }
+      .win { fill: #f5f5f7; fill-opacity: 0.55; stroke: #d0d0d6; stroke-width: 1; }
+      .titlebar { fill: #f5f5f7; fill-opacity: 0.14; }
+      .sep { stroke: #d7d7dd; stroke-width: 1; }
+
+      .content { fill: #f5f5f7; fill-opacity: 0.55; }
+      .sidebar { fill: #efeff2; fill-opacity: 0.65; }
+      .divider { stroke: #e6e6eb; stroke-width: 1; }
+
+      .text { fill: #1c1c1e; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif; }
+      .muted { fill: #6e6e73; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif; }
+      .onPrimary { fill: #ffffff; font-weight: 700; }
+      .onAccentPrimary { fill: #ffffff; font-weight: 700; }
+      .onAccentSecondary { fill: #ffffff; fill-opacity: 0.82; }
+      .h1 { font-size: 14px; font-weight: 700; }
+      .h2 { font-size: 18px; font-weight: 800; }
+      .label { font-size: 12px; font-weight: 600; }
+      .body { font-size: 12px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+      .segWrap { fill: #ececf0; fill-opacity: 0.45; stroke: #d1d1d6; stroke-width: 1; }
+      .segSel { fill: #dfe0e6; fill-opacity: 0.55; }
+      .segText { font-size: 12px; font-weight: 700; }
+      .segDivider { stroke: #d1d1d6; stroke-width: 1; }
+
+      .rowSel { fill: #0a84ff; }
+      .row { fill: transparent; }
+
+      .field { fill: #ffffff; fill-opacity: 0.90; stroke: #cfcfd6; stroke-width: 1; }
+      .pill { fill: #ffffff; fill-opacity: 0.90; stroke: #cfcfd6; stroke-width: 1; }
+      .btn { fill: #ffffff; fill-opacity: 0.90; stroke: #cfcfd6; stroke-width: 1; }
+      .btnPrimary { fill: #0a84ff; stroke: #0a84ff; stroke-width: 1; }
+
+      .ok { fill: #2fb344; font-weight: 700; }
+      .bad { fill: #d63939; font-weight: 700; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="760" />
+  <g opacity="0.85">
+    <circle cx="200" cy="150" r="260" fill="#6fd6ff" opacity="0.34" filter="url(#softBlur)" />
+    <circle cx="960" cy="160" r="280" fill="#ff7ac8" opacity="0.14" filter="url(#softBlur)" />
+    <circle cx="860" cy="640" r="340" fill="#8a7cff" opacity="0.18" filter="url(#softBlur)" />
+    <circle cx="240" cy="680" r="320" fill="#ff7ac8" opacity="0.18" filter="url(#softBlur)" />
+  </g>
+
+  <!-- Window -->
+  <rect x="100" y="60" rx="12" ry="12" width="1000" height="640" fill="#000000" filter="url(#shadow)" />
+  <!-- Glass backdrop (simulated) -->
+  <g clip-path="url(#windowClip)">
+    <g filter="url(#glassBackdropBlur)">
+      <rect class="bg" x="0" y="0" width="1200" height="760" />
+      <g opacity="0.85">
+        <circle cx="200" cy="150" r="260" fill="#6fd6ff" opacity="0.34" filter="url(#softBlur)" />
+        <circle cx="960" cy="160" r="280" fill="#ff7ac8" opacity="0.14" filter="url(#softBlur)" />
+        <circle cx="860" cy="640" r="340" fill="#8a7cff" opacity="0.18" filter="url(#softBlur)" />
+        <circle cx="240" cy="680" r="320" fill="#ff7ac8" opacity="0.18" filter="url(#softBlur)" />
+      </g>
+    </g>
+  </g>
+  <rect class="win" x="100" y="60" rx="12" ry="12" width="1000" height="640" />
+  <rect class="titlebar" x="100" y="60" width="1000" height="52" clip-path="url(#windowClip)" />
+  <line class="sep" x1="100" y1="112" x2="1100" y2="112" />
+
+  <!-- Traffic lights -->
+  <circle cx="128" cy="86" r="6" fill="#ff5f57" />
+  <circle cx="146" cy="86" r="6" fill="#febc2e" />
+  <circle cx="164" cy="86" r="6" fill="#28c840" />
+
+  <text class="text h1" x="210" y="92" text-anchor="start">Settings</text>
+
+  <!-- Segmented control backdrop (simulated glass) -->
+  <g clip-path="url(#segClip)">
+    <g filter="url(#glassBackdropBlur)">
+      <rect class="bg" x="0" y="0" width="1200" height="760" />
+      <g opacity="0.85">
+        <circle cx="200" cy="150" r="260" fill="#6fd6ff" opacity="0.34" filter="url(#softBlur)" />
+        <circle cx="960" cy="160" r="280" fill="#ff7ac8" opacity="0.14" filter="url(#softBlur)" />
+        <circle cx="860" cy="640" r="340" fill="#8a7cff" opacity="0.18" filter="url(#softBlur)" />
+        <circle cx="240" cy="680" r="320" fill="#ff7ac8" opacity="0.18" filter="url(#softBlur)" />
+      </g>
+    </g>
+  </g>
+  <rect class="segWrap" x="380" y="74" width="440" height="28" rx="8" ry="8" />
+  <rect class="segSel" x="382" y="76" width="108" height="24" rx="7" ry="7" />
+  <line class="segDivider" x1="490" y1="76" x2="490" y2="100" />
+  <line class="segDivider" x1="600" y1="76" x2="600" y2="100" />
+  <line class="segDivider" x1="710" y1="76" x2="710" y2="100" />
+  <text class="text segText" x="435" y="94" text-anchor="middle">Targets</text>
+  <text class="muted segText" x="545" y="94" text-anchor="middle">Endpoints</text>
+  <text class="muted segText" x="655" y="94" text-anchor="middle">Recovery Key</text>
+  <text class="muted segText" x="765" y="94" text-anchor="middle">Schedule</text>
+
+  <!-- Content -->
+  <rect class="sidebar" x="100" y="112" width="260" height="588" clip-path="url(#windowClip)" />
+  <rect class="content" x="360" y="112" width="740" height="588" clip-path="url(#windowClip)" />
+  <line class="divider" x1="360" y1="112" x2="360" y2="700" />
+
+  <!-- Sidebar: target list -->
+  <rect class="rowSel" x="110" y="130" width="240" height="48" rx="6" ry="6" />
+  <text class="text label onAccentPrimary" x="124" y="150">manual</text>
+  <text class="text body mono onAccentSecondary" x="124" y="168">/Volumes/Data 1/SyncTest</text>
+
+  <rect class="row" x="110" y="184" width="240" height="48" rx="6" ry="6" />
+  <text class="text label" x="124" y="204">archive</text>
+  <text class="muted body mono" x="124" y="222">/Volumes/Archive/Backups</text>
+
+  <!-- Sidebar footer (+ / -) -->
+  <line class="divider" x1="100" y1="650" x2="360" y2="650" />
+  <rect class="btn" x="116" y="664" width="34" height="26" rx="7" ry="7" />
+  <text class="text h1" x="133" y="683" text-anchor="middle">+</text>
+  <rect class="btn" x="158" y="664" width="34" height="26" rx="7" ry="7" />
+  <text class="text h1" x="175" y="683" text-anchor="middle">–</text>
+
+  <!-- Detail pane -->
+  <text class="text h2" x="390" y="154">Target</text>
+
+  <!-- ID -->
+  <text class="text body" x="390" y="186">ID</text>
+  <text class="muted body mono" x="1068" y="186" text-anchor="end">src_3d66df21</text>
+
+  <!-- Enabled toggle -->
+  <rect x="390" y="200" width="16" height="16" rx="3" ry="3" fill="#0a84ff" opacity="0.18" stroke="#0a84ff" stroke-width="1" />
+  <path d="M394 208 L399 213 L408 203" fill="none" stroke="#0a84ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+  <text class="text body" x="414" y="213">Enabled</text>
+
+  <!-- Source -->
+  <text class="text body" x="390" y="244">Source</text>
+  <text class="muted body mono" x="1068" y="244" text-anchor="end">/Volumes/Data 1/SyncTest</text>
+
+  <!-- Label -->
+  <text class="text body" x="390" y="274">Label</text>
+  <rect class="field" x="818" y="258" width="250" height="26" rx="6" ry="6" />
+  <text class="text body" x="832" y="275">manual</text>
+
+  <line class="divider" x1="390" y1="300" x2="1068" y2="300" />
+
+  <!-- Endpoint binding -->
+  <text class="text body" x="390" y="330">Endpoint</text>
+  <rect class="field" x="760" y="314" width="180" height="26" rx="6" ry="6" />
+  <text class="text body" x="774" y="331">default</text>
+  <path d="M924 324 l6 6 l6 -6" fill="none" stroke="#6e6e73" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+
+  <rect class="btn" x="950" y="314" width="118" height="26" rx="6" ry="6" />
+  <text class="text body" x="1009" y="331" text-anchor="middle">Edit…</text>
+
+  <text class="muted body" x="390" y="356">Endpoint config is managed in Endpoints tab</text>
+
+  <!-- Endpoint summary (read-only) -->
+  <text class="text body" x="390" y="388">Chat ID</text>
+  <text class="muted body mono" x="1068" y="388" text-anchor="end">770190749</text>
+
+  <text class="text body" x="390" y="416">Bot token</text>
+  <text class="ok body" x="1068" y="416" text-anchor="end">Saved (encrypted)</text>
+
+  <text class="text body" x="390" y="444">API ID</text>
+  <text class="muted body mono" x="1068" y="444" text-anchor="end">14712068</text>
+
+  <text class="text body" x="390" y="472">API hash</text>
+  <text class="ok body" x="1068" y="472" text-anchor="end">Saved (encrypted)</text>
+
+  <text class="text body" x="390" y="500">Session</text>
+  <text class="muted body" x="1068" y="500" text-anchor="end">saved</text>
+
+  <text class="text body" x="390" y="528">Validation</text>
+  <text class="muted body" x="1068" y="528" text-anchor="end">Not validated</text>
+
+  <rect class="btnPrimary" x="390" y="554" width="140" height="30" rx="8" ry="8" />
+  <text class="text body onPrimary" x="460" y="574" text-anchor="middle">Test connection</text>
+  <text class="muted body" x="1068" y="574" text-anchor="end">Tap to validate</text>
+
+  <line class="divider" x1="390" y1="610" x2="1068" y2="610" />
+  <text class="text label" x="390" y="638">Schedule</text>
+  <rect x="390" y="650" width="14" height="14" rx="3" ry="3" fill="#ffffff" stroke="#cfcfd6" stroke-width="1" />
+  <text class="text body" x="414" y="661">Override global schedule</text>
+</svg>
