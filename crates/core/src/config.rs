@@ -715,8 +715,14 @@ endpoint_id = "e1"
 "#;
         let s = parse_settings_v2(input).unwrap();
         assert_eq!(s.telegram_endpoints.len(), 2);
-        assert_eq!(s.telegram_endpoints[0].mtproto.session_key, "telegram.mtproto.session.e1");
-        assert_eq!(s.telegram_endpoints[1].mtproto.session_key, "telegram.mtproto.session.e2");
+        assert_eq!(
+            s.telegram_endpoints[0].mtproto.session_key,
+            "telegram.mtproto.session.e1"
+        );
+        assert_eq!(
+            s.telegram_endpoints[1].mtproto.session_key,
+            "telegram.mtproto.session.e2"
+        );
         validate_settings_schema_v2(&s).unwrap();
     }
 }
