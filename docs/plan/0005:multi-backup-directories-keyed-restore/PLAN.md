@@ -202,6 +202,7 @@
 ## Change log
 
 - 2026-01-22: 实现 settings v2（targets/endpoints）、TBK1 金钥导入/导出、pinned bootstrap/catalog、`restore latest`，并完成 macOS Settings window + 文档同步。
+- 2026-01-22: 订正 Settings window 设计图，使其与当前实现一致（toolbar segmented control、Targets 侧栏宽度与底部 +/- 控制条、字段布局）。
 
 ## 约束与风险（Constraints & Risks）
 
