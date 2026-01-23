@@ -237,6 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     avg_bytes: settings.chunking.avg_bytes,
                     max_bytes: settings.chunking.max_bytes,
                 },
+                rate_limit: ep.rate_limit.clone(),
                 master_key,
                 snapshot_id: None,
                 keep_last_snapshots: settings.retention.keep_last_snapshots,
