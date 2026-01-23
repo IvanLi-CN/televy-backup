@@ -1,0 +1,132 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Settings window preview (#0009)</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --panel: rgba(255, 255, 255, 0.08);
+    --text: rgba(255, 255, 255, 0.9);
+    --muted: rgba(255, 255, 255, 0.65);
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  }
+
+  header {
+    position: sticky;
+    top: 0;
+    backdrop-filter: blur(12px);
+    background: rgba(11, 16, 32, 0.72);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  nav a {
+    display: inline-block;
+    margin-right: 10px;
+    padding: 6px 10px;
+    border-radius: 10px;
+    text-decoration: none;
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.10);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  nav a:hover {
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    user-select: none;
+  }
+
+  .tools input {
+    vertical-align: middle;
+  }
+
+  body.grid {
+    background-color: var(--bg);
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px);
+    background-size: 8px 8px;
+    background-position: 0 0;
+  }
+
+  main {
+    padding: 18px 16px 40px;
+    display: grid;
+    gap: 18px;
+  }
+
+  section {
+    background: var(--panel);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 14px;
+    padding: 14px;
+  }
+
+  h2 {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: 0.2px;
+  }
+
+  img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+  }
+</style>
+
+<header>
+  <nav>
+    <a href="#targets">Targets</a>
+    <a href="#endpoints">Endpoints</a>
+  </nav>
+  <div class="tools">
+    <label><input id="grid" type="checkbox" /> Grid (8px)</label>
+  </div>
+</header>
+
+<main>
+  <section id="targets">
+    <h2>Settings window • Targets (endpoint summary)</h2>
+    <img src="./settings-window-targets.svg" alt="Settings window (Targets)" />
+  </section>
+
+  <section id="endpoints">
+    <h2>Settings window • Endpoints</h2>
+    <img src="./settings-window-endpoints.svg" alt="Settings window (Endpoints)" />
+  </section>
+</main>
+
+<script>
+  const grid = document.getElementById("grid");
+  grid?.addEventListener("change", () => {
+    document.body.classList.toggle("grid", grid.checked);
+  });
+</script>
