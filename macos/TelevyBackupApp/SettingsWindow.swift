@@ -1,5 +1,7 @@
 import AppKit
+import Security
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct CliSettingsGetResponse: Decodable {
     let settings: SettingsV2
@@ -106,6 +108,7 @@ struct SettingsWindowRootView: View {
 
     @State private var settings: SettingsV2?
     @State private var secrets: CliSecretsPresence?
+    @State private var vaultKeyPresent: Bool = false
     @State private var loadError: String?
 
     @State private var selectedTargetId: String?
@@ -117,18 +120,28 @@ struct SettingsWindowRootView: View {
     @State private var showImportRecoveryKeySheet: Bool = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let loadError {
-                Text(loadError)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding()
-            }
+        ZStack {
+            VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow, state: .active)
+                .ignoresSafeArea()
 
-            content
+            VStack(spacing: 0) {
+                if let loadError {
+                    Text(loadError)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding()
+                }
+
+                content
+            }
         }
         .frame(minWidth: 820, minHeight: 560)
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Text("Settings")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
+            }
             ToolbarItem(placement: .principal) {
                 Picker("", selection: $section) {
                     ForEach(SettingsSection.allCases) { s in
@@ -155,7 +168,7 @@ struct SettingsWindowRootView: View {
     }
 
     private var targetsView: some View {
-        NavigationSplitView {
+        HStack(spacing: 0) {
             VStack(spacing: 0) {
                 List(selection: $selectedTargetId) {
                     ForEach(settings?.targets ?? []) { t in
@@ -171,22 +184,19 @@ struct SettingsWindowRootView: View {
                         .tag(t.id as String?)
                     }
                 }
-                .navigationTitle("Targets")
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
 
                 Divider()
 
                 HStack(spacing: 10) {
-                    Button {
-                        addTarget()
-                    } label: {
+                    Button { addTarget() } label: {
                         Image(systemName: "plus")
                             .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.bordered)
 
-                    Button {
-                        deleteSelectedTarget()
-                    } label: {
+                    Button { deleteSelectedTarget() } label: {
                         Image(systemName: "minus")
                             .frame(width: 20, height: 20)
                     }
@@ -194,82 +204,153 @@ struct SettingsWindowRootView: View {
                     .disabled(selectedTargetId == nil)
 
                     Spacer()
-                }
-                .padding(10)
             }
-            .frame(minWidth: 220)
-        } detail: {
-            if let idx = selectedTargetIndex(), settings != nil {
-                TargetEditor(
-                    settings: Binding(
-                        get: { self.settings! },
-                        set: { new in
-                            self.settings = new
-                            self.queueAutoSave()
-                        }
-                    ),
-                    secrets: secrets,
-                    targetIndex: idx,
-                    onReload: { self.reload() }
-                )
-                .overlay(alignment: .topTrailing) {
-                    if isSaving {
-                        Text("Saving…")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .padding()
-                    }
-                }
-            } else {
-                Text("Select a target")
-                    .foregroundStyle(.secondary)
-            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
         }
-        .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 320)
+        .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)
+
+        Divider()
+
+            GroupBox {
+                if let idx = selectedTargetIndex(), settings != nil {
+                    ScrollView {
+                        TargetEditor(
+                            settings: Binding(
+                                get: { self.settings! },
+                                set: { new in
+                                    self.settings = new
+                                    self.queueAutoSave()
+                                }
+                            ),
+                            secrets: secrets,
+                            targetIndex: idx,
+                            embedded: false,
+                            onReload: { self.reload() }
+                        )
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 12)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if isSaving {
+                            Text("Saving…")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .padding()
+                        }
+                    }
+                } else {
+                    Text("Select a target")
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 12)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 
     private var recoveryKeyView: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let masterKeyPresent = secrets?.masterKeyPresent ?? false
+
+        return VStack(alignment: .leading, spacing: 14) {
             Text("Recovery Key")
                 .font(.system(size: 18, weight: .bold))
             Text("Export/import the gold key (TBK1) to move restore capability across devices.")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            HStack(spacing: 12) {
-                Text("Master key")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Text((secrets?.masterKeyPresent ?? false) ? "Present" : "Missing")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle((secrets?.masterKeyPresent ?? false) ? .green : .red)
+            GroupBox {
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        Text("Vault key")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 110, alignment: .leading)
+                        Spacer()
+                        Text(vaultKeyPresent ? "Present" : "Missing")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(vaultKeyPresent ? .green : .red)
+                        Text("· Keychain")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 10)
+
+                    Divider()
+
+                    HStack(spacing: 12) {
+                        Text("Recovery key")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 110, alignment: .leading)
+
+                        Text(recoveryKeyDisplayText())
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(.background)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary))
+
+                        Button(goldKeyRevealed ? "Hide" : "Reveal") { toggleRevealRecoveryKey() }
+                            .buttonStyle(.bordered)
+                            .disabled(!masterKeyPresent)
+
+                        Button("Copy") { copyRecoveryKeyToClipboard() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!masterKeyPresent)
+
+                        if !masterKeyPresent {
+                            Text("Missing")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.red)
+                                .frame(width: 64, alignment: .trailing)
+                        }
+                    }
+                    .padding(.vertical, 10)
+
+                    Divider()
+
+                    HStack(spacing: 12) {
+                        Text("Export")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 110, alignment: .leading)
+                        Text("Format: TBK1:<base64url_no_pad>")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Export…") { exportRecoveryKeyToFile() }
+                            .buttonStyle(.bordered)
+                            .disabled(!masterKeyPresent)
+                    }
+                    .padding(.vertical, 10)
+
+                    Divider()
+
+                    HStack(spacing: 12) {
+                        Text("Import")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 110, alignment: .leading)
+                        Text("Import opens a sheet and requires confirmation.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button("Import…") { showImportRecoveryKeySheet = true }
+                            .buttonStyle(.bordered)
+                    }
+                    .padding(.vertical, 10)
+                }
+                .padding(.vertical, 2)
+                .padding(.horizontal, 12)
             }
 
-            Divider()
-
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 12) {
-                    Text("Recovery key")
-                        .font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    Text(recoveryKeyDisplayText())
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-                }
-
-                HStack(spacing: 10) {
-                    Button(goldKeyRevealed ? "Hide" : "Reveal") { toggleRevealRecoveryKey() }
-                        .buttonStyle(.bordered)
-                    Button("Copy") { copyRecoveryKeyToClipboard() }
-                        .buttonStyle(.borderedProminent)
-                    Button("Import…") { showImportRecoveryKeySheet = true }
-                        .buttonStyle(.bordered)
-                    Spacer()
-                }
-            }
+            Text("New Mac restore requires: recovery key + bot token + chat_id.")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
 
             Spacer()
         }
@@ -370,6 +451,11 @@ struct SettingsWindowRootView: View {
             return
         }
 
+        vaultKeyPresent = keychainHasGenericPassword(
+            service: "TelevyBackup",
+            account: "televybackup.vault_key"
+        )
+
         let res = model.runCommandCapture(
             exe: cli,
             args: ["--json", "settings", "get", "--with-secrets"],
@@ -394,6 +480,38 @@ struct SettingsWindowRootView: View {
         } catch {
             loadError = "settings get: JSON decode failed"
         }
+    }
+
+    private func exportRecoveryKeyToFile() {
+        loadRecoveryKeyIfNeeded()
+        guard let goldKey else { return }
+
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "televybackup-recovery-key.txt"
+        panel.allowedContentTypes = [UTType.plainText]
+        panel.prompt = "Export"
+
+        if panel.runModal() != .OK { return }
+        guard let url = panel.url else { return }
+
+        do {
+            try goldKey.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            // Best-effort UX: keep the view responsive; user can retry.
+        }
+    }
+
+    private func keychainHasGenericPassword(service: String, account: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecReturnData as String: false,
+        ]
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        return status == errSecSuccess
     }
 
     private func queueAutoSave() {
@@ -661,6 +779,7 @@ struct TargetEditor: View {
     @Binding var settings: SettingsV2
     let secrets: CliSecretsPresence?
     let targetIndex: Int
+    let embedded: Bool
     let onReload: () -> Void
 
     @FocusState private var tokenFocused: Bool
@@ -673,6 +792,20 @@ struct TargetEditor: View {
     @State private var validateText: String = "Not validated"
     @State private var validateOk: Bool? = nil
 
+    init(
+        settings: Binding<SettingsV2>,
+        secrets: CliSecretsPresence?,
+        targetIndex: Int,
+        embedded: Bool = false,
+        onReload: @escaping () -> Void
+    ) {
+        self._settings = settings
+        self.secrets = secrets
+        self.targetIndex = targetIndex
+        self.embedded = embedded
+        self.onReload = onReload
+    }
+
     var body: some View {
         let target = settings.targets[targetIndex]
         let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == target.endpoint_id })
@@ -680,8 +813,10 @@ struct TargetEditor: View {
         let apiHashPresent = secrets?.telegramMtprotoApiHashPresent ?? false
 
         VStack(alignment: .leading, spacing: 12) {
-            Text("Target")
-                .font(.system(size: 18, weight: .bold))
+            if !embedded {
+                Text("Target")
+                    .font(.system(size: 18, weight: .bold))
+            }
 
             HStack {
                 Text("ID")
@@ -744,9 +879,11 @@ struct TargetEditor: View {
 
             scheduleOverrideEditor
 
-            Spacer()
+            if !embedded {
+                Spacer()
+            }
         }
-        .padding()
+        .padding(embedded ? 0 : 16)
         .onChange(of: settings.targets[targetIndex].endpoint_id) { _, _ in
             validateOk = nil
             validateText = "Not validated"

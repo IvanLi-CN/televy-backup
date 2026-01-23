@@ -639,30 +639,70 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func openSettingsWindow() {
-        DispatchQueue.main.async {
-            let window: NSWindow
-            if let existing = self.settingsWindow {
-                window = existing
-            } else {
-                let root = SettingsWindowRootView()
-                    .environmentObject(self)
-                let controller = NSHostingController(rootView: root)
-                let w = NSWindow(contentViewController: controller)
-                w.title = "Settings"
-                w.setContentSize(NSSize(width: 820, height: 560))
-                w.minSize = NSSize(width: 760, height: 520)
-                w.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
-                w.isReleasedWhenClosed = false
-                w.center()
-                self.settingsWindow = w
-                window = w
-            }
+	    func openSettingsWindow() {
+	        DispatchQueue.main.async {
+	            let window: NSWindow
+	            if let existing = self.settingsWindow {
+	                window = existing
+	            } else {
+	                let root = SettingsWindowRootView()
+	                    .environmentObject(self)
+	                let controller = NSHostingController(rootView: root)
+	                controller.view.wantsLayer = true
+	                controller.view.layer?.backgroundColor = NSColor.clear.cgColor
+	                let w = NSWindow(contentViewController: controller)
+	                w.title = "Settings"
+	                w.titleVisibility = .hidden
+	                if #available(macOS 11.0, *) {
+	                    w.toolbarStyle = .unified
+	                }
+	                let fixedWidth: CGFloat = 820
+	                w.setContentSize(NSSize(width: fixedWidth, height: 560))
+	                // Keep a consistent top bar layout: allow vertical resize, lock width.
+	                w.minSize = NSSize(width: fixedWidth, height: 520)
+	                w.maxSize = NSSize(width: fixedWidth, height: 2000)
+	                w.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
+	                w.isReleasedWhenClosed = false
+	                w.center()
+	                self.configureSettingsWindowIfNeeded(w)
+	                self.settingsWindow = w
+	                window = w
+	            }
 
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-        }
-    }
+	            self.configureSettingsWindowIfNeeded(window)
+	            NSApp.activate(ignoringOtherApps: true)
+	            window.makeKeyAndOrderFront(nil)
+	        }
+	    }
+
+	    private func configureSettingsWindowIfNeeded(_ window: NSWindow) {
+	        if window.isOpaque {
+	            window.isOpaque = false
+	        }
+	        if window.backgroundColor != .clear {
+	            window.backgroundColor = .clear
+	        }
+	        if !window.styleMask.contains(.fullSizeContentView) {
+	            window.styleMask.insert(.fullSizeContentView)
+	        }
+	        if window.appearance?.name != .vibrantLight {
+	            window.appearance = NSAppearance(named: .vibrantLight)
+	        }
+	        window.titlebarAppearsTransparent = true
+	        window.isMovableByWindowBackground = true
+
+	        // Lock Settings window width (only allow vertical resizing).
+	        let fixedWidth: CGFloat = 820
+	        if window.minSize.width != fixedWidth || window.maxSize.width != fixedWidth {
+	            window.minSize = NSSize(width: fixedWidth, height: window.minSize.height)
+	            window.maxSize = NSSize(width: fixedWidth, height: max(window.maxSize.height, 2000))
+	        }
+
+	        if let contentView = window.contentView {
+	            contentView.wantsLayer = true
+	            contentView.layer?.backgroundColor = NSColor.clear.cgColor
+	        }
+	    }
 
     private func appendLog(_ line: String) {
         let trimmed = sanitizeLogLine(line.trimmingCharacters(in: .newlines))
@@ -1632,6 +1672,10 @@ struct ToastPill: View {
         .overlay(Capsule().strokeBorder(Color.white.opacity(0.28), lineWidth: 1))
         .shadow(color: Color.black.opacity(0.14), radius: 10, x: 0, y: 4)
     }
+}
+
+private enum SettingsTitlebarAccessory {
+    static let identifier = NSUserInterfaceItemIdentifier("televybackup.settings.title")
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
