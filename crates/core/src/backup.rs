@@ -5,19 +5,19 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use fastcdc::ronomon::FastCDC;
-use fastcdc::v2020::{ChunkData, Error as CdcError, StreamCDC, MAXIMUM_MAX as V2020_MAXIMUM_MAX};
+use fastcdc::v2020::{ChunkData, Error as CdcError, MAXIMUM_MAX as V2020_MAXIMUM_MAX, StreamCDC};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use tracing::{debug, error};
 use walkdir::WalkDir;
 
+use crate::crypto::FRAMING_OVERHEAD_BYTES;
 use crate::crypto::encrypt_framed;
 use crate::index_db::open_index_db;
 use crate::index_manifest::{IndexManifest, IndexManifestPart, index_part_aad};
-use crate::crypto::FRAMING_OVERHEAD_BYTES;
 use crate::pack::{
-    PACK_MAX_BYTES, PACK_MAX_ENTRIES_PER_PACK, PACK_TARGET_BYTES, PACK_TARGET_JITTER_BYTES, PackBlob,
-    PackBuilder,
+    PACK_MAX_BYTES, PACK_MAX_ENTRIES_PER_PACK, PACK_TARGET_BYTES, PACK_TARGET_JITTER_BYTES,
+    PackBlob, PackBuilder,
 };
 use crate::progress::{ProgressSink, TaskProgress};
 use crate::storage::MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES;
@@ -123,7 +123,10 @@ impl ChunkingConfig {
     }
 }
 
-fn file_chunker(file: File, chunking: &ChunkingConfig) -> Box<dyn Iterator<Item = CdcResult<ChunkData>>> {
+fn file_chunker(
+    file: File,
+    chunking: &ChunkingConfig,
+) -> Box<dyn Iterator<Item = CdcResult<ChunkData>>> {
     if chunking.max_bytes <= V2020_MAXIMUM_MAX {
         Box::new(StreamCDC::new(
             file,
@@ -192,10 +195,7 @@ impl<R: Read> RonomonStreamCDC<R> {
         self.compact_if_needed();
 
         let mut tmp = vec![0u8; RONOMON_READ_CHUNK_BYTES];
-        let n = self
-            .source
-            .read(&mut tmp)
-            .map_err(CdcError::IoError)?;
+        let n = self.source.read(&mut tmp).map_err(CdcError::IoError)?;
         if n == 0 {
             self.eof = true;
             return Ok(0);
@@ -229,8 +229,13 @@ impl<R: Read> Iterator for RonomonStreamCDC<R> {
                 return None;
             }
 
-            let mut chunker =
-                FastCDC::with_eof(available, self.min_size, self.avg_size, self.max_size, self.eof);
+            let mut chunker = FastCDC::with_eof(
+                available,
+                self.min_size,
+                self.avg_size,
+                self.max_size,
+                self.eof,
+            );
             if let Some(chunk) = chunker.next() {
                 let len = chunk.length;
                 if len == 0 {

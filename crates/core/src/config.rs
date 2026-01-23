@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result};
 use crate::crypto::FRAMING_OVERHEAD_BYTES;
 use crate::storage::MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES;
+use crate::{Error, Result};
 
 pub const SETTINGS_SCHEMA_VERSION: u32 = 2;
 

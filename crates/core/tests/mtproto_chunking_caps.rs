@@ -20,16 +20,18 @@ impl<'a, S: Storage + Sync> Storage for ProviderOverride<'a, S> {
         &'b self,
         filename: &'b str,
         bytes: Vec<u8>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = televy_backup_core::Result<String>> + Send + 'b>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = televy_backup_core::Result<String>> + Send + 'b>,
+    > {
         self.inner.upload_document(filename, bytes)
     }
 
     fn download_document<'b>(
         &'b self,
         object_id: &'b str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = televy_backup_core::Result<Vec<u8>>> + Send + 'b>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = televy_backup_core::Result<Vec<u8>>> + Send + 'b>,
+    > {
         self.inner.download_document(object_id)
     }
 }
