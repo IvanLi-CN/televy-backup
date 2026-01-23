@@ -7,6 +7,8 @@ use crate::{Error, Result};
 
 pub const FRAMING_VERSION: u8 = 0x01;
 pub const NONCE_LEN: usize = 24;
+pub(crate) const AEAD_TAG_LEN: usize = 16;
+pub(crate) const FRAMING_OVERHEAD_BYTES: usize = 1 + NONCE_LEN + AEAD_TAG_LEN;
 
 pub fn encrypt_framed(master_key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new(master_key.into());

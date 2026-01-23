@@ -50,6 +50,10 @@ All binary objects uploaded to Telegram use the same framing:
 
 AEAD: XChaCha20-Poly1305
 
+Framing overhead:
+
+- `1(version) + 24(nonce) + 16(tag) = 41 bytes`
+
 Associated Data (AD):
 
 - Chunk blob: `chunk_hash` (hex UTF-8)
@@ -69,6 +73,12 @@ The storage provider is **MTProto-only**:
 - Each encrypted chunk/index/manifest is uploaded as a Telegram `document` via MTProto.
 - `object_id` is versioned: `tgmtproto:v1:<base64url(json)>` (peer/msgId/docId/accessHash; does not store `file_reference`).
 - Downloads refresh `file_reference` by fetching the message by `peer+msgId` and are chunked/resumable via `TELEVYBACKUP_DATA_DIR/cache/mtproto/`.
+- Engineered upload limit (to cap memory peaks and failure surface): `MTProtoEngineeredUploadMaxBytes = 128MiB`.
+  - Since chunk blobs are framed, the effective cap is `chunking.max_bytes <= 128MiB - 41`.
+- Pack sizing defaults:
+  - `PACK_MAX_BYTES = 128MiB`
+  - `PACK_TARGET_BYTES = 64MiB ± 8MiB` (per-pack jitter)
+  - `PACK_MAX_ENTRIES_PER_PACK = 32`
 
 ## Remote bootstrap/catalog (pinned)
 

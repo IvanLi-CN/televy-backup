@@ -1,19 +1,26 @@
 use std::collections::HashSet;
 use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use fastcdc::v2020::StreamCDC;
+use fastcdc::ronomon::FastCDC;
+use fastcdc::v2020::{ChunkData, Error as CdcError, MAXIMUM_MAX as V2020_MAXIMUM_MAX, StreamCDC};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
 use tracing::{debug, error};
 use walkdir::WalkDir;
 
+use crate::crypto::FRAMING_OVERHEAD_BYTES;
 use crate::crypto::encrypt_framed;
 use crate::index_db::open_index_db;
 use crate::index_manifest::{IndexManifest, IndexManifestPart, index_part_aad};
-use crate::pack::{PACK_MAX_BYTES, PACK_TARGET_BYTES, PackBlob, PackBuilder};
+use crate::pack::{
+    PACK_MAX_BYTES, PACK_MAX_ENTRIES_PER_PACK, PACK_TARGET_BYTES, PACK_TARGET_JITTER_BYTES,
+    PackBlob, PackBuilder,
+};
 use crate::progress::{ProgressSink, TaskProgress};
+use crate::storage::MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES;
 use crate::storage::{Storage, encode_tgfile_object_id, encode_tgpack_object_id};
 use crate::{Error, Result};
 use tokio_util::sync::CancellationToken;
@@ -21,6 +28,9 @@ use tokio_util::sync::CancellationToken;
 const INDEX_PART_BYTES: usize = 32 * 1024 * 1024;
 const PACK_ENABLE_MIN_OBJECTS: usize = 10;
 const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
+const RONOMON_READ_CHUNK_BYTES: usize = 1024 * 1024;
+
+type CdcResult<T> = std::result::Result<T, CdcError>;
 
 #[derive(Debug, Clone)]
 pub struct ChunkingConfig {
@@ -41,7 +51,227 @@ impl ChunkingConfig {
                 message: "chunk sizes must satisfy min <= avg <= max".to_string(),
             });
         }
+
+        // Avoid panics from FastCDC internal assertions by validating bounds up-front.
+        if self.max_bytes <= V2020_MAXIMUM_MAX {
+            let min_ok = (fastcdc::v2020::MINIMUM_MIN..=fastcdc::v2020::MINIMUM_MAX)
+                .contains(&self.min_bytes);
+            let avg_ok = (fastcdc::v2020::AVERAGE_MIN..=fastcdc::v2020::AVERAGE_MAX)
+                .contains(&self.avg_bytes);
+            let max_ok = (fastcdc::v2020::MAXIMUM_MIN..=fastcdc::v2020::MAXIMUM_MAX)
+                .contains(&self.max_bytes);
+            if !(min_ok && avg_ok && max_ok) {
+                return Err(Error::InvalidConfig {
+                    message: format!(
+                        "chunk sizes out of bounds for fastcdc::v2020 (min={}..={}, avg={}..={}, max>={})",
+                        fastcdc::v2020::MINIMUM_MIN,
+                        fastcdc::v2020::MINIMUM_MAX,
+                        fastcdc::v2020::AVERAGE_MIN,
+                        fastcdc::v2020::AVERAGE_MAX,
+                        fastcdc::v2020::MAXIMUM_MIN,
+                    ),
+                });
+            }
+        } else {
+            let min = self.min_bytes as usize;
+            let avg = self.avg_bytes as usize;
+            let max = self.max_bytes as usize;
+            let min_ok =
+                (fastcdc::ronomon::MINIMUM_MIN..=fastcdc::ronomon::MINIMUM_MAX).contains(&min);
+            let avg_ok =
+                (fastcdc::ronomon::AVERAGE_MIN..=fastcdc::ronomon::AVERAGE_MAX).contains(&avg);
+            let max_ok =
+                (fastcdc::ronomon::MAXIMUM_MIN..=fastcdc::ronomon::MAXIMUM_MAX).contains(&max);
+            if !(min_ok && avg_ok && max_ok) {
+                return Err(Error::InvalidConfig {
+                    message: format!(
+                        "chunk sizes out of bounds for fastcdc::ronomon (min={}..={}, avg={}..={}, max={}..={})",
+                        fastcdc::ronomon::MINIMUM_MIN,
+                        fastcdc::ronomon::MINIMUM_MAX,
+                        fastcdc::ronomon::AVERAGE_MIN,
+                        fastcdc::ronomon::AVERAGE_MAX,
+                        fastcdc::ronomon::MAXIMUM_MIN,
+                        fastcdc::ronomon::MAXIMUM_MAX,
+                    ),
+                });
+            }
+        }
         Ok(())
+    }
+
+    pub fn validate_for_provider(&self, provider: &str) -> Result<()> {
+        self.validate()?;
+
+        // MTProto-only: cap chunking.max_bytes to keep upload_document bytes <= engineered max.
+        if provider.starts_with("telegram.mtproto") {
+            let mtproto_max_plain_bytes =
+                MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES.saturating_sub(FRAMING_OVERHEAD_BYTES);
+            if self.max_bytes as usize > mtproto_max_plain_bytes {
+                return Err(Error::InvalidConfig {
+                    message: format!(
+                        "chunking.max_bytes too large for MTProto storage: max_bytes={} must be <= {} (= MTProtoEngineeredUploadMaxBytes {} - framing_overhead {} bytes)",
+                        self.max_bytes,
+                        mtproto_max_plain_bytes,
+                        MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES,
+                        FRAMING_OVERHEAD_BYTES,
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn file_chunker(
+    file: File,
+    chunking: &ChunkingConfig,
+) -> Box<dyn Iterator<Item = CdcResult<ChunkData>>> {
+    if chunking.max_bytes <= V2020_MAXIMUM_MAX {
+        Box::new(StreamCDC::new(
+            file,
+            chunking.min_bytes,
+            chunking.avg_bytes,
+            chunking.max_bytes,
+        ))
+    } else {
+        Box::new(RonomonStreamCDC::new(
+            file,
+            chunking.min_bytes as usize,
+            chunking.avg_bytes as usize,
+            chunking.max_bytes as usize,
+        ))
+    }
+}
+
+struct RonomonStreamCDC<R: Read> {
+    source: R,
+    buffer: Vec<u8>,
+    eof: bool,
+    processed: u64,
+    min_size: usize,
+    avg_size: usize,
+    max_size: usize,
+    buffer_start: usize,
+}
+
+impl<R: Read> RonomonStreamCDC<R> {
+    fn new(source: R, min_size: usize, avg_size: usize, max_size: usize) -> Self {
+        Self {
+            source,
+            buffer: Vec::with_capacity(std::cmp::min(max_size, RONOMON_READ_CHUNK_BYTES)),
+            eof: false,
+            processed: 0,
+            min_size,
+            avg_size,
+            max_size,
+            buffer_start: 0,
+        }
+    }
+
+    fn available(&self) -> &[u8] {
+        &self.buffer[self.buffer_start..]
+    }
+
+    fn compact_if_needed(&mut self) {
+        if self.buffer_start == 0 {
+            return;
+        }
+        if self.buffer_start >= self.buffer.len() {
+            self.buffer.clear();
+            self.buffer_start = 0;
+            return;
+        }
+        if self.buffer_start < self.buffer.len() / 2 {
+            return;
+        }
+        let start = self.buffer_start;
+        self.buffer.copy_within(start.., 0);
+        self.buffer.truncate(self.buffer.len() - start);
+        self.buffer_start = 0;
+    }
+
+    fn read_more(&mut self) -> CdcResult<usize> {
+        self.compact_if_needed();
+
+        let mut tmp = vec![0u8; RONOMON_READ_CHUNK_BYTES];
+        let n = self.source.read(&mut tmp).map_err(CdcError::IoError)?;
+        if n == 0 {
+            self.eof = true;
+            return Ok(0);
+        }
+        tmp.truncate(n);
+        self.buffer.extend_from_slice(&tmp);
+        Ok(n)
+    }
+}
+
+impl<R: Read> Iterator for RonomonStreamCDC<R> {
+    type Item = CdcResult<ChunkData>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.available().is_empty() && self.eof {
+                return None;
+            }
+
+            // Ensure enough bytes to find a cut point.
+            while !self.eof && self.available().len() < self.max_size {
+                match self.read_more() {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) => return Some(Err(e)),
+                }
+            }
+
+            let available = self.available();
+            if available.is_empty() && self.eof {
+                return None;
+            }
+
+            let mut chunker = FastCDC::with_eof(
+                available,
+                self.min_size,
+                self.avg_size,
+                self.max_size,
+                self.eof,
+            );
+            if let Some(chunk) = chunker.next() {
+                let len = chunk.length;
+                if len == 0 {
+                    return Some(Err(CdcError::Other(
+                        "chunking failed: zero-length chunk".to_string(),
+                    )));
+                }
+                if len > available.len() {
+                    return Some(Err(CdcError::Other(
+                        "chunking failed: chunk length out of bounds".to_string(),
+                    )));
+                }
+
+                let data = available[..len].to_vec();
+                let out = ChunkData {
+                    hash: chunk.hash as u64,
+                    offset: self.processed,
+                    length: len,
+                    data,
+                };
+
+                self.buffer_start = self.buffer_start.saturating_add(len);
+                self.processed = self.processed.saturating_add(len as u64);
+                self.compact_if_needed();
+                return Some(Ok(out));
+            }
+
+            if self.eof {
+                return None;
+            }
+            match self.read_more() {
+                Ok(0) => continue,
+                Ok(_) => continue,
+                Err(e) => return Some(Err(e)),
+            }
+        }
     }
 }
 
@@ -97,7 +327,8 @@ pub async fn run_backup_with<S: Storage>(
     let scan_started = Instant::now();
     debug!(event = "phase.start", phase = "scan", "phase.start");
 
-    config.chunking.validate()?;
+    let provider = storage.provider();
+    config.chunking.validate_for_provider(provider)?;
     if config.keep_last_snapshots < 1 {
         return Err(Error::InvalidConfig {
             message: "keep_last_snapshots must be >= 1".to_string(),
@@ -110,7 +341,6 @@ pub async fn run_backup_with<S: Storage>(
     }
 
     let pool = open_index_db(&config.db_path).await?;
-    let provider = storage.provider();
 
     let base_snapshot_id = latest_snapshot_for_source(&pool, &config.source_path).await?;
     let snapshot_id = config
@@ -140,7 +370,7 @@ pub async fn run_backup_with<S: Storage>(
     let mut pack_enabled = false;
     let mut pending_bytes: usize = 0;
     let mut pending: Vec<PackBlob> = Vec::new();
-    let mut packer = PackBuilder::new();
+    let mut pack_state = PackState::new(provider, &snapshot_id);
 
     if let Some(sink) = options.progress {
         sink.on_progress(TaskProgress {
@@ -249,12 +479,7 @@ pub async fn run_backup_with<S: Storage>(
         }
 
         let file = File::open(path)?;
-        let chunker = StreamCDC::new(
-            file,
-            config.chunking.min_bytes,
-            config.chunking.avg_bytes,
-            config.chunking.max_bytes,
-        );
+        let chunker = file_chunker(file, &config.chunking);
 
         for (seq, chunk) in chunker.enumerate() {
             if let Some(cancel) = options.cancel
@@ -309,7 +534,7 @@ pub async fn run_backup_with<S: Storage>(
                                 &pool,
                                 provider,
                                 &config.master_key,
-                                &mut packer,
+                                &mut pack_state,
                                 b,
                                 &mut result,
                             )
@@ -323,7 +548,7 @@ pub async fn run_backup_with<S: Storage>(
                         &pool,
                         provider,
                         &config.master_key,
-                        &mut packer,
+                        &mut pack_state,
                         blob,
                         &mut result,
                     )
@@ -379,7 +604,7 @@ pub async fn run_backup_with<S: Storage>(
             &pool,
             provider,
             &config.master_key,
-            &mut packer,
+            &mut pack_state,
             &mut result,
         )
         .await?;
@@ -462,7 +687,7 @@ async fn schedule_pack_or_direct_upload<S: Storage>(
     pool: &SqlitePool,
     provider: &str,
     master_key: &[u8; 32],
-    packer: &mut PackBuilder,
+    pack_state: &mut PackState,
     blob: PackBlob,
     result: &mut BackupResult,
 ) -> Result<()> {
@@ -470,7 +695,7 @@ async fn schedule_pack_or_direct_upload<S: Storage>(
     let PackBlob { chunk_hash, blob } = blob;
 
     if blob.len() + SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES > PACK_MAX_BYTES {
-        flush_packer(storage, pool, provider, master_key, packer, result).await?;
+        flush_packer(storage, pool, provider, master_key, pack_state, result).await?;
         let filename = telegram_camouflaged_filename();
         let object_id = storage
             .upload_document(&filename, blob)
@@ -499,13 +724,15 @@ async fn schedule_pack_or_direct_upload<S: Storage>(
         return Ok(());
     }
 
-    if !packer.is_empty() && packer.blob_len() + blob.len() > PACK_MAX_BYTES {
-        flush_packer(storage, pool, provider, master_key, packer, result).await?;
+    if !pack_state.packer.is_empty() && pack_state.packer.blob_len() + blob.len() > PACK_MAX_BYTES {
+        flush_packer(storage, pool, provider, master_key, pack_state, result).await?;
     }
 
-    packer.push_blob(PackBlob { chunk_hash, blob })?;
-    if packer.blob_len() >= PACK_TARGET_BYTES {
-        flush_packer(storage, pool, provider, master_key, packer, result).await?;
+    pack_state.packer.push_blob(PackBlob { chunk_hash, blob })?;
+    if pack_state.packer.entries_len() >= PACK_MAX_ENTRIES_PER_PACK
+        || pack_state.packer.blob_len() >= pack_state.flush_target_bytes
+    {
+        flush_packer(storage, pool, provider, master_key, pack_state, result).await?;
     }
 
     Ok(())
@@ -516,11 +743,11 @@ async fn flush_packer<S: Storage>(
     pool: &SqlitePool,
     provider: &str,
     master_key: &[u8; 32],
-    packer: &mut PackBuilder,
+    pack_state: &mut PackState,
     result: &mut BackupResult,
 ) -> Result<()> {
-    while !packer.is_empty() {
-        let (pack, carry) = packer.finalize_fit(master_key, PACK_MAX_BYTES)?;
+    while !pack_state.packer.is_empty() {
+        let (pack, carry) = pack_state.packer.finalize_fit(master_key, PACK_MAX_BYTES)?;
         let filename = telegram_camouflaged_filename();
         let pack_bytes_len = pack.bytes.len() as u64;
         let pack_bytes = pack.bytes;
@@ -551,12 +778,50 @@ async fn flush_packer<S: Storage>(
             result.chunks_uploaded += 1;
         }
 
-        packer.reset();
+        pack_state.packs_uploaded = pack_state.packs_uploaded.saturating_add(1);
+        pack_state.flush_target_bytes = pack_state.jittered_target_bytes();
+        pack_state.packer.reset();
         for b in carry {
-            packer.push_blob(b)?;
+            pack_state.packer.push_blob(b)?;
         }
     }
     Ok(())
+}
+
+struct PackState {
+    packer: PackBuilder,
+    packs_uploaded: u64,
+    flush_target_bytes: usize,
+    seed_prefix: String,
+}
+
+impl PackState {
+    fn new(provider: &str, snapshot_id: &str) -> Self {
+        let seed_prefix = format!("pack_target_bytes|{provider}|{snapshot_id}|");
+        let mut state = Self {
+            packer: PackBuilder::new(),
+            packs_uploaded: 0,
+            flush_target_bytes: PACK_TARGET_BYTES,
+            seed_prefix,
+        };
+        state.flush_target_bytes = state.jittered_target_bytes();
+        state
+    }
+
+    fn jittered_target_bytes(&self) -> usize {
+        let seed = format!("{}{}", self.seed_prefix, self.packs_uploaded);
+        let h = blake3::hash(seed.as_bytes());
+        let mut bytes8 = [0u8; 8];
+        bytes8.copy_from_slice(&h.as_bytes()[..8]);
+        let v = u64::from_le_bytes(bytes8);
+
+        let base = PACK_TARGET_BYTES as i64;
+        let jitter = PACK_TARGET_JITTER_BYTES as i64;
+        let span = (PACK_TARGET_JITTER_BYTES as u64) * 2 + 1;
+        let offset = (v % span) as i64 - jitter;
+
+        (base + offset) as usize
+    }
 }
 
 async fn record_chunk_object(

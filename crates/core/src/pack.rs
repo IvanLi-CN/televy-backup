@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::encrypt_framed;
 use crate::{Error, Result};
 
-pub const PACK_TARGET_BYTES: usize = 32 * 1024 * 1024;
-pub const PACK_MAX_BYTES: usize = 49 * 1024 * 1024;
+pub const PACK_TARGET_JITTER_BYTES: usize = 8 * 1024 * 1024;
+pub const PACK_MAX_BYTES: usize = 128 * 1024 * 1024;
+pub const PACK_MAX_ENTRIES_PER_PACK: usize = 32;
+pub const PACK_TARGET_BYTES: usize = 64 * 1024 * 1024;
 
 const HEADER_TRAILER_BYTES: usize = 4;
 const PACK_HEADER_AAD: &[u8] = b"televy.pack.header.v1";
@@ -49,6 +51,10 @@ impl PackBuilder {
 
     pub fn blob_len(&self) -> usize {
         self.blob_bytes.len()
+    }
+
+    pub fn entries_len(&self) -> usize {
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {

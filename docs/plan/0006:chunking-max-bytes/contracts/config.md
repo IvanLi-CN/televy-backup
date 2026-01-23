@@ -42,7 +42,8 @@ Telegram 客户端侧能力参考：非 Premium 用户单文件 2GB、Premium �
 为控制内存峰值、上传超时与失败面，本计划引入一个 **MTProto 上传单文件工程上限**（显著小于 Telegram 理论上限）：
 
 - 约束：`chunking.max_bytes + 41 <= MTProtoEngineeredUploadMaxBytes`
-- `MTProtoEngineeredUploadMaxBytes`（建议默认）：`128MiB`（定义为“单次 upload_document 的 bytes 上限”，包含 framing；精确值以实现常量为准）
+  - 等价写法：`chunking.max_bytes <= MTProtoEngineeredUploadMaxBytes - 41`
+- `MTProtoEngineeredUploadMaxBytes`：`128MiB`（定义为“单次 upload_document 的 bytes 上限”，包含 framing；精确值以实现常量为准）
 
 ## 2) 与 pack 的关系（pack interaction）
 
@@ -54,12 +55,12 @@ Telegram 客户端侧能力参考：非 Premium 用户单文件 2GB、Premium �
 
 （如实现阶段发现现有逻辑无法满足该预期，需要在本计划内补齐回归测试并修复。）
 
-### Pack sizing（本计划拟调整的默认值；internal）
+### Pack sizing（默认值；internal）
 
-- `PACK_MAX_BYTES`：拟调整为 `128MiB`（与 `MTProtoEngineeredUploadMaxBytes` 对齐）
-- `PACK_TARGET_BYTES`：拟调整为 `64MiB`（减少“单 pack entries 数量过大”的风险；并仍可显著减少上传次数）
-- `PACK_TARGET_BYTES` jitter：建议引入 `±8MiB` 的抖动区间（每个 pack 的 flush 阈值不同；避免文件尺寸过于规律）
-- `PACK_MAX_ENTRIES_PER_PACK`：新增一个 entries 上限（达到上限就强制 flush），用于避免一个 pack 里塞入过多小文件（过多 entries）
+- `PACK_MAX_BYTES`：`128MiB`（与 `MTProtoEngineeredUploadMaxBytes` 对齐）
+- `PACK_TARGET_BYTES`：`64MiB`
+- `PACK_TARGET_BYTES` jitter：`±8MiB`（每个 pack 的 flush 阈值不同；避免文件尺寸过于规律）
+- `PACK_MAX_ENTRIES_PER_PACK`：`32`（达到上限就强制 flush；避免一个 pack 里塞入过多小文件）
   - Owner decision: `32`
 - `PACK_ENABLE_MIN_OBJECTS`：保持 `10` 不变（达到该数量后可进入 pack 模式）
 

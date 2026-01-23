@@ -7,6 +7,8 @@ use tokio::sync::Mutex;
 
 use crate::{Error, Result};
 
+pub(crate) const MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES: usize = 128 * 1024 * 1024;
+
 mod telegram_mtproto;
 pub use telegram_mtproto::{
     TelegramMtProtoStorage, TelegramMtProtoStorageConfig, TgMtProtoObjectIdV1,

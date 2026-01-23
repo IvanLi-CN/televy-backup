@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-22
-- Last: 2026-01-22
+- Last: 2026-01-23
 
 ## 已冻结决策（Decisions, frozen）
 
@@ -56,7 +56,7 @@
 
 ### Out of scope
 
-- 任何会改变运行行为的实现提交（本会话为 plan 阶段，后续进入 impl 才做）。
+- UI 暂不提供 chunking/pack 上限可配置项（仅通过默认值与实现常量控制）。
 
 ## 需求（Requirements）
 
@@ -176,3 +176,7 @@
 ## 参考（References）
 
 - Telegram 官方：Telegram Premium（2GB/4GB 上传能力）作为 MTProto 方向的能力参考。
+
+## Change log
+
+- 2026-01-23: Implemented MTProto chunking cap (128MiB - 41), updated pack sizing (128MiB max, 64MiB±8MiB target, max 32 entries), and added tests + docs sync.
