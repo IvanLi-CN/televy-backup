@@ -70,7 +70,7 @@ pub struct TelegramEndpoint {
     pub rate_limit: TelegramRateLimit,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TelegramEndpointMtproto {
     pub session_key: String,
 }
@@ -150,14 +150,6 @@ impl Default for TelegramGlobal {
         Self {
             mode: "mtproto".to_string(),
             mtproto: TelegramMtprotoGlobal::default(),
-        }
-    }
-}
-
-impl Default for TelegramEndpointMtproto {
-    fn default() -> Self {
-        Self {
-            session_key: String::new(),
         }
     }
 }
