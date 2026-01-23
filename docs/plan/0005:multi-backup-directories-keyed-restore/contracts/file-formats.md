@@ -4,10 +4,10 @@
 
 ## 1) 目标
 
-在 Telegram Bot API 的约束下（无法枚举历史文件），为跨设备恢复提供“可发现的引导信息”：
+在 Telegram 的约束下（无法枚举历史文件），为跨设备恢复提供“可发现的引导信息”：
 
 - 新设备无旧 SQLite 时，仍能定位到 latest 快照的 `snapshot_id + manifest_object_id`
-- 用户只需：金钥 + bot token + chat_id
+- 用户只需：金钥 + bot token + chat_id（以及 MTProto 所需的 `api_id + api_hash`）
 
 ## 2) 存储位置与发现方式（frozen）
 
@@ -20,7 +20,7 @@
 
 - Root pointer 使用 **pinned message**：
   - bot 在 chat 中 pin 一条消息，其 document 即为最新的 bootstrap/catalog
-  - 新设备通过 `getChat(chat_id=...)` 获取 `pinned_message.document.file_id`，再通过 `getFile` 下载
+  - 新设备通过 MTProto 获取 pinned message，并得到其对应的存储 `object_id`，再下载该 document
 
 前置条件：
 
@@ -47,7 +47,7 @@
       "label": "manual",
       "latest": {
         "snapshot_id": "snp_...",
-        "manifest_object_id": "telegram_file_id"
+        "manifest_object_id": "tgmtproto:v1:..."
       }
     }
   ]
@@ -56,7 +56,7 @@
 
 约束：
 
-- `manifest_object_id` 必须是 Bot API 可用于 `getFile` 的 `file_id`
+- `manifest_object_id` 必须是远端存储对象的 `object_id`（当前实现为 `tgmtproto:v1:...`）
 - 至少需要记录 `latest`；是否保留历史（多版本）在实现阶段决定
 - `source_path` / `label` 等敏感元数据在上传前已被 master key 加密（不明文暴露在 Telegram）
 
@@ -65,7 +65,7 @@
 - 当某个 target 的 backup 成功完成并产生新的 `manifest_object_id` 时：
   1. 读取现有 catalog（若不存在则初始化）
   2. 更新对应 target 的 `latest`
-  3. 上传新 catalog（新的 document/file_id）
+  3. 上传新 catalog（新的 document/object_id）
   4. 将该消息 pin 为最新 root pointer（或更新 root pointer）
 
 失败处理（最低要求）：

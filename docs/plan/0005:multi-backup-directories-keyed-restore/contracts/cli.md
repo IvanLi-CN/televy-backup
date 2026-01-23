@@ -28,6 +28,8 @@
 - `secrets`：
   - `masterKeyPresent`: bool
   - `telegramBotTokenPresentByEndpoint`: object（key 为 endpoint_id，value 为 bool）
+  - `telegramMtprotoApiHashPresent`: bool
+  - `telegramMtprotoSessionPresentByEndpoint`: object（key 为 endpoint_id，value 为 bool）
 
 示例（仅示意）：
 
@@ -37,11 +39,13 @@
     "version": 2,
     "schedule": { "enabled": true, "kind": "hourly", "hourly_minute": 0, "daily_at": "02:00", "timezone": "local" },
     "targets": [{ "id": "aaa-bbb", "source_path": "/AAA/BBB", "endpoint_id": "default", "enabled": true }],
-    "telegram_endpoints": [{ "id": "default", "mode": "botapi", "chat_id": "-100123...", "bot_token_key": "telegram.bot_token.default" }]
+    "telegram_endpoints": [{ "id": "default", "mode": "mtproto", "chat_id": "-100123...", "bot_token_key": "telegram.bot_token.default" }]
   },
   "secrets": {
     "masterKeyPresent": true,
-    "telegramBotTokenPresentByEndpoint": { "default": true }
+    "telegramBotTokenPresentByEndpoint": { "default": true },
+    "telegramMtprotoApiHashPresent": true,
+    "telegramMtprotoSessionPresentByEndpoint": { "default": true }
   }
 }
 ```

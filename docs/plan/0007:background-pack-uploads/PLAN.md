@@ -43,7 +43,7 @@
 - 调整 `televy_backup_core::backup` 的备份管线：
   - scan 阶段只负责：遍历文件、分块、加密封装、写入索引（SQLite）。
   - upload 阶段负责：把 scan 产出的 pack（以及必要时的 direct blob）通过后台 worker 并发上传，并回写 `chunk_objects` 映射。
-- 以 `config.toml` 中现有的 `telegram.rate_limit.*` 作为上传速率限制的来源（与计划 #0004 的配置口径一致）。
+- 以 `config.toml` 中现有的 `telegram_endpoints[].rate_limit.*` 作为上传速率限制的来源（使用当前 backup target 绑定的 endpoint）。
 - 补齐测试：用可控延迟的 fake storage 覆盖“scan 不等待上传”“队列回压”“失败传播”关键路径。
 
 ### Out of scope
@@ -59,7 +59,7 @@
 - 必须支持 pack 后台上传：当 pack 达到 flush 条件时，允许在 scan 阶段 finalize pack bytes，但上传必须交由后台 worker 执行。
 - 必须处理“大 blob 直传”场景：当单 blob 超过 pack 预算时，仍需能上传（但上传同样必须后台化）。
 - 必须有界：后台上传队列必须有明确上限（以条目数或字节预算表达）；达到上限时 scan 必须施加回压（阻塞/等待）而不是无限制占用内存。
-- 并发与速率限制必须可控：使用 `telegram.rate_limit.max_concurrent_uploads` 与 `min_delay_ms` 来约束 upload worker 的行为。
+- 并发与速率限制必须可控：使用当前 endpoint 的 `rate_limit.max_concurrent_uploads` 与 `rate_limit.min_delay_ms` 来约束 upload worker 的行为。
 - 失败语义：任一上传失败应导致本次 backup 失败，且错误信息可定位（至少包含 object kind / bytes / 原因）；失败后下次重跑允许重新上传缺失对象，不破坏索引一致性。
 
 ## 接口契约（Interfaces & Contracts）
@@ -68,7 +68,7 @@
 
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `config.toml`：`telegram.rate_limit.*` | Config | external | Modify | ./contracts/config.md | app/core | CLI / daemon / macOS app | 本计划仅落地“上传侧”的并发/节流语义（download 侧不在本计划范围内） |
+| `config.toml`：`telegram_endpoints[].rate_limit.*` | Config | external | Modify | ./contracts/config.md | app/core | CLI / daemon / macOS app | 本计划仅落地“上传侧”的并发/节流语义（download 侧不在本计划范围内） |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -80,10 +80,10 @@
 - Given 一个 storage 实现，其 `upload_document` 人为引入固定延迟（例如 2s/次），且待上传 pack 数量足够多，
   When 执行一次 backup，
   Then `phase.finish(scan)` 的耗时不应随“单次上传延迟”线性增长（scan 不等待上传；如触发队列回压则按回压规则阻塞）。
-- Given `telegram.rate_limit.max_concurrent_uploads = 2`，
+- Given 当前 target 的 endpoint 满足 `rate_limit.max_concurrent_uploads = 2`，
   When 执行一次 backup 且产生多个 pack 上传，
   Then 同时进行的上传任务数不超过 2（可通过测试用假 storage 统计并发峰值验证）。
-- Given `telegram.rate_limit.min_delay_ms = 250`，
+- Given 当前 target 的 endpoint 满足 `rate_limit.min_delay_ms = 250`，
   When 连续触发多次上传，
   Then 上传启动间隔满足最小间隔约束（按契约定义的口径验证）。
 - Given 任意一次上传失败，
@@ -128,15 +128,14 @@
 
 - scan 阶段把“需要上传的 payload（pack bytes / direct blob bytes）”封装成 job，通过有界队列交给后台 worker；worker 负责上传并产出“已上传对象引用”结果。
 - 主流程在 upload 阶段等待所有 job 完成，聚合统计并将结果回写到 SQLite（`chunk_objects`），最后进入 index/retention。
-- 速率限制：以 endpoint 的 `max_concurrent_uploads` 控制并行度；以 `min_delay_ms` 控制上传启动节奏（具体口径见契约）。
-- 速率限制：以 `telegram.rate_limit.max_concurrent_uploads` 控制并行度；以 `min_delay_ms` 控制上传启动节奏（具体口径见契约）。
+- 速率限制：以当前 endpoint 的 `rate_limit.max_concurrent_uploads` 控制并行度；以 `rate_limit.min_delay_ms` 控制上传启动节奏（具体口径见契约）。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
 - 风险：scan 与 upload 并发写 SQLite 可能引入锁竞争（需在实现中控制写入路径，必要时引入单独的 DB 写入通道）。
 
-- 假设：现有 `telegram_endpoints.rate_limit.*` 字段将作为 upload 的唯一配置来源（不新增 UI/CLI 配置项）。
-- 假设：不引入 v2 `telegram_endpoints` 结构；若后续按计划 #0005 引入 per-endpoint 配置，再单独调整契约与实现。
+- 假设：本计划不新增新的配置字段，只复用 v2 settings 中 endpoint 的 `rate_limit.*`（单次 backup 取当前 target 绑定的 endpoint）。
+- 假设：不引入额外的 per-target rate_limit override；如未来需要跨 endpoint 的全局节流策略，再单独调整契约与实现。
 
 ## 参考（References）
 

@@ -1,95 +1,135 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
   <defs>
+    <linearGradient id="wallpaper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7f7ff" />
+      <stop offset="36%" stop-color="#d7f0ff" />
+      <stop offset="72%" stop-color="#ffe6f1" />
+      <stop offset="100%" stop-color="#e8e2ff" />
+    </linearGradient>
+    <filter id="softBlur" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="56" />
+    </filter>
+    <filter id="glassBackdropBlur" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="18" />
+    </filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14" result="blur" />
+      <feOffset in="blur" dx="0" dy="12" result="off" />
+      <feFlood flood-color="#000000" flood-opacity="0.22" result="flood" />
+      <feComposite in="flood" in2="off" operator="in" result="shadow" />
+      <feComposite in="shadow" in2="SourceAlpha" operator="out" result="outerShadow" />
+      <feMerge>
+        <feMergeNode in="outerShadow" />
+      </feMerge>
+    </filter>
+    <clipPath id="windowClip">
+      <rect x="100" y="60" rx="12" ry="12" width="1000" height="640" />
+    </clipPath>
+    <clipPath id="segClip">
+      <rect x="440" y="74" width="330" height="28" rx="8" ry="8" />
+    </clipPath>
     <style>
-      .bg { fill: #ffffff; }
-      .win { fill: #f7f7f9; stroke: #d0d0d6; stroke-width: 1; }
-      .titlebar { fill: #f5f5f7; }
-      .toolbar { fill: #f5f5f7; }
+      .bg { fill: url(#wallpaper); }
+      .win { fill: #f5f5f7; fill-opacity: 0.55; stroke: #d0d0d6; stroke-width: 1; }
+      .titlebar { fill: #f5f5f7; fill-opacity: 0.14; }
       .sep { stroke: #d7d7dd; stroke-width: 1; }
+      .divider { stroke: #e6e6eb; stroke-width: 1; }
+
       .text { fill: #1c1c1e; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif; }
       .muted { fill: #6e6e73; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif; }
       .h1 { font-size: 14px; font-weight: 700; }
-      .label { font-size: 12px; font-weight: 600; }
+      .h2 { font-size: 18px; font-weight: 800; }
+      .label { font-size: 13px; font-weight: 700; }
       .body { font-size: 12px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
 
-      .toolItem { fill: none; }
-      .toolItemSel { fill: #e5e5ea; stroke: #d1d1d6; stroke-width: 1; }
-      .toolIcon { fill: #6e6e73; }
-      .toolIconSel { fill: #0a84ff; }
+      .segWrap { fill: #ececf0; fill-opacity: 0.45; stroke: #d1d1d6; stroke-width: 1; }
+      .segSel { fill: #dfe0e6; fill-opacity: 0.55; }
+      .segText { font-size: 12px; font-weight: 700; }
+      .segDivider { stroke: #d1d1d6; stroke-width: 1; }
 
-      .group { fill: #ffffff; stroke: #e6e6eb; stroke-width: 1; }
-      .field { fill: #ffffff; stroke: #cfcfd6; stroke-width: 1; }
-      .btn { fill: #ffffff; stroke: #cfcfd6; stroke-width: 1; }
-      .btnPrimary { fill: #0a84ff; stroke: #0a84ff; stroke-width: 1; }
-      .btnText { fill: #1c1c1e; font-size: 12px; font-weight: 600; }
-      .btnTextOnPrimary { fill: #ffffff; font-size: 12px; font-weight: 700; }
-      .hint { fill: #6e6e73; font-size: 11px; }
+      .field { fill: #ffffff; fill-opacity: 0.90; stroke: #cfcfd6; stroke-width: 1; }
+      .btn { fill: #ffffff; fill-opacity: 0.90; stroke: #cfcfd6; stroke-width: 1; }
     </style>
   </defs>
 
   <rect class="bg" x="0" y="0" width="1200" height="760" />
+  <g opacity="0.85">
+    <circle cx="200" cy="150" r="260" fill="#6fd6ff" opacity="0.34" filter="url(#softBlur)" />
+    <circle cx="960" cy="160" r="280" fill="#ff7ac8" opacity="0.14" filter="url(#softBlur)" />
+    <circle cx="860" cy="640" r="340" fill="#8a7cff" opacity="0.18" filter="url(#softBlur)" />
+    <circle cx="240" cy="680" r="320" fill="#ff7ac8" opacity="0.18" filter="url(#softBlur)" />
+  </g>
 
   <!-- Window -->
-  <rect id="window" class="win" x="100" y="60" rx="12" ry="12" width="1000" height="640" />
-  <rect class="titlebar" x="100" y="60" rx="12" ry="12" width="1000" height="52" />
-  <rect class="toolbar" x="100" y="112" width="1000" height="60" />
+  <rect x="100" y="60" rx="12" ry="12" width="1000" height="640" fill="#000000" filter="url(#shadow)" />
+  <!-- Glass backdrop (simulated) -->
+  <g clip-path="url(#windowClip)">
+    <g filter="url(#glassBackdropBlur)">
+      <rect class="bg" x="0" y="0" width="1200" height="760" />
+      <g opacity="0.85">
+        <circle cx="200" cy="150" r="260" fill="#6fd6ff" opacity="0.34" filter="url(#softBlur)" />
+        <circle cx="960" cy="160" r="280" fill="#ff7ac8" opacity="0.14" filter="url(#softBlur)" />
+        <circle cx="860" cy="640" r="340" fill="#8a7cff" opacity="0.18" filter="url(#softBlur)" />
+        <circle cx="240" cy="680" r="320" fill="#ff7ac8" opacity="0.18" filter="url(#softBlur)" />
+      </g>
+    </g>
+  </g>
+  <rect class="win" x="100" y="60" rx="12" ry="12" width="1000" height="640" />
+  <rect class="titlebar" x="100" y="60" width="1000" height="52" clip-path="url(#windowClip)" />
   <line class="sep" x1="100" y1="112" x2="1100" y2="112" />
-  <line class="sep" x1="100" y1="172" x2="1100" y2="172" />
 
   <!-- Traffic lights -->
   <circle cx="128" cy="86" r="6" fill="#ff5f57" />
   <circle cx="146" cy="86" r="6" fill="#febc2e" />
   <circle cx="164" cy="86" r="6" fill="#28c840" />
 
-  <text id="title" class="text h1" x="600" y="92" text-anchor="middle">TelevyBackup Settings</text>
+  <text class="text h1" x="210" y="92" text-anchor="start">Settings</text>
 
-  <!-- Toolbar items -->
-  <rect class="toolItem" x="415" y="120" width="110" height="44" rx="8" ry="8" />
-  <!-- Iconify: tabler:folder -->
-  <g transform="translate(460 124) scale(0.85)" color="#6e6e73" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
-    <path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2" />
+  <!-- Segmented control -->
+  <!-- Segmented control backdrop (simulated glass) -->
+  <g clip-path="url(#segClip)">
+    <g filter="url(#glassBackdropBlur)">
+      <rect class="bg" x="0" y="0" width="1200" height="760" />
+      <g opacity="0.85">
+        <circle cx="200" cy="150" r="260" fill="#6fd6ff" opacity="0.34" filter="url(#softBlur)" />
+        <circle cx="960" cy="160" r="280" fill="#ff7ac8" opacity="0.14" filter="url(#softBlur)" />
+        <circle cx="860" cy="640" r="340" fill="#8a7cff" opacity="0.18" filter="url(#softBlur)" />
+        <circle cx="240" cy="680" r="320" fill="#ff7ac8" opacity="0.18" filter="url(#softBlur)" />
+      </g>
+    </g>
   </g>
-  <text class="muted body" x="470" y="155" text-anchor="middle">Targets</text>
-
-  <rect class="toolItem" x="545" y="120" width="110" height="44" rx="8" ry="8" />
-  <!-- Iconify: tabler:key -->
-  <g transform="translate(590 123) scale(0.85)" color="#6e6e73" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
-    <path d="m16.555 3.843l3.602 3.602a2.877 2.877 0 0 1 0 4.069l-2.643 2.643a2.877 2.877 0 0 1-4.069 0l-.301-.301l-6.558 6.558a2 2 0 0 1-1.239.578L5.172 21H4a1 1 0 0 1-.993-.883L3 20v-1.172a2 2 0 0 1 .467-1.284l.119-.13L4 17h2v-2h2v-2l2.144-2.144l-.301-.301a2.877 2.877 0 0 1 0-4.069l2.643-2.643a2.877 2.877 0 0 1 4.069 0M15 9h.01" />
-  </g>
-  <text class="muted body" x="600" y="157" text-anchor="middle">Recovery Key</text>
-
-  <rect class="toolItemSel" x="675" y="120" width="110" height="44" rx="8" ry="8" />
-  <!-- Iconify: tabler:clock -->
-  <g transform="translate(720 125) scale(0.85)" color="#0a84ff" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
-    <path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0-18 0" />
-    <path d="M12 7v5l3 3" />
-  </g>
-  <text class="text body" x="730" y="157" text-anchor="middle">Schedule</text>
+  <rect class="segWrap" x="440" y="74" width="330" height="28" rx="8" ry="8" />
+  <rect class="segSel" x="662" y="76" width="106" height="24" rx="7" ry="7" />
+  <line class="segDivider" x1="550" y1="76" x2="550" y2="100" />
+  <line class="segDivider" x1="660" y1="76" x2="660" y2="100" />
+  <text class="muted segText" x="495" y="94" text-anchor="middle">Targets</text>
+  <text class="muted segText" x="605" y="94" text-anchor="middle">Recovery Key</text>
+  <text class="text segText" x="715" y="94" text-anchor="middle">Schedule</text>
 
   <!-- Content -->
-  <text id="label-global" class="text label" x="140" y="212">Global schedule</text>
+  <text class="text h2" x="140" y="160">Schedule</text>
+  <text class="muted body" x="140" y="184">Global schedule (targets inherit by default).</text>
 
-  <rect id="group-global" class="group" x="120" y="228" width="960" height="206" rx="8" ry="8" />
-  <text id="row-enable" class="text body" x="140" y="263">Enable automatic backups</text>
-  <!-- macOS-style switch (ON) -->
-  <rect id="toggle" x="1017" y="248" rx="12" ry="12" width="44" height="24" fill="#34c759" opacity="0.92"/>
-  <circle id="toggle-knob" cx="1049" cy="260" r="10" fill="#ffffff" opacity="0.98" stroke="#d1d1d6" stroke-width="1"/>
+  <line class="divider" x1="140" y1="206" x2="1060" y2="206" />
 
-  <text class="muted body" x="140" y="312">Frequency</text>
-  <rect id="field-frequency" class="field" x="220" y="294" width="180" height="28" rx="6" ry="6" />
-  <text id="value-frequency" class="text body" x="234" y="313">Daily</text>
+  <!-- Enable toggle -->
+  <rect x="140" y="222" width="14" height="14" rx="3" ry="3" fill="#ffffff" stroke="#cfcfd6" stroke-width="1" />
+  <text class="text body" x="164" y="233">Enable</text>
 
-  <text class="muted body" x="140" y="360">At</text>
-  <rect id="field-at" class="field" x="220" y="342" width="180" height="28" rx="6" ry="6" />
-  <text id="value-at" class="text body" x="234" y="361">03:00</text>
+  <!-- Frequency -->
+  <text class="text body" x="140" y="268">Frequency</text>
+  <rect class="field" x="920" y="252" width="140" height="26" rx="6" ry="6" />
+  <text class="text body" x="934" y="269">Hourly</text>
+  <path d="M1038 263 l6 6 l6 -6" fill="none" stroke="#6e6e73" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
 
-  <text id="hint-global" class="hint" x="140" y="407">Per-target schedules can inherit these defaults, or override them per directory.</text>
+  <!-- Hourly minute -->
+  <text class="text body" x="140" y="300">Minute</text>
+  <rect class="field" x="926" y="284" width="70" height="26" rx="6" ry="6" />
+  <text class="text body mono" x="961" y="301" text-anchor="middle">00</text>
 
-  <rect id="group-notes" class="group" x="120" y="458" width="960" height="104" rx="8" ry="8" />
-  <text class="text label" x="140" y="488">Notes</text>
-  <text class="hint" x="140" y="514">- Each target can choose “Inherit global schedule” or set an override.</text>
-  <text class="hint" x="140" y="534">- Schedule settings do not include secrets; bot tokens and master keys are stored encrypted locally.</text>
-
-  <!-- Footer -->
-  <text class="hint" x="140" y="664">Changes are saved automatically.</text>
+  <rect class="btn" x="1002" y="284" width="26" height="26" rx="7" ry="7" />
+  <text class="text h1" x="1015" y="302" text-anchor="middle">+</text>
+  <rect class="btn" x="1034" y="284" width="26" height="26" rx="7" ry="7" />
+  <text class="text h1" x="1047" y="302" text-anchor="middle">–</text>
 </svg>

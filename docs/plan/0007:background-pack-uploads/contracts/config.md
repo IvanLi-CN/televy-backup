@@ -1,6 +1,6 @@
 # 配置（Config）
 
-## `telegram.rate_limit`（上传/下载的速率限制）
+## `telegram_endpoints[].rate_limit`（上传/下载的速率限制）
 
 - 范围（Scope）: external
 - 变更（Change）: Modify
@@ -9,7 +9,7 @@
 
 ### 适用范围（Applies to）
 
-- 本配置项的语义来源于计划 #0004：作为 Telegram 侧上传/下载的统一并发与节流配置。
+- 本配置项的语义来源于计划 #0004：作为 Telegram 侧上传/下载的并发与节流配置。
 - 本计划 #0007 的交付范围仅包含 **backup 的上传侧**（调用 `Storage::upload_document`），覆盖所有上传类型：
   - pack 上传
   - “直传 blob”（无法/不应打包时的单对象上传）
@@ -25,8 +25,9 @@
 
 ### 行为语义（Semantics）
 
+- 适用对象：单次 backup 运行时，使用“当前 target 绑定的 endpoint”的 `rate_limit.*` 作为上传侧的速率限制来源。
 - 并发：任一时刻“正在执行 upload”的任务数不超过 `max_concurrent_uploads`。
-- 最小间隔：**两次 upload 启动**之间的时间间隔不小于 `min_delay_ms`（全局节流；多 worker 不应叠加速率）。
+- 最小间隔：**两次 upload 启动**之间的时间间隔不小于 `min_delay_ms`（单次 backup 内全局节流；多 worker 不应叠加速率）。
 
 ### 校验（Validation）
 
@@ -35,4 +36,4 @@
 
 ### 兼容性（Compatibility）
 
-- 兼容旧配置文件：字段已存在但此前可能不生效；本计划会让其语义生效，属于“行为增强”。
+- settings v2 中，`rate_limit` 位于每个 `[[telegram_endpoints]]` 下；本计划仅让其“上传侧”的语义在 backup 路径上生效。

@@ -1,151 +1,211 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
   <defs>
+    <linearGradient id="wallpaper" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7f7ff" />
+      <stop offset="36%" stop-color="#d7f0ff" />
+      <stop offset="72%" stop-color="#ffe6f1" />
+      <stop offset="100%" stop-color="#e8e2ff" />
+    </linearGradient>
+    <filter id="softBlur" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="56" />
+    </filter>
+    <filter id="glassBackdropBlur" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="18" />
+    </filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="14" result="blur" />
+      <feOffset in="blur" dx="0" dy="12" result="off" />
+      <feFlood flood-color="#000000" flood-opacity="0.22" result="flood" />
+      <feComposite in="flood" in2="off" operator="in" result="shadow" />
+      <feComposite in="shadow" in2="SourceAlpha" operator="out" result="outerShadow" />
+      <feMerge>
+        <feMergeNode in="outerShadow" />
+      </feMerge>
+    </filter>
+    <clipPath id="windowClip">
+      <rect x="100" y="60" rx="12" ry="12" width="1000" height="640" />
+    </clipPath>
+    <clipPath id="segClip">
+      <rect x="440" y="74" width="330" height="28" rx="8" ry="8" />
+    </clipPath>
     <style>
-      .bg { fill: #ffffff; }
-      .win { fill: #f7f7f9; stroke: #d0d0d6; stroke-width: 1; }
-      .titlebar { fill: #f5f5f7; }
-      .toolbar { fill: #f5f5f7; }
+      .bg { fill: url(#wallpaper); }
+      .win { fill: #f5f5f7; fill-opacity: 0.55; stroke: #d0d0d6; stroke-width: 1; }
+      .titlebar { fill: #f5f5f7; fill-opacity: 0.14; }
       .sep { stroke: #d7d7dd; stroke-width: 1; }
+
+      .content { fill: #f5f5f7; fill-opacity: 0.55; }
+      .sidebar { fill: #efeff2; fill-opacity: 0.65; }
+      .divider { stroke: #e6e6eb; stroke-width: 1; }
+
       .text { fill: #1c1c1e; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif; }
       .muted { fill: #6e6e73; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif; }
+      .onPrimary { fill: #ffffff; font-weight: 700; }
+      .onAccentPrimary { fill: #ffffff; font-weight: 700; }
+      .onAccentSecondary { fill: #ffffff; fill-opacity: 0.82; }
       .h1 { font-size: 14px; font-weight: 700; }
+      .h2 { font-size: 18px; font-weight: 800; }
       .label { font-size: 12px; font-weight: 600; }
       .body { font-size: 12px; }
-      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 11px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
 
-      .toolItem { fill: none; }
-      .toolItemSel { fill: #e5e5ea; stroke: #d1d1d6; stroke-width: 1; }
-      .toolIcon { fill: #6e6e73; }
-      .toolIconSel { fill: #0a84ff; }
+      .segWrap { fill: #ececf0; fill-opacity: 0.45; stroke: #d1d1d6; stroke-width: 1; }
+      .segSel { fill: #dfe0e6; fill-opacity: 0.55; }
+      .segText { font-size: 12px; font-weight: 700; }
+      .segDivider { stroke: #d1d1d6; stroke-width: 1; }
 
-      .splitBorder { fill: #ffffff; stroke: #e6e6eb; stroke-width: 1; }
-      .tableHead { fill: #f5f5f7; stroke: #e6e6eb; stroke-width: 1; }
-      .row { fill: #ffffff; }
-      .rowSel { fill: #e8f1ff; }
-      .rowLine { stroke: #e6e6eb; stroke-width: 1; }
+      .rowSel { fill: #0a84ff; }
+      .row { fill: transparent; }
 
-      .group { fill: #ffffff; stroke: #e6e6eb; stroke-width: 1; }
-      .field { fill: #ffffff; stroke: #cfcfd6; stroke-width: 1; }
-      .btn { fill: #ffffff; stroke: #cfcfd6; stroke-width: 1; }
+      .field { fill: #ffffff; fill-opacity: 0.90; stroke: #cfcfd6; stroke-width: 1; }
+      .pill { fill: #ffffff; fill-opacity: 0.90; stroke: #cfcfd6; stroke-width: 1; }
+      .btn { fill: #ffffff; fill-opacity: 0.90; stroke: #cfcfd6; stroke-width: 1; }
       .btnPrimary { fill: #0a84ff; stroke: #0a84ff; stroke-width: 1; }
-      .btnText { fill: #1c1c1e; font-size: 12px; font-weight: 600; }
-      .btnTextOnPrimary { fill: #ffffff; font-size: 12px; font-weight: 700; }
-      .hint { fill: #6e6e73; font-size: 11px; }
+
+      .ok { fill: #2fb344; font-weight: 700; }
     </style>
   </defs>
 
   <rect class="bg" x="0" y="0" width="1200" height="760" />
+  <g opacity="0.85">
+    <circle cx="200" cy="150" r="260" fill="#6fd6ff" opacity="0.34" filter="url(#softBlur)" />
+    <circle cx="960" cy="160" r="280" fill="#ff7ac8" opacity="0.14" filter="url(#softBlur)" />
+    <circle cx="860" cy="640" r="340" fill="#8a7cff" opacity="0.18" filter="url(#softBlur)" />
+    <circle cx="240" cy="680" r="320" fill="#ff7ac8" opacity="0.18" filter="url(#softBlur)" />
+  </g>
 
-  <!-- Window (macOS Preferences-style: titlebar + toolbar, no in-content tabs) -->
+  <!-- Window -->
+  <rect x="100" y="60" rx="12" ry="12" width="1000" height="640" fill="#000000" filter="url(#shadow)" />
+  <!-- Glass backdrop (simulated) -->
+  <g clip-path="url(#windowClip)">
+    <g filter="url(#glassBackdropBlur)">
+      <rect class="bg" x="0" y="0" width="1200" height="760" />
+      <g opacity="0.85">
+        <circle cx="200" cy="150" r="260" fill="#6fd6ff" opacity="0.34" filter="url(#softBlur)" />
+        <circle cx="960" cy="160" r="280" fill="#ff7ac8" opacity="0.14" filter="url(#softBlur)" />
+        <circle cx="860" cy="640" r="340" fill="#8a7cff" opacity="0.18" filter="url(#softBlur)" />
+        <circle cx="240" cy="680" r="320" fill="#ff7ac8" opacity="0.18" filter="url(#softBlur)" />
+      </g>
+    </g>
+  </g>
   <rect class="win" x="100" y="60" rx="12" ry="12" width="1000" height="640" />
-  <rect class="titlebar" x="100" y="60" rx="12" ry="12" width="1000" height="52" />
-  <rect class="toolbar" x="100" y="112" width="1000" height="60" />
+  <rect class="titlebar" x="100" y="60" width="1000" height="52" clip-path="url(#windowClip)" />
   <line class="sep" x1="100" y1="112" x2="1100" y2="112" />
-  <line class="sep" x1="100" y1="172" x2="1100" y2="172" />
 
   <!-- Traffic lights -->
   <circle cx="128" cy="86" r="6" fill="#ff5f57" />
   <circle cx="146" cy="86" r="6" fill="#febc2e" />
   <circle cx="164" cy="86" r="6" fill="#28c840" />
 
-  <text class="text h1" x="600" y="92" text-anchor="middle">TelevyBackup Settings</text>
+  <text class="text h1" x="210" y="92" text-anchor="start">Settings</text>
 
-  <!-- Toolbar items -->
-  <!-- Targets (selected) -->
-  <rect class="toolItemSel" x="415" y="120" width="110" height="44" rx="8" ry="8" />
-  <!-- Iconify: tabler:folder -->
-  <g transform="translate(460 124) scale(0.85)" color="#0a84ff" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
-    <path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2" />
+  <!-- Segmented control (toolbar principal) -->
+  <!-- Segmented control backdrop (simulated glass) -->
+  <g clip-path="url(#segClip)">
+    <g filter="url(#glassBackdropBlur)">
+      <rect class="bg" x="0" y="0" width="1200" height="760" />
+      <g opacity="0.85">
+        <circle cx="200" cy="150" r="260" fill="#6fd6ff" opacity="0.34" filter="url(#softBlur)" />
+        <circle cx="960" cy="160" r="280" fill="#ff7ac8" opacity="0.14" filter="url(#softBlur)" />
+        <circle cx="860" cy="640" r="340" fill="#8a7cff" opacity="0.18" filter="url(#softBlur)" />
+        <circle cx="240" cy="680" r="320" fill="#ff7ac8" opacity="0.18" filter="url(#softBlur)" />
+      </g>
+    </g>
   </g>
-  <text class="text body" x="470" y="155" text-anchor="middle">Targets</text>
+  <rect class="segWrap" x="440" y="74" width="330" height="28" rx="8" ry="8" />
+  <rect class="segSel" x="442" y="76" width="106" height="24" rx="7" ry="7" />
+  <line class="segDivider" x1="550" y1="76" x2="550" y2="100" />
+  <line class="segDivider" x1="660" y1="76" x2="660" y2="100" />
+  <text class="text segText" x="495" y="94" text-anchor="middle">Targets</text>
+  <text class="muted segText" x="605" y="94" text-anchor="middle">Recovery Key</text>
+  <text class="muted segText" x="715" y="94" text-anchor="middle">Schedule</text>
 
-  <!-- Recovery Key -->
-  <rect class="toolItem" x="545" y="120" width="110" height="44" rx="8" ry="8" />
-  <!-- Iconify: tabler:key -->
-  <g transform="translate(590 123) scale(0.85)" color="#6e6e73" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
-    <path d="m16.555 3.843l3.602 3.602a2.877 2.877 0 0 1 0 4.069l-2.643 2.643a2.877 2.877 0 0 1-4.069 0l-.301-.301l-6.558 6.558a2 2 0 0 1-1.239.578L5.172 21H4a1 1 0 0 1-.993-.883L3 20v-1.172a2 2 0 0 1 .467-1.284l.119-.13L4 17h2v-2h2v-2l2.144-2.144l-.301-.301a2.877 2.877 0 0 1 0-4.069l2.643-2.643a2.877 2.877 0 0 1 4.069 0M15 9h.01" />
-  </g>
-  <text class="muted body" x="600" y="157" text-anchor="middle">Recovery Key</text>
+  <!-- Content -->
+  <rect class="sidebar" x="100" y="112" width="260" height="588" clip-path="url(#windowClip)" />
+  <rect class="content" x="360" y="112" width="740" height="588" clip-path="url(#windowClip)" />
+  <line class="divider" x1="360" y1="112" x2="360" y2="700" />
 
-  <!-- Schedule -->
-  <rect class="toolItem" x="675" y="120" width="110" height="44" rx="8" ry="8" />
-  <!-- Iconify: tabler:clock -->
-  <g transform="translate(720 125) scale(0.85)" color="#6e6e73" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
-    <path d="M3 12a9 9 0 1 0 18 0a9 9 0 0 0-18 0" />
-    <path d="M12 7v5l3 3" />
-  </g>
-  <text class="muted body" x="730" y="157" text-anchor="middle">Schedule</text>
+  <!-- Sidebar: target list -->
+  <rect class="rowSel" x="110" y="130" width="240" height="48" rx="6" ry="6" />
+  <text class="text label onAccentPrimary" x="124" y="150">manual</text>
+  <text class="text body mono onAccentSecondary" x="124" y="168">/Volumes/Data 1/SyncTest</text>
 
-  <!-- Split view -->
-  <rect class="splitBorder" x="120" y="192" width="310" height="488" rx="8" ry="8" />
-  <rect class="splitBorder" x="450" y="192" width="630" height="488" rx="8" ry="8" />
+  <rect class="row" x="110" y="184" width="240" height="48" rx="6" ry="6" />
+  <text class="text label" x="124" y="204">archive</text>
+  <text class="muted body mono" x="124" y="222">/Volumes/Archive/Backups</text>
 
-  <!-- Left: targets list -->
-  <rect class="tableHead" x="120" y="192" width="310" height="34" rx="8" ry="8" />
-  <text class="muted body" x="140" y="214">Targets</text>
+  <!-- Sidebar footer (+ / -) -->
+  <line class="divider" x1="100" y1="650" x2="360" y2="650" />
+  <rect class="btn" x="116" y="664" width="34" height="26" rx="7" ry="7" />
+  <text class="text h1" x="133" y="683" text-anchor="middle">+</text>
+  <rect class="btn" x="158" y="664" width="34" height="26" rx="7" ry="7" />
+  <text class="text h1" x="175" y="683" text-anchor="middle">–</text>
 
-  <rect class="rowSel" x="121" y="228" width="308" height="34" />
-  <text class="text body mono" x="140" y="250">/AAA/BBB</text>
-  <line class="rowLine" x1="120" y1="262" x2="430" y2="262" />
+  <!-- Detail pane -->
+  <text class="text h2" x="390" y="154">Target</text>
 
-  <rect class="row" x="121" y="262" width="308" height="34" />
-  <text class="text body mono" x="140" y="284">/TimeMachine/Backups</text>
-  <line class="rowLine" x1="120" y1="296" x2="430" y2="296" />
+  <!-- ID -->
+  <text class="text body" x="390" y="186">ID</text>
+  <text class="muted body mono" x="1068" y="186" text-anchor="end">src_3d66df21</text>
 
-  <rect class="row" x="121" y="296" width="308" height="34" />
-  <text class="text body mono" x="140" y="318">/Projects/Archive</text>
-  <line class="rowLine" x1="120" y1="330" x2="430" y2="330" />
+  <!-- Enabled toggle -->
+  <rect x="390" y="200" width="16" height="16" rx="3" ry="3" fill="#0a84ff" opacity="0.18" stroke="#0a84ff" stroke-width="1" />
+  <path d="M394 208 L399 213 L408 203" fill="none" stroke="#0a84ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+  <text class="text body" x="414" y="213">Enabled</text>
 
-  <!-- Add/Remove -->
-  <rect class="btn" x="130" y="642" width="26" height="22" rx="6" ry="6" />
-  <text class="text body" x="143" y="658" text-anchor="middle">+</text>
-  <rect class="btn" x="162" y="642" width="26" height="22" rx="6" ry="6" />
-  <text class="text body" x="175" y="658" text-anchor="middle">–</text>
-  <text class="hint" x="200" y="658">One local directory = one target</text>
+  <!-- Source -->
+  <text class="text body" x="390" y="244">Source</text>
+  <text class="muted body mono" x="1068" y="244" text-anchor="end">/Volumes/Data 1/SyncTest</text>
 
-  <!-- Right: selected target editor -->
-  <text class="text label" x="470" y="220">Selected Target</text>
+  <!-- Label -->
+  <text class="text body" x="390" y="274">Label</text>
+  <rect class="field" x="818" y="258" width="250" height="26" rx="6" ry="6" />
+  <text class="text body" x="832" y="275">manual</text>
 
-  <!-- Group: Source -->
-  <rect class="group" x="466" y="236" width="598" height="86" rx="8" ry="8" />
-  <text class="muted body" x="486" y="258">Source folder</text>
-  <rect class="field" x="486" y="266" width="430" height="28" rx="6" ry="6" />
-  <text class="text body mono" x="498" y="285">/AAA/BBB</text>
-  <rect class="btn" x="926" y="266" width="120" height="28" rx="6" ry="6" />
-  <text class="text btnText" x="986" y="285" text-anchor="middle">Choose…</text>
+  <line class="divider" x1="390" y1="300" x2="1068" y2="300" />
 
-  <!-- Group: Telegram (per-target bot info) -->
-  <rect id="group-telegram" class="group" x="466" y="336" width="598" height="216" rx="8" ry="8" />
-  <text class="muted body" x="486" y="358">Telegram (bot + chat)</text>
+  <!-- Endpoint -->
+  <text class="text body" x="390" y="330">Endpoint</text>
+  <rect class="field" x="808" y="314" width="260" height="26" rx="6" ry="6" />
+  <text class="text body" x="822" y="331">default</text>
+  <path d="M1052 324 l6 6 l6 -6" fill="none" stroke="#6e6e73" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
 
-  <text class="muted body" x="486" y="388">endpoint_id</text>
-  <rect class="field" x="486" y="396" width="220" height="28" rx="6" ry="6" />
-  <text class="text body mono" x="498" y="415">default</text>
-  <rect class="btn" x="716" y="396" width="148" height="28" rx="6" ry="6" />
-  <text class="text btnText" x="790" y="415" text-anchor="middle">Re-use…</text>
+  <!-- Chat ID -->
+  <text class="text body" x="390" y="362">Chat ID</text>
+  <rect class="field" x="808" y="346" width="260" height="26" rx="6" ry="6" />
+  <text class="text body" x="822" y="363">770190749</text>
 
-  <text class="muted body" x="486" y="452">Chat ID</text>
-  <rect class="field" x="486" y="460" width="378" height="28" rx="6" ry="6" />
-  <text class="muted body mono" x="498" y="479">-100123…</text>
+  <!-- Bot token -->
+  <text class="text body" x="390" y="394">Bot token</text>
+  <text class="ok body" x="1068" y="394" text-anchor="end">Saved (encrypted)</text>
+  <rect class="field" x="390" y="404" width="568" height="26" rx="6" ry="6" />
+  <text class="muted body mono" x="404" y="421">•••••••••••••••••••••••••••</text>
+  <rect class="btn" x="968" y="404" width="100" height="26" rx="6" ry="6" />
+  <text class="text body" x="1018" y="421" text-anchor="middle">Save token</text>
 
-  <text class="muted body" x="486" y="506">Bot token</text>
-  <text class="hint" x="560" y="506">(stored securely)</text>
-  <rect id="btn-set-token" class="btn" x="486" y="514" width="128" height="28" rx="6" ry="6" />
-  <text class="text btnText" x="550" y="533" text-anchor="middle">Set token…</text>
-  <rect id="btn-test-connection" class="btn" x="624" y="514" width="150" height="28" rx="6" ry="6" />
-  <text class="text btnText" x="699" y="533" text-anchor="middle">Test connection</text>
-  <text id="telegram-validation-status" class="hint" x="786" y="533">Not validated</text>
+  <line class="divider" x1="390" y1="450" x2="1068" y2="450" />
 
-  <!-- Group: Schedule -->
-  <rect class="group" x="466" y="562" width="598" height="88" rx="8" ry="8" />
-  <text class="muted body" x="486" y="584">Schedule (per target)</text>
-  <text class="text body" x="486" y="612">Inherit global schedule</text>
-  <circle cx="646" cy="608" r="8" fill="#0a84ff" opacity="0.12"/>
-  <circle cx="646" cy="608" r="4" fill="#0a84ff"/>
-  <text class="hint" x="670" y="612">Daily 03:00</text>
-  <rect class="btn" x="926" y="592" width="120" height="28" rx="6" ry="6" />
-  <text class="text btnText" x="986" y="611" text-anchor="middle">Override…</text>
+  <!-- API -->
+  <text class="text body" x="390" y="480">API ID</text>
+  <rect class="field" x="818" y="464" width="250" height="26" rx="6" ry="6" />
+  <text class="text body" x="832" y="481">14712068</text>
 
-  <!-- Footer -->
-  <text class="hint" x="466" y="664">Changes are saved automatically.</text>
+  <text class="text body" x="390" y="512">API hash</text>
+  <text class="ok body" x="1068" y="512" text-anchor="end">Saved (encrypted)</text>
+  <rect class="field" x="390" y="522" width="568" height="26" rx="6" ry="6" />
+  <text class="muted body mono" x="404" y="539">•••••••••••••••••••••••••••</text>
+  <rect class="btn" x="968" y="522" width="100" height="26" rx="6" ry="6" />
+  <text class="text body" x="1018" y="539" text-anchor="middle">Save api_hash</text>
+
+  <rect class="btn" x="390" y="560" width="120" height="28" rx="8" ry="8" />
+  <text class="text body" x="450" y="579" text-anchor="middle">Clear sessions</text>
+  <rect class="btnPrimary" x="390" y="596" width="140" height="30" rx="8" ry="8" />
+  <text class="text body onPrimary" x="460" y="616" text-anchor="middle">Test connection</text>
+  <text class="muted body" x="1068" y="585" text-anchor="end">Session: saved</text>
+  <text class="muted body" x="1068" y="615" text-anchor="end">Not validated</text>
+
+  <line class="divider" x1="390" y1="642" x2="1068" y2="642" />
+  <text class="text label" x="390" y="670">Schedule</text>
+  <rect x="390" y="682" width="14" height="14" rx="3" ry="3" fill="#ffffff" stroke="#cfcfd6" stroke-width="1" />
+  <text class="text body" x="414" y="693">Override global schedule</text>
 </svg>

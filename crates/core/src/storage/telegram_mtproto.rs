@@ -112,6 +112,7 @@ pub fn parse_tgmtproto_object_id_v1(encoded: &str) -> Result<TgMtProtoObjectIdV1
 
 #[derive(Debug, Clone)]
 pub struct TelegramMtProtoStorageConfig {
+    pub provider: String,
     pub api_id: i32,
     pub api_hash: String,
     pub bot_token: String,
@@ -122,6 +123,7 @@ pub struct TelegramMtProtoStorageConfig {
 }
 
 pub struct TelegramMtProtoStorage {
+    provider: String,
     chat_id: String,
     session: Mutex<Option<Vec<u8>>>,
     helper: Mutex<MtProtoHelper>,
@@ -146,6 +148,7 @@ impl TelegramMtProtoStorage {
         })?;
 
         Ok(Self {
+            provider: config.provider,
             chat_id: config.chat_id,
             session: Mutex::new(helper.session_bytes()),
             helper: Mutex::new(helper),
@@ -155,11 +158,53 @@ impl TelegramMtProtoStorage {
     pub fn session_bytes(&self) -> Option<Vec<u8>> {
         self.session.lock().ok().and_then(|guard| guard.clone())
     }
+
+    pub fn pinned_object_id(&self) -> Result<Option<String>> {
+        let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper lock poisoned".to_string(),
+        })?;
+        let out = helper.get_pinned();
+        *self.session.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper session lock poisoned".to_string(),
+        })? = helper.session_bytes();
+        out
+    }
+
+    pub fn pin_message_id(&self, msg_id: i32) -> Result<()> {
+        let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper lock poisoned".to_string(),
+        })?;
+        let out = helper.pin(msg_id);
+        *self.session.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper session lock poisoned".to_string(),
+        })? = helper.session_bytes();
+        out?;
+        Ok(())
+    }
+}
+
+impl crate::bootstrap::PinnedStorage for TelegramMtProtoStorage {
+    fn get_pinned_object_id(&self) -> Result<Option<String>> {
+        self.pinned_object_id()
+    }
+
+    fn set_pinned_object_id(&self, object_id: &str) -> Result<()> {
+        let parsed = parse_tgmtproto_object_id_v1(object_id)?;
+        if parsed.peer != self.chat_id {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "tgmtproto peer mismatch: expected={} got={}",
+                    self.chat_id, parsed.peer
+                ),
+            });
+        }
+        self.pin_message_id(parsed.msg_id)
+    }
 }
 
 impl Storage for TelegramMtProtoStorage {
-    fn provider(&self) -> &'static str {
-        "telegram.mtproto"
+    fn provider(&self) -> &str {
+        &self.provider
     }
 
     fn upload_document<'a>(
@@ -256,6 +301,8 @@ enum Request {
     Init(InitRequest),
     Upload(UploadRequestMeta),
     Download(DownloadRequest),
+    GetPinned,
+    Pin(PinRequest),
 }
 
 #[derive(Debug, Serialize)]
@@ -290,6 +337,12 @@ struct UploadRequestMeta {
 struct DownloadRequest {
     #[serde(rename = "objectId")]
     object_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PinRequest {
+    #[serde(rename = "msgId")]
+    msg_id: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -445,6 +498,46 @@ impl MtProtoHelper {
             bytes,
             session: self.session_bytes(),
         })
+    }
+
+    fn get_pinned(&mut self) -> Result<Option<String>> {
+        self.send_json(&Request::GetPinned)?;
+
+        let env = self.read_json_line()?;
+        self.apply_session(&env)?;
+        if !env.ok {
+            return Err(Error::Telegram {
+                message: env
+                    .error
+                    .unwrap_or_else(|| "mtproto get_pinned failed".to_string()),
+            });
+        }
+
+        let v = env.data.get("objectId").ok_or_else(|| Error::Telegram {
+            message: "mtproto get_pinned missing objectId".to_string(),
+        })?;
+        if v.is_null() {
+            return Ok(None);
+        }
+        let object_id = v.as_str().ok_or_else(|| Error::Telegram {
+            message: "mtproto get_pinned invalid objectId".to_string(),
+        })?;
+        Ok(Some(object_id.to_string()))
+    }
+
+    fn pin(&mut self, msg_id: i32) -> Result<()> {
+        self.send_json(&Request::Pin(PinRequest { msg_id }))?;
+
+        let env = self.read_json_line()?;
+        self.apply_session(&env)?;
+        if !env.ok {
+            return Err(Error::Telegram {
+                message: env
+                    .error
+                    .unwrap_or_else(|| "mtproto pin failed".to_string()),
+            });
+        }
+        Ok(())
     }
 
     fn apply_session(&mut self, env: &ResponseEnvelope) -> Result<()> {

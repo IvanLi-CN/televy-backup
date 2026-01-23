@@ -39,6 +39,8 @@ enum Request {
     Init(InitRequest),
     Upload(UploadRequest),
     Download(DownloadRequest),
+    GetPinned,
+    Pin(PinRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +69,12 @@ struct UploadRequest {
 struct DownloadRequest {
     #[serde(rename = "objectId")]
     object_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PinRequest {
+    #[serde(rename = "msgId")]
+    msg_id: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -319,6 +327,95 @@ async fn main() {
                     }
                 }
             }
+            Request::GetPinned => {
+                let Some(s) = state.as_mut() else {
+                    let _ = write_response(
+                        &mut output,
+                        Response {
+                            ok: false,
+                            error: Some("not initialized".to_string()),
+                            session_b64: None,
+                            data: BTreeMap::new(),
+                        },
+                    );
+                    continue;
+                };
+
+                let res = get_pinned_object_id(s).await;
+                match res {
+                    Ok(object_id) => {
+                        let mut data = BTreeMap::new();
+                        match object_id {
+                            Some(id) => {
+                                data.insert("objectId".to_string(), serde_json::Value::String(id));
+                            }
+                            None => {
+                                data.insert("objectId".to_string(), serde_json::Value::Null);
+                            }
+                        }
+                        let _ = write_response(
+                            &mut output,
+                            Response {
+                                ok: true,
+                                error: None,
+                                session_b64: Some(session_b64(&s.session)),
+                                data,
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        let _ = write_response(
+                            &mut output,
+                            Response {
+                                ok: false,
+                                error: Some(err),
+                                session_b64: Some(session_b64(&s.session)),
+                                data: BTreeMap::new(),
+                            },
+                        );
+                    }
+                }
+            }
+            Request::Pin(req) => {
+                let Some(s) = state.as_mut() else {
+                    let _ = write_response(
+                        &mut output,
+                        Response {
+                            ok: false,
+                            error: Some("not initialized".to_string()),
+                            session_b64: None,
+                            data: BTreeMap::new(),
+                        },
+                    );
+                    continue;
+                };
+
+                let res = pin_message(s, req.msg_id).await;
+                match res {
+                    Ok(()) => {
+                        let _ = write_response(
+                            &mut output,
+                            Response {
+                                ok: true,
+                                error: None,
+                                session_b64: Some(session_b64(&s.session)),
+                                data: BTreeMap::new(),
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        let _ = write_response(
+                            &mut output,
+                            Response {
+                                ok: false,
+                                error: Some(err),
+                                session_b64: Some(session_b64(&s.session)),
+                                data: BTreeMap::new(),
+                            },
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -450,6 +547,48 @@ async fn resolve_chat(client: &Client, chat_id: &str) -> Result<Peer, String> {
         .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("chat not found: {chat_id}"))
+}
+
+async fn get_pinned_object_id(state: &mut State) -> Result<Option<String>, String> {
+    let pinned = timeout(
+        Duration::from_secs(DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS),
+        state.client.get_pinned_message(&state.chat),
+    )
+    .await
+    .map_err(|_| {
+        format!("get_pinned_message timed out after {DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS}s")
+    })?
+    .map_err(|e| format!("get_pinned_message failed: {e}"))?;
+
+    let Some(msg) = pinned else {
+        return Ok(None);
+    };
+
+    let msg_id = msg.id();
+    let Some(media) = msg.media() else {
+        // Pinned message exists but isn't a document (e.g. a text message). Treat as no catalog.
+        return Ok(None);
+    };
+
+    let (doc_id, access_hash) = match extract_document_id(&media) {
+        Ok(v) => v,
+        // Common real-world case: the chat already has a pinned message that isn't a document.
+        // Treat this as "no bootstrap catalog", so the first run can create+pin ours.
+        Err(_) => return Ok(None),
+    };
+    let object_id = encode_tgmtproto_object_id_v1(&state.chat_id, msg_id, doc_id, access_hash)?;
+    Ok(Some(object_id))
+}
+
+async fn pin_message(state: &mut State, msg_id: i32) -> Result<(), String> {
+    timeout(
+        Duration::from_secs(UPLOAD_SEND_MESSAGE_TIMEOUT_SECS),
+        state.client.pin_message(&state.chat, msg_id),
+    )
+    .await
+    .map_err(|_| format!("pin_message timed out after {UPLOAD_SEND_MESSAGE_TIMEOUT_SECS}s"))?
+    .map_err(|e| format!("pin_message failed: {e}"))?;
+    Ok(())
 }
 
 async fn upload(state: &mut State, filename: String, bytes: Vec<u8>) -> Result<String, String> {

@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-20
-- Last: 2026-01-21
+- Last: 2026-01-22
 
 ## 已冻结决策（Decisions, frozen）
 
@@ -37,7 +37,7 @@
 **核心场景**
 
 - 用户在 Settings window 中配置多个 backup target，并为每个 target 选择对应的 Telegram endpoint（bot token + chat_id）。
-- 用户在新电脑上重装后，仅凭“金钥 + Bot token + chat_id”（以及要恢复的目录/target 选择）即可完成 restore/verify。
+- 用户在新电脑上重装后，仅凭“金钥 + Bot token + chat_id”（以及 MTProto 所需的 `api_id + api_hash`，以及要恢复的目录/target 选择）即可完成 restore/verify。
 
 ## 目标 / 非目标
 
@@ -95,8 +95,8 @@
   - 必须保持“不在 config.toml 中存 token 明文”的约束；token 仅存 secrets store（加密）。
 - Recovery / portability
   - 必须提供“金钥”导入/导出能力，使得用户可在新设备重建解密能力（master key）。
-  - 必须定义并实现一个“远端引导信息（bootstrap/catalog）”机制，使得在新设备没有旧 SQLite 的情况下，也能定位到要恢复的 snapshot（至少 latest）所需的 `manifest_object_id`。
-  - 必须保证用户只需要：金钥 + bot token + chat_id（以及要恢复的 source_path/target 选择）即可完成 restore/verify。
+- 必须定义并实现一个“远端引导信息（bootstrap/catalog）”机制，使得在新设备没有旧 SQLite 的情况下，也能定位到要恢复的 snapshot（至少 latest）所需的 `manifest_object_id`。
+- 必须保证用户只需要：金钥 + bot token + chat_id（以及 MTProto 所需的 `api_id + api_hash`，以及要恢复的 source_path/target 选择）即可完成 restore/verify。
 - Safety & privacy
   - 必须明确并实现 provider namespace 规则：用于区分不同 endpoint 的对象引用/去重；namespace 不得包含 token 明文。
   - 必须在 UI/CLI 输出中避免泄露 secrets（token/master key/金钥本体）。
@@ -155,7 +155,7 @@
 - Daemon：
   - `crates/daemon/src/main.rs`：当前按全局 schedule 轮询并对 `settings.sources[]` 逐个跑 backup，且只支持单 `telegram` endpoint；本计划需要支持 per-target schedule（继承/override）与多 endpoint。
 - Core / storage / provider namespace：
-  - `crates/core/src/storage.rs`：当前 `Storage::provider() -> &'static str` 且 `TelegramBotApiStorage` 固定返回 `"telegram.botapi"`；本计划的 provider namespace 要包含 `endpoint_id`（`telegram.botapi/<endpoint_id>`），需要调整 trait/实现以支持动态 provider。
+  - `crates/core/src/storage.rs`：`Storage::provider()` 需要支持动态 provider；multi-endpoint 下 provider namespace 包含 `endpoint_id`（`telegram.mtproto/<endpoint_id>`），用于去重隔离与索引引用。
   - `crates/core/src/backup.rs` / `crates/core/src/restore.rs`：读写 SQLite index 时会依赖 `provider` 字段用于对象引用与去重隔离；multi-endpoint 下将受 provider namespace 变更影响。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
@@ -190,26 +190,31 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: `config.toml` schema v2（targets + endpoints + per-target schedule）与 v1 兼容读取/迁移写回
-- [ ] M2: provider namespace 变更：`telegram.botapi/<endpoint_id>`（多 endpoint 去重隔离）
-- [ ] M3: multi-endpoint secrets + validate：每个 endpoint 的 token 写入 secrets store、按 endpoint validate
-- [ ] M4: bootstrap/catalog：加密 catalog 文档上传 + pin root pointer + resolve latest（供 restore/verify 使用）
-- [ ] M5: restore/verify 新入口：`latest`（按 `target_id` 或 `source_path`）在新设备无旧 SQLite 下可恢复
-- [ ] M6: Settings window UI（targets/endpoints/schedule/recovery key）+ Popover 导航最小改动（移除 Settings tab + gear 打开 Settings window）
-- [ ] M7: daemon 按 target schedule 触发（默认继承全局；override 生效）+ 多 endpoint 支持
-- [ ] M8: tests + docs updates（覆盖 config/crypto/bootstrap；更新 README/architecture）
+- [x] M1: `config.toml` schema v2（targets + endpoints + per-target schedule）与 v1 兼容读取/迁移写回
+- [x] M2: provider namespace 变更：`telegram.mtproto/<endpoint_id>`（多 endpoint 去重隔离）
+- [x] M3: multi-endpoint secrets + validate：每个 endpoint 的 token 写入 secrets store、按 endpoint validate
+- [x] M4: bootstrap/catalog：加密 catalog 文档上传 + pin root pointer + resolve latest（供 restore/verify 使用）
+- [x] M5: restore/verify 新入口：`latest`（按 `target_id` 或 `source_path`）在新设备无旧 SQLite 下可恢复
+- [x] M6: Settings window UI（targets/endpoints/schedule/recovery key）+ Popover 导航最小改动（移除 Settings tab + gear 打开 Settings window）
+- [x] M7: daemon 按 target schedule 触发（默认继承全局；override 生效）+ 多 endpoint 支持
+- [x] M8: tests + docs updates（覆盖 config/crypto/bootstrap；更新 README/architecture）
+
+## Change log
+
+- 2026-01-22: 实现 settings v2（targets/endpoints）、TBK1 金钥导入/导出、pinned bootstrap/catalog、`restore latest`，并完成 macOS Settings window + 文档同步。
+- 2026-01-22: 订正 Settings window 设计图，使其与当前实现一致（toolbar segmented control、Targets 侧栏宽度与底部 +/- 控制条、字段布局）。
 
 ## 约束与风险（Constraints & Risks）
 
-- Telegram Bot API 无法枚举历史文件：跨设备恢复必须依赖可发现的 bootstrap 指针（例如 pinned message）或用户手动提供指针。
+- Telegram 无法枚举历史文件：跨设备恢复必须依赖可发现的 bootstrap 指针（例如 pinned message）或用户手动提供指针。
 - UI 约束：Popover 现有视觉与信息架构不得做“超出合理范围”的改动；Settings window 采用标准 macOS Preferences 风格（避免在内容区自制 tabs/pills），Popover 内只做最小必要变更（移除 Settings tab + gear 打开 Settings window）。
 - endpoint/账号风险：
   - chat 失效（退群/踢出 bot/拉黑 bot/解散群/删号等）会导致无法继续上传；且若 pinned bootstrap/catalog 丢失，将阻断新设备恢复。
-  - 若 endpoint 使用的是 **私聊（bot ↔ 用户）**：当该用户账号被删号/不可用时，该 chat 往往会变为不可访问（Bot API 层面可能表现为 `chat not found` 等），从而同时影响“上传”和“通过 pinned message 发现 bootstrap”的能力。
+  - 若 endpoint 使用的是 **私聊（bot ↔ 用户）**：当该用户账号被删号/不可用时，该 chat 往往会变为不可访问（Telegram 层面可能表现为 `chat not found` 等），从而同时影响“上传”和“通过 pinned message 发现 bootstrap”的能力。
   - 若 endpoint 使用的是 **群组/超级群/频道**：单个成员删号通常不影响 chat，但“群被解散/频道被删/bot 被移除/置顶消息被取消置顶或被删除”仍会破坏 bootstrap 可发现性。
   - bot 创建者账号被删号：Telegram 未公开保证 bot 的生命周期与所有权迁移行为；保守起见应视为运维风险（例如无法通过 BotFather 管理/轮换 token）。实现层面：只要 token 仍有效，备份/恢复可继续工作；若 token 被撤销或 bot 被封禁，则该 endpoint 的远端数据将不可再读取（即便仍持有金钥）。
   - bot token 泄露意味着该 endpoint 的远端密文可被读取（仍需 master key 才能解密）。
-- 多 endpoint 的 provider namespace 若设计不当，可能导致“用错 file_id”或 dedup 污染，最终造成 restore/verify 失败或错误恢复。
+- 多 endpoint 的 provider namespace 若设计不当，可能导致“用错 object_id”或 dedup 污染，最终造成 restore/verify 失败或错误恢复。
 
 ## 开放问题（需要主人决策）
 
