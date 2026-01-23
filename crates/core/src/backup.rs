@@ -54,12 +54,13 @@ impl ChunkingConfig {
 
         // Avoid panics from FastCDC internal assertions by validating bounds up-front.
         if self.max_bytes <= V2020_MAXIMUM_MAX {
-            if self.min_bytes < fastcdc::v2020::MINIMUM_MIN
-                || self.min_bytes > fastcdc::v2020::MINIMUM_MAX
-                || self.avg_bytes < fastcdc::v2020::AVERAGE_MIN
-                || self.avg_bytes > fastcdc::v2020::AVERAGE_MAX
-                || self.max_bytes < fastcdc::v2020::MAXIMUM_MIN
-            {
+            let min_ok = (fastcdc::v2020::MINIMUM_MIN..=fastcdc::v2020::MINIMUM_MAX)
+                .contains(&self.min_bytes);
+            let avg_ok = (fastcdc::v2020::AVERAGE_MIN..=fastcdc::v2020::AVERAGE_MAX)
+                .contains(&self.avg_bytes);
+            let max_ok = (fastcdc::v2020::MAXIMUM_MIN..=fastcdc::v2020::MAXIMUM_MAX)
+                .contains(&self.max_bytes);
+            if !(min_ok && avg_ok && max_ok) {
                 return Err(Error::InvalidConfig {
                     message: format!(
                         "chunk sizes out of bounds for fastcdc::v2020 (min={}..={}, avg={}..={}, max>={})",
@@ -75,13 +76,13 @@ impl ChunkingConfig {
             let min = self.min_bytes as usize;
             let avg = self.avg_bytes as usize;
             let max = self.max_bytes as usize;
-            if min < fastcdc::ronomon::MINIMUM_MIN
-                || min > fastcdc::ronomon::MINIMUM_MAX
-                || avg < fastcdc::ronomon::AVERAGE_MIN
-                || avg > fastcdc::ronomon::AVERAGE_MAX
-                || max < fastcdc::ronomon::MAXIMUM_MIN
-                || max > fastcdc::ronomon::MAXIMUM_MAX
-            {
+            let min_ok =
+                (fastcdc::ronomon::MINIMUM_MIN..=fastcdc::ronomon::MINIMUM_MAX).contains(&min);
+            let avg_ok =
+                (fastcdc::ronomon::AVERAGE_MIN..=fastcdc::ronomon::AVERAGE_MAX).contains(&avg);
+            let max_ok =
+                (fastcdc::ronomon::MAXIMUM_MIN..=fastcdc::ronomon::MAXIMUM_MAX).contains(&max);
+            if !(min_ok && avg_ok && max_ok) {
                 return Err(Error::InvalidConfig {
                     message: format!(
                         "chunk sizes out of bounds for fastcdc::ronomon (min={}..={}, avg={}..={}, max={}..={})",
@@ -103,9 +104,8 @@ impl ChunkingConfig {
 
         // MTProto-only: cap chunking.max_bytes to keep upload_document bytes <= engineered max.
         if provider.starts_with("telegram.mtproto") {
-            let mtproto_max_plain_bytes = MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES
-                .checked_sub(FRAMING_OVERHEAD_BYTES)
-                .unwrap_or(0);
+            let mtproto_max_plain_bytes =
+                MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES.saturating_sub(FRAMING_OVERHEAD_BYTES);
             if self.max_bytes as usize > mtproto_max_plain_bytes {
                 return Err(Error::InvalidConfig {
                     message: format!(

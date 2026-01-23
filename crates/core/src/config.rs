@@ -344,12 +344,13 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
 
     // Validate chunk sizes against FastCDC bounds (avoid runtime panics).
     if settings.chunking.max_bytes <= fastcdc::v2020::MAXIMUM_MAX {
-        if settings.chunking.min_bytes < fastcdc::v2020::MINIMUM_MIN
-            || settings.chunking.min_bytes > fastcdc::v2020::MINIMUM_MAX
-            || settings.chunking.avg_bytes < fastcdc::v2020::AVERAGE_MIN
-            || settings.chunking.avg_bytes > fastcdc::v2020::AVERAGE_MAX
-            || settings.chunking.max_bytes < fastcdc::v2020::MAXIMUM_MIN
-        {
+        let min_ok = (fastcdc::v2020::MINIMUM_MIN..=fastcdc::v2020::MINIMUM_MAX)
+            .contains(&settings.chunking.min_bytes);
+        let avg_ok = (fastcdc::v2020::AVERAGE_MIN..=fastcdc::v2020::AVERAGE_MAX)
+            .contains(&settings.chunking.avg_bytes);
+        let max_ok = (fastcdc::v2020::MAXIMUM_MIN..=fastcdc::v2020::MAXIMUM_MAX)
+            .contains(&settings.chunking.max_bytes);
+        if !(min_ok && avg_ok && max_ok) {
             return Err(Error::InvalidConfig {
                 message: format!(
                     "chunk sizes out of bounds for fastcdc::v2020 (min={}..={}, avg={}..={}, max>={})",
@@ -365,13 +366,10 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
         let min = settings.chunking.min_bytes as usize;
         let avg = settings.chunking.avg_bytes as usize;
         let max = settings.chunking.max_bytes as usize;
-        if min < fastcdc::ronomon::MINIMUM_MIN
-            || min > fastcdc::ronomon::MINIMUM_MAX
-            || avg < fastcdc::ronomon::AVERAGE_MIN
-            || avg > fastcdc::ronomon::AVERAGE_MAX
-            || max < fastcdc::ronomon::MAXIMUM_MIN
-            || max > fastcdc::ronomon::MAXIMUM_MAX
-        {
+        let min_ok = (fastcdc::ronomon::MINIMUM_MIN..=fastcdc::ronomon::MINIMUM_MAX).contains(&min);
+        let avg_ok = (fastcdc::ronomon::AVERAGE_MIN..=fastcdc::ronomon::AVERAGE_MAX).contains(&avg);
+        let max_ok = (fastcdc::ronomon::MAXIMUM_MIN..=fastcdc::ronomon::MAXIMUM_MAX).contains(&max);
+        if !(min_ok && avg_ok && max_ok) {
             return Err(Error::InvalidConfig {
                 message: format!(
                     "chunk sizes out of bounds for fastcdc::ronomon (min={}..={}, avg={}..={}, max={}..={})",
@@ -388,9 +386,8 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
 
     // MTProto-only: cap chunking.max_bytes to keep upload_document bytes <= engineered max.
     // upload_bytes = chunk_plain_bytes + framing_overhead_bytes
-    let mtproto_max_plain_bytes = MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES
-        .checked_sub(FRAMING_OVERHEAD_BYTES)
-        .unwrap_or(0);
+    let mtproto_max_plain_bytes =
+        MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES.saturating_sub(FRAMING_OVERHEAD_BYTES);
     if settings.chunking.max_bytes as usize > mtproto_max_plain_bytes {
         return Err(Error::InvalidConfig {
             message: format!(
@@ -789,9 +786,8 @@ endpoint_id = "e1"
         s.chunking.min_bytes = 64;
         s.chunking.avg_bytes = 256;
 
-        let max_plain = MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES
-            .checked_sub(FRAMING_OVERHEAD_BYTES)
-            .unwrap_or(0) as u32;
+        let max_plain =
+            MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES.saturating_sub(FRAMING_OVERHEAD_BYTES) as u32;
         s.chunking.max_bytes = max_plain + 1;
 
         let err = validate_settings_schema_v2(&s).unwrap_err();
@@ -807,9 +803,8 @@ endpoint_id = "e1"
         s.chunking.min_bytes = 64;
         s.chunking.avg_bytes = 256;
 
-        let max_plain = MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES
-            .checked_sub(FRAMING_OVERHEAD_BYTES)
-            .unwrap_or(0) as u32;
+        let max_plain =
+            MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES.saturating_sub(FRAMING_OVERHEAD_BYTES) as u32;
         s.chunking.max_bytes = max_plain;
 
         validate_settings_schema_v2(&s).unwrap();
