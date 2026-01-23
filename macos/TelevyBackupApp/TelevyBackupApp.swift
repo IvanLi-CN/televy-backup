@@ -161,8 +161,10 @@ final class AppModel: ObservableObject {
         DispatchQueue.global(qos: .utility).async {
             self.refreshSettings(withSecrets: false) {
                 guard userInitiated else { return }
-                self.refreshInFlight = false
-                self.showToast("Refreshed", isError: false)
+                DispatchQueue.main.async {
+                    self.refreshInFlight = false
+                    self.showToast("Refreshed", isError: false)
+                }
             }
         }
     }

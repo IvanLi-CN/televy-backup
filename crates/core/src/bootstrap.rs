@@ -77,7 +77,15 @@ pub async fn load_remote_catalog<S: PinnedStorage>(
         return Ok(None);
     };
     let bytes = storage.download_document(&object_id).await?;
-    let cat = decrypt_catalog(master_key, &bytes)?;
+    let cat = match decrypt_catalog(master_key, &bytes) {
+        Ok(cat) => cat,
+        Err(_) => {
+            // Pinned message may exist but not be a TelevyBackup bootstrap catalog (or may be
+            // encrypted with a different key). Treat this as missing catalog and overwrite it on
+            // next save.
+            return Ok(None);
+        }
+    };
     Ok(Some(cat))
 }
 

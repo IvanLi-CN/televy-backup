@@ -1498,9 +1498,9 @@ async fn restore_run(
             lookup_manifest_meta(&local_db_path, &snapshot_id).await?;
 
         let endpoint_id = if snapshot_provider == "telegram.mtproto" {
-            "default".to_string()
+            None
         } else if let Some(rest) = snapshot_provider.strip_prefix("telegram.mtproto/") {
-            rest.to_string()
+            Some(rest)
         } else {
             return Err(CliError::new(
                 "snapshot.unsupported_provider",
@@ -1510,18 +1510,7 @@ async fn restore_run(
             ));
         };
 
-        let ep = settings
-            .telegram_endpoints
-            .iter()
-            .find(|e| e.id == endpoint_id)
-            .ok_or_else(|| {
-                CliError::new(
-                    "config.invalid",
-                    format!(
-                        "snapshot provider endpoint_id not found in settings: snapshot_id={snapshot_id} endpoint_id={endpoint_id}"
-                    ),
-                )
-            })?;
+        let ep = select_endpoint(&settings, endpoint_id)?;
 
         if settings.telegram.mtproto.api_id <= 0 {
             return Err(CliError::new(
@@ -2058,9 +2047,9 @@ async fn verify_run(
             lookup_manifest_meta(&local_db_path, &snapshot_id).await?;
 
         let endpoint_id = if snapshot_provider == "telegram.mtproto" {
-            "default".to_string()
+            None
         } else if let Some(rest) = snapshot_provider.strip_prefix("telegram.mtproto/") {
-            rest.to_string()
+            Some(rest)
         } else {
             return Err(CliError::new(
                 "snapshot.unsupported_provider",
@@ -2070,18 +2059,7 @@ async fn verify_run(
             ));
         };
 
-        let ep = settings
-            .telegram_endpoints
-            .iter()
-            .find(|e| e.id == endpoint_id)
-            .ok_or_else(|| {
-                CliError::new(
-                    "config.invalid",
-                    format!(
-                        "snapshot provider endpoint_id not found in settings: snapshot_id={snapshot_id} endpoint_id={endpoint_id}"
-                    ),
-                )
-            })?;
+        let ep = select_endpoint(&settings, endpoint_id)?;
 
         if settings.telegram.mtproto.api_id <= 0 {
             return Err(CliError::new(
