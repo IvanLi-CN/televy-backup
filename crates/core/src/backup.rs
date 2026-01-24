@@ -640,6 +640,7 @@ pub async fn run_backup_with<S: Storage>(
         let pool = pool.clone();
         let uploader = uploader.clone();
         let upload_tx = upload_tx.clone();
+        let upload_tx_for_error = upload_tx.clone();
         let cancel = upload_cancel.clone();
         async move {
             let res = async {
@@ -911,7 +912,7 @@ pub async fn run_backup_with<S: Storage>(
 
             if res.is_err() {
                 cancel.cancel();
-                drop(upload_tx);
+                drop(upload_tx_for_error);
             }
             res
         }
