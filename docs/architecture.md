@@ -6,7 +6,8 @@
   - Provides Settings UI and task controls (backup/restore/verify).
   - Spawns the local `televybackup` CLI for long-running operations and streams progress from stdout.
 - **Core library**: `televy_backup_core` (`crates/core/`).
-  - Implements scan → CDC chunking → hash → encrypt framing → upload → SQLite index.
+  - Implements scan → CDC chunking → hash → encrypt framing → enqueue uploads → worker uploads → SQLite index.
+  - Backup pipeline is phase-split (scan/upload/index); scan enqueues jobs into a bounded queue and upload workers honor endpoint rate limits.
   - Implements restore/verify using remote index manifest + chunk downloads.
 - **Daemon**: `televybackupd` (`crates/daemon/`).
   - Runs scheduled backups (hourly/daily) and applies retention policy.

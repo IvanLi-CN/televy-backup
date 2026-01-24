@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-22
-- Last: 2026-01-22
+- Last: 2026-01-23
 
 ## 已冻结决策（Decisions, frozen）
 
@@ -119,10 +119,11 @@
 ## 实现里程碑（Milestones）
 
 - [ ] M1: 设计并落地 upload 队列与 worker pool（有界队列 + 并发上限 + 最小间隔）
-- [ ] M2: 改造 backup scan：pack/direct blob 产出 → enqueue（scan 内不 await 上传）
-- [ ] M3: upload 阶段 drain 队列并回写 `chunk_objects`；错误传播与取消语义对齐
-- [ ] M4: 补齐测试（延迟/失败/回压/并发上限）并在本地跑通
-- [ ] M5: 更新文档（`docs/architecture.md`）并补充可观测口径（scan/upload 分离后的含义）
+- [x] M1: 设计并落地 upload 队列与 worker pool（有界队列 + 并发上限 + 最小间隔）
+- [x] M2: 改造 backup scan：pack/direct blob 产出 → enqueue（scan 内不 await 上传）
+- [x] M3: upload 阶段 drain 队列并回写 `chunk_objects`；错误传播与取消语义对齐
+- [x] M4: 补齐测试（延迟/失败/回压/并发上限）并在本地跑通
+- [x] M5: 更新文档（`docs/architecture.md`）并补充可观测口径（scan/upload 分离后的含义）
 
 ## 方案概述（Approach, high-level）
 

@@ -174,3 +174,4 @@ None
 ## Change log
 
 - 2026-01-20: 落地每轮日志（NDJSON）+ `flush+fsync` + `TELEVYBACKUP_LOG`/`TELEVYBACKUP_LOG_DIR`；补齐 core phase/I/O 日志点位；补齐最小测试与 docs。
+- 2026-01-23: 备份 scan/upload 语义调整为“scan 入队、upload drain 队列”；phase 日志语义以分阶段视角解读。
