@@ -420,8 +420,7 @@ struct UploadQueue {
 impl UploadQueue {
     async fn enqueue_direct(&self, chunk_hash: String, blob: Vec<u8>) -> Result<()> {
         let bytes = blob.len();
-        let permit =
-            acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
+        let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
         let job = UploadJob::Direct {
             chunk_hash,
             blob,
@@ -435,8 +434,7 @@ impl UploadQueue {
 
     async fn enqueue_pack(&self, entries: Vec<PackEntryRef>, pack_bytes: Vec<u8>) -> Result<()> {
         let bytes = pack_bytes.len();
-        let permit =
-            acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
+        let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
         let job = UploadJob::Pack {
             entries,
             pack_bytes,
