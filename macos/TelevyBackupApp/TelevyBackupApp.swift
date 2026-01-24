@@ -1,5 +1,6 @@
 import AppKit
 import Darwin
+import Foundation
 import SwiftUI
 
 struct VisualEffectView: NSViewRepresentable {
@@ -722,14 +723,19 @@ final class AppModel: ObservableObject {
 
     private func sanitizeLogLine(_ line: String) -> String {
         // Redact any api.telegram.org URL segment to avoid leaking secrets.
-        let needle = "api.telegram.org"
-        guard let r = line.range(of: needle) else { return line }
-        let start = r.lowerBound
-        var end = line.endIndex
-        if let ws = line[start...].firstIndex(where: { $0.isWhitespace }) {
-            end = ws
+        // Keep the rest of the line intact (e.g., JSON stderr) by replacing only the URL substring.
+        let patterns = [
+            #"https?://api\.telegram\.org[^\s"'()\[\]{}<>,]+"#,
+            #"api\.telegram\.org(?=[/\?])[^\s"'()\[\]{}<>,]+"#,
+        ]
+
+        var out = line
+        for pattern in patterns {
+            guard let re = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let range = NSRange(out.startIndex..<out.endIndex, in: out)
+            out = re.stringByReplacingMatches(in: out, range: range, withTemplate: "[redacted_url]")
         }
-        return line.replacingCharacters(in: start..<end, with: "[redacted_url]")
+        return out
     }
 
     private func uiLogFileURL() -> URL {
