@@ -918,6 +918,9 @@ pub async fn run_backup_with<S: Storage>(
         }
     };
 
+    drop(uploader);
+    drop(upload_tx);
+
     let collect_future = async {
         let mut outcomes = Vec::new();
         let mut rx = result_rx;
