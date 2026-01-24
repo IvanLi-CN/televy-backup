@@ -22,26 +22,11 @@ struct VisualEffectView: NSViewRepresentable {
     }
 }
 
-enum Tab: String, CaseIterable, Identifiable {
-    case overview = "Overview"
-    case logs = "Logs"
-
-    var id: String { rawValue }
-}
-
-struct LogEntry: Identifiable {
-    let id = UUID()
-    let timestamp: Date
-    let message: String
-}
-
 final class ModelStore {
     static let shared = AppModel()
 }
 
 final class AppModel: ObservableObject {
-    @Published var tab: Tab = .overview
-
     @Published var sourcePath: String = ""
     @Published var label: String = "manual"
     @Published var chatId: String = ""
@@ -83,10 +68,9 @@ final class AppModel: ObservableObject {
     @Published var currentBytesDeduped: Int64 = 0
     @Published var taskStartedAt: Date?
 
-    @Published var logEntries: [LogEntry] = []
-
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
+    private var didShowUiLogWriteErrorToast: Bool = false
     private var settingsWindow: NSWindow? = nil
 
     private enum LegacyConfigWriteError: LocalizedError {
@@ -106,6 +90,21 @@ final class AppModel: ObservableObject {
             .appendingPathComponent("Library")
             .appendingPathComponent("Application Support")
             .appendingPathComponent("TelevyBackup")
+    }
+
+    func defaultDataDir() -> URL {
+        // Keep macOS defaults consistent with docs: data/logs live under Application Support.
+        defaultConfigDir()
+    }
+
+    private func logDirURL() -> URL {
+        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_LOG_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
+        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env).appendingPathComponent("logs")
+        }
+        return defaultDataDir().appendingPathComponent("logs")
     }
 
     func configTomlPath() -> URL {
@@ -216,7 +215,7 @@ final class AppModel: ObservableObject {
             if error is LegacyConfigWriteError {
                 showToast("Save disabled for settings v2 (open Settings)", isError: true)
             } else {
-                showToast("Save failed (see Logs)", isError: true)
+                showToast("Save failed (see ui.log)", isError: true)
             }
         }
     }
@@ -251,7 +250,7 @@ final class AppModel: ObservableObject {
                     self.secretPresenceKnown = true
                     self.updateTelegramStatus()
                 } else {
-                    self.showToast("Failed to save token (see Logs)", isError: true)
+                    self.showToast("Failed to save token (see ui.log)", isError: true)
                 }
             }
         )
@@ -271,7 +270,7 @@ final class AppModel: ObservableObject {
             onExit: { status in
                 self.refreshSecretsPresence(force: true)
                 if status != 0 {
-                    self.showToast("Migration failed (see Logs)", isError: true)
+                    self.showToast("Migration failed (see ui.log)", isError: true)
                     self.updateTelegramStatus()
                     return
                 }
@@ -291,7 +290,7 @@ final class AppModel: ObservableObject {
                         if status2 == 0 {
                             self.showToast("Master key created (encrypted)", isError: false)
                         } else {
-                            self.showToast("Failed to init master key (see Logs)", isError: true)
+                            self.showToast("Failed to init master key (see ui.log)", isError: true)
                         }
                         self.updateTelegramStatus()
                     }
@@ -315,7 +314,7 @@ final class AppModel: ObservableObject {
                 if status == 0 {
                     self.showToast("Migration complete", isError: false)
                 } else {
-                    self.showToast("Migration failed (see Logs)", isError: true)
+                    self.showToast("Migration failed (see ui.log)", isError: true)
                 }
                 self.updateTelegramStatus()
             }
@@ -351,7 +350,7 @@ final class AppModel: ObservableObject {
                     self.showToast("Saved (encrypted)", isError: false)
                     self.mtprotoApiHashPresent = true
                 } else {
-                    self.showToast("Failed to save api_hash (see Logs)", isError: true)
+                    self.showToast("Failed to save api_hash (see ui.log)", isError: true)
                 }
                 self.updateTelegramStatus()
             }
@@ -373,7 +372,7 @@ final class AppModel: ObservableObject {
                 if status == 0 {
                     self.showToast("Session cleared", isError: false)
                 } else {
-                    self.showToast("Failed to clear session (see Logs)", isError: true)
+                    self.showToast("Failed to clear session (see ui.log)", isError: true)
                 }
                 self.updateTelegramStatus()
             }
@@ -407,8 +406,8 @@ final class AppModel: ObservableObject {
                     self.showToast("Telegram OK", isError: false)
                 } else {
                     self.telegramValidateOk = false
-                    self.telegramValidateText = "Failed (see Logs)"
-                    self.showToast("Test failed (see Logs)", isError: true)
+                    self.telegramValidateText = "Failed (see ui.log)"
+                    self.showToast("Test failed (see ui.log)", isError: true)
                 }
                 self.refreshSecretsPresence(force: true)
                 self.updateTelegramStatus()
@@ -449,7 +448,16 @@ final class AppModel: ObservableObject {
     }
 
     func openLogs() {
-        tab = .logs
+        let dir = logDirURL()
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        } catch {
+            showToast("Failed to create logs folder", isError: true)
+            return
+        }
+        if !NSWorkspace.shared.open(dir) {
+            showToast("Failed to open logs folder", isError: true)
+        }
     }
 
     private func writeConfigToml() throws {
@@ -710,12 +718,6 @@ final class AppModel: ObservableObject {
         let trimmed = sanitizeLogLine(line.trimmingCharacters(in: .newlines))
         guard !trimmed.isEmpty else { return }
         appendFileLog(trimmed)
-        DispatchQueue.main.async {
-            self.logEntries.append(LogEntry(timestamp: Date(), message: trimmed))
-            if self.logEntries.count > 400 {
-                self.logEntries.removeFirst(self.logEntries.count - 400)
-            }
-        }
     }
 
     private func sanitizeLogLine(_ line: String) -> String {
@@ -731,7 +733,7 @@ final class AppModel: ObservableObject {
     }
 
     private func uiLogFileURL() -> URL {
-        defaultConfigDir().appendingPathComponent("ui.log")
+        logDirURL().appendingPathComponent("ui.log")
     }
 
     private func appendFileLog(_ message: String) {
@@ -752,7 +754,12 @@ final class AppModel: ObservableObject {
                 }
                 try handle.close()
             } catch {
-                // Do not recurse into appendLog; ignore file logging failures.
+                DispatchQueue.main.async {
+                    if !self.didShowUiLogWriteErrorToast {
+                        self.didShowUiLogWriteErrorToast = true
+                        self.showToast("Failed to write ui.log", isError: true)
+                    }
+                }
             }
         }
     }
@@ -1177,53 +1184,6 @@ struct GlassCard<Content: View>: View {
     }
 }
 
-struct SegmentedTabs: View {
-    @Binding var tab: Tab
-
-    var body: some View {
-        HStack(spacing: 0) {
-            tabButton(.overview)
-            divider
-            tabButton(.logs)
-        }
-        .padding(1)
-        .background(Color.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-        )
-        .frame(height: 32)
-    }
-
-    private var divider: some View {
-        Rectangle()
-            .fill(Color.black.opacity(0.10))
-            .frame(width: 1)
-            .padding(.vertical, 3)
-    }
-
-    private func tabButton(_ t: Tab) -> some View {
-        Button {
-            tab = t
-        } label: {
-            Text(t.rawValue)
-                .font(.system(size: 12, weight: .bold))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .foregroundStyle(tab == t ? Color.primary : Color.secondary)
-        }
-        .buttonStyle(.plain)
-        .background(
-            Group {
-                if tab == t {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.white.opacity(0.30))
-                        .padding(1)
-                }
-            }
-        )
-    }
-}
-
 struct PopoverRootView: View {
     @EnvironmentObject var model: AppModel
 
@@ -1246,14 +1206,7 @@ struct PopoverRootView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 header
-                SegmentedTabs(tab: $model.tab)
-
-                switch model.tab {
-                case .overview:
-                    OverviewView()
-                case .logs:
-                    LogsView()
-                }
+                OverviewView()
             }
             .padding(12)
         }
@@ -1483,33 +1436,6 @@ struct OverviewView: View {
             return "(\(model.lastRunErrorCode ?? "error"))"
         }
         return lastRunText()
-    }
-}
-
-struct LogsView: View {
-    @EnvironmentObject var model: AppModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            List(model.logEntries.reversed()) { item in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(item.message)
-                        .font(.system(size: 12, design: .monospaced))
-                        .lineLimit(3)
-                    Text(item.timestamp.formatted(date: .omitted, time: .standard))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 3)
-            }
-            .listStyle(.plain)
-
-            HStack {
-                Button("Refresh") { model.refresh() }
-                    .buttonStyle(.bordered)
-                Spacer()
-            }
-        }
     }
 }
 

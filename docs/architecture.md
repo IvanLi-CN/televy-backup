@@ -25,6 +25,8 @@ When env vars are not set, the GUI uses `~/Library/Application Support/TelevyBac
 
 Per-run logs are written to files as NDJSON and never mixed into stdout/stderr, so `televybackup --events` stdout remains NDJSON-only and stderr remains error-JSON-only.
 
+The macOS GUI also writes an append-only UI log file `ui.log` into the same log directory (best effort; redacts `api.telegram.org` URL segments).
+
 ## Secrets (vault key + local secrets store)
 
 Secrets are not stored in `config.toml`.

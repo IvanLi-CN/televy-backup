@@ -138,6 +138,14 @@ struct SettingsWindowRootView: View {
             }
         }
         .frame(minWidth: 820, minHeight: 560)
+        .overlay(alignment: .bottomTrailing) {
+            if let toast = model.toastText {
+                ToastPill(text: toast, isError: model.toastIsError)
+                    .padding(12)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Text("Settings")
@@ -152,6 +160,14 @@ struct SettingsWindowRootView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 360)
+            }
+            ToolbarItemGroup(placement: .automatic) {
+                Button {
+                    model.openLogs()
+                } label: {
+                    Label("Open logs", systemImage: "folder")
+                }
+                .help("Open logs folder in Finder")
             }
         }
         .onAppear { reload() }

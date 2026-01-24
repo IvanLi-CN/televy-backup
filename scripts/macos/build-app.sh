@@ -76,10 +76,15 @@ if [[ -n "$codesign_identity" ]]; then
     || echo "WARN: codesign CLI failed (Keychain prompts may repeat)"
   codesign --force --sign "$codesign_identity" -i com.ivan.televybackup.mtproto-helper "$macos_dir/televybackup-mtproto-helper" \
     || echo "WARN: codesign helper failed (Keychain prompts may repeat)"
-  codesign --force --sign "$codesign_identity" "$app_dir" \
+  codesign --force --deep --sign "$codesign_identity" "$app_dir" \
     || echo "WARN: codesign app failed"
 else
-  echo "Skipping codesign (set TELEVYBACKUP_CODESIGN_IDENTITY to reduce Keychain prompts)"
+  echo "No codesign identity found; applying ad-hoc signature for local runs"
+  codesign --force --deep --sign - "$app_dir" \
+    || echo "WARN: ad-hoc codesign app failed"
 fi
+
+codesign -vvv --deep --strict "$app_dir" >/dev/null 2>&1 \
+  || echo "WARN: codesign verification failed (embedded CLI may be killed by macOS)"
 
 echo "Built: $app_dir"
