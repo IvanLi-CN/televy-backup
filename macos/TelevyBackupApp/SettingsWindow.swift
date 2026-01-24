@@ -96,10 +96,73 @@ struct TargetScheduleOverrideV2: Codable {
 
 enum SettingsSection: String, CaseIterable, Identifiable {
     case targets = "Targets"
+    case endpoints = "Endpoints"
     case recoveryKey = "Recovery Key"
     case schedule = "Schedule"
 
     var id: String { rawValue }
+}
+
+private enum EndpointHeuristicsDefaults {
+    static let lastTouchedEndpointIdKey = "ui.settings.endpoints.lastTouchedEndpointId"
+    static let lastTouchedAtKey = "ui.settings.endpoints.lastTouchedAt"
+    static let lastSelectedEndpointIdKey = "ui.settings.targets.lastSelectedEndpointId"
+    static let lastSelectedAtKey = "ui.settings.targets.lastSelectedAt"
+
+    static func commitEndpointTouched(endpointId: String, now: Date = Date()) {
+        let defaults = UserDefaults.standard
+        defaults.set(endpointId, forKey: lastTouchedEndpointIdKey)
+        defaults.set(now.timeIntervalSince1970, forKey: lastTouchedAtKey)
+    }
+
+    static func commitEndpointSelectedForTarget(endpointId: String, now: Date = Date()) {
+        let defaults = UserDefaults.standard
+        defaults.set(endpointId, forKey: lastSelectedEndpointIdKey)
+        defaults.set(now.timeIntervalSince1970, forKey: lastSelectedAtKey)
+    }
+
+    static func preferredEndpointId(endpointsSorted: [TelegramEndpointV2]) -> String? {
+        guard !endpointsSorted.isEmpty else { return nil }
+        let defaults = UserDefaults.standard
+        let lastTouchedId = defaults.string(forKey: lastTouchedEndpointIdKey)
+        let lastTouchedAt = defaults.double(forKey: lastTouchedAtKey)
+        let lastSelectedId = defaults.string(forKey: lastSelectedEndpointIdKey)
+        let lastSelectedAt = defaults.double(forKey: lastSelectedAtKey)
+
+        let ids = Set(endpointsSorted.map(\.id))
+        let touchedOk = (lastTouchedId != nil && ids.contains(lastTouchedId!))
+        let selectedOk = (lastSelectedId != nil && ids.contains(lastSelectedId!))
+
+        if touchedOk && selectedOk {
+            return (lastTouchedAt >= lastSelectedAt) ? lastTouchedId : lastSelectedId
+        }
+        if touchedOk { return lastTouchedId }
+        if selectedOk { return lastSelectedId }
+        return endpointsSorted.first?.id
+    }
+}
+
+private struct EndpointListRow: View {
+    let endpoint: TelegramEndpointV2
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(endpoint.id)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Text(endpoint.chat_id.isEmpty ? "Chat: —" : "Chat: \(endpoint.chat_id)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .padding(.vertical, 2)
+    }
 }
 
 struct SettingsWindowRootView: View {
@@ -112,6 +175,7 @@ struct SettingsWindowRootView: View {
     @State private var loadError: String?
 
     @State private var selectedTargetId: String?
+    @State private var selectedEndpointId: String?
     @State private var savePending: DispatchWorkItem?
     @State private var isSaving: Bool = false
     @State private var saveSeq: Int = 0
@@ -120,6 +184,12 @@ struct SettingsWindowRootView: View {
     @State private var goldKey: String?
     @State private var goldKeyRevealed: Bool = false
     @State private var showImportRecoveryKeySheet: Bool = false
+
+    @State private var pendingLastTouchedEndpointId: String?
+    @State private var pendingLastSelectedEndpointId: String?
+
+    @State private var showEndpointDeleteBlockedAlert: Bool = false
+    @State private var endpointDeleteBlockedTargetId: String?
 
     var body: some View {
         ZStack {
@@ -171,6 +241,9 @@ struct SettingsWindowRootView: View {
             }
         }
         .onAppear { reload() }
+        .onChange(of: selectedTargetId) { _, _ in
+            ensureSelectedTargetEndpointValid()
+        }
     }
 
     @ViewBuilder
@@ -178,6 +251,8 @@ struct SettingsWindowRootView: View {
         switch section {
         case .targets:
             targetsView
+        case .endpoints:
+            endpointsView
         case .recoveryKey:
             recoveryKeyView
         case .schedule:
@@ -188,18 +263,29 @@ struct SettingsWindowRootView: View {
     private var targetsView: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
-                List(selection: $selectedTargetId) {
-                    ForEach(settings?.targets ?? []) { t in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(t.label.isEmpty ? t.id : t.label)
-                                .font(.system(size: 13, weight: .semibold))
-                            Text(t.source_path)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                ScrollViewReader { proxy in
+                    List(selection: $selectedTargetId) {
+                        ForEach(settings?.targets ?? []) { t in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(t.label.isEmpty ? t.id : t.label)
+                                    .font(.system(size: 13, weight: .semibold))
+                                Text(t.source_path)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .id(t.id)
+                            .tag(t.id as String?)
                         }
-                        .tag(t.id as String?)
+                    }
+                    .onChange(of: selectedTargetId) { _, id in
+                        guard let id else { return }
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                    .onAppear {
+                        guard let id = selectedTargetId else { return }
+                        proxy.scrollTo(id, anchor: .center)
                     }
                 }
                 .scrollContentBackground(.hidden)
@@ -244,6 +330,13 @@ struct SettingsWindowRootView: View {
                             secrets: secrets,
                             targetIndex: idx,
                             embedded: false,
+                            onEndpointSelected: { endpointId in
+                                pendingLastSelectedEndpointId = endpointId
+                            },
+                            onEditEndpoint: { endpointId in
+                                section = .endpoints
+                                selectedEndpointId = endpointId
+                            },
                             onReload: { self.reload() }
                         )
                         .padding(.vertical, 10)
@@ -265,6 +358,112 @@ struct SettingsWindowRootView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private var endpointsView: some View {
+        let endpoints = sortedEndpoints()
+
+        return HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                ScrollViewReader { proxy in
+                    List(selection: $selectedEndpointId) {
+                        ForEach(endpoints) { ep in
+                            EndpointListRow(endpoint: ep)
+                            .id(ep.id)
+                            .tag(ep.id as String?)
+                        }
+                    }
+                    .onChange(of: selectedEndpointId) { _, id in
+                        guard let id else { return }
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                    .onAppear {
+                        guard let id = selectedEndpointId else { return }
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                }
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
+
+                Divider()
+
+                HStack(spacing: 10) {
+                    Button { addEndpoint() } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(settings == nil)
+
+                    Button { deleteSelectedEndpoint() } label: {
+                        Image(systemName: "minus")
+                            .frame(width: 20, height: 20)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(selectedEndpointId == nil || settings == nil)
+
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+            .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)
+
+            Divider()
+
+            GroupBox {
+                if let endpointId = selectedEndpointId, settings != nil {
+                    ScrollView {
+                        EndpointEditor(
+                            settings: Binding(
+                                get: { self.settings! },
+                                set: { new in
+                                    self.settings = new
+                                    self.queueAutoSave()
+                                }
+                            ),
+                            secrets: secrets,
+                            endpointId: endpointId,
+                            onEndpointTouchedPending: { pendingLastTouchedEndpointId = $0 },
+                            onEndpointTouchedCommitted: { EndpointHeuristicsDefaults.commitEndpointTouched(endpointId: $0) },
+                            onReload: { self.reload() }
+                        )
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 12)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if isSaving {
+                            Text("Saving…")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .padding()
+                        }
+                    }
+                } else {
+                    Text("Select an endpoint")
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 14)
+                        .padding(.horizontal, 12)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .alert("Cannot delete endpoint", isPresented: $showEndpointDeleteBlockedAlert) {
+            Button("Cancel", role: .cancel) {}
+            Button("Go to Targets") {
+                if let endpointDeleteBlockedTargetId {
+                    selectedTargetId = endpointDeleteBlockedTargetId
+                }
+                section = .targets
+            }
+        } message: {
+            Text("This endpoint is still referenced by at least one target. Rebind/unbind it in Targets, then retry deletion.")
+        }
+        .onAppear {
+            if selectedEndpointId == nil, let s = settings {
+                selectedEndpointId = EndpointHeuristicsDefaults.preferredEndpointId(endpointsSorted: sortedEndpoints(settings: s))
+            }
         }
     }
 
@@ -521,6 +720,17 @@ struct SettingsWindowRootView: View {
                 if self.selectedTargetId == nil {
                     self.selectedTargetId = decoded.settings.targets.first?.id
                 }
+                if let selected = self.selectedEndpointId {
+                    let ids = Set(decoded.settings.telegram_endpoints.map(\.id))
+                    if !ids.contains(selected) {
+                        self.selectedEndpointId = nil
+                    }
+                }
+                if self.selectedEndpointId == nil {
+                    self.selectedEndpointId = EndpointHeuristicsDefaults.preferredEndpointId(
+                        endpointsSorted: self.sortedEndpoints(settings: decoded.settings)
+                    )
+                }
             }
         }
     }
@@ -586,6 +796,14 @@ struct SettingsWindowRootView: View {
                 if res.status != 0 {
                     self.loadError = "settings set failed: exit=\(res.status)"
                     return
+                }
+                if let id = self.pendingLastTouchedEndpointId {
+                    EndpointHeuristicsDefaults.commitEndpointTouched(endpointId: id)
+                    self.pendingLastTouchedEndpointId = nil
+                }
+                if let id = self.pendingLastSelectedEndpointId {
+                    EndpointHeuristicsDefaults.commitEndpointSelectedForTarget(endpointId: id)
+                    self.pendingLastSelectedEndpointId = nil
                 }
                 self.reload()
             }
@@ -672,6 +890,35 @@ struct SettingsWindowRootView: View {
         return "\"\(escaped)\""
     }
 
+    private func sortedEndpoints(settings: SettingsV2) -> [TelegramEndpointV2] {
+        settings.telegram_endpoints.sorted { a, b in
+            a.id.localizedStandardCompare(b.id) == .orderedAscending
+        }
+    }
+
+    private func sortedEndpoints() -> [TelegramEndpointV2] {
+        guard let settings else { return [] }
+        return sortedEndpoints(settings: settings)
+    }
+
+    private func preferredEndpointId(settings: SettingsV2) -> String? {
+        EndpointHeuristicsDefaults.preferredEndpointId(endpointsSorted: sortedEndpoints(settings: settings))
+    }
+
+    private func ensureSelectedTargetEndpointValid() {
+        guard var s = settings else { return }
+        guard let idx = selectedTargetIndex() else { return }
+
+        let current = s.targets[idx].endpoint_id
+        let exists = s.telegram_endpoints.contains(where: { $0.id == current })
+        if exists { return }
+
+        guard let preferred = preferredEndpointId(settings: s) else { return }
+        s.targets[idx].endpoint_id = preferred
+        settings = s
+        queueAutoSave()
+    }
+
     private func addTarget() {
         guard settings != nil else { return }
         let panel = NSOpenPanel()
@@ -683,19 +930,26 @@ struct SettingsWindowRootView: View {
         guard let url = panel.url else { return }
 
         var s = settings!
-        let endpointId = "ep_" + UUID().uuidString.lowercased().prefix(8)
         let targetId = "t_" + UUID().uuidString.lowercased().prefix(8)
 
-        s.telegram_endpoints.append(
-            TelegramEndpointV2(
-                id: String(endpointId),
-                mode: "mtproto",
-                chat_id: "",
-                bot_token_key: "telegram.bot_token.\(endpointId)",
-                mtproto: TelegramEndpointMtprotoV2(session_key: "telegram.mtproto.session.\(endpointId)"),
-                rate_limit: TelegramRateLimitV2(max_concurrent_uploads: 2, min_delay_ms: 250)
+        let endpointId: String
+        if let preferred = preferredEndpointId(settings: s) {
+            endpointId = preferred
+        } else {
+            let newEndpointId = "ep_" + UUID().uuidString.lowercased().prefix(8)
+            endpointId = String(newEndpointId)
+            s.telegram_endpoints.append(
+                TelegramEndpointV2(
+                    id: endpointId,
+                    mode: "mtproto",
+                    chat_id: "",
+                    bot_token_key: "telegram.bot_token.\(endpointId)",
+                    mtproto: TelegramEndpointMtprotoV2(session_key: "telegram.mtproto.session.\(endpointId)"),
+                    rate_limit: TelegramRateLimitV2(max_concurrent_uploads: 2, min_delay_ms: 250)
+                )
             )
-        )
+            pendingLastTouchedEndpointId = endpointId
+        }
         s.targets.append(
             TargetV2(
                 id: String(targetId),
@@ -714,10 +968,42 @@ struct SettingsWindowRootView: View {
     private func deleteSelectedTarget() {
         guard var s = settings, let selectedTargetId else { return }
         s.targets.removeAll { $0.id == selectedTargetId }
-        let usedEndpoints = Set(s.targets.map { $0.endpoint_id })
-        s.telegram_endpoints.removeAll { !usedEndpoints.contains($0.id) }
         settings = s
         self.selectedTargetId = s.targets.first?.id
+        queueAutoSave()
+    }
+
+    private func addEndpoint() {
+        guard settings != nil else { return }
+        var s = settings!
+        let endpointId = "ep_" + UUID().uuidString.lowercased().prefix(8)
+        s.telegram_endpoints.append(
+            TelegramEndpointV2(
+                id: String(endpointId),
+                mode: "mtproto",
+                chat_id: "",
+                bot_token_key: "telegram.bot_token.\(endpointId)",
+                mtproto: TelegramEndpointMtprotoV2(session_key: "telegram.mtproto.session.\(endpointId)"),
+                rate_limit: TelegramRateLimitV2(max_concurrent_uploads: 2, min_delay_ms: 250)
+            )
+        )
+        settings = s
+        selectedEndpointId = String(endpointId)
+        pendingLastTouchedEndpointId = String(endpointId)
+        queueAutoSave()
+    }
+
+    private func deleteSelectedEndpoint() {
+        guard var s = settings, let endpointId = selectedEndpointId else { return }
+        if let referencing = s.targets.first(where: { $0.endpoint_id == endpointId }) {
+            endpointDeleteBlockedTargetId = referencing.id
+            showEndpointDeleteBlockedAlert = true
+            return
+        }
+
+        s.telegram_endpoints.removeAll { $0.id == endpointId }
+        settings = s
+        selectedEndpointId = preferredEndpointId(settings: s)
         queueAutoSave()
     }
 
@@ -831,6 +1117,8 @@ struct TargetEditor: View {
     let secrets: CliSecretsPresence?
     let targetIndex: Int
     let embedded: Bool
+    let onEndpointSelected: (_ endpointId: String) -> Void
+    let onEditEndpoint: (_ endpointId: String) -> Void
     let onReload: () -> Void
 
     @FocusState private var tokenFocused: Bool
@@ -848,12 +1136,16 @@ struct TargetEditor: View {
         secrets: CliSecretsPresence?,
         targetIndex: Int,
         embedded: Bool = false,
+        onEndpointSelected: @escaping (_ endpointId: String) -> Void,
+        onEditEndpoint: @escaping (_ endpointId: String) -> Void,
         onReload: @escaping () -> Void
     ) {
         self._settings = settings
         self.secrets = secrets
         self.targetIndex = targetIndex
         self.embedded = embedded
+        self.onEndpointSelected = onEndpointSelected
+        self.onEditEndpoint = onEditEndpoint
         self.onReload = onReload
     }
 
@@ -862,6 +1154,9 @@ struct TargetEditor: View {
         let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == target.endpoint_id })
         let botPresent = secrets?.telegramBotTokenPresentByEndpoint?[target.endpoint_id] ?? false
         let apiHashPresent = secrets?.telegramMtprotoApiHashPresent ?? false
+        let endpointsSorted = settings.telegram_endpoints.sorted { a, b in
+            a.id.localizedStandardCompare(b.id) == .orderedAscending
+        }
 
         VStack(alignment: .leading, spacing: 12) {
             if !embedded {
@@ -909,9 +1204,12 @@ struct TargetEditor: View {
                 Spacer()
                 Picker("", selection: Binding(
                     get: { settings.targets[targetIndex].endpoint_id },
-                    set: { v in settings.targets[targetIndex].endpoint_id = v }
+                    set: { v in
+                        settings.targets[targetIndex].endpoint_id = v
+                        onEndpointSelected(v)
+                    }
                 )) {
-                    ForEach(settings.telegram_endpoints) { ep in
+                    ForEach(endpointsSorted) { ep in
                         Text(ep.id).tag(ep.id)
                     }
                 }
@@ -920,7 +1218,7 @@ struct TargetEditor: View {
             }
 
             if let epIndex {
-                endpointEditor(epIndex: epIndex)
+                endpointSummary(epIndex: epIndex)
             } else {
                 Text("Endpoint not found in config")
                     .foregroundStyle(.secondary)
@@ -979,6 +1277,71 @@ struct TargetEditor: View {
             if isFocused, apiHashDraftMasked {
                 apiHashDraft = ""
                 apiHashDraftMasked = false
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func endpointSummary(epIndex: Int) -> some View {
+        let ep = settings.telegram_endpoints[epIndex]
+        let botPresent = secrets?.telegramBotTokenPresentByEndpoint?[ep.id] ?? false
+        let sessionPresent = secrets?.telegramMtprotoSessionPresentByEndpoint?[ep.id] ?? false
+        let apiHashPresent = secrets?.telegramMtprotoApiHashPresent ?? false
+
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Chat ID")
+                Spacer()
+                Text(ep.chat_id.isEmpty ? "—" : ep.chat_id)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            HStack {
+                Text("Bot token")
+                Spacer()
+                Text(botPresent ? "Saved (encrypted)" : "Not set")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(botPresent ? .green : .secondary)
+            }
+
+            HStack {
+                Text("API ID")
+                Spacer()
+                Text(String(settings.telegram.mtproto.api_id))
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Text("API hash")
+                Spacer()
+                Text(apiHashPresent ? "Saved (encrypted)" : "Not set")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(apiHashPresent ? .green : .secondary)
+            }
+
+            HStack {
+                Text("Session")
+                Spacer()
+                Text(sessionPresent ? "Saved" : "None")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                Button("Edit endpoint…") { onEditEndpoint(ep.id) }
+                    .buttonStyle(.bordered)
+
+                Button("Test connection") { testConnection(endpointId: ep.id) }
+                    .buttonStyle(.borderedProminent)
+
+                Spacer()
+                Text(validateText)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(validateOk == true ? .green : (validateOk == false ? .red : .secondary))
             }
         }
     }
@@ -1202,6 +1565,275 @@ struct TargetEditor: View {
             timeoutSeconds: 30
         )
         onReload()
+    }
+
+    private func testConnection(endpointId: String) {
+        guard let cli = model.cliPath() else { return }
+        let res = model.runCommandCapture(
+            exe: cli,
+            args: ["--json", "telegram", "validate", "--endpoint-id", endpointId],
+            timeoutSeconds: 180
+        )
+        if res.status == 0 {
+            validateOk = true
+            validateText = "Connected"
+            onReload()
+        } else {
+            validateOk = false
+            validateText = "Failed (see ui.log)"
+        }
+    }
+}
+
+struct EndpointEditor: View {
+    @EnvironmentObject var model: AppModel
+    @Binding var settings: SettingsV2
+    let secrets: CliSecretsPresence?
+    let endpointId: String
+    let onEndpointTouchedPending: (_ endpointId: String) -> Void
+    let onEndpointTouchedCommitted: (_ endpointId: String) -> Void
+    let onReload: () -> Void
+
+    @FocusState private var tokenFocused: Bool
+    @FocusState private var apiHashFocused: Bool
+
+    @State private var botTokenDraft: String = ""
+    @State private var botTokenDraftMasked: Bool = false
+    @State private var apiHashDraft: String = ""
+    @State private var apiHashDraftMasked: Bool = false
+    @State private var validateText: String = "Not validated"
+    @State private var validateOk: Bool? = nil
+
+    var body: some View {
+        let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == endpointId })
+        let botPresent = secrets?.telegramBotTokenPresentByEndpoint?[endpointId] ?? false
+        let sessionPresent = secrets?.telegramMtprotoSessionPresentByEndpoint?[endpointId] ?? false
+        let apiHashPresent = secrets?.telegramMtprotoApiHashPresent ?? false
+
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Endpoint")
+                .font(.system(size: 18, weight: .bold))
+
+            HStack {
+                Text("ID")
+                Spacer()
+                Text(endpointId)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
+            if let epIndex {
+                HStack {
+                    Text("Mode")
+                    Spacer()
+                    Text(settings.telegram_endpoints[epIndex].mode)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider()
+                    .padding(.vertical, 10)
+
+                HStack {
+                    Text("Chat ID")
+                    Spacer()
+                    TextField("-100123…", text: Binding(
+                        get: { settings.telegram_endpoints[epIndex].chat_id },
+                        set: { v in
+                            settings.telegram_endpoints[epIndex].chat_id = v
+                            onEndpointTouchedPending(endpointId)
+                        }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 260)
+                }
+
+                HStack {
+                    Text("Bot token")
+                    Spacer()
+                    Text(botPresent ? "Saved (encrypted)" : "Not set")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(botPresent ? .green : .secondary)
+                }
+
+                HStack(spacing: 8) {
+                    SecureField("Paste new bot token", text: $botTokenDraft)
+                        .focused($tokenFocused)
+                    Button("Save token") { saveBotToken(endpointId: endpointId) }
+                        .buttonStyle(.bordered)
+                }
+
+                Divider()
+                    .padding(.vertical, 14)
+
+                Text("Telegram MTProto (global)")
+                    .font(.system(size: 13, weight: .semibold))
+                    .padding(.bottom, 2)
+
+                HStack {
+                    Text("API ID")
+                    Spacer()
+                    TextField("123456", value: Binding(
+                        get: { settings.telegram.mtproto.api_id },
+                        set: { v in
+                            settings.telegram.mtproto.api_id = v
+                            onEndpointTouchedPending(endpointId)
+                        }
+                    ), formatter: NumberFormatter())
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                }
+
+                HStack {
+                    Text("API hash")
+                    Spacer()
+                    Text(apiHashPresent ? "Saved (encrypted)" : "Not set")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(apiHashPresent ? .green : .secondary)
+                }
+
+                HStack(spacing: 8) {
+                    SecureField("Paste api_hash", text: $apiHashDraft)
+                        .focused($apiHashFocused)
+                    Button("Save api_hash") { saveApiHash(endpointId: endpointId) }
+                        .buttonStyle(.bordered)
+                }
+
+                Divider()
+                    .padding(.vertical, 14)
+
+                HStack {
+                    Button("Clear sessions") { clearSessions(endpointId: endpointId) }
+                        .buttonStyle(.bordered)
+                    Spacer()
+                    Text(sessionPresent ? "Session: saved" : "Session: none")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 10) {
+                    Button("Test connection") { testConnection(endpointId: endpointId) }
+                        .buttonStyle(.borderedProminent)
+                    Spacer()
+                    Text(validateText)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(validateOk == true ? .green : (validateOk == false ? .red : .secondary))
+                }
+
+                Text("Delete: go to Targets to unbind if referenced")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 6)
+            } else {
+                Text("Endpoint not found in config")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .onChange(of: botPresent) { _, isPresent in
+            if isPresent && botTokenDraft.isEmpty {
+                botTokenDraft = String(repeating: "•", count: 18)
+                botTokenDraftMasked = true
+            } else if !isPresent && botTokenDraftMasked {
+                botTokenDraft = ""
+                botTokenDraftMasked = false
+            }
+        }
+        .onChange(of: apiHashPresent) { _, isPresent in
+            if isPresent && apiHashDraft.isEmpty {
+                apiHashDraft = String(repeating: "•", count: 18)
+                apiHashDraftMasked = true
+            } else if !isPresent && apiHashDraftMasked {
+                apiHashDraft = ""
+                apiHashDraftMasked = false
+            }
+        }
+        .onAppear {
+            if botPresent && botTokenDraft.isEmpty {
+                botTokenDraft = String(repeating: "•", count: 18)
+                botTokenDraftMasked = true
+            }
+            if apiHashPresent && apiHashDraft.isEmpty {
+                apiHashDraft = String(repeating: "•", count: 18)
+                apiHashDraftMasked = true
+            }
+        }
+        .onChange(of: tokenFocused) { _, isFocused in
+            if isFocused, botTokenDraftMasked {
+                botTokenDraft = ""
+                botTokenDraftMasked = false
+            }
+        }
+        .onChange(of: apiHashFocused) { _, isFocused in
+            if isFocused, apiHashDraftMasked {
+                apiHashDraft = ""
+                apiHashDraftMasked = false
+            }
+        }
+        .onChange(of: endpointId) { _, _ in
+            validateOk = nil
+            validateText = "Not validated"
+            botTokenDraft = ""
+            botTokenDraftMasked = false
+            apiHashDraft = ""
+            apiHashDraftMasked = false
+        }
+        .onSubmit {
+            if tokenFocused {
+                saveBotToken(endpointId: endpointId)
+            } else if apiHashFocused {
+                saveApiHash(endpointId: endpointId)
+            }
+        }
+    }
+
+    private func saveBotToken(endpointId: String) {
+        guard let cli = model.cliPath() else { return }
+        let token = botTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token.isEmpty { return }
+        let res = model.runCommandCapture(
+            exe: cli,
+            args: ["--json", "secrets", "set-telegram-bot-token", "--endpoint-id", endpointId],
+            stdin: token + "\n",
+            timeoutSeconds: 30
+        )
+        if res.status == 0 {
+            botTokenDraft = String(repeating: "•", count: 18)
+            botTokenDraftMasked = true
+            onEndpointTouchedCommitted(endpointId)
+            onReload()
+        }
+    }
+
+    private func saveApiHash(endpointId: String) {
+        guard let cli = model.cliPath() else { return }
+        if apiHashDraftMasked { return }
+        let apiHash = apiHashDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if apiHash.isEmpty { return }
+        let res = model.runCommandCapture(
+            exe: cli,
+            args: ["--json", "secrets", "set-telegram-api-hash"],
+            stdin: apiHash + "\n",
+            timeoutSeconds: 30
+        )
+        if res.status == 0 {
+            apiHashDraft = String(repeating: "•", count: 18)
+            apiHashDraftMasked = true
+            onEndpointTouchedCommitted(endpointId)
+            onReload()
+        }
+    }
+
+    private func clearSessions(endpointId: String) {
+        guard let cli = model.cliPath() else { return }
+        let res = model.runCommandCapture(
+            exe: cli,
+            args: ["--json", "secrets", "clear-telegram-mtproto-session"],
+            timeoutSeconds: 30
+        )
+        if res.status == 0 {
+            onEndpointTouchedCommitted(endpointId)
+            onReload()
+        }
     }
 
     private func testConnection(endpointId: String) {
