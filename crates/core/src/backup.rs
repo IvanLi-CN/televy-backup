@@ -414,12 +414,14 @@ struct UploadQueue {
     sender: mpsc::Sender<UploadJob>,
     bytes_sem: Arc<Semaphore>,
     bytes_budget: usize,
+    cancel: CancellationToken,
 }
 
 impl UploadQueue {
     async fn enqueue_direct(&self, chunk_hash: String, blob: Vec<u8>) -> Result<()> {
         let bytes = blob.len();
-        let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes).await?;
+        let permit =
+            acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
         let job = UploadJob::Direct {
             chunk_hash,
             blob,
@@ -433,7 +435,8 @@ impl UploadQueue {
 
     async fn enqueue_pack(&self, entries: Vec<PackEntryRef>, pack_bytes: Vec<u8>) -> Result<()> {
         let bytes = pack_bytes.len();
-        let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes).await?;
+        let permit =
+            acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
         let job = UploadJob::Pack {
             entries,
             pack_bytes,
@@ -450,7 +453,11 @@ async fn acquire_bytes(
     bytes_sem: &Arc<Semaphore>,
     bytes_budget: usize,
     bytes: usize,
+    cancel: &CancellationToken,
 ) -> Result<OwnedSemaphorePermit> {
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     if bytes > bytes_budget {
         return Err(Error::InvalidConfig {
             message: format!(
@@ -461,13 +468,14 @@ async fn acquire_bytes(
     let bytes_u32 = u32::try_from(bytes).map_err(|_| Error::InvalidConfig {
         message: format!("upload bytes too large: {bytes}"),
     })?;
-    bytes_sem
-        .clone()
-        .acquire_many_owned(bytes_u32)
-        .await
-        .map_err(|_| Error::Telegram {
-            message: "upload queue closed".to_string(),
-        })
+    tokio::select! {
+        permit = bytes_sem.clone().acquire_many_owned(bytes_u32) => {
+            permit.map_err(|_| Error::Telegram {
+                message: "upload queue closed".to_string(),
+            })
+        }
+        _ = cancel.cancelled() => Err(Error::Cancelled),
+    }
 }
 
 async fn process_upload_job<S: Storage>(
@@ -582,6 +590,10 @@ pub async fn run_backup_with<S: Storage>(
     let scan_master_key = config.master_key;
 
     let bytes_budget = u32::try_from(limits.max_pending_bytes).unwrap_or(u32::MAX) as usize;
+    let upload_cancel = options
+        .cancel
+        .map(CancellationToken::child_token)
+        .unwrap_or_else(CancellationToken::new);
     let (upload_tx, upload_rx) = mpsc::channel::<UploadJob>(limits.max_pending_jobs);
     let (result_tx, result_rx) = mpsc::channel::<Result<UploadOutcome>>(limits.max_pending_jobs);
     let bytes_sem = Arc::new(Semaphore::new(bytes_budget));
@@ -589,6 +601,7 @@ pub async fn run_backup_with<S: Storage>(
         sender: upload_tx.clone(),
         bytes_sem: bytes_sem.clone(),
         bytes_budget,
+        cancel: upload_cancel.clone(),
     };
 
     let upload_rx = Arc::new(Mutex::new(upload_rx));
@@ -598,15 +611,22 @@ pub async fn run_backup_with<S: Storage>(
         let tx = result_tx.clone();
         let limiter = rate_limiter.clone();
         let provider = provider_owned.clone();
+        let cancel = upload_cancel.clone();
         workers.push(async move {
             loop {
-                let job = {
-                    let mut guard = rx.lock().await;
-                    guard.recv().await
+                let job = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    job = async {
+                        let mut guard = rx.lock().await;
+                        guard.recv().await
+                    } => job,
                 };
                 let Some(job) = job else {
                     break;
                 };
+                if cancel.is_cancelled() {
+                    break;
+                }
                 let outcome = process_upload_job(storage, &provider, &limiter, job).await;
                 if tx.send(outcome).await.is_err() {
                     break;
@@ -621,232 +641,131 @@ pub async fn run_backup_with<S: Storage>(
     let scan_future = {
         let pool = pool.clone();
         let uploader = uploader.clone();
+        let upload_tx = upload_tx.clone();
+        let cancel = upload_cancel.clone();
         async move {
-            let base_snapshot_id = latest_snapshot_for_source(&pool, &scan_source_path).await?;
-            let snapshot_id = scan_snapshot_id
-                .clone()
-                .unwrap_or_else(|| format!("snp_{}", uuid::Uuid::new_v4()));
+            let res = async {
+                let base_snapshot_id = latest_snapshot_for_source(&pool, &scan_source_path).await?;
+                let snapshot_id = scan_snapshot_id
+                    .clone()
+                    .unwrap_or_else(|| format!("snp_{}", uuid::Uuid::new_v4()));
 
-            sqlx::query(
-                r#"
-                INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id)
-                VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?, ?, ?)
-                "#,
-            )
-            .bind(&snapshot_id)
-            .bind(path_to_utf8(&scan_source_path)?)
-            .bind(&scan_label)
-            .bind(base_snapshot_id)
-            .execute(&pool)
-            .await?;
-
-            let mut result = BackupResult {
-                snapshot_id: snapshot_id.clone(),
-                ..BackupResult::default()
-            };
-
-            let mut scheduled_new_chunks = HashSet::<String>::new();
-            let mut pack_enabled = false;
-            let mut pending_bytes: usize = 0;
-            let mut pending: Vec<PackBlob> = Vec::new();
-            let mut pack_state = PackState::new(provider, &snapshot_id);
-
-            if let Some(sink) = options.progress {
-                sink.on_progress(TaskProgress {
-                    phase: "scan".to_string(),
-                    files_total: None,
-                    files_done: Some(0),
-                    chunks_total: Some(0),
-                    chunks_done: Some(0),
-                    bytes_read: Some(0),
-                    bytes_uploaded: Some(0),
-                    bytes_deduped: Some(0),
-                });
-            }
-
-            for entry in WalkDir::new(&scan_source_path).follow_links(false) {
-                if let Some(cancel) = options.cancel
-                    && cancel.is_cancelled()
-                {
-                    return Err(Error::Cancelled);
-                }
-
-                let entry = entry.map_err(|e| Error::InvalidConfig {
-                    message: format!("walkdir error: {e}"),
-                })?;
-
-                let path = entry.path();
-                if path == scan_source_path {
-                    continue;
-                }
-
-                let rel_path =
-                    path.strip_prefix(&scan_source_path)
-                        .map_err(|_| Error::InvalidConfig {
-                            message: "path strip_prefix failed".to_string(),
-                        })?;
-                let rel_path_str = path_to_utf8(rel_path)?;
-
-                let metadata = entry.metadata()?;
-
-                let kind = if metadata.is_dir() {
-                    "dir"
-                } else if metadata.is_file() {
-                    "file"
-                } else if metadata.is_symlink() {
-                    "symlink"
-                } else {
-                    continue;
-                };
-
-                let (size, mtime_ms, mode) = if kind == "file" {
-                    let size = metadata.len() as i64;
-                    let mtime_ms = metadata
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_millis() as i64)
-                        .unwrap_or(0);
-                    #[cfg(unix)]
-                    let mode = {
-                        use std::os::unix::fs::MetadataExt;
-                        metadata.mode() as i64
-                    };
-                    #[cfg(not(unix))]
-                    let mode = 0i64;
-                    (size, mtime_ms, mode)
-                } else {
-                    (0i64, 0i64, 0i64)
-                };
-
-                result.files_total += 1;
-
-                let file_id = format!("f_{}", uuid::Uuid::new_v4());
                 sqlx::query(
                     r#"
-                    INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id)
+                    VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?, ?, ?)
                     "#,
                 )
-                .bind(&file_id)
                 .bind(&snapshot_id)
-                .bind(rel_path_str)
-                .bind(size)
-                .bind(mtime_ms)
-                .bind(mode)
-                .bind(kind)
+                .bind(path_to_utf8(&scan_source_path)?)
+                .bind(&scan_label)
+                .bind(base_snapshot_id)
                 .execute(&pool)
                 .await?;
 
-                result.files_indexed += 1;
+                let mut result = BackupResult {
+                    snapshot_id: snapshot_id.clone(),
+                    ..BackupResult::default()
+                };
+
+                let mut scheduled_new_chunks = HashSet::<String>::new();
+                let mut pack_enabled = false;
+                let mut pending_bytes: usize = 0;
+                let mut pending: Vec<PackBlob> = Vec::new();
+                let mut pack_state = PackState::new(provider, &snapshot_id);
 
                 if let Some(sink) = options.progress {
                     sink.on_progress(TaskProgress {
                         phase: "scan".to_string(),
                         files_total: None,
-                        files_done: Some(result.files_indexed),
-                        chunks_total: Some(result.chunks_total),
-                        chunks_done: Some(result.chunks_total),
-                        bytes_read: Some(result.bytes_read),
-                        bytes_uploaded: Some(result.bytes_uploaded),
-                        bytes_deduped: Some(result.bytes_deduped),
+                        files_done: Some(0),
+                        chunks_total: Some(0),
+                        chunks_done: Some(0),
+                        bytes_read: Some(0),
+                        bytes_uploaded: Some(0),
+                        bytes_deduped: Some(0),
                     });
                 }
 
-                if kind != "file" {
-                    continue;
-                }
-
-                let file = File::open(path)?;
-                let chunker = file_chunker(file, &scan_chunking);
-
-                for (seq, chunk) in chunker.enumerate() {
+                for entry in WalkDir::new(&scan_source_path).follow_links(false) {
                     if let Some(cancel) = options.cancel
                         && cancel.is_cancelled()
                     {
                         return Err(Error::Cancelled);
                     }
 
-                    let chunk = chunk.map_err(|_| Error::InvalidConfig {
-                        message: "chunking failed".to_string(),
+                    let entry = entry.map_err(|e| Error::InvalidConfig {
+                        message: format!("walkdir error: {e}"),
                     })?;
-                    result.chunks_total += 1;
-                    result.bytes_read += chunk.data.len() as u64;
 
-                    let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
-
-                    let exists = chunk_object_exists(&pool, provider, &chunk_hash).await?
-                        || scheduled_new_chunks.contains(&chunk_hash);
-                    if exists {
-                        result.bytes_deduped += chunk.data.len() as u64;
-                    } else {
-                        scheduled_new_chunks.insert(chunk_hash.clone());
-
-                        let encrypted =
-                            encrypt_framed(&scan_master_key, chunk_hash.as_bytes(), &chunk.data)?;
-
-                        sqlx::query(
-                            r#"
-                            INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
-                            VALUES (?, ?, 'blake3', 'xchacha20poly1305', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-                            "#,
-                        )
-                        .bind(&chunk_hash)
-                        .bind(chunk.data.len() as i64)
-                        .execute(&pool)
-                        .await?;
-
-                        let blob = PackBlob {
-                            chunk_hash: chunk_hash.clone(),
-                            blob: encrypted,
-                        };
-
-                        if !pack_enabled {
-                            pending_bytes = pending_bytes.saturating_add(blob.blob.len());
-                            pending.push(blob);
-                            if pending.len() > PACK_ENABLE_MIN_OBJECTS
-                                || pending_bytes > PACK_TARGET_BYTES
-                            {
-                                pack_enabled = true;
-                                for b in pending.drain(..) {
-                                    schedule_pack_or_direct_upload(
-                                        &uploader,
-                                        &scan_master_key,
-                                        &mut pack_state,
-                                        b,
-                                    )
-                                    .await?;
-                                }
-                                pending_bytes = 0;
-                            }
-                        } else {
-                            schedule_pack_or_direct_upload(
-                                &uploader,
-                                &scan_master_key,
-                                &mut pack_state,
-                                blob,
-                            )
-                            .await?;
-                        }
+                    let path = entry.path();
+                    if path == scan_source_path {
+                        continue;
                     }
 
+                    let rel_path =
+                        path.strip_prefix(&scan_source_path)
+                            .map_err(|_| Error::InvalidConfig {
+                                message: "path strip_prefix failed".to_string(),
+                            })?;
+                    let rel_path_str = path_to_utf8(rel_path)?;
+
+                    let metadata = entry.metadata()?;
+
+                    let kind = if metadata.is_dir() {
+                        "dir"
+                    } else if metadata.is_file() {
+                        "file"
+                    } else if metadata.is_symlink() {
+                        "symlink"
+                    } else {
+                        continue;
+                    };
+
+                    let (size, mtime_ms, mode) = if kind == "file" {
+                        let size = metadata.len() as i64;
+                        let mtime_ms = metadata
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as i64)
+                            .unwrap_or(0);
+                        #[cfg(unix)]
+                        let mode = {
+                            use std::os::unix::fs::MetadataExt;
+                            metadata.mode() as i64
+                        };
+                        #[cfg(not(unix))]
+                        let mode = 0i64;
+                        (size, mtime_ms, mode)
+                    } else {
+                        (0i64, 0i64, 0i64)
+                    };
+
+                    result.files_total += 1;
+
+                    let file_id = format!("f_{}", uuid::Uuid::new_v4());
                     sqlx::query(
                         r#"
-                        INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         "#,
                     )
                     .bind(&file_id)
-                    .bind(seq as i64)
-                    .bind(&chunk_hash)
-                    .bind(chunk.offset as i64)
-                    .bind(chunk.length as i64)
+                    .bind(&snapshot_id)
+                    .bind(rel_path_str)
+                    .bind(size)
+                    .bind(mtime_ms)
+                    .bind(mode)
+                    .bind(kind)
                     .execute(&pool)
                     .await?;
 
+                    result.files_indexed += 1;
+
                     if let Some(sink) = options.progress {
                         sink.on_progress(TaskProgress {
-                            phase: "upload".to_string(),
+                            phase: "scan".to_string(),
                             files_total: None,
                             files_done: Some(result.files_indexed),
                             chunks_total: Some(result.chunks_total),
@@ -856,32 +775,147 @@ pub async fn run_backup_with<S: Storage>(
                             bytes_deduped: Some(result.bytes_deduped),
                         });
                     }
+
+                    if kind != "file" {
+                        continue;
+                    }
+
+                    let file = File::open(path)?;
+                    let chunker = file_chunker(file, &scan_chunking);
+
+                    for (seq, chunk) in chunker.enumerate() {
+                        if let Some(cancel) = options.cancel
+                            && cancel.is_cancelled()
+                        {
+                            return Err(Error::Cancelled);
+                        }
+
+                        let chunk = chunk.map_err(|_| Error::InvalidConfig {
+                            message: "chunking failed".to_string(),
+                        })?;
+                        result.chunks_total += 1;
+                        result.bytes_read += chunk.data.len() as u64;
+
+                        let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
+
+                        let exists = chunk_object_exists(&pool, provider, &chunk_hash).await?
+                            || scheduled_new_chunks.contains(&chunk_hash);
+                        if exists {
+                            result.bytes_deduped += chunk.data.len() as u64;
+                        } else {
+                            scheduled_new_chunks.insert(chunk_hash.clone());
+
+                            let encrypted = encrypt_framed(
+                                &scan_master_key,
+                                chunk_hash.as_bytes(),
+                                &chunk.data,
+                            )?;
+
+                            sqlx::query(
+                                r#"
+                                INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+                                VALUES (?, ?, 'blake3', 'xchacha20poly1305', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                                "#,
+                            )
+                            .bind(&chunk_hash)
+                            .bind(chunk.data.len() as i64)
+                            .execute(&pool)
+                            .await?;
+
+                            let blob = PackBlob {
+                                chunk_hash: chunk_hash.clone(),
+                                blob: encrypted,
+                            };
+
+                            if !pack_enabled {
+                                pending_bytes = pending_bytes.saturating_add(blob.blob.len());
+                                pending.push(blob);
+                                if pending.len() > PACK_ENABLE_MIN_OBJECTS
+                                    || pending_bytes > PACK_TARGET_BYTES
+                                {
+                                    pack_enabled = true;
+                                    for b in pending.drain(..) {
+                                        schedule_pack_or_direct_upload(
+                                            &uploader,
+                                            &scan_master_key,
+                                            &mut pack_state,
+                                            b,
+                                        )
+                                        .await?;
+                                    }
+                                    pending_bytes = 0;
+                                }
+                            } else {
+                                schedule_pack_or_direct_upload(
+                                    &uploader,
+                                    &scan_master_key,
+                                    &mut pack_state,
+                                    blob,
+                                )
+                                .await?;
+                            }
+                        }
+
+                        sqlx::query(
+                            r#"
+                            INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
+                            VALUES (?, ?, ?, ?, ?)
+                            "#,
+                        )
+                        .bind(&file_id)
+                        .bind(seq as i64)
+                        .bind(&chunk_hash)
+                        .bind(chunk.offset as i64)
+                        .bind(chunk.length as i64)
+                        .execute(&pool)
+                        .await?;
+
+                        if let Some(sink) = options.progress {
+                            sink.on_progress(TaskProgress {
+                                phase: "upload".to_string(),
+                                files_total: None,
+                                files_done: Some(result.files_indexed),
+                                chunks_total: Some(result.chunks_total),
+                                chunks_done: Some(result.chunks_total),
+                                bytes_read: Some(result.bytes_read),
+                                bytes_uploaded: Some(result.bytes_uploaded),
+                                bytes_deduped: Some(result.bytes_deduped),
+                            });
+                        }
+                    }
                 }
-            }
 
-            debug!(
-                event = "phase.finish",
-                phase = "scan",
-                duration_ms = scan_started.elapsed().as_millis() as u64,
-                files_total = result.files_total,
-                files_indexed = result.files_indexed,
-                chunks_total = result.chunks_total,
-                bytes_read = result.bytes_read,
-                "phase.finish"
-            );
+                debug!(
+                    event = "phase.finish",
+                    phase = "scan",
+                    duration_ms = scan_started.elapsed().as_millis() as u64,
+                    files_total = result.files_total,
+                    files_indexed = result.files_indexed,
+                    chunks_total = result.chunks_total,
+                    bytes_read = result.bytes_read,
+                    "phase.finish"
+                );
 
-            let upload_started = Instant::now();
-            debug!(event = "phase.start", phase = "upload", "phase.start");
-            if pack_enabled {
-                flush_packer(&uploader, &scan_master_key, &mut pack_state).await?;
-            } else {
-                for blob in pending {
-                    uploader.enqueue_direct(blob.chunk_hash, blob.blob).await?;
+                let upload_started = Instant::now();
+                debug!(event = "phase.start", phase = "upload", "phase.start");
+                if pack_enabled {
+                    flush_packer(&uploader, &scan_master_key, &mut pack_state).await?;
+                } else {
+                    for blob in pending {
+                        uploader.enqueue_direct(blob.chunk_hash, blob.blob).await?;
+                    }
                 }
-            }
-            drop(upload_tx);
+                drop(upload_tx);
 
-            Ok((snapshot_id, result, upload_started))
+                Ok((snapshot_id, result, upload_started))
+            }
+            .await;
+
+            if res.is_err() {
+                cancel.cancel();
+                drop(upload_tx);
+            }
+            res
         }
     };
 
