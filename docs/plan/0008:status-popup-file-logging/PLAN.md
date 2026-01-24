@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-22
-- Last: 2026-01-23
+- Last: 2026-01-24
 
 ## 已确认决策（Decisions, frozen）
 
@@ -134,9 +134,13 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: 移除 Popover 的 `Logs` Tab（导航与布局对齐，确保无悬挂入口）
-- [ ] M2: 固化并验证 UI 日志落盘（路径/格式/脱敏/失败 best effort）与契约一致
-- [ ] M3: 更新文档（`README.md` / `docs/architecture.md`）说明日志位置与排查路径
+- [x] M1: 移除 Popover 的 `Logs` Tab（导航与布局对齐，确保无悬挂入口）
+- [x] M2: 固化并验证 UI 日志落盘（路径/格式/脱敏/失败 best effort）与契约一致
+- [x] M3: 更新文档（`README.md` / `docs/architecture.md`）说明日志位置与排查路径
+
+## Change log
+
+- 2026-01-24: 移除 Popover 日志 UI 与内存日志列表；`ui.log` 写入 logs 目录（与 per-run logs 同目录）；Settings “Open logs” 打开日志目录。
 
 ## 方案概述（Approach, high-level）
 

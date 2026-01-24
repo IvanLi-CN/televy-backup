@@ -28,6 +28,7 @@ macOS Keychain stores **only** the vault key used to decrypt `secrets.enc`.
 - Local index DB: `$APP_DATA_DIR/index/index.sqlite` or `TELEVYBACKUP_DATA_DIR/index/index.sqlite`
 - Per-run logs (NDJSON): `TELEVYBACKUP_LOG_DIR/` (override) or `TELEVYBACKUP_DATA_DIR/logs/` (default: `~/Library/Application Support/TelevyBackup/logs/`)
   - Log level filter: `TELEVYBACKUP_LOG` → `RUST_LOG` → default `debug`
+- UI logs (macOS app): `TELEVYBACKUP_LOG_DIR/ui.log` (override) or `TELEVYBACKUP_DATA_DIR/logs/ui.log` (default: `~/Library/Application Support/TelevyBackup/logs/ui.log`)
 - Keychain:
   - Vault key: key = `televybackup.vault_key` (Base64 32 bytes)
 - Secrets store entries (inside `secrets.enc`):

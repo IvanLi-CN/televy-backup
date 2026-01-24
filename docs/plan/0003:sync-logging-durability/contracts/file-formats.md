@@ -12,6 +12,10 @@
 2. `$TELEVYBACKUP_DATA_DIR/logs/`
 3. `~/Library/Application Support/TelevyBackup/logs/`（macOS 默认）
 
+备注：
+
+- macOS GUI 会在同一目录下追加写入 UI 日志文件 `ui.log`（用于排查 GUI/命令调用问题；best effort）。
+
 ## 2) 日志文件命名（Per-run）
 
 每次同步任务（backup/restore/verify）生成一个新文件，不复用、不覆盖。
