@@ -1217,7 +1217,7 @@ struct TargetEditor: View {
             onReload()
         } else {
             validateOk = false
-            validateText = "Failed (see Logs)"
+            validateText = "Failed (see ui.log)"
         }
     }
 }
