@@ -591,7 +591,7 @@ pub async fn run_backup_with<S: Storage>(
     let upload_cancel = options
         .cancel
         .map(CancellationToken::child_token)
-        .unwrap_or_else(CancellationToken::new);
+        .unwrap_or_default();
     let (upload_tx, upload_rx) = mpsc::channel::<UploadJob>(limits.max_pending_jobs);
     let (result_tx, result_rx) = mpsc::channel::<Result<UploadOutcome>>(limits.max_pending_jobs);
     let bytes_sem = Arc::new(Semaphore::new(bytes_budget));
