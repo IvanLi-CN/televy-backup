@@ -10,6 +10,14 @@
 - Consumers: macOS UI（Popover Overview / Dev）
 - Delivery semantics: best-effort；UI 以 `generatedAt` 做 stale 判定；事件允许丢失（因为每条都是完整快照）
 
+### Semantics（职责与口径）
+
+- `source.kind`/`source.detail` 表示**上游状态来源**（用于排障定位“这条快照从哪里来”），并不等价于“NDJSON transport 的输出进程”。
+  - 本计划默认：daemon 写入 `status.json`，`status stream` 读取并转发，因此 `source.kind` 通常为 `daemon`（即使 NDJSON 是由 CLI 输出）。
+  - `cli`/`file` 仅用于“无需 daemon 的快照”（例如纯 CLI 直算、或读取离线文件/fixture）等场景。
+- `global.*Total` 与 `targets[].upTotal` 表示“**自 UI/stream 启动以来**累计值”（非持久化，重启清零），由 UI/CLI 侧在渲染/转发时负责累积；当未知/未实现时，输出 `{ "bytes": null }`（不要省略字段）。
+- `global.uiUptimeSeconds` 表示 UI/stream 的 session uptime（秒），由 UI/CLI 侧提供；当未知/未实现时缺省或 `null`。
+
 ### Payload schema
 
 ```ts
@@ -53,7 +61,7 @@ type TargetState = {
   // Realtime rate (per target; business-level bytesUploaded rate)
   up: Rate;
 
-  // Session totals since UI start (per target; optional)
+  // Session totals since UI/stream start (per target; bytes may be null)
   upTotal: Counter;
 
   progress?: Progress | null; // present when running
@@ -99,7 +107,7 @@ type StatusSnapshot = {
   "type": "status.snapshot",
   "schemaVersion": 1,
   "generatedAt": 1769212800123,
-  "source": { "kind": "daemon", "detail": "televybackupd" },
+  "source": { "kind": "daemon", "detail": "televybackupd (status.json)" },
   "global": {
     "up": { "bytesPerSecond": 3355443 },
     "down": { "bytesPerSecond": 8192 },

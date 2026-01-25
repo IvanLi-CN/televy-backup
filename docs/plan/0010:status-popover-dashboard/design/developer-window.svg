@@ -149,8 +149,8 @@
   <!-- Activity -->
   <rect class="card" x="380" y="478" width="700" height="182" rx="10" ry="10" />
   <text class="muted label" x="400" y="502">ACTIVITY</text>
-  <rect class="pill" x="928" y="490" width="140" height="24" rx="10" ry="10" />
-  <text class="muted mono small" x="998" y="507" text-anchor="middle">filter: target</text>
+  <rect class="pill" x="920" y="494" width="140" height="24" rx="10" ry="10" />
+  <text class="muted mono small" x="990" y="511" text-anchor="middle">filter: target</text>
 
   <text class="text mono small" x="400" y="530">10:00:00.120  snapshot.updated  targets=3</text>
   <text class="text mono small" x="400" y="552">10:00:00.080  backup.progress   phase=upload chunks=2100/4020</text>
