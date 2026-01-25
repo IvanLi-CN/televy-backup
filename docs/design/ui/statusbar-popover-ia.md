@@ -32,7 +32,7 @@
 - 入口：Settings window 提供 `Developer…` 入口（增加入口，不新增 Settings 页面），点击打开独立窗口；Popover 不承载 Dev 页面
 - Global：schemaVersion/source/generatedAt + 原始 up/down/totals + staleAge
 - Per-target：targetId/sourcePath/endpointId/enabled + state + progress 原始计数 + lastRun/errorCode
- - Activity：可见的工作活动时间线（快照更新、写入、进度推进、错误/告警等）
+- Activity：可见的工作活动时间线（快照更新、写入、进度推进、错误/告警等）
 
 ## Settings window（独立窗口）
 

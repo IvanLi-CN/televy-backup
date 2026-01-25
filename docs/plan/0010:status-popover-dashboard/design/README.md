@@ -46,6 +46,11 @@
 ### 3) Dev：详细状态（尽量充分）
 
 - 入口：Settings window 提供“Developer…”入口（增加入口，不新增 Settings 页面），点击打开独立窗口
+- Toolbar actions（右上角）：
+  - `Copy JSON`：复制当前快照（含 global + 选中 target + activity）为 JSON 到剪贴板（用于快速贴到 issue/群里排障）。
+  - `Reveal…`：在 Finder 中定位当前数据源文件（当 source 为 `status.json` 文件时可用；不可用则 disabled）。
+  - `Freeze` toggle：暂停/恢复实时刷新（暂停时不再应用新快照，便于人工检查字段；恢复后继续接收更新）。
+    - Icon（Iconify）：`tabler/player-pause`（可点击进入冻结） / `tabler/player-play`（可点击恢复实时）
 - Global:
   - `schemaVersion / generatedAt / source`（用于确认数据源）
   - `global.up/down` 与 totals（原始数值）
@@ -54,8 +59,8 @@
   - `targetId / label / sourcePath / endpointId / enabled`
   - `state` + `progress` 原始计数（files/chunks/bytes）
   - `lastRun`（finishedAt/duration/status/errorCode）
- - Activity（必须）：
-   - 最近 N 条“工作活动”时间线（快照更新、文件落盘、阶段推进、错误码出现、stale 触发等）
+- Activity（必须）：
+  - 最近 N 条“工作活动”时间线（快照更新、文件落盘、阶段推进、错误码出现、stale 触发等）
 
 ## 视觉与状态语义（冻结口径）
 

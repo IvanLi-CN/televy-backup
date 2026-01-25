@@ -70,7 +70,7 @@
   - `Last updated`（或等价的 freshness 提示），用于判断是否 stale。
 - Popover（Overview）：targets 列表必须展示每个 target：
   - 标识：`label`（若空则回退到短 `target_id`）+ `source_path`（可截断）。
-  - 运行状态：`idle/running/succeeded/failed/stale`（视觉语义一致）。
+  - 运行状态：`idle/running/failed/stale`（成功通过 `lastRun.status=succeeded` 表示；视觉语义一致）。
   - 实时上行速率（单位自动切换；业务口径）。
   - “文件体积”（见 Display Logic 定义）：至少包含 `bytesRead` 或 `bytesUploaded` 的一个主指标；若两者可得则同时展示（一个主、一个次）。
   - 最近一次运行：时间点 + 用时（若可得）；失败时展示错误码（短）。
@@ -178,7 +178,7 @@
 - 已确认状态数据源：daemon 落盘 `status.json`（路径/原子写/刷新频率）→ CLI `status stream`（输出 NDJSON），以及刷新频率上限。
 - 已确认 Dev 视图入口对所有用户可见。
 - Repo reconnaissance（已完成，供实现落点定位）：
-  - `macos/TelevyBackupApp/TelevyBackupApp.swift`：`PopoverRootView` 当前包含 `SegmentedTabs`（Overview/Logs）与 `LogsView`；本计划要求 Popover 无 tabs，因此实现需移除 tabs 并将 Overview 替换为“全局 network + 多 target 列表”。
+  - `macos/TelevyBackupApp/TelevyBackupApp.swift`：`PopoverRootView` 当前为 header + `OverviewView()`（无 tabs/Logs）；本计划主要替换 Overview 为“全局 network + 多 target 列表”。
   - `macos/TelevyBackupApp/TelevyBackupApp.swift`：当前 `popover.contentSize = NSSize(width: 360, height: 460)`；本计划要求“宽 360、高度自适应（max 720）”，实现需按 targets 内容动态调整 content size（溢出时列表滚动）。
   - `macos/TelevyBackupApp/TelevyBackupApp.swift`：Settings window 已通过 header gear 打开；本计划要求在 Settings 内“增加 Developer… 入口”（不新增 Settings 页面），点击打开独立 Developer window。
 

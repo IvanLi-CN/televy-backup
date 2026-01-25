@@ -92,7 +92,8 @@
   <rect class="btn" x="952" y="76" width="92" height="28" rx="8" ry="8" />
   <text class="text small" x="998" y="95" text-anchor="middle">Reveal…</text>
   <rect class="btnPrimary" x="1050" y="76" width="40" height="28" rx="8" ry="8" />
-  <text class="text small" x="1070" y="95" text-anchor="middle" fill="#ffffff">⏸</text>
+  <rect x="1065" y="84" width="3" height="12" rx="1" ry="1" fill="#ffffff" />
+  <rect x="1072" y="84" width="3" height="12" rx="1" ry="1" fill="#ffffff" />
 
   <!-- Sidebar -->
   <rect class="sidebar" x="100" y="112" width="260" height="588" />
@@ -148,8 +149,8 @@
   <!-- Activity -->
   <rect class="card" x="380" y="478" width="700" height="182" rx="10" ry="10" />
   <text class="muted label" x="400" y="502">ACTIVITY</text>
-  <rect class="pill" x="940" y="490" width="140" height="24" rx="10" ry="10" />
-  <text class="muted mono small" x="1010" y="507" text-anchor="middle">filter: target</text>
+  <rect class="pill" x="928" y="490" width="140" height="24" rx="10" ry="10" />
+  <text class="muted mono small" x="998" y="507" text-anchor="middle">filter: target</text>
 
   <text class="text mono small" x="400" y="530">10:00:00.120  snapshot.updated  targets=3</text>
   <text class="text mono small" x="400" y="552">10:00:00.080  backup.progress   phase=upload chunks=2100/4020</text>
@@ -158,4 +159,3 @@
   <text class="text mono small" x="400" y="618">09:59:59.120  warning           staleAgeMs=980</text>
   <text class="text mono small" x="400" y="640">09:59:58.820  error             target=t_zzzz0000 code=config.invalid</text>
 </svg>
-
