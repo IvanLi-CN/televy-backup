@@ -20,6 +20,12 @@ Plan #0005（Settings window 独立化）相关的最新 popover 设计在：
 
 - `docs/plan/0005:multi-backup-directories-keyed-restore/design/popover-minimal.png`（及同名 `.svg`）
 
+Plan #0010（状态弹窗重做：全局网络 + 多目标面板 + Developer）相关设计在：
+
+- `docs/plan/0010:status-popover-dashboard/design/popover-overview.png`（及同名 `.svg`）
+- `docs/plan/0010:status-popover-dashboard/design/popover-overview-empty.png`（及同名 `.svg`，targets=0）
+- `docs/plan/0010:status-popover-dashboard/design/developer-window.png`（及同名 `.svg`）
+
 本地预览（macOS）：
 
 ```bash
