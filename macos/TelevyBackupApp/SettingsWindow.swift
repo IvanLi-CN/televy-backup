@@ -1121,13 +1121,6 @@ struct TargetEditor: View {
     let onEditEndpoint: (_ endpointId: String) -> Void
     let onReload: () -> Void
 
-    @FocusState private var tokenFocused: Bool
-    @FocusState private var apiHashFocused: Bool
-
-    @State private var botTokenDraft: String = ""
-    @State private var botTokenDraftMasked: Bool = false
-    @State private var apiHashDraft: String = ""
-    @State private var apiHashDraftMasked: Bool = false
     @State private var validateText: String = "Not validated"
     @State private var validateOk: Bool? = nil
 
@@ -1152,8 +1145,6 @@ struct TargetEditor: View {
     var body: some View {
         let target = settings.targets[targetIndex]
         let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == target.endpoint_id })
-        let botPresent = secrets?.telegramBotTokenPresentByEndpoint?[target.endpoint_id] ?? false
-        let apiHashPresent = secrets?.telegramMtprotoApiHashPresent ?? false
         let endpointsSorted = settings.telegram_endpoints.sorted { a, b in
             a.id.localizedStandardCompare(b.id) == .orderedAscending
         }
@@ -1236,48 +1227,6 @@ struct TargetEditor: View {
         .onChange(of: settings.targets[targetIndex].endpoint_id) { _, _ in
             validateOk = nil
             validateText = "Not validated"
-            botTokenDraft = ""
-            botTokenDraftMasked = false
-        }
-        .onChange(of: botPresent) { _, isPresent in
-            if isPresent && botTokenDraft.isEmpty {
-                botTokenDraft = String(repeating: "•", count: 18)
-                botTokenDraftMasked = true
-            } else if !isPresent && botTokenDraftMasked {
-                botTokenDraft = ""
-                botTokenDraftMasked = false
-            }
-        }
-        .onChange(of: apiHashPresent) { _, isPresent in
-            if isPresent && apiHashDraft.isEmpty {
-                apiHashDraft = String(repeating: "•", count: 18)
-                apiHashDraftMasked = true
-            } else if !isPresent && apiHashDraftMasked {
-                apiHashDraft = ""
-                apiHashDraftMasked = false
-            }
-        }
-        .onAppear {
-            if botPresent && botTokenDraft.isEmpty {
-                botTokenDraft = String(repeating: "•", count: 18)
-                botTokenDraftMasked = true
-            }
-            if apiHashPresent && apiHashDraft.isEmpty {
-                apiHashDraft = String(repeating: "•", count: 18)
-                apiHashDraftMasked = true
-            }
-        }
-        .onChange(of: tokenFocused) { _, isFocused in
-            if isFocused, botTokenDraftMasked {
-                botTokenDraft = ""
-                botTokenDraftMasked = false
-            }
-        }
-        .onChange(of: apiHashFocused) { _, isFocused in
-            if isFocused, apiHashDraftMasked {
-                apiHashDraft = ""
-                apiHashDraftMasked = false
-            }
         }
     }
 
@@ -1438,133 +1387,6 @@ struct TargetEditor: View {
                 }
             }
         }
-    }
-
-    @ViewBuilder
-    private func endpointEditor(epIndex: Int) -> some View {
-        let ep = settings.telegram_endpoints[epIndex]
-        let botPresent = secrets?.telegramBotTokenPresentByEndpoint?[ep.id] ?? false
-        let sessionPresent = secrets?.telegramMtprotoSessionPresentByEndpoint?[ep.id] ?? false
-        let apiHashPresent = secrets?.telegramMtprotoApiHashPresent ?? false
-
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Chat ID")
-                Spacer()
-                TextField("-100123…", text: Binding(
-                    get: { settings.telegram_endpoints[epIndex].chat_id },
-                    set: { v in settings.telegram_endpoints[epIndex].chat_id = v }
-                ))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 260)
-            }
-
-            HStack {
-                Text("Bot token")
-                Spacer()
-                Text(botPresent ? "Saved (encrypted)" : "Not set")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(botPresent ? .green : .secondary)
-            }
-
-            HStack(spacing: 8) {
-                SecureField("Paste new bot token", text: $botTokenDraft)
-                    .focused($tokenFocused)
-                Button("Save token") { saveBotToken(endpointId: ep.id) }
-                    .buttonStyle(.bordered)
-            }
-
-            Divider()
-
-            HStack {
-                Text("API ID")
-                Spacer()
-                TextField("123456", value: Binding(
-                    get: { settings.telegram.mtproto.api_id },
-                    set: { v in settings.telegram.mtproto.api_id = v }
-                ), formatter: NumberFormatter())
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 180)
-            }
-
-            HStack {
-                Text("API hash")
-                Spacer()
-                Text(apiHashPresent ? "Saved (encrypted)" : "Not set")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(apiHashPresent ? .green : .secondary)
-            }
-
-            HStack(spacing: 8) {
-                SecureField("Paste api_hash", text: $apiHashDraft)
-                    .focused($apiHashFocused)
-                Button("Save api_hash") { saveApiHash() }
-                    .buttonStyle(.bordered)
-            }
-
-            HStack {
-                Button("Clear sessions") { clearSessions() }
-                    .buttonStyle(.bordered)
-                Spacer()
-                Text(sessionPresent ? "Session: saved" : "Session: none")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack(spacing: 10) {
-                Button("Test connection") { testConnection(endpointId: ep.id) }
-                    .buttonStyle(.borderedProminent)
-                Spacer()
-                Text(validateText)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(validateOk == true ? .green : (validateOk == false ? .red : .secondary))
-            }
-        }
-    }
-
-    private func saveBotToken(endpointId: String) {
-        guard let cli = model.cliPath() else { return }
-        let token = botTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if token.isEmpty { return }
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "secrets", "set-telegram-bot-token", "--endpoint-id", endpointId],
-            stdin: token + "\n",
-            timeoutSeconds: 30
-        )
-        if res.status == 0 {
-            botTokenDraft = String(repeating: "•", count: 18)
-            botTokenDraftMasked = true
-            onReload()
-        }
-    }
-
-    private func saveApiHash() {
-        guard let cli = model.cliPath() else { return }
-        if apiHashDraftMasked { return }
-        let apiHash = apiHashDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if apiHash.isEmpty { return }
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "secrets", "set-telegram-api-hash"],
-            stdin: apiHash + "\n",
-            timeoutSeconds: 30
-        )
-        if res.status == 0 {
-            apiHashDraft = String(repeating: "•", count: 18)
-            apiHashDraftMasked = true
-            onReload()
-        }
-    }
-
-    private func clearSessions() {
-        guard let cli = model.cliPath() else { return }
-        _ = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "secrets", "clear-telegram-mtproto-session"],
-            timeoutSeconds: 30
-        )
-        onReload()
     }
 
     private func testConnection(endpointId: String) {
