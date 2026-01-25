@@ -1,0 +1,102 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Status popover preview</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --panel: rgba(255, 255, 255, 0.08);
+    --text: rgba(255, 255, 255, 0.9);
+    --muted: rgba(255, 255, 255, 0.65);
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  }
+
+  header {
+    position: sticky;
+    top: 0;
+    backdrop-filter: blur(12px);
+    background: rgba(11, 16, 32, 0.72);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  nav a {
+    display: inline-block;
+    margin-right: 10px;
+    padding: 6px 10px;
+    border-radius: 10px;
+    text-decoration: none;
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.10);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  nav a:hover {
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  main {
+    padding: 18px 16px 40px;
+    display: grid;
+    gap: 18px;
+  }
+
+  section {
+    background: var(--panel);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 14px;
+    padding: 14px;
+  }
+
+  h2 {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--muted);
+    letter-spacing: 0.2px;
+  }
+
+  img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.06);
+  }
+</style>
+
+<header>
+  <nav>
+    <a href="#overview">Overview</a>
+    <a href="#dev">Dev</a>
+  </nav>
+  <div></div>
+</header>
+
+<main>
+  <section id="overview">
+    <h2>Status popover • Overview</h2>
+    <img src="./popover-overview.svg" alt="Status popover (Overview)" />
+    <h2 style="margin-top: 14px">Status popover • Overview (empty)</h2>
+    <img src="./popover-overview-empty.svg" alt="Status popover (Overview, empty)" />
+  </section>
+
+  <section id="dev">
+    <h2>Developer window</h2>
+    <img src="./developer-window.svg" alt="Developer window" />
+  </section>
+</main>
