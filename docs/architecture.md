@@ -13,6 +13,19 @@
   - Runs scheduled backups (hourly/daily) and applies retention policy.
   - Intended to be managed by `brew services` as a user-level LaunchAgent.
 
+## Status snapshots (Popover / Developer dashboard)
+
+The macOS popover “dashboard” UI is driven by a single snapshot schema (`StatusSnapshot`) and a single stream:
+
+- **Source of truth** (daemon): `status.json` written by `televybackupd` via atomic write + rename.
+  - Path: `$TELEVYBACKUP_DATA_DIR/status/status.json` (or macOS default data dir when env vars are unset).
+  - Semantics:
+    - `generatedAt` is used for stale detection in the UI.
+    - `global.*Total` and `targets[].upTotal` are **session totals** (UI/stream start → now) and are not persisted.
+- **Transport** (CLI): `televybackup --json status stream` emits NDJSON, one `status.snapshot` per line.
+  - The UI runs this as a long-lived process and decodes each line.
+  - If `status.json` is missing/unreadable, the CLI emits a synthetic snapshot derived from Settings (targets list only) with `source.kind="cli"` and `targets[].state="stale"`, so the UI can still render configured targets.
+
 ## Data locations
 
 The app and daemon can share the same data locations via env vars:
@@ -26,6 +39,25 @@ When env vars are not set, the GUI uses `~/Library/Application Support/TelevyBac
 Per-run logs are written to files as NDJSON and never mixed into stdout/stderr, so `televybackup --events` stdout remains NDJSON-only and stderr remains error-JSON-only.
 
 The macOS GUI also writes an append-only UI log file `ui.log` into the same log directory (best effort; redacts `api.telegram.org` URL segments).
+
+## Daemon lifecycle (auto-start expectation)
+
+The UI dashboard is best-effort without the daemon, but “live” status requires `televybackupd` to be running and writing `status.json`.
+
+Expected behavior:
+
+- When the user opens the popover, the app should make a best-effort attempt to ensure the daemon is running (so `status.json` begins updating quickly).
+  - Preferred: `launchctl kickstart` the user LaunchAgent if present (Homebrew services label `homebrew.mxcl.televybackupd`).
+  - Fallback (dev/local): spawn a bundled `televybackupd` if available.
+
+Implementation options:
+
+- **LaunchAgent (recommended)**: install/manage `televybackupd` via `launchd` (e.g. Homebrew services).
+  - The UI can optionally “kickstart” the LaunchAgent when opening the popover.
+  - Pros: standard macOS background-process model; stable; avoids multiple daemon instances.
+- **Bundle-and-spawn**: embed `televybackupd` inside the `.app` bundle and spawn it from the UI.
+  - Pros: fewer external setup steps.
+  - Cons: requires bundling/updates for the daemon binary; careful lifecycle/dup prevention; entitlements/signing considerations.
 
 ## Secrets (vault key + local secrets store)
 

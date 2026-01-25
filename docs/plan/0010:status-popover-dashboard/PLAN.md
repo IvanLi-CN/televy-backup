@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 部分完成（3/4）
 - Created: 2026-01-24
 - Last: 2026-01-25
 
@@ -206,18 +206,18 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: 定义并实现状态数据源（`status get/stream` + `StatusSnapshot`）
-- [ ] M2: Popover Overview 重做（全局网络 + 多 target 列表 + 进度/状态）
-- [ ] M3: Popover Dev 视图落地（全局 + per-target 原始字段展示）
+- [x] M1: 定义并实现状态数据源（`status get/stream` + `StatusSnapshot`）
+- [x] M2: Popover Overview 重做（全局网络 + 多 target 列表 + 进度/状态）
+- [x] M3: Popover Dev 视图落地（全局 + per-target 原始字段展示）
 - [ ] M4: 测试与文档更新（契约测试 + UI smoke + IA 文档）
 
 ## 设计图与说明（Design assets）
 
-- `design/popover-overview.svg` / `design/popover-overview.png`
-- `design/popover-overview-empty.svg` / `design/popover-overview-empty.png`
-- `design/developer-window.svg` / `design/developer-window.png`
-- `design/README.md`
-- `design/_preview-popover.html`
+- `docs/design/ui/statusbar-popover-dashboard/popover-overview.svg` / `docs/design/ui/statusbar-popover-dashboard/popover-overview.png`
+- `docs/design/ui/statusbar-popover-dashboard/popover-overview-empty.svg` / `docs/design/ui/statusbar-popover-dashboard/popover-overview-empty.png`
+- `docs/design/ui/statusbar-popover-dashboard/developer-window.svg` / `docs/design/ui/statusbar-popover-dashboard/developer-window.png`
+- `docs/design/ui/statusbar-popover-dashboard/README.md`
+- `docs/design/ui/statusbar-popover-dashboard/_preview-popover.html`
 
 ## 方案概述（Approach, high-level）
 
@@ -231,3 +231,9 @@
 - 风险：现有后端 `TaskProgress` 字段不包含网络层 tx/rx；需要新增埋点与汇聚后才能满足全局上下行需求。
 - 风险：daemon 与 UI 进程的生命周期与数据源耦合不清晰时，可能导致 stale/误报；需在契约中引入 `generatedAt` 与 `source` 字段。
 - 假设（需主人确认）：Dev 视图默认对所有用户可见（不做隐藏手势/开关）；若需要隐藏，将在实现前置条件中补充开关策略。
+
+## Change log
+
+- 2026-01-25：实现 `status.json`（daemon）+ `televybackup status get/stream`（CLI）+ Popover Overview（全局 network + targets）+ Developer window（原始字段 + activity + Copy JSON/Reveal/Freeze）；同步设计资产到 `docs/design/ui/` 并更新 IA 文档；验证：`cargo test`、`scripts/macos/build-app.sh`。
+- 2026-01-25：Popover 打开时 best-effort 拉起 `televybackupd`：优先 `launchctl kickstart gui/<uid>/homebrew.mxcl.televybackupd`，无服务时回退为从 app bundle（或 PATH）直接启动；`scripts/macos/build-app.sh` 将 `televybackupd` 打进 `.app`，确保本地构建可自动拉起。
+- 2026-01-25：对齐 Popover Overview 视觉基准图：NETWORK/updated 排版、Up/Down chip 样式、Targets list（badge/row/empty state）与滚动分隔线；并将 daemon/status stream 的 best-effort 启动前置到 app launch（无需先打开 popover）。

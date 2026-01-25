@@ -47,6 +47,8 @@ type TargetRunSummary = {
   durationSeconds?: number | null;
   status?: "succeeded" | "failed" | null;
   errorCode?: string | null; // short machine code
+  bytesUploaded?: number | null;
+  bytesDeduped?: number | null;
 };
 
 type TargetState = {
@@ -57,6 +59,8 @@ type TargetState = {
   enabled: boolean;
 
   state: "idle" | "running" | "failed" | "stale";
+
+  runningSince?: UnixMs | null;
 
   // Realtime rate (per target; business-level bytesUploaded rate)
   up: Rate;

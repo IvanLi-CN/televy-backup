@@ -1,5 +1,10 @@
 # Status Bar Popover IA (macOS)
 
+Design assets:
+
+- `docs/design/ui/statusbar-popover-dashboard/`（Overview / empty / Developer window）
+- `docs/design/ui/settings-window/`（Settings window + popover minimal）
+
 ## Form factor
 
 - 形态：点击状态栏图标后出现的 popover（悬浮、不可太大）
