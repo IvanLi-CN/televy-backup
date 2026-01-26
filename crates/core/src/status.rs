@@ -2,15 +2,27 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 pub fn now_unix_ms() -> u64 {
-    SystemTime::now()
+    static LAST_UNIX_MS: AtomicU64 = AtomicU64::new(0);
+
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64
+        .as_millis() as u64;
+
+    let mut prev = LAST_UNIX_MS.load(Ordering::Relaxed);
+    loop {
+        let next = now.max(prev);
+        match LAST_UNIX_MS.compare_exchange_weak(prev, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return next,
+            Err(current) => prev = current,
+        }
+    }
 }
 
 pub fn status_json_path(data_dir: &Path) -> PathBuf {

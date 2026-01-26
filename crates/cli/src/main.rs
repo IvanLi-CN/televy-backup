@@ -497,6 +497,7 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
             .unwrap_or(0.0);
 
         let mut global_up_bps: u64 = 0;
+        let mut any_target_rate = false;
         let mut global_up_total: u64 = 0;
         let mut any_running = false;
 
@@ -550,13 +551,20 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
 
             t.up.bytes_per_second = bps;
             t.up_total.bytes = Some(*total);
-            global_up_bps = global_up_bps.saturating_add(bps.unwrap_or(0));
+            if let Some(bps) = bps {
+                any_target_rate = true;
+                global_up_bps = global_up_bps.saturating_add(bps);
+            }
             global_up_total = global_up_total.saturating_add(*total);
 
             prev_uploaded_by_target.insert(t.target_id.clone(), bytes_uploaded_now);
         }
 
-        snap.global.up.bytes_per_second = Some(global_up_bps);
+        snap.global.up.bytes_per_second = if any_target_rate {
+            Some(global_up_bps)
+        } else {
+            None
+        };
         snap.global.down.bytes_per_second = None;
         snap.global.up_total.bytes = Some(global_up_total);
         snap.global.down_total.bytes = None;
