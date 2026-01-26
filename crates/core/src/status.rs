@@ -118,15 +118,15 @@ pub fn read_status_snapshot_json(path: &Path) -> std::io::Result<StatusSnapshot>
     Ok(snap)
 }
 
-pub fn write_status_snapshot_json_atomic(path: &Path, snapshot: &StatusSnapshot) -> std::io::Result<()> {
+pub fn write_status_snapshot_json_atomic(
+    path: &Path,
+    snapshot: &StatusSnapshot,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let tmp = path.with_extension(format!(
-        "json.tmp.{}",
-        std::process::id()
-    ));
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     let data = serde_json::to_vec(snapshot)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
@@ -169,8 +169,12 @@ mod tests {
                 detail: Some("test".to_string()),
             },
             global: GlobalStatus {
-                up: Rate { bytes_per_second: None },
-                down: Rate { bytes_per_second: None },
+                up: Rate {
+                    bytes_per_second: None,
+                },
+                down: Rate {
+                    bytes_per_second: None,
+                },
                 up_total: Counter { bytes: None },
                 down_total: Counter { bytes: None },
                 ui_uptime_seconds: None,
@@ -183,7 +187,9 @@ mod tests {
                 enabled: true,
                 state: "idle".to_string(),
                 running_since: None,
-                up: Rate { bytes_per_second: None },
+                up: Rate {
+                    bytes_per_second: None,
+                },
                 up_total: Counter { bytes: None },
                 progress: None,
                 last_run: None,

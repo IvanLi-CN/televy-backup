@@ -7,7 +7,6 @@ use std::time::Instant;
 use base64::Engine;
 use chrono::{Datelike, Timelike};
 use sqlx::Row;
-use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::status::{
     Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource, TargetRunSummary,
     TargetState, now_unix_ms, status_json_path, write_status_snapshot_json_atomic,
@@ -16,6 +15,7 @@ use televy_backup_core::{
     BackupConfig, BackupOptions, ChunkingConfig, TelegramMtProtoStorage,
     TelegramMtProtoStorageConfig,
 };
+use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
@@ -78,11 +78,16 @@ impl StatusRuntimeState {
                 },
             );
         }
-        Self { target_order, targets }
+        Self {
+            target_order,
+            targets,
+        }
     }
 
     fn mark_run_start(&mut self, target_id: &str) {
-        let Some(t) = self.targets.get_mut(target_id) else { return };
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
         t.state = "running".to_string();
         t.running_since = Some(now_unix_ms());
         t.progress = Some(Progress {
@@ -98,7 +103,9 @@ impl StatusRuntimeState {
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
-        let Some(t) = self.targets.get_mut(target_id) else { return };
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
         if t.state != "running" {
             t.state = "running".to_string();
         }
@@ -125,7 +132,9 @@ impl StatusRuntimeState {
         bytes_uploaded: u64,
         bytes_deduped: u64,
     ) {
-        let Some(t) = self.targets.get_mut(target_id) else { return };
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
         t.state = "idle".to_string();
         t.running_since = None;
         t.progress = None;
@@ -142,8 +151,15 @@ impl StatusRuntimeState {
         });
     }
 
-    fn mark_run_finish_failure(&mut self, target_id: &str, duration_seconds: f64, error_code: String) {
-        let Some(t) = self.targets.get_mut(target_id) else { return };
+    fn mark_run_finish_failure(
+        &mut self,
+        target_id: &str,
+        duration_seconds: f64,
+        error_code: String,
+    ) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
         t.state = "failed".to_string();
         t.running_since = None;
         t.progress = None;
@@ -167,7 +183,9 @@ impl StatusRuntimeState {
     fn build_snapshot(&self, now_ms: u64) -> StatusSnapshot {
         let mut out_targets = Vec::new();
         for id in &self.target_order {
-            let Some(t) = self.targets.get(id) else { continue };
+            let Some(t) = self.targets.get(id) else {
+                continue;
+            };
             out_targets.push(TargetState {
                 target_id: t.target_id.clone(),
                 label: t.label.clone(),
@@ -176,7 +194,9 @@ impl StatusRuntimeState {
                 enabled: t.enabled,
                 state: t.state.clone(),
                 running_since: t.running_since,
-                up: Rate { bytes_per_second: None },
+                up: Rate {
+                    bytes_per_second: None,
+                },
                 up_total: Counter { bytes: None },
                 progress: t.progress.clone(),
                 last_run: t.last_run.clone(),
@@ -193,8 +213,12 @@ impl StatusRuntimeState {
                 detail: Some("televybackupd (status.json)".to_string()),
             },
             global: GlobalStatus {
-                up: Rate { bytes_per_second: None },
-                down: Rate { bytes_per_second: None },
+                up: Rate {
+                    bytes_per_second: None,
+                },
+                down: Rate {
+                    bytes_per_second: None,
+                },
                 up_total: Counter { bytes: None },
                 down_total: Counter { bytes: None },
                 ui_uptime_seconds: None,
@@ -332,8 +356,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let scheduled_slot = if manual_triggered {
                 Some(ScheduleSlot::Manual)
             } else {
-                let eff =
-                    settings_config::effective_schedule(&settings.schedule, target.schedule.as_ref());
+                let eff = settings_config::effective_schedule(
+                    &settings.schedule,
+                    target.schedule.as_ref(),
+                );
                 if !eff.enabled {
                     None
                 } else {
@@ -518,8 +544,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 progress: Some(&sink),
             };
 
-            let result =
-                televy_backup_core::run_backup_with(storage, cfg, opts).await;
+            let result = televy_backup_core::run_backup_with(storage, cfg, opts).await;
             let duration_seconds = started.elapsed().as_secs_f64();
 
             match result {
@@ -597,7 +622,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
 
                     if let Ok(mut st) = status_state.lock() {
-                        st.mark_run_finish_failure(&target.id, duration_seconds, e.code().to_string());
+                        st.mark_run_finish_failure(
+                            &target.id,
+                            duration_seconds,
+                            e.code().to_string(),
+                        );
                     }
                 }
             }

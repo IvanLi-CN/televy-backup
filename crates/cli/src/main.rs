@@ -402,7 +402,9 @@ fn synthetic_snapshot_from_settings(
             enabled: t.enabled,
             state: "stale".to_string(),
             running_since: None,
-            up: televy_backup_core::status::Rate { bytes_per_second: None },
+            up: televy_backup_core::status::Rate {
+                bytes_per_second: None,
+            },
             up_total: televy_backup_core::status::Counter { bytes: None },
             progress: None,
             last_run: None,
@@ -422,8 +424,12 @@ fn synthetic_snapshot_from_settings(
             )),
         },
         global: televy_backup_core::status::GlobalStatus {
-            up: televy_backup_core::status::Rate { bytes_per_second: None },
-            down: televy_backup_core::status::Rate { bytes_per_second: None },
+            up: televy_backup_core::status::Rate {
+                bytes_per_second: None,
+            },
+            down: televy_backup_core::status::Rate {
+                bytes_per_second: None,
+            },
             up_total: televy_backup_core::status::Counter { bytes: None },
             down_total: televy_backup_core::status::Counter { bytes: None },
             ui_uptime_seconds: None,
@@ -460,7 +466,10 @@ async fn status_get(config_dir: &Path, data_dir: &Path, json: bool) -> Result<()
 
 async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
     if !json {
-        return Err(CliError::new("cli.invalid", "--json is required for status stream"));
+        return Err(CliError::new(
+            "cli.invalid",
+            "--json is required for status stream",
+        ));
     }
 
     let path = televy_backup_core::status::status_json_path(data_dir);
@@ -474,12 +483,8 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
     loop {
         let read = televy_backup_core::status::read_status_snapshot_json(&path);
         let mut snap = match read {
-            Ok(snap) => {
-                snap
-            }
-            Err(_) => {
-                synthetic_snapshot_from_settings(config_dir, data_dir)?
-            }
+            Ok(snap) => snap,
+            Err(_) => synthetic_snapshot_from_settings(config_dir, data_dir)?,
         };
 
         let is_daemon = snap.source.kind == "daemon";
@@ -521,7 +526,10 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
             let mut bps: Option<u64> = None;
             if t.state == "running" && stale_age_ms <= 2_000 && dt > 0.0 {
                 let raw = (delta as f64) / dt;
-                let prev = smoothed_rate_by_target.get(&t.target_id).copied().unwrap_or(raw);
+                let prev = smoothed_rate_by_target
+                    .get(&t.target_id)
+                    .copied()
+                    .unwrap_or(raw);
                 // 1.0s window EWMA.
                 let alpha = 1.0 - (-dt).exp();
                 let smoothed = prev * (1.0 - alpha) + raw * alpha;
