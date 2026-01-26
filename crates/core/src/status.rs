@@ -142,10 +142,10 @@ pub fn write_status_snapshot_json_atomic(
     std::fs::rename(&tmp, path)?;
 
     // Best-effort directory sync (ignored on platforms where it isn't supported).
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = File::open(parent) {
-            let _ = dir.sync_all();
-        }
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = File::open(parent)
+    {
+        let _ = dir.sync_all();
     }
 
     Ok(())
