@@ -100,6 +100,10 @@
       <text class="sf" x="70" y="44" font-size="15" font-weight="700" fill="#111827">TelevyBackup</text>
       <text class="sf" x="70" y="62" font-size="12" font-weight="600" fill="#374151" opacity="0.85">Status • Live</text>
 
+      <!-- Backup now -->
+      <rect x="244" y="34" width="22" height="22" rx="10" fill="#ffffff" opacity="0.26" stroke="#ffffff" stroke-opacity="0.35" stroke-width="1"/>
+      <polygon points="253,40 253,50 262,45" fill="#111827" opacity="0.55"/>
+
       <!-- Status LED -->
       <circle cx="284" cy="45" r="5" fill="#34c759" opacity="0.95"/>
       <circle cx="284" cy="45" r="8" fill="#34c759" opacity="0.14"/>

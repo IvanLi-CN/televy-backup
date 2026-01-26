@@ -1509,6 +1509,50 @@ final class AppModel: ObservableObject {
             }
         }
     }
+
+    private func controlDirURL() -> URL {
+        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env).appendingPathComponent("control")
+        }
+        return defaultDataDir().appendingPathComponent("control")
+    }
+
+    func triggerBackupNowAllEnabled() {
+        ensureDaemonRunning()
+        let anyRunning = statusSnapshot?.targets.contains(where: { $0.state == "running" }) ?? false
+
+        DispatchQueue.global(qos: .utility).async {
+            let dir = self.controlDirURL()
+            let path = dir.appendingPathComponent("backup-now")
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+                let tmp = dir.appendingPathComponent("backup-now.tmp.\(getpid())")
+                let payload = "manual backup trigger at \(ISO8601DateFormatter().string(from: Date()))\n"
+                if let data = payload.data(using: .utf8) {
+                    try data.write(to: tmp, options: .atomic)
+                } else {
+                    throw NSError(domain: "TelevyBackup", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "failed to encode trigger payload",
+                    ])
+                }
+                if FileManager.default.fileExists(atPath: path.path) {
+                    try? FileManager.default.removeItem(at: path)
+                }
+                try FileManager.default.moveItem(at: tmp, to: path)
+
+                DispatchQueue.main.async {
+                    self.appendStatusActivity("Manual backup trigger written (all enabled targets)")
+                    self.showToast(anyRunning ? "Queued backup…" : "Starting backup…", isError: false)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.appendLog("ERROR: failed to write manual backup trigger: \(error)")
+                    self.showToast("Failed to start backup (see ui.log)", isError: true)
+                }
+            }
+        }
+    }
 }
 
 private func tomlString(_ s: String) -> String {
@@ -1661,6 +1705,21 @@ struct PopoverRootView: View {
                 }
 
                 Spacer()
+
+                Button {
+                    model.triggerBackupNowAllEnabled()
+                } label: {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 11, weight: .heavy))
+                        .frame(width: 22, height: 22)
+                        .background(Color.white.opacity(0.26), in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Backup now (all enabled targets)")
 
                 StatusLED(color: statusColor)
 

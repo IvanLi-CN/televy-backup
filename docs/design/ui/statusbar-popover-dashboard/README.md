@@ -24,6 +24,13 @@
 
 - Popover 无 tabs；打开即为 Overview。
 - 尺寸：宽度固定 `360`；高度按内容自适应，最大高度 `720`（高宽比 `2:1` 上限）；targets 溢出时区域滚动承载长列表（header/global 固定）。
+- Header actions：
+  - `Backup now`（立即备份）：一键触发“立即备份”（详细行为见 Plan #0010；多 targets 时的默认策略需冻结）。
+  - `Settings…`（齿轮）：打开 Settings window（含 Developer… 入口）。
+
+`Backup now` 默认策略（冻结）：
+
+- 多 targets：立即备份所有 `enabled=true` 的 targets（顺序/并发按后端既有策略）。
 
 ### 2) Overview：全局 + targets
 

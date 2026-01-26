@@ -17,7 +17,9 @@ Design assets:
 - Header（固定）
   - App 标识 + 标题 `TelevyBackup`
   - 状态 LED：`Live / Stale / Disconnected`（由快照新鲜度判定）
-  - 右侧：齿轮（打开 Settings window）/`…`（可选）
+  - 右侧：
+    - `Backup now`（立即备份）：一键触发立即备份（多 targets：立即备份所有 enabled targets）
+    - 齿轮（打开 Settings window）/`…`（可选）
 - 全局状态（NETWORK）
   - 实时上下行速率（↑/↓）
   - 自 UI 启动后累计上下行流量（session totals）

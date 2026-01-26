@@ -49,6 +49,9 @@ Expected behavior:
 - When the user opens the popover, the app should make a best-effort attempt to ensure the daemon is running (so `status.json` begins updating quickly).
   - Preferred: `launchctl kickstart` the user LaunchAgent if present (Homebrew services label `homebrew.mxcl.televybackupd`).
   - Fallback (dev/local): spawn a bundled `televybackupd` if available.
+- When the user clicks `Backup now` in the popover header, the app triggers an immediate backup wave for all `enabled=true` targets by writing a control file:
+  - Path: `$TELEVYBACKUP_DATA_DIR/control/backup-now`
+  - The daemon polls for this trigger and consumes it (best-effort remove + run).
 
 Implementation options:
 

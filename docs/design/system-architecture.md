@@ -95,9 +95,14 @@ Popover 右上角状态灯与 header 文案反映“快照新鲜度”：
 - 当未安装 LaunchAgent 时，GUI 可从 app bundle（或 PATH）直接 spawn `televybackupd`。
 - 目的：让本地构建即可直接体验“打开即有状态”，降低开发摩擦。
 
+### 4.3 手动触发（Backup now）
+
+- Popover Header 提供 `Backup now`（立即备份）按钮。
+- 多 targets 策略（冻结）：点击后立即备份所有 `enabled=true` 的 targets（顺序/并发按后端既有策略）。
+- 触发机制：GUI 写入控制文件 `$TELEVYBACKUP_DATA_DIR/control/backup-now`，daemon 侧检测并消费该触发（best-effort remove + run）。
+
 ## 5. 日志与可排查性（Observability）
 
 - 任务日志（CLI/daemon）：以 NDJSON 落盘（每轮任务一份文件），避免混入 stdout（保证事件流可解析）。
 - UI 日志：`ui.log`（best-effort 追加写），用于记录进程拉起、status stream 解析错误、stale 转换等。
 - Developer window：用于把“快照来源/更新时间/原始字段”展示出来，尽量减少排障时对外部日志的依赖。
-

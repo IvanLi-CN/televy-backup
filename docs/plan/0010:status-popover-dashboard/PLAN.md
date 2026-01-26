@@ -64,6 +64,9 @@
 ### MUST
 
 - Popover 不提供 tabs/segmented 导航；打开即为 Overview。
+- Popover Header 必须提供 `Backup now`（立即备份）按钮：
+  - 可直接点击触发一次立即备份（不依赖打开 Settings）。
+  - 多 targets 时的默认触发策略需冻结（见“开放问题”）。
 - Popover（Overview）：全局区必须展示：
   - `Up`/`Down` 实时速率（单位自动切换；业务口径）。
   - `Up`/`Down` 自 UI 启动以来累计值（session totals；业务口径）。
@@ -158,6 +161,9 @@
 - Given 用户点击菜单栏图标打开 Popover，
   When 查看弹窗内容，
   Then 能看到全局 `Up/Down` 实时速率与 session totals，且每个 target 都有一行状态展示（targets 行仅展示 `Up`；缺失字段以 `—` 稳定回退）。
+- Given 用户点击 Header 的 `Backup now`（立即备份），
+  When 触发成功，
+  Then UI 能在 targets 列表中观察到对应 target 进入 `Running` 并开始更新进度（或给出明确失败提示与可排障入口）。
 - Given 任一 target 正在运行且底层有持续进度更新，
   When 用户观察 Overview，
   Then 进度条与关键数字以 `≥ 5Hz` 频率更新且无明显卡顿/滞后（人眼可感知延迟 ≤ 200ms 目标）。
@@ -231,6 +237,8 @@
 - 风险：现有后端 `TaskProgress` 字段不包含网络层 tx/rx；需要新增埋点与汇聚后才能满足全局上下行需求。
 - 风险：daemon 与 UI 进程的生命周期与数据源耦合不清晰时，可能导致 stale/误报；需在契约中引入 `generatedAt` 与 `source` 字段。
 - 假设（需主人确认）：Dev 视图默认对所有用户可见（不做隐藏手势/开关）；若需要隐藏，将在实现前置条件中补充开关策略。
+- 开放问题（需主人确认）：多 targets 场景下点击 `Backup now` 的默认策略：
+- ✅ A) 立即备份所有 enabled targets（顺序/并发按既有后端策略）
 
 ## Change log
 
@@ -238,3 +246,4 @@
 - 2026-01-25：Popover 打开时 best-effort 拉起 `televybackupd`：优先 `launchctl kickstart gui/<uid>/homebrew.mxcl.televybackupd`，无服务时回退为从 app bundle（或 PATH）直接启动；`scripts/macos/build-app.sh` 将 `televybackupd` 打进 `.app`，确保本地构建可自动拉起。
 - 2026-01-25：对齐 Popover Overview 视觉基准图：NETWORK/updated 排版、Up/Down chip 样式、Targets list（badge/row/empty state）与滚动分隔线；并将 daemon/status stream 的 best-effort 启动前置到 app launch（无需先打开 popover）。
 - 2026-01-26：订正设计基准图：Targets 行 `label`↔badge 间距统一（视觉约 10px）；右侧信息语义固定为“主行时间类 + 次行数值类”，避免不同状态下右侧含义乱跳，并同步到 IA 文档。
+- 2026-01-26：新增 `Backup now`（立即备份）按钮：多 targets 策略冻结为“立即备份所有 enabled targets”；实现为 UI 写入 `$TELEVYBACKUP_DATA_DIR/control/backup-now`，daemon 轮询消费触发并执行备份。

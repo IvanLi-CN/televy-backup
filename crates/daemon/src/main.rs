@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -29,6 +30,7 @@ struct TargetScheduleState {
 enum ScheduleSlot {
     Hourly((i32, u32, u32, u32)),
     Daily((i32, u32, u32)),
+    Manual,
 }
 
 #[derive(Debug, Clone)]
@@ -305,13 +307,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut schedule_state_by_target = HashMap::<String, TargetScheduleState>::new();
     let mut storage_by_endpoint = HashMap::<String, TelegramMtProtoStorage>::new();
 
+    let manual_trigger_pending = Arc::new(AtomicBool::new(false));
+    tokio::spawn(manual_trigger_watcher_loop(
+        data_root.clone(),
+        manual_trigger_pending.clone(),
+    ));
+
     loop {
         let now = chrono::Local::now();
+        let manual_triggered = manual_trigger_pending.swap(false, Ordering::SeqCst);
 
         for target in &settings.targets {
-            let eff =
-                settings_config::effective_schedule(&settings.schedule, target.schedule.as_ref());
-            if !target.enabled || !eff.enabled {
+            if !target.enabled {
                 continue;
             }
 
@@ -319,34 +326,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .entry(target.id.clone())
                 .or_default();
 
-            let scheduled_slot = match eff.kind.as_str() {
-                "hourly" => {
-                    if now.minute() != eff.hourly_minute as u32 {
-                        None
-                    } else {
-                        let key = (now.year(), now.month(), now.day(), now.hour());
-                        if state.last_hourly == Some(key) {
-                            None
-                        } else {
-                            Some(ScheduleSlot::Hourly(key))
+            let scheduled_slot = if manual_triggered {
+                Some(ScheduleSlot::Manual)
+            } else {
+                let eff =
+                    settings_config::effective_schedule(&settings.schedule, target.schedule.as_ref());
+                if !eff.enabled {
+                    None
+                } else {
+                    match eff.kind.as_str() {
+                        "hourly" => {
+                            if now.minute() != eff.hourly_minute as u32 {
+                                None
+                            } else {
+                                let key = (now.year(), now.month(), now.day(), now.hour());
+                                if state.last_hourly == Some(key) {
+                                    None
+                                } else {
+                                    Some(ScheduleSlot::Hourly(key))
+                                }
+                            }
+                        }
+                        "daily" => {
+                            let (hh, mm) = parse_hhmm(&eff.daily_at)?;
+                            if now.hour() != hh as u32 || now.minute() != mm as u32 {
+                                None
+                            } else {
+                                let key = (now.year(), now.month(), now.day());
+                                if state.last_daily == Some(key) {
+                                    None
+                                } else {
+                                    Some(ScheduleSlot::Daily(key))
+                                }
+                            }
+                        }
+                        other => {
+                            return Err(format!("unsupported schedule.kind: {other}").into());
                         }
                     }
-                }
-                "daily" => {
-                    let (hh, mm) = parse_hhmm(&eff.daily_at)?;
-                    if now.hour() != hh as u32 || now.minute() != mm as u32 {
-                        None
-                    } else {
-                        let key = (now.year(), now.month(), now.day());
-                        if state.last_daily == Some(key) {
-                            None
-                        } else {
-                            Some(ScheduleSlot::Daily(key))
-                        }
-                    }
-                }
-                other => {
-                    return Err(format!("unsupported schedule.kind: {other}").into());
                 }
             };
 
@@ -439,6 +456,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match scheduled_slot {
                 ScheduleSlot::Hourly(key) => state.last_hourly = Some(key),
                 ScheduleSlot::Daily(key) => state.last_daily = Some(key),
+                ScheduleSlot::Manual => {}
             }
 
             let task_id = format!("tsk_{}", Uuid::new_v4());
@@ -458,10 +476,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             let started = Instant::now();
-            let label = if target.label.trim().is_empty() {
-                "scheduled".to_string()
-            } else {
-                target.label.clone()
+            let label = match scheduled_slot {
+                ScheduleSlot::Manual => "manual".to_string(),
+                _ => {
+                    if target.label.trim().is_empty() {
+                        "scheduled".to_string()
+                    } else {
+                        target.label.clone()
+                    }
+                }
             };
 
             let cfg = BackupConfig {
@@ -597,7 +620,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        sleep(Duration::from_secs(30)).await;
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn manual_trigger_watcher_loop(data_root: PathBuf, pending: Arc<AtomicBool>) {
+    let control_dir = data_root.join("control");
+    let path = control_dir.join("backup-now");
+    loop {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+            pending.store(true, Ordering::SeqCst);
+            tracing::info!(
+                event = "manual.trigger",
+                kind = "backup",
+                path = %path.display(),
+                "manual backup trigger consumed"
+            );
+        }
+        sleep(Duration::from_millis(200)).await;
     }
 }
 
