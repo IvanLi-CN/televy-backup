@@ -237,3 +237,4 @@
 - 2026-01-25：实现 `status.json`（daemon）+ `televybackup status get/stream`（CLI）+ Popover Overview（全局 network + targets）+ Developer window（原始字段 + activity + Copy JSON/Reveal/Freeze）；同步设计资产到 `docs/design/ui/` 并更新 IA 文档；验证：`cargo test`、`scripts/macos/build-app.sh`。
 - 2026-01-25：Popover 打开时 best-effort 拉起 `televybackupd`：优先 `launchctl kickstart gui/<uid>/homebrew.mxcl.televybackupd`，无服务时回退为从 app bundle（或 PATH）直接启动；`scripts/macos/build-app.sh` 将 `televybackupd` 打进 `.app`，确保本地构建可自动拉起。
 - 2026-01-25：对齐 Popover Overview 视觉基准图：NETWORK/updated 排版、Up/Down chip 样式、Targets list（badge/row/empty state）与滚动分隔线；并将 daemon/status stream 的 best-effort 启动前置到 app launch（无需先打开 popover）。
+- 2026-01-26：订正设计基准图：Targets 行 `label`↔badge 间距统一（视觉约 10px）；右侧信息语义固定为“主行时间类 + 次行数值类”，避免不同状态下右侧含义乱跳，并同步到 IA 文档。

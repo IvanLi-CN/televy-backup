@@ -115,7 +115,7 @@
     <!-- Network -->
     <g>
       <text class="sf" x="50" y="106" font-size="11" font-weight="800" fill="#374151" letter-spacing="0.8">NETWORK</text>
-      <text class="sf" x="314" y="106" text-anchor="end" font-size="11" font-weight="750" fill="#6b7280" opacity="0.92">updated 120ms</text>
+      <text class="sf" x="314" y="106" text-anchor="end" font-size="11" font-weight="750" fill="#6b7280" opacity="0.92">Updated 120ms</text>
 
       <!-- Two stat chips (macOS-style) -->
       <rect x="34" y="112" width="140" height="64" rx="12" fill="#ffffff" opacity="0.10" stroke="#ffffff" stroke-opacity="0.18" stroke-width="1"/>
@@ -151,12 +151,13 @@
 
           <text class="sf" x="50" y="232" font-size="13.5" font-weight="800" fill="#111827">Photos</text>
           <!-- status badge -->
-          <rect x="104" y="219.5" width="78" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
-          <circle cx="113" cy="229" r="3.2" fill="#0a84ff" opacity="0.95"/>
-          <text class="sf" x="122" y="233.5" font-size="11.5" font-weight="850" fill="#0a84ff" opacity="0.95">Running</text>
-          <text class="mono" x="314" y="232" text-anchor="end" font-size="12" font-weight="900" fill="#111827" opacity="0.92">↑ 3.2 MB/s</text>
+          <rect x="108" y="219.5" width="78" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
+          <circle cx="117" cy="229" r="3.2" fill="#0a84ff" opacity="0.95"/>
+          <text class="sf" x="126" y="233.5" font-size="11.5" font-weight="850" fill="#0a84ff" opacity="0.95">Running</text>
+          <text class="sf" x="314" y="232" text-anchor="end" font-size="12" font-weight="750" fill="#6b7280" opacity="0.92">Elapsed 00:48</text>
 
-          <text class="mono" x="50" y="254" font-size="11.5" font-weight="750" fill="#374151" opacity="0.92">Uploaded 128 MB • Elapsed 00:48</text>
+          <text class="mono" x="50" y="254" font-size="11.5" font-weight="750" fill="#374151" opacity="0.92">Uploaded 128 MB</text>
+          <text class="mono" x="314" y="254" text-anchor="end" font-size="11.5" font-weight="900" fill="#111827" opacity="0.92">↑ 3.2 MB/s</text>
           <rect x="50" y="264" width="264" height="6" rx="3" fill="#111827" opacity="0.10"/>
           <rect x="50" y="264" width="110" height="6" rx="3" fill="#0a84ff" opacity="0.92"/>
         </g>
@@ -167,9 +168,9 @@
 
           <text class="sf" x="50" y="304" font-size="13.5" font-weight="800" fill="#111827">Documents</text>
           <!-- status badge -->
-          <rect x="124" y="291.5" width="56" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
-          <circle cx="133" cy="301" r="3.0" fill="#6b7280" opacity="0.80"/>
-          <text class="sf" x="143" y="305.5" font-size="11.5" font-weight="850" fill="#6b7280" opacity="0.90">Idle</text>
+          <rect x="132" y="291.5" width="56" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
+          <circle cx="141" cy="301" r="3.0" fill="#6b7280" opacity="0.80"/>
+          <text class="sf" x="151" y="305.5" font-size="11.5" font-weight="850" fill="#6b7280" opacity="0.90">Idle</text>
           <text class="sf" x="314" y="304" text-anchor="end" font-size="12" font-weight="750" fill="#6b7280" opacity="0.92">Last 2h ago</text>
 
           <text class="sf" x="50" y="324" font-size="10.8" font-weight="650" fill="#6b7280" opacity="0.95">~/Documents</text>
@@ -182,24 +183,25 @@
 
           <text class="sf" x="50" y="366" font-size="13.5" font-weight="800" fill="#111827">Movies</text>
           <!-- status badge -->
-          <rect x="104" y="353.5" width="64" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
-          <circle cx="113" cy="363" r="3.0" fill="#ff453a" opacity="0.78"/>
-          <text class="sf" x="122" y="367.5" font-size="11.5" font-weight="850" fill="#ff453a" opacity="0.86">Failed</text>
-          <text class="mono" x="314" y="366" text-anchor="end" font-size="11.5" font-weight="900" fill="#111827" opacity="0.92">config.invalid</text>
+          <rect x="108" y="353.5" width="64" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
+          <circle cx="117" cy="363" r="3.0" fill="#ff453a" opacity="0.78"/>
+          <text class="sf" x="126" y="367.5" font-size="11.5" font-weight="850" fill="#ff453a" opacity="0.86">Failed</text>
+          <text class="sf" x="314" y="366" text-anchor="end" font-size="12" font-weight="750" fill="#6b7280" opacity="0.92">Last 1d ago</text>
 
           <text class="sf" x="50" y="386" font-size="10.8" font-weight="650" fill="#6b7280" opacity="0.95">/Volumes/HDD/Movies</text>
-          <text class="sf" x="314" y="386" text-anchor="end" font-size="12" font-weight="750" fill="#6b7280" opacity="0.92">Last 1d ago</text>
+          <text class="mono" x="314" y="386" text-anchor="end" font-size="11.5" font-weight="900" fill="#111827" opacity="0.92">config.invalid</text>
         </g>
 
         <!-- Row 4 -->
         <g opacity="0.92">
           <text class="sf" x="50" y="428" font-size="13.5" font-weight="800" fill="#111827">Workspace</text>
           <!-- status badge -->
-          <rect x="124" y="415.5" width="76" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
-          <circle cx="133" cy="425" r="3.0" fill="#6b7280" opacity="0.80"/>
-          <text class="sf" x="143" y="429.5" font-size="11.5" font-weight="850" fill="#6b7280" opacity="0.90">Queued</text>
+          <rect x="132" y="415.5" width="76" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
+          <circle cx="141" cy="425" r="3.0" fill="#6b7280" opacity="0.80"/>
+          <text class="sf" x="151" y="429.5" font-size="11.5" font-weight="850" fill="#6b7280" opacity="0.90">Queued</text>
           <text class="sf" x="314" y="428" text-anchor="end" font-size="12" font-weight="750" fill="#6b7280" opacity="0.92">Next 17:00</text>
           <text class="sf" x="50" y="448" font-size="10.8" font-weight="650" fill="#6b7280" opacity="0.95">/Volumes/SSD/Work</text>
+          <text class="mono" x="314" y="448" text-anchor="end" font-size="11.5" font-weight="800" fill="#374151" opacity="0.92">—</text>
         </g>
 
         <!-- Row 5 -->
@@ -208,9 +210,9 @@
 
           <text class="sf" x="50" y="490" font-size="13.5" font-weight="800" fill="#111827">Archive</text>
           <!-- status badge -->
-          <rect x="114" y="477.5" width="56" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
-          <circle cx="123" cy="487" r="3.0" fill="#6b7280" opacity="0.80"/>
-          <text class="sf" x="133" y="491.5" font-size="11.5" font-weight="850" fill="#6b7280" opacity="0.90">Idle</text>
+          <rect x="116" y="477.5" width="56" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
+          <circle cx="125" cy="487" r="3.0" fill="#6b7280" opacity="0.80"/>
+          <text class="sf" x="135" y="491.5" font-size="11.5" font-weight="850" fill="#6b7280" opacity="0.90">Idle</text>
           <text class="sf" x="314" y="490" text-anchor="end" font-size="12" font-weight="750" fill="#6b7280" opacity="0.92">Last 10m ago</text>
 
           <text class="sf" x="50" y="510" font-size="10.8" font-weight="650" fill="#6b7280" opacity="0.95">/Volumes/NAS/Archive</text>
@@ -226,7 +228,7 @@
           <rect x="124" y="539.5" width="60" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
           <circle cx="133" cy="549" r="3.0" fill="#ff9f0a" opacity="0.78"/>
           <text class="sf" x="142" y="553.5" font-size="11.5" font-weight="850" fill="#ff9f0a" opacity="0.86">Stale</text>
-          <text class="sf" x="314" y="552" text-anchor="end" font-size="12" font-weight="750" fill="#6b7280" opacity="0.92">updated 8s ago</text>
+          <text class="sf" x="314" y="552" text-anchor="end" font-size="12" font-weight="750" fill="#6b7280" opacity="0.92">Updated 8s ago</text>
 
           <text class="sf" x="50" y="572" font-size="10.8" font-weight="650" fill="#6b7280" opacity="0.95">~/Projects</text>
           <text class="mono" x="314" y="572" text-anchor="end" font-size="11.5" font-weight="800" fill="#374151" opacity="0.92">↑ —</text>
@@ -238,9 +240,9 @@
 
           <text class="sf" x="50" y="614" font-size="13.5" font-weight="800" fill="#111827">Music</text>
           <!-- status badge -->
-          <rect x="104" y="601.5" width="56" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
-          <circle cx="113" cy="611" r="3.0" fill="#6b7280" opacity="0.80"/>
-          <text class="sf" x="123" y="615.5" font-size="11.5" font-weight="850" fill="#6b7280" opacity="0.90">Idle</text>
+          <rect x="100" y="601.5" width="56" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
+          <circle cx="109" cy="611" r="3.0" fill="#6b7280" opacity="0.80"/>
+          <text class="sf" x="119" y="615.5" font-size="11.5" font-weight="850" fill="#6b7280" opacity="0.90">Idle</text>
           <text class="sf" x="314" y="614" text-anchor="end" font-size="12" font-weight="750" fill="#6b7280" opacity="0.92">Last 3m ago</text>
 
           <text class="sf" x="50" y="634" font-size="10.8" font-weight="650" fill="#6b7280" opacity="0.95">~/Music</text>
@@ -253,12 +255,13 @@
 
           <text class="sf" x="50" y="676" font-size="13.5" font-weight="800" fill="#111827">Camera</text>
           <!-- status badge -->
-          <rect x="114" y="663.5" width="62" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
-          <circle cx="123" cy="673" r="3.0" fill="#6b7280" opacity="0.80"/>
-          <text class="sf" x="133" y="677.5" font-size="11.5" font-weight="850" fill="#6b7280" opacity="0.90">Queued</text>
+          <rect x="108" y="663.5" width="62" height="19" rx="9.5" fill="#111827" opacity="0.05" stroke="#ffffff" stroke-opacity="0.16" stroke-width="1"/>
+          <circle cx="117" cy="673" r="3.0" fill="#6b7280" opacity="0.80"/>
+          <text class="sf" x="127" y="677.5" font-size="11.5" font-weight="850" fill="#6b7280" opacity="0.90">Queued</text>
           <text class="sf" x="314" y="676" text-anchor="end" font-size="12" font-weight="750" fill="#6b7280" opacity="0.92">Next 19:00</text>
 
           <text class="sf" x="50" y="696" font-size="10.8" font-weight="650" fill="#6b7280" opacity="0.95">/Volumes/SD/DCIM</text>
+          <text class="mono" x="314" y="696" text-anchor="end" font-size="11.5" font-weight="800" fill="#374151" opacity="0.92">—</text>
         </g>
         </g>
       </g>

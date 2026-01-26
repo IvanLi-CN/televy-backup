@@ -91,7 +91,7 @@
     <!-- Network -->
     <g>
       <text class="sf" x="50" y="106" font-size="11" font-weight="800" fill="#374151" letter-spacing="0.8">NETWORK</text>
-      <text class="sf" x="314" y="106" text-anchor="end" font-size="11" font-weight="750" fill="#6b7280" opacity="0.92">updated 120ms</text>
+      <text class="sf" x="314" y="106" text-anchor="end" font-size="11" font-weight="750" fill="#6b7280" opacity="0.92">Updated 120ms</text>
 
       <!-- Two stat chips -->
       <rect x="34" y="112" width="140" height="64" rx="12" fill="#ffffff" opacity="0.10" stroke="#ffffff" stroke-opacity="0.18" stroke-width="1"/>

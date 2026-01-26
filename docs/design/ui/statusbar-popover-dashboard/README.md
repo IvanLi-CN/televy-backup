@@ -43,6 +43,22 @@
 - 列表右上角仅展示 targets 总数（例如 `8 targets`），不暗示当前滚动位置。
 - 当 `targets=0`：展示 empty state，引导用户打开 Settings 添加 targets，并提供主按钮 `Open Settings…`。
 
+#### Targets 行：对齐规则（修订）
+
+- `label` 与 status badge 之间的水平距离应 **尽量一致**（视觉上保持约 `10px` 的间隔）；不以“badge 统一列对齐”为目标（避免不同长度 label 造成间距参差）。
+- 右侧信息采用“主/次两行”结构：**主行**（top-right）+ **次行**（bottom-right），并固定到统一的基线位置，避免每行右侧信息随状态乱跳。
+- 当某行在当前状态下没有可展示内容时，显示 `—`（而不是留空），以保持视觉节奏与信息密度一致。
+
+右侧信息映射（冻结口径，语义固定）：
+
+- **主行（top-right）永远是时间类**：`Last …` / `Next …` / `Updated …` / `Elapsed …`
+- **次行（bottom-right）永远是数值类**：`↑ <rate>` / `+<bytes> • <duration>` / `<errorCode>` / `—`
+- `Running`：主行 = `Elapsed mm:ss`；次行 = `↑ <rate>`（mono）
+- `Idle`：主行 = `Last <relative>`；次行 = `+<bytesUploaded> • <duration>`（mono）
+- `Failed`：主行 = `Last <relative>`；次行 = `<errorCode>`（mono）
+- `Queued`：主行 = `Next <time>`；次行 = `—`
+- `Stale`：主行 = `Updated <age> ago`；次行 = `↑ —`（mono）
+
 ### 3) Dev：详细状态（尽量充分）
 
 - 入口：Settings window 提供“Developer…”入口（增加入口，不新增 Settings 页面），点击打开独立窗口
