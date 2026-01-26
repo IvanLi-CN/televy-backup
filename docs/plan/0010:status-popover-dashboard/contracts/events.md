@@ -47,6 +47,7 @@ type TargetRunSummary = {
   durationSeconds?: number | null;
   status?: "succeeded" | "failed" | null;
   errorCode?: string | null; // short machine code
+  filesIndexed?: number | null; // count of indexed files in that run (when known)
   bytesUploaded?: number | null;
   bytesDeduped?: number | null;
 };

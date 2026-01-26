@@ -121,6 +121,7 @@ impl StatusRuntimeState {
         &mut self,
         target_id: &str,
         duration_seconds: f64,
+        files_indexed: u64,
         bytes_uploaded: u64,
         bytes_deduped: u64,
     ) {
@@ -135,6 +136,7 @@ impl StatusRuntimeState {
             duration_seconds: Some(duration_seconds),
             status: Some("succeeded".to_string()),
             error_code: None,
+            files_indexed: Some(files_indexed),
             bytes_uploaded: Some(bytes_uploaded),
             bytes_deduped: Some(bytes_deduped),
         });
@@ -152,6 +154,7 @@ impl StatusRuntimeState {
             duration_seconds: Some(duration_seconds),
             status: Some("failed".to_string()),
             error_code: Some(error_code),
+            files_indexed: None,
             bytes_uploaded: None,
             bytes_deduped: None,
         });
@@ -543,6 +546,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         st.mark_run_finish_success(
                             &target.id,
                             duration_seconds,
+                            res.files_indexed,
                             res.bytes_uploaded,
                             res.bytes_deduped,
                         );
