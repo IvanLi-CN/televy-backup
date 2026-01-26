@@ -24,7 +24,9 @@ The macOS popover “dashboard” UI is driven by a single snapshot schema (`Sta
     - `global.*Total` and `targets[].upTotal` are **session totals** (UI/stream start → now) and are not persisted.
 - **Transport** (CLI): `televybackup --json status stream` emits NDJSON, one `status.snapshot` per line.
   - The UI runs this as a long-lived process and decodes each line.
+  - The UI should pass `TELEVYBACKUP_CONFIG_DIR` / `TELEVYBACKUP_DATA_DIR` to the spawned CLI so it reads the same snapshot location as the daemon.
   - If `status.json` is missing/unreadable, the CLI emits a synthetic snapshot derived from Settings (targets list only) with `source.kind="cli"` and `targets[].state="stale"`, so the UI can still render configured targets.
+  - If the CLI binary itself is unavailable (dev/local), the UI may fall back to polling `status.json` directly at low frequency (e.g. 1Hz) to avoid a blank dashboard.
 
 ## Data locations
 

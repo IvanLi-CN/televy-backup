@@ -2,17 +2,17 @@
 
 ## 状态
 
-- Status: 部分完成（3/4）
+- Status: 已完成
 - Created: 2026-01-24
-- Last: 2026-01-25
+- Last: 2026-01-26
 
 ## 已确认决策（Decisions, frozen）
 
 - “实时上下行/累计流量”采用**业务层口径**（bytesUploaded/bytesDownloaded），不使用传输层（MTProto session bytes sent/recv）。
 - Dev 视图对所有用户可见（不做隐藏开关/手势）。
 - Popover 尺寸：宽度固定 `360`；高度按内容自适应，最大高度为 `720`（高宽比 `2:1` 的上限）。当 targets 列表溢出时，列表区域滚动承载长列表，header/global 保持可见（或等价可用性设计）。
-- Targets 行仅展示**上行**（业务口径 bytesUploaded）；不展示 per-target 下行字段（避免在 backup 场景下误导）。
-- 本计划不引入 socket IPC：状态“真源”采用 daemon 落盘快照文件（`status.json`）；UI 仍通过 `televybackup status stream` 获取实时快照（UI 不直读文件）。
+- Targets 行仅展示**上行**（业务口径 bytesUploaded）与 last run 概要；不展示 per-target 下行字段（避免在 backup 场景下误导）。last run 次行默认展示 `bytesUploaded`；当 `bytesUploaded=0` 且 `bytesDeduped>0` 时，展示 `saved bytesDeduped`（可附带 `filesIndexed`）。
+- 本计划不引入 socket IPC：状态“真源”采用 daemon 落盘快照文件（`status.json`）；UI 默认通过 `televybackup status stream` 获取实时快照；当 CLI 不可用时允许退化为低频轮询 `status.json`（用于本地开发/应急）。
 
 ## 背景 / 问题陈述
 
@@ -215,7 +215,7 @@
 - [x] M1: 定义并实现状态数据源（`status get/stream` + `StatusSnapshot`）
 - [x] M2: Popover Overview 重做（全局网络 + 多 target 列表 + 进度/状态）
 - [x] M3: Popover Dev 视图落地（全局 + per-target 原始字段展示）
-- [ ] M4: 测试与文档更新（契约测试 + UI smoke + IA 文档）
+- [x] M4: 测试与文档更新（契约测试 + UI smoke + IA 文档）
 
 ## 设计图与说明（Design assets）
 
@@ -247,3 +247,4 @@
 - 2026-01-25：对齐 Popover Overview 视觉基准图：NETWORK/updated 排版、Up/Down chip 样式、Targets list（badge/row/empty state）与滚动分隔线；并将 daemon/status stream 的 best-effort 启动前置到 app launch（无需先打开 popover）。
 - 2026-01-26：订正设计基准图：Targets 行 `label`↔badge 间距统一（视觉约 10px）；右侧信息语义固定为“主行时间类 + 次行数值类”，避免不同状态下右侧含义乱跳，并同步到 IA 文档。
 - 2026-01-26：新增 `Backup now`（立即备份）按钮：多 targets 策略冻结为“立即备份所有 enabled targets”；实现为 UI 写入 `$TELEVYBACKUP_DATA_DIR/control/backup-now`，daemon 轮询消费触发并执行备份。
+- 2026-01-26：补齐“短任务可见性”：`lastRun` 增加 `filesIndexed`；Popover idle 次行在 `bytesUploaded=0` 但 `bytesDeduped>0` 时展示 `saved bytesDeduped`（可附带 files）；并在观测到新 `lastRun` 时弹 toast 提示完成/失败。修复 UI 启动 CLI 时 env 不一致问题（传递 `TELEVYBACKUP_CONFIG_DIR`/`TELEVYBACKUP_DATA_DIR`）；当 CLI 不可用时退化为低频轮询 `status.json`，避免面板空白/误判断开。

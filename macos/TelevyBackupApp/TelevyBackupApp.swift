@@ -4,6 +4,12 @@ import Darwin
 import Foundation
 import SwiftUI
 
+fileprivate enum StatusFreshness {
+    static let staleMs: Int64 = 5_000
+    static let disconnectedMs: Int64 = 60_000
+    static let toastMaxAgeSeconds: Int = 15
+}
+
 struct VisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
     let blendingMode: NSVisualEffectView.BlendingMode
@@ -90,6 +96,8 @@ final class AppModel: ObservableObject {
     @Published var statusActivity: [StatusActivityItem] = []
     private var statusStaleLevel: Int = 0
     private var statusStaleTimer: DispatchSourceTimer? = nil
+    private var statusPollTimer: DispatchSourceTimer? = nil
+    private var lastNotifiedRunFinishedAtByTargetId: [String: String] = [:]
 
     private var statusStreamTask: Process? = nil
     private var statusStreamReconnectWork: DispatchWorkItem? = nil
@@ -253,15 +261,28 @@ final class AppModel: ObservableObject {
 
         guard statusStreamTask == nil else { return }
         guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (status stream unavailable)")
+            appendLog("WARN: televybackup not found (falling back to status.json polling)")
+            appendStatusActivity("Using status.json polling (CLI not found)")
+            ensureStatusPollRunning()
             return
         }
+
+        stopStatusPollIfNeeded()
 
         appendLog("Starting status stream")
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: cli)
         task.arguments = ["--json", "status", "stream"]
+
+        var env = ProcessInfo.processInfo.environment
+        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
+            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
+        }
+        if env["TELEVYBACKUP_DATA_DIR"] == nil {
+            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
+        }
+        task.environment = env
 
         let out = Pipe()
         let err = Pipe()
@@ -310,6 +331,33 @@ final class AppModel: ObservableObject {
 
         statusStreamTask = task
         statusStreamBackoffSeconds = 0.5
+    }
+
+    private func stopStatusPollIfNeeded() {
+        if let t = statusPollTimer {
+            t.cancel()
+            statusPollTimer = nil
+            appendStatusActivity("Stopped status.json polling (stream active)")
+        }
+    }
+
+    private func ensureStatusPollRunning() {
+        if statusPollTimer != nil { return }
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        t.schedule(deadline: .now() + 0.10, repeating: 1.0)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            let url = self.statusJsonURL()
+            guard let data = try? Data(contentsOf: url) else { return }
+            guard let snap = try? JSONDecoder().decode(StatusSnapshot.self, from: data) else { return }
+            DispatchQueue.main.async {
+                if self.statusStreamFrozen { return }
+                if self.statusSnapshot?.generatedAt == snap.generatedAt { return }
+                self.applyStatusSnapshot(snap)
+            }
+        }
+        statusPollTimer = t
+        t.activate()
     }
 
     func ensureDaemonRunning() {
@@ -517,13 +565,13 @@ final class AppModel: ObservableObject {
             guard let snap = self.statusSnapshot else { return }
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
             let age = max(0, nowMs - snap.generatedAt)
-            let level: Int = (age > 10_000) ? 2 : ((age > 2_000) ? 1 : 0)
+            let level: Int = (age > StatusFreshness.disconnectedMs) ? 2 : ((age > StatusFreshness.staleMs) ? 1 : 0)
             if level != self.statusStaleLevel {
                 self.statusStaleLevel = level
                 if level == 1 {
-                    self.appendStatusActivity("Stale (> 2s since generatedAt)")
+                    self.appendStatusActivity("Stale (> \(StatusFreshness.staleMs / 1000)s since generatedAt)")
                 } else if level == 2 {
-                    self.appendStatusActivity("Disconnected (> 10s since generatedAt)")
+                    self.appendStatusActivity("Disconnected (> \(StatusFreshness.disconnectedMs / 1000)s since generatedAt)")
                 } else {
                     self.appendStatusActivity("Fresh (updates resumed)")
                 }
@@ -547,6 +595,57 @@ final class AppModel: ObservableObject {
         statusSnapshotReceivedAt = Date()
         appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
         updatePopoverHeightForTargets(targetCount: snap.targets.count)
+
+        // Surface "what happened" for very short runs: show a toast when we observe a new lastRun.
+        for t in snap.targets {
+            guard let finishedAt = t.lastRun?.finishedAt, !finishedAt.isEmpty else { continue }
+            let prevFinishedAt = lastNotifiedRunFinishedAtByTargetId[t.targetId]
+            if prevFinishedAt == nil {
+                // First time we see this target's lastRun; don't toast on startup.
+                lastNotifiedRunFinishedAtByTargetId[t.targetId] = finishedAt
+                continue
+            }
+            guard prevFinishedAt != finishedAt else { continue }
+            lastNotifiedRunFinishedAtByTargetId[t.targetId] = finishedAt
+
+            guard let d = parseIsoDate(finishedAt) else { continue }
+            let ageSeconds = Int(Date().timeIntervalSince(d))
+            if ageSeconds < 0 || ageSeconds > StatusFreshness.toastMaxAgeSeconds { continue }
+
+            let label = (t.label?.isEmpty == false) ? (t.label ?? t.targetId) : t.targetId
+            let runStatus = t.lastRun?.status ?? "unknown"
+            if runStatus == "failed" {
+                let code = t.lastRun?.errorCode ?? "failed"
+                showToast("\(label) • Failed (\(code))", isError: true)
+                continue
+            }
+            if runStatus == "succeeded" {
+                var parts: [String] = []
+                if let files = t.lastRun?.filesIndexed, files > 0 {
+                    parts.append("\(files) files")
+                }
+                if let uploaded = t.lastRun?.bytesUploaded, uploaded > 0 {
+                    parts.append("+\(formatBytes(uploaded))")
+                } else if let saved = t.lastRun?.bytesDeduped, saved > 0 {
+                    parts.append("saved \(formatBytes(saved))")
+                }
+                if let dur = t.lastRun?.durationSeconds, dur > 0 {
+                    parts.append(formatDuration(dur))
+                }
+                let suffix = parts.isEmpty ? "" : (" • " + parts.joined(separator: " • "))
+                showToast("\(label) • Backup finished\(suffix)", isError: false)
+            }
+        }
+
+    }
+
+    private func parseIsoDate(_ s: String) -> Date? {
+        let f1 = ISO8601DateFormatter()
+        f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f1.date(from: s) { return d }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: s)
     }
 
     func refreshSecretsPresence(force: Bool = false) {
@@ -1417,6 +1516,15 @@ final class AppModel: ObservableObject {
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
 
+        var env = ProcessInfo.processInfo.environment
+        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
+            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
+        }
+        if env["TELEVYBACKUP_DATA_DIR"] == nil {
+            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
+        }
+        task.environment = env
+
         let out = Pipe()
         let err = Pipe()
         task.standardOutput = out
@@ -1667,15 +1775,15 @@ struct PopoverRootView: View {
         let statusText: String = {
             if snap == nil { return "Status • Disconnected" }
             if !isDaemon { return "Status • Stale" }
-            if ageMs > 10_000 { return "Status • Disconnected" }
-            if ageMs > 2_000 { return "Status • Stale" }
+            if ageMs > StatusFreshness.disconnectedMs { return "Status • Disconnected" }
+            if ageMs > StatusFreshness.staleMs { return "Status • Stale" }
             return "Status • Live"
         }()
         let statusColor: Color = {
             if snap == nil { return .red }
             if !isDaemon { return .orange }
-            if ageMs > 10_000 { return .red }
-            if ageMs > 2_000 { return .orange }
+            if ageMs > StatusFreshness.disconnectedMs { return .red }
+            if ageMs > StatusFreshness.staleMs { return .orange }
             return .green
         }()
 
@@ -1802,8 +1910,8 @@ struct OverviewView: View {
     private func networkSection(snap: StatusSnapshot?, nowMs: Int64) -> some View {
         let staleAgeMs = snap == nil ? Int64.max : max(0, nowMs - (snap?.generatedAt ?? 0))
         let isDaemon = (snap?.source.kind == "daemon")
-        let disconnected = isDaemon && staleAgeMs > 10_000
-        let hideValues = disconnected || (!isDaemon) || staleAgeMs > 2_000
+        let disconnected = isDaemon && staleAgeMs > StatusFreshness.disconnectedMs
+        let hideValues = disconnected || (!isDaemon) || staleAgeMs > StatusFreshness.staleMs
 
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
@@ -2111,9 +2219,9 @@ private struct TargetRowView: View {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
         let staleAgeMs = max(0, nowMs - snapshotGeneratedAtMs)
         let isDaemon = (snapshotSourceKind == "daemon")
-        let disconnected = isDaemon && staleAgeMs > 10_000
+        let disconnected = isDaemon && staleAgeMs > StatusFreshness.disconnectedMs
 
-        let running = (target.state == "running") && !disconnected && (isDaemon && staleAgeMs <= 10_000)
+        let running = (target.state == "running") && !disconnected && (isDaemon && staleAgeMs <= StatusFreshness.disconnectedMs)
 
         return VStack(alignment: .leading, spacing: 0) {
             if running {
@@ -2143,7 +2251,7 @@ private struct TargetRowView: View {
 
     private func stateBadge(staleAgeMs: Int64, isDaemon: Bool) -> some View {
         let (text, c): (String, Color) = {
-            if !isDaemon || staleAgeMs > 2_000 { return ("Stale", .orange) }
+            if !isDaemon || staleAgeMs > StatusFreshness.staleMs { return ("Stale", .orange) }
             if target.state == "running" { return ("Running", .blue) }
             if target.state == "failed" || target.lastRun?.status == "failed" { return ("Failed", .red) }
             if target.state == "stale" { return ("Stale", .orange) }
@@ -2196,7 +2304,7 @@ private struct TargetRowView: View {
 
     private func idleRow(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, disconnected: Bool) -> some View {
         let failed = target.state == "failed" || target.lastRun?.status == "failed"
-        let showStale = (!isDaemon) || staleAgeMs > 2_000
+        let showStale = (!isDaemon) || staleAgeMs > StatusFreshness.staleMs
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -2255,7 +2363,7 @@ private struct TargetRowView: View {
         if target.state == "failed" || target.lastRun?.status == "failed" {
             return target.lastRun?.errorCode ?? "failed"
         }
-        if !isDaemon || staleAgeMs > 2_000 {
+        if !isDaemon || staleAgeMs > StatusFreshness.staleMs {
             return "updated \(formatUpdatedAge(staleAgeMs)) ago"
         }
         if let finishedAt = target.lastRun?.finishedAt, let date = parseIso(finishedAt) {
@@ -2273,11 +2381,31 @@ private struct TargetRowView: View {
             }
             return "Last —"
         }
-        if showStale { return "↑ —" }
-        if let bytes = target.lastRun?.bytesUploaded, bytes > 0, let dur = target.lastRun?.durationSeconds, dur > 0 {
+        if showStale { return "—" }
+
+        let dur = target.lastRun?.durationSeconds ?? 0
+        if let bytes = target.lastRun?.bytesUploaded, bytes > 0, dur > 0 {
             return "+\(formatBytes(bytes)) • \(formatElapsed(seconds: Int(dur)))"
         }
-        return "↑ —"
+
+        let mutParts: [String] = {
+            var parts: [String] = []
+            if let files = target.lastRun?.filesIndexed, files > 0 {
+                parts.append("\(files) files")
+            }
+            if let deduped = target.lastRun?.bytesDeduped, deduped > 0 {
+                parts.append("saved \(formatBytes(deduped))")
+            }
+            if dur > 0 {
+                parts.append(formatElapsed(seconds: Int(dur)))
+            }
+            return parts
+        }()
+        if !mutParts.isEmpty {
+            return mutParts.joined(separator: " • ")
+        }
+
+        return "—"
     }
 
     private func runningSummary(nowMs: Int64) -> String {
@@ -2521,7 +2649,10 @@ struct DeveloperWindowRootView: View {
                             keyValue("progress", "—")
                         }
                         if let r = target.lastRun {
-                            keyValue("lastRun", "\(r.status ?? "—")  code=\(r.errorCode ?? "—")  dur=\(r.durationSeconds.map { String(format: "%.2fs", $0) } ?? "—")")
+                            keyValue(
+                                "lastRun",
+                                "\(r.status ?? "—")  code=\(r.errorCode ?? "—")  dur=\(r.durationSeconds.map { String(format: "%.2fs", $0) } ?? "—")  files=\(r.filesIndexed.map(String.init) ?? "—")  uploaded=\(r.bytesUploaded.map(String.init) ?? "—")  deduped=\(r.bytesDeduped.map(String.init) ?? "—")"
+                            )
                         } else {
                             keyValue("lastRun", "—")
                         }

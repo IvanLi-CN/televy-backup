@@ -59,12 +59,15 @@
 右侧信息映射（冻结口径，语义固定）：
 
 - **主行（top-right）永远是时间类**：`Last …` / `Next …` / `Updated …` / `Elapsed …`
-- **次行（bottom-right）永远是数值类**：`↑ <rate>` / `+<bytes> • <duration>` / `<errorCode>` / `—`
+- **次行（bottom-right）永远是数值类**：`↑ <rate>` / `+<bytes> • <duration>` / `saved <bytes> • <duration>` / `<errorCode>` / `—`
 - `Running`：主行 = `Elapsed mm:ss`；次行 = `↑ <rate>`（mono）
-- `Idle`：主行 = `Last <relative>`；次行 = `+<bytesUploaded> • <duration>`（mono）
+- `Idle`：主行 = `Last <relative>`；次行优先级：
+  - 若 `bytesUploaded>0`：`+<bytesUploaded> • <duration>`（mono）
+  - 否则若 `bytesDeduped>0`：`<filesIndexed> files • saved <bytesDeduped> • <duration>`（mono，`filesIndexed` 可省略）
+  - 否则：`—`
 - `Failed`：主行 = `Last <relative>`；次行 = `<errorCode>`（mono）
 - `Queued`：主行 = `Next <time>`；次行 = `—`
-- `Stale`：主行 = `Updated <age> ago`；次行 = `↑ —`（mono）
+- `Stale`：主行 = `Updated <age> ago`；次行 = `—`
 
 ### 3) Dev：详细状态（尽量充分）
 
