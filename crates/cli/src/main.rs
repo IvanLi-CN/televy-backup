@@ -516,7 +516,18 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
                 .copied()
                 .unwrap_or(bytes_uploaded_now);
 
-            let delta = bytes_uploaded_now.saturating_sub(prev_bytes);
+            // A new run may reset counters to 0; avoid carrying stale EWMA rates across runs.
+            let reset = bytes_uploaded_now < prev_bytes;
+            if reset || t.state != "running" {
+                smoothed_rate_by_target.remove(&t.target_id);
+            }
+
+            let base = if reset {
+                bytes_uploaded_now
+            } else {
+                prev_bytes
+            };
+            let delta = bytes_uploaded_now.saturating_sub(base);
             let total = totals_by_target
                 .entry(t.target_id.clone())
                 .and_modify(|v| *v = v.saturating_add(delta))

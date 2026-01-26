@@ -1411,7 +1411,10 @@ final class AppModel: ObservableObject {
     private func handleOutputLine(_ line: String) {
         guard let data = line.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return }
+        else {
+            appendLog(line)
+            return
+        }
 
         if let type = obj["type"] as? String, type == "status.snapshot" {
             if let snap = try? JSONDecoder().decode(StatusSnapshot.self, from: data) {
