@@ -8,8 +8,9 @@ use base64::Engine;
 use chrono::{Datelike, Timelike};
 use sqlx::Row;
 use televy_backup_core::status::{
-    Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource, TargetRunSummary,
-    TargetState, now_unix_ms, status_json_path, write_status_snapshot_json_atomic,
+    Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource, StatusWriteOptions,
+    TargetRunSummary, TargetState, now_unix_ms, status_json_path,
+    write_status_snapshot_json_atomic_with_options,
 };
 use televy_backup_core::{
     BackupConfig, BackupOptions, ChunkingConfig, TelegramMtProtoStorage,
@@ -256,7 +257,12 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
             .unwrap_or(false);
 
         let now = Instant::now();
-        let should_write = has_running || now.duration_since(last_write) >= Duration::from_secs(1);
+        let min_interval = if has_running {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_secs(1)
+        };
+        let should_write = now.duration_since(last_write) >= min_interval;
         if should_write {
             let snapshot_opt = {
                 match state.lock() {
@@ -272,18 +278,50 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
                 }
             };
 
-            if let Err(e) = write_status_snapshot_json_atomic(&status_path, &snapshot) {
-                tracing::warn!(
-                    event = "status.write_failed",
-                    error = %e,
-                    path = %status_path.display(),
-                    "status.write_failed"
-                );
+            // Writing status snapshots is sync I/O + fsync-heavy; keep it off Tokio worker threads.
+            // Status snapshots are "best-effort" and do not need durability guarantees; atomic rename is sufficient.
+            let options = StatusWriteOptions {
+                fsync_file: false,
+                fsync_dir: false,
+            };
+            let status_path_for_write = status_path.clone();
+            let status_path_for_log = status_path.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                write_status_snapshot_json_atomic_with_options(
+                    &status_path_for_write,
+                    &snapshot,
+                    options,
+                )
+            })
+            .await;
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        event = "status.write_failed",
+                        error = %e,
+                        path = %status_path_for_log.display(),
+                        "status.write_failed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        event = "status.write_failed",
+                        error = %e,
+                        path = %status_path_for_log.display(),
+                        "status.write_failed"
+                    );
+                }
             }
             last_write = Instant::now();
         }
 
-        sleep(Duration::from_millis(100)).await;
+        let tick = if has_running {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(200)
+        };
+        sleep(tick).await;
     }
 }
 

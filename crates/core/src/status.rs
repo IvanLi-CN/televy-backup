@@ -118,9 +118,32 @@ pub fn read_status_snapshot_json(path: &Path) -> std::io::Result<StatusSnapshot>
     Ok(snap)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct StatusWriteOptions {
+    pub fsync_file: bool,
+    pub fsync_dir: bool,
+}
+
+impl Default for StatusWriteOptions {
+    fn default() -> Self {
+        Self {
+            fsync_file: true,
+            fsync_dir: true,
+        }
+    }
+}
+
 pub fn write_status_snapshot_json_atomic(
     path: &Path,
     snapshot: &StatusSnapshot,
+) -> std::io::Result<()> {
+    write_status_snapshot_json_atomic_with_options(path, snapshot, StatusWriteOptions::default())
+}
+
+pub fn write_status_snapshot_json_atomic_with_options(
+    path: &Path,
+    snapshot: &StatusSnapshot,
+    options: StatusWriteOptions,
 ) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -136,13 +159,16 @@ pub fn write_status_snapshot_json_atomic(
         .truncate(true)
         .open(&tmp)?;
     f.write_all(&data)?;
-    f.sync_all()?;
+    if options.fsync_file {
+        f.sync_all()?;
+    }
     drop(f);
 
     std::fs::rename(&tmp, path)?;
 
     // Best-effort directory sync (ignored on platforms where it isn't supported).
-    if let Some(parent) = path.parent()
+    if options.fsync_dir
+        && let Some(parent) = path.parent()
         && let Ok(dir) = File::open(parent)
     {
         let _ = dir.sync_all();
