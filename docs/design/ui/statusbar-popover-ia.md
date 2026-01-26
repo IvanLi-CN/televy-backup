@@ -1,5 +1,10 @@
 # Status Bar Popover IA (macOS)
 
+Design assets:
+
+- `docs/design/ui/statusbar-popover-dashboard/`（Overview / empty / Developer window）
+- `docs/design/ui/settings-window/`（Settings window + popover minimal）
+
 ## Form factor
 
 - 形态：点击状态栏图标后出现的 popover（悬浮、不可太大）
@@ -11,8 +16,10 @@
 
 - Header（固定）
   - App 标识 + 标题 `TelevyBackup`
-  - 状态 LED（例如：Online/Offline/Syncing）
-  - 右侧：齿轮（打开 Settings window）/`…`（可选）
+  - 状态 LED：`Live / Stale / Disconnected`（由快照新鲜度判定）
+  - 右侧：
+    - `Backup now`（立即备份）：一键触发立即备份（多 targets：立即备份所有 enabled targets）
+    - 齿轮（打开 Settings window）/`…`（可选）
 - 全局状态（NETWORK）
   - 实时上下行速率（↑/↓）
   - 自 UI 启动后累计上下行流量（session totals）
@@ -21,11 +28,15 @@
   - 实时上行（业务口径 bytesUploaded）、体积指标（bytesRead/bytesUploaded）、运行状态
   - 最近一次运行时间/用时（失败时显示短 error code）
   - 运行中显示进度条 + 已用时（可选 ETA）
+  - 对齐规则：`label` 与 status badge 的水平间距保持一致（视觉约 `10px`），避免不同 label 长度导致参差
+  - 右侧信息采用主/次两行结构（主行 top-right、次行 bottom-right），并保持固定基线位置
+    - 主行语义固定为时间类：`Last/Next/Updated/Elapsed`
+    - 次行语义固定为数值类：`↑ rate / +bytes•dur / errorCode / —`
+    - 没有内容时显示 `—`（不留空）
   - 列表可滚动时：上下边缘渐隐提示仅在“未到顶/未到底”时显示（使用内容 alpha mask，避免遮罩染色）
 - Empty（targets=0）
   - 显示引导文案 + 主按钮 `Open Settings…`（跳转到 Settings 添加 targets）
-- Footer
-  - Telegram storage 连接状态 + 简短提示（错误时提供一行可操作引导）
+（注）Popover 不再承载 footer；连接/排障信息通过 header 状态与 Developer window 提供。
 
 ## Dev（开发者视图）
 

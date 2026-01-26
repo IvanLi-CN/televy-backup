@@ -20,6 +20,10 @@ echo "Building CLI..."
 cargo build -p televybackup --release
 cp "$root_dir/target/release/televybackup" "$macos_dir/televybackup-cli"
 
+echo "Building daemon..."
+cargo build -p televybackupd --release
+cp "$root_dir/target/release/televybackupd" "$macos_dir/televybackupd"
+
 echo "Building MTProto helper..."
 cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release
 cp "$root_dir/crates/mtproto-helper/target/release/televybackup-mtproto-helper" "$macos_dir/televybackup-mtproto-helper"

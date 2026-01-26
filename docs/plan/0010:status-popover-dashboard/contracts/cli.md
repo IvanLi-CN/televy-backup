@@ -55,3 +55,8 @@ televybackup --json status stream
 ### Termination / reconnect
 
 - 若 stream 退出：UI 侧应显示 stale，并尝试指数退避重连（实现策略在 impl 阶段确定）。
+
+### Fallback behavior (no daemon snapshots)
+
+- 若 `status.json` 不存在或不可读：`status get/stream` 会返回一个由 `settings v2` 合成的最小快照（`source.kind="cli"`）。
+- 合成快照的 `targets[]` 仅包含配置态字段（`targetId/label/sourcePath/endpointId/enabled`），并将 `state="stale"` 以提示“缺少运行态状态源”。

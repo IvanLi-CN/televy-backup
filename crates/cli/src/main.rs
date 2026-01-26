@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
@@ -42,6 +44,10 @@ enum Command {
     Settings {
         #[command(subcommand)]
         cmd: SettingsCmd,
+    },
+    Status {
+        #[command(subcommand)]
+        cmd: StatusCmd,
     },
     Secrets {
         #[command(subcommand)]
@@ -125,6 +131,12 @@ enum StatsCmd {
         #[arg(long)]
         source: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum StatusCmd {
+    Get,
+    Stream,
 }
 
 #[derive(Subcommand)]
@@ -221,6 +233,7 @@ impl ProgressSink for NdjsonProgressSink {
             "bytesDeduped": p.bytes_deduped,
         });
         println!("{line}");
+        let _ = std::io::stdout().flush();
     }
 }
 
@@ -304,6 +317,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             StatsCmd::Get => stats_get(&data_dir, cli.json).await,
             StatsCmd::Last { source } => stats_last(&data_dir, source, cli.json).await,
         },
+        Command::Status { cmd } => match cmd {
+            StatusCmd::Get => status_get(&config_dir, &data_dir, cli.json).await,
+            StatusCmd::Stream => status_stream(&config_dir, &data_dir, cli.json).await,
+        },
         Command::Backup { cmd } => match cmd {
             BackupCmd::Run {
                 target_id,
@@ -362,6 +379,210 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 verify_run(&config_dir, &data_dir, snapshot_id, cli.json, cli.events).await
             }
         },
+    }
+}
+
+fn synthetic_snapshot_from_settings(
+    config_dir: &Path,
+    data_dir: &Path,
+) -> Result<televy_backup_core::status::StatusSnapshot, CliError> {
+    let settings = load_settings(config_dir)?;
+
+    let mut targets = Vec::new();
+    for t in settings.targets {
+        targets.push(televy_backup_core::status::TargetState {
+            target_id: t.id,
+            label: if t.label.trim().is_empty() {
+                None
+            } else {
+                Some(t.label)
+            },
+            source_path: t.source_path,
+            endpoint_id: t.endpoint_id,
+            enabled: t.enabled,
+            state: "stale".to_string(),
+            running_since: None,
+            up: televy_backup_core::status::Rate {
+                bytes_per_second: None,
+            },
+            up_total: televy_backup_core::status::Counter { bytes: None },
+            progress: None,
+            last_run: None,
+            extra: Default::default(),
+        });
+    }
+
+    Ok(televy_backup_core::status::StatusSnapshot {
+        type_: "status.snapshot".to_string(),
+        schema_version: 1,
+        generated_at: televy_backup_core::status::now_unix_ms(),
+        source: televy_backup_core::status::StatusSource {
+            kind: "cli".to_string(),
+            detail: Some(format!(
+                "fallback (missing {})",
+                televy_backup_core::status::status_json_path(data_dir).display()
+            )),
+        },
+        global: televy_backup_core::status::GlobalStatus {
+            up: televy_backup_core::status::Rate {
+                bytes_per_second: None,
+            },
+            down: televy_backup_core::status::Rate {
+                bytes_per_second: None,
+            },
+            up_total: televy_backup_core::status::Counter { bytes: None },
+            down_total: televy_backup_core::status::Counter { bytes: None },
+            ui_uptime_seconds: None,
+        },
+        targets,
+        extra: Default::default(),
+    })
+}
+
+async fn status_get(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
+    let path = televy_backup_core::status::status_json_path(data_dir);
+    let snap = match televy_backup_core::status::read_status_snapshot_json(&path) {
+        Ok(s) => s,
+        Err(_) => synthetic_snapshot_from_settings(config_dir, data_dir)?,
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&snap)
+                .map_err(|e| CliError::new("status.invalid", e.to_string()))?
+        );
+    } else {
+        println!(
+            "status: schemaVersion={} generatedAt={} targets={}",
+            snap.schema_version,
+            snap.generated_at,
+            snap.targets.len()
+        );
+    }
+
+    Ok(())
+}
+
+async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
+    if !json {
+        return Err(CliError::new(
+            "cli.invalid",
+            "--json is required for status stream",
+        ));
+    }
+
+    let path = televy_backup_core::status::status_json_path(data_dir);
+    let started = Instant::now();
+
+    let mut totals_by_target: HashMap<String, u64> = HashMap::new();
+    let mut smoothed_rate_by_target: HashMap<String, f64> = HashMap::new();
+    let mut prev_sample_at: Option<Instant> = None;
+    let mut prev_uploaded_by_target: HashMap<String, u64> = HashMap::new();
+
+    loop {
+        let read = televy_backup_core::status::read_status_snapshot_json(&path);
+        let mut snap = match read {
+            Ok(snap) => snap,
+            Err(_) => synthetic_snapshot_from_settings(config_dir, data_dir)?,
+        };
+
+        let is_daemon = snap.source.kind == "daemon";
+
+        let now_ms = televy_backup_core::status::now_unix_ms();
+        let stale_age_ms = now_ms.saturating_sub(snap.generated_at);
+        let now = Instant::now();
+        let dt = prev_sample_at
+            .map(|t| now.duration_since(t).as_secs_f64())
+            .unwrap_or(0.0);
+
+        let mut global_up_bps: u64 = 0;
+        let mut any_target_rate = false;
+        let mut global_up_total: u64 = 0;
+        let mut any_running = false;
+
+        for t in &mut snap.targets {
+            if t.state == "running" {
+                any_running = true;
+            }
+
+            let bytes_uploaded_now = t
+                .progress
+                .as_ref()
+                .and_then(|p| p.bytes_uploaded)
+                .unwrap_or(0);
+
+            let prev_bytes = prev_uploaded_by_target
+                .get(&t.target_id)
+                .copied()
+                .unwrap_or(bytes_uploaded_now);
+
+            // A new run may reset counters to 0; avoid carrying stale EWMA rates across runs.
+            let reset = bytes_uploaded_now < prev_bytes;
+            if reset || t.state != "running" {
+                smoothed_rate_by_target.remove(&t.target_id);
+            }
+
+            let base = if reset {
+                bytes_uploaded_now
+            } else {
+                prev_bytes
+            };
+            let delta = bytes_uploaded_now.saturating_sub(base);
+            let total = totals_by_target
+                .entry(t.target_id.clone())
+                .and_modify(|v| *v = v.saturating_add(delta))
+                .or_insert(delta);
+
+            // Realtime rates only make sense when updates are timely.
+            let mut bps: Option<u64> = None;
+            if t.state == "running" && stale_age_ms <= 2_000 && dt > 0.0 {
+                let raw = (delta as f64) / dt;
+                let prev = smoothed_rate_by_target
+                    .get(&t.target_id)
+                    .copied()
+                    .unwrap_or(raw);
+                // 1.0s window EWMA.
+                let alpha = 1.0 - (-dt).exp();
+                let smoothed = prev * (1.0 - alpha) + raw * alpha;
+                smoothed_rate_by_target.insert(t.target_id.clone(), smoothed);
+                bps = Some(smoothed.max(0.0).round() as u64);
+            }
+
+            t.up.bytes_per_second = bps;
+            t.up_total.bytes = Some(*total);
+            if let Some(bps) = bps {
+                any_target_rate = true;
+                global_up_bps = global_up_bps.saturating_add(bps);
+            }
+            global_up_total = global_up_total.saturating_add(*total);
+
+            prev_uploaded_by_target.insert(t.target_id.clone(), bytes_uploaded_now);
+        }
+
+        snap.global.up.bytes_per_second = if any_target_rate {
+            Some(global_up_bps)
+        } else {
+            None
+        };
+        snap.global.down.bytes_per_second = None;
+        snap.global.up_total.bytes = Some(global_up_total);
+        snap.global.down_total.bytes = None;
+        snap.global.ui_uptime_seconds = Some(started.elapsed().as_secs_f64());
+
+        let line = serde_json::to_string(&snap)
+            .map_err(|e| CliError::new("status.invalid", e.to_string()))?;
+        println!("{line}");
+        let _ = std::io::stdout().flush();
+
+        prev_sample_at = Some(now);
+
+        let sleep = if is_daemon && any_running && stale_age_ms <= 2_000 {
+            std::time::Duration::from_millis(100)
+        } else {
+            std::time::Duration::from_secs(1)
+        };
+        tokio::time::sleep(sleep).await;
     }
 }
 

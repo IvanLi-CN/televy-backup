@@ -1,7 +1,14 @@
 import AppKit
+import Combine
 import Darwin
 import Foundation
 import SwiftUI
+
+fileprivate enum StatusFreshness {
+    static let staleMs: Int64 = 5_000
+    static let disconnectedMs: Int64 = 60_000
+    static let toastMaxAgeSeconds: Int = 15
+}
 
 struct VisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
@@ -69,10 +76,48 @@ final class AppModel: ObservableObject {
     @Published var currentBytesDeduped: Int64 = 0
     @Published var taskStartedAt: Date?
 
+    @Published var statusSnapshot: StatusSnapshot? = nil
+    @Published var statusSnapshotReceivedAt: Date? = nil
+    @Published var statusStreamFrozen: Bool = false
+    @Published var popoverDesiredHeight: CGFloat = 460
+
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
     private var didShowUiLogWriteErrorToast: Bool = false
     private var settingsWindow: NSWindow? = nil
+    private var developerWindow: NSWindow? = nil
+
+    struct StatusActivityItem: Identifiable {
+        let id = UUID()
+        let at: Date
+        let text: String
+    }
+
+    @Published var statusActivity: [StatusActivityItem] = []
+    private var statusStaleLevel: Int = 0
+    private var statusStaleTimer: DispatchSourceTimer? = nil
+    private var statusPollTimer: DispatchSourceTimer? = nil
+    private var lastNotifiedRunFinishedAtByTargetId: [String: String] = [:]
+
+    private var statusStreamTask: Process? = nil
+    private var statusStreamReconnectWork: DispatchWorkItem? = nil
+    private var statusStreamBackoffSeconds: Double = 0.5
+    private var daemonTask: Process? = nil
+    private var lastDaemonStartAttemptAt: Date? = nil
+
+    private enum PopoverSizing {
+        static let maxHeight: CGFloat = 720
+        static let chromeHeightEstimate: CGFloat = 240
+        static let rowHeight: CGFloat = 62
+        static let listInsetTop: CGFloat = 0
+        static let listInsetBottom: CGFloat = 0
+        static let emptyStateHeight: CGFloat = 276
+        static let minHeight: CGFloat = 320
+    }
+
+    init() {
+        startStatusStaleTimer()
+    }
 
     private enum LegacyConfigWriteError: LocalizedError {
         case v2ConfigDetected
@@ -96,6 +141,17 @@ final class AppModel: ObservableObject {
     func defaultDataDir() -> URL {
         // Keep macOS defaults consistent with docs: data/logs live under Application Support.
         defaultConfigDir()
+    }
+
+    private func statusJsonURL() -> URL {
+        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+                .appendingPathComponent("status")
+                .appendingPathComponent("status.json")
+        }
+        return defaultDataDir()
+            .appendingPathComponent("status")
+            .appendingPathComponent("status.json")
     }
 
     private func logDirURL() -> URL {
@@ -146,6 +202,34 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func daemonPath() -> String? {
+        let bundled = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("MacOS")
+            .appendingPathComponent("televybackupd")
+        if FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled.path
+        }
+        if let p = ProcessInfo.processInfo.environment["TELEVYBACKUP_DAEMON_PATH"], !p.isEmpty {
+            return p
+        }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        task.arguments = ["televybackupd"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        do {
+            try task.run()
+            task.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let out = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return out.isEmpty ? nil : out
+        } catch {
+            return nil
+        }
+    }
+
     func refresh(userInitiated: Bool = false) {
         if !didWriteStartupLog {
             didWriteStartupLog = true
@@ -167,6 +251,401 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+    }
+
+    func ensureStatusStreamRunning() {
+        DispatchQueue.main.async {
+            self.statusStreamReconnectWork?.cancel()
+            self.statusStreamReconnectWork = nil
+        }
+
+        guard statusStreamTask == nil else { return }
+        guard let cli = cliPath() else {
+            appendLog("WARN: televybackup not found (falling back to status.json polling)")
+            appendStatusActivity("Using status.json polling (CLI not found)")
+            ensureStatusPollRunning()
+            return
+        }
+
+        stopStatusPollIfNeeded()
+
+        appendLog("Starting status stream")
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: cli)
+        task.arguments = ["--json", "status", "stream"]
+
+        var env = ProcessInfo.processInfo.environment
+        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
+            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
+        }
+        if env["TELEVYBACKUP_DATA_DIR"] == nil {
+            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
+        }
+        task.environment = env
+
+        let out = Pipe()
+        let err = Pipe()
+        task.standardOutput = out
+        task.standardError = err
+
+        var stdoutBuf = ""
+        var stderrBuf = ""
+
+        out.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { return }
+            stdoutBuf += String(decoding: data, as: UTF8.self)
+            while let idx = stdoutBuf.firstIndex(of: "\n") {
+                let line = String(stdoutBuf[..<idx])
+                stdoutBuf.removeSubrange(...idx)
+                self.handleOutputLine(line)
+            }
+        }
+        err.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty { return }
+            stderrBuf += String(decoding: data, as: UTF8.self)
+            while let idx = stderrBuf.firstIndex(of: "\n") {
+                let line = String(stderrBuf[..<idx])
+                stderrBuf.removeSubrange(...idx)
+                self.handleOutputLine(line)
+            }
+        }
+
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try task.run()
+                task.waitUntilExit()
+            } catch {
+                self.appendLog("ERROR: failed to start status stream: \(error)")
+            }
+
+            DispatchQueue.main.async {
+                out.fileHandleForReading.readabilityHandler = nil
+                err.fileHandleForReading.readabilityHandler = nil
+                self.statusStreamTask = nil
+                self.scheduleStatusStreamReconnect()
+            }
+        }
+
+        statusStreamTask = task
+        statusStreamBackoffSeconds = 0.5
+    }
+
+    private func stopStatusPollIfNeeded() {
+        if let t = statusPollTimer {
+            t.cancel()
+            statusPollTimer = nil
+            appendStatusActivity("Stopped status.json polling (stream active)")
+        }
+    }
+
+    private func ensureStatusPollRunning() {
+        if statusPollTimer != nil { return }
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        t.schedule(deadline: .now() + 0.10, repeating: 1.0)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            let url = self.statusJsonURL()
+            guard let data = try? Data(contentsOf: url) else { return }
+            guard let snap = try? JSONDecoder().decode(StatusSnapshot.self, from: data) else { return }
+            DispatchQueue.main.async {
+                if self.statusStreamFrozen { return }
+                if self.statusSnapshot?.generatedAt == snap.generatedAt { return }
+                self.applyStatusSnapshot(snap)
+            }
+        }
+        statusPollTimer = t
+        t.activate()
+    }
+
+    func ensureDaemonRunning() {
+        let now = Date()
+        if let last = lastDaemonStartAttemptAt, now.timeIntervalSince(last) < 3 {
+            return
+        }
+        lastDaemonStartAttemptAt = now
+
+        if isDaemonRunning() {
+            return
+        }
+
+        // Prefer launchd service if installed (Homebrew services).
+        if kickstartLaunchAgent(label: "homebrew.mxcl.televybackupd") {
+            appendStatusActivity("Daemon kickstarted via launchd (homebrew.mxcl.televybackupd)")
+            return
+        }
+
+        // Fallback: spawn a bundled or PATH daemon for local/dev runs.
+        guard let daemon = daemonPath() else {
+            appendLog("WARN: televybackupd not found (daemon auto-start unavailable)")
+            showToast("Daemon not found (install televybackupd)", isError: true)
+            return
+        }
+
+        if daemonTask?.isRunning == true {
+            return
+        }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: daemon)
+
+        var env = ProcessInfo.processInfo.environment
+        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
+            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
+        }
+        if env["TELEVYBACKUP_DATA_DIR"] == nil {
+            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
+        }
+        task.environment = env
+
+        // Best-effort logging for the spawned daemon (dev fallback).
+        let logDir = logDirURL()
+        try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+        let outPath = logDir.appendingPathComponent("televybackupd.spawned.log").path
+        if FileManager.default.fileExists(atPath: outPath) == false {
+            _ = FileManager.default.createFile(atPath: outPath, contents: Data())
+        }
+        if let fh = try? FileHandle(forWritingTo: URL(fileURLWithPath: outPath)) {
+            _ = try? fh.seekToEnd()
+            let pipe = Pipe()
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty { return }
+                try? fh.write(contentsOf: data)
+            }
+            task.standardOutput = pipe
+            task.standardError = pipe
+        }
+
+        do {
+            try task.run()
+            daemonTask = task
+            appendStatusActivity("Daemon spawned (\(daemon))")
+        } catch {
+            appendLog("ERROR: failed to start daemon: \(error)")
+            showToast("Failed to start daemon (see ui.log)", isError: true)
+        }
+    }
+
+    private func isDaemonRunning() -> Bool {
+        let res = runCommandCapture(exe: "/usr/bin/pgrep", args: ["-x", "televybackupd"], timeoutSeconds: 2)
+        return res.status == 0
+    }
+
+    private func kickstartLaunchAgent(label: String) -> Bool {
+        let uid = getuid()
+        let service = "gui/\(uid)/\(label)"
+        let kick = runCommandCapture(exe: "/bin/launchctl", args: ["kickstart", "-k", service], timeoutSeconds: 3)
+        if kick.status == 0 {
+            return true
+        }
+        let start = runCommandCapture(exe: "/bin/launchctl", args: ["start", service], timeoutSeconds: 3)
+        return start.status == 0
+    }
+
+    private func scheduleStatusStreamReconnect() {
+        if statusStreamReconnectWork != nil { return }
+        let delay = min(statusStreamBackoffSeconds, 30.0)
+        statusStreamBackoffSeconds = min(statusStreamBackoffSeconds * 1.8, 30.0)
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.statusStreamReconnectWork = nil
+            self.ensureStatusStreamRunning()
+        }
+        statusStreamReconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    func updatePopoverHeightForTargets(targetCount: Int) {
+        let listContentHeight: CGFloat
+        if targetCount <= 0 {
+            listContentHeight = PopoverSizing.emptyStateHeight
+        } else {
+            listContentHeight = (CGFloat(targetCount) * PopoverSizing.rowHeight)
+                + PopoverSizing.listInsetTop + PopoverSizing.listInsetBottom
+        }
+        let desired = min(PopoverSizing.maxHeight, PopoverSizing.chromeHeightEstimate + listContentHeight)
+        let clamped = max(PopoverSizing.minHeight, desired)
+        if abs(popoverDesiredHeight - clamped) >= 1 {
+            popoverDesiredHeight = clamped
+        }
+    }
+
+    func targetsListMaxHeight() -> CGFloat {
+        max(160, PopoverSizing.maxHeight - PopoverSizing.chromeHeightEstimate)
+    }
+
+    func targetsListInsets() -> EdgeInsets {
+        EdgeInsets(top: PopoverSizing.listInsetTop, leading: 0, bottom: PopoverSizing.listInsetBottom, trailing: 0)
+    }
+
+    func openDeveloperWindow() {
+        DispatchQueue.main.async {
+            let window: NSWindow
+            if let existing = self.developerWindow {
+                window = existing
+            } else {
+                let root = DeveloperWindowRootView()
+                    .environmentObject(self)
+                let controller = NSHostingController(rootView: root)
+                controller.view.wantsLayer = true
+                controller.view.layer?.backgroundColor = NSColor.clear.cgColor
+
+                let w = NSWindow(contentViewController: controller)
+                w.title = "Developer"
+                if #available(macOS 11.0, *) {
+                    w.toolbarStyle = .unified
+                }
+                w.setContentSize(NSSize(width: 860, height: 720))
+                w.minSize = NSSize(width: 720, height: 560)
+                w.maxSize = NSSize(width: 1600, height: 2000)
+                w.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
+                w.isReleasedWhenClosed = false
+                w.center()
+                self.configureDeveloperWindowIfNeeded(w)
+                self.developerWindow = w
+                window = w
+            }
+
+            self.configureDeveloperWindowIfNeeded(window)
+            self.ensureStatusStreamRunning()
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func configureDeveloperWindowIfNeeded(_ window: NSWindow) {
+        if window.isOpaque {
+            window.isOpaque = false
+        }
+        if window.backgroundColor != .clear {
+            window.backgroundColor = .clear
+        }
+        if !window.styleMask.contains(.fullSizeContentView) {
+            window.styleMask.insert(.fullSizeContentView)
+        }
+        if window.appearance?.name != .vibrantLight {
+            window.appearance = NSAppearance(named: .vibrantLight)
+        }
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+
+        if let contentView = window.contentView {
+            contentView.wantsLayer = true
+            contentView.layer?.backgroundColor = NSColor.clear.cgColor
+        }
+    }
+
+    func copyStatusSnapshotJsonToClipboard() {
+        guard let statusSnapshot else { return }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(statusSnapshot),
+              let text = String(data: data, encoding: .utf8)
+        else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        showToast("Copied status JSON", isError: false)
+    }
+
+    func revealStatusSourceInFinder() {
+        NSWorkspace.shared.activateFileViewerSelecting([statusJsonURL()])
+    }
+
+    private func startStatusStaleTimer() {
+        if statusStaleTimer != nil { return }
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.main)
+        t.schedule(deadline: .now() + 0.3, repeating: 0.5)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            guard let snap = self.statusSnapshot else { return }
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
+            let age = max(0, nowMs - snap.generatedAt)
+            let level: Int = (age > StatusFreshness.disconnectedMs) ? 2 : ((age > StatusFreshness.staleMs) ? 1 : 0)
+            if level != self.statusStaleLevel {
+                self.statusStaleLevel = level
+                if level == 1 {
+                    self.appendStatusActivity("Stale (> \(StatusFreshness.staleMs / 1000)s since generatedAt)")
+                } else if level == 2 {
+                    self.appendStatusActivity("Disconnected (> \(StatusFreshness.disconnectedMs / 1000)s since generatedAt)")
+                } else {
+                    self.appendStatusActivity("Fresh (updates resumed)")
+                }
+            }
+        }
+        statusStaleTimer = t
+        t.activate()
+    }
+
+    private func appendStatusActivity(_ text: String) {
+        let item = StatusActivityItem(at: Date(), text: text)
+        statusActivity.append(item)
+        if statusActivity.count > 200 {
+            statusActivity.removeFirst(statusActivity.count - 200)
+        }
+    }
+
+    private func applyStatusSnapshot(_ snap: StatusSnapshot) {
+        if statusStreamFrozen { return }
+        statusSnapshot = snap
+        statusSnapshotReceivedAt = Date()
+        appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
+        updatePopoverHeightForTargets(targetCount: snap.targets.count)
+
+        // Surface "what happened" for very short runs: show a toast when we observe a new lastRun.
+        for t in snap.targets {
+            guard let finishedAt = t.lastRun?.finishedAt, !finishedAt.isEmpty else { continue }
+            let prevFinishedAt = lastNotifiedRunFinishedAtByTargetId[t.targetId]
+            if prevFinishedAt == nil {
+                // First time we see this target's lastRun; don't toast on startup.
+                lastNotifiedRunFinishedAtByTargetId[t.targetId] = finishedAt
+                continue
+            }
+            guard prevFinishedAt != finishedAt else { continue }
+            lastNotifiedRunFinishedAtByTargetId[t.targetId] = finishedAt
+
+            guard let d = parseIsoDate(finishedAt) else { continue }
+            let ageSeconds = Int(Date().timeIntervalSince(d))
+            if ageSeconds < 0 || ageSeconds > StatusFreshness.toastMaxAgeSeconds { continue }
+
+            let label = (t.label?.isEmpty == false) ? (t.label ?? t.targetId) : t.targetId
+            let runStatus = t.lastRun?.status ?? "unknown"
+            if runStatus == "failed" {
+                let code = t.lastRun?.errorCode ?? "failed"
+                showToast("\(label) • Failed (\(code))", isError: true)
+                continue
+            }
+            if runStatus == "succeeded" {
+                var parts: [String] = []
+                if let files = t.lastRun?.filesIndexed, files > 0 {
+                    parts.append("\(files) files")
+                }
+                if let uploaded = t.lastRun?.bytesUploaded, uploaded > 0 {
+                    parts.append("+\(formatBytes(uploaded))")
+                } else if let saved = t.lastRun?.bytesDeduped, saved > 0 {
+                    parts.append("saved \(formatBytes(saved))")
+                }
+                if let dur = t.lastRun?.durationSeconds, dur > 0 {
+                    parts.append(formatDuration(dur))
+                }
+                let suffix = parts.isEmpty ? "" : (" • " + parts.joined(separator: " • "))
+                showToast("\(label) • Backup finished\(suffix)", isError: false)
+            }
+        }
+
+    }
+
+    private func parseIsoDate(_ s: String) -> Date? {
+        let f1 = ISO8601DateFormatter()
+        f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f1.date(from: s) { return d }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: s)
     }
 
     func refreshSecretsPresence(force: Bool = false) {
@@ -930,11 +1409,21 @@ final class AppModel: ObservableObject {
     }
 
     private func handleOutputLine(_ line: String) {
-        appendLog(line)
-
         guard let data = line.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return }
+        else {
+            appendLog(line)
+            return
+        }
+
+        if let type = obj["type"] as? String, type == "status.snapshot" {
+            if let snap = try? JSONDecoder().decode(StatusSnapshot.self, from: data) {
+                DispatchQueue.main.async { self.applyStatusSnapshot(snap) }
+            }
+            return
+        }
+
+        appendLog(line)
 
         if let code = obj["code"] as? String {
             DispatchQueue.main.async {
@@ -1030,6 +1519,15 @@ final class AppModel: ObservableObject {
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
 
+        var env = ProcessInfo.processInfo.environment
+        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
+            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
+        }
+        if env["TELEVYBACKUP_DATA_DIR"] == nil {
+            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
+        }
+        task.environment = env
+
         let out = Pipe()
         let err = Pipe()
         task.standardOutput = out
@@ -1122,6 +1620,50 @@ final class AppModel: ObservableObject {
             }
         }
     }
+
+    private func controlDirURL() -> URL {
+        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env).appendingPathComponent("control")
+        }
+        return defaultDataDir().appendingPathComponent("control")
+    }
+
+    func triggerBackupNowAllEnabled() {
+        ensureDaemonRunning()
+        let anyRunning = statusSnapshot?.targets.contains(where: { $0.state == "running" }) ?? false
+
+        DispatchQueue.global(qos: .utility).async {
+            let dir = self.controlDirURL()
+            let path = dir.appendingPathComponent("backup-now")
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+                let tmp = dir.appendingPathComponent("backup-now.tmp.\(getpid())")
+                let payload = "manual backup trigger at \(ISO8601DateFormatter().string(from: Date()))\n"
+                if let data = payload.data(using: .utf8) {
+                    try data.write(to: tmp, options: .atomic)
+                } else {
+                    throw NSError(domain: "TelevyBackup", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "failed to encode trigger payload",
+                    ])
+                }
+                if FileManager.default.fileExists(atPath: path.path) {
+                    try? FileManager.default.removeItem(at: path)
+                }
+                try FileManager.default.moveItem(at: tmp, to: path)
+
+                DispatchQueue.main.async {
+                    self.appendStatusActivity("Manual backup trigger written (all enabled targets)")
+                    self.showToast(anyRunning ? "Queued backup…" : "Starting backup…", isError: false)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.appendLog("ERROR: failed to write manual backup trigger: \(error)")
+                    self.showToast("Failed to start backup (see ui.log)", isError: true)
+                }
+            }
+        }
+    }
 }
 
 private func tomlString(_ s: String) -> String {
@@ -1153,16 +1695,16 @@ private func formatDuration(_ seconds: Double) -> String {
 }
 
 struct StatusLED: View {
-    let ok: Bool
+    let color: Color
 
     var body: some View {
         ZStack {
             Circle()
-                .fill(ok ? Color.green : Color.red)
+                .fill(color)
                 .opacity(0.95)
                 .frame(width: 10, height: 10)
             Circle()
-                .fill(ok ? Color.green : Color.red)
+                .fill(color)
                 .opacity(0.16)
                 .frame(width: 18, height: 18)
         }
@@ -1214,9 +1756,9 @@ struct PopoverRootView: View {
                 header
                 OverviewView()
             }
-            .padding(12)
+            .padding(16)
         }
-        .frame(width: 360, height: 460)
+        .frame(width: 360)
         .preferredColorScheme(.light)
         .overlay(alignment: .bottom) {
             if let toast = model.toastText {
@@ -1229,59 +1771,88 @@ struct PopoverRootView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.white.opacity(0.25))
-                    .frame(width: 28, height: 28)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
-                    )
-                Circle()
-                    .fill(Color.blue)
-                    .frame(width: 12, height: 12)
-            }
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
+        let snap = model.statusSnapshot
+        let ageMs = snap == nil ? Int64.max : max(0, nowMs - (snap?.generatedAt ?? 0))
+        let isDaemon = (snap?.source.kind == "daemon")
+        let statusText: String = {
+            if snap == nil { return "Status • Disconnected" }
+            if !isDaemon { return "Status • Stale" }
+            if ageMs > StatusFreshness.disconnectedMs { return "Status • Disconnected" }
+            if ageMs > StatusFreshness.staleMs { return "Status • Stale" }
+            return "Status • Live"
+        }()
+        let statusColor: Color = {
+            if snap == nil { return .red }
+            if !isDaemon { return .orange }
+            if ageMs > StatusFreshness.disconnectedMs { return .red }
+            if ageMs > StatusFreshness.staleMs { return .orange }
+            return .green
+        }()
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("TelevyBackup")
-                    .font(.system(size: 15, weight: .bold))
-                Text(model.telegramStatusText)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            StatusLED(ok: model.telegramOk)
-
-            Button {
-                model.openSettingsWindow()
-            } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 22, height: 22)
-                    .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 10))
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                model.refresh(userInitiated: true)
-            } label: {
+        return VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 10) {
                 ZStack {
-                    if model.refreshInFlight {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 13, weight: .semibold))
-                    }
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.white.opacity(0.32))
+                        .frame(width: 28, height: 28)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
+                        )
+                    Circle()
+                        .fill(Color.blue)
+                        .frame(width: 12, height: 12)
+                        .opacity(0.95)
                 }
-                    .frame(width: 22, height: 22)
-                    .background(Color.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("TelevyBackup")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Color.primary.opacity(0.95))
+                    Text(statusText)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.secondary.opacity(0.95))
+                }
+
+                Spacer()
+
+                Button {
+                    model.triggerBackupNowAllEnabled()
+                } label: {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 11, weight: .heavy))
+                        .frame(width: 22, height: 22)
+                        .background(Color.white.opacity(0.26), in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Backup now (all enabled targets)")
+
+                StatusLED(color: statusColor)
+
+                Button {
+                    model.openSettingsWindow()
+                } label: {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                        .background(Color.white.opacity(0.26), in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
-            .disabled(model.refreshInFlight)
+            .padding(.bottom, 12)
+
+            Rectangle()
+                .fill(Color.black.opacity(0.08))
+                .frame(height: 1)
         }
         .padding(.bottom, 2)
     }
@@ -1325,123 +1896,858 @@ struct OverviewView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            GlassCard(title: "STATUS") {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(statusTitle())
-                        .font(.system(size: 16, weight: .heavy))
-                    Text(statusSubtitle())
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
+        let snap = model.statusSnapshot
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
 
-                ProgressView()
-                    .progressViewStyle(.linear)
-                    .opacity(model.isRunning ? 1 : 0)
-
-                HStack(spacing: 26) {
-                    statColumn("Uploaded", formatBytes(displayBytesUploaded()), .blue)
-                    statColumn("Dedupe", formatBytes(displayBytesDeduped()), .green)
-                    statColumn("Duration", formatDuration(displayDurationSeconds()), .primary)
-                }
-            }
-
-            GlassCard(title: "DETAILS") {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Source")
-                        .font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    Text(model.sourcePath.isEmpty ? "—" : model.sourcePath)
-                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Button("Edit…") { model.openSettingsWindow() }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                }
-                Divider().opacity(0.35)
-                detailRow(label: "Next schedule", value: nextScheduleText())
-                Divider().opacity(0.35)
-                detailRow(label: "Index", value: "Encrypted • Synced")
-            }
-
-            Button {
-                model.runBackupNow()
-            } label: {
-                Text("Run backup now")
-                    .font(.system(size: 13, weight: .heavy))
-                    .frame(maxWidth: .infinity, minHeight: 34)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.blue)
+        VStack(alignment: .leading, spacing: 14) {
+            networkSection(snap: snap, nowMs: nowMs)
+            targetsSection(snap: snap, nowMs: nowMs)
+        }
+        .onAppear {
+            model.ensureDaemonRunning()
+            model.ensureStatusStreamRunning()
+            model.updatePopoverHeightForTargets(targetCount: snap?.targets.count ?? 0)
         }
     }
 
-    private func statColumn(_ label: String, _ value: String, _ color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.primary.opacity(0.85))
+    private func networkSection(snap: StatusSnapshot?, nowMs: Int64) -> some View {
+        let staleAgeMs = snap == nil ? Int64.max : max(0, nowMs - (snap?.generatedAt ?? 0))
+        let isDaemon = (snap?.source.kind == "daemon")
+        let disconnected = isDaemon && staleAgeMs > StatusFreshness.disconnectedMs
+        let hideValues = disconnected || (!isDaemon) || staleAgeMs > StatusFreshness.staleMs
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("NETWORK")
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundStyle(.secondary)
+                    .tracking(0.8)
+                Spacer()
+                Text(updatedText(snap: snap, nowMs: nowMs))
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundStyle(Color.secondary.opacity(0.92))
+            }
+
+            HStack(spacing: 12) {
+                statChip(
+                    title: "↑ Up",
+                    titleColor: Color.blue.opacity(0.92),
+                    value: formatRateChip(snap?.global.up.bytesPerSecond, hide: hideValues),
+                    session: formatSessionChip(snap?.global.upTotal.bytes, hide: hideValues)
+                )
+                statChip(
+                    title: "↓ Down",
+                    titleColor: Color.secondary.opacity(0.88),
+                    value: formatRateChip(snap?.global.down.bytesPerSecond, hide: hideValues),
+                    session: formatSessionChip(snap?.global.downTotal.bytes, hide: hideValues)
+                )
+            }
+        }
+    }
+
+    private func statChip(title: String, titleColor: Color, value: String, session: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 11, weight: .heavy))
+                .foregroundStyle(titleColor)
             Text(value)
-                .font(.system(.body, design: .monospaced).weight(.bold))
-                .foregroundStyle(color)
+                .font(.system(size: 14, weight: .heavy, design: .monospaced))
+                .foregroundStyle(Color.primary.opacity(0.92))
+            Text(session)
+                .font(.system(size: 11, weight: .heavy))
+                .foregroundStyle(Color.secondary.opacity(0.88))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+        )
+    }
+
+    private func targetsSection(snap: StatusSnapshot?, nowMs: Int64) -> some View {
+        let targets = snap?.targets ?? []
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("TARGETS")
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundStyle(.secondary)
+                    .tracking(0.8)
+                Spacer()
+                Text("\(targets.count) targets")
+                    .font(.system(size: 11, weight: .heavy))
+                    .foregroundStyle(Color.secondary.opacity(0.92))
+            }
+
+            targetsContainer(snap: snap, targets: targets, nowMs: nowMs)
         }
     }
 
-    private func displayBytesUploaded() -> Int64 {
-        model.isRunning ? model.currentBytesUploaded : model.lastBytesUploaded
+    private func updatedText(snap: StatusSnapshot?, nowMs: Int64) -> String {
+        guard let snap else { return "updated —" }
+        let ageMs = max(0, nowMs - snap.generatedAt)
+        if ageMs < 1_000 { return "updated \(ageMs)ms" }
+        if ageMs < 60_000 { return "updated \(ageMs / 1000)s" }
+        if ageMs < 3_600_000 { return "updated \(ageMs / 60_000)m" }
+        return "updated \(ageMs / 3_600_000)h"
     }
 
-    private func displayBytesDeduped() -> Int64 {
-        model.isRunning ? model.currentBytesDeduped : model.lastBytesDeduped
-    }
+    private func targetsContainer(snap: StatusSnapshot?, targets: [StatusTarget], nowMs: Int64) -> some View {
+        let container = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let height: CGFloat = {
+            if targets.isEmpty {
+                return 276
+            }
+            let desired = CGFloat(targets.count) * 62
+            return min(model.targetsListMaxHeight(), desired)
+        }()
 
-    private func displayDurationSeconds() -> Double {
-        if model.isRunning, let startedAt = model.taskStartedAt {
-            return Date().timeIntervalSince(startedAt)
+        return ZStack {
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.16),
+                    Color.white.opacity(0.10),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .clipShape(container)
+            .overlay(container.strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
+
+            if targets.isEmpty {
+                if snap == nil {
+                    waitingForStatusEmptyState()
+                } else {
+                    targetsEmptyState()
+                }
+            } else if let snap {
+                TargetsListView(
+                    targets: targets,
+                    snapshotGeneratedAtMs: snap.generatedAt,
+                    snapshotSourceKind: snap.source.kind
+                )
+                .padding(.vertical, 0)
+            } else {
+                waitingForStatusEmptyState()
+            }
         }
-        return model.lastDurationSeconds
+        .frame(height: height)
     }
 
-    private func detailRow(label: String, value: String) -> some View {
+    private func targetsEmptyState() -> some View {
+        VStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white.opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                    )
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(Color.secondary.opacity(0.7))
+            }
+            .frame(width: 80, height: 80)
+            .padding(.bottom, 2)
+
+            Text("No targets yet")
+                .font(.system(size: 14, weight: .heavy))
+                .foregroundStyle(Color.primary.opacity(0.92))
+            Text("Add a folder to back up in Settings.")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Color.secondary.opacity(0.92))
+
+            Button("Open Settings…") { model.openSettingsWindow() }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .controlSize(.large)
+                .frame(width: 152)
+                .padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func waitingForStatusEmptyState() -> some View {
+        VStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white.opacity(0.12))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                    )
+                Image(systemName: "waveform.path.ecg")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(Color.secondary.opacity(0.7))
+            }
+            .frame(width: 80, height: 80)
+            .padding(.bottom, 2)
+
+            Text("Waiting for status…")
+                .font(.system(size: 14, weight: .heavy))
+                .foregroundStyle(Color.primary.opacity(0.92))
+            Text("Starting daemon and reading snapshots.")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Color.secondary.opacity(0.92))
+
+            Button("Open Settings…") { model.openSettingsWindow() }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .frame(width: 152)
+                .padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func formatSessionChip(_ bytes: Int64?, hide: Bool) -> String {
+        if hide { return "Session —" }
+        guard let bytes else { return "Session —" }
+        return "Session \(formatBytes(bytes))"
+    }
+
+    private func formatRateChip(_ bps: Int64?, hide: Bool) -> String {
+        if hide { return "—" }
+        guard let bps else { return "—" }
+        return "\(formatBytes(bps))/s"
+    }
+}
+
+private struct TargetsListView: View {
+    @EnvironmentObject var model: AppModel
+    let targets: [StatusTarget]
+    let snapshotGeneratedAtMs: Int64
+    let snapshotSourceKind: String
+
+    @State private var contentMinY: CGFloat = 0
+    @State private var contentHeight: CGFloat = 0
+    @State private var containerHeight: CGFloat = 0
+
+    private struct ContentMetrics: Equatable {
+        let minY: CGFloat
+        let height: CGFloat
+    }
+
+    private struct ContentMetricsKey: PreferenceKey {
+        static var defaultValue: ContentMetrics = .init(minY: 0, height: 0)
+        static func reduce(value: inout ContentMetrics, nextValue: () -> ContentMetrics) {
+            value = nextValue()
+        }
+    }
+
+    private struct ContainerHeightKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
+        }
+    }
+
+    var body: some View {
+        ScrollView(.vertical) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(targets.enumerated()), id: \.element.id) { idx, t in
+                    TargetRowView(target: t, snapshotGeneratedAtMs: snapshotGeneratedAtMs, snapshotSourceKind: snapshotSourceKind)
+                    if idx != targets.count - 1 {
+                        Rectangle()
+                            .fill(Color.black.opacity(0.08))
+                            .frame(height: 1)
+                            .padding(.horizontal, 12)
+                    }
+                }
+            }
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: ContentMetricsKey.self,
+                        value: ContentMetrics(
+                            minY: proxy.frame(in: .named("targetsScroll")).minY,
+                            height: proxy.size.height
+                        )
+                    )
+                }
+            )
+        }
+        .coordinateSpace(name: "targetsScroll")
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(key: ContainerHeightKey.self, value: proxy.size.height)
+            }
+        )
+        .onPreferenceChange(ContentMetricsKey.self) { v in
+            contentMinY = v.minY
+            contentHeight = v.height
+        }
+        .onPreferenceChange(ContainerHeightKey.self) { h in
+            containerHeight = h
+        }
+        .mask(fadeMask)
+    }
+
+    private var fadeMask: some View {
+        let fade: CGFloat = 16
+        let canScroll = contentHeight > containerHeight + 1
+        let atTop = contentMinY >= -0.5
+        let bottomEdge = contentMinY + contentHeight
+        let atBottom = bottomEdge <= containerHeight + 0.5
+        let showTop = canScroll && !atTop
+        let showBottom = canScroll && !atBottom
+
+        return VStack(spacing: 0) {
+            LinearGradient(
+                colors: [Color.black.opacity(showTop ? 0 : 1), Color.black],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: fade)
+            Rectangle().fill(Color.black).frame(maxHeight: .infinity)
+            LinearGradient(
+                colors: [Color.black, Color.black.opacity(showBottom ? 0 : 1)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: fade)
+        }
+    }
+}
+
+private struct TargetRowView: View {
+    @EnvironmentObject var model: AppModel
+    let target: StatusTarget
+    let snapshotGeneratedAtMs: Int64
+    let snapshotSourceKind: String
+
+    var body: some View {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
+        let staleAgeMs = max(0, nowMs - snapshotGeneratedAtMs)
+        let isDaemon = (snapshotSourceKind == "daemon")
+        let disconnected = isDaemon && staleAgeMs > StatusFreshness.disconnectedMs
+
+        let running = (target.state == "running") && !disconnected && (isDaemon && staleAgeMs <= StatusFreshness.disconnectedMs)
+
+        return VStack(alignment: .leading, spacing: 0) {
+            if running {
+                runningRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.10))
+            } else {
+                idleRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func displayLabel() -> String {
+        if let label = target.label, !label.isEmpty { return label }
+        return shortId(target.targetId)
+    }
+
+    private func shortId(_ id: String) -> String {
+        if id.count <= 8 { return id }
+        return String(id.suffix(8))
+    }
+
+    private func stateBadge(staleAgeMs: Int64, isDaemon: Bool) -> some View {
+        let (text, c): (String, Color) = {
+            if !isDaemon || staleAgeMs > StatusFreshness.staleMs { return ("Stale", .orange) }
+            if target.state == "running" { return ("Running", .blue) }
+            if target.state == "failed" || target.lastRun?.status == "failed" { return ("Failed", .red) }
+            if target.state == "stale" { return ("Stale", .orange) }
+            return ("Idle", .secondary)
+        }()
+
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(c)
+                .frame(width: 6, height: 6)
+                .opacity(0.90)
+            Text(text)
+                .font(.system(size: 11.5, weight: .heavy))
+                .foregroundStyle(c.opacity(0.95))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Color.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 9.5, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9.5, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+        )
+    }
+
+    private func formatRateInline(_ bps: Int64?) -> String {
+        guard let bps else { return "—" }
+        return "\(formatBytes(bps))/s"
+    }
+
+    private func runningRow(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, disconnected: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(displayLabel())
+                    .font(.system(size: 13.5, weight: .heavy))
+                    .foregroundStyle(Color.primary.opacity(0.92))
+                stateBadge(staleAgeMs: staleAgeMs, isDaemon: isDaemon)
+                Spacer()
+                Text("↑ \(formatRateInline(target.up.bytesPerSecond))")
+                    .font(.system(size: 12, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(Color.primary.opacity(0.92))
+            }
+
+            Text(runningSummary(nowMs: nowMs))
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Color.secondary.opacity(0.92))
+
+            progressBar
+        }
+    }
+
+    private func idleRow(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, disconnected: Bool) -> some View {
+        let failed = target.state == "failed" || target.lastRun?.status == "failed"
+        let showStale = (!isDaemon) || staleAgeMs > StatusFreshness.staleMs
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(displayLabel())
+                    .font(.system(size: 13.5, weight: .heavy))
+                    .foregroundStyle(Color.primary.opacity(0.92))
+                stateBadge(staleAgeMs: staleAgeMs, isDaemon: isDaemon)
+                Spacer()
+                Text(rightTopText(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected))
+                    .font(.system(size: 12, weight: failed ? .heavy : .semibold, design: failed ? .monospaced : .default))
+                    .foregroundStyle(failed ? Color.primary.opacity(0.92) : Color.secondary.opacity(0.92))
+            }
+
+            HStack(alignment: .firstTextBaseline) {
+                Text(target.sourcePath)
+                    .font(.system(size: 10.8, weight: .semibold))
+                    .foregroundStyle(Color.secondary.opacity(0.95))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text(rightBottomText(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, showStale: showStale, failed: failed))
+                    .font(rightBottomFont(showStale: showStale, failed: failed))
+                    .foregroundStyle(Color.secondary.opacity(0.92))
+            }
+        }
+    }
+
+    private func rightBottomFont(showStale: Bool, failed: Bool) -> Font {
+        if failed {
+            return .system(size: 12, weight: .semibold)
+        }
+        if showStale {
+            return .system(size: 11.5, weight: .heavy, design: .monospaced)
+        }
+        return .system(size: 11.5, weight: .heavy, design: .monospaced)
+    }
+
+    private var progressBar: some View {
+        let bg = RoundedRectangle(cornerRadius: 3, style: .continuous)
+        return ZStack(alignment: .leading) {
+            bg.fill(Color.black.opacity(0.10))
+            if let frac = progressFraction() {
+                bg.fill(Color.blue.opacity(0.92))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .scaleEffect(x: max(0.02, CGFloat(min(1.0, frac))), y: 1, anchor: .leading)
+            } else {
+                bg.fill(Color.blue.opacity(0.55))
+                    .frame(width: 56)
+            }
+        }
+        .frame(height: 6)
+    }
+
+    private func rightTopText(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, disconnected: Bool) -> String {
+        if disconnected { return "—" }
+        if target.state == "failed" || target.lastRun?.status == "failed" {
+            return target.lastRun?.errorCode ?? "failed"
+        }
+        if !isDaemon || staleAgeMs > StatusFreshness.staleMs {
+            return "updated \(formatUpdatedAge(staleAgeMs)) ago"
+        }
+        if let finishedAt = target.lastRun?.finishedAt, let date = parseIso(finishedAt) {
+            let age = Int(nowMs / 1000) - Int(date.timeIntervalSince1970)
+            return "Last \(formatRelativeSeconds(age))"
+        }
+        return "Last —"
+    }
+
+    private func rightBottomText(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, showStale: Bool, failed: Bool) -> String {
+        if failed {
+            if let finishedAt = target.lastRun?.finishedAt, let date = parseIso(finishedAt) {
+                let age = Int(nowMs / 1000) - Int(date.timeIntervalSince1970)
+                return "Last \(formatRelativeSeconds(age))"
+            }
+            return "Last —"
+        }
+        if showStale { return "—" }
+
+        let dur = target.lastRun?.durationSeconds ?? 0
+        if let bytes = target.lastRun?.bytesUploaded, bytes > 0, dur > 0 {
+            return "+\(formatBytes(bytes)) • \(formatElapsed(seconds: Int(dur)))"
+        }
+
+        let mutParts: [String] = {
+            var parts: [String] = []
+            if let files = target.lastRun?.filesIndexed, files > 0 {
+                parts.append("\(files) files")
+            }
+            if let deduped = target.lastRun?.bytesDeduped, deduped > 0 {
+                parts.append("saved \(formatBytes(deduped))")
+            }
+            if dur > 0 {
+                parts.append(formatElapsed(seconds: Int(dur)))
+            }
+            return parts
+        }()
+        if !mutParts.isEmpty {
+            return mutParts.joined(separator: " • ")
+        }
+
+        return "—"
+    }
+
+    private func runningSummary(nowMs: Int64) -> String {
+        let uploaded = target.progress?.bytesUploaded ?? 0
+        let elapsed = elapsedText(nowMs: nowMs)
+        return "Uploaded \(formatBytes(uploaded)) • Elapsed \(elapsed)"
+    }
+
+    private func progressFraction() -> Double? {
+        if let p = target.progress {
+            if let done = p.chunksDone, let total = p.chunksTotal, total > 0 {
+                return min(1.0, Double(done) / Double(total))
+            }
+            if let done = p.filesDone, let total = p.filesTotal, total > 0 {
+                return min(1.0, Double(done) / Double(total))
+            }
+        }
+        return nil
+    }
+
+    private func elapsedText(nowMs: Int64) -> String {
+        guard let since = target.runningSince else { return "—" }
+        let seconds = max(0, (nowMs - since)) / 1000
+        return formatElapsed(seconds: Int(seconds))
+    }
+
+    private func lastRunText(nowMs: Int64) -> String {
+        guard let finishedAt = target.lastRun?.finishedAt,
+              let date = parseIso(finishedAt)
+        else { return "Last run: —" }
+        let age = Int(nowMs / 1000) - Int(date.timeIntervalSince1970)
+        let rel = formatRelativeSeconds(age)
+        let dur = target.lastRun?.durationSeconds ?? 0
+        let durText = dur > 0 ? formatElapsed(seconds: Int(dur)) : "—"
+        return "Last run: \(rel) • \(durText)"
+    }
+
+    private func parseIso(_ s: String) -> Date? {
+        let f1 = ISO8601DateFormatter()
+        f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f1.date(from: s) { return d }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: s)
+    }
+
+    private func formatRelativeSeconds(_ s: Int) -> String {
+        if s < 5 { return "just now" }
+        if s < 60 { return "\(s)s ago" }
+        if s < 3600 { return "\(s / 60)m ago" }
+        if s < 86400 { return "\(s / 3600)h ago" }
+        return "\(s / 86400)d ago"
+    }
+
+    private func formatElapsed(seconds: Int) -> String {
+        if seconds < 60 { return String(format: "00:%02d", seconds) }
+        if seconds < 3600 {
+            let m = seconds / 60
+            let s = seconds % 60
+            return String(format: "%02d:%02d", m, s)
+        }
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        return String(format: "%02d:%02d", h, m)
+    }
+
+    private func formatUpdatedAge(_ ms: Int64) -> String {
+        if ms < 1_000 { return "\(ms)ms" }
+        if ms < 60_000 { return "\(ms / 1000)s" }
+        if ms < 3_600_000 { return "\(ms / 60_000)m" }
+        return "\(ms / 3_600_000)h"
+    }
+
+}
+
+struct DeveloperWindowRootView: View {
+    @EnvironmentObject var model: AppModel
+    @State private var selectedTargetId: String? = nil
+    @State private var activityFilter: String = ""
+
+    var body: some View {
+        ZStack {
+            VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow, state: .active)
+                .ignoresSafeArea()
+
+            if let snap = model.statusSnapshot {
+                HStack(spacing: 0) {
+                    sidebar(snapshot: snap)
+                        .frame(width: 280)
+                    Divider().opacity(0.2)
+                    mainPanel(snapshot: snap)
+                }
+            } else {
+                GlassCard(title: "STATUS") {
+                    Text("Waiting for status snapshots…")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                Button {
+                    model.copyStatusSnapshotJsonToClipboard()
+                } label: {
+                    Label("Copy JSON", systemImage: "doc.on.doc")
+                }
+                Button {
+                    model.revealStatusSourceInFinder()
+                } label: {
+                    Label("Reveal…", systemImage: "folder")
+                }
+                Button {
+                    model.statusStreamFrozen.toggle()
+                } label: {
+                    Label("Freeze", systemImage: model.statusStreamFrozen ? "pause.fill" : "play.fill")
+                }
+            }
+        }
+    }
+
+    private func sidebar(snapshot snap: StatusSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("TARGETS")
+                .font(.system(size: 11, weight: .heavy))
+                .foregroundStyle(.secondary)
+                .tracking(0.8)
+                .padding(.top, 14)
+                .padding(.horizontal, 14)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(snap.targets) { t in
+                        Button {
+                            selectedTargetId = t.targetId
+                        } label: {
+                            sidebarRow(target: t, selected: effectiveSelectedTargetId(snapshot: snap) == t.targetId)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+            }
+
+            Divider().opacity(0.2)
+                .padding(.horizontal, 14)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Last snapshot: \(updatedAgeText(snapshot: snap))")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Text("Source: \(snap.source.kind)\(snap.source.detail.map { " (\($0))" } ?? "")")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 14)
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private func sidebarRow(target t: StatusTarget, selected: Bool) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(displayLabel(t))
+                    .font(.system(size: 12, weight: .heavy))
+                    .foregroundStyle(.primary)
+                Text(t.targetId)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(t.state)
+                    .font(.system(size: 11, weight: .heavy, design: .monospaced))
+                    .foregroundStyle(stateColor(t))
+                Text("↑ \(t.up.bytesPerSecond.map { "\(formatBytes($0))/s" } ?? "—")")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(selected ? Color.blue.opacity(0.10) : Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+        )
+    }
+
+    private func mainPanel(snapshot snap: StatusSnapshot) -> some View {
+        let selectedId = effectiveSelectedTargetId(snapshot: snap)
+        let target = snap.targets.first(where: { $0.targetId == selectedId }) ?? snap.targets.first
+
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if let target {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Text(displayLabel(target))
+                            .font(.system(size: 18, weight: .heavy))
+                        Text(target.sourcePath)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .padding(.leading, 8)
+                        Spacer()
+                    }
+                    .padding(.top, 14)
+                    .padding(.horizontal, 16)
+                }
+
+                GlassCard(title: "GLOBAL") {
+                    let up = snap.global.up.bytesPerSecond.map { "\(formatBytes($0))/s" } ?? "—"
+                    let down = snap.global.down.bytesPerSecond.map { "\(formatBytes($0))/s" } ?? "—"
+                    let upTot = snap.global.upTotal.bytes.map { formatBytes($0) } ?? "—"
+                    let downTot = snap.global.downTotal.bytes.map { formatBytes($0) } ?? "—"
+
+                    keyValue("schemaVersion", "\(snap.schemaVersion)")
+                    keyValue("generatedAt", isoFromMs(snap.generatedAt))
+                    keyValue("rates", "up=\(up) down=\(down)")
+                    keyValue("session totals", "up=\(upTot) down=\(downTot)")
+                }
+                .padding(.horizontal, 16)
+
+                if let target {
+                    GlassCard(title: "TARGET DETAILS") {
+                        keyValue("state", target.state)
+                        keyValue("phase", target.progress?.phase ?? "—")
+                        if let p = target.progress {
+                            keyValue("progress", "chunks \(p.chunksDone ?? -1)/\(p.chunksTotal ?? -1)  files \(p.filesDone ?? -1)/\(p.filesTotal ?? -1)")
+                            keyValue("bytesRead", p.bytesRead.map(String.init) ?? "—")
+                            keyValue("bytesUploaded", p.bytesUploaded.map(String.init) ?? "—")
+                            keyValue("bytesDeduped", p.bytesDeduped.map(String.init) ?? "—")
+                        } else {
+                            keyValue("progress", "—")
+                        }
+                        if let r = target.lastRun {
+                            keyValue(
+                                "lastRun",
+                                "\(r.status ?? "—")  code=\(r.errorCode ?? "—")  dur=\(r.durationSeconds.map { String(format: "%.2fs", $0) } ?? "—")  files=\(r.filesIndexed.map(String.init) ?? "—")  uploaded=\(r.bytesUploaded.map(String.init) ?? "—")  deduped=\(r.bytesDeduped.map(String.init) ?? "—")"
+                            )
+                        } else {
+                            keyValue("lastRun", "—")
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+
+                GlassCard(title: "ACTIVITY") {
+                    HStack {
+                        Spacer()
+                        TextField("filter: target", text: $activityFilter)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                            .frame(width: 220)
+                    }
+                    Divider().opacity(0.25)
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(filteredActivityItems(selectedTargetId: selectedId)) { item in
+                            Text("\(isoFromDate(item.at))  \(item.text)")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(.primary.opacity(0.9))
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
+            }
+        }
+    }
+
+    private func filteredActivityItems(selectedTargetId: String?) -> [AppModel.StatusActivityItem] {
+        let all = Array(model.statusActivity.suffix(200).reversed())
+        let needle = activityFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !needle.isEmpty {
+            return all.filter { $0.text.localizedCaseInsensitiveContains(needle) }
+        }
+        if let selectedTargetId {
+            return all.filter { $0.text.contains(selectedTargetId) }
+        }
+        return all
+    }
+
+    private func effectiveSelectedTargetId(snapshot snap: StatusSnapshot) -> String? {
+        if let selectedTargetId, snap.targets.contains(where: { $0.targetId == selectedTargetId }) {
+            return selectedTargetId
+        }
+        return snap.targets.first?.targetId
+    }
+
+    private func updatedAgeText(snapshot snap: StatusSnapshot) -> String {
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
+        let ageMs = max(0, nowMs - snap.generatedAt)
+        if ageMs < 1_000 { return "\(ageMs)ms ago" }
+        if ageMs < 60_000 { return "\(ageMs / 1000)s ago" }
+        if ageMs < 3_600_000 { return "\(ageMs / 60_000)m ago" }
+        return "\(ageMs / 3_600_000)h ago"
+    }
+
+    private func stateColor(_ t: StatusTarget) -> Color {
+        if t.state == "running" { return .green }
+        if t.state == "failed" { return .red }
+        if t.state == "stale" { return .orange }
+        return .secondary
+    }
+
+    private func displayLabel(_ t: StatusTarget) -> String {
+        if let label = t.label, !label.isEmpty { return label }
+        return t.targetId
+    }
+
+    private func keyValue(_ key: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(label)
-                .font(.system(size: 13, weight: .semibold))
+            Text(key)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
             Spacer()
             Text(value)
-                .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.trailing)
         }
     }
 
-    private func nextScheduleText() -> String {
-        if !model.scheduleEnabled { return "—" }
-        return model.scheduleKind == "daily" ? "Daily 02:00" : "Hourly :00"
+    private func isoFromMs(_ ms: Int64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000.0)
+        return isoFromDate(date)
     }
 
-    private func lastRunText() -> String {
-        guard let last = model.lastRunAt else { return "(ready)" }
-        let seconds = Date().timeIntervalSince(last)
-        if seconds < 60 { return "(last run just now)" }
-        if seconds < 3600 { return "(last run \(Int(seconds / 60))m ago)" }
-        return "(last run \(Int(seconds / 3600))h ago)"
-    }
-
-    private func statusTitle() -> String {
-        if model.isRunning { return "Syncing" }
-        if model.lastRunOk == false { return "Failed" }
-        return "Idle"
-    }
-
-    private func statusSubtitle() -> String {
-        if model.isRunning { return "(\(model.phase))" }
-        if model.lastRunOk == false {
-            return "(\(model.lastRunErrorCode ?? "error"))"
-        }
-        return lastRunText()
+    private func isoFromDate(_ date: Date) -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.string(from: date)
     }
 }
 
@@ -1615,6 +2921,7 @@ private enum SettingsTitlebarAccessory {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var statusItem: NSStatusItem?
+    private var cancellables: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -1636,6 +2943,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.view.wantsLayer = true
         host.view.layer?.backgroundColor = NSColor.clear.cgColor
         popover.contentViewController = host
+
+        // Best-effort: keep daemon running even if the popover is not opened yet.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            ModelStore.shared.ensureDaemonRunning()
+            ModelStore.shared.ensureStatusStreamRunning()
+        }
+
+        ModelStore.shared.$popoverDesiredHeight
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] h in
+                guard let self else { return }
+                let height = min(max(320, h), 720)
+                if self.popover.contentSize.height != height {
+                    self.popover.contentSize = NSSize(width: 360, height: height)
+                }
+            }
+            .store(in: &cancellables)
 
         if ProcessInfo.processInfo.environment["TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH"] != "0" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -1659,6 +2983,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPopover(_ sender: Any?) {
         guard let button = statusItem?.button else { return }
+        ModelStore.shared.ensureDaemonRunning()
+        ModelStore.shared.ensureStatusStreamRunning()
         ModelStore.shared.refresh()
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)

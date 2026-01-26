@@ -1,15 +1,22 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use base64::Engine;
 use chrono::{Datelike, Timelike};
 use sqlx::Row;
-use televy_backup_core::Storage;
+use televy_backup_core::status::{
+    Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource, StatusWriteOptions,
+    TargetRunSummary, TargetState, now_unix_ms, status_json_path,
+    write_status_snapshot_json_atomic_with_options,
+};
 use televy_backup_core::{
     BackupConfig, BackupOptions, ChunkingConfig, TelegramMtProtoStorage,
     TelegramMtProtoStorageConfig,
 };
+use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
@@ -24,6 +31,298 @@ struct TargetScheduleState {
 enum ScheduleSlot {
     Hourly((i32, u32, u32, u32)),
     Daily((i32, u32, u32)),
+    Manual,
+}
+
+#[derive(Debug, Clone)]
+struct TargetRuntime {
+    target_id: String,
+    label: Option<String>,
+    source_path: String,
+    endpoint_id: String,
+    enabled: bool,
+
+    state: String, // "idle" | "running" | "failed"
+    running_since: Option<u64>,
+    progress: Option<Progress>,
+    last_run: Option<TargetRunSummary>,
+}
+
+#[derive(Debug)]
+struct StatusRuntimeState {
+    target_order: Vec<String>,
+    targets: HashMap<String, TargetRuntime>,
+}
+
+impl StatusRuntimeState {
+    fn from_settings(settings: &settings_config::SettingsV2) -> Self {
+        let mut target_order = Vec::new();
+        let mut targets = HashMap::new();
+        for t in &settings.targets {
+            target_order.push(t.id.clone());
+            targets.insert(
+                t.id.clone(),
+                TargetRuntime {
+                    target_id: t.id.clone(),
+                    label: if t.label.trim().is_empty() {
+                        None
+                    } else {
+                        Some(t.label.clone())
+                    },
+                    source_path: t.source_path.clone(),
+                    endpoint_id: t.endpoint_id.clone(),
+                    enabled: t.enabled,
+                    state: "idle".to_string(),
+                    running_since: None,
+                    progress: None,
+                    last_run: None,
+                },
+            );
+        }
+        Self {
+            target_order,
+            targets,
+        }
+    }
+
+    fn mark_run_start(&mut self, target_id: &str) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+        t.state = "running".to_string();
+        t.running_since = Some(now_unix_ms());
+        t.progress = Some(Progress {
+            phase: "running".to_string(),
+            files_total: None,
+            files_done: None,
+            chunks_total: None,
+            chunks_done: None,
+            bytes_read: None,
+            bytes_uploaded: Some(0),
+            bytes_deduped: Some(0),
+        });
+    }
+
+    fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+        if t.state != "running" {
+            t.state = "running".to_string();
+        }
+        if t.running_since.is_none() {
+            t.running_since = Some(now_unix_ms());
+        }
+        t.progress = Some(Progress {
+            phase: p.phase,
+            files_total: p.files_total,
+            files_done: p.files_done,
+            chunks_total: p.chunks_total,
+            chunks_done: p.chunks_done,
+            bytes_read: p.bytes_read,
+            bytes_uploaded: p.bytes_uploaded,
+            bytes_deduped: p.bytes_deduped,
+        });
+    }
+
+    fn mark_run_finish_success(
+        &mut self,
+        target_id: &str,
+        duration_seconds: f64,
+        files_indexed: u64,
+        bytes_uploaded: u64,
+        bytes_deduped: u64,
+    ) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+        t.state = "idle".to_string();
+        t.running_since = None;
+        t.progress = None;
+        t.last_run = Some(TargetRunSummary {
+            finished_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+            duration_seconds: Some(duration_seconds),
+            status: Some("succeeded".to_string()),
+            error_code: None,
+            files_indexed: Some(files_indexed),
+            bytes_uploaded: Some(bytes_uploaded),
+            bytes_deduped: Some(bytes_deduped),
+        });
+    }
+
+    fn mark_run_finish_failure(
+        &mut self,
+        target_id: &str,
+        duration_seconds: f64,
+        error_code: String,
+    ) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+        t.state = "failed".to_string();
+        t.running_since = None;
+        t.progress = None;
+        t.last_run = Some(TargetRunSummary {
+            finished_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+            duration_seconds: Some(duration_seconds),
+            status: Some("failed".to_string()),
+            error_code: Some(error_code),
+            files_indexed: None,
+            bytes_uploaded: None,
+            bytes_deduped: None,
+        });
+    }
+
+    fn has_running(&self) -> bool {
+        self.targets.values().any(|t| t.state == "running")
+    }
+
+    fn build_snapshot(&self, now_ms: u64) -> StatusSnapshot {
+        let mut out_targets = Vec::new();
+        for id in &self.target_order {
+            let Some(t) = self.targets.get(id) else {
+                continue;
+            };
+            out_targets.push(TargetState {
+                target_id: t.target_id.clone(),
+                label: t.label.clone(),
+                source_path: t.source_path.clone(),
+                endpoint_id: t.endpoint_id.clone(),
+                enabled: t.enabled,
+                state: t.state.clone(),
+                running_since: t.running_since,
+                up: Rate {
+                    bytes_per_second: None,
+                },
+                up_total: Counter { bytes: None },
+                progress: t.progress.clone(),
+                last_run: t.last_run.clone(),
+                extra: Default::default(),
+            });
+        }
+
+        StatusSnapshot {
+            type_: "status.snapshot".to_string(),
+            schema_version: 1,
+            generated_at: now_ms,
+            source: StatusSource {
+                kind: "daemon".to_string(),
+                detail: Some("televybackupd (status.json)".to_string()),
+            },
+            global: GlobalStatus {
+                up: Rate {
+                    bytes_per_second: None,
+                },
+                down: Rate {
+                    bytes_per_second: None,
+                },
+                up_total: Counter { bytes: None },
+                down_total: Counter { bytes: None },
+                ui_uptime_seconds: None,
+            },
+            targets: out_targets,
+            extra: Default::default(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct StatusProgressSink {
+    target_id: String,
+    state: Arc<Mutex<StatusRuntimeState>>,
+}
+
+impl ProgressSink for StatusProgressSink {
+    fn on_progress(&self, progress: TaskProgress) {
+        if let Ok(mut st) = self.state.lock() {
+            st.on_progress(&self.target_id, progress);
+        }
+    }
+}
+
+async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: PathBuf) {
+    let mut last_write = Instant::now()
+        .checked_sub(Duration::from_secs(3600))
+        .unwrap_or_else(Instant::now);
+
+    loop {
+        let has_running = state
+            .lock()
+            .ok()
+            .map(|st| st.has_running())
+            .unwrap_or(false);
+
+        let now = Instant::now();
+        let min_interval = if has_running {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_secs(1)
+        };
+        let should_write = now.duration_since(last_write) >= min_interval;
+        if should_write {
+            let snapshot_opt = {
+                match state.lock() {
+                    Ok(st) => Some(st.build_snapshot(now_unix_ms())),
+                    Err(_) => None,
+                }
+            };
+            let snapshot = match snapshot_opt {
+                Some(s) => s,
+                None => {
+                    sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+
+            // Writing status snapshots is sync I/O + fsync-heavy; keep it off Tokio worker threads.
+            // Status snapshots are "best-effort" and do not need durability guarantees; atomic rename is sufficient.
+            let options = StatusWriteOptions {
+                fsync_file: false,
+                fsync_dir: false,
+            };
+            let status_path_for_write = status_path.clone();
+            let status_path_for_log = status_path.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                write_status_snapshot_json_atomic_with_options(
+                    &status_path_for_write,
+                    &snapshot,
+                    options,
+                )
+            })
+            .await;
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        event = "status.write_failed",
+                        error = %e,
+                        path = %status_path_for_log.display(),
+                        "status.write_failed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        event = "status.write_failed",
+                        error = %e,
+                        path = %status_path_for_log.display(),
+                        "status.write_failed"
+                    );
+                }
+            }
+            last_write = Instant::now();
+        }
+
+        let tick = if has_running {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(200)
+        };
+        sleep(tick).await;
+    }
 }
 
 #[tokio::main]
@@ -41,6 +340,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let settings = settings_config::load_settings_v2(&config_root)?;
     settings_config::validate_settings_schema_v2(&settings)?;
+
+    let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
+    let status_path = status_json_path(&data_root);
+    tokio::spawn(status_writer_loop(status_state.clone(), status_path));
 
     if settings.telegram.mtproto.api_id <= 0 {
         return Err("telegram.mtproto.api_id must be > 0".into());
@@ -69,13 +372,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut schedule_state_by_target = HashMap::<String, TargetScheduleState>::new();
     let mut storage_by_endpoint = HashMap::<String, TelegramMtProtoStorage>::new();
 
+    let manual_trigger_pending = Arc::new(AtomicBool::new(false));
+    tokio::spawn(manual_trigger_watcher_loop(
+        data_root.clone(),
+        manual_trigger_pending.clone(),
+    ));
+
     loop {
         let now = chrono::Local::now();
+        let manual_triggered = manual_trigger_pending.swap(false, Ordering::SeqCst);
 
         for target in &settings.targets {
-            let eff =
-                settings_config::effective_schedule(&settings.schedule, target.schedule.as_ref());
-            if !target.enabled || !eff.enabled {
+            if !target.enabled {
                 continue;
             }
 
@@ -83,34 +391,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .entry(target.id.clone())
                 .or_default();
 
-            let scheduled_slot = match eff.kind.as_str() {
-                "hourly" => {
-                    if now.minute() != eff.hourly_minute as u32 {
-                        None
-                    } else {
-                        let key = (now.year(), now.month(), now.day(), now.hour());
-                        if state.last_hourly == Some(key) {
-                            None
-                        } else {
-                            Some(ScheduleSlot::Hourly(key))
+            let scheduled_slot = if manual_triggered {
+                Some(ScheduleSlot::Manual)
+            } else {
+                let eff = settings_config::effective_schedule(
+                    &settings.schedule,
+                    target.schedule.as_ref(),
+                );
+                if !eff.enabled {
+                    None
+                } else {
+                    match eff.kind.as_str() {
+                        "hourly" => {
+                            if now.minute() != eff.hourly_minute as u32 {
+                                None
+                            } else {
+                                let key = (now.year(), now.month(), now.day(), now.hour());
+                                if state.last_hourly == Some(key) {
+                                    None
+                                } else {
+                                    Some(ScheduleSlot::Hourly(key))
+                                }
+                            }
+                        }
+                        "daily" => {
+                            let (hh, mm) = parse_hhmm(&eff.daily_at)?;
+                            if now.hour() != hh as u32 || now.minute() != mm as u32 {
+                                None
+                            } else {
+                                let key = (now.year(), now.month(), now.day());
+                                if state.last_daily == Some(key) {
+                                    None
+                                } else {
+                                    Some(ScheduleSlot::Daily(key))
+                                }
+                            }
+                        }
+                        other => {
+                            return Err(format!("unsupported schedule.kind: {other}").into());
                         }
                     }
-                }
-                "daily" => {
-                    let (hh, mm) = parse_hhmm(&eff.daily_at)?;
-                    if now.hour() != hh as u32 || now.minute() != mm as u32 {
-                        None
-                    } else {
-                        let key = (now.year(), now.month(), now.day());
-                        if state.last_daily == Some(key) {
-                            None
-                        } else {
-                            Some(ScheduleSlot::Daily(key))
-                        }
-                    }
-                }
-                other => {
-                    return Err(format!("unsupported schedule.kind: {other}").into());
                 }
             };
 
@@ -203,6 +523,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match scheduled_slot {
                 ScheduleSlot::Hourly(key) => state.last_hourly = Some(key),
                 ScheduleSlot::Daily(key) => state.last_daily = Some(key),
+                ScheduleSlot::Manual => {
+                    // If a manual trigger happens to coincide with a scheduled slot, consume that slot too
+                    // to avoid an immediate second run within the same minute.
+                    let eff = settings_config::effective_schedule(
+                        &settings.schedule,
+                        target.schedule.as_ref(),
+                    );
+                    if eff.enabled {
+                        match eff.kind.as_str() {
+                            "hourly" => {
+                                if now.minute() == eff.hourly_minute as u32 {
+                                    let key = (now.year(), now.month(), now.day(), now.hour());
+                                    state.last_hourly = Some(key);
+                                }
+                            }
+                            "daily" => {
+                                if let Ok((hh, mm)) = parse_hhmm(&eff.daily_at)
+                                    && now.hour() == hh as u32
+                                    && now.minute() == mm as u32
+                                {
+                                    let key = (now.year(), now.month(), now.day());
+                                    state.last_daily = Some(key);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
 
             let task_id = format!("tsk_{}", Uuid::new_v4());
@@ -222,10 +570,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             let started = Instant::now();
-            let label = if target.label.trim().is_empty() {
-                "scheduled".to_string()
-            } else {
-                target.label.clone()
+            let label = match scheduled_slot {
+                ScheduleSlot::Manual => "manual".to_string(),
+                _ => {
+                    if target.label.trim().is_empty() {
+                        "scheduled".to_string()
+                    } else {
+                        target.label.clone()
+                    }
+                }
             };
 
             let cfg = BackupConfig {
@@ -243,8 +596,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 keep_last_snapshots: settings.retention.keep_last_snapshots,
             };
 
-            let result =
-                televy_backup_core::run_backup_with(storage, cfg, BackupOptions::default()).await;
+            if let Ok(mut st) = status_state.lock() {
+                st.mark_run_start(&target.id);
+            }
+
+            let sink = StatusProgressSink {
+                target_id: target.id.clone(),
+                state: status_state.clone(),
+            };
+            let opts = BackupOptions {
+                cancel: None,
+                progress: Some(&sink),
+            };
+
+            let result = televy_backup_core::run_backup_with(storage, cfg, opts).await;
             let duration_seconds = started.elapsed().as_secs_f64();
 
             match result {
@@ -266,6 +631,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         index_parts = res.index_parts,
                         "run.finish"
                     );
+
+                    if let Ok(mut st) = status_state.lock() {
+                        st.mark_run_finish_success(
+                            &target.id,
+                            duration_seconds,
+                            res.files_indexed,
+                            res.bytes_uploaded,
+                            res.bytes_deduped,
+                        );
+                    }
 
                     let pool =
                         televy_backup_core::index_db::open_existing_index_db(&db_path).await?;
@@ -310,6 +685,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         error_message = %e,
                         "run.finish"
                     );
+
+                    if let Ok(mut st) = status_state.lock() {
+                        st.mark_run_finish_failure(
+                            &target.id,
+                            duration_seconds,
+                            e.code().to_string(),
+                        );
+                    }
                 }
             }
 
@@ -335,7 +718,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        sleep(Duration::from_secs(30)).await;
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn manual_trigger_watcher_loop(data_root: PathBuf, pending: Arc<AtomicBool>) {
+    let control_dir = data_root.join("control");
+    let path = control_dir.join("backup-now");
+    loop {
+        let removed = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || {
+                if !path.exists() {
+                    return Ok(false);
+                }
+                match std::fs::remove_file(&path) {
+                    Ok(()) => Ok(true),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(e) => Err(e),
+                }
+            }
+        })
+        .await;
+
+        match removed {
+            Ok(Ok(true)) => {
+                pending.store(true, Ordering::SeqCst);
+                tracing::info!(
+                    event = "manual.trigger",
+                    kind = "backup",
+                    path = %path.display(),
+                    "manual backup trigger consumed"
+                );
+            }
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    event = "manual.trigger_remove_failed",
+                    kind = "backup",
+                    path = %path.display(),
+                    error = %e,
+                    "failed to consume manual trigger"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    event = "manual.trigger_task_failed",
+                    kind = "backup",
+                    path = %path.display(),
+                    error = %e,
+                    "failed to spawn blocking task to consume manual trigger"
+                );
+            }
+        }
+        sleep(Duration::from_millis(200)).await;
     }
 }
 

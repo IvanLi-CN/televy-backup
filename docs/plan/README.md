@@ -63,5 +63,5 @@
 | 0007 | Pack 上传后台并发（scan 与 upload 解耦） | 已完成 | `0007:background-pack-uploads/PLAN.md` | 2026-01-23 | 已冻结：队列双阈值（jobs+bytes）+ 等待回压；`min_delay_ms` 全局节流；限速来源 `telegram.rate_limit.*`；覆盖所有 upload（pack/直传/index）；实现分支：`feat/0007-background-pack-uploads` |
 | 0008 | 状态弹出界面移除日志页（日志仅落盘） | 已完成 | `0008:status-popup-file-logging/PLAN.md` | 2026-01-24 | 已落地：Popover 移除 Logs + 移除 UI 内存日志缓存；UI 日志 `ui.log` 与 per-run logs 同目录；Settings 提供 Open logs（单入口）。实现分支：`feat/0008-status-popup-file-logging` |
 | 0009 | Settings：Endpoints 独立配置页（Targets 仅绑定） | 已完成 | `0009:endpoints-settings-page/PLAN.md` | 2026-01-24 |  |
-| 0010 | 状态弹窗重做：全局网络 + 多目标面板 + 开发者视图 | 待实现 | `0010:status-popover-dashboard/PLAN.md` | 2026-01-25 |  |
+| 0010 | 状态弹窗重做：全局网络 + 多目标面板 + 开发者视图 | 已完成 | `0010:status-popover-dashboard/PLAN.md` | 2026-01-26 | 实现分支：`feat/0010-status-popover-dashboard` |
 | 0011 | daemon 状态 IPC：替换 file-based 状态源 | 待实现 | `0011:daemon-status-ipc/PLAN.md` | 2026-01-25 |  |

@@ -16,19 +16,27 @@
 - `docs/design/ui/liquid-glass-popover-settings.svg`：可编辑源文件（SVG）
 - `docs/design/ui/statusbar-popover-ia.md`：信息架构与交互说明
 
-Plan #0005（Settings window 独立化）相关的最新 popover 设计在：
+## Settings window（独立窗口）+ Popover minimal
 
-- `docs/plan/0005:multi-backup-directories-keyed-restore/design/popover-minimal.png`（及同名 `.svg`）
+- `docs/design/ui/settings-window/popover-minimal.png`（及同名 `.svg`）
+- `docs/design/ui/settings-window/settings-window-targets.png`（及同名 `.svg`）
+- `docs/design/ui/settings-window/settings-window-schedule.png`（及同名 `.svg`）
+- `docs/design/ui/settings-window/settings-window-security.png`（及同名 `.svg`）
+- `docs/design/ui/settings-window/_preview-popover-minimal.html`
+- `docs/design/ui/settings-window/_preview-settings-window.html`
 
-Plan #0010（状态弹窗重做：全局网络 + 多目标面板 + Developer）相关设计在：
+## Status popover dashboard（全局 network + 多目标 + Developer）
 
-- `docs/plan/0010:status-popover-dashboard/design/popover-overview.png`（及同名 `.svg`）
-- `docs/plan/0010:status-popover-dashboard/design/popover-overview-empty.png`（及同名 `.svg`，targets=0）
-- `docs/plan/0010:status-popover-dashboard/design/developer-window.png`（及同名 `.svg`）
+- `docs/design/ui/statusbar-popover-dashboard/popover-overview.png`（及同名 `.svg`）
+- `docs/design/ui/statusbar-popover-dashboard/popover-overview-empty.png`（及同名 `.svg`，targets=0）
+- `docs/design/ui/statusbar-popover-dashboard/developer-window.png`（及同名 `.svg`）
+- `docs/design/ui/statusbar-popover-dashboard/_preview-popover.html`
 
 本地预览（macOS）：
 
 ```bash
 open docs/design/ui/liquid-glass-popover-overview.png
 open docs/design/ui/liquid-glass-popover-settings.png
+open docs/design/ui/settings-window/popover-minimal.png
+open docs/design/ui/statusbar-popover-dashboard/popover-overview.png
 ```

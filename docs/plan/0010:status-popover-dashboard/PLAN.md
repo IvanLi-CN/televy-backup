@@ -2,17 +2,17 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-24
-- Last: 2026-01-25
+- Last: 2026-01-26
 
 ## 已确认决策（Decisions, frozen）
 
 - “实时上下行/累计流量”采用**业务层口径**（bytesUploaded/bytesDownloaded），不使用传输层（MTProto session bytes sent/recv）。
 - Dev 视图对所有用户可见（不做隐藏开关/手势）。
 - Popover 尺寸：宽度固定 `360`；高度按内容自适应，最大高度为 `720`（高宽比 `2:1` 的上限）。当 targets 列表溢出时，列表区域滚动承载长列表，header/global 保持可见（或等价可用性设计）。
-- Targets 行仅展示**上行**（业务口径 bytesUploaded）；不展示 per-target 下行字段（避免在 backup 场景下误导）。
-- 本计划不引入 socket IPC：状态“真源”采用 daemon 落盘快照文件（`status.json`）；UI 仍通过 `televybackup status stream` 获取实时快照（UI 不直读文件）。
+- Targets 行仅展示**上行**（业务口径 bytesUploaded）与 last run 概要；不展示 per-target 下行字段（避免在 backup 场景下误导）。last run 次行默认展示 `bytesUploaded`；当 `bytesUploaded=0` 且 `bytesDeduped>0` 时，展示 `saved bytesDeduped`（可附带 `filesIndexed`）。
+- 本计划不引入 socket IPC：状态“真源”采用 daemon 落盘快照文件（`status.json`）；UI 默认通过 `televybackup status stream` 获取实时快照；当 CLI 不可用时允许退化为低频轮询 `status.json`（用于本地开发/应急）。
 
 ## 背景 / 问题陈述
 
@@ -64,6 +64,9 @@
 ### MUST
 
 - Popover 不提供 tabs/segmented 导航；打开即为 Overview。
+- Popover Header 必须提供 `Backup now`（立即备份）按钮：
+  - 可直接点击触发一次立即备份（不依赖打开 Settings）。
+  - 多 targets 时的默认触发策略需冻结（见“开放问题”）。
 - Popover（Overview）：全局区必须展示：
   - `Up`/`Down` 实时速率（单位自动切换；业务口径）。
   - `Up`/`Down` 自 UI 启动以来累计值（session totals；业务口径）。
@@ -158,6 +161,9 @@
 - Given 用户点击菜单栏图标打开 Popover，
   When 查看弹窗内容，
   Then 能看到全局 `Up/Down` 实时速率与 session totals，且每个 target 都有一行状态展示（targets 行仅展示 `Up`；缺失字段以 `—` 稳定回退）。
+- Given 用户点击 Header 的 `Backup now`（立即备份），
+  When 触发成功，
+  Then UI 能在 targets 列表中观察到对应 target 进入 `Running` 并开始更新进度（或给出明确失败提示与可排障入口）。
 - Given 任一 target 正在运行且底层有持续进度更新，
   When 用户观察 Overview，
   Then 进度条与关键数字以 `≥ 5Hz` 频率更新且无明显卡顿/滞后（人眼可感知延迟 ≤ 200ms 目标）。
@@ -206,18 +212,18 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: 定义并实现状态数据源（`status get/stream` + `StatusSnapshot`）
-- [ ] M2: Popover Overview 重做（全局网络 + 多 target 列表 + 进度/状态）
-- [ ] M3: Popover Dev 视图落地（全局 + per-target 原始字段展示）
-- [ ] M4: 测试与文档更新（契约测试 + UI smoke + IA 文档）
+- [x] M1: 定义并实现状态数据源（`status get/stream` + `StatusSnapshot`）
+- [x] M2: Popover Overview 重做（全局网络 + 多 target 列表 + 进度/状态）
+- [x] M3: Popover Dev 视图落地（全局 + per-target 原始字段展示）
+- [x] M4: 测试与文档更新（契约测试 + UI smoke + IA 文档）
 
 ## 设计图与说明（Design assets）
 
-- `design/popover-overview.svg` / `design/popover-overview.png`
-- `design/popover-overview-empty.svg` / `design/popover-overview-empty.png`
-- `design/developer-window.svg` / `design/developer-window.png`
-- `design/README.md`
-- `design/_preview-popover.html`
+- `docs/design/ui/statusbar-popover-dashboard/popover-overview.svg` / `docs/design/ui/statusbar-popover-dashboard/popover-overview.png`
+- `docs/design/ui/statusbar-popover-dashboard/popover-overview-empty.svg` / `docs/design/ui/statusbar-popover-dashboard/popover-overview-empty.png`
+- `docs/design/ui/statusbar-popover-dashboard/developer-window.svg` / `docs/design/ui/statusbar-popover-dashboard/developer-window.png`
+- `docs/design/ui/statusbar-popover-dashboard/README.md`
+- `docs/design/ui/statusbar-popover-dashboard/_preview-popover.html`
 
 ## 方案概述（Approach, high-level）
 
@@ -231,3 +237,14 @@
 - 风险：现有后端 `TaskProgress` 字段不包含网络层 tx/rx；需要新增埋点与汇聚后才能满足全局上下行需求。
 - 风险：daemon 与 UI 进程的生命周期与数据源耦合不清晰时，可能导致 stale/误报；需在契约中引入 `generatedAt` 与 `source` 字段。
 - 假设（需主人确认）：Dev 视图默认对所有用户可见（不做隐藏手势/开关）；若需要隐藏，将在实现前置条件中补充开关策略。
+- 开放问题（需主人确认）：多 targets 场景下点击 `Backup now` 的默认策略：
+- ✅ A) 立即备份所有 enabled targets（顺序/并发按既有后端策略）
+
+## Change log
+
+- 2026-01-25：实现 `status.json`（daemon）+ `televybackup status get/stream`（CLI）+ Popover Overview（全局 network + targets）+ Developer window（原始字段 + activity + Copy JSON/Reveal/Freeze）；同步设计资产到 `docs/design/ui/` 并更新 IA 文档；验证：`cargo test`、`scripts/macos/build-app.sh`。
+- 2026-01-25：Popover 打开时 best-effort 拉起 `televybackupd`：优先 `launchctl kickstart gui/<uid>/homebrew.mxcl.televybackupd`，无服务时回退为从 app bundle（或 PATH）直接启动；`scripts/macos/build-app.sh` 将 `televybackupd` 打进 `.app`，确保本地构建可自动拉起。
+- 2026-01-25：对齐 Popover Overview 视觉基准图：NETWORK/updated 排版、Up/Down chip 样式、Targets list（badge/row/empty state）与滚动分隔线；并将 daemon/status stream 的 best-effort 启动前置到 app launch（无需先打开 popover）。
+- 2026-01-26：订正设计基准图：Targets 行 `label`↔badge 间距统一（视觉约 10px）；右侧信息语义固定为“主行时间类 + 次行数值类”，避免不同状态下右侧含义乱跳，并同步到 IA 文档。
+- 2026-01-26：新增 `Backup now`（立即备份）按钮：多 targets 策略冻结为“立即备份所有 enabled targets”；实现为 UI 写入 `$TELEVYBACKUP_DATA_DIR/control/backup-now`，daemon 轮询消费触发并执行备份。
+- 2026-01-26：补齐“短任务可见性”：`lastRun` 增加 `filesIndexed`；Popover idle 次行在 `bytesUploaded=0` 但 `bytesDeduped>0` 时展示 `saved bytesDeduped`（可附带 files）；并在观测到新 `lastRun` 时弹 toast 提示完成/失败。修复 UI 启动 CLI 时 env 不一致问题（传递 `TELEVYBACKUP_CONFIG_DIR`/`TELEVYBACKUP_DATA_DIR`）；当 CLI 不可用时退化为低频轮询 `status.json`，避免面板空白/误判断开。
