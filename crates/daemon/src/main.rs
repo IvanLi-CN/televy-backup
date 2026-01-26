@@ -523,7 +523,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match scheduled_slot {
                 ScheduleSlot::Hourly(key) => state.last_hourly = Some(key),
                 ScheduleSlot::Daily(key) => state.last_daily = Some(key),
-                ScheduleSlot::Manual => {}
+                ScheduleSlot::Manual => {
+                    // If a manual trigger happens to coincide with a scheduled slot, consume that slot too
+                    // to avoid an immediate second run within the same minute.
+                    let eff = settings_config::effective_schedule(
+                        &settings.schedule,
+                        target.schedule.as_ref(),
+                    );
+                    if eff.enabled {
+                        match eff.kind.as_str() {
+                            "hourly" => {
+                                if now.minute() == eff.hourly_minute as u32 {
+                                    let key = (now.year(), now.month(), now.day(), now.hour());
+                                    state.last_hourly = Some(key);
+                                }
+                            }
+                            "daily" => {
+                                if let Ok((hh, mm)) = parse_hhmm(&eff.daily_at)
+                                    && now.hour() == hh as u32
+                                    && now.minute() == mm as u32
+                                {
+                                    let key = (now.year(), now.month(), now.day());
+                                    state.last_daily = Some(key);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
 
             let task_id = format!("tsk_{}", Uuid::new_v4());
@@ -699,15 +726,50 @@ async fn manual_trigger_watcher_loop(data_root: PathBuf, pending: Arc<AtomicBool
     let control_dir = data_root.join("control");
     let path = control_dir.join("backup-now");
     loop {
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-            pending.store(true, Ordering::SeqCst);
-            tracing::info!(
-                event = "manual.trigger",
-                kind = "backup",
-                path = %path.display(),
-                "manual backup trigger consumed"
-            );
+        let removed = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || {
+                if !path.exists() {
+                    return Ok(false);
+                }
+                match std::fs::remove_file(&path) {
+                    Ok(()) => Ok(true),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(e) => Err(e),
+                }
+            }
+        })
+        .await;
+
+        match removed {
+            Ok(Ok(true)) => {
+                pending.store(true, Ordering::SeqCst);
+                tracing::info!(
+                    event = "manual.trigger",
+                    kind = "backup",
+                    path = %path.display(),
+                    "manual backup trigger consumed"
+                );
+            }
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    event = "manual.trigger_remove_failed",
+                    kind = "backup",
+                    path = %path.display(),
+                    error = %e,
+                    "failed to consume manual trigger"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    event = "manual.trigger_task_failed",
+                    kind = "backup",
+                    path = %path.display(),
+                    error = %e,
+                    "failed to spawn blocking task to consume manual trigger"
+                );
+            }
         }
         sleep(Duration::from_millis(200)).await;
     }
