@@ -3,12 +3,15 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use sqlx::Row;
+use tokio::io::AsyncBufReadExt;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 use televy_backup_core::{
     APP_NAME, BackupConfig, BackupOptions, ChunkingConfig, ProgressSink, RestoreConfig,
     RestoreOptions, Storage, TelegramMtProtoStorage, TelegramMtProtoStorageConfig, VerifyConfig,
@@ -209,6 +212,11 @@ impl CliError {
             retryable: true,
         }
     }
+
+    fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = details;
+        self
+    }
 }
 
 struct NdjsonProgressSink {
@@ -382,68 +390,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     }
 }
 
-fn synthetic_snapshot_from_settings(
-    config_dir: &Path,
-    data_dir: &Path,
-) -> Result<televy_backup_core::status::StatusSnapshot, CliError> {
-    let settings = load_settings(config_dir)?;
-
-    let mut targets = Vec::new();
-    for t in settings.targets {
-        targets.push(televy_backup_core::status::TargetState {
-            target_id: t.id,
-            label: if t.label.trim().is_empty() {
-                None
-            } else {
-                Some(t.label)
-            },
-            source_path: t.source_path,
-            endpoint_id: t.endpoint_id,
-            enabled: t.enabled,
-            state: "stale".to_string(),
-            running_since: None,
-            up: televy_backup_core::status::Rate {
-                bytes_per_second: None,
-            },
-            up_total: televy_backup_core::status::Counter { bytes: None },
-            progress: None,
-            last_run: None,
-            extra: Default::default(),
-        });
-    }
-
-    Ok(televy_backup_core::status::StatusSnapshot {
-        type_: "status.snapshot".to_string(),
-        schema_version: 1,
-        generated_at: televy_backup_core::status::now_unix_ms(),
-        source: televy_backup_core::status::StatusSource {
-            kind: "cli".to_string(),
-            detail: Some(format!(
-                "fallback (missing {})",
-                televy_backup_core::status::status_json_path(data_dir).display()
-            )),
-        },
-        global: televy_backup_core::status::GlobalStatus {
-            up: televy_backup_core::status::Rate {
-                bytes_per_second: None,
-            },
-            down: televy_backup_core::status::Rate {
-                bytes_per_second: None,
-            },
-            up_total: televy_backup_core::status::Counter { bytes: None },
-            down_total: televy_backup_core::status::Counter { bytes: None },
-            ui_uptime_seconds: None,
-        },
-        targets,
-        extra: Default::default(),
-    })
-}
-
 async fn status_get(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
-    let path = televy_backup_core::status::status_json_path(data_dir);
-    let snap = match televy_backup_core::status::read_status_snapshot_json(&path) {
+    let snap = match read_status_snapshot_from_ipc(data_dir).await {
         Ok(s) => s,
-        Err(_) => synthetic_snapshot_from_settings(config_dir, data_dir)?,
+        Err(e) if e.code == "status.unavailable" => {
+            read_status_snapshot_from_file(config_dir, data_dir)?
+        }
+        Err(e) => return Err(e),
     };
 
     if json {
@@ -472,47 +425,50 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
         ));
     }
 
-    let path = televy_backup_core::status::status_json_path(data_dir);
-    let started = Instant::now();
+    #[cfg(unix)]
+    {
+        if let Ok(stream) = connect_status_ipc(data_dir).await {
+            return status_stream_ipc(stream).await;
+        }
+    }
 
-    let mut totals_by_target: HashMap<String, u64> = HashMap::new();
-    let mut smoothed_rate_by_target: HashMap<String, f64> = HashMap::new();
-    let mut prev_sample_at: Option<Instant> = None;
-    let mut prev_uploaded_by_target: HashMap<String, u64> = HashMap::new();
+    status_stream_file(config_dir, data_dir).await
+}
 
-    loop {
-        let read = televy_backup_core::status::read_status_snapshot_json(&path);
-        let mut snap = match read {
-            Ok(snap) => snap,
-            Err(_) => synthetic_snapshot_from_settings(config_dir, data_dir)?,
-        };
+#[derive(Default)]
+struct StatusStreamEnricher {
+    started: Option<Instant>,
+    totals_by_target: HashMap<String, u64>,
+    smoothed_rate_by_target: HashMap<String, f64>,
+    prev_sample_at: Option<Instant>,
+    prev_uploaded_by_target: HashMap<String, u64>,
+}
 
-        let is_daemon = snap.source.kind == "daemon";
+impl StatusStreamEnricher {
+    fn enrich(&mut self, snap: &mut televy_backup_core::status::StatusSnapshot) {
+        let started = *self.started.get_or_insert_with(Instant::now);
 
         let now_ms = televy_backup_core::status::now_unix_ms();
         let stale_age_ms = now_ms.saturating_sub(snap.generated_at);
         let now = Instant::now();
-        let dt = prev_sample_at
+        let dt = self
+            .prev_sample_at
             .map(|t| now.duration_since(t).as_secs_f64())
             .unwrap_or(0.0);
 
         let mut global_up_bps: u64 = 0;
         let mut any_target_rate = false;
         let mut global_up_total: u64 = 0;
-        let mut any_running = false;
 
         for t in &mut snap.targets {
-            if t.state == "running" {
-                any_running = true;
-            }
-
             let bytes_uploaded_now = t
                 .progress
                 .as_ref()
                 .and_then(|p| p.bytes_uploaded)
                 .unwrap_or(0);
 
-            let prev_bytes = prev_uploaded_by_target
+            let prev_bytes = self
+                .prev_uploaded_by_target
                 .get(&t.target_id)
                 .copied()
                 .unwrap_or(bytes_uploaded_now);
@@ -520,16 +476,13 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
             // A new run may reset counters to 0; avoid carrying stale EWMA rates across runs.
             let reset = bytes_uploaded_now < prev_bytes;
             if reset || t.state != "running" {
-                smoothed_rate_by_target.remove(&t.target_id);
+                self.smoothed_rate_by_target.remove(&t.target_id);
             }
 
-            let base = if reset {
-                bytes_uploaded_now
-            } else {
-                prev_bytes
-            };
+            let base = if reset { bytes_uploaded_now } else { prev_bytes };
             let delta = bytes_uploaded_now.saturating_sub(base);
-            let total = totals_by_target
+            let total = self
+                .totals_by_target
                 .entry(t.target_id.clone())
                 .and_modify(|v| *v = v.saturating_add(delta))
                 .or_insert(delta);
@@ -538,14 +491,15 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
             let mut bps: Option<u64> = None;
             if t.state == "running" && stale_age_ms <= 2_000 && dt > 0.0 {
                 let raw = (delta as f64) / dt;
-                let prev = smoothed_rate_by_target
+                let prev = self
+                    .smoothed_rate_by_target
                     .get(&t.target_id)
                     .copied()
                     .unwrap_or(raw);
                 // 1.0s window EWMA.
                 let alpha = 1.0 - (-dt).exp();
                 let smoothed = prev * (1.0 - alpha) + raw * alpha;
-                smoothed_rate_by_target.insert(t.target_id.clone(), smoothed);
+                self.smoothed_rate_by_target.insert(t.target_id.clone(), smoothed);
                 bps = Some(smoothed.max(0.0).round() as u64);
             }
 
@@ -557,7 +511,8 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
             }
             global_up_total = global_up_total.saturating_add(*total);
 
-            prev_uploaded_by_target.insert(t.target_id.clone(), bytes_uploaded_now);
+            self.prev_uploaded_by_target
+                .insert(t.target_id.clone(), bytes_uploaded_now);
         }
 
         snap.global.up.bytes_per_second = if any_target_rate {
@@ -570,12 +525,80 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
         snap.global.down_total.bytes = None;
         snap.global.ui_uptime_seconds = Some(started.elapsed().as_secs_f64());
 
-        let line = serde_json::to_string(&snap)
+        self.prev_sample_at = Some(now);
+    }
+}
+
+async fn status_stream_ipc(stream: impl tokio::io::AsyncRead + Unpin) -> Result<(), CliError> {
+    let mut enricher = StatusStreamEnricher::default();
+    let mut lines = tokio::io::BufReader::new(stream).lines();
+
+    let first = tokio::time::timeout(Duration::from_millis(500), lines.next_line())
+        .await
+        .map_err(|_| CliError::retryable("status.unavailable", "ipc status stream timed out"))?
+        .map_err(|e| CliError::retryable("status.unavailable", e.to_string()))?
+        .ok_or_else(|| CliError::retryable("status.unavailable", "ipc status stream ended"))?;
+
+    let mut snap: televy_backup_core::status::StatusSnapshot = serde_json::from_str(&first)
+        .map_err(|e| CliError::new("status.invalid", e.to_string()))?;
+    enricher.enrich(&mut snap);
+    println!(
+        "{}",
+        serde_json::to_string(&snap).map_err(|e| CliError::new("status.invalid", e.to_string()))?
+    );
+    let _ = std::io::stdout().flush();
+
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|e| CliError::retryable("status.unavailable", e.to_string()))?
+    {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let mut snap: televy_backup_core::status::StatusSnapshot = serde_json::from_str(&line)
+            .map_err(|e| CliError::new("status.invalid", e.to_string()))?;
+        enricher.enrich(&mut snap);
+
+        let out = serde_json::to_string(&snap)
+            .map_err(|e| CliError::new("status.invalid", e.to_string()))?;
+        println!("{out}");
+        let _ = std::io::stdout().flush();
+    }
+
+    Err(CliError::retryable(
+        "status.unavailable",
+        "ipc status stream ended",
+    ))
+}
+
+async fn status_stream_file(_config_dir: &Path, data_dir: &Path) -> Result<(), CliError> {
+    let path = televy_backup_core::status::status_json_path(data_dir);
+    let mut enricher = StatusStreamEnricher::default();
+
+    // If status.json is missing or invalid, treat it as unavailable (no synthetic snapshots).
+    let mut first = televy_backup_core::status::read_status_snapshot_json(&path).map_err(|e| {
+        CliError::new("status.unavailable", "status source unavailable").with_details(
+            serde_json::json!({
+                "statusJsonPath": path.display().to_string(),
+                "error": e.to_string(),
+            }),
+        )
+    })?;
+
+    loop {
+        let is_daemon = first.source.kind == "daemon";
+        let now_ms = televy_backup_core::status::now_unix_ms();
+        let stale_age_ms = now_ms.saturating_sub(first.generated_at);
+        let any_running = first.targets.iter().any(|t| t.state == "running");
+
+        enricher.enrich(&mut first);
+
+        let line = serde_json::to_string(&first)
             .map_err(|e| CliError::new("status.invalid", e.to_string()))?;
         println!("{line}");
         let _ = std::io::stdout().flush();
-
-        prev_sample_at = Some(now);
 
         let sleep = if is_daemon && any_running && stale_age_ms <= 2_000 {
             std::time::Duration::from_millis(100)
@@ -583,7 +606,76 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
             std::time::Duration::from_secs(1)
         };
         tokio::time::sleep(sleep).await;
+
+        first = televy_backup_core::status::read_status_snapshot_json(&path).map_err(|e| {
+            CliError::new("status.unavailable", "status source unavailable").with_details(
+                serde_json::json!({
+                    "statusJsonPath": path.display().to_string(),
+                    "error": e.to_string(),
+                }),
+            )
+        })?;
     }
+}
+
+#[cfg(unix)]
+async fn connect_status_ipc(data_dir: &Path) -> std::io::Result<UnixStream> {
+    let socket_path = televy_backup_core::status::status_ipc_socket_path(data_dir);
+    UnixStream::connect(socket_path).await
+}
+
+#[cfg(not(unix))]
+async fn connect_status_ipc(_data_dir: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("status IPC is only supported on unix"))
+}
+
+#[cfg(not(unix))]
+async fn read_status_snapshot_from_ipc(
+    _data_dir: &Path,
+) -> Result<televy_backup_core::status::StatusSnapshot, CliError> {
+    Err(CliError::new(
+        "status.unavailable",
+        "status IPC is only supported on unix",
+    ))
+}
+
+#[cfg(unix)]
+async fn read_status_snapshot_from_ipc(
+    data_dir: &Path,
+) -> Result<televy_backup_core::status::StatusSnapshot, CliError> {
+    let stream = connect_status_ipc(data_dir).await.map_err(|e| {
+        CliError::new("status.unavailable", "status ipc unavailable").with_details(
+            serde_json::json!({
+                "socketPath": televy_backup_core::status::status_ipc_socket_path(data_dir).display().to_string(),
+                "error": e.to_string(),
+            }),
+        )
+    })?;
+
+    let mut lines = tokio::io::BufReader::new(stream).lines();
+    let line = tokio::time::timeout(Duration::from_millis(500), lines.next_line())
+        .await
+        .map_err(|_| CliError::retryable("status.unavailable", "ipc status get timed out"))?
+        .map_err(|e| CliError::new("status.unavailable", e.to_string()))?
+        .ok_or_else(|| CliError::new("status.unavailable", "ipc status get ended"))?;
+
+    serde_json::from_str(&line).map_err(|e| CliError::new("status.invalid", e.to_string()))
+}
+
+fn read_status_snapshot_from_file(
+    config_dir: &Path,
+    data_dir: &Path,
+) -> Result<televy_backup_core::status::StatusSnapshot, CliError> {
+    let _ = config_dir; // reserved for future compatibility checks / synthetic snapshots
+    let path = televy_backup_core::status::status_json_path(data_dir);
+    televy_backup_core::status::read_status_snapshot_json(&path).map_err(|e| {
+        CliError::new("status.unavailable", "status source unavailable").with_details(
+            serde_json::json!({
+                "statusJsonPath": path.display().to_string(),
+                "error": e.to_string(),
+            }),
+        )
+    })
 }
 
 async fn settings_get(config_dir: &Path, json: bool, with_secrets: bool) -> Result<(), CliError> {

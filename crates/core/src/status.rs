@@ -29,6 +29,10 @@ pub fn status_json_path(data_dir: &Path) -> PathBuf {
     data_dir.join("status").join("status.json")
 }
 
+pub fn status_ipc_socket_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("ipc").join("status.sock")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Rate {
