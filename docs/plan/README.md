@@ -65,3 +65,4 @@
 | 0009 | Settings：Endpoints 独立配置页（Targets 仅绑定） | 已完成 | `0009:endpoints-settings-page/PLAN.md` | 2026-01-24 |  |
 | 0010 | 状态弹窗重做：全局网络 + 多目标面板 + 开发者视图 | 已完成 | `0010:status-popover-dashboard/PLAN.md` | 2026-01-26 | 实现分支：`feat/0010-status-popover-dashboard` |
 | 0011 | daemon 状态 IPC：替换 file-based 状态源 | 待实现 | `0011:daemon-status-ipc/PLAN.md` | 2026-01-25 |  |
+| 0012 | 备份远端索引权威 + 本地自动同步（remote-first） | 待实现 | `0012:remote-first-index-sync/PLAN.md` | 2026-01-27 |  |
