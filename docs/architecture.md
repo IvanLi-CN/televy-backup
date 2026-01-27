@@ -17,15 +17,17 @@
 
 The macOS popover “dashboard” UI is driven by a single snapshot schema (`StatusSnapshot`) and a single stream:
 
-- **Source of truth** (daemon): `status.json` written by `televybackupd` via atomic write + rename.
-  - Path: `$TELEVYBACKUP_DATA_DIR/status/status.json` (or macOS default data dir when env vars are unset).
+- **Source of truth** (daemon): local IPC status stream (Unix domain socket).
+  - Socket: `$TELEVYBACKUP_DATA_DIR/ipc/status.sock` (or macOS default data dir when env vars are unset).
   - Semantics:
     - `generatedAt` is used for stale detection in the UI.
     - `global.*Total` and `targets[].upTotal` are **session totals** (UI/stream start → now) and are not persisted.
+- **Fallback** (daemon → file): `status.json` written by `televybackupd` via atomic write + rename.
+  - Path: `$TELEVYBACKUP_DATA_DIR/status/status.json`.
 - **Transport** (CLI): `televybackup --json status stream` emits NDJSON, one `status.snapshot` per line.
   - The UI runs this as a long-lived process and decodes each line.
-  - The UI should pass `TELEVYBACKUP_CONFIG_DIR` / `TELEVYBACKUP_DATA_DIR` to the spawned CLI so it reads the same snapshot location as the daemon.
-  - If `status.json` is missing/unreadable, the CLI emits a synthetic snapshot derived from Settings (targets list only) with `source.kind="cli"` and `targets[].state="stale"`, so the UI can still render configured targets.
+  - The UI should pass `TELEVYBACKUP_CONFIG_DIR` / `TELEVYBACKUP_DATA_DIR` to the spawned CLI so it connects to the same IPC socket as the daemon.
+  - If IPC is unavailable, the CLI falls back to reading `status.json`; if both are unavailable, it returns `status.unavailable`.
   - If the CLI binary itself is unavailable (dev/local), the UI may fall back to polling `status.json` directly at low frequency (e.g. 1Hz) to avoid a blank dashboard.
 
 ## Data locations
