@@ -303,8 +303,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             SecretsCmd::ClearTelegramMtprotoSession => {
                 secrets_clear_telegram_mtproto_session(&config_dir, &data_dir, cli.json).await
             }
-            SecretsCmd::MigrateKeychain => secrets_migrate_keychain(&config_dir, &data_dir, cli.json).await,
-            SecretsCmd::InitMasterKey => secrets_init_master_key(&config_dir, &data_dir, cli.json).await,
+            SecretsCmd::MigrateKeychain => {
+                secrets_migrate_keychain(&config_dir, &data_dir, cli.json).await
+            }
+            SecretsCmd::InitMasterKey => {
+                secrets_init_master_key(&config_dir, &data_dir, cli.json).await
+            }
             SecretsCmd::ExportMasterKey { i_understand } => {
                 secrets_export_master_key(&config_dir, &data_dir, i_understand, cli.json).await
             }
@@ -696,8 +700,12 @@ async fn settings_get(
         if with_secrets {
             let master_present = get_secret(config_dir, data_dir, MASTER_KEY_KEY)?.is_some();
 
-            let mtproto_api_hash_present =
-                get_secret(config_dir, data_dir, &settings.telegram.mtproto.api_hash_key)?.is_some();
+            let mtproto_api_hash_present = get_secret(
+                config_dir,
+                data_dir,
+                &settings.telegram.mtproto.api_hash_key,
+            )?
+            .is_some();
 
             let mut bot_present_by_endpoint = serde_json::Map::<String, serde_json::Value>::new();
             let mut mtproto_session_present_by_endpoint =
@@ -735,13 +743,18 @@ async fn settings_get(
         }
         if with_secrets {
             let master_present = get_secret(config_dir, data_dir, MASTER_KEY_KEY)?.is_some();
-            let mtproto_api_hash_present =
-                get_secret(config_dir, data_dir, &settings.telegram.mtproto.api_hash_key)?.is_some();
+            let mtproto_api_hash_present = get_secret(
+                config_dir,
+                data_dir,
+                &settings.telegram.mtproto.api_hash_key,
+            )?
+            .is_some();
             println!();
             println!("masterKeyPresent={master_present}");
             println!("telegramMtprotoApiHashPresent={mtproto_api_hash_present}");
             for ep in &settings.telegram_endpoints {
-                let telegram_present = get_secret(config_dir, data_dir, &ep.bot_token_key)?.is_some();
+                let telegram_present =
+                    get_secret(config_dir, data_dir, &ep.bot_token_key)?.is_some();
                 let mtproto_session_present =
                     get_secret(config_dir, data_dir, &ep.mtproto.session_key)?.is_some();
                 println!(
@@ -1140,13 +1153,17 @@ async fn telegram_validate(
 
     let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
         .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
-    let api_hash =
-        get_secret(config_dir, data_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(|| {
-            CliError::new(
-                "telegram.mtproto.missing_api_hash",
-                "mtproto api_hash missing",
-            )
-        })?;
+    let api_hash = get_secret(
+        config_dir,
+        data_dir,
+        &settings.telegram.mtproto.api_hash_key,
+    )?
+    .ok_or_else(|| {
+        CliError::new(
+            "telegram.mtproto.missing_api_hash",
+            "mtproto api_hash missing",
+        )
+    })?;
 
     let session = load_optional_base64_secret_bytes(
         config_dir,
@@ -2056,13 +2073,17 @@ async fn restore_list_latest(
     let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
         .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
     let master_key = load_master_key(config_dir, data_dir)?;
-    let api_hash =
-        get_secret(config_dir, data_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(|| {
-            CliError::new(
-                "telegram.mtproto.missing_api_hash",
-                "mtproto api_hash missing",
-            )
-        })?;
+    let api_hash = get_secret(
+        config_dir,
+        data_dir,
+        &settings.telegram.mtproto.api_hash_key,
+    )?
+    .ok_or_else(|| {
+        CliError::new(
+            "telegram.mtproto.missing_api_hash",
+            "mtproto api_hash missing",
+        )
+    })?;
     let session = load_optional_base64_secret_bytes(
         config_dir,
         data_dir,
@@ -2196,13 +2217,17 @@ async fn restore_latest(
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
         let master_key = load_master_key(config_dir, data_dir)?;
-        let api_hash = get_secret(config_dir, data_dir, &settings.telegram.mtproto.api_hash_key)?
-            .ok_or_else(|| {
-                CliError::new(
-                    "telegram.mtproto.missing_api_hash",
-                    "mtproto api_hash missing",
-                )
-            })?;
+        let api_hash = get_secret(
+            config_dir,
+            data_dir,
+            &settings.telegram.mtproto.api_hash_key,
+        )?
+        .ok_or_else(|| {
+            CliError::new(
+                "telegram.mtproto.missing_api_hash",
+                "mtproto api_hash missing",
+            )
+        })?;
         let session = load_optional_base64_secret_bytes(
             config_dir,
             data_dir,
@@ -2692,16 +2717,14 @@ fn vault_ipc_call(data_dir: &Path, req: &VaultIpcRequest) -> Result<VaultIpcResp
 
     let mut reader = BufReader::new(stream);
     let mut resp_line = String::new();
-    reader
-        .read_line(&mut resp_line)
-        .map_err(|e| {
-            CliError::retryable("daemon.unavailable", "vault IPC read failed").with_details(
-                serde_json::json!({
-                    "socketPath": socket_path.display().to_string(),
-                    "error": e.to_string(),
-                }),
-            )
-        })?;
+    reader.read_line(&mut resp_line).map_err(|e| {
+        CliError::retryable("daemon.unavailable", "vault IPC read failed").with_details(
+            serde_json::json!({
+                "socketPath": socket_path.display().to_string(),
+                "error": e.to_string(),
+            }),
+        )
+    })?;
 
     let resp: VaultIpcResponse = serde_json::from_str(resp_line.trim_end())
         .map_err(|e| CliError::new("daemon.unavailable", format!("invalid IPC response: {e}")))?;
@@ -2711,7 +2734,8 @@ fn vault_ipc_call(data_dir: &Path, req: &VaultIpcRequest) -> Result<VaultIpcResp
     } else {
         Err(CliError::new(
             "daemon.failed",
-            resp.error.unwrap_or_else(|| "daemon request failed".to_string()),
+            resp.error
+                .unwrap_or_else(|| "daemon request failed".to_string()),
         ))
     }
 }
@@ -2726,9 +2750,8 @@ fn vault_ipc_call(_data_dir: &Path, _req: &VaultIpcRequest) -> Result<VaultIpcRe
 
 fn daemon_vault_get_or_create_b64(data_dir: &Path) -> Result<String, CliError> {
     let resp = vault_ipc_call(data_dir, &VaultIpcRequest::VaultGetOrCreate)?;
-    resp.vault_key_b64.ok_or_else(|| {
-        CliError::new("daemon.failed", "vault IPC missing vault_key_b64")
-    })
+    resp.vault_key_b64
+        .ok_or_else(|| CliError::new("daemon.failed", "vault IPC missing vault_key_b64"))
 }
 
 fn daemon_keychain_get_secret(data_dir: &Path, key: &str) -> Result<Option<String>, CliError> {
@@ -2771,12 +2794,7 @@ fn get_secret(config_dir: &Path, data_dir: &Path, key: &str) -> Result<Option<St
     Ok(store.get(key).map(|s| s.to_string()))
 }
 
-fn set_secret(
-    config_dir: &Path,
-    data_dir: &Path,
-    key: &str,
-    value: &str,
-) -> Result<(), CliError> {
+fn set_secret(config_dir: &Path, data_dir: &Path, key: &str, value: &str) -> Result<(), CliError> {
     let vault_key = load_or_create_vault_key(data_dir)?;
     let path = televy_backup_core::secrets::secrets_path(config_dir);
     let mut store = televy_backup_core::secrets::load_secrets_store(&path, &vault_key)

@@ -912,9 +912,7 @@ fn keychain_set_secret(key: &str, value: &str) -> Result<(), Box<dyn std::error:
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn keychain_delete_secret(
-    key: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
+pub(crate) fn keychain_delete_secret(key: &str) -> Result<bool, Box<dyn std::error::Error>> {
     use security_framework::passwords::delete_generic_password;
 
     match delete_generic_password(televy_backup_core::APP_NAME, key) {
@@ -929,9 +927,7 @@ pub(crate) fn keychain_delete_secret(
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn keychain_delete_secret(
-    _key: &str,
-) -> Result<bool, Box<dyn std::error::Error>> {
+pub(crate) fn keychain_delete_secret(_key: &str) -> Result<bool, Box<dyn std::error::Error>> {
     Err("keychain only supported on macOS".into())
 }
 
