@@ -114,7 +114,7 @@
 
 - Given pinned bootstrap catalog 存在但不可解密，
   When 执行 `backup run`（默认行为），
-  Then 不覆盖 pinned catalog，并返回可操作的错误（提示导入正确 master key 或使用显式 force 覆盖入口）。
+  Then 不覆盖 pinned catalog，并返回可操作的错误（提示导入正确 master key / TBK1）。
 
 - Given 用户显式禁用远端对齐（例如 `--no-remote-index-sync`），
   When 执行 `backup run`，
@@ -150,7 +150,7 @@
 
 - [ ] M1: Core 抽取并复用“download remote index db（manifest → sqlite）”能力（支持原子落盘）
 - [ ] M2: CLI `backup run` 接入 preflight index sync（默认启用 + 开关）
-- [ ] M3: pinned catalog 覆盖策略收紧（decrypt 失败默认拒绝覆盖 + 明确 force 入口）
+- [ ] M3: pinned catalog 覆盖策略收紧（decrypt 失败默认拒绝覆盖 + 明确错误指引）
 - [ ] M4: 测试覆盖（unit + integration）
 - [ ] M5: 文档与 release notes 更新
 
