@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-24
-- Last: 2026-01-25
+- Last: 2026-01-26
 
 ## 背景 / 问题陈述
 
@@ -116,6 +116,10 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: daemon status IPC server（socket + NDJSON 输出 + 限频）
-- [ ] M2: CLI 默认改为 IPC，并实现 fallback
-- [ ] M3: 测试与文档更新（契约/断线/时延）
+- [x] M1: daemon status IPC server（socket + NDJSON 输出 + 限频）
+- [x] M2: CLI 默认改为 IPC，并实现 fallback
+- [x] M3: 测试与文档更新（契约/断线/时延）
+
+## Change log
+
+- 2026-01-26: 新增 daemon status IPC（NDJSON over Unix socket），CLI `status get/stream` 默认改走 IPC 并保留 `status.json` fallback；补充 IPC cadence 与首条快照时延测试；同步更新相关契约与架构文档。

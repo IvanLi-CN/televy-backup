@@ -36,7 +36,7 @@ televybackup --json status get
   - 选择 NDJSON 的原因：可逐行增量解析（无需等待/缓存完整 JSON 数组），天然适合长连接流；单行损坏也更易跳过/重连；并且便于用 `tail -f` / 日志管道做排障。
   - 运行中推荐频率：`5–10Hz`；静止态可降至 `1Hz`（由实现决定，但必须稳定）。
   - 必须包含 `generatedAt`（用于 stale 判定）。
-  - 数据来源：从 daemon 落盘 `status.json` 读取；CLI 作为适配层对上层输出统一事件流（UI 不直读文件）。
+  - 数据来源：优先从 daemon 的本地 IPC（Unix domain socket）读取（见计划 #0011）；CLI 作为适配层对上层输出统一事件流（UI 不直读 socket/文件）。
 
 ### Usage
 
@@ -56,7 +56,8 @@ televybackup --json status stream
 
 - 若 stream 退出：UI 侧应显示 stale，并尝试指数退避重连（实现策略在 impl 阶段确定）。
 
-### Fallback behavior (no daemon snapshots)
+### Fallback behavior
 
-- 若 `status.json` 不存在或不可读：`status get/stream` 会返回一个由 `settings v2` 合成的最小快照（`source.kind="cli"`）。
-- 合成快照的 `targets[]` 仅包含配置态字段（`targetId/label/sourcePath/endpointId/enabled`），并将 `state="stale"` 以提示“缺少运行态状态源”。
+- Default: connect IPC (`$TELEVYBACKUP_DATA_DIR/ipc/status.sock`) and stream NDJSON `status.snapshot`.
+- Fallback: if IPC is unavailable, read `$TELEVYBACKUP_DATA_DIR/status/status.json` and stream.
+- Failure: if both are unavailable, return `status.unavailable`.

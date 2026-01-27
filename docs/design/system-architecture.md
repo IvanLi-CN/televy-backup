@@ -55,19 +55,19 @@ macOS 默认（未设置 env 时，GUI 侧）：
 
 ## 3. 状态快照（Popover/Developer Dashboard）
 
-### 3.1 真源：daemon 落盘 `status.json`
+### 3.1 真源：daemon 本地 IPC（Unix domain socket）
 
-- 文件路径：`$TELEVYBACKUP_DATA_DIR/status/status.json`
-- 写入方式：临时文件写入 + `fsync` + `rename`（原子替换），避免 UI 读到半写入内容。
+- Socket 路径：`$TELEVYBACKUP_DATA_DIR/ipc/status.sock`
+- 输出：NDJSON，每行一个 `StatusSnapshot`（`type="status.snapshot"`），便于调试与逐行解析。
 - 关键字段：
   - `generatedAt`：UI 用于 stale/disconnected 判定的时间基准。
-  - `source.kind`：区分 `daemon`/`cli` 等来源（UI 用于解释“为什么看起来不是 live”）。
+  - `source.kind`：区分 `daemon`/`cli` 等来源（用于解释“为什么看起来不是 live”）。
 
 ### 3.2 传输：CLI `status stream`（NDJSON）
 
 - 命令：`televybackup --json status stream`
 - 输出：NDJSON，每行一条 `status.snapshot`，UI 使用长生命周期进程持续读取（避免轮询与频繁拉起进程）。
-- 兼容策略：当 `status.json` 缺失/不可读时，CLI 可输出基于 Settings 推导的“合成快照”（targets 列表仍可渲染，但标记为 stale）。
+- 兼容策略：CLI 优先连接 IPC；若 IPC 不可用则 fallback 读取 `status.json`；两者都不可用时返回 `status.unavailable`。
 
 ### 3.3 UI 语义：Live / Stale / Disconnected
 
@@ -80,7 +80,7 @@ Popover 右上角状态灯与 header 文案反映“快照新鲜度”：
 如果用户看到“未连接/红色”，优先排查：
 
 1) `televybackupd` 是否在跑（LaunchAgent / 进程）
-2) `status.json` 是否在预期路径产生并更新
+2) `status.sock` 是否在预期路径产生并可连接（或 fallback 的 `status.json` 是否存在）
 3) GUI 是否在读取同一个 `TELEVYBACKUP_*_DIR`（路径不一致会导致 UI 永远等不到快照）
 
 ## 4. 启动模型（Startup / Lifecycle）

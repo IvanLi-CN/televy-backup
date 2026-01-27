@@ -9,7 +9,7 @@ use chrono::{Datelike, Timelike};
 use sqlx::Row;
 use televy_backup_core::status::{
     Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource, StatusWriteOptions,
-    TargetRunSummary, TargetState, now_unix_ms, status_json_path,
+    TargetRunSummary, TargetState, now_unix_ms, status_ipc_socket_path, status_json_path,
     write_status_snapshot_json_atomic_with_options,
 };
 use televy_backup_core::{
@@ -20,6 +20,8 @@ use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
+
+mod status_ipc;
 
 #[derive(Default, Clone)]
 struct TargetScheduleState {
@@ -344,6 +346,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
     let status_path = status_json_path(&data_root);
     tokio::spawn(status_writer_loop(status_state.clone(), status_path));
+
+    let ipc_socket_path = status_ipc_socket_path(&data_root);
+    let ipc_state = status_state.clone();
+    let _status_ipc_server = match status_ipc::spawn_status_ipc_server(
+        ipc_socket_path.clone(),
+        Arc::new(move || {
+            let now_ms = now_unix_ms();
+            match ipc_state.lock() {
+                Ok(st) => {
+                    let has_running = st.has_running();
+                    let mut snap = st.build_snapshot(now_ms);
+                    snap.source.detail = Some("televybackupd (ipc)".to_string());
+                    (snap, has_running)
+                }
+                Err(_) => {
+                    let snap = StatusSnapshot {
+                        type_: "status.snapshot".to_string(),
+                        schema_version: 1,
+                        generated_at: now_ms,
+                        source: StatusSource {
+                            kind: "daemon".to_string(),
+                            detail: Some("televybackupd (ipc)".to_string()),
+                        },
+                        global: GlobalStatus {
+                            up: Rate {
+                                bytes_per_second: None,
+                            },
+                            down: Rate {
+                                bytes_per_second: None,
+                            },
+                            up_total: Counter { bytes: None },
+                            down_total: Counter { bytes: None },
+                            ui_uptime_seconds: None,
+                        },
+                        targets: Vec::new(),
+                        extra: Default::default(),
+                    };
+                    (snap, false)
+                }
+            }
+        }),
+    ) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!(
+                event = "status.ipc_bind_failed",
+                error = %e,
+                path = %ipc_socket_path.display(),
+                "status.ipc_bind_failed"
+            );
+            None
+        }
+    };
 
     if settings.telegram.mtproto.api_id <= 0 {
         return Err("telegram.mtproto.api_id must be > 0".into());
