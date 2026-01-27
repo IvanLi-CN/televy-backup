@@ -584,7 +584,7 @@ async fn status_stream_file(_config_dir: &Path, data_dir: &Path) -> Result<(), C
 
     // If status.json is missing or invalid, treat it as unavailable (no synthetic snapshots).
     let mut first = televy_backup_core::status::read_status_snapshot_json(&path).map_err(|e| {
-        CliError::new("status.unavailable", "status source unavailable").with_details(
+        CliError::retryable("status.unavailable", "status source unavailable").with_details(
             serde_json::json!({
                 "statusJsonPath": path.display().to_string(),
                 "error": e.to_string(),
@@ -613,7 +613,7 @@ async fn status_stream_file(_config_dir: &Path, data_dir: &Path) -> Result<(), C
         tokio::time::sleep(sleep).await;
 
         first = televy_backup_core::status::read_status_snapshot_json(&path).map_err(|e| {
-            CliError::new("status.unavailable", "status source unavailable").with_details(
+            CliError::retryable("status.unavailable", "status source unavailable").with_details(
                 serde_json::json!({
                     "statusJsonPath": path.display().to_string(),
                     "error": e.to_string(),
@@ -640,7 +640,7 @@ async fn connect_status_ipc(_data_dir: &Path) -> std::io::Result<()> {
 async fn read_status_snapshot_from_ipc(
     _data_dir: &Path,
 ) -> Result<televy_backup_core::status::StatusSnapshot, CliError> {
-    Err(CliError::new(
+    Err(CliError::retryable(
         "status.unavailable",
         "status IPC is only supported on unix",
     ))
@@ -651,7 +651,7 @@ async fn read_status_snapshot_from_ipc(
     data_dir: &Path,
 ) -> Result<televy_backup_core::status::StatusSnapshot, CliError> {
     let stream = connect_status_ipc(data_dir).await.map_err(|e| {
-        CliError::new("status.unavailable", "status ipc unavailable").with_details(
+        CliError::retryable("status.unavailable", "status ipc unavailable").with_details(
             serde_json::json!({
                 "socketPath": televy_backup_core::status::status_ipc_socket_path(data_dir).display().to_string(),
                 "error": e.to_string(),
@@ -663,8 +663,8 @@ async fn read_status_snapshot_from_ipc(
     let line = tokio::time::timeout(Duration::from_millis(500), lines.next_line())
         .await
         .map_err(|_| CliError::retryable("status.unavailable", "ipc status get timed out"))?
-        .map_err(|e| CliError::new("status.unavailable", e.to_string()))?
-        .ok_or_else(|| CliError::new("status.unavailable", "ipc status get ended"))?;
+        .map_err(|e| CliError::retryable("status.unavailable", e.to_string()))?
+        .ok_or_else(|| CliError::retryable("status.unavailable", "ipc status get ended"))?;
 
     serde_json::from_str(&line).map_err(|e| CliError::new("status.invalid", e.to_string()))
 }
@@ -676,7 +676,7 @@ fn read_status_snapshot_from_file(
     let _ = config_dir; // reserved for future compatibility checks / synthetic snapshots
     let path = televy_backup_core::status::status_json_path(data_dir);
     televy_backup_core::status::read_status_snapshot_json(&path).map_err(|e| {
-        CliError::new("status.unavailable", "status source unavailable").with_details(
+        CliError::retryable("status.unavailable", "status source unavailable").with_details(
             serde_json::json!({
                 "statusJsonPath": path.display().to_string(),
                 "error": e.to_string(),
