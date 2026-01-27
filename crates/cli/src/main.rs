@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 

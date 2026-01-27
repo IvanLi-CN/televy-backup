@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use base64::Engine;
@@ -865,6 +867,7 @@ fn default_data_dir() -> PathBuf {
 }
 
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
+#[cfg(target_os = "macos")]
 static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
 
 fn get_secret_from_store(
