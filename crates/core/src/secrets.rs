@@ -93,6 +93,10 @@ pub fn secrets_path(config_dir: &Path) -> PathBuf {
     config_dir.join(SECRETS_FILE_NAME)
 }
 
+pub fn vault_ipc_socket_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("ipc").join("vault.sock")
+}
+
 pub fn load_secrets_store(
     path: &Path,
     vault_key: &[u8; 32],

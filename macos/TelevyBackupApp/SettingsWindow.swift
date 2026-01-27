@@ -1,5 +1,4 @@
 import AppKit
-import Security
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -675,11 +674,6 @@ struct SettingsWindowRootView: View {
             return
         }
 
-        let vaultPresent = keychainHasGenericPassword(
-            service: "TelevyBackup",
-            account: "televybackup.vault_key"
-        )
-
         reloadSeq += 1
         let seq = reloadSeq
 
@@ -692,7 +686,7 @@ struct SettingsWindowRootView: View {
             if res.status != 0 {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = vaultPresent
+                    self.vaultKeyPresent = false
                     self.loadError = "settings get failed: exit=\(res.status)"
                 }
                 return
@@ -700,7 +694,7 @@ struct SettingsWindowRootView: View {
             guard let data = res.stdout.data(using: .utf8) else {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = vaultPresent
+                    self.vaultKeyPresent = false
                     self.loadError = "settings get: bad output"
                 }
                 return
@@ -712,7 +706,7 @@ struct SettingsWindowRootView: View {
             } catch {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = vaultPresent
+                    self.vaultKeyPresent = false
                     self.loadError = "settings get: JSON decode failed"
                 }
                 return
@@ -720,7 +714,7 @@ struct SettingsWindowRootView: View {
 
             DispatchQueue.main.async {
                 guard seq == self.reloadSeq else { return }
-                self.vaultKeyPresent = vaultPresent
+                self.vaultKeyPresent = true
                 self.settings = decoded.settings
                 self.secrets = decoded.secrets
                 self.loadError = nil
@@ -760,18 +754,6 @@ struct SettingsWindowRootView: View {
         } catch {
             // Best-effort UX: keep the view responsive; user can retry.
         }
-    }
-
-    private func keychainHasGenericPassword(service: String, account: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: false,
-        ]
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        return status == errSecSuccess
     }
 
     private func queueAutoSave() {

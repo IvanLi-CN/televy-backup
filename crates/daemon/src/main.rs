@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use base64::Engine;
@@ -22,6 +22,7 @@ use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 mod status_ipc;
+mod vault_ipc;
 
 #[derive(Default, Clone)]
 struct TargetScheduleState {
@@ -395,6 +396,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error = %e,
                 path = %ipc_socket_path.display(),
                 "status.ipc_bind_failed"
+            );
+            None
+        }
+    };
+
+    let vault_socket_path = televy_backup_core::secrets::vault_ipc_socket_path(&data_root);
+    let _vault_ipc_server = match vault_ipc::spawn_vault_ipc_server(vault_socket_path.clone()) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!(
+                event = "vault.ipc_bind_failed",
+                error = %e,
+                path = %vault_socket_path.display(),
+                "vault.ipc_bind_failed"
             );
             None
         }
@@ -850,6 +865,7 @@ fn default_data_dir() -> PathBuf {
 }
 
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
+static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
 
 fn get_secret_from_store(
     store: &televy_backup_core::secrets::SecretsStore,
@@ -865,7 +881,7 @@ fn decode_base64_32(b64: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub(crate) fn keychain_get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
     use security_framework::passwords::{PasswordOptions, generic_password};
 
     let opts = PasswordOptions::new_generic_password(televy_backup_core::APP_NAME, key);
@@ -882,7 +898,9 @@ fn keychain_get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::
 }
 
 #[cfg(not(target_os = "macos"))]
-fn keychain_get_secret(_key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub(crate) fn keychain_get_secret(
+    _key: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     Err("keychain only supported on macOS".into())
 }
 
@@ -894,13 +912,48 @@ fn keychain_set_secret(key: &str, value: &str) -> Result<(), Box<dyn std::error:
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn keychain_delete_secret(
+    key: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use security_framework::passwords::delete_generic_password;
+
+    match delete_generic_password(televy_backup_core::APP_NAME, key) {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            if is_keychain_not_found(&e) {
+                return Ok(false);
+            }
+            Err(Box::new(e))
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn keychain_delete_secret(
+    _key: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    Err("keychain only supported on macOS".into())
+}
+
+#[cfg(target_os = "macos")]
 fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
     // errSecItemNotFound
     e.code() == -25300
 }
 
 #[cfg(target_os = "macos")]
-fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    if let Some(key) = VAULT_KEY_CACHE.get() {
+        return Ok(*key);
+    }
+
+    let key = load_or_create_vault_key_uncached()?;
+    let _ = VAULT_KEY_CACHE.set(key);
+    Ok(key)
+}
+
+#[cfg(target_os = "macos")]
+fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::Error>> {
     let existing = keychain_get_secret(televy_backup_core::secrets::VAULT_KEY_KEY)?
         .map(|s| s.trim().to_string());
 
@@ -917,6 +970,6 @@ fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
     Err("vault key only supported on macOS".into())
 }
