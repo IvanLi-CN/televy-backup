@@ -140,9 +140,7 @@ mod tests {
     use tokio::io::AsyncBufReadExt;
     use tokio::time::{Instant, timeout};
 
-    use televy_backup_core::status::{
-        Counter, GlobalStatus, Rate, StatusSource, TargetState,
-    };
+    use televy_backup_core::status::{Counter, GlobalStatus, Rate, StatusSource, TargetState};
 
     use super::*;
 
@@ -156,8 +154,12 @@ mod tests {
                 detail: Some("test".to_string()),
             },
             global: GlobalStatus {
-                up: Rate { bytes_per_second: None },
-                down: Rate { bytes_per_second: None },
+                up: Rate {
+                    bytes_per_second: None,
+                },
+                down: Rate {
+                    bytes_per_second: None,
+                },
                 up_total: Counter { bytes: None },
                 down_total: Counter { bytes: None },
                 ui_uptime_seconds: None,
@@ -170,7 +172,9 @@ mod tests {
                 enabled: true,
                 state: "idle".to_string(),
                 running_since: None,
-                up: Rate { bytes_per_second: None },
+                up: Rate {
+                    bytes_per_second: None,
+                },
                 up_total: Counter { bytes: None },
                 progress: None,
                 last_run: None,
@@ -240,7 +244,11 @@ mod tests {
         let _ = lines.next_line().await.unwrap().unwrap();
 
         // Idle cadence is 1Hz; we should not get a second line too quickly.
-        assert!(timeout(Duration::from_millis(200), lines.next_line()).await.is_err());
+        assert!(
+            timeout(Duration::from_millis(200), lines.next_line())
+                .await
+                .is_err()
+        );
         let _ = timeout(Duration::from_millis(1500), lines.next_line())
             .await
             .unwrap()

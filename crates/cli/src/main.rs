@@ -9,15 +9,15 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use sqlx::Row;
-use tokio::io::AsyncBufReadExt;
-#[cfg(unix)]
-use tokio::net::UnixStream;
 use televy_backup_core::{
     APP_NAME, BackupConfig, BackupOptions, ChunkingConfig, ProgressSink, RestoreConfig,
     RestoreOptions, Storage, TelegramMtProtoStorage, TelegramMtProtoStorageConfig, VerifyConfig,
     VerifyOptions, restore_snapshot_with, run_backup_with, verify_snapshot_with,
 };
 use televy_backup_core::{config as settings_config, gold_key};
+use tokio::io::AsyncBufReadExt;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 
 #[derive(Parser)]
 #[command(name = "televybackup")]
@@ -479,7 +479,11 @@ impl StatusStreamEnricher {
                 self.smoothed_rate_by_target.remove(&t.target_id);
             }
 
-            let base = if reset { bytes_uploaded_now } else { prev_bytes };
+            let base = if reset {
+                bytes_uploaded_now
+            } else {
+                prev_bytes
+            };
             let delta = bytes_uploaded_now.saturating_sub(base);
             let total = self
                 .totals_by_target
@@ -499,7 +503,8 @@ impl StatusStreamEnricher {
                 // 1.0s window EWMA.
                 let alpha = 1.0 - (-dt).exp();
                 let smoothed = prev * (1.0 - alpha) + raw * alpha;
-                self.smoothed_rate_by_target.insert(t.target_id.clone(), smoothed);
+                self.smoothed_rate_by_target
+                    .insert(t.target_id.clone(), smoothed);
                 bps = Some(smoothed.max(0.0).round() as u64);
             }
 
@@ -539,8 +544,8 @@ async fn status_stream_ipc(stream: impl tokio::io::AsyncRead + Unpin) -> Result<
         .map_err(|e| CliError::retryable("status.unavailable", e.to_string()))?
         .ok_or_else(|| CliError::retryable("status.unavailable", "ipc status stream ended"))?;
 
-    let mut snap: televy_backup_core::status::StatusSnapshot = serde_json::from_str(&first)
-        .map_err(|e| CliError::new("status.invalid", e.to_string()))?;
+    let mut snap: televy_backup_core::status::StatusSnapshot =
+        serde_json::from_str(&first).map_err(|e| CliError::new("status.invalid", e.to_string()))?;
     enricher.enrich(&mut snap);
     println!(
         "{}",
@@ -626,7 +631,9 @@ async fn connect_status_ipc(data_dir: &Path) -> std::io::Result<UnixStream> {
 
 #[cfg(not(unix))]
 async fn connect_status_ipc(_data_dir: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::other("status IPC is only supported on unix"))
+    Err(std::io::Error::other(
+        "status IPC is only supported on unix",
+    ))
 }
 
 #[cfg(not(unix))]
