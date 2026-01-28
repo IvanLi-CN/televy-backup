@@ -66,4 +66,4 @@
 | 0010 | 状态弹窗重做：全局网络 + 多目标面板 + 开发者视图 | 已完成 | `0010:status-popover-dashboard/PLAN.md` | 2026-01-26 | 实现分支：`feat/0010-status-popover-dashboard` |
 | 0011 | daemon 状态 IPC：替换 file-based 状态源 | 已完成 | `0011:daemon-status-ipc/PLAN.md` | 2026-01-26 | 实现分支：`feat/0011-daemon-status-ipc` |
 | 0012 | 备份远端索引权威 + 本地自动同步（remote-first） | 已完成 | `0012:remote-first-index-sync/PLAN.md` | 2026-01-27 | 实现分支：`feat/0012-remote-first-index-sync` |
-| 0013 | MTProto dialogs picker（自动选可用 chat_id） | 部分完成（3/4） | `0013:mtproto-dialogs-picker/PLAN.md` | 2026-01-28 | CLI e2e 已验证；UI 仍待主人确认 |
+| 0013 | MTProto dialogs picker（自动选可用 chat_id） | 已完成 | `0013:mtproto-dialogs-picker/PLAN.md` | 2026-01-29 | CLI+UI e2e 已确认；状态面板 Up/UpTotal 上传中实时更新 |

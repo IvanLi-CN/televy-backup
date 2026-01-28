@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 部分完成（3/4）
+- Status: 已完成
 - Created: 2026-01-28
-- Last: 2026-01-28
+- Last: 2026-01-29
 
 ## 背景 / 问题陈述
 
@@ -82,7 +82,7 @@
 - [x] M1: MTProto helper 支持 chat-less init + wait-chat 稳定输出（含超时）
 - [x] M2: CLI `telegram wait-chat` 可用（chat_id 允许为空）
 - [x] M3: macOS Settings 增加 “Listen…” picker 并能写回 chat_id
-- [ ] M4: 端到端验证（CLI + UI）
+- [x] M4: 端到端验证（CLI + UI）
 
 ## Change log
 
@@ -91,3 +91,4 @@
 - 2026-01-28: 修复 `get_pinned_message` 在“无 pinned message”场景触发 `MESSAGE_IDS_EMPTY` 导致备份失败；用隔离的 `target/e2e-*` 配置完成一次备份并通过 `restore list-latest` 验证 pinned catalog 可用。
 - 2026-01-28: 修复“chat_id 切换后错误命中 dedupe”的根因：本地 `chunk_objects` 可能仍指向旧 peer（如私聊），导致 `bytes_uploaded=0` 但新频道为空；改为对 MTProto object_id 进行 peer 校验并在冲突时覆写映射（`ON CONFLICT(provider, chunk_hash) DO UPDATE`），确保后续会重新上传到当前频道。
 - 2026-01-28: 修复状态面板上传速率/累计上传长期为 0：mtproto helper 输出 upload progress，core/daemon 透传并计算 `up.bytesPerSecond`/`upTotal.bytes`，用于 UI 实时展示。
+- 2026-01-29: 端到端验证通过：重启 macOS app 并触发一次 daemon 备份，确认 UI 的 `Up`/`UpTotal` 在上传过程中实时更新（不再长期显示 0）。
