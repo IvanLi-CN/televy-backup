@@ -13,10 +13,58 @@ macOS desktop backup app + Rust backend (work in progress).
 - Build macOS app: `./scripts/macos/build-app.sh`
 - Run macOS app: `./scripts/macos/run-app.sh`
 
+## Development: bypass Keychain (codesign + vault key)
+
+There are two separate “Keychain touchpoints” during development:
+
+1) **Build-time codesign** (the build script may query Keychain for signing identities)
+2) **Runtime vault key** (the daemon normally reads/writes the vault key via Keychain to decrypt `secrets.enc`)
+
+### Build-time: ad-hoc signing (no identity lookup)
+
+Force ad-hoc signing by setting `TELEVYBACKUP_CODESIGN_IDENTITY=-`:
+
+```bash
+TELEVYBACKUP_CODESIGN_IDENTITY=- ./scripts/macos/build-app.sh
+```
+
+or:
+
+```bash
+TELEVYBACKUP_CODESIGN_IDENTITY=- ./scripts/macos/run-app.sh
+```
+
+### Runtime: disable Keychain for the daemon (security downgrade)
+
+Set `TELEVYBACKUP_DISABLE_KEYCHAIN=1` when starting the daemon. In this mode, the daemon will **not** access Keychain
+and will use a local vault key file instead:
+
+- Default: `TELEVYBACKUP_CONFIG_DIR/vault.key` (default config dir: `~/Library/Application Support/TelevyBackup/`)
+- Override: `TELEVYBACKUP_VAULT_KEY_FILE=<path>`
+
+Example:
+
+```bash
+TELEVYBACKUP_DISABLE_KEYCHAIN=1 televybackupd
+```
+
+Important: `vault.key` on disk is a **security downgrade**. Treat it like a secret and only use this mode for local dev.
+
+### Daemon-only boundary (secrets)
+
+Keychain / `vault.key` / `secrets.enc` are **daemon-only**:
+
+- `televybackupd` is the only component that may read/write the vault key backend (Keychain or `vault.key`) and decrypt
+  `secrets.enc`.
+- The CLI (`televybackup`) and macOS app must not access Keychain / `vault.key` / `secrets.enc` directly; use daemon IPC
+  (see `docs/architecture.md`).
+
 ## Configuration
 
-The app stores non-secret settings in `config.toml`, and secrets in an encrypted local secrets store (`secrets.enc`).
-macOS Keychain stores **only** the vault key used to decrypt `secrets.enc`.
+The daemon stores non-secret settings in `config.toml`, and secrets in an encrypted local secrets store (`secrets.enc`).
+
+- Production default: macOS Keychain stores **only** the vault key used to decrypt `secrets.enc`.
+- Development optional: set `TELEVYBACKUP_DISABLE_KEYCHAIN=1` to store the vault key in `vault.key` (security downgrade).
 
 - Telegram storage is **MTProto-only** (`telegram.mode = "mtproto"`). Telegram Bot API is no longer supported; older `telegram.botapi` snapshots require a new backup.
 - `config.toml` schema is **v2** (`version = 2`) and supports multiple backup targets and multiple Telegram endpoints:
