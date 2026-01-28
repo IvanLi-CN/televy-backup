@@ -1844,6 +1844,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "televy_backup_core",
+ "tempfile",
  "tokio",
  "toml",
  "tracing",

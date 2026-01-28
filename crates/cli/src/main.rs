@@ -2729,19 +2729,27 @@ fn daemon_vault_get_or_create_b64(data_dir: &Path) -> Result<String, CliError> {
 }
 
 #[cfg(unix)]
-fn control_ipc_call(
+fn control_ipc_call_with_timeouts(
     data_dir: &Path,
     method: &str,
     params: serde_json::Value,
+    read_timeout: Duration,
+    write_timeout: Duration,
 ) -> Result<televy_backup_core::control::ControlResponse, CliError> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    use std::time::Duration;
+
+    fn is_timeout_io_error(e: &std::io::Error) -> bool {
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        )
+    }
 
     let socket_path = televy_backup_core::control::control_ipc_socket_path(data_dir);
     let mut stream = UnixStream::connect(&socket_path).map_err(|e| {
         CliError::retryable(
-            "daemon.unavailable",
+            "control.unavailable",
             "control IPC unavailable (is daemon running?)",
         )
         .with_details(serde_json::json!({
@@ -2750,43 +2758,73 @@ fn control_ipc_call(
         }))
     })?;
 
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_read_timeout(Some(read_timeout));
+    let _ = stream.set_write_timeout(Some(write_timeout));
 
     let req = televy_backup_core::control::ControlRequest::new(
         uuid::Uuid::new_v4().to_string(),
         method,
         params,
     );
-    let line = serde_json::to_string(&req)
-        .map_err(|e| CliError::new("daemon.unavailable", e.to_string()))?;
+    let line =
+        serde_json::to_string(&req).map_err(|e| CliError::new("control.unavailable", e.to_string()))?;
     stream
         .write_all(line.as_bytes())
         .and_then(|_| stream.write_all(b"\n"))
         .map_err(|e| {
-            CliError::retryable("daemon.unavailable", "control IPC write failed").with_details(
-                serde_json::json!({
-                    "socketPath": socket_path.display().to_string(),
-                    "error": e.to_string(),
-                }),
-            )
+            if is_timeout_io_error(&e) {
+                CliError::retryable("control.timeout", "control IPC timeout").with_details(
+                    serde_json::json!({
+                        "socketPath": socket_path.display().to_string(),
+                        "error": e.to_string(),
+                    }),
+                )
+            } else {
+                CliError::retryable("control.unavailable", "control IPC write failed").with_details(
+                    serde_json::json!({
+                        "socketPath": socket_path.display().to_string(),
+                        "error": e.to_string(),
+                    }),
+                )
+            }
         })?;
     let _ = stream.flush();
 
     let mut reader = BufReader::new(stream);
     let mut resp_line = String::new();
-    reader.read_line(&mut resp_line).map_err(|e| {
-        CliError::retryable("daemon.unavailable", "control IPC read failed").with_details(
-            serde_json::json!({
-                "socketPath": socket_path.display().to_string(),
-                "error": e.to_string(),
-            }),
-        )
-    })?;
+    match reader.read_line(&mut resp_line) {
+        Ok(0) => Err(
+            CliError::retryable("control.unavailable", "control IPC closed before response")
+                .with_details(serde_json::json!({
+                    "socketPath": socket_path.display().to_string(),
+                })),
+        ),
+        Ok(_) => Ok(()),
+        Err(e) => Err(if is_timeout_io_error(&e) {
+            CliError::retryable("control.timeout", "control IPC timeout").with_details(
+                serde_json::json!({
+                    "socketPath": socket_path.display().to_string(),
+                    "error": e.to_string(),
+                }),
+            )
+        } else {
+            CliError::retryable("control.unavailable", "control IPC read failed").with_details(
+                serde_json::json!({
+                    "socketPath": socket_path.display().to_string(),
+                    "error": e.to_string(),
+                }),
+            )
+        }),
+    }?;
 
     let resp: televy_backup_core::control::ControlResponse =
         serde_json::from_str(resp_line.trim_end()).map_err(|e| {
-            CliError::new("daemon.unavailable", format!("invalid IPC response: {e}"))
+            CliError::new("control.unavailable", format!("invalid IPC response: {e}")).with_details(
+                serde_json::json!({
+                    "socketPath": socket_path.display().to_string(),
+                    "responseLine": resp_line.clone(),
+                }),
+            )
         })?;
 
     if resp.ok {
@@ -2800,11 +2838,37 @@ fn control_ipc_call(
                 retryable: false,
                 details: serde_json::json!({}),
             });
-        Err(
-            CliError::new("control.failed", format!("{}: {}", err.code, err.message))
-                .with_details(err.details),
-        )
+
+        let code = match err.code.as_str() {
+            "control.unavailable" => "control.unavailable",
+            "control.timeout" => "control.timeout",
+            "control.invalid_request" => "control.invalid_request",
+            "control.method_not_found" => "control.method_not_found",
+            _ => "control.failed",
+        };
+
+        let out = if err.retryable {
+            CliError::retryable(code, err.message)
+        } else {
+            CliError::new(code, err.message)
+        };
+        Err(out.with_details(err.details))
     }
+}
+
+#[cfg(unix)]
+fn control_ipc_call(
+    data_dir: &Path,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<televy_backup_core::control::ControlResponse, CliError> {
+    control_ipc_call_with_timeouts(
+        data_dir,
+        method,
+        params,
+        Duration::from_millis(500),
+        Duration::from_millis(500),
+    )
 }
 
 #[cfg(not(unix))]
@@ -2817,6 +2881,126 @@ fn control_ipc_call(
         "daemon.unavailable",
         "control IPC is only supported on unix",
     ))
+}
+
+#[cfg(all(test, unix))]
+mod control_ipc_tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    use super::*;
+
+    fn wait_for_socket(path: &Path) {
+        for _ in 0..50 {
+            if path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("socket did not appear: {}", path.display());
+    }
+
+    #[test]
+    fn control_ipc_missing_socket_maps_to_control_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = control_ipc_call_with_timeouts(
+            dir.path(),
+            "secrets.presence",
+            serde_json::json!({}),
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "control.unavailable");
+        assert!(err.retryable);
+    }
+
+    #[test]
+    fn control_ipc_timeout_maps_to_control_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let ipc_dir = dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                let (stream, _addr) = listener.accept().unwrap();
+                let mut r = BufReader::new(stream.try_clone().unwrap());
+                let mut _line = String::new();
+                let _ = r.read_line(&mut _line);
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        let err = control_ipc_call_with_timeouts(
+            dir.path(),
+            "secrets.presence",
+            serde_json::json!({}),
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "control.timeout");
+        assert!(err.retryable);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn control_ipc_method_not_found_maps_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let ipc_dir = dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                let (mut stream, _addr) = listener.accept().unwrap();
+
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+
+                let req: televy_backup_core::control::ControlRequest =
+                    serde_json::from_str(line.trim_end()).unwrap();
+                let resp = televy_backup_core::control::ControlResponse::err(
+                    req.id,
+                    televy_backup_core::control::ControlError::method_not_found(
+                        "unknown method",
+                        serde_json::json!({}),
+                    ),
+                );
+                let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
+                stream.write_all(resp_line.as_bytes()).unwrap();
+                let _ = stream.flush();
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        let err = control_ipc_call_with_timeouts(
+            dir.path(),
+            "unknown.method",
+            serde_json::json!({}),
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "control.method_not_found");
+        assert!(!err.retryable);
+
+        server.join().unwrap();
+    }
 }
 
 fn daemon_control_secrets_presence(
