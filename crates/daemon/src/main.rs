@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
@@ -22,6 +24,7 @@ use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 mod status_ipc;
+mod vault_ipc;
 
 #[derive(Default, Clone)]
 struct TargetScheduleState {
@@ -573,6 +576,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let vault_socket_path = televy_backup_core::secrets::vault_ipc_socket_path(&data_root);
+    let _vault_ipc_server = match vault_ipc::spawn_vault_ipc_server(vault_socket_path.clone()) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!(
+                event = "vault.ipc_bind_failed",
+                error = %e,
+                path = %vault_socket_path.display(),
+                "vault.ipc_bind_failed"
+            );
+            None
+        }
+    };
+
+    if settings.telegram.mtproto.api_id <= 0 {
+        return Err("telegram.mtproto.api_id must be > 0".into());
+    }
+    if settings.telegram.mtproto.api_hash_key.trim().is_empty() {
+        return Err("telegram.mtproto.api_hash_key must not be empty".into());
+    }
     let vault_key = load_or_create_vault_key()?;
     let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
     let mut secrets_store = televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
@@ -1112,6 +1135,10 @@ fn default_data_dir() -> PathBuf {
 }
 
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
+#[cfg(target_os = "macos")]
+static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
+#[cfg(target_os = "macos")]
+static VAULT_KEY_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn get_secret_from_store(
     store: &televy_backup_core::secrets::SecretsStore,
@@ -1127,7 +1154,7 @@ fn decode_base64_32(b64: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub(crate) fn keychain_get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
     use security_framework::passwords::{PasswordOptions, generic_password};
 
     let opts = PasswordOptions::new_generic_password(televy_backup_core::APP_NAME, key);
@@ -1144,7 +1171,9 @@ fn keychain_get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::
 }
 
 #[cfg(not(target_os = "macos"))]
-fn keychain_get_secret(_key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub(crate) fn keychain_get_secret(
+    _key: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     Err("keychain only supported on macOS".into())
 }
 
@@ -1156,13 +1185,52 @@ fn keychain_set_secret(key: &str, value: &str) -> Result<(), Box<dyn std::error:
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn keychain_delete_secret(key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    use security_framework::passwords::delete_generic_password;
+
+    match delete_generic_password(televy_backup_core::APP_NAME, key) {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            if is_keychain_not_found(&e) {
+                return Ok(false);
+            }
+            Err(Box::new(e))
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn keychain_delete_secret(_key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    Err("keychain only supported on macOS".into())
+}
+
+#[cfg(target_os = "macos")]
 fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
     // errSecItemNotFound
     e.code() == -25300
 }
 
 #[cfg(target_os = "macos")]
-fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    if let Some(key) = VAULT_KEY_CACHE.get() {
+        return Ok(*key);
+    }
+
+    // With concurrent IPC requests, ensure only one initializer runs.
+    let lock = VAULT_KEY_INIT_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().map_err(|_| "vault key init lock poisoned")?;
+
+    if let Some(key) = VAULT_KEY_CACHE.get() {
+        return Ok(*key);
+    }
+
+    let key = load_or_create_vault_key_uncached()?;
+    let _ = VAULT_KEY_CACHE.set(key);
+    Ok(*VAULT_KEY_CACHE.get().unwrap_or(&key))
+}
+
+#[cfg(target_os = "macos")]
+fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::Error>> {
     let existing = keychain_get_secret(televy_backup_core::secrets::VAULT_KEY_KEY)?
         .map(|s| s.trim().to_string());
 
@@ -1179,6 +1247,6 @@ fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
     Err("vault key only supported on macOS".into())
 }
