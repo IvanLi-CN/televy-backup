@@ -1,6 +1,7 @@
 mod backup;
 pub mod bootstrap;
 pub mod config;
+pub mod control;
 mod crypto;
 mod error;
 pub mod gold_key;
