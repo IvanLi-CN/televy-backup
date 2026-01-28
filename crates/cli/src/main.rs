@@ -1214,6 +1214,12 @@ async fn telegram_validate(
             "telegram.mtproto.api_hash_key must not be empty",
         ));
     }
+    if ep.chat_id.trim().is_empty() {
+        return Err(CliError::new(
+            "config.invalid",
+            format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
+        ));
+    }
 
     let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
         .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
@@ -1328,12 +1334,6 @@ async fn telegram_dialogs(
         return Err(CliError::new(
             "config.invalid",
             "telegram.mtproto.api_hash_key must not be empty",
-        ));
-    }
-    if ep.chat_id.is_empty() {
-        return Err(CliError::new(
-            "config.invalid",
-            format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
         ));
     }
 
