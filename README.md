@@ -61,7 +61,7 @@ Keychain / `vault.key` / `secrets.enc` are **daemon-only**:
 
 ## Configuration
 
-The daemon stores non-secret settings in `config.toml`, and secrets in an encrypted local secrets store (`secrets.enc`).
+TelevyBackup stores non-secret settings in `config.toml`, and secrets in an encrypted local secrets store (`secrets.enc`).
 
 - Production default: macOS Keychain stores **only** the vault key used to decrypt `secrets.enc`.
 - Development optional: set `TELEVYBACKUP_DISABLE_KEYCHAIN=1` to store the vault key in `vault.key` (security downgrade).
