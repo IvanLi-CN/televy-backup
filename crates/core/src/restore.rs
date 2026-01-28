@@ -9,9 +9,9 @@ use tracing::{debug, error};
 
 use crate::crypto::decrypt_framed;
 use crate::index_db::open_existing_index_db;
-use crate::index_manifest::{IndexManifest, index_part_aad};
 use crate::pack::extract_pack_blob;
 use crate::progress::{ProgressSink, TaskProgress};
+use crate::remote_index_db::download_and_write_index_db_atomic;
 use crate::storage::{ChunkObjectRef, Storage, parse_chunk_object_ref};
 use crate::{Error, Result};
 use tokio_util::sync::CancellationToken;
@@ -67,7 +67,7 @@ pub async fn restore_snapshot_with<S: Storage>(
     let restore_started = Instant::now();
     debug!(event = "phase.start", phase = "restore", "phase.start");
 
-    let _manifest = download_and_write_index_db(
+    let _stats = download_and_write_index_db_atomic(
         storage,
         &config.snapshot_id,
         &config.manifest_object_id,
@@ -128,7 +128,7 @@ pub async fn verify_snapshot_with<S: Storage>(
     let verify_started = Instant::now();
     debug!(event = "phase.start", phase = "verify", "phase.start");
 
-    let _manifest = download_and_write_index_db(
+    let _stats = download_and_write_index_db_atomic(
         storage,
         &config.snapshot_id,
         &config.manifest_object_id,
@@ -161,135 +161,6 @@ pub async fn verify_snapshot_with<S: Storage>(
     );
 
     Ok(result)
-}
-
-async fn download_and_write_index_db<S: Storage>(
-    storage: &S,
-    snapshot_id: &str,
-    manifest_object_id: &str,
-    master_key: &[u8; 32],
-    index_db_path: &Path,
-    cancel: Option<&CancellationToken>,
-) -> Result<IndexManifest> {
-    if let Some(cancel) = cancel
-        && cancel.is_cancelled()
-    {
-        return Err(Error::Cancelled);
-    }
-    let manifest_enc = storage
-        .download_document(manifest_object_id)
-        .await
-        .map_err(|e| {
-            error!(
-                event = "io.telegram.download_failed",
-                snapshot_id,
-                object_id = manifest_object_id,
-                error = %e,
-                "io.telegram.download_failed"
-            );
-            e
-        })?;
-    let manifest_json = decrypt_framed(master_key, snapshot_id.as_bytes(), &manifest_enc).map_err(
-        |e| Error::Crypto {
-            message: format!(
-                "manifest decrypt failed: snapshot_id={snapshot_id} object_id={manifest_object_id}; {e}"
-            ),
-        },
-    )?;
-
-    let manifest: IndexManifest =
-        serde_json::from_slice(&manifest_json).map_err(|e| Error::InvalidConfig {
-            message: format!("invalid index manifest json: {e}"),
-        })?;
-
-    if manifest.version != 1 {
-        return Err(Error::InvalidConfig {
-            message: format!("unsupported manifest version: {}", manifest.version),
-        });
-    }
-    if manifest.snapshot_id != snapshot_id {
-        return Err(Error::InvalidConfig {
-            message: "manifest snapshot_id mismatch".to_string(),
-        });
-    }
-    if manifest.enc_alg != "xchacha20poly1305" {
-        return Err(Error::InvalidConfig {
-            message: format!("unsupported enc_alg: {}", manifest.enc_alg),
-        });
-    }
-    if manifest.compression != "zstd" {
-        return Err(Error::InvalidConfig {
-            message: format!("unsupported compression: {}", manifest.compression),
-        });
-    }
-
-    let mut parts = manifest.parts.clone();
-    parts.sort_by_key(|p| p.no);
-
-    let mut compressed = Vec::new();
-    for part in parts {
-        if let Some(cancel) = cancel
-            && cancel.is_cancelled()
-        {
-            return Err(Error::Cancelled);
-        }
-        let part_enc = storage
-            .download_document(&part.object_id)
-            .await
-            .map_err(|e| {
-                error!(
-                    event = "io.telegram.download_failed",
-                    snapshot_id,
-                    part_no = part.no,
-                    object_id = %part.object_id,
-                    error = %e,
-                    "io.telegram.download_failed"
-                );
-                Error::MissingIndexPart {
-                    snapshot_id: snapshot_id.to_string(),
-                    part_no: part.no,
-                }
-            })?;
-
-        if part_enc.len() != part.size {
-            return Err(Error::Integrity {
-                message: format!(
-                    "index part size mismatch: snapshot_id={snapshot_id} part_no={} expected={} got={}",
-                    part.no,
-                    part.size,
-                    part_enc.len()
-                ),
-            });
-        }
-
-        let part_hash = blake3::hash(&part_enc).to_hex().to_string();
-        if part_hash != part.hash {
-            return Err(Error::Integrity {
-                message: format!(
-                    "index part hash mismatch: snapshot_id={snapshot_id} part_no={}",
-                    part.no
-                ),
-            });
-        }
-
-        let aad = index_part_aad(snapshot_id, part.no);
-        let part_plain = decrypt_framed(master_key, aad.as_bytes(), &part_enc).map_err(|e| {
-            Error::Crypto {
-                message: format!(
-                    "index part decrypt failed: snapshot_id={snapshot_id} part_no={} object_id={}; {e}",
-                    part.no, part.object_id
-                ),
-            }
-        })?;
-        compressed.extend_from_slice(&part_plain);
-    }
-
-    let sqlite_bytes = zstd::stream::decode_all(compressed.as_slice())?;
-    if let Some(parent) = index_db_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(index_db_path, sqlite_bytes)?;
-    Ok(manifest)
 }
 
 async fn ensure_snapshot_present(pool: &SqlitePool, snapshot_id: &str) -> Result<()> {

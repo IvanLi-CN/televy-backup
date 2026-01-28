@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-27
 - Last: 2026-01-27
 
@@ -148,13 +148,18 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: Core 抽取并复用“download remote index db（manifest → sqlite）”能力（支持原子落盘）
-- [ ] M2: CLI `backup run` 接入 preflight index sync（默认启用 + 开关）
-- [ ] M3: pinned catalog 覆盖策略收紧（decrypt 失败默认拒绝覆盖 + 明确错误指引）
-- [ ] M4: 测试覆盖（unit + integration）
-- [ ] M5: 文档与 release notes 更新
+- [x] M1: Core 抽取并复用“download remote index db（manifest → sqlite）”能力（支持原子落盘）
+- [x] M2: CLI `backup run` 接入 preflight index sync（默认启用 + 开关）
+- [x] M3: pinned catalog 覆盖策略收紧（decrypt 失败默认拒绝覆盖 + 明确错误指引）
+- [x] M4: 测试覆盖（unit + integration）
+- [x] M5: 文档与 release notes 更新
 
 ## 风险与开放问题（Risks / Open Questions）
 
 - 远端索引体积增长：整库下载可能变慢；是否需要后续计划做“增量索引”或“分层索引”（不在本计划内）。
 - 两设备交替备份：latest 指针可能频繁变化；是否需要“备份开始时锁定 head，并在结束时更新 latest”策略（当前倾向：开始时对齐最新即可）。
+
+## Change log
+
+- 2026-01-27: 实现 `index_sync` 备份前置对齐（remote-first），新增 `--no-remote-index-sync`，并收紧 pinned catalog 解密失败时的覆盖策略（默认拒绝覆盖）。
+- 2026-01-27: 针对私聊 `chat_id` 增加提前拦截与更明确的错误/告警（bootstrap 依赖 pinned，需群/频道或 `@username`）。

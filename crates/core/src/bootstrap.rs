@@ -77,16 +77,14 @@ pub async fn load_remote_catalog<S: PinnedStorage>(
         return Ok(None);
     };
     let bytes = storage.download_document(&object_id).await?;
-    let cat = match decrypt_catalog(master_key, &bytes) {
-        Ok(cat) => cat,
-        Err(_) => {
-            // Pinned message may exist but not be a TelevyBackup bootstrap catalog (or may be
-            // encrypted with a different key). Treat this as missing catalog and overwrite it on
-            // next save.
-            return Ok(None);
-        }
-    };
-    Ok(Some(cat))
+    match decrypt_catalog(master_key, &bytes) {
+        Ok(cat) => Ok(Some(cat)),
+        Err(e) => Err(Error::BootstrapDecryptFailed {
+            message: format!(
+                "failed to decrypt pinned bootstrap catalog: object_id={object_id}; {e}"
+            ),
+        }),
+    }
 }
 
 pub async fn save_remote_catalog<S: PinnedStorage>(
@@ -154,8 +152,8 @@ pub async fn resolve_remote_latest<S: PinnedStorage>(
 ) -> Result<BootstrapLatest> {
     let cat = load_remote_catalog(storage, master_key)
         .await?
-        .ok_or_else(|| Error::InvalidConfig {
-            message: "bootstrap missing (no pinned catalog)".to_string(),
+        .ok_or_else(|| Error::BootstrapMissing {
+            message: "no pinned bootstrap catalog".to_string(),
         })?;
 
     if let Some(id) = target_id {
@@ -275,7 +273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_overwrites_non_catalog_pinned_doc() {
+    async fn update_refuses_to_overwrite_non_catalog_pinned_doc() {
         let store = MemPinned::new();
         let key = [3u8; 32];
 
@@ -285,17 +283,12 @@ mod tests {
             .unwrap();
         store.set_pinned_object_id(&pinned_before).unwrap();
 
-        update_remote_latest(&store, &key, "t1", "/A", "manual", "snp_1", "obj_1")
+        let err = update_remote_latest(&store, &key, "t1", "/A", "manual", "snp_1", "obj_1")
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(err.code(), "bootstrap.decrypt_failed");
 
         let pinned_after = store.get_pinned_object_id().unwrap().unwrap();
-        assert_ne!(pinned_after, pinned_before);
-
-        let latest = resolve_remote_latest(&store, &key, Some("t1"), None)
-            .await
-            .unwrap();
-        assert_eq!(latest.snapshot_id, "snp_1");
-        assert_eq!(latest.manifest_object_id, "obj_1");
+        assert_eq!(pinned_after, pinned_before);
     }
 }

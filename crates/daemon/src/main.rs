@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use base64::Engine;
 use chrono::{Datelike, Timelike};
@@ -85,6 +85,41 @@ impl StatusRuntimeState {
             target_order,
             targets,
         }
+    }
+
+    fn apply_settings(&mut self, settings: &settings_config::SettingsV2) {
+        let mut target_order = Vec::new();
+        let mut targets = HashMap::new();
+
+        for t in &settings.targets {
+            target_order.push(t.id.clone());
+
+            let mut rt = self.targets.get(&t.id).cloned().unwrap_or(TargetRuntime {
+                target_id: t.id.clone(),
+                label: None,
+                source_path: t.source_path.clone(),
+                endpoint_id: t.endpoint_id.clone(),
+                enabled: t.enabled,
+                state: "idle".to_string(),
+                running_since: None,
+                progress: None,
+                last_run: None,
+            });
+
+            rt.label = if t.label.trim().is_empty() {
+                None
+            } else {
+                Some(t.label.clone())
+            };
+            rt.source_path = t.source_path.clone();
+            rt.endpoint_id = t.endpoint_id.clone();
+            rt.enabled = t.enabled;
+
+            targets.insert(t.id.clone(), rt);
+        }
+
+        self.target_order = target_order;
+        self.targets = targets;
     }
 
     fn mark_run_start(&mut self, target_id: &str) {
@@ -327,6 +362,10 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
     }
 }
 
+fn file_mtime(path: &PathBuf) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = std::env::var("TELEVYBACKUP_CONFIG_DIR")
@@ -340,8 +379,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_root = data_dir.unwrap_or_else(default_data_dir);
     let db_path = data_root.join("index").join("index.sqlite");
 
-    let settings = settings_config::load_settings_v2(&config_root)?;
+    let config_path = settings_config::config_path(&config_root);
+    let mut settings = settings_config::load_settings_v2(&config_root)?;
     settings_config::validate_settings_schema_v2(&settings)?;
+    let mut last_config_mtime = file_mtime(&config_path);
 
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
     let status_path = status_json_path(&data_root);
@@ -400,29 +441,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    if settings.telegram.mtproto.api_id <= 0 {
-        return Err("telegram.mtproto.api_id must be > 0".into());
-    }
-    if settings.telegram.mtproto.api_hash_key.trim().is_empty() {
-        return Err("telegram.mtproto.api_hash_key must not be empty".into());
-    }
-
     let vault_key = load_or_create_vault_key()?;
     let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
-    let mut secrets_store =
-        televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
+    let mut secrets_store = televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
+    let mut last_secrets_mtime = file_mtime(&secrets_path);
 
-    let master_key_b64 = get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
+    let mut master_key_b64 = get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
         .or_else(|| keychain_get_secret(MASTER_KEY_KEY).ok().flatten())
         .ok_or("master key missing")?;
-    let master_key = decode_base64_32(&master_key_b64)?;
+    let mut master_key = decode_base64_32(&master_key_b64)?;
 
-    let api_hash = get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
+    let mut api_hash = get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
         .ok_or("telegram api_hash missing")?;
-
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
 
     let mut schedule_state_by_target = HashMap::<String, TargetScheduleState>::new();
     let mut storage_by_endpoint = HashMap::<String, TelegramMtProtoStorage>::new();
@@ -436,6 +466,106 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let now = chrono::Local::now();
         let manual_triggered = manual_trigger_pending.swap(false, Ordering::SeqCst);
+
+        // Hot-reload settings + secrets when files change. This avoids confusing situations where the
+        // UI saved new endpoint chat_id but the long-running daemon kept using the old one.
+        let has_running = status_state.lock().ok().is_some_and(|st| st.has_running());
+        if !has_running {
+            let config_mtime = file_mtime(&config_path);
+            let secrets_mtime = file_mtime(&secrets_path);
+            let config_changed = config_mtime.is_some() && config_mtime != last_config_mtime;
+            let secrets_changed = secrets_mtime.is_some() && secrets_mtime != last_secrets_mtime;
+
+            if config_changed || secrets_changed {
+                if config_changed {
+                    match settings_config::load_settings_v2(&config_root) {
+                        Ok(new_settings) => {
+                            if let Err(e) = settings_config::validate_settings_schema_v2(&new_settings)
+                            {
+                                tracing::warn!(
+                                    event = "config.reload_failed",
+                                    error = %e,
+                                    path = %config_path.display(),
+                                    "config.reload_failed"
+                                );
+                            } else {
+                                settings = new_settings;
+                                last_config_mtime = config_mtime;
+                                storage_by_endpoint.clear();
+                                schedule_state_by_target.retain(|k, _| {
+                                    settings.targets.iter().any(|t| t.id == *k)
+                                });
+                                if let Ok(mut st) = status_state.lock() {
+                                    st.apply_settings(&settings);
+                                }
+                                tracing::info!(
+                                    event = "config.reloaded",
+                                    path = %config_path.display(),
+                                    "config.reloaded"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "config.reload_failed",
+                                error = %e,
+                                path = %config_path.display(),
+                                "config.reload_failed"
+                            );
+                        }
+                    }
+                }
+
+                if secrets_changed {
+                    match televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)
+                    {
+                        Ok(new_store) => {
+                            secrets_store = new_store;
+                            last_secrets_mtime = secrets_mtime;
+                            storage_by_endpoint.clear();
+
+                            if let Some(v) = get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
+                                .or_else(|| keychain_get_secret(MASTER_KEY_KEY).ok().flatten())
+                            {
+                                master_key_b64 = v;
+                                if let Ok(k) = decode_base64_32(&master_key_b64) {
+                                    master_key = k;
+                                }
+                            }
+                            if let Some(h) =
+                                get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
+                            {
+                                api_hash = h;
+                            }
+
+                            tracing::info!(
+                                event = "secrets.reloaded",
+                                path = %secrets_path.display(),
+                                "secrets.reloaded"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "secrets.reload_failed",
+                                error = %e,
+                                path = %secrets_path.display(),
+                                "secrets.reload_failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if settings.telegram.mtproto.api_id <= 0 || settings.telegram.mtproto.api_hash_key.trim().is_empty() {
+            // Keep the daemon alive so the UI can show status, but skip running backups until config is fixed.
+            sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         for target in &settings.targets {
             if !target.enabled {

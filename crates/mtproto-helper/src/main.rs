@@ -9,7 +9,7 @@ use grammers_client::grammers_tl_types as tl;
 use grammers_client::session::defs::{PeerAuth, PeerId, PeerRef};
 use grammers_client::session::storages::TlSession;
 use grammers_client::types::{Media, Peer};
-use grammers_client::{Client, InputMessage};
+use grammers_client::{Client, InputMessage, Update, UpdatesConfiguration};
 use grammers_mtsender::SenderPool;
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, timeout};
@@ -21,6 +21,9 @@ const INIT_RESOLVE_CHAT_TIMEOUT_SECS: u64 = 60;
 const UPLOAD_SEND_MESSAGE_TIMEOUT_SECS: u64 = 60;
 const DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS: u64 = 60;
 const DOWNLOAD_CHUNK_TIMEOUT_SECS: u64 = 60;
+const LIST_DIALOGS_TIMEOUT_SECS: u64 = 30;
+const WAIT_FOR_CHAT_TIMEOUT_SECS_DEFAULT: u64 = 60;
+const WAIT_FOR_CHAT_TIMEOUT_SECS_MAX: u64 = 10 * 60;
 
 fn upload_stream_timeout_secs(size: usize) -> u64 {
     // Scale with size to avoid hanging forever, while allowing large objects to complete on slow links.
@@ -41,6 +44,8 @@ enum Request {
     Download(DownloadRequest),
     GetPinned,
     Pin(PinRequest),
+    ListDialogs(ListDialogsRequest),
+    WaitForChat(WaitForChatRequest),
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +82,22 @@ struct PinRequest {
     msg_id: i32,
 }
 
+#[derive(Debug, Deserialize)]
+struct ListDialogsRequest {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default, rename = "includeUsers")]
+    include_users: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct WaitForChatRequest {
+    #[serde(default, rename = "timeoutSecs")]
+    timeout_secs: Option<u64>,
+    #[serde(default, rename = "includeUsers")]
+    include_users: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct Response {
     ok: bool,
@@ -88,12 +109,27 @@ struct Response {
     data: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Serialize)]
+struct DialogInfo {
+    kind: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    #[serde(rename = "peerId")]
+    peer_id: i64,
+    #[serde(rename = "configChatId")]
+    config_chat_id: String,
+    #[serde(rename = "bootstrapHint")]
+    bootstrap_hint: bool,
+}
+
 struct State {
     chat_id: String,
     cache_dir: PathBuf,
     session: Arc<TlSession>,
     client: Client,
-    chat: Peer,
+    chat: Option<Peer>,
+    updates: grammers_client::client::updates::UpdateStream,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -416,6 +452,92 @@ async fn main() {
                     }
                 }
             }
+            Request::ListDialogs(req) => {
+                let Some(s) = state.as_mut() else {
+                    let _ = write_response(
+                        &mut output,
+                        Response {
+                            ok: false,
+                            error: Some("not initialized".to_string()),
+                            session_b64: None,
+                            data: BTreeMap::new(),
+                        },
+                    );
+                    continue;
+                };
+
+                let limit = req.limit.unwrap_or(200).clamp(1, 5_000);
+                let res = list_dialogs(s, limit, req.include_users).await;
+                match res {
+                    Ok(dialogs) => {
+                        let mut data = BTreeMap::new();
+                        data.insert("dialogs".to_string(), serde_json::json!(dialogs));
+                        let _ = write_response(
+                            &mut output,
+                            Response {
+                                ok: true,
+                                error: None,
+                                session_b64: Some(session_b64(&s.session)),
+                                data,
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        let _ = write_response(
+                            &mut output,
+                            Response {
+                                ok: false,
+                                error: Some(err),
+                                session_b64: Some(session_b64(&s.session)),
+                                data: BTreeMap::new(),
+                            },
+                        );
+                    }
+                }
+            }
+            Request::WaitForChat(req) => {
+                let Some(s) = state.as_mut() else {
+                    let _ = write_response(
+                        &mut output,
+                        Response {
+                            ok: false,
+                            error: Some("not initialized".to_string()),
+                            session_b64: None,
+                            data: BTreeMap::new(),
+                        },
+                    );
+                    continue;
+                };
+
+                let timeout_secs = req.timeout_secs.unwrap_or(WAIT_FOR_CHAT_TIMEOUT_SECS_DEFAULT);
+                let res = wait_for_chat(s, timeout_secs, req.include_users).await;
+                match res {
+                    Ok(chat) => {
+                        let mut data = BTreeMap::new();
+                        data.insert("chat".to_string(), serde_json::json!(chat));
+                        let _ = write_response(
+                            &mut output,
+                            Response {
+                                ok: true,
+                                error: None,
+                                session_b64: Some(session_b64(&s.session)),
+                                data,
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        let _ = write_response(
+                            &mut output,
+                            Response {
+                                ok: false,
+                                error: Some(err),
+                                session_b64: Some(session_b64(&s.session)),
+                                data: BTreeMap::new(),
+                            },
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -447,7 +569,7 @@ async fn init(req: InitRequest) -> Result<State, String> {
 
     let pool = SenderPool::new(Arc::clone(&session), req.api_id);
     let client = Client::new(&pool);
-    let SenderPool { runner, .. } = pool;
+    let SenderPool { runner, updates, .. } = pool;
     tokio::spawn(runner.run());
 
     let authorized = timeout(
@@ -475,19 +597,33 @@ async fn init(req: InitRequest) -> Result<State, String> {
         .map_err(|e| format!("bot_sign_in failed: {e}"))?;
     }
 
-    let chat = timeout(
-        Duration::from_secs(INIT_RESOLVE_CHAT_TIMEOUT_SECS),
-        resolve_chat(&client, &req.chat_id),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "resolve_chat timed out after {INIT_RESOLVE_CHAT_TIMEOUT_SECS}s (check chat_id and bot dialog history)"
+    let chat = if req.chat_id.trim().is_empty() {
+        None
+    } else {
+        Some(
+            timeout(
+                Duration::from_secs(INIT_RESOLVE_CHAT_TIMEOUT_SECS),
+                resolve_chat(&client, &req.chat_id),
+            )
+            .await
+            .map_err(|_| {
+                format!(
+                    "resolve_chat timed out after {INIT_RESOLVE_CHAT_TIMEOUT_SECS}s (check chat_id and bot dialog history)"
+                )
+            })?
+            .map_err(|e| format!("resolve chat failed: {e}"))?,
         )
-    })?
-    .map_err(|e| format!("resolve chat failed: {e}"))?;
+    };
 
     std::fs::create_dir_all(&req.cache_dir).map_err(|e| format!("cache dir create failed: {e}"))?;
+
+    let updates = client.stream_updates(
+        updates,
+        UpdatesConfiguration {
+            catch_up: true,
+            ..Default::default()
+        },
+    );
 
     Ok(State {
         chat_id: req.chat_id,
@@ -495,7 +631,18 @@ async fn init(req: InitRequest) -> Result<State, String> {
         session,
         client,
         chat,
+        updates,
     })
+}
+
+fn require_chat(state: &State) -> Result<&Peer, String> {
+    if state.chat_id.trim().is_empty() {
+        return Err("telegram.chat_id is empty (required for upload/download/pin; dialogs list can run without chat_id)".to_string());
+    }
+    state
+        .chat
+        .as_ref()
+        .ok_or_else(|| "chat is not resolved (required for upload/download/pin; re-run with a valid chat_id)".to_string())
 }
 
 async fn resolve_chat(client: &Client, chat_id: &str) -> Result<Peer, String> {
@@ -550,15 +697,29 @@ async fn resolve_chat(client: &Client, chat_id: &str) -> Result<Peer, String> {
 }
 
 async fn get_pinned_object_id(state: &mut State) -> Result<Option<String>, String> {
-    let pinned = timeout(
+    let chat = require_chat(state)?;
+    let pinned = match timeout(
         Duration::from_secs(DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS),
-        state.client.get_pinned_message(&state.chat),
+        state.client.get_pinned_message(chat),
     )
     .await
-    .map_err(|_| {
-        format!("get_pinned_message timed out after {DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS}s")
-    })?
-    .map_err(|e| format!("get_pinned_message failed: {e}"))?;
+    {
+        Err(_) => {
+            return Err(format!(
+                "get_pinned_message timed out after {DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS}s"
+            ));
+        }
+        Ok(Ok(pinned)) => pinned,
+        Ok(Err(e)) => {
+            // Some chats simply don't have a pinned message. grammers currently turns this into
+            // an RPC error ("MESSAGE_IDS_EMPTY") when fetching the pinned message id, which
+            // should be treated as "no catalog yet".
+            if e.to_string().contains("MESSAGE_IDS_EMPTY") {
+                return Ok(None);
+            }
+            return Err(format!("get_pinned_message failed: {e}"));
+        }
+    };
 
     let Some(msg) = pinned else {
         return Ok(None);
@@ -581,9 +742,10 @@ async fn get_pinned_object_id(state: &mut State) -> Result<Option<String>, Strin
 }
 
 async fn pin_message(state: &mut State, msg_id: i32) -> Result<(), String> {
+    let chat = require_chat(state)?;
     timeout(
         Duration::from_secs(UPLOAD_SEND_MESSAGE_TIMEOUT_SECS),
-        state.client.pin_message(&state.chat, msg_id),
+        state.client.pin_message(chat, msg_id),
     )
     .await
     .map_err(|_| format!("pin_message timed out after {UPLOAD_SEND_MESSAGE_TIMEOUT_SECS}s"))?
@@ -591,7 +753,167 @@ async fn pin_message(state: &mut State, msg_id: i32) -> Result<(), String> {
     Ok(())
 }
 
+async fn list_dialogs(
+    state: &mut State,
+    limit: usize,
+    include_users: bool,
+) -> Result<Vec<DialogInfo>, String> {
+    let fut = async {
+        let mut out = Vec::new();
+        let mut dialogs = state.client.iter_dialogs();
+
+        while let Some(dialog) = dialogs
+            .next()
+            .await
+            .map_err(|e| format!("iter_dialogs failed: {e}"))?
+        {
+            let peer = dialog.peer();
+            let peer_id = peer.id().bot_api_dialog_id();
+            let title = peer.name().unwrap_or("<unknown>").to_string();
+            let username = peer.username().map(|s| s.to_string());
+
+            let info = match peer {
+                Peer::User(_) => {
+                    if !include_users {
+                        continue;
+                    }
+                    DialogInfo {
+                        kind: "user".to_string(),
+                        title,
+                        username,
+                        peer_id,
+                        config_chat_id: peer_id.to_string(),
+                        bootstrap_hint: false,
+                    }
+                }
+                Peer::Group(_) => {
+                    let config_chat_id = username
+                        .as_ref()
+                        .map(|u| format!("@{u}"))
+                        .unwrap_or_else(|| format!("{peer_id}"));
+                    DialogInfo {
+                        kind: "group".to_string(),
+                        title,
+                        username,
+                        peer_id,
+                        config_chat_id,
+                        bootstrap_hint: true,
+                    }
+                }
+                Peer::Channel(_) => {
+                    let config_chat_id = username
+                        .as_ref()
+                        .map(|u| format!("@{u}"))
+                        .unwrap_or_else(|| format!("{peer_id}"));
+                    DialogInfo {
+                        kind: "channel".to_string(),
+                        title,
+                        username,
+                        peer_id,
+                        config_chat_id,
+                        bootstrap_hint: true,
+                    }
+                }
+            };
+
+            out.push(info);
+            if out.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(out)
+    };
+
+    timeout(Duration::from_secs(LIST_DIALOGS_TIMEOUT_SECS), fut)
+        .await
+        .map_err(|_| format!("list_dialogs timed out after {LIST_DIALOGS_TIMEOUT_SECS}s"))?
+}
+
+async fn wait_for_chat(
+    state: &mut State,
+    timeout_secs: u64,
+    include_users: bool,
+) -> Result<DialogInfo, String> {
+    let timeout_secs = timeout_secs.clamp(1, WAIT_FOR_CHAT_TIMEOUT_SECS_MAX);
+
+    let fut = async {
+        loop {
+            let update = state
+                .updates
+                .next()
+                .await
+                .map_err(|e| format!("updates next failed: {e}"))?;
+
+            match update {
+                Update::NewMessage(message) if !message.outgoing() => {
+                    let peer_id = message.peer_id().bot_api_dialog_id();
+                    let peer = match message.peer() {
+                        Ok(p) => p.clone(),
+                        Err(_) => continue,
+                    };
+
+                    let title = peer.name().unwrap_or("<unknown>").to_string();
+                    let username = peer.username().map(|s| s.to_string());
+
+                    let info = match peer {
+                        Peer::User(_) => {
+                            if !include_users {
+                                continue;
+                            }
+                            DialogInfo {
+                                kind: "user".to_string(),
+                                title,
+                                username,
+                                peer_id,
+                                config_chat_id: peer_id.to_string(),
+                                bootstrap_hint: false,
+                            }
+                        }
+                        Peer::Group(_) => {
+                            let config_chat_id = username
+                                .as_ref()
+                                .map(|u| format!("@{u}"))
+                                .unwrap_or_else(|| format!("{peer_id}"));
+                            DialogInfo {
+                                kind: "group".to_string(),
+                                title,
+                                username,
+                                peer_id,
+                                config_chat_id,
+                                bootstrap_hint: true,
+                            }
+                        }
+                        Peer::Channel(_) => {
+                            let config_chat_id = username
+                                .as_ref()
+                                .map(|u| format!("@{u}"))
+                                .unwrap_or_else(|| format!("{peer_id}"));
+                            DialogInfo {
+                                kind: "channel".to_string(),
+                                title,
+                                username,
+                                peer_id,
+                                config_chat_id,
+                                bootstrap_hint: true,
+                            }
+                        }
+                    };
+
+                    return Ok(info);
+                }
+                _ => continue,
+            }
+        }
+    };
+
+    timeout(Duration::from_secs(timeout_secs), fut)
+        .await
+        .map_err(|_| format!("wait_for_chat timed out after {timeout_secs}s"))?
+}
+
 async fn upload(state: &mut State, filename: String, bytes: Vec<u8>) -> Result<String, String> {
+    let chat = require_chat(state)?;
     let size = bytes.len();
     let mut stream = std::io::Cursor::new(bytes);
     let timeout_secs = upload_stream_timeout_secs(size);
@@ -607,7 +929,7 @@ async fn upload(state: &mut State, filename: String, bytes: Vec<u8>) -> Result<S
         Duration::from_secs(UPLOAD_SEND_MESSAGE_TIMEOUT_SECS),
         state
             .client
-            .send_message(&state.chat, InputMessage::new().text("").file(uploaded)),
+            .send_message(chat, InputMessage::new().text("").file(uploaded)),
     )
     .await
     .map_err(|_| format!("send_message timed out after {UPLOAD_SEND_MESSAGE_TIMEOUT_SECS}s"))?
@@ -624,6 +946,7 @@ async fn upload(state: &mut State, filename: String, bytes: Vec<u8>) -> Result<S
 }
 
 async fn download_to_cache(state: &mut State, object_id: &str) -> Result<PathBuf, String> {
+    let chat = require_chat(state)?;
     let parsed = parse_tgmtproto_object_id_v1(object_id)?;
     if parsed.peer != state.chat_id {
         return Err(format!(
@@ -636,7 +959,7 @@ async fn download_to_cache(state: &mut State, object_id: &str) -> Result<PathBuf
         Duration::from_secs(DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS),
         state
             .client
-            .get_messages_by_id(&state.chat, &[parsed.msg_id]),
+            .get_messages_by_id(chat, &[parsed.msg_id]),
     )
     .await
     .map_err(|_| {

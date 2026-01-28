@@ -797,7 +797,13 @@ pub async fn run_backup_with<S: Storage>(
 
                         let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
 
-                        let exists = chunk_object_exists(&pool, provider, &chunk_hash).await?
+                        let exists = chunk_object_exists_for_storage(
+                            &pool,
+                            storage,
+                            provider,
+                            &chunk_hash,
+                        )
+                        .await?
                             || scheduled_new_chunks.contains(&chunk_hash);
                         if exists {
                             result.bytes_deduped += chunk.data.len() as u64;
@@ -1127,8 +1133,11 @@ async fn record_chunk_object(
 ) -> Result<()> {
     sqlx::query(
         r#"
-        INSERT OR IGNORE INTO chunk_objects (chunk_hash, provider, object_id, created_at)
+        INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at)
         VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        ON CONFLICT(provider, chunk_hash) DO UPDATE SET
+          object_id = excluded.object_id,
+          created_at = excluded.created_at
         "#,
     )
     .bind(chunk_hash)
@@ -1238,10 +1247,33 @@ fn telegram_camouflaged_filename() -> String {
     format!("file_{}.dat", &id[..12])
 }
 
-async fn chunk_object_exists(pool: &SqlitePool, provider: &str, chunk_hash: &str) -> Result<bool> {
+fn tgmtproto_peer_from_object_id(object_id: &str) -> Option<String> {
+    // chunk_objects.object_id can be:
+    // - direct tgmtproto object_id
+    // - tgpack slice (tgpack:<tgmtproto...>@off+len)
+    // - tgfile wrapper (tgfile:<tgmtproto...>)
+    let parsed = match crate::storage::parse_chunk_object_ref(object_id) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    let pack_object_id = match parsed {
+        crate::storage::ChunkObjectRef::Direct { object_id } => object_id,
+        crate::storage::ChunkObjectRef::PackSlice { pack_object_id, .. } => pack_object_id,
+    };
+    crate::storage::parse_tgmtproto_object_id_v1(&pack_object_id)
+        .ok()
+        .map(|v| v.peer)
+}
+
+async fn chunk_object_exists_for_storage<S: Storage>(
+    pool: &SqlitePool,
+    storage: &S,
+    provider: &str,
+    chunk_hash: &str,
+) -> Result<bool> {
     let row: Option<SqliteRow> = sqlx::query(
         r#"
-        SELECT 1 as present
+        SELECT object_id
         FROM chunk_objects
         WHERE provider = ? AND chunk_hash = ?
         LIMIT 1
@@ -1251,7 +1283,23 @@ async fn chunk_object_exists(pool: &SqlitePool, provider: &str, chunk_hash: &str
     .bind(chunk_hash)
     .fetch_optional(pool)
     .await?;
-    Ok(row.is_some())
+
+    let Some(row) = row else {
+        return Ok(false);
+    };
+
+    let object_id: String = row.get("object_id");
+    let Some(expected_scope) = storage.object_id_scope() else {
+        return Ok(true);
+    };
+
+    // For Telegram MTProto, object IDs embed the peer. If the stored object_id points at a
+    // different peer (e.g. user changed endpoint chat_id), treat it as missing so we re-upload and
+    // rewrite the mapping.
+    let Some(peer) = tgmtproto_peer_from_object_id(&object_id) else {
+        return Ok(false);
+    };
+    Ok(peer == expected_scope)
 }
 
 async fn upload_index<S: Storage>(
