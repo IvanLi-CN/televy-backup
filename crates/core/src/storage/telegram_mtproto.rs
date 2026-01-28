@@ -581,10 +581,11 @@ impl MtProtoHelper {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             if event == "upload_progress" {
-                if let Some(bytes) = env.data.get("bytesUploaded").and_then(|v| v.as_u64()) {
-                    if let Some(cb) = on_progress.as_mut() {
-                        (**cb)(bytes);
-                    }
+                if let (Some(bytes), Some(cb)) = (
+                    env.data.get("bytesUploaded").and_then(|v| v.as_u64()),
+                    on_progress.as_mut(),
+                ) {
+                    (**cb)(bytes);
                 }
                 continue;
             }

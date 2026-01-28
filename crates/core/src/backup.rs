@@ -1471,6 +1471,7 @@ async fn chunk_object_exists_for_storage<S: Storage>(
     Ok(peer == expected_scope)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_index<S: Storage>(
     pool: &SqlitePool,
     storage: &S,

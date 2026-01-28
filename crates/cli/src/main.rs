@@ -1875,6 +1875,7 @@ async fn stats_last(data_dir: &Path, source: Option<PathBuf>, json: bool) -> Res
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn backup_run(
     config_dir: &Path,
     data_dir: &Path,
@@ -2166,6 +2167,7 @@ async fn backup_run(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn preflight_remote_first_index_sync(
     storage: &TelegramMtProtoStorage,
     master_key: &[u8; 32],
