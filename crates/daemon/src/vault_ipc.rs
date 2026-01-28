@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, oneshot};
 
@@ -69,7 +69,7 @@ pub fn spawn_vault_ipc_server(socket_path: PathBuf) -> std::io::Result<VaultIpcS
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
         }
     }
 
@@ -83,7 +83,7 @@ pub fn spawn_vault_ipc_server(socket_path: PathBuf) -> std::io::Result<VaultIpcS
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
     let handle_socket_path = socket_path.clone();
@@ -135,20 +135,39 @@ async fn handle_vault_ipc_client(
     let mut r = BufReader::new(r);
     let mut w = BufWriter::new(w);
 
-    let mut line = String::new();
-    tokio::select! {
-        res = r.read_line(&mut line) => {
-            let n = res?;
-            if n == 0 {
+    const MAX_REQUEST_LINE_BYTES: usize = 64 * 1024;
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if buf.len() > MAX_REQUEST_LINE_BYTES {
+            break;
+        }
+
+        tokio::select! {
+            res = r.read(&mut chunk) => {
+                let n = res?;
+                if n == 0 {
+                    break;
+                }
+
+                if let Some(pos) = chunk[..n].iter().position(|b| *b == b'\n') {
+                    buf.extend_from_slice(&chunk[..pos]);
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            _ = shutdown.recv() => {
                 return Ok(());
             }
         }
-        _ = shutdown.recv() => {
-            return Ok(());
-        }
     }
 
-    if line.len() > 64 * 1024 {
+    if buf.is_empty() {
+        return Ok(());
+    }
+
+    if buf.len() > MAX_REQUEST_LINE_BYTES {
         write_json_line(
             &mut w,
             VaultIpcResponse {
@@ -162,6 +181,24 @@ async fn handle_vault_ipc_client(
         .await?;
         return Ok(());
     }
+
+    let line = match String::from_utf8(buf) {
+        Ok(s) => s,
+        Err(_) => {
+            write_json_line(
+                &mut w,
+                VaultIpcResponse {
+                    ok: false,
+                    vault_key_b64: None,
+                    value: None,
+                    deleted: None,
+                    error: Some("invalid utf-8".to_string()),
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+    };
 
     let req: VaultIpcRequest = match serde_json::from_str(line.trim_end()) {
         Ok(x) => x,

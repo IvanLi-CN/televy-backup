@@ -697,39 +697,60 @@ async fn settings_get(
 
     if json {
         if with_secrets {
-            let master_present = get_secret(config_dir, data_dir, MASTER_KEY_KEY)?.is_some();
+            // The macOS UI calls `settings get --with-secrets` unconditionally.
+            // Keep settings readable even when daemon IPC / Keychain access isn't available.
+            let secrets = (|| -> Result<serde_json::Value, CliError> {
+                let master_present = get_secret(config_dir, data_dir, MASTER_KEY_KEY)?.is_some();
 
-            let mtproto_api_hash_present = get_secret(
-                config_dir,
-                data_dir,
-                &settings.telegram.mtproto.api_hash_key,
-            )?
-            .is_some();
+                let mtproto_api_hash_present = get_secret(
+                    config_dir,
+                    data_dir,
+                    &settings.telegram.mtproto.api_hash_key,
+                )?
+                .is_some();
 
-            let mut bot_present_by_endpoint = serde_json::Map::<String, serde_json::Value>::new();
-            let mut mtproto_session_present_by_endpoint =
-                serde_json::Map::<String, serde_json::Value>::new();
-            for ep in &settings.telegram_endpoints {
-                let bot_present = get_secret(config_dir, data_dir, &ep.bot_token_key)?.is_some();
-                bot_present_by_endpoint.insert(ep.id.clone(), serde_json::Value::Bool(bot_present));
+                let mut bot_present_by_endpoint =
+                    serde_json::Map::<String, serde_json::Value>::new();
+                let mut mtproto_session_present_by_endpoint =
+                    serde_json::Map::<String, serde_json::Value>::new();
+                for ep in &settings.telegram_endpoints {
+                    let bot_present =
+                        get_secret(config_dir, data_dir, &ep.bot_token_key)?.is_some();
+                    bot_present_by_endpoint
+                        .insert(ep.id.clone(), serde_json::Value::Bool(bot_present));
 
-                let sess_present =
-                    get_secret(config_dir, data_dir, &ep.mtproto.session_key)?.is_some();
-                mtproto_session_present_by_endpoint
-                    .insert(ep.id.clone(), serde_json::Value::Bool(sess_present));
+                    let sess_present =
+                        get_secret(config_dir, data_dir, &ep.mtproto.session_key)?.is_some();
+                    mtproto_session_present_by_endpoint
+                        .insert(ep.id.clone(), serde_json::Value::Bool(sess_present));
+                }
+
+                Ok(serde_json::json!({
+                    "telegramBotTokenPresentByEndpoint": bot_present_by_endpoint,
+                    "masterKeyPresent": master_present,
+                    "telegramMtprotoApiHashPresent": mtproto_api_hash_present,
+                    "telegramMtprotoSessionPresentByEndpoint": mtproto_session_present_by_endpoint
+                }))
+            })();
+
+            match secrets {
+                Ok(secrets) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "settings": settings, "secrets": secrets })
+                    );
+                }
+                Err(e) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "settings": settings,
+                            "secrets": serde_json::Value::Null,
+                            "secretsError": { "code": e.code, "message": e.message, "retryable": e.retryable }
+                        })
+                    );
+                }
             }
-            println!(
-                "{}",
-                serde_json::json!({
-                    "settings": settings,
-                    "secrets": {
-                        "telegramBotTokenPresentByEndpoint": bot_present_by_endpoint,
-                        "masterKeyPresent": master_present,
-                        "telegramMtprotoApiHashPresent": mtproto_api_hash_present,
-                        "telegramMtprotoSessionPresentByEndpoint": mtproto_session_present_by_endpoint
-                    }
-                })
-            );
         } else {
             println!("{}", serde_json::json!({ "settings": settings }));
         }

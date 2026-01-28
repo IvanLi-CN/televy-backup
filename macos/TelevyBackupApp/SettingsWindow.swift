@@ -714,9 +714,9 @@ struct SettingsWindowRootView: View {
 
             DispatchQueue.main.async {
                 guard seq == self.reloadSeq else { return }
-                self.vaultKeyPresent = true
                 self.settings = decoded.settings
                 self.secrets = decoded.secrets
+                self.vaultKeyPresent = (decoded.secrets != nil)
                 self.loadError = nil
                 if self.selectedTargetId == nil {
                     self.selectedTargetId = decoded.settings.targets.first?.id
