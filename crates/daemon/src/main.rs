@@ -418,11 +418,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    if settings.telegram.mtproto.api_id <= 0 {
-        return Err("telegram.mtproto.api_id must be > 0".into());
-    }
-    if settings.telegram.mtproto.api_hash_key.trim().is_empty() {
-        return Err("telegram.mtproto.api_hash_key must not be empty".into());
+    let has_enabled_targets = settings.targets.iter().any(|t| t.enabled);
+    if has_enabled_targets {
+        if settings.telegram.mtproto.api_id <= 0 {
+            return Err("telegram.mtproto.api_id must be > 0".into());
+        }
+        if settings.telegram.mtproto.api_hash_key.trim().is_empty() {
+            return Err("telegram.mtproto.api_hash_key must not be empty".into());
+        }
     }
 
     let vault_key = load_or_create_vault_key()?;
@@ -448,8 +451,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let master_key = decode_base64_32(&master_key_b64)?;
 
-    let api_hash = get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
-        .ok_or("telegram api_hash missing")?;
+    let api_hash = if has_enabled_targets {
+        Some(
+            get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
+                .ok_or("telegram api_hash missing")?,
+        )
+    } else {
+        None
+    };
 
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -587,7 +596,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
                     provider,
                     api_id: settings.telegram.mtproto.api_id,
-                    api_hash: api_hash.clone(),
+                    api_hash: api_hash
+                        .clone()
+                        .ok_or("telegram api_hash missing")?,
                     bot_token: bot_token.clone(),
                     chat_id: ep.chat_id.clone(),
                     session,
