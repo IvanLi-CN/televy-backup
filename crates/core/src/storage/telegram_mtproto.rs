@@ -261,6 +261,35 @@ impl Storage for TelegramMtProtoStorage {
         })
     }
 
+    fn upload_document_with_progress<'a>(
+        &'a self,
+        filename: &'a str,
+        bytes: Vec<u8>,
+        mut progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
+                message: "mtproto helper lock poisoned".to_string(),
+            })?;
+            let resp = {
+                let progress = progress
+                    .as_deref_mut()
+                    .map(|cb| cb as &mut dyn FnMut(u64));
+                helper.upload_with_progress(
+                    UploadRequest {
+                        filename: filename.to_string(),
+                        bytes,
+                    },
+                    progress,
+                )?
+            };
+            *self.session.lock().map_err(|_| Error::Telegram {
+                message: "mtproto helper session lock poisoned".to_string(),
+            })? = resp.session;
+            Ok(resp.object_id)
+        })
+    }
+
     fn download_document<'a>(
         &'a self,
         object_id: &'a str,
@@ -517,6 +546,14 @@ impl MtProtoHelper {
     }
 
     fn upload(&mut self, req: UploadRequest) -> Result<UploadResponse> {
+        self.upload_with_progress(req, None)
+    }
+
+    fn upload_with_progress(
+        &mut self,
+        req: UploadRequest,
+        mut on_progress: Option<&mut dyn FnMut(u64)>,
+    ) -> Result<UploadResponse> {
         let meta = UploadRequestMeta {
             filename: req.filename,
             size: req.bytes.len(),
@@ -529,29 +566,45 @@ impl MtProtoHelper {
             })?;
         self.stdin.flush().ok();
 
-        let env = self.read_json_line()?;
-        self.apply_session(&env)?;
-        if !env.ok {
-            return Err(Error::Telegram {
-                message: env
-                    .error
-                    .unwrap_or_else(|| "mtproto upload failed".to_string()),
+        loop {
+            let env = self.read_json_line()?;
+            self.apply_session(&env)?;
+            if !env.ok {
+                return Err(Error::Telegram {
+                    message: env
+                        .error
+                        .unwrap_or_else(|| "mtproto upload failed".to_string()),
+                });
+            }
+
+            let event = env
+                .data
+                .get("event")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if event == "upload_progress" {
+                if let Some(bytes) = env.data.get("bytesUploaded").and_then(|v| v.as_u64()) {
+                    if let Some(cb) = on_progress.as_mut() {
+                        (**cb)(bytes);
+                    }
+                }
+                continue;
+            }
+
+            let object_id = env
+                .data
+                .get("objectId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::Telegram {
+                    message: "mtproto upload missing objectId".to_string(),
+                })?
+                .to_string();
+
+            return Ok(UploadResponse {
+                object_id,
+                session: self.session_bytes(),
             });
         }
-
-        let object_id = env
-            .data
-            .get("objectId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::Telegram {
-                message: "mtproto upload missing objectId".to_string(),
-            })?
-            .to_string();
-
-        Ok(UploadResponse {
-            object_id,
-            session: self.session_bytes(),
-        })
     }
 
     fn download(&mut self, req: DownloadRequest) -> Result<DownloadResponse> {

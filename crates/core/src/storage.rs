@@ -98,6 +98,16 @@ pub trait Storage {
         bytes: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 
+    fn upload_document_with_progress<'a>(
+        &'a self,
+        filename: &'a str,
+        bytes: Vec<u8>,
+        progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+        let _ = progress;
+        self.upload_document(filename, bytes)
+    }
+
     fn download_document<'a>(
         &'a self,
         object_id: &'a str,

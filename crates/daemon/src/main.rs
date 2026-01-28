@@ -48,6 +48,11 @@ struct TargetRuntime {
     running_since: Option<u64>,
     progress: Option<Progress>,
     last_run: Option<TargetRunSummary>,
+
+    up_bps: Option<u64>,
+    up_total_bytes: Option<u64>,
+    last_up_sample_bytes: Option<u64>,
+    last_up_sample_at_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -78,6 +83,10 @@ impl StatusRuntimeState {
                     running_since: None,
                     progress: None,
                     last_run: None,
+                    up_bps: None,
+                    up_total_bytes: None,
+                    last_up_sample_bytes: None,
+                    last_up_sample_at_ms: None,
                 },
             );
         }
@@ -104,6 +113,10 @@ impl StatusRuntimeState {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                up_bps: None,
+                up_total_bytes: None,
+                last_up_sample_bytes: None,
+                last_up_sample_at_ms: None,
             });
 
             rt.label = if t.label.trim().is_empty() {
@@ -127,7 +140,8 @@ impl StatusRuntimeState {
             return;
         };
         t.state = "running".to_string();
-        t.running_since = Some(now_unix_ms());
+        let now = now_unix_ms();
+        t.running_since = Some(now);
         t.progress = Some(Progress {
             phase: "running".to_string(),
             files_total: None,
@@ -138,6 +152,10 @@ impl StatusRuntimeState {
             bytes_uploaded: Some(0),
             bytes_deduped: Some(0),
         });
+        t.up_total_bytes = Some(0);
+        t.up_bps = Some(0);
+        t.last_up_sample_bytes = Some(0);
+        t.last_up_sample_at_ms = Some(now);
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -160,6 +178,27 @@ impl StatusRuntimeState {
             bytes_uploaded: p.bytes_uploaded,
             bytes_deduped: p.bytes_deduped,
         });
+
+        if let Some(bytes) = p.bytes_uploaded {
+            let now = now_unix_ms();
+            t.up_total_bytes = Some(bytes);
+            match (t.last_up_sample_bytes, t.last_up_sample_at_ms) {
+                (Some(prev_bytes), Some(prev_at)) => {
+                    let dt_ms = now.saturating_sub(prev_at).max(1);
+                    let db = bytes.saturating_sub(prev_bytes);
+                    // Avoid oscillating noise when updates are too frequent.
+                    if dt_ms >= 50 {
+                        t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
+                        t.last_up_sample_bytes = Some(bytes);
+                        t.last_up_sample_at_ms = Some(now);
+                    }
+                }
+                _ => {
+                    t.last_up_sample_bytes = Some(bytes);
+                    t.last_up_sample_at_ms = Some(now);
+                }
+            }
+        }
     }
 
     fn mark_run_finish_success(
@@ -176,6 +215,10 @@ impl StatusRuntimeState {
         t.state = "idle".to_string();
         t.running_since = None;
         t.progress = None;
+        t.up_bps = None;
+        t.up_total_bytes = None;
+        t.last_up_sample_bytes = None;
+        t.last_up_sample_at_ms = None;
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -201,6 +244,10 @@ impl StatusRuntimeState {
         t.state = "failed".to_string();
         t.running_since = None;
         t.progress = None;
+        t.up_bps = None;
+        t.up_total_bytes = None;
+        t.last_up_sample_bytes = None;
+        t.last_up_sample_at_ms = None;
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -219,11 +266,23 @@ impl StatusRuntimeState {
     }
 
     fn build_snapshot(&self, now_ms: u64) -> StatusSnapshot {
+        let mut global_up_bps: u64 = 0;
+        let mut global_up_total: u64 = 0;
+        let mut have_global_up = false;
+
         let mut out_targets = Vec::new();
         for id in &self.target_order {
             let Some(t) = self.targets.get(id) else {
                 continue;
             };
+            if let Some(bps) = t.up_bps {
+                global_up_bps = global_up_bps.saturating_add(bps);
+                have_global_up = true;
+            }
+            if let Some(bytes) = t.up_total_bytes {
+                global_up_total = global_up_total.saturating_add(bytes);
+                have_global_up = true;
+            }
             out_targets.push(TargetState {
                 target_id: t.target_id.clone(),
                 label: t.label.clone(),
@@ -233,9 +292,11 @@ impl StatusRuntimeState {
                 state: t.state.clone(),
                 running_since: t.running_since,
                 up: Rate {
-                    bytes_per_second: None,
+                    bytes_per_second: t.up_bps,
                 },
-                up_total: Counter { bytes: None },
+                up_total: Counter {
+                    bytes: t.up_total_bytes,
+                },
                 progress: t.progress.clone(),
                 last_run: t.last_run.clone(),
                 extra: Default::default(),
@@ -252,12 +313,14 @@ impl StatusRuntimeState {
             },
             global: GlobalStatus {
                 up: Rate {
-                    bytes_per_second: None,
+                    bytes_per_second: have_global_up.then_some(global_up_bps),
                 },
                 down: Rate {
                     bytes_per_second: None,
                 },
-                up_total: Counter { bytes: None },
+                up_total: Counter {
+                    bytes: have_global_up.then_some(global_up_total),
+                },
                 down_total: Counter { bytes: None },
                 ui_uptime_seconds: None,
             },
@@ -278,6 +341,75 @@ impl ProgressSink for StatusProgressSink {
         if let Ok(mut st) = self.state.lock() {
             st.on_progress(&self.target_id, progress);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_one_target() -> StatusRuntimeState {
+        let mut st = StatusRuntimeState {
+            target_order: vec!["t1".to_string()],
+            targets: HashMap::new(),
+        };
+        st.targets.insert(
+            "t1".to_string(),
+            TargetRuntime {
+                target_id: "t1".to_string(),
+                label: None,
+                source_path: "/tmp".to_string(),
+                endpoint_id: "ep".to_string(),
+                enabled: true,
+                state: "idle".to_string(),
+                running_since: None,
+                progress: None,
+                last_run: None,
+                up_bps: None,
+                up_total_bytes: None,
+                last_up_sample_bytes: None,
+                last_up_sample_at_ms: None,
+            },
+        );
+        st
+    }
+
+    fn progress(bytes_uploaded: u64) -> TaskProgress {
+        TaskProgress {
+            phase: "upload".to_string(),
+            files_total: None,
+            files_done: None,
+            chunks_total: None,
+            chunks_done: None,
+            bytes_read: None,
+            bytes_uploaded: Some(bytes_uploaded),
+            bytes_deduped: None,
+        }
+    }
+
+    #[test]
+    fn up_total_tracks_progress_bytes_uploaded() {
+        let mut st = state_one_target();
+        st.mark_run_start("t1");
+        st.on_progress("t1", progress(123));
+        assert_eq!(st.targets.get("t1").unwrap().up_total_bytes, Some(123));
+    }
+
+    #[test]
+    fn up_bps_updates_even_with_frequent_progress_calls() {
+        let mut st = state_one_target();
+        st.mark_run_start("t1");
+
+        for n in 0..200u64 {
+            st.on_progress("t1", progress(n));
+        }
+
+        std::thread::sleep(Duration::from_millis(80));
+        st.on_progress("t1", progress(2000));
+
+        let t = st.targets.get("t1").unwrap();
+        assert_eq!(t.up_total_bytes, Some(2000));
+        assert!(t.up_bps.unwrap_or(0) > 0);
     }
 }
 

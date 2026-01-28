@@ -2,16 +2,20 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use grammers_client::client::files::MAX_CHUNK_SIZE;
 use grammers_client::grammers_tl_types as tl;
 use grammers_client::session::defs::{PeerAuth, PeerId, PeerRef};
 use grammers_client::session::storages::TlSession;
+use grammers_client::types::media::Uploaded;
 use grammers_client::types::{Media, Peer};
 use grammers_client::{Client, InputMessage, Update, UpdatesConfiguration};
 use grammers_mtsender::SenderPool;
 use serde::{Deserialize, Serialize};
+use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
 
 const TG_MTPROTO_OBJECT_ID_PREFIX_V1: &str = "tgmtproto:v1:";
@@ -24,6 +28,8 @@ const DOWNLOAD_CHUNK_TIMEOUT_SECS: u64 = 60;
 const LIST_DIALOGS_TIMEOUT_SECS: u64 = 30;
 const WAIT_FOR_CHAT_TIMEOUT_SECS_DEFAULT: u64 = 60;
 const WAIT_FOR_CHAT_TIMEOUT_SECS_MAX: u64 = 10 * 60;
+const UPLOAD_BIG_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
+const UPLOAD_WORKER_COUNT: usize = 4;
 
 fn upload_stream_timeout_secs(size: usize) -> u64 {
     // Scale with size to avoid hanging forever, while allowing large objects to complete on slow links.
@@ -250,7 +256,7 @@ async fn main() {
                     continue;
                 }
 
-                let res = upload(s, req.filename, bytes).await;
+                let res = upload_with_progress(s, req.filename, bytes, &mut output).await;
                 match res {
                     Ok(object_id) => {
                         let mut data = BTreeMap::new();
@@ -912,24 +918,215 @@ async fn wait_for_chat(
         .map_err(|_| format!("wait_for_chat timed out after {timeout_secs}s"))?
 }
 
-async fn upload(state: &mut State, filename: String, bytes: Vec<u8>) -> Result<String, String> {
-    let chat = require_chat(state)?;
+fn generate_upload_file_id() -> i64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let mixed = nanos ^ n.rotate_left(13);
+    (mixed & 0x7fff_ffff_ffff_ffff) as i64
+}
+
+fn write_upload_progress(
+    out: &mut impl Write,
+    session_b64: Option<String>,
+    bytes_uploaded: u64,
+    bytes_total: u64,
+) -> Result<(), String> {
+    let mut data = BTreeMap::new();
+    data.insert(
+        "event".to_string(),
+        serde_json::Value::String("upload_progress".to_string()),
+    );
+    data.insert("bytesUploaded".to_string(), serde_json::json!(bytes_uploaded));
+    data.insert("bytesTotal".to_string(), serde_json::json!(bytes_total));
+    write_response(
+        out,
+        Response {
+            ok: true,
+            error: None,
+            session_b64,
+            data,
+        },
+    )
+    .map_err(|e| format!("stdout write failed: {e}"))?;
+    Ok(())
+}
+
+async fn upload_bytes_with_progress(
+    state: &mut State,
+    filename: String,
+    bytes: Vec<u8>,
+    out: &mut impl Write,
+) -> Result<Uploaded, String> {
     let size = bytes.len();
-    let mut stream = std::io::Cursor::new(bytes);
+    let bytes_total = size as u64;
+    if size == 0 {
+        return Err("invalid upload: empty stream".to_string());
+    }
+
+    let file_id = generate_upload_file_id();
+    let name = if filename.is_empty() {
+        "a".to_string()
+    } else {
+        filename
+    };
+
+    let chunk_size = MAX_CHUNK_SIZE as usize;
+    let total_parts = ((size + chunk_size - 1) / chunk_size) as i32;
+
+    if size > UPLOAD_BIG_FILE_SIZE_BYTES {
+        let bytes = Arc::new(bytes);
+        let next_part = Arc::new(AtomicI32::new(0));
+        let uploaded = Arc::new(AtomicU64::new(0));
+        let client = state.client.clone();
+
+        let mut join_set = JoinSet::new();
+        for _ in 0..UPLOAD_WORKER_COUNT {
+            let bytes = Arc::clone(&bytes);
+            let next_part = Arc::clone(&next_part);
+            let uploaded = Arc::clone(&uploaded);
+            let client = client.clone();
+            join_set.spawn(async move {
+                loop {
+                    let part = next_part.fetch_add(1, Ordering::Relaxed);
+                    if part >= total_parts {
+                        break;
+                    }
+                    let start = (part as usize).saturating_mul(chunk_size);
+                    let end = (start + chunk_size).min(bytes.len());
+                    let len = end.saturating_sub(start);
+                    if len == 0 {
+                        continue;
+                    }
+                    let chunk = bytes[start..end].to_vec();
+                    let len_u64 = len as u64;
+                    uploaded.fetch_add(len_u64, Ordering::Relaxed);
+                    let ok = match client
+                        .invoke(&tl::functions::upload::SaveBigFilePart {
+                            file_id,
+                            file_part: part,
+                            file_total_parts: total_parts,
+                            bytes: chunk,
+                        })
+                        .await
+                    {
+                        Ok(ok) => ok,
+                        Err(e) => {
+                            uploaded.fetch_sub(len_u64, Ordering::Relaxed);
+                            return Err(format!("save_big_file_part failed: {e}"));
+                        }
+                    };
+                    if !ok {
+                        uploaded.fetch_sub(len_u64, Ordering::Relaxed);
+                        return Err("server failed to store uploaded data".to_string());
+                    }
+                }
+                Ok::<(), String>(())
+            });
+        }
+
+        let mut last_reported = 0u64;
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let now = uploaded.load(Ordering::Relaxed).min(bytes_total);
+                    if now != last_reported {
+                        last_reported = now;
+                        let session = Some(session_b64(&state.session));
+                        write_upload_progress(out, session, last_reported, bytes_total)?;
+                    }
+                }
+                res = join_set.join_next() => {
+                    match res {
+                        Some(Ok(Ok(()))) => {}
+                        Some(Ok(Err(e))) => {
+                            join_set.abort_all();
+                            return Err(e);
+                        }
+                        Some(Err(e)) => {
+                            join_set.abort_all();
+                            return Err(format!("upload worker join failed: {e}"));
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        let final_uploaded = uploaded.load(Ordering::Relaxed).min(bytes_total);
+        if final_uploaded != last_reported {
+            let session = Some(session_b64(&state.session));
+            write_upload_progress(out, session, final_uploaded, bytes_total)?;
+        }
+
+        return Ok(Uploaded::from_raw(
+            tl::types::InputFileBig {
+                id: file_id,
+                parts: total_parts,
+                name,
+            }
+            .into(),
+        ));
+    }
+
+    let mut md5 = md5::Context::new();
+    let mut bytes_uploaded = 0u64;
+    for (part, chunk) in bytes.chunks(chunk_size).enumerate() {
+        md5.consume(chunk);
+        bytes_uploaded = bytes_uploaded.saturating_add(chunk.len() as u64).min(bytes_total);
+        let session = Some(session_b64(&state.session));
+        write_upload_progress(out, session, bytes_uploaded, bytes_total)?;
+        let ok = state
+            .client
+            .invoke(&tl::functions::upload::SaveFilePart {
+                file_id,
+                file_part: part as i32,
+                bytes: chunk.to_vec(),
+            })
+            .await
+            .map_err(|e| format!("save_file_part failed: {e}"))?;
+        if !ok {
+            return Err("server failed to store uploaded data".to_string());
+        }
+    }
+
+    Ok(Uploaded::from_raw(
+        tl::types::InputFile {
+            id: file_id,
+            parts: total_parts,
+            name,
+            md5_checksum: format!("{:x}", md5.compute()),
+        }
+        .into(),
+    ))
+}
+
+async fn upload_with_progress(
+    state: &mut State,
+    filename: String,
+    bytes: Vec<u8>,
+    out: &mut impl Write,
+) -> Result<String, String> {
+    let chat = require_chat(state)?.clone();
+    let size = bytes.len();
     let timeout_secs = upload_stream_timeout_secs(size);
     let uploaded = timeout(
         Duration::from_secs(timeout_secs),
-        state.client.upload_stream(&mut stream, size, filename),
+        upload_bytes_with_progress(state, filename, bytes, out),
     )
     .await
-    .map_err(|_| format!("upload_stream timed out after {timeout_secs}s"))?
-    .map_err(|e| format!("upload_stream failed: {e}"))?;
+    .map_err(|_| format!("upload_stream timed out after {timeout_secs}s"))??;
 
     let msg = timeout(
         Duration::from_secs(UPLOAD_SEND_MESSAGE_TIMEOUT_SECS),
         state
             .client
-            .send_message(chat, InputMessage::new().text("").file(uploaded)),
+            .send_message(&chat, InputMessage::new().text("").file(uploaded)),
     )
     .await
     .map_err(|_| format!("send_message timed out after {UPLOAD_SEND_MESSAGE_TIMEOUT_SECS}s"))?
