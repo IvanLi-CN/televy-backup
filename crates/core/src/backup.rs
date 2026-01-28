@@ -1051,11 +1051,7 @@ pub async fn run_backup_with<S: Storage>(
                                 &pool,
                                 &provider,
                                 &entry.chunk_hash,
-                                &encode_tgpack_object_id(
-                                    &pack_object_id,
-                                    entry.offset,
-                                    entry.len,
-                                ),
+                                &encode_tgpack_object_id(&pack_object_id, entry.offset, entry.len),
                             )
                             .await?;
                             stats.chunks_uploaded += 1;
@@ -1128,8 +1124,7 @@ pub async fn run_backup_with<S: Storage>(
                     });
                 }
 
-                if scan_done.load(Ordering::Relaxed)
-                    && active_uploads.load(Ordering::Relaxed) == 0
+                if scan_done.load(Ordering::Relaxed) && active_uploads.load(Ordering::Relaxed) == 0
                 {
                     break;
                 }

@@ -598,7 +598,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let vault_key = load_or_create_vault_key()?;
     let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
-    let mut secrets_store = televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
+    let mut secrets_store =
+        televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
     let mut last_secrets_mtime = file_mtime(&secrets_path);
 
     let mut master_key_b64 = get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
@@ -606,8 +607,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("master key missing")?;
     let mut master_key = decode_base64_32(&master_key_b64)?;
 
-    let mut api_hash = get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
-        .ok_or("telegram api_hash missing")?;
+    let mut api_hash =
+        get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
+            .ok_or("telegram api_hash missing")?;
 
     let mut schedule_state_by_target = HashMap::<String, TargetScheduleState>::new();
     let mut storage_by_endpoint = HashMap::<String, TelegramMtProtoStorage>::new();
@@ -635,7 +637,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if config_changed {
                     match settings_config::load_settings_v2(&config_root) {
                         Ok(new_settings) => {
-                            if let Err(e) = settings_config::validate_settings_schema_v2(&new_settings)
+                            if let Err(e) =
+                                settings_config::validate_settings_schema_v2(&new_settings)
                             {
                                 tracing::warn!(
                                     event = "config.reload_failed",
@@ -647,9 +650,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 settings = new_settings;
                                 last_config_mtime = config_mtime;
                                 storage_by_endpoint.clear();
-                                schedule_state_by_target.retain(|k, _| {
-                                    settings.targets.iter().any(|t| t.id == *k)
-                                });
+                                schedule_state_by_target
+                                    .retain(|k, _| settings.targets.iter().any(|t| t.id == *k));
                                 if let Ok(mut st) = status_state.lock() {
                                     st.apply_settings(&settings);
                                 }
@@ -687,9 +689,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     master_key = k;
                                 }
                             }
-                            if let Some(h) =
-                                get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
-                            {
+                            if let Some(h) = get_secret_from_store(
+                                &secrets_store,
+                                &settings.telegram.mtproto.api_hash_key,
+                            ) {
                                 api_hash = h;
                             }
 
@@ -712,7 +715,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if settings.telegram.mtproto.api_id <= 0 || settings.telegram.mtproto.api_hash_key.trim().is_empty() {
+        if settings.telegram.mtproto.api_id <= 0
+            || settings.telegram.mtproto.api_hash_key.trim().is_empty()
+        {
             // Keep the daemon alive so the UI can show status, but skip running backups until config is fixed.
             sleep(Duration::from_secs(1)).await;
             continue;

@@ -1339,13 +1339,17 @@ async fn telegram_dialogs(
 
     let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
         .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
-    let api_hash =
-        get_secret(config_dir, data_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(|| {
-            CliError::new(
-                "telegram.mtproto.missing_api_hash",
-                "mtproto api_hash missing",
-            )
-        })?;
+    let api_hash = get_secret(
+        config_dir,
+        data_dir,
+        &settings.telegram.mtproto.api_hash_key,
+    )?
+    .ok_or_else(|| {
+        CliError::new(
+            "telegram.mtproto.missing_api_hash",
+            "mtproto api_hash missing",
+        )
+    })?;
     let session = load_optional_base64_secret_bytes(
         config_dir,
         data_dir,
@@ -1378,7 +1382,8 @@ async fn telegram_dialogs(
     let dialogs = match storage.list_dialogs(limit, include_users) {
         Ok(v) => v,
         Err(televy_backup_core::Error::Telegram { message })
-            if message.contains("BOT_METHOD_INVALID") || message.contains("messages.getDialogs") =>
+            if message.contains("BOT_METHOD_INVALID")
+                || message.contains("messages.getDialogs") =>
         {
             return Err(CliError::new(
                 "telegram.dialogs_unsupported",
@@ -1458,13 +1463,17 @@ async fn telegram_wait_chat(
 
     let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
         .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
-    let api_hash =
-        get_secret(config_dir, data_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(|| {
-            CliError::new(
-                "telegram.mtproto.missing_api_hash",
-                "mtproto api_hash missing",
-            )
-        })?;
+    let api_hash = get_secret(
+        config_dir,
+        data_dir,
+        &settings.telegram.mtproto.api_hash_key,
+    )?
+    .ok_or_else(|| {
+        CliError::new(
+            "telegram.mtproto.missing_api_hash",
+            "mtproto api_hash missing",
+        )
+    })?;
     let session = load_optional_base64_secret_bytes(
         config_dir,
         data_dir,

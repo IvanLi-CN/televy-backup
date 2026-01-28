@@ -272,9 +272,7 @@ impl Storage for TelegramMtProtoStorage {
                 message: "mtproto helper lock poisoned".to_string(),
             })?;
             let resp = {
-                let progress = progress
-                    .as_deref_mut()
-                    .map(|cb| cb as &mut dyn FnMut(u64));
+                let progress = progress.as_deref_mut().map(|cb| cb as &mut dyn FnMut(u64));
                 helper.upload_with_progress(
                     UploadRequest {
                         filename: filename.to_string(),
@@ -765,7 +763,11 @@ impl MtProtoHelper {
         Ok(out)
     }
 
-    fn wait_for_chat(&mut self, timeout_secs: u64, include_users: bool) -> Result<TelegramDialogInfo> {
+    fn wait_for_chat(
+        &mut self,
+        timeout_secs: u64,
+        include_users: bool,
+    ) -> Result<TelegramDialogInfo> {
         self.send_json(&Request::WaitForChat(WaitForChatRequest {
             timeout_secs,
             include_users,
