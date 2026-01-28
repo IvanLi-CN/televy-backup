@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-#[cfg(target_os = "macos")]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -343,6 +342,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_root = data_dir.unwrap_or_else(default_data_dir);
     let db_path = data_root.join("index").join("index.sqlite");
 
+    let _ = CONFIG_ROOT_CACHE.set(config_root.clone());
+
     let settings = settings_config::load_settings_v2(&config_root)?;
     settings_config::validate_settings_schema_v2(&settings)?;
 
@@ -426,12 +427,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let vault_key = load_or_create_vault_key()?;
     let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
+    let secrets_file_exists = secrets_path.exists();
     let mut secrets_store =
         televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
 
-    let master_key_b64 = get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
-        .or_else(|| keychain_get_secret(MASTER_KEY_KEY).ok().flatten())
-        .ok_or("master key missing")?;
+    let master_key_b64 = match get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
+        .or_else(|| maybe_keychain_get_secret(MASTER_KEY_KEY))
+    {
+        Some(v) => v,
+        None if keychain_disabled() && !secrets_file_exists => {
+            let mut bytes = [0u8; 32];
+            getrandom::getrandom(&mut bytes)
+                .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
+            let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
+            secrets_store.set(MASTER_KEY_KEY, b64.clone());
+            televy_backup_core::secrets::save_secrets_store(&secrets_path, &vault_key, &secrets_store)?;
+            b64
+        }
+        None => return Err("master key missing".into()),
+    };
     let master_key = decode_base64_32(&master_key_b64)?;
 
     let api_hash = get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
@@ -543,7 +557,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let bot_token = get_secret_from_store(&secrets_store, &ep.bot_token_key)
-                .or_else(|| keychain_get_secret(&ep.bot_token_key).ok().flatten());
+                .or_else(|| maybe_keychain_get_secret(&ep.bot_token_key));
             let Some(bot_token) = bot_token else {
                 tracing::error!(
                     event = "run.finish",
@@ -867,9 +881,8 @@ fn default_data_dir() -> PathBuf {
 }
 
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
-#[cfg(target_os = "macos")]
+static CONFIG_ROOT_CACHE: OnceLock<PathBuf> = OnceLock::new();
 static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
-#[cfg(target_os = "macos")]
 static VAULT_KEY_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn get_secret_from_store(
@@ -885,9 +898,27 @@ fn decode_base64_32(b64: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     Ok(arr)
 }
 
+fn keychain_disabled() -> bool {
+    matches!(
+        std::env::var("TELEVYBACKUP_DISABLE_KEYCHAIN").as_deref(),
+        Ok("1")
+    )
+}
+
+fn maybe_keychain_get_secret(key: &str) -> Option<String> {
+    if keychain_disabled() {
+        return None;
+    }
+    keychain_get_secret(key).ok().flatten()
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn keychain_get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
     use security_framework::passwords::{PasswordOptions, generic_password};
+
+    if keychain_disabled() {
+        return Err("keychain disabled".into());
+    }
 
     let opts = PasswordOptions::new_generic_password(televy_backup_core::APP_NAME, key);
     match generic_password(opts) {
@@ -912,6 +943,9 @@ pub(crate) fn keychain_get_secret(
 #[cfg(target_os = "macos")]
 fn keychain_set_secret(key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
     use security_framework::passwords::set_generic_password;
+    if keychain_disabled() {
+        return Err("keychain disabled".into());
+    }
     set_generic_password(televy_backup_core::APP_NAME, key, value.as_bytes())?;
     Ok(())
 }
@@ -919,6 +953,10 @@ fn keychain_set_secret(key: &str, value: &str) -> Result<(), Box<dyn std::error:
 #[cfg(target_os = "macos")]
 pub(crate) fn keychain_delete_secret(key: &str) -> Result<bool, Box<dyn std::error::Error>> {
     use security_framework::passwords::delete_generic_password;
+
+    if keychain_disabled() {
+        return Err("keychain disabled".into());
+    }
 
     match delete_generic_password(televy_backup_core::APP_NAME, key) {
         Ok(()) => Ok(true),
@@ -942,7 +980,6 @@ fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
     e.code() == -25300
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
     if let Some(key) = VAULT_KEY_CACHE.get() {
         return Ok(*key);
@@ -961,24 +998,56 @@ pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error:
     Ok(*VAULT_KEY_CACHE.get().unwrap_or(&key))
 }
 
-#[cfg(target_os = "macos")]
 fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    let existing = keychain_get_secret(televy_backup_core::secrets::VAULT_KEY_KEY)?
-        .map(|s| s.trim().to_string());
+    let config_root = CONFIG_ROOT_CACHE
+        .get()
+        .cloned()
+        .unwrap_or_else(default_config_dir);
 
-    if let Some(b64) = existing {
-        return Ok(televy_backup_core::secrets::vault_key_from_base64(&b64)?);
+    let key_file_path = std::env::var("TELEVYBACKUP_VAULT_KEY_FILE")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| televy_backup_core::secrets::vault_key_file_path(&config_root));
+
+    if let Ok(b64) = std::env::var("TELEVYBACKUP_VAULT_KEY_B64") {
+        let key = televy_backup_core::secrets::vault_key_from_base64(b64.trim())?;
+        televy_backup_core::secrets::write_vault_key_file_private(&key_file_path, &key)?;
+        return Ok(key);
     }
 
-    let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes)
-        .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
-    let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
-    keychain_set_secret(televy_backup_core::secrets::VAULT_KEY_KEY, &b64)?;
-    Ok(bytes)
-}
+    match televy_backup_core::secrets::read_vault_key_file(&key_file_path) {
+        Ok(key) => return Ok(key),
+        Err(televy_backup_core::secrets::SecretsStoreError::Io(e))
+            if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Box::new(e)),
+    }
 
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    Err("vault key only supported on macOS".into())
+    if keychain_disabled() {
+        let mut bytes = [0u8; 32];
+        getrandom::getrandom(&mut bytes)
+            .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
+        televy_backup_core::secrets::write_vault_key_file_private(&key_file_path, &bytes)?;
+        return Ok(bytes);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let existing = keychain_get_secret(televy_backup_core::secrets::VAULT_KEY_KEY)?
+            .map(|s| s.trim().to_string());
+        if let Some(b64) = existing {
+            return Ok(televy_backup_core::secrets::vault_key_from_base64(&b64)?);
+        }
+
+        let mut bytes = [0u8; 32];
+        getrandom::getrandom(&mut bytes)
+            .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
+        let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
+        keychain_set_secret(televy_backup_core::secrets::VAULT_KEY_KEY, &b64)?;
+        Ok(bytes)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("vault key unavailable (keychain unsupported)".into())
+    }
 }
