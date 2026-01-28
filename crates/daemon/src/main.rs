@@ -22,6 +22,7 @@ use televy_backup_core::{bootstrap, config as settings_config};
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
+mod control_ipc;
 mod status_ipc;
 mod vault_ipc;
 
@@ -413,6 +414,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error = %e,
                 path = %vault_socket_path.display(),
                 "vault.ipc_bind_failed"
+            );
+            None
+        }
+    };
+
+    let control_socket_path = televy_backup_core::control::control_ipc_socket_path(&data_root);
+    let _control_ipc_server = match control_ipc::spawn_control_ipc_server(
+        control_socket_path.clone(),
+        config_root.clone(),
+        Arc::new(settings.clone()),
+    ) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!(
+                event = "control.ipc_bind_failed",
+                error = %e,
+                path = %control_socket_path.display(),
+                "control.ipc_bind_failed"
             );
             None
         }
