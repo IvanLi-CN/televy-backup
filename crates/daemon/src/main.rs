@@ -869,6 +869,8 @@ fn default_data_dir() -> PathBuf {
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
 #[cfg(target_os = "macos")]
 static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
+#[cfg(target_os = "macos")]
+static VAULT_KEY_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn get_secret_from_store(
     store: &televy_backup_core::secrets::SecretsStore,
@@ -946,9 +948,17 @@ pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error:
         return Ok(*key);
     }
 
+    // With concurrent IPC requests, ensure only one initializer runs.
+    let lock = VAULT_KEY_INIT_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().map_err(|_| "vault key init lock poisoned")?;
+
+    if let Some(key) = VAULT_KEY_CACHE.get() {
+        return Ok(*key);
+    }
+
     let key = load_or_create_vault_key_uncached()?;
     let _ = VAULT_KEY_CACHE.set(key);
-    Ok(key)
+    Ok(*VAULT_KEY_CACHE.get().unwrap_or(&key))
 }
 
 #[cfg(target_os = "macos")]
