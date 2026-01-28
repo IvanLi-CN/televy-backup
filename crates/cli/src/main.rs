@@ -697,60 +697,11 @@ async fn settings_get(
 
     if json {
         if with_secrets {
-            // The macOS UI calls `settings get --with-secrets` unconditionally.
-            // Keep settings readable even when daemon IPC / Keychain access isn't available.
-            let secrets = (|| -> Result<serde_json::Value, CliError> {
-                let master_present = get_secret(config_dir, data_dir, MASTER_KEY_KEY)?.is_some();
-
-                let mtproto_api_hash_present = get_secret(
-                    config_dir,
-                    data_dir,
-                    &settings.telegram.mtproto.api_hash_key,
-                )?
-                .is_some();
-
-                let mut bot_present_by_endpoint =
-                    serde_json::Map::<String, serde_json::Value>::new();
-                let mut mtproto_session_present_by_endpoint =
-                    serde_json::Map::<String, serde_json::Value>::new();
-                for ep in &settings.telegram_endpoints {
-                    let bot_present =
-                        get_secret(config_dir, data_dir, &ep.bot_token_key)?.is_some();
-                    bot_present_by_endpoint
-                        .insert(ep.id.clone(), serde_json::Value::Bool(bot_present));
-
-                    let sess_present =
-                        get_secret(config_dir, data_dir, &ep.mtproto.session_key)?.is_some();
-                    mtproto_session_present_by_endpoint
-                        .insert(ep.id.clone(), serde_json::Value::Bool(sess_present));
-                }
-
-                Ok(serde_json::json!({
-                    "telegramBotTokenPresentByEndpoint": bot_present_by_endpoint,
-                    "masterKeyPresent": master_present,
-                    "telegramMtprotoApiHashPresent": mtproto_api_hash_present,
-                    "telegramMtprotoSessionPresentByEndpoint": mtproto_session_present_by_endpoint
-                }))
-            })();
-
-            match secrets {
-                Ok(secrets) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({ "settings": settings, "secrets": secrets })
-                    );
-                }
-                Err(e) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "settings": settings,
-                            "secrets": serde_json::Value::Null,
-                            "secretsError": { "code": e.code, "message": e.message, "retryable": e.retryable }
-                        })
-                    );
-                }
-            }
+            let secrets = daemon_control_secrets_presence(data_dir, None)?;
+            println!(
+                "{}",
+                serde_json::json!({ "settings": settings, "secrets": secrets })
+            );
         } else {
             println!("{}", serde_json::json!({ "settings": settings }));
         }
@@ -762,21 +713,29 @@ async fn settings_get(
             println!();
         }
         if with_secrets {
-            let master_present = get_secret(config_dir, data_dir, MASTER_KEY_KEY)?.is_some();
-            let mtproto_api_hash_present = get_secret(
-                config_dir,
-                data_dir,
-                &settings.telegram.mtproto.api_hash_key,
-            )?
-            .is_some();
+            let secrets = daemon_control_secrets_presence(data_dir, None)?;
+            let master_present = secrets
+                .get("masterKeyPresent")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mtproto_api_hash_present = secrets
+                .get("telegramMtprotoApiHashPresent")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             println!();
             println!("masterKeyPresent={master_present}");
             println!("telegramMtprotoApiHashPresent={mtproto_api_hash_present}");
             for ep in &settings.telegram_endpoints {
-                let telegram_present =
-                    get_secret(config_dir, data_dir, &ep.bot_token_key)?.is_some();
-                let mtproto_session_present =
-                    get_secret(config_dir, data_dir, &ep.mtproto.session_key)?.is_some();
+                let telegram_present = secrets
+                    .get("telegramBotTokenPresentByEndpoint")
+                    .and_then(|m| m.get(&ep.id))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let mtproto_session_present = secrets
+                    .get("telegramMtprotoSessionPresentByEndpoint")
+                    .and_then(|m| m.get(&ep.id))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 println!(
                     "telegramBotTokenPresent[{id}]={telegram_present}",
                     id = ep.id
@@ -911,7 +870,7 @@ async fn secrets_set_telegram_bot_token(
     if token.is_empty() {
         return Err(CliError::new("config.invalid", "token is empty"));
     }
-    set_secret(config_dir, data_dir, &ep.bot_token_key, &token)?;
+    daemon_control_secrets_set_telegram_bot_token(data_dir, &ep.id, &token)?;
 
     if json {
         println!("{}", serde_json::json!({ "ok": true }));
@@ -935,13 +894,8 @@ async fn secrets_set_telegram_api_hash(
     if api_hash.is_empty() {
         return Err(CliError::new("config.invalid", "api_hash is empty"));
     }
-
-    set_secret(
-        config_dir,
-        data_dir,
-        &settings.telegram.mtproto.api_hash_key,
-        &api_hash,
-    )?;
+    let _ = settings;
+    daemon_control_secrets_set_telegram_api_hash(data_dir, &api_hash)?;
 
     if json {
         println!("{}", serde_json::json!({ "ok": true }));
@@ -958,7 +912,7 @@ async fn secrets_clear_telegram_mtproto_session(
 ) -> Result<(), CliError> {
     let settings = load_settings(config_dir)?;
     for ep in &settings.telegram_endpoints {
-        delete_secret(config_dir, data_dir, &ep.mtproto.session_key)?;
+        daemon_control_secrets_clear_telegram_mtproto_session(data_dir, &ep.id)?;
     }
 
     if json {
@@ -2774,6 +2728,135 @@ fn daemon_vault_get_or_create_b64(data_dir: &Path) -> Result<String, CliError> {
         .ok_or_else(|| CliError::new("daemon.failed", "vault IPC missing vault_key_b64"))
 }
 
+#[cfg(unix)]
+fn control_ipc_call(
+    data_dir: &Path,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<televy_backup_core::control::ControlResponse, CliError> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let socket_path = televy_backup_core::control::control_ipc_socket_path(data_dir);
+    let mut stream = UnixStream::connect(&socket_path).map_err(|e| {
+        CliError::retryable(
+            "daemon.unavailable",
+            "control IPC unavailable (is daemon running?)",
+        )
+        .with_details(serde_json::json!({
+            "socketPath": socket_path.display().to_string(),
+            "error": e.to_string(),
+        }))
+    })?;
+
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+
+    let req = televy_backup_core::control::ControlRequest::new(
+        uuid::Uuid::new_v4().to_string(),
+        method,
+        params,
+    );
+    let line = serde_json::to_string(&req)
+        .map_err(|e| CliError::new("daemon.unavailable", e.to_string()))?;
+    stream
+        .write_all(line.as_bytes())
+        .and_then(|_| stream.write_all(b"\n"))
+        .map_err(|e| {
+            CliError::retryable("daemon.unavailable", "control IPC write failed").with_details(
+                serde_json::json!({
+                    "socketPath": socket_path.display().to_string(),
+                    "error": e.to_string(),
+                }),
+            )
+        })?;
+    let _ = stream.flush();
+
+    let mut reader = BufReader::new(stream);
+    let mut resp_line = String::new();
+    reader.read_line(&mut resp_line).map_err(|e| {
+        CliError::retryable("daemon.unavailable", "control IPC read failed").with_details(
+            serde_json::json!({
+                "socketPath": socket_path.display().to_string(),
+                "error": e.to_string(),
+            }),
+        )
+    })?;
+
+    let resp: televy_backup_core::control::ControlResponse =
+        serde_json::from_str(resp_line.trim_end()).map_err(|e| {
+            CliError::new("daemon.unavailable", format!("invalid IPC response: {e}"))
+        })?;
+
+    if resp.ok {
+        Ok(resp)
+    } else {
+        let err = resp
+            .error
+            .unwrap_or(televy_backup_core::control::ControlError {
+                code: "control.failed".to_string(),
+                message: "daemon request failed".to_string(),
+                retryable: false,
+                details: serde_json::json!({}),
+            });
+        Err(
+            CliError::new("control.failed", format!("{}: {}", err.code, err.message))
+                .with_details(err.details),
+        )
+    }
+}
+
+#[cfg(not(unix))]
+fn control_ipc_call(
+    _data_dir: &Path,
+    _method: &str,
+    _params: serde_json::Value,
+) -> Result<televy_backup_core::control::ControlResponse, CliError> {
+    Err(CliError::new(
+        "daemon.unavailable",
+        "control IPC is only supported on unix",
+    ))
+}
+
+fn daemon_control_secrets_presence(
+    data_dir: &Path,
+    endpoint_id: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
+    let params = serde_json::json!({ "endpointId": endpoint_id });
+    let resp = control_ipc_call(data_dir, "secrets.presence", params)?;
+    resp.result
+        .ok_or_else(|| CliError::new("control.failed", "missing result"))
+}
+
+fn daemon_control_secrets_set_telegram_bot_token(
+    data_dir: &Path,
+    endpoint_id: &str,
+    token: &str,
+) -> Result<(), CliError> {
+    let params = serde_json::json!({ "endpointId": endpoint_id, "token": token });
+    let _ = control_ipc_call(data_dir, "secrets.setTelegramBotToken", params)?;
+    Ok(())
+}
+
+fn daemon_control_secrets_set_telegram_api_hash(
+    data_dir: &Path,
+    api_hash: &str,
+) -> Result<(), CliError> {
+    let params = serde_json::json!({ "apiHash": api_hash });
+    let _ = control_ipc_call(data_dir, "secrets.setTelegramApiHash", params)?;
+    Ok(())
+}
+
+fn daemon_control_secrets_clear_telegram_mtproto_session(
+    data_dir: &Path,
+    endpoint_id: &str,
+) -> Result<(), CliError> {
+    let params = serde_json::json!({ "endpointId": endpoint_id });
+    let _ = control_ipc_call(data_dir, "secrets.clearTelegramMtprotoSession", params)?;
+    Ok(())
+}
+
 fn daemon_keychain_get_secret(data_dir: &Path, key: &str) -> Result<Option<String>, CliError> {
     let resp = vault_ipc_call(
         data_dir,
@@ -2823,19 +2906,6 @@ fn set_secret(config_dir: &Path, data_dir: &Path, key: &str, value: &str) -> Res
     televy_backup_core::secrets::save_secrets_store(&path, &vault_key, &store)
         .map_err(map_secrets_store_err)?;
     Ok(())
-}
-
-fn delete_secret(config_dir: &Path, data_dir: &Path, key: &str) -> Result<bool, CliError> {
-    let vault_key = load_or_create_vault_key(data_dir)?;
-    let path = televy_backup_core::secrets::secrets_path(config_dir);
-    let mut store = televy_backup_core::secrets::load_secrets_store(&path, &vault_key)
-        .map_err(map_secrets_store_err)?;
-    let removed = store.remove(key);
-    if removed {
-        televy_backup_core::secrets::save_secrets_store(&path, &vault_key, &store)
-            .map_err(map_secrets_store_err)?;
-    }
-    Ok(removed)
 }
 
 fn map_secrets_store_err(e: televy_backup_core::secrets::SecretsStoreError) -> CliError {
