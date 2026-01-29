@@ -407,13 +407,13 @@ fn secrets_presence(
     settings: &Settings,
     endpoint_id: Option<&str>,
 ) -> Result<serde_json::Value, ControlError> {
-    if let Some(id) = endpoint_id {
-        if !settings.telegram_endpoints.iter().any(|e| e.id == id) {
-            return Err(ControlError::invalid_request(
-                "unknown endpoint_id",
-                serde_json::json!({ "endpointId": id }),
-            ));
-        }
+    if let Some(id) = endpoint_id
+        && !settings.telegram_endpoints.iter().any(|e| e.id == id)
+    {
+        return Err(ControlError::invalid_request(
+            "unknown endpoint_id",
+            serde_json::json!({ "endpointId": id }),
+        ));
     }
 
     let vault_key = crate::load_or_create_vault_key().map_err(|e| ControlError {
