@@ -74,6 +74,7 @@ pub async fn restore_snapshot_with<S: Storage>(
         &config.master_key,
         &config.index_db_path,
         options.cancel,
+        Some(storage.provider()),
     )
     .await?;
 
@@ -135,6 +136,7 @@ pub async fn verify_snapshot_with<S: Storage>(
         &config.master_key,
         &config.index_db_path,
         options.cancel,
+        Some(storage.provider()),
     )
     .await?;
 

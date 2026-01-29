@@ -23,6 +23,7 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
     master_key: &[u8; 32],
     index_db_path: &Path,
     cancel: Option<&CancellationToken>,
+    normalize_provider: Option<&str>,
 ) -> Result<DownloadedIndexDbStats> {
     if let Some(cancel) = cancel
         && cancel.is_cancelled()
@@ -146,7 +147,7 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
     let sqlite_bytes = zstd::stream::decode_all(compressed.as_slice())?;
     let bytes_written = sqlite_bytes.len() as u64;
 
-    write_atomic(index_db_path, &sqlite_bytes)?;
+    write_index_db_atomic(index_db_path, &sqlite_bytes, normalize_provider).await?;
 
     Ok(DownloadedIndexDbStats {
         bytes_downloaded,
@@ -154,7 +155,11 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
     })
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+async fn write_index_db_atomic(
+    path: &Path,
+    bytes: &[u8],
+    normalize_provider: Option<&str>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -180,11 +185,73 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         fs::write(&tmp, bytes)?;
     }
 
-    match fs::rename(&tmp, path) {
+    if let Some(provider) = normalize_provider {
+        normalize_provider_in_index_db(&tmp, provider).await?;
+    }
+
+    replace_atomic(&tmp, path)?;
+    Ok(())
+}
+
+async fn normalize_provider_in_index_db(path: &Path, provider: &str) -> Result<()> {
+    let kind = provider_kind(provider);
+    let like = format!("{kind}%");
+
+    let pool = crate::index_db::open_existing_index_db(path).await?;
+    // `chunk_objects` has unique constraints involving `provider`, so avoid hard failures when the
+    // downloaded DB already contains the normalized provider (e.g. two endpoint IDs pointing to the
+    // same chat). The duplicates are harmless for lookups.
+    sqlx::query(
+        "UPDATE OR IGNORE chunk_objects SET provider = ? WHERE provider != ? AND provider LIKE ?",
+    )
+    .bind(provider)
+    .bind(provider)
+    .bind(&like)
+    .execute(&pool)
+    .await?;
+    sqlx::query("UPDATE remote_indexes SET provider = ? WHERE provider != ? AND provider LIKE ?")
+        .bind(provider)
+        .bind(provider)
+        .bind(&like)
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE remote_index_parts SET provider = ? WHERE provider != ? AND provider LIKE ?",
+    )
+    .bind(provider)
+    .bind(provider)
+    .bind(&like)
+    .execute(&pool)
+    .await?;
+
+    Ok(())
+}
+
+fn provider_kind(provider: &str) -> &str {
+    provider.split(['/', ':']).next().unwrap_or(provider).trim()
+}
+
+fn replace_atomic(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    match fs::rename(tmp, path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let _ = fs::remove_file(path);
-            fs::rename(&tmp, path)
+            // Some platforms (e.g. Windows) do not allow renaming over an existing destination.
+            // Avoid deleting the existing DB: move it aside, then restore it if the replace fails.
+            let mut backup = path.to_path_buf();
+            backup.set_extension(format!("bak-{}", uuid::Uuid::new_v4()));
+
+            fs::rename(path, &backup)?;
+            match fs::rename(tmp, path) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&backup);
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = fs::rename(&backup, path);
+                    let _ = fs::remove_file(tmp);
+                    Err(e)
+                }
+            }
         }
         Err(e) => Err(e),
     }
@@ -193,6 +260,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Row;
 
     #[tokio::test]
     async fn download_and_write_roundtrip_writes_expected_sqlite_bytes() {
@@ -259,6 +327,7 @@ mod tests {
             &master_key,
             &out_db,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -268,5 +337,126 @@ mod tests {
 
         let out_bytes = fs::read(&out_db).unwrap();
         assert_eq!(out_bytes, sqlite_bytes);
+    }
+
+    #[tokio::test]
+    async fn download_and_write_normalizes_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_db = dir.path().join("source.sqlite");
+        let out_db = dir.path().join("out.sqlite");
+
+        let pool = crate::index_db::open_index_db(&source_db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, '2026-01-01T00:00:00Z', '/', 'manual', NULL)",
+        )
+        .bind("snp_1")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES ('chk_1', 1, 'blake3', 'xchacha20poly1305', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at) VALUES ('chk_1', 'telegram.mtproto/old', 'obj_1', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO remote_indexes (snapshot_id, provider, manifest_object_id, created_at) VALUES ('snp_1', 'telegram.mtproto/old', 'man_1', '2026-01-01T00:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO remote_index_parts (snapshot_id, part_no, provider, object_id, size, hash) VALUES ('snp_1', 0, 'telegram.mtproto/old', 'part_1', 1, 'h')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        drop(pool);
+
+        let sqlite_bytes = fs::read(&source_db).unwrap();
+        let compressed = zstd::stream::encode_all(sqlite_bytes.as_slice(), 0).unwrap();
+
+        let snapshot_id = "snp_1";
+        let master_key = [9u8; 32];
+
+        let part_no = 0u32;
+        let aad = index_part_aad(snapshot_id, part_no);
+        let part_enc =
+            crate::crypto::encrypt_framed(&master_key, aad.as_bytes(), &compressed).unwrap();
+        let part_hash = blake3::hash(&part_enc).to_hex().to_string();
+
+        let storage = crate::InMemoryStorage::new();
+        let part_object_id = storage.upload_document("part.dat", part_enc).await.unwrap();
+
+        let manifest = IndexManifest {
+            version: 1,
+            snapshot_id: snapshot_id.to_string(),
+            hash_alg: "blake3".to_string(),
+            enc_alg: "xchacha20poly1305".to_string(),
+            compression: "zstd".to_string(),
+            parts: vec![crate::index_manifest::IndexManifestPart {
+                no: part_no,
+                size: storage
+                    .download_document(&part_object_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                hash: part_hash,
+                object_id: part_object_id,
+            }],
+        };
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let manifest_enc =
+            crate::crypto::encrypt_framed(&master_key, snapshot_id.as_bytes(), &manifest_json)
+                .unwrap();
+        let manifest_object_id = storage
+            .upload_document("manifest.dat", manifest_enc)
+            .await
+            .unwrap();
+
+        download_and_write_index_db_atomic(
+            &storage,
+            snapshot_id,
+            &manifest_object_id,
+            &master_key,
+            &out_db,
+            None,
+            Some("telegram.mtproto/new"),
+        )
+        .await
+        .unwrap();
+
+        let pool = crate::index_db::open_existing_index_db(&out_db)
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT provider FROM chunk_objects LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let provider: String = row.try_get("provider").unwrap();
+        assert_eq!(provider, "telegram.mtproto/new");
+
+        let row = sqlx::query("SELECT provider FROM remote_indexes WHERE snapshot_id = 'snp_1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let provider: String = row.try_get("provider").unwrap();
+        assert_eq!(provider, "telegram.mtproto/new");
+
+        let row = sqlx::query(
+            "SELECT provider FROM remote_index_parts WHERE snapshot_id = 'snp_1' AND part_no = 0",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let provider: String = row.try_get("provider").unwrap();
+        assert_eq!(provider, "telegram.mtproto/new");
     }
 }

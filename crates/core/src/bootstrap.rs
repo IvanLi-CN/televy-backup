@@ -79,18 +79,22 @@ pub async fn load_remote_catalog<S: PinnedStorage>(
     let bytes = storage.download_document(&object_id).await?;
     match decrypt_catalog(master_key, &bytes) {
         Ok(cat) => Ok(Some(cat)),
-        Err(e) => {
-            // A pinned message may exist but not belong to TelevyBackup (or may be encrypted with a
-            // different key). Don't block normal setup: treat it as "no catalog" and let the next
-            // update overwrite the pinned item.
+        Err(Error::Crypto { message }) if message.starts_with("invalid framing") => {
+            // A pinned message may exist but not belong to TelevyBackup (e.g. user pinned an
+            // unrelated file). Treat it as "no catalog" and let the next update overwrite the pin.
             tracing::warn!(
-                event = "bootstrap.catalog.decrypt_failed",
+                event = "bootstrap.catalog.not_catalog",
                 object_id = %object_id,
-                error = %e,
-                "ignoring pinned document: not a decryptable TelevyBackup bootstrap catalog"
+                error = %message,
+                "ignoring pinned document: not a TelevyBackup bootstrap catalog"
             );
             Ok(None)
         }
+        Err(e) => Err(Error::BootstrapDecryptFailed {
+            message: format!(
+                "pinned bootstrap catalog decrypt failed: object_id={object_id}; {e} (check TBK1 master key)"
+            ),
+        }),
     }
 }
 
@@ -302,5 +306,24 @@ mod tests {
             .unwrap();
         assert_eq!(latest.snapshot_id, "snp_1");
         assert_eq!(latest.manifest_object_id, "obj_1");
+    }
+
+    #[tokio::test]
+    async fn resolve_fails_on_wrong_master_key() {
+        let store = MemPinned::new();
+        let key_ok = [3u8; 32];
+        let key_bad = [4u8; 32];
+
+        update_remote_latest(&store, &key_ok, "t1", "/A", "manual", "snp_1", "obj_1")
+            .await
+            .unwrap();
+
+        let err = resolve_remote_latest(&store, &key_bad, Some("t1"), None)
+            .await
+            .unwrap_err();
+        match err {
+            Error::BootstrapDecryptFailed { .. } => {}
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

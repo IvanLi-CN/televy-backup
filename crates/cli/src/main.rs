@@ -2287,6 +2287,7 @@ async fn preflight_remote_first_index_sync(
         master_key,
         local_index_db,
         None,
+        Some(provider),
     )
     .await
     .map_err(map_core_err)?;
