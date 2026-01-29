@@ -3376,8 +3376,8 @@ fn control_ipc_call(
         data_dir,
         method,
         params,
-        Duration::from_millis(500),
-        Duration::from_millis(500),
+        Duration::from_secs(30),
+        Duration::from_secs(5),
     )
 }
 

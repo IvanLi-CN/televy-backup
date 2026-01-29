@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{RwLock, broadcast, oneshot};
 
 use televy_backup_core::control::{
     ControlError, ControlRequest, ControlResponse, SecretsClearTelegramMtprotoSessionParams,
@@ -48,7 +48,7 @@ impl Drop for ControlIpcServerHandle {
 pub fn spawn_control_ipc_server(
     socket_path: PathBuf,
     config_root: PathBuf,
-    settings: Arc<Settings>,
+    settings: Arc<RwLock<Settings>>,
 ) -> std::io::Result<ControlIpcServerHandle> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -118,7 +118,7 @@ pub fn spawn_control_ipc_server(
 async fn handle_control_ipc_client(
     stream: UnixStream,
     config_root: &std::path::Path,
-    settings: Arc<Settings>,
+    settings: Arc<RwLock<Settings>>,
     shutdown: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let (r, w) = stream.into_split();
@@ -200,7 +200,10 @@ async fn handle_control_ipc_client(
         }
     };
 
-    let resp = handle_request(&req, config_root, &settings);
+    let resp = {
+        let settings = settings.read().await;
+        handle_request(&req, config_root, &settings)
+    };
     write_json_line(&mut w, &resp).await?;
     Ok(())
 }
@@ -636,9 +639,12 @@ mod tests {
         let cfg_root = dir.path().join("cfg");
         std::fs::create_dir_all(&cfg_root).unwrap();
 
-        let _server =
-            spawn_control_ipc_server(socket_path.clone(), cfg_root.clone(), Arc::new(settings()))
-                .unwrap();
+        let _server = spawn_control_ipc_server(
+            socket_path.clone(),
+            cfg_root.clone(),
+            Arc::new(RwLock::new(settings())),
+        )
+        .unwrap();
 
         let stream = UnixStream::connect(&socket_path).await.unwrap();
         let (r, mut w) = stream.into_split();

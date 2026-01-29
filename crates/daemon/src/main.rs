@@ -19,6 +19,7 @@ use televy_backup_core::{
 };
 use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
+use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
@@ -592,11 +593,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let control_ipc_settings = Arc::new(RwLock::new(settings.clone()));
+
     let control_socket_path = televy_backup_core::control::control_ipc_socket_path(&data_root);
     let _control_ipc_server = match control_ipc::spawn_control_ipc_server(
         control_socket_path.clone(),
         config_root.clone(),
-        Arc::new(settings.clone()),
+        control_ipc_settings.clone(),
     ) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -694,6 +697,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             } else {
                                 settings = new_settings;
+                                *control_ipc_settings.write().await = settings.clone();
                                 last_config_mtime = config_mtime;
                                 storage_by_endpoint.clear();
                                 schedule_state_by_target
