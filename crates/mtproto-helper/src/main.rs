@@ -623,10 +623,13 @@ async fn init(req: InitRequest) -> Result<State, String> {
 
     std::fs::create_dir_all(&req.cache_dir).map_err(|e| format!("cache dir create failed: {e}"))?;
 
+    // For TelevyBackup, updates are used for the interactive `wait-chat` discovery flow: the user
+    // is expected to send a *new* message while listening. Avoid replaying older updates received
+    // while offline to prevent returning stale dialogs.
     let updates = client.stream_updates(
         updates,
         UpdatesConfiguration {
-            catch_up: true,
+            catch_up: false,
             ..Default::default()
         },
     );
@@ -842,6 +845,21 @@ async fn wait_for_chat(
     include_users: bool,
 ) -> Result<DialogInfo, String> {
     let timeout_secs = timeout_secs.clamp(1, WAIT_FOR_CHAT_TIMEOUT_SECS_MAX);
+
+    // Drain any already-buffered updates so we only react to messages that arrive *after* the
+    // caller started listening. This avoids returning stale dialogs in long-running helper
+    // sessions.
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+        let mut drained: u32 = 0;
+        while tokio::time::Instant::now() < deadline && drained < 1_000 {
+            match timeout(Duration::from_millis(0), state.updates.next()).await {
+                Ok(Ok(_)) => drained += 1,
+                Ok(Err(e)) => return Err(format!("updates next failed: {e}")),
+                Err(_) => break,
+            }
+        }
+    }
 
     let fut = async {
         loop {

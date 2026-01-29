@@ -79,11 +79,18 @@ pub async fn load_remote_catalog<S: PinnedStorage>(
     let bytes = storage.download_document(&object_id).await?;
     match decrypt_catalog(master_key, &bytes) {
         Ok(cat) => Ok(Some(cat)),
-        Err(e) => Err(Error::BootstrapDecryptFailed {
-            message: format!(
-                "failed to decrypt pinned bootstrap catalog: object_id={object_id}; {e}"
-            ),
-        }),
+        Err(e) => {
+            // A pinned message may exist but not belong to TelevyBackup (or may be encrypted with a
+            // different key). Don't block normal setup: treat it as "no catalog" and let the next
+            // update overwrite the pinned item.
+            tracing::warn!(
+                event = "bootstrap.catalog.decrypt_failed",
+                object_id = %object_id,
+                error = %e,
+                "ignoring pinned document: not a decryptable TelevyBackup bootstrap catalog"
+            );
+            Ok(None)
+        }
     }
 }
 
@@ -273,7 +280,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_refuses_to_overwrite_non_catalog_pinned_doc() {
+    async fn update_overwrites_non_catalog_pinned_doc() {
         let store = MemPinned::new();
         let key = [3u8; 32];
 
@@ -283,12 +290,17 @@ mod tests {
             .unwrap();
         store.set_pinned_object_id(&pinned_before).unwrap();
 
-        let err = update_remote_latest(&store, &key, "t1", "/A", "manual", "snp_1", "obj_1")
+        update_remote_latest(&store, &key, "t1", "/A", "manual", "snp_1", "obj_1")
             .await
-            .unwrap_err();
-        assert_eq!(err.code(), "bootstrap.decrypt_failed");
+            .unwrap();
 
         let pinned_after = store.get_pinned_object_id().unwrap().unwrap();
-        assert_eq!(pinned_after, pinned_before);
+        assert_ne!(pinned_after, pinned_before);
+
+        let latest = resolve_remote_latest(&store, &key, Some("t1"), None)
+            .await
+            .unwrap();
+        assert_eq!(latest.snapshot_id, "snp_1");
+        assert_eq!(latest.manifest_object_id, "obj_1");
     }
 }

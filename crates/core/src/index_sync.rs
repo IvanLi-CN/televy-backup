@@ -41,7 +41,18 @@ pub async fn local_index_matches_remote_latest(
         Err(_) => return Ok(false),
     };
 
-    Ok(row_provider == provider && row_manifest_object_id == manifest_object_id)
+    if row_manifest_object_id != manifest_object_id {
+        return Ok(false);
+    }
+
+    // Provider includes endpoint_id (e.g. `telegram.mtproto/default`). Across machines or configs,
+    // endpoint IDs may differ even when using the same Telegram chat, so treat the "provider kind"
+    // as authoritative for the "already synced" check.
+    Ok(row_provider == provider || provider_kind(&row_provider) == provider_kind(provider))
+}
+
+fn provider_kind(provider: &str) -> &str {
+    provider.split(['/', ':']).next().unwrap_or(provider).trim()
 }
 
 #[cfg(test)]
@@ -85,6 +96,17 @@ mod tests {
             .await
             .unwrap();
         assert!(ok);
+
+        // Endpoint IDs differ across machines/configs; the provider kind should still match.
+        let ok_other_provider = local_index_matches_remote_latest(
+            &path,
+            "telegram.mtproto/other-endpoint",
+            "snp_1",
+            "obj_1",
+        )
+        .await
+        .unwrap();
+        assert!(ok_other_provider);
 
         let stale =
             local_index_matches_remote_latest(&path, "telegram.mtproto:v1", "snp_1", "obj_2")
