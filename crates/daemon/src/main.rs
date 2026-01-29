@@ -1047,14 +1047,14 @@ fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::E
         return Ok(key);
     }
 
-    match televy_backup_core::secrets::read_vault_key_file(&key_file_path) {
-        Ok(key) => return Ok(key),
-        Err(televy_backup_core::secrets::SecretsStoreError::Io(e))
-            if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(Box::new(e)),
-    }
-
     if keychain_disabled() {
+        match televy_backup_core::secrets::read_vault_key_file(&key_file_path) {
+            Ok(key) => return Ok(key),
+            Err(televy_backup_core::secrets::SecretsStoreError::Io(e))
+                if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Box::new(e)),
+        }
+
         let mut bytes = [0u8; 32];
         getrandom::getrandom(&mut bytes)
             .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;

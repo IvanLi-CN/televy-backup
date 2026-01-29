@@ -347,28 +347,28 @@ fn vault_status(config_root: &std::path::Path) -> Result<VaultStatusResult, Cont
         });
     }
 
-    match televy_backup_core::secrets::read_vault_key_file(&key_file_path) {
-        Ok(_) => {
-            return Ok(VaultStatusResult {
-                backend: "file".to_string(),
-                key_present: true,
-                keychain_disabled,
-                vault_key_file_path: Some(key_file_path.display().to_string()),
-            });
-        }
-        Err(televy_backup_core::secrets::SecretsStoreError::Io(e))
-            if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(ControlError {
-                code: "secrets.vault_key_file_io_failed".to_string(),
-                message: e.to_string(),
-                retryable: false,
-                details: serde_json::json!({ "path": key_file_path.display().to_string() }),
-            });
-        }
-    }
-
     if keychain_disabled {
+        match televy_backup_core::secrets::read_vault_key_file(&key_file_path) {
+            Ok(_) => {
+                return Ok(VaultStatusResult {
+                    backend: "file".to_string(),
+                    key_present: true,
+                    keychain_disabled,
+                    vault_key_file_path: Some(key_file_path.display().to_string()),
+                });
+            }
+            Err(televy_backup_core::secrets::SecretsStoreError::Io(e))
+                if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(ControlError {
+                    code: "secrets.vault_key_file_io_failed".to_string(),
+                    message: e.to_string(),
+                    retryable: false,
+                    details: serde_json::json!({ "path": key_file_path.display().to_string() }),
+                });
+            }
+        }
+
         return Ok(VaultStatusResult {
             backend: "file".to_string(),
             key_present: false,
