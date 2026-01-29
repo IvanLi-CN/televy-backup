@@ -16,3 +16,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 toml = "0.8"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

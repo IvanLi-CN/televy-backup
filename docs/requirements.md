@@ -47,6 +47,8 @@
 - **Performance:** 在本地磁盘与网络带宽允许范围内，尽量减少重复上传；支持并发与限速。
 - **Reliability:** 上传失败可重试；任务中断可恢复；索引与数据一致性可验证。
 - **Security:** 分块后加密；密钥仅本地保存；上传链路使用安全通道。
+  - 生产默认口径：vault key 仅存于 macOS Keychain，用于解密本地加密 secrets store（`secrets.enc`）。
+  - 开发期可选口径：允许通过环境变量禁用 Keychain 并改用 `vault.key` 文件（**安全性降级**，仅用于本地开发/调试；不应作为生产默认）。
 - **Privacy/compliance:** 不上传明文敏感数据；索引中避免泄露敏感内容。
 - **Accessibility:** CLI 输出清晰可读。
 - **Observability:** 每轮 `backup|restore|verify` 生成一份独立的 NDJSON 日志文件（任务结束前 `flush+fsync`），可通过 `TELEVYBACKUP_LOG`/`TELEVYBACKUP_LOG_DIR` 配置；不混入 stdout/stderr 的机器可解析输出。
@@ -85,6 +87,8 @@
 - **Data**
   - SQLite：本地索引数据库（索引本身也会加密分片上传以支持恢复）。
   - Keychain：仅保存 vault key（用于解密本地加密 secrets store）；配置文件不落 secret 明文。
+    - 生产默认：使用 Keychain（推荐）。
+    - 开发期可选：`TELEVYBACKUP_DISABLE_KEYCHAIN=1` 时由 daemon 以 `vault.key` 文件承载 vault key（安全性降级）。
   - secrets store（`secrets.enc`）：保存 bot token / master key / MTProto 凭据与 session（加密落盘）。
 - **Packaging**
   - Homebrew：formula（daemon）+ cask（GUI app）。

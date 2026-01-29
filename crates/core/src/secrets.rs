@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SECRETS_FILE_NAME: &str = "secrets.enc";
 pub const VAULT_KEY_KEY: &str = "televybackup.vault_key";
+pub const VAULT_KEY_FILE_NAME: &str = "vault.key";
 
 const SECRETS_FILE_VERSION: u8 = 1;
 const SECRETS_PAYLOAD_VERSION: u32 = 1;
@@ -91,6 +92,28 @@ pub fn vault_key_to_base64(vault_key: &[u8; 32]) -> String {
 
 pub fn secrets_path(config_dir: &Path) -> PathBuf {
     config_dir.join(SECRETS_FILE_NAME)
+}
+
+pub fn vault_key_file_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(VAULT_KEY_FILE_NAME)
+}
+
+pub fn read_vault_key_file(path: &Path) -> Result<[u8; 32], SecretsStoreError> {
+    let text = std::fs::read_to_string(path)?;
+    vault_key_from_base64(text.trim())
+}
+
+pub fn write_vault_key_file_private(
+    path: &Path,
+    vault_key: &[u8; 32],
+) -> Result<(), SecretsStoreError> {
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+
+    let b64 = vault_key_to_base64(vault_key);
+    write_atomic_private_text(path, &(b64 + "\n"))?;
+    Ok(())
 }
 
 pub fn vault_ipc_socket_path(data_dir: &Path) -> PathBuf {
@@ -224,9 +247,81 @@ fn write_atomic_private(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error>
     }
 }
 
+fn ensure_private_dir(path: &Path) -> Result<(), std::io::Error> {
+    if path.exists() {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)?;
+        Ok(())
+    }
+}
+
+fn write_atomic_private_text(path: &Path, text: &str) -> Result<(), std::io::Error> {
+    let tmp = path.with_extension("tmp");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_key_from_base64_rejects_invalid_base64() {
+        let err = vault_key_from_base64("not base64!").unwrap_err();
+        assert!(matches!(err, SecretsStoreError::Base64(_)));
+    }
+
+    #[test]
+    fn vault_key_from_base64_rejects_wrong_length() {
+        let too_short = base64::engine::general_purpose::STANDARD.encode([1u8; 31]);
+        let err = vault_key_from_base64(&too_short).unwrap_err();
+        assert!(
+            matches!(err, SecretsStoreError::InvalidFormat { .. }),
+            "unexpected error: {err:?}"
+        );
+
+        let too_long = base64::engine::general_purpose::STANDARD.encode([1u8; 33]);
+        let err = vault_key_from_base64(&too_long).unwrap_err();
+        assert!(
+            matches!(err, SecretsStoreError::InvalidFormat { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
 
     #[test]
     fn secrets_store_roundtrip() {
@@ -240,5 +335,67 @@ mod tests {
 
         let loaded = load_secrets_store(&path, &vault_key).unwrap();
         assert_eq!(loaded.get("k"), Some("v"));
+    }
+
+    #[test]
+    fn vault_key_file_roundtrip_and_trim() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        let path = nested.join("vault.key");
+        let key = [7u8; 32];
+
+        write_vault_key_file_private(&path, &key).unwrap();
+        let loaded = read_vault_key_file(&path).unwrap();
+        assert_eq!(loaded, key);
+
+        let b64 = vault_key_to_base64(&key);
+        std::fs::write(&path, format!(" \n{b64}\n \n")).unwrap();
+        let loaded = read_vault_key_file(&path).unwrap();
+        assert_eq!(loaded, key);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(file_mode, 0o600);
+
+            let dir_mode = std::fs::metadata(&nested).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700);
+        }
+    }
+
+    #[test]
+    fn read_vault_key_file_missing_returns_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.key");
+        let err = read_vault_key_file(&path).unwrap_err();
+        assert!(matches!(err, SecretsStoreError::Io(_)));
+    }
+
+    #[test]
+    fn write_vault_key_file_private_does_not_leave_tmp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("nested");
+        let path = nested.join("vault.key");
+        let key = [7u8; 32];
+
+        write_vault_key_file_private(&path, &key).unwrap();
+        assert!(!path.with_extension("tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_vault_key_file_private_unwritable_dir_returns_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let unwritable = dir.path().join("unwritable");
+        std::fs::create_dir_all(&unwritable).unwrap();
+        std::fs::set_permissions(&unwritable, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let path = unwritable.join("vault.key");
+        let key = [7u8; 32];
+        let err = write_vault_key_file_private(&path, &key).unwrap_err();
+        assert!(matches!(err, SecretsStoreError::Io(_)));
     }
 }
