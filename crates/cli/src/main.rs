@@ -3108,7 +3108,10 @@ async fn verify_latest(
             }
 
             if json {
-                println!("{}", serde_json::json!({ "ok": true, "snapshotId": snapshot_id }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "ok": true, "snapshotId": snapshot_id })
+                );
             } else {
                 println!("ok");
                 println!("snapshotId={snapshot_id}");
