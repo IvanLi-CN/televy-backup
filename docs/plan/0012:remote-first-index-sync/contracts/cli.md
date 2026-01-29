@@ -18,9 +18,10 @@
 
 - `--no-remote-index-sync`
   - 禁用备份前置索引对齐。
-  - 语义：不读取 pinned catalog，不下载远端索引；按本地索引执行（无索引则按首次备份）。
+  - 语义：不读取/不写入 pinned catalog，不下载远端索引；按本地索引执行（无索引则按首次备份）。
 
 ## 错误语义
 
 - `bootstrap.missing`：无 pinned catalog（可降级跳过 sync）。
 - `bootstrap.decrypt_failed`：存在 pinned，但无法解密（阻断并提示导入正确 master key / TBK1）。
+- `bootstrap.unsupported_chat`：chat 不支持 pinned（例如私聊），需要改用群/频道（或 `@username`）才能启用 remote-first / restore latest。

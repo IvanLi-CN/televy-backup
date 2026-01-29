@@ -162,6 +162,14 @@ Cross-device restore (without the old local SQLite) uses a per-endpoint “boots
 - A pinned message in the chat acts as a root pointer to the latest catalog document.
 - `restore latest` resolves `snapshot_id + manifest_object_id` from the pinned catalog.
 
+Remote-first index sync (backup preflight):
+
+- `backup run` treats the pinned catalog’s `latest` remote index as the **source of truth**.
+- Before entering `scan`, it may download the remote latest index DB (manifest → parts → decrypt → zstd → SQLite) and atomically replace `TELEVYBACKUP_DATA_DIR/index/index.sqlite`.
+  - If the pinned catalog is missing: skip sync (first backup / no cross-device pointer).
+  - If the pinned catalog exists but cannot be decrypted: fail with `bootstrap.decrypt_failed` (do not overwrite pinned).
+  - Can be disabled for offline/debug via `backup run --no-remote-index-sync` (no pinned read; no remote index download).
+
 ## SQLite index
 
 The local index database schema is defined in:

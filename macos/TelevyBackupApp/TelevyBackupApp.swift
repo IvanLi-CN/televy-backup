@@ -2966,6 +2966,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.showPopover(nil)
             }
         }
+
+        // Fallback: if the status item/popover isn't visible (common when launching from Terminal or
+        // when the menu bar is hidden), open Settings so the user has a visible UI entrypoint.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
+            if self.statusItem?.button == nil {
+                NSApp.activate(ignoringOtherApps: true)
+                ModelStore.shared.openSettingsWindow()
+                return
+            }
+            if ProcessInfo.processInfo.environment["TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH"] != "0",
+               !self.popover.isShown
+            {
+                self.showPopover(nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    if !self.popover.isShown {
+                        NSApp.activate(ignoringOtherApps: true)
+                        ModelStore.shared.openSettingsWindow()
+                    }
+                }
+            }
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

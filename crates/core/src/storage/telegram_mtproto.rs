@@ -181,6 +181,36 @@ impl TelegramMtProtoStorage {
         out?;
         Ok(())
     }
+
+    pub fn list_dialogs(
+        &self,
+        limit: usize,
+        include_users: bool,
+    ) -> Result<Vec<TelegramDialogInfo>> {
+        let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper lock poisoned".to_string(),
+        })?;
+        let out = helper.list_dialogs(limit, include_users);
+        *self.session.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper session lock poisoned".to_string(),
+        })? = helper.session_bytes();
+        out
+    }
+
+    pub fn wait_for_chat(
+        &self,
+        timeout_secs: u64,
+        include_users: bool,
+    ) -> Result<TelegramDialogInfo> {
+        let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper lock poisoned".to_string(),
+        })?;
+        let out = helper.wait_for_chat(timeout_secs, include_users);
+        *self.session.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper session lock poisoned".to_string(),
+        })? = helper.session_bytes();
+        out
+    }
 }
 
 impl crate::bootstrap::PinnedStorage for TelegramMtProtoStorage {
@@ -207,6 +237,10 @@ impl Storage for TelegramMtProtoStorage {
         &self.provider
     }
 
+    fn object_id_scope(&self) -> Option<&str> {
+        Some(&self.chat_id)
+    }
+
     fn upload_document<'a>(
         &'a self,
         filename: &'a str,
@@ -220,6 +254,33 @@ impl Storage for TelegramMtProtoStorage {
                 filename: filename.to_string(),
                 bytes,
             })?;
+            *self.session.lock().map_err(|_| Error::Telegram {
+                message: "mtproto helper session lock poisoned".to_string(),
+            })? = resp.session;
+            Ok(resp.object_id)
+        })
+    }
+
+    fn upload_document_with_progress<'a>(
+        &'a self,
+        filename: &'a str,
+        bytes: Vec<u8>,
+        mut progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
+                message: "mtproto helper lock poisoned".to_string(),
+            })?;
+            let resp = {
+                let progress = progress.as_deref_mut().map(|cb| cb as &mut dyn FnMut(u64));
+                helper.upload_with_progress(
+                    UploadRequest {
+                        filename: filename.to_string(),
+                        bytes,
+                    },
+                    progress,
+                )?
+            };
             *self.session.lock().map_err(|_| Error::Telegram {
                 message: "mtproto helper session lock poisoned".to_string(),
             })? = resp.session;
@@ -258,7 +319,39 @@ impl Storage for TelegramMtProtoStorage {
 
 fn default_helper_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    Some(exe.with_file_name("televybackup-mtproto-helper"))
+    let sibling = exe.with_file_name("televybackup-mtproto-helper");
+    if sibling.exists() {
+        return Some(sibling);
+    }
+
+    // Dev ergonomics: the helper is built from an excluded crate (`crates/mtproto-helper`), so it
+    // won't land next to `target/{debug,release}/televybackup` unless manually copied. If we're
+    // running from that typical Cargo layout, try the helper's own target dir.
+    //
+    // Note: the app bundle path is handled by the sibling check above.
+    let parent = exe.parent()?;
+    let profile_dir = parent.file_name()?.to_string_lossy();
+    if profile_dir != "debug" && profile_dir != "release" {
+        return None;
+    }
+
+    let target_dir = parent.parent()?;
+    if target_dir.file_name()?.to_string_lossy() != "target" {
+        return None;
+    }
+
+    let root_dir = target_dir.parent()?;
+    let candidate = root_dir
+        .join("crates")
+        .join("mtproto-helper")
+        .join("target")
+        .join(profile_dir.as_ref())
+        .join("televybackup-mtproto-helper");
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -303,6 +396,8 @@ enum Request {
     Download(DownloadRequest),
     GetPinned,
     Pin(PinRequest),
+    ListDialogs(ListDialogsRequest),
+    WaitForChat(WaitForChatRequest),
 }
 
 #[derive(Debug, Serialize)]
@@ -345,6 +440,21 @@ struct PinRequest {
     msg_id: i32,
 }
 
+#[derive(Debug, Serialize)]
+struct ListDialogsRequest {
+    limit: usize,
+    #[serde(rename = "includeUsers")]
+    include_users: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WaitForChatRequest {
+    #[serde(rename = "timeoutSecs")]
+    timeout_secs: u64,
+    #[serde(rename = "includeUsers")]
+    include_users: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct ResponseEnvelope {
@@ -371,6 +481,16 @@ struct UploadResponse {
 struct DownloadResponse {
     bytes: Vec<u8>,
     session: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TelegramDialogInfo {
+    pub kind: String,
+    pub title: String,
+    pub username: Option<String>,
+    pub peer_id: i64,
+    pub config_chat_id: String,
+    pub bootstrap_hint: bool,
 }
 
 impl MtProtoHelper {
@@ -424,6 +544,14 @@ impl MtProtoHelper {
     }
 
     fn upload(&mut self, req: UploadRequest) -> Result<UploadResponse> {
+        self.upload_with_progress(req, None)
+    }
+
+    fn upload_with_progress(
+        &mut self,
+        req: UploadRequest,
+        mut on_progress: Option<&mut dyn FnMut(u64)>,
+    ) -> Result<UploadResponse> {
         let meta = UploadRequestMeta {
             filename: req.filename,
             size: req.bytes.len(),
@@ -436,29 +564,46 @@ impl MtProtoHelper {
             })?;
         self.stdin.flush().ok();
 
-        let env = self.read_json_line()?;
-        self.apply_session(&env)?;
-        if !env.ok {
-            return Err(Error::Telegram {
-                message: env
-                    .error
-                    .unwrap_or_else(|| "mtproto upload failed".to_string()),
+        loop {
+            let env = self.read_json_line()?;
+            self.apply_session(&env)?;
+            if !env.ok {
+                return Err(Error::Telegram {
+                    message: env
+                        .error
+                        .unwrap_or_else(|| "mtproto upload failed".to_string()),
+                });
+            }
+
+            let event = env
+                .data
+                .get("event")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if event == "upload_progress" {
+                if let (Some(bytes), Some(cb)) = (
+                    env.data.get("bytesUploaded").and_then(|v| v.as_u64()),
+                    on_progress.as_mut(),
+                ) {
+                    (**cb)(bytes);
+                }
+                continue;
+            }
+
+            let object_id = env
+                .data
+                .get("objectId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::Telegram {
+                    message: "mtproto upload missing objectId".to_string(),
+                })?
+                .to_string();
+
+            return Ok(UploadResponse {
+                object_id,
+                session: self.session_bytes(),
             });
         }
-
-        let object_id = env
-            .data
-            .get("objectId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::Telegram {
-                message: "mtproto upload missing objectId".to_string(),
-            })?
-            .to_string();
-
-        Ok(UploadResponse {
-            object_id,
-            session: self.session_bytes(),
-        })
     }
 
     fn download(&mut self, req: DownloadRequest) -> Result<DownloadResponse> {
@@ -538,6 +683,155 @@ impl MtProtoHelper {
             });
         }
         Ok(())
+    }
+
+    fn list_dialogs(
+        &mut self,
+        limit: usize,
+        include_users: bool,
+    ) -> Result<Vec<TelegramDialogInfo>> {
+        self.send_json(&Request::ListDialogs(ListDialogsRequest {
+            limit,
+            include_users,
+        }))?;
+
+        let env = self.read_json_line()?;
+        self.apply_session(&env)?;
+        if !env.ok {
+            return Err(Error::Telegram {
+                message: env
+                    .error
+                    .unwrap_or_else(|| "mtproto list_dialogs failed".to_string()),
+            });
+        }
+
+        let dialogs = env
+            .data
+            .get("dialogs")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| Error::Telegram {
+                message: "mtproto list_dialogs missing dialogs".to_string(),
+            })?;
+
+        let mut out = Vec::with_capacity(dialogs.len());
+        for d in dialogs {
+            let kind = d
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::Telegram {
+                    message: "mtproto list_dialogs invalid kind".to_string(),
+                })?
+                .to_string();
+            let title = d
+                .get("title")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::Telegram {
+                    message: "mtproto list_dialogs invalid title".to_string(),
+                })?
+                .to_string();
+            let username = d
+                .get("username")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let peer_id =
+                d.get("peerId")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| Error::Telegram {
+                        message: "mtproto list_dialogs invalid peerId".to_string(),
+                    })?;
+            let config_chat_id = d
+                .get("configChatId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| Error::Telegram {
+                    message: "mtproto list_dialogs invalid configChatId".to_string(),
+                })?
+                .to_string();
+            let bootstrap_hint = d
+                .get("bootstrapHint")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            out.push(TelegramDialogInfo {
+                kind,
+                title,
+                username,
+                peer_id,
+                config_chat_id,
+                bootstrap_hint,
+            });
+        }
+
+        Ok(out)
+    }
+
+    fn wait_for_chat(
+        &mut self,
+        timeout_secs: u64,
+        include_users: bool,
+    ) -> Result<TelegramDialogInfo> {
+        self.send_json(&Request::WaitForChat(WaitForChatRequest {
+            timeout_secs,
+            include_users,
+        }))?;
+
+        let env = self.read_json_line()?;
+        self.apply_session(&env)?;
+        if !env.ok {
+            return Err(Error::Telegram {
+                message: env
+                    .error
+                    .unwrap_or_else(|| "mtproto wait_for_chat failed".to_string()),
+            });
+        }
+
+        let d = env.data.get("chat").ok_or_else(|| Error::Telegram {
+            message: "mtproto wait_for_chat missing chat".to_string(),
+        })?;
+
+        let kind = d
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Telegram {
+                message: "mtproto wait_for_chat invalid kind".to_string(),
+            })?
+            .to_string();
+        let title = d
+            .get("title")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Telegram {
+                message: "mtproto wait_for_chat invalid title".to_string(),
+            })?
+            .to_string();
+        let username = d
+            .get("username")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let peer_id = d
+            .get("peerId")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| Error::Telegram {
+                message: "mtproto wait_for_chat invalid peerId".to_string(),
+            })?;
+        let config_chat_id = d
+            .get("configChatId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::Telegram {
+                message: "mtproto wait_for_chat invalid configChatId".to_string(),
+            })?
+            .to_string();
+        let bootstrap_hint = d
+            .get("bootstrapHint")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        Ok(TelegramDialogInfo {
+            kind,
+            title,
+            username,
+            peer_id,
+            config_chat_id,
+            bootstrap_hint,
+        })
     }
 
     fn apply_session(&mut self, env: &ResponseEnvelope) -> Result<()> {

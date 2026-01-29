@@ -116,6 +116,22 @@ enum TelegramCmd {
         #[arg(long)]
         endpoint_id: Option<String>,
     },
+    Dialogs {
+        #[arg(long)]
+        endpoint_id: Option<String>,
+        #[arg(long, default_value_t = 200)]
+        limit: u32,
+        #[arg(long)]
+        include_users: bool,
+    },
+    WaitChat {
+        #[arg(long)]
+        endpoint_id: Option<String>,
+        #[arg(long, default_value_t = 60)]
+        timeout_secs: u32,
+        #[arg(long)]
+        include_users: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -150,6 +166,8 @@ enum BackupCmd {
         source: Option<PathBuf>,
         #[arg(long, default_value = "manual")]
         label: String,
+        #[arg(long)]
+        no_remote_index_sync: bool,
     },
 }
 
@@ -319,6 +337,36 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             TelegramCmd::Validate { endpoint_id } => {
                 telegram_validate(&config_dir, &data_dir, endpoint_id, cli.json).await
             }
+            TelegramCmd::Dialogs {
+                endpoint_id,
+                limit,
+                include_users,
+            } => {
+                telegram_dialogs(
+                    &config_dir,
+                    &data_dir,
+                    endpoint_id,
+                    limit,
+                    include_users,
+                    cli.json,
+                )
+                .await
+            }
+            TelegramCmd::WaitChat {
+                endpoint_id,
+                timeout_secs,
+                include_users,
+            } => {
+                telegram_wait_chat(
+                    &config_dir,
+                    &data_dir,
+                    endpoint_id,
+                    timeout_secs,
+                    include_users,
+                    cli.json,
+                )
+                .await
+            }
         },
         Command::Snapshots { cmd } => match cmd {
             SnapshotsCmd::List { limit } => snapshots_list(&data_dir, limit, cli.json).await,
@@ -336,6 +384,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 target_id,
                 source,
                 label,
+                no_remote_index_sync,
             } => {
                 backup_run(
                     &config_dir,
@@ -343,6 +392,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     target_id,
                     source,
                     label,
+                    no_remote_index_sync,
                     cli.json,
                     cli.events,
                 )
@@ -1142,7 +1192,7 @@ async fn telegram_validate(
             "telegram.mtproto.api_hash_key must not be empty",
         ));
     }
-    if ep.chat_id.is_empty() {
+    if ep.chat_id.trim().is_empty() {
         return Err(CliError::new(
             "config.invalid",
             format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
@@ -1238,6 +1288,246 @@ async fn telegram_validate(
         println!("roundTripOk=true");
         println!("sampleObjectId={object_id}");
     }
+    Ok(())
+}
+
+async fn telegram_dialogs(
+    config_dir: &Path,
+    data_dir: &Path,
+    endpoint_id: Option<String>,
+    limit: u32,
+    include_users: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    let settings = load_settings(config_dir)?;
+    let ep = select_endpoint(&settings, endpoint_id.as_deref())?;
+
+    if settings.telegram.mtproto.api_id <= 0 {
+        return Err(CliError::new(
+            "config.invalid",
+            "telegram.mtproto.api_id must be > 0",
+        ));
+    }
+    if settings.telegram.mtproto.api_hash_key.is_empty() {
+        return Err(CliError::new(
+            "config.invalid",
+            "telegram.mtproto.api_hash_key must not be empty",
+        ));
+    }
+
+    let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
+        .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
+    let api_hash = get_secret(
+        config_dir,
+        data_dir,
+        &settings.telegram.mtproto.api_hash_key,
+    )?
+    .ok_or_else(|| {
+        CliError::new(
+            "telegram.mtproto.missing_api_hash",
+            "mtproto api_hash missing",
+        )
+    })?;
+    let session = load_optional_base64_secret_bytes(
+        config_dir,
+        data_dir,
+        &ep.mtproto.session_key,
+        "telegram.mtproto.session_invalid",
+        "invalid mtproto session (try: `televybackup secrets clear-telegram-mtproto-session`)",
+    )?;
+
+    let cache_dir = data_dir.join("cache").join("mtproto");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+    let provider = settings_config::endpoint_provider(&ep.id);
+    let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+        provider,
+        api_id: settings.telegram.mtproto.api_id,
+        api_hash: api_hash.clone(),
+        bot_token: bot_token.clone(),
+        // Dialog listing does not require a selected chat. Intentionally skip resolve_chat so users
+        // can discover a valid group/channel even when chat_id is empty/invalid.
+        chat_id: String::new(),
+        session,
+        cache_dir,
+        helper_path: None,
+    })
+    .await
+    .map_err(map_core_err)?;
+
+    let limit = limit.clamp(1, 5_000) as usize;
+    let dialogs = match storage.list_dialogs(limit, include_users) {
+        Ok(v) => v,
+        Err(televy_backup_core::Error::Telegram { message })
+            if message.contains("BOT_METHOD_INVALID")
+                || message.contains("messages.getDialogs") =>
+        {
+            return Err(CliError::new(
+                "telegram.dialogs_unsupported",
+                "bots cannot list dialogs via MTProto (messages.getDialogs rejected); use `televybackup telegram wait-chat` and send a message in the target group/channel to discover its chat_id",
+            ));
+        }
+        Err(e) => return Err(map_core_err(e)),
+    };
+
+    if let Some(bytes) = storage.session_bytes() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        if let Err(e) = set_secret(config_dir, data_dir, &ep.mtproto.session_key, &b64) {
+            tracing::warn!(
+                event = "secrets.session_persist_failed",
+                error_code = e.code,
+                error_message = %e.message,
+                "failed to persist mtproto session"
+            );
+        }
+    }
+
+    if json {
+        let items = dialogs
+            .iter()
+            .map(|d| {
+                serde_json::json!({
+                    "kind": d.kind,
+                    "title": d.title,
+                    "username": d.username,
+                    "peerId": d.peer_id,
+                    "configChatId": d.config_chat_id,
+                    "bootstrapHint": d.bootstrap_hint,
+                })
+            })
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::json!({ "dialogs": items }));
+        return Ok(());
+    }
+
+    for d in dialogs {
+        let u = d
+            .username
+            .as_ref()
+            .map(|s| format!("@{s}"))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "kind={} chatId={} username={} title={}",
+            d.kind, d.config_chat_id, u, d.title
+        );
+    }
+    Ok(())
+}
+
+async fn telegram_wait_chat(
+    config_dir: &Path,
+    data_dir: &Path,
+    endpoint_id: Option<String>,
+    timeout_secs: u32,
+    include_users: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    let settings = load_settings(config_dir)?;
+    let ep = select_endpoint(&settings, endpoint_id.as_deref())?;
+
+    if settings.telegram.mtproto.api_id <= 0 {
+        return Err(CliError::new(
+            "config.invalid",
+            "telegram.mtproto.api_id must be > 0",
+        ));
+    }
+    if settings.telegram.mtproto.api_hash_key.is_empty() {
+        return Err(CliError::new(
+            "config.invalid",
+            "telegram.mtproto.api_hash_key must not be empty",
+        ));
+    }
+
+    let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
+        .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
+    let api_hash = get_secret(
+        config_dir,
+        data_dir,
+        &settings.telegram.mtproto.api_hash_key,
+    )?
+    .ok_or_else(|| {
+        CliError::new(
+            "telegram.mtproto.missing_api_hash",
+            "mtproto api_hash missing",
+        )
+    })?;
+    let session = load_optional_base64_secret_bytes(
+        config_dir,
+        data_dir,
+        &ep.mtproto.session_key,
+        "telegram.mtproto.session_invalid",
+        "invalid mtproto session (try: `televybackup secrets clear-telegram-mtproto-session`)",
+    )?;
+
+    let cache_dir = data_dir.join("cache").join("mtproto");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+    let provider = settings_config::endpoint_provider(&ep.id);
+    let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+        provider,
+        api_id: settings.telegram.mtproto.api_id,
+        api_hash: api_hash.clone(),
+        bot_token: bot_token.clone(),
+        // WaitChat does not require a selected chat.
+        chat_id: String::new(),
+        session,
+        cache_dir,
+        helper_path: None,
+    })
+    .await
+    .map_err(map_core_err)?;
+
+    let timeout_secs = (timeout_secs as u64).clamp(1, 10 * 60);
+    let chat = match storage.wait_for_chat(timeout_secs, include_users) {
+        Ok(v) => v,
+        Err(televy_backup_core::Error::Telegram { message })
+            if message.contains("wait_for_chat timed out") =>
+        {
+            return Err(CliError::retryable("telegram.timeout", message));
+        }
+        Err(e) => return Err(map_core_err(e)),
+    };
+
+    if let Some(bytes) = storage.session_bytes() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        if let Err(e) = set_secret(config_dir, data_dir, &ep.mtproto.session_key, &b64) {
+            tracing::warn!(
+                event = "secrets.session_persist_failed",
+                error_code = e.code,
+                error_message = %e.message,
+                "failed to persist mtproto session"
+            );
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "chat": {
+                    "kind": chat.kind,
+                    "title": chat.title,
+                    "username": chat.username,
+                    "peerId": chat.peer_id,
+                    "configChatId": chat.config_chat_id,
+                    "bootstrapHint": chat.bootstrap_hint,
+                }
+            })
+        );
+        return Ok(());
+    }
+
+    let u = chat
+        .username
+        .as_ref()
+        .map(|s| format!("@{s}"))
+        .unwrap_or_else(|| "-".to_string());
+    println!(
+        "kind={} chatId={} username={} title={}",
+        chat.kind, chat.config_chat_id, u, chat.title
+    );
     Ok(())
 }
 
@@ -1563,12 +1853,14 @@ async fn stats_last(data_dir: &Path, source: Option<PathBuf>, json: bool) -> Res
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn backup_run(
     config_dir: &Path,
     data_dir: &Path,
     target_id: Option<String>,
     source: Option<PathBuf>,
     label: String,
+    no_remote_index_sync: bool,
     json: bool,
     events: bool,
 ) -> Result<(), CliError> {
@@ -1696,35 +1988,63 @@ async fn backup_run(
         .await
         .map_err(map_core_err)?;
 
-        let res = run_backup_with(&storage, cfg, opts)
-            .await
-            .map_err(map_core_err)?;
-
-        // Update remote bootstrap/catalog for cross-device restore.
-        let (manifest_object_id, snapshot_provider) =
-            lookup_manifest_meta(&db_path, &res.snapshot_id).await?;
-        if snapshot_provider != storage.provider() {
-            return Err(CliError::new(
-                "snapshot.unsupported_provider",
-                format!(
-                    "unexpected snapshot provider in local db: snapshot_id={} expected_provider={} got_provider={}",
-                    res.snapshot_id,
-                    storage.provider(),
-                    snapshot_provider
-                ),
-            ));
-        }
-        televy_backup_core::bootstrap::update_remote_latest(
+        preflight_remote_first_index_sync(
             &storage,
             &master_key,
             &target.id,
             &target.source_path,
-            &label_for_bootstrap,
-            &res.snapshot_id,
-            &manifest_object_id,
+            &db_path,
+            no_remote_index_sync,
+            is_likely_private_chat_id(&ep.chat_id),
+            events.then_some(&sink),
         )
-        .await
-        .map_err(map_core_err)?;
+        .await?;
+
+        let res = run_backup_with(&storage, cfg, opts)
+            .await
+            .map_err(map_core_err)?;
+
+        // Update remote bootstrap/catalog for cross-device restore. This uses Telegram pinned
+        // messages; if chat_id points at a private user dialog, MTProto bots can't rely on pinning.
+        if no_remote_index_sync {
+            tracing::warn!(
+                event = "bootstrap.skipped",
+                reason = "flag_no_remote_index_sync",
+                "skipping bootstrap catalog update (--no-remote-index-sync)"
+            );
+        } else if is_likely_private_chat_id(&ep.chat_id) {
+            tracing::warn!(
+                event = "bootstrap.skipped",
+                reason = "unsupported_private_chat",
+                chat_id = %ep.chat_id,
+                "bootstrap catalog requires pinning; use a group/channel (e.g. -100...) or @username chat id"
+            );
+        } else {
+            let (manifest_object_id, snapshot_provider) =
+                lookup_manifest_meta(&db_path, &res.snapshot_id).await?;
+            if snapshot_provider != storage.provider() {
+                return Err(CliError::new(
+                    "snapshot.unsupported_provider",
+                    format!(
+                        "unexpected snapshot provider in local db: snapshot_id={} expected_provider={} got_provider={}",
+                        res.snapshot_id,
+                        storage.provider(),
+                        snapshot_provider
+                    ),
+                ));
+            }
+            televy_backup_core::bootstrap::update_remote_latest(
+                &storage,
+                &master_key,
+                &target.id,
+                &target.source_path,
+                &label_for_bootstrap,
+                &res.snapshot_id,
+                &manifest_object_id,
+            )
+            .await
+            .map_err(map_core_err)?;
+        }
 
         if let Some(bytes) = storage.session_bytes() {
             let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -1823,6 +2143,153 @@ async fn backup_run(
             Err(e)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn preflight_remote_first_index_sync(
+    storage: &TelegramMtProtoStorage,
+    master_key: &[u8; 32],
+    target_id: &str,
+    source_path: &str,
+    local_index_db: &Path,
+    no_remote_index_sync: bool,
+    is_private_chat: bool,
+    sink: Option<&dyn ProgressSink>,
+) -> Result<(), CliError> {
+    if no_remote_index_sync {
+        return Ok(());
+    }
+
+    let started = Instant::now();
+    tracing::debug!(event = "phase.start", phase = "index_sync", "phase.start");
+    if let Some(sink) = sink {
+        sink.on_progress(televy_backup_core::TaskProgress {
+            phase: "index_sync".to_string(),
+            ..Default::default()
+        });
+    }
+
+    if is_private_chat {
+        tracing::warn!(
+            event = "index_sync.skipped",
+            reason = "unsupported_private_chat",
+            "index_sync requires pinned bootstrap catalog; use a group/channel (e.g. -100...) or @username chat id"
+        );
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "unsupported_chat",
+            "phase.finish"
+        );
+        return Ok(());
+    }
+
+    let catalog = televy_backup_core::bootstrap::load_remote_catalog(storage, master_key)
+        .await
+        .map_err(map_core_err)?;
+
+    let Some(catalog) = catalog else {
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "bootstrap_missing",
+            "phase.finish"
+        );
+        return Ok(());
+    };
+
+    let latest = if let Some(t) = catalog.targets.iter().find(|t| t.target_id == target_id) {
+        t.latest.clone().ok_or_else(|| {
+            CliError::new(
+                "config.invalid",
+                format!("bootstrap missing latest for target_id: {target_id}"),
+            )
+        })?
+    } else {
+        let matches = catalog
+            .targets
+            .iter()
+            .filter(|t| t.source_path == source_path)
+            .collect::<Vec<_>>();
+
+        if matches.is_empty() {
+            return Err(CliError::new(
+                "config.invalid",
+                format!("bootstrap missing source_path: {source_path}"),
+            ));
+        }
+        if matches.len() > 1 {
+            return Err(CliError::new(
+                "config.invalid",
+                format!("bootstrap source_path is ambiguous: {source_path}"),
+            ));
+        }
+        matches[0].latest.clone().ok_or_else(|| {
+            CliError::new(
+                "config.invalid",
+                format!("bootstrap missing latest for source_path: {source_path}"),
+            )
+        })?
+    };
+
+    let provider = storage.provider();
+    let already_synced = televy_backup_core::index_sync::local_index_matches_remote_latest(
+        local_index_db,
+        provider,
+        &latest.snapshot_id,
+        &latest.manifest_object_id,
+    )
+    .await
+    .map_err(map_core_err)?;
+
+    if already_synced {
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "already_synced",
+            "phase.finish"
+        );
+        return Ok(());
+    }
+
+    let stats = televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
+        storage,
+        &latest.snapshot_id,
+        &latest.manifest_object_id,
+        master_key,
+        local_index_db,
+        None,
+        Some(provider),
+    )
+    .await
+    .map_err(map_core_err)?;
+
+    tracing::debug!(
+        event = "phase.finish",
+        phase = "index_sync",
+        duration_ms = started.elapsed().as_millis() as u64,
+        index_source = "downloaded",
+        bytes_downloaded = stats.bytes_downloaded,
+        bytes_written = stats.bytes_written,
+        snapshot_id = %latest.snapshot_id,
+        "phase.finish"
+    );
+
+    Ok(())
+}
+
+fn is_likely_private_chat_id(chat_id: &str) -> bool {
+    let s = chat_id.trim();
+    let Ok(id) = s.parse::<i64>() else {
+        return false;
+    };
+    id > 0
 }
 
 async fn restore_run(
@@ -2067,6 +2534,12 @@ async fn restore_list_latest(
             format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
         ));
     }
+    if is_likely_private_chat_id(&ep.chat_id) {
+        return Err(CliError::new(
+            "bootstrap.unsupported_chat",
+            "bootstrap catalog requires message pinning; private chats are not supported. Use a group/channel (e.g. -100...) or an @username chat id.".to_string(),
+        ));
+    }
 
     let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
         .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
@@ -2209,6 +2682,12 @@ async fn restore_latest(
             return Err(CliError::new(
                 "config.invalid",
                 format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
+            ));
+        }
+        if is_likely_private_chat_id(&ep.chat_id) {
+            return Err(CliError::new(
+                "bootstrap.unsupported_chat",
+                "restore latest requires the pinned bootstrap catalog; private chats are not supported. Use a group/channel (e.g. -100...) or an @username chat id.".to_string(),
             ));
         }
 
@@ -3196,6 +3675,14 @@ fn map_core_err(e: televy_backup_core::Error) -> CliError {
         televy_backup_core::Error::InvalidConfig { message } => {
             CliError::new("config.invalid", message)
         }
+        televy_backup_core::Error::BootstrapMissing { message } => {
+            CliError::new("bootstrap.missing", message)
+        }
+        televy_backup_core::Error::BootstrapDecryptFailed { message } => CliError::new(
+            "bootstrap.decrypt_failed",
+            "pinned bootstrap catalog exists but cannot be decrypted; import the correct master key (TBK1)".to_string(),
+        )
+        .with_details(serde_json::json!({ "cause": message })),
         televy_backup_core::Error::Crypto { message } => {
             CliError::new("crypto", format!("crypto error: {message}"))
         }

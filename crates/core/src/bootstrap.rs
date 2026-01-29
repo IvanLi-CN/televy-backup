@@ -77,16 +77,25 @@ pub async fn load_remote_catalog<S: PinnedStorage>(
         return Ok(None);
     };
     let bytes = storage.download_document(&object_id).await?;
-    let cat = match decrypt_catalog(master_key, &bytes) {
-        Ok(cat) => cat,
-        Err(_) => {
-            // Pinned message may exist but not be a TelevyBackup bootstrap catalog (or may be
-            // encrypted with a different key). Treat this as missing catalog and overwrite it on
-            // next save.
-            return Ok(None);
+    match decrypt_catalog(master_key, &bytes) {
+        Ok(cat) => Ok(Some(cat)),
+        Err(Error::Crypto { message }) if message.starts_with("invalid framing") => {
+            // A pinned message may exist but not belong to TelevyBackup (e.g. user pinned an
+            // unrelated file). Treat it as "no catalog" and let the next update overwrite the pin.
+            tracing::warn!(
+                event = "bootstrap.catalog.not_catalog",
+                object_id = %object_id,
+                error = %message,
+                "ignoring pinned document: not a TelevyBackup bootstrap catalog"
+            );
+            Ok(None)
         }
-    };
-    Ok(Some(cat))
+        Err(e) => Err(Error::BootstrapDecryptFailed {
+            message: format!(
+                "pinned bootstrap catalog decrypt failed: object_id={object_id}; {e} (check TBK1 master key)"
+            ),
+        }),
+    }
 }
 
 pub async fn save_remote_catalog<S: PinnedStorage>(
@@ -154,8 +163,8 @@ pub async fn resolve_remote_latest<S: PinnedStorage>(
 ) -> Result<BootstrapLatest> {
     let cat = load_remote_catalog(storage, master_key)
         .await?
-        .ok_or_else(|| Error::InvalidConfig {
-            message: "bootstrap missing (no pinned catalog)".to_string(),
+        .ok_or_else(|| Error::BootstrapMissing {
+            message: "no pinned bootstrap catalog".to_string(),
         })?;
 
     if let Some(id) = target_id {
@@ -297,5 +306,24 @@ mod tests {
             .unwrap();
         assert_eq!(latest.snapshot_id, "snp_1");
         assert_eq!(latest.manifest_object_id, "obj_1");
+    }
+
+    #[tokio::test]
+    async fn resolve_fails_on_wrong_master_key() {
+        let store = MemPinned::new();
+        let key_ok = [3u8; 32];
+        let key_bad = [4u8; 32];
+
+        update_remote_latest(&store, &key_ok, "t1", "/A", "manual", "snp_1", "obj_1")
+            .await
+            .unwrap();
+
+        let err = resolve_remote_latest(&store, &key_bad, Some("t1"), None)
+            .await
+            .unwrap_err();
+        match err {
+            Error::BootstrapDecryptFailed { .. } => {}
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

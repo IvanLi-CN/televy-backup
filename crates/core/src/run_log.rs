@@ -260,8 +260,10 @@ mod tests {
                 .as_object()
                 .expect("fields object");
             assert!(
-                fields.contains_key("message") || fields.contains_key("event"),
-                "fields missing message/event"
+                fields.contains_key("message")
+                    || fields.contains_key("event")
+                    || fields.contains_key("summary"),
+                "fields missing expected keys (message/event/summary)"
             );
         }
     }

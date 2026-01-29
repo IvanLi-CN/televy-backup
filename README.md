@@ -101,6 +101,20 @@ On a new device, you can restore without the old local SQLite:
 
 - `televybackup restore latest --target-id <target_id> --target <path>`
 
+Note: the pinned bootstrap catalog requires message pinning, so the endpoint chat should be a group/channel (or an `@username`), not a private 1:1 chat id.
+
+## Cross-device incremental backup (remote-first index)
+
+If you move to a new machine (or lose `index/index.sqlite`), TelevyBackup can continue incremental backups as long as:
+
+- The pinned bootstrap catalog exists in the Telegram chat, and
+- You imported the correct master key (`TBK1`) via `televybackup secrets import-master-key`.
+
+By default, `televybackup backup run` performs a preflight `index_sync` step before `scan`:
+
+- If needed, it downloads the remote latest index DB and atomically writes `TELEVYBACKUP_DATA_DIR/index/index.sqlite`.
+- To force local-only behavior (offline/debug): `televybackup backup run --no-remote-index-sync`.
+
 ## Daemon (scheduled backups)
 
 The scheduled runner is `televybackupd` (`crates/daemon/`). It uses the same `config.toml` and `secrets.enc` (vault key in Keychain).

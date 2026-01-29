@@ -11,7 +11,7 @@ pub(crate) const MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES: usize = 128 * 1024 * 1024;
 
 mod telegram_mtproto;
 pub use telegram_mtproto::{
-    TelegramMtProtoStorage, TelegramMtProtoStorageConfig, TgMtProtoObjectIdV1,
+    TelegramDialogInfo, TelegramMtProtoStorage, TelegramMtProtoStorageConfig, TgMtProtoObjectIdV1,
     encode_tgmtproto_object_id_v1, parse_tgmtproto_object_id_v1,
 };
 
@@ -84,11 +84,29 @@ pub fn parse_chunk_object_ref(encoded: &str) -> Result<ChunkObjectRef> {
 pub trait Storage {
     fn provider(&self) -> &str;
 
+    /// Optional scope identifier embedded into object IDs (e.g. Telegram peer / chat_id).
+    ///
+    /// When present, callers may use it to detect stale `chunk_objects` rows that reference a
+    /// different remote location (e.g. the user changed `chat_id` from a DM to a channel).
+    fn object_id_scope(&self) -> Option<&str> {
+        None
+    }
+
     fn upload_document<'a>(
         &'a self,
         filename: &'a str,
         bytes: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
+
+    fn upload_document_with_progress<'a>(
+        &'a self,
+        filename: &'a str,
+        bytes: Vec<u8>,
+        progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+        let _ = progress;
+        self.upload_document(filename, bytes)
+    }
 
     fn download_document<'a>(
         &'a self,
