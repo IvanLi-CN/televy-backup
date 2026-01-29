@@ -636,7 +636,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
             let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
             secrets_store.set(MASTER_KEY_KEY, b64.clone());
-            televy_backup_core::secrets::save_secrets_store(&secrets_path, &vault_key, &secrets_store)?;
+            televy_backup_core::secrets::save_secrets_store(
+                &secrets_path,
+                &vault_key,
+                &secrets_store,
+            )?;
             b64
         }
         None => return Err("master key missing".into()),
@@ -735,8 +739,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &secrets_store,
                                 &settings.telegram.mtproto.api_hash_key,
                             )
-                            .or_else(|| maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key))
-                            {
+                            .or_else(|| {
+                                maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key)
+                            }) {
                                 api_hash = Some(h);
                             }
 

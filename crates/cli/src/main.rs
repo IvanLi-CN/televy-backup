@@ -3269,8 +3269,8 @@ fn control_ipc_call_with_timeouts(
         method,
         params,
     );
-    let line =
-        serde_json::to_string(&req).map_err(|e| CliError::new("control.unavailable", e.to_string()))?;
+    let line = serde_json::to_string(&req)
+        .map_err(|e| CliError::new("control.unavailable", e.to_string()))?;
     stream
         .write_all(line.as_bytes())
         .and_then(|_| stream.write_all(b"\n"))
@@ -3296,12 +3296,13 @@ fn control_ipc_call_with_timeouts(
     let mut reader = BufReader::new(stream);
     let mut resp_line = String::new();
     match reader.read_line(&mut resp_line) {
-        Ok(0) => Err(
-            CliError::retryable("control.unavailable", "control IPC closed before response")
-                .with_details(serde_json::json!({
-                    "socketPath": socket_path.display().to_string(),
-                })),
-        ),
+        Ok(0) => Err(CliError::retryable(
+            "control.unavailable",
+            "control IPC closed before response",
+        )
+        .with_details(serde_json::json!({
+            "socketPath": socket_path.display().to_string(),
+        }))),
         Ok(_) => Ok(()),
         Err(e) => Err(if is_timeout_io_error(&e) {
             CliError::retryable("control.timeout", "control IPC timeout").with_details(
@@ -3393,7 +3394,7 @@ fn control_ipc_call(
 }
 
 #[cfg(all(test, unix))]
-    mod control_ipc_tests {
+mod control_ipc_tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::thread;
@@ -3463,7 +3464,7 @@ fn control_ipc_call(
     }
 
     #[test]
-        fn control_ipc_method_not_found_maps_code() {
+    fn control_ipc_method_not_found_maps_code() {
         let dir = tempfile::tempdir().unwrap();
         let ipc_dir = dir.path().join("ipc");
         std::fs::create_dir_all(&ipc_dir).unwrap();
