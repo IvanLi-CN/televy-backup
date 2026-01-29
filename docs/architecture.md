@@ -12,6 +12,7 @@
 - **Daemon**: `televybackupd` (`crates/daemon/`).
   - Runs scheduled backups (hourly/daily) and applies retention policy.
   - Intended to be managed by `brew services` as a user-level LaunchAgent.
+  - Owns all secrets access (Keychain / `vault.key` / `secrets.enc`). Other components must use daemon IPC.
 
 ## Status snapshots (Popover / Developer dashboard)
 
@@ -29,6 +30,16 @@ The macOS popover “dashboard” UI is driven by a single snapshot schema (`Sta
   - The UI should pass `TELEVYBACKUP_CONFIG_DIR` / `TELEVYBACKUP_DATA_DIR` to the spawned CLI so it connects to the same IPC socket as the daemon.
   - If IPC is unavailable, the CLI falls back to reading `status.json`; if both are unavailable, it returns `status.unavailable`.
   - If the CLI binary itself is unavailable (dev/local), the UI may fall back to polling `status.json` directly at low frequency (e.g. 1Hz) to avoid a blank dashboard.
+
+## Daemon control IPC (settings/secrets boundary)
+
+In addition to the status stream socket, there is a separate daemon “control plane” socket:
+
+- Socket: `<TELEVYBACKUP_DATA_DIR>/ipc/control.sock`
+- Purpose: allow the CLI and macOS app to query **presence/status** and trigger **write actions** (e.g. ensuring vault
+  key availability, updating secrets) without directly accessing Keychain / `vault.key` / `secrets.enc`.
+- Security posture: the control IPC must not return vault key plaintext; access is scoped by Unix socket file
+  permissions.
 
 ## Data locations
 
@@ -70,6 +81,15 @@ Implementation options:
 
 Secrets are not stored in `config.toml`.
 
+### Daemon-only boundary
+
+Keychain / `vault.key` / `secrets.enc` are daemon-only:
+
+- `televybackupd` is the only component that may read/write the vault key backend and decrypt/update `secrets.enc`.
+- The CLI (`televybackup`) and macOS app must treat secrets as remote state and use daemon control IPC.
+
+### Production default (Keychain)
+
 - Keychain (macOS): vault key `televybackup.vault_key` (Base64 32 bytes)
   - Used to encrypt/decrypt the local secrets store.
 - Local secrets store: `TELEVYBACKUP_CONFIG_DIR/secrets.enc`
@@ -77,6 +97,17 @@ Secrets are not stored in `config.toml`.
   - Master key: entry key = `televybackup.master_key` (Base64 32 bytes)
   - MTProto API hash: entry key = `telegram.mtproto.api_hash` (default; key name configurable via `telegram.mtproto.api_hash_key`)
   - MTProto session: entry key = `[[telegram_endpoints]].mtproto.session_key` (per-endpoint; Base64)
+
+### Development bypass (disable Keychain; security downgrade)
+
+For development only, the daemon can be configured to avoid any Keychain access:
+
+- `TELEVYBACKUP_DISABLE_KEYCHAIN=1`
+- Vault key file:
+  - Default: `TELEVYBACKUP_CONFIG_DIR/vault.key`
+  - Override: `TELEVYBACKUP_VAULT_KEY_FILE=<path>`
+
+This is a security downgrade because `vault.key` is persisted on disk.
 
 Master key portability:
 

@@ -4,7 +4,7 @@
 
 ## 快速新增一个计划
 
-1. 分配一个新的四位编号 `ID`（查看下方 Index，取未使用的最小或递增编号）。
+1. 分配一个新的 `ID`（推荐 5 位 nanoId 风格；兼容四位数字；查看下方 Index，确保未被占用）。
 2. 新建目录：`docs/plan/<id>:<title>/`（`<title>` 必须为 kebab-case 的短 slug）。
 3. 在该目录下创建 `PLAN.md`（模板见下方“PLAN.md 写法（简要）”）。
 4. 在下方 Index 表新增一行，并把 `Status` 设为 `待设计` 或 `待实现`（取决于是否已冻结验收标准），并填入 `Last`（通常为当天）。
@@ -12,7 +12,7 @@
 ## 目录与命名规则
 
 - 每个计划一个目录：`docs/plan/<id>:<title>/`
-- `<id>`：四位数字（`0001`–`9999`），一经分配不要变更。
+- `<id>`：推荐 5 位 nanoId 风格（`[23456789abcdefghjkmnpqrstuvwxyz]{5}`），并兼容四位数字（`0001`–`9999`）；一经分配不要变更。
 - `<title>`：短标题 slug（必须 kebab-case，避免空格与特殊字符）；目录名一经创建不再变更。
 - 人类可读标题写在 Index 的 `Title` 列；标题变更只改 `Title`，不改目录名。
 
@@ -67,3 +67,4 @@
 | 0011 | daemon 状态 IPC：替换 file-based 状态源 | 已完成 | `0011:daemon-status-ipc/PLAN.md` | 2026-01-26 | 实现分支：`feat/0011-daemon-status-ipc` |
 | 0012 | 备份远端索引权威 + 本地自动同步（remote-first） | 已完成 | `0012:remote-first-index-sync/PLAN.md` | 2026-01-29 | 实现分支：`feat/0012-remote-first-index-sync` |
 | 0013 | MTProto dialogs picker（自动选可用 chat_id） | 已完成 | `0013:mtproto-dialogs-picker/PLAN.md` | 2026-01-29 | CLI+UI e2e 已确认；状态面板 Up/UpTotal 上传中实时更新 |
+| nvr79 | 开发期绕过 Keychain（codesign + vault key；daemon-only） | 已完成 | `nvr79:avoid-keychain-in-dev/PLAN.md` | 2026-01-28 | 已落地：`TELEVYBACKUP_DISABLE_KEYCHAIN` + `vault.key` + daemon control IPC + tests |

@@ -748,42 +748,8 @@ async fn settings_get(
     if json {
         if with_secrets {
             // The macOS UI calls `settings get --with-secrets` unconditionally.
-            // Keep settings readable even when daemon IPC / Keychain access isn't available.
-            let secrets = (|| -> Result<serde_json::Value, CliError> {
-                let master_present = get_secret(config_dir, data_dir, MASTER_KEY_KEY)?.is_some();
-
-                let mtproto_api_hash_present = get_secret(
-                    config_dir,
-                    data_dir,
-                    &settings.telegram.mtproto.api_hash_key,
-                )?
-                .is_some();
-
-                let mut bot_present_by_endpoint =
-                    serde_json::Map::<String, serde_json::Value>::new();
-                let mut mtproto_session_present_by_endpoint =
-                    serde_json::Map::<String, serde_json::Value>::new();
-                for ep in &settings.telegram_endpoints {
-                    let bot_present =
-                        get_secret(config_dir, data_dir, &ep.bot_token_key)?.is_some();
-                    bot_present_by_endpoint
-                        .insert(ep.id.clone(), serde_json::Value::Bool(bot_present));
-
-                    let sess_present =
-                        get_secret(config_dir, data_dir, &ep.mtproto.session_key)?.is_some();
-                    mtproto_session_present_by_endpoint
-                        .insert(ep.id.clone(), serde_json::Value::Bool(sess_present));
-                }
-
-                Ok(serde_json::json!({
-                    "telegramBotTokenPresentByEndpoint": bot_present_by_endpoint,
-                    "masterKeyPresent": master_present,
-                    "telegramMtprotoApiHashPresent": mtproto_api_hash_present,
-                    "telegramMtprotoSessionPresentByEndpoint": mtproto_session_present_by_endpoint
-                }))
-            })();
-
-            match secrets {
+            // Keep settings readable even when control IPC isn't available.
+            match daemon_control_secrets_presence(data_dir, None) {
                 Ok(secrets) => {
                     println!(
                         "{}",
@@ -812,29 +778,46 @@ async fn settings_get(
             println!();
         }
         if with_secrets {
-            let master_present = get_secret(config_dir, data_dir, MASTER_KEY_KEY)?.is_some();
-            let mtproto_api_hash_present = get_secret(
-                config_dir,
-                data_dir,
-                &settings.telegram.mtproto.api_hash_key,
-            )?
-            .is_some();
-            println!();
-            println!("masterKeyPresent={master_present}");
-            println!("telegramMtprotoApiHashPresent={mtproto_api_hash_present}");
-            for ep in &settings.telegram_endpoints {
-                let telegram_present =
-                    get_secret(config_dir, data_dir, &ep.bot_token_key)?.is_some();
-                let mtproto_session_present =
-                    get_secret(config_dir, data_dir, &ep.mtproto.session_key)?.is_some();
-                println!(
-                    "telegramBotTokenPresent[{id}]={telegram_present}",
-                    id = ep.id
-                );
-                println!(
-                    "telegramMtprotoSessionPresent[{id}]={mtproto_session_present}",
-                    id = ep.id
-                );
+            match daemon_control_secrets_presence(data_dir, None) {
+                Ok(secrets) => {
+                    let master_present = secrets
+                        .get("masterKeyPresent")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let mtproto_api_hash_present = secrets
+                        .get("telegramMtprotoApiHashPresent")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    println!();
+                    println!("masterKeyPresent={master_present}");
+                    println!("telegramMtprotoApiHashPresent={mtproto_api_hash_present}");
+                    for ep in &settings.telegram_endpoints {
+                        let telegram_present = secrets
+                            .get("telegramBotTokenPresentByEndpoint")
+                            .and_then(|m| m.get(&ep.id))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let mtproto_session_present = secrets
+                            .get("telegramMtprotoSessionPresentByEndpoint")
+                            .and_then(|m| m.get(&ep.id))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        println!(
+                            "telegramBotTokenPresent[{id}]={telegram_present}",
+                            id = ep.id
+                        );
+                        println!(
+                            "telegramMtprotoSessionPresent[{id}]={mtproto_session_present}",
+                            id = ep.id
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!();
+                    println!("secretsErrorCode={}", e.code);
+                    println!("secretsErrorMessage={}", e.message);
+                    println!("secretsErrorRetryable={}", e.retryable);
+                }
             }
         }
     }
@@ -961,7 +944,7 @@ async fn secrets_set_telegram_bot_token(
     if token.is_empty() {
         return Err(CliError::new("config.invalid", "token is empty"));
     }
-    set_secret(config_dir, data_dir, &ep.bot_token_key, &token)?;
+    daemon_control_secrets_set_telegram_bot_token(data_dir, &ep.id, &token)?;
 
     if json {
         println!("{}", serde_json::json!({ "ok": true }));
@@ -985,13 +968,8 @@ async fn secrets_set_telegram_api_hash(
     if api_hash.is_empty() {
         return Err(CliError::new("config.invalid", "api_hash is empty"));
     }
-
-    set_secret(
-        config_dir,
-        data_dir,
-        &settings.telegram.mtproto.api_hash_key,
-        &api_hash,
-    )?;
+    let _ = settings;
+    daemon_control_secrets_set_telegram_api_hash(data_dir, &api_hash)?;
 
     if json {
         println!("{}", serde_json::json!({ "ok": true }));
@@ -1008,7 +986,7 @@ async fn secrets_clear_telegram_mtproto_session(
 ) -> Result<(), CliError> {
     let settings = load_settings(config_dir)?;
     for ep in &settings.telegram_endpoints {
-        delete_secret(config_dir, data_dir, &ep.mtproto.session_key)?;
+        daemon_control_secrets_clear_telegram_mtproto_session(data_dir, &ep.id)?;
     }
 
     if json {
@@ -3253,6 +3231,380 @@ fn daemon_vault_get_or_create_b64(data_dir: &Path) -> Result<String, CliError> {
         .ok_or_else(|| CliError::new("daemon.failed", "vault IPC missing vault_key_b64"))
 }
 
+#[cfg(unix)]
+fn control_ipc_call_with_timeouts(
+    data_dir: &Path,
+    method: &str,
+    params: serde_json::Value,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) -> Result<televy_backup_core::control::ControlResponse, CliError> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    fn is_timeout_io_error(e: &std::io::Error) -> bool {
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        )
+    }
+
+    let socket_path = televy_backup_core::control::control_ipc_socket_path(data_dir);
+    let mut stream = UnixStream::connect(&socket_path).map_err(|e| {
+        CliError::retryable(
+            "control.unavailable",
+            "control IPC unavailable (is daemon running?)",
+        )
+        .with_details(serde_json::json!({
+            "socketPath": socket_path.display().to_string(),
+            "error": e.to_string(),
+        }))
+    })?;
+
+    let _ = stream.set_read_timeout(Some(read_timeout));
+    let _ = stream.set_write_timeout(Some(write_timeout));
+
+    let req = televy_backup_core::control::ControlRequest::new(
+        uuid::Uuid::new_v4().to_string(),
+        method,
+        params,
+    );
+    let line = serde_json::to_string(&req)
+        .map_err(|e| CliError::new("control.unavailable", e.to_string()))?;
+    stream
+        .write_all(line.as_bytes())
+        .and_then(|_| stream.write_all(b"\n"))
+        .map_err(|e| {
+            if is_timeout_io_error(&e) {
+                CliError::retryable("control.timeout", "control IPC timeout").with_details(
+                    serde_json::json!({
+                        "socketPath": socket_path.display().to_string(),
+                        "error": e.to_string(),
+                    }),
+                )
+            } else {
+                CliError::retryable("control.unavailable", "control IPC write failed").with_details(
+                    serde_json::json!({
+                        "socketPath": socket_path.display().to_string(),
+                        "error": e.to_string(),
+                    }),
+                )
+            }
+        })?;
+    let _ = stream.flush();
+
+    let mut reader = BufReader::new(stream);
+    let mut resp_line = String::new();
+    match reader.read_line(&mut resp_line) {
+        Ok(0) => Err(CliError::retryable(
+            "control.unavailable",
+            "control IPC closed before response",
+        )
+        .with_details(serde_json::json!({
+            "socketPath": socket_path.display().to_string(),
+        }))),
+        Ok(_) => Ok(()),
+        Err(e) => Err(if is_timeout_io_error(&e) {
+            CliError::retryable("control.timeout", "control IPC timeout").with_details(
+                serde_json::json!({
+                    "socketPath": socket_path.display().to_string(),
+                    "error": e.to_string(),
+                }),
+            )
+        } else {
+            CliError::retryable("control.unavailable", "control IPC read failed").with_details(
+                serde_json::json!({
+                    "socketPath": socket_path.display().to_string(),
+                    "error": e.to_string(),
+                }),
+            )
+        }),
+    }?;
+
+    let resp: televy_backup_core::control::ControlResponse =
+        serde_json::from_str(resp_line.trim_end()).map_err(|e| {
+            CliError::new("control.unavailable", format!("invalid IPC response: {e}")).with_details(
+                serde_json::json!({
+                    "socketPath": socket_path.display().to_string(),
+                    "responseLine": resp_line.clone(),
+                }),
+            )
+        })?;
+
+    if resp.ok {
+        Ok(resp)
+    } else {
+        let err = resp
+            .error
+            .unwrap_or(televy_backup_core::control::ControlError {
+                code: "control.failed".to_string(),
+                message: "daemon request failed".to_string(),
+                retryable: false,
+                details: serde_json::json!({}),
+            });
+
+        let (code, details) = match err.code.as_str() {
+            "control.unavailable" => ("control.unavailable", err.details),
+            "control.timeout" => ("control.timeout", err.details),
+            "control.invalid_request" => ("control.invalid_request", err.details),
+            "control.method_not_found" => ("control.method_not_found", err.details),
+            _ => (
+                "control.failed",
+                serde_json::json!({
+                    "daemonCode": err.code,
+                    "daemonDetails": err.details,
+                }),
+            ),
+        };
+
+        let out = if err.retryable {
+            CliError::retryable(code, err.message)
+        } else {
+            CliError::new(code, err.message)
+        };
+        Err(out.with_details(details))
+    }
+}
+
+#[cfg(unix)]
+fn control_ipc_call(
+    data_dir: &Path,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<televy_backup_core::control::ControlResponse, CliError> {
+    control_ipc_call_with_timeouts(
+        data_dir,
+        method,
+        params,
+        Duration::from_secs(30),
+        Duration::from_secs(5),
+    )
+}
+
+#[cfg(not(unix))]
+fn control_ipc_call(
+    _data_dir: &Path,
+    _method: &str,
+    _params: serde_json::Value,
+) -> Result<televy_backup_core::control::ControlResponse, CliError> {
+    Err(CliError::new(
+        "daemon.unavailable",
+        "control IPC is only supported on unix",
+    ))
+}
+
+#[cfg(all(test, unix))]
+mod control_ipc_tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::thread;
+
+    use super::*;
+
+    fn wait_for_socket(path: &Path) {
+        for _ in 0..50 {
+            if path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("socket did not appear: {}", path.display());
+    }
+
+    #[test]
+    fn control_ipc_missing_socket_maps_to_control_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = control_ipc_call_with_timeouts(
+            dir.path(),
+            "secrets.presence",
+            serde_json::json!({}),
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "control.unavailable");
+        assert!(err.retryable);
+    }
+
+    #[test]
+    fn control_ipc_timeout_maps_to_control_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let ipc_dir = dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                let (stream, _addr) = listener.accept().unwrap();
+                let mut r = BufReader::new(stream.try_clone().unwrap());
+                let mut _line = String::new();
+                let _ = r.read_line(&mut _line);
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        let err = control_ipc_call_with_timeouts(
+            dir.path(),
+            "secrets.presence",
+            serde_json::json!({}),
+            Duration::from_millis(20),
+            Duration::from_millis(20),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "control.timeout");
+        assert!(err.retryable);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn control_ipc_method_not_found_maps_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let ipc_dir = dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                let (mut stream, _addr) = listener.accept().unwrap();
+
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+
+                let req: televy_backup_core::control::ControlRequest =
+                    serde_json::from_str(line.trim_end()).unwrap();
+                let resp = televy_backup_core::control::ControlResponse::err(
+                    req.id,
+                    televy_backup_core::control::ControlError::method_not_found(
+                        "unknown method",
+                        serde_json::json!({}),
+                    ),
+                );
+                let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
+                stream.write_all(resp_line.as_bytes()).unwrap();
+                let _ = stream.flush();
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        let err = control_ipc_call_with_timeouts(
+            dir.path(),
+            "unknown.method",
+            serde_json::json!({}),
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "control.method_not_found");
+        assert!(!err.retryable);
+
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn control_ipc_preserves_daemon_error_code_in_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let ipc_dir = dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                let (mut stream, _addr) = listener.accept().unwrap();
+
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+
+                let req: televy_backup_core::control::ControlRequest =
+                    serde_json::from_str(line.trim_end()).unwrap();
+                let resp = televy_backup_core::control::ControlResponse::err(
+                    req.id,
+                    televy_backup_core::control::ControlError {
+                        code: "secrets.vault_unavailable".to_string(),
+                        message: "vault unavailable".to_string(),
+                        retryable: false,
+                        details: serde_json::json!({ "hint": "test" }),
+                    },
+                );
+                let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
+                stream.write_all(resp_line.as_bytes()).unwrap();
+                let _ = stream.flush();
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        let err = control_ipc_call_with_timeouts(
+            dir.path(),
+            "secrets.presence",
+            serde_json::json!({}),
+            Duration::from_millis(200),
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, "control.failed");
+        assert_eq!(
+            err.details.get("daemonCode").and_then(|v| v.as_str()),
+            Some("secrets.vault_unavailable")
+        );
+
+        server.join().unwrap();
+    }
+}
+
+fn daemon_control_secrets_presence(
+    data_dir: &Path,
+    endpoint_id: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
+    let params = serde_json::json!({ "endpointId": endpoint_id });
+    let resp = control_ipc_call(data_dir, "secrets.presence", params)?;
+    resp.result
+        .ok_or_else(|| CliError::new("control.failed", "missing result"))
+}
+
+fn daemon_control_secrets_set_telegram_bot_token(
+    data_dir: &Path,
+    endpoint_id: &str,
+    token: &str,
+) -> Result<(), CliError> {
+    let params = serde_json::json!({ "endpointId": endpoint_id, "token": token });
+    let _ = control_ipc_call(data_dir, "secrets.setTelegramBotToken", params)?;
+    Ok(())
+}
+
+fn daemon_control_secrets_set_telegram_api_hash(
+    data_dir: &Path,
+    api_hash: &str,
+) -> Result<(), CliError> {
+    let params = serde_json::json!({ "apiHash": api_hash });
+    let _ = control_ipc_call(data_dir, "secrets.setTelegramApiHash", params)?;
+    Ok(())
+}
+
+fn daemon_control_secrets_clear_telegram_mtproto_session(
+    data_dir: &Path,
+    endpoint_id: &str,
+) -> Result<(), CliError> {
+    let params = serde_json::json!({ "endpointId": endpoint_id });
+    let _ = control_ipc_call(data_dir, "secrets.clearTelegramMtprotoSession", params)?;
+    Ok(())
+}
+
 fn daemon_keychain_get_secret(data_dir: &Path, key: &str) -> Result<Option<String>, CliError> {
     let resp = vault_ipc_call(
         data_dir,
@@ -3302,19 +3654,6 @@ fn set_secret(config_dir: &Path, data_dir: &Path, key: &str, value: &str) -> Res
     televy_backup_core::secrets::save_secrets_store(&path, &vault_key, &store)
         .map_err(map_secrets_store_err)?;
     Ok(())
-}
-
-fn delete_secret(config_dir: &Path, data_dir: &Path, key: &str) -> Result<bool, CliError> {
-    let vault_key = load_or_create_vault_key(data_dir)?;
-    let path = televy_backup_core::secrets::secrets_path(config_dir);
-    let mut store = televy_backup_core::secrets::load_secrets_store(&path, &vault_key)
-        .map_err(map_secrets_store_err)?;
-    let removed = store.remove(key);
-    if removed {
-        televy_backup_core::secrets::save_secrets_store(&path, &vault_key, &store)
-            .map_err(map_secrets_store_err)?;
-    }
-    Ok(removed)
 }
 
 fn map_secrets_store_err(e: televy_backup_core::secrets::SecretsStoreError) -> CliError {
