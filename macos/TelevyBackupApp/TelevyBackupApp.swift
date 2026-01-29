@@ -80,12 +80,17 @@ final class AppModel: ObservableObject {
     @Published var statusSnapshotReceivedAt: Date? = nil
     @Published var statusStreamFrozen: Bool = false
     @Published var popoverDesiredHeight: CGFloat = 460
+    @Published var runHistory: [RunLogSummary] = []
+    @Published var runHistoryRefreshInFlight: Bool = false
 
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
     private var didShowUiLogWriteErrorToast: Bool = false
     private var settingsWindow: NSWindow? = nil
+    private var mainWindow: NSWindow? = nil
     private var developerWindow: NSWindow? = nil
+    private var lastTaskKind: String? = nil
+    private var lastTaskState: String? = nil
 
     struct StatusActivityItem: Identifiable {
         let id = UUID()
@@ -154,7 +159,7 @@ final class AppModel: ObservableObject {
             .appendingPathComponent("status.json")
     }
 
-    private func logDirURL() -> URL {
+    func logDirURL() -> URL {
         if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_LOG_DIR"], !env.isEmpty {
             return URL(fileURLWithPath: env)
         }
@@ -908,6 +913,80 @@ final class AppModel: ObservableObject {
         runProcess(exe: cli, args: ["--events", "backup", "run", "--source", sourcePath, "--label", label])
     }
 
+    func promptRestoreLatest(targetId: String) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Restore"
+        panel.message = "Choose an empty folder to restore into"
+
+        let response = panel.runModal()
+        guard response == .OK, let url = panel.url else { return }
+
+        let path = url.path
+        do {
+            let items = try FileManager.default.contentsOfDirectory(atPath: path)
+            if !items.isEmpty {
+                showToast("Folder must be empty", isError: true)
+                return
+            }
+        } catch {
+            appendLog("ERROR: failed to read restore destination: \(error)")
+            showToast("Failed to read folder (see ui.log)", isError: true)
+            return
+        }
+
+        restoreLatest(targetId: targetId, destinationPath: path)
+    }
+
+    func restoreLatest(targetId: String, destinationPath: String) {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        showToast("Starting restore…", isError: false)
+        runProcess(
+            exe: cli,
+            args: [
+                "--events",
+                "restore",
+                "latest",
+                "--target-id",
+                targetId,
+                "--target",
+                destinationPath,
+            ],
+            timeoutSeconds: nil,
+            onExit: { _ in
+                self.refreshRunHistory()
+            }
+        )
+    }
+
+    func verifyLatest(targetId: String) {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        showToast("Starting verify…", isError: false)
+        runProcess(
+            exe: cli,
+            args: [
+                "--events",
+                "verify",
+                "latest",
+                "--target-id",
+                targetId,
+            ],
+            timeoutSeconds: nil,
+            onExit: { _ in
+                self.refreshRunHistory()
+            }
+        )
+    }
+
     func chooseSourceFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -938,6 +1017,142 @@ final class AppModel: ObservableObject {
         if !NSWorkspace.shared.open(dir) {
             showToast("Failed to open logs folder", isError: true)
         }
+    }
+
+    func refreshRunHistory(limit: Int = 200) {
+        if runHistoryRefreshInFlight { return }
+        DispatchQueue.main.async {
+            self.runHistoryRefreshInFlight = true
+        }
+
+        let dir = logDirURL()
+        DispatchQueue.global(qos: .utility).async {
+            defer {
+                DispatchQueue.main.async {
+                    self.runHistoryRefreshInFlight = false
+                }
+            }
+
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let files = try FileManager.default.contentsOfDirectory(
+                    at: dir,
+                    includingPropertiesForKeys: nil,
+                    options: [.skipsHiddenFiles]
+                )
+                let ndjson = files
+                    .filter { $0.lastPathComponent.hasPrefix("sync-") && $0.pathExtension == "ndjson" }
+                    .sorted { $0.lastPathComponent > $1.lastPathComponent }
+
+                var out: [RunLogSummary] = []
+                out.reserveCapacity(min(limit, ndjson.count))
+                for url in ndjson {
+                    if out.count >= limit { break }
+                    if let item = self.parseRunLogSummary(url: url) {
+                        out.append(item)
+                    }
+                }
+
+                DispatchQueue.main.async {
+                    self.runHistory = out
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.appendLog("ERROR: refresh run history failed: \(error)")
+                    self.showToast("Failed to read run logs", isError: true)
+                    self.runHistory = []
+                }
+            }
+        }
+    }
+
+    private func parseRunLogSummary(url: URL) -> RunLogSummary? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+
+        var kind: String?
+        var targetId: String?
+        var status: String?
+        var errorCode: String?
+        var durationSeconds: Double?
+        var snapshotId: String?
+
+        var bytesUploaded: Int64?
+        var bytesDeduped: Int64?
+        var bytesWritten: Int64?
+        var bytesChecked: Int64?
+        var filesRestored: Int64?
+        var chunksDownloaded: Int64?
+        var chunksChecked: Int64?
+
+        var finishedAt: Date?
+
+        for line in text.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+
+            let ts = obj["timestamp"] as? String
+            let fields = obj["fields"] as? [String: Any]
+            let event = fields?["event"] as? String
+            if event == "run.start" {
+                kind = fields?["kind"] as? String ?? kind
+                targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
+                snapshotId = fields?["snapshot_id"] as? String ?? snapshotId
+                continue
+            }
+
+            if event == "run.finish" {
+                kind = fields?["kind"] as? String ?? kind
+                targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
+                status = fields?["status"] as? String ?? status
+                errorCode = fields?["error_code"] as? String ?? errorCode
+                durationSeconds = (fields?["duration_seconds"] as? NSNumber)?.doubleValue ?? durationSeconds
+                snapshotId = fields?["snapshot_id"] as? String ?? snapshotId
+
+                bytesUploaded = (fields?["bytes_uploaded"] as? NSNumber)?.int64Value ?? bytesUploaded
+                bytesDeduped = (fields?["bytes_deduped"] as? NSNumber)?.int64Value ?? bytesDeduped
+                bytesWritten = (fields?["bytes_written"] as? NSNumber)?.int64Value ?? bytesWritten
+                bytesChecked = (fields?["bytes_checked"] as? NSNumber)?.int64Value ?? bytesChecked
+                filesRestored = (fields?["files_restored"] as? NSNumber)?.int64Value ?? filesRestored
+                chunksDownloaded = (fields?["chunks_downloaded"] as? NSNumber)?.int64Value ?? chunksDownloaded
+                chunksChecked = (fields?["chunks_checked"] as? NSNumber)?.int64Value ?? chunksChecked
+
+                if let ts, let d = Self.parseIso8601(ts) {
+                    finishedAt = d
+                }
+            }
+        }
+
+        guard let kind else { return nil }
+        if kind != "backup" && kind != "restore" && kind != "verify" { return nil }
+
+        return RunLogSummary(
+            id: url.lastPathComponent,
+            kind: kind,
+            targetId: targetId,
+            snapshotId: snapshotId,
+            status: status,
+            errorCode: errorCode,
+            durationSeconds: durationSeconds,
+            finishedAt: finishedAt,
+            logURL: url,
+            bytesUploaded: bytesUploaded,
+            bytesDeduped: bytesDeduped,
+            bytesWritten: bytesWritten,
+            bytesChecked: bytesChecked,
+            filesRestored: filesRestored,
+            chunksDownloaded: chunksDownloaded,
+            chunksChecked: chunksChecked
+        )
+    }
+
+    private static func parseIso8601(_ s: String) -> Date? {
+        let f1 = ISO8601DateFormatter()
+        f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f1.date(from: s) { return d }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: s)
     }
 
     private func writeConfigToml() throws {
@@ -1191,6 +1406,57 @@ final class AppModel: ObservableObject {
 	        if let contentView = window.contentView {
 	            contentView.wantsLayer = true
 	            contentView.layer?.backgroundColor = NSColor.clear.cgColor
+	        }
+	    }
+
+	    func openMainWindow() {
+	        DispatchQueue.main.async {
+	            self.ensureDaemonRunning()
+	            self.ensureStatusStreamRunning()
+	            self.refresh()
+	            self.refreshRunHistory()
+
+	            let window: NSWindow
+	            if let existing = self.mainWindow {
+	                window = existing
+	            } else {
+	                let root = MainWindowRootView()
+	                    .environmentObject(self)
+	                let controller = NSHostingController(rootView: root)
+	                controller.view.wantsLayer = true
+	                controller.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+	                let w = NSWindow(contentViewController: controller)
+	                w.title = "TelevyBackup"
+	                w.titleVisibility = .visible
+	                if #available(macOS 11.0, *) {
+	                    w.toolbarStyle = .unified
+	                }
+	                w.setContentSize(NSSize(width: 980, height: 640))
+	                w.minSize = NSSize(width: 860, height: 520)
+	                w.maxSize = NSSize(width: 1600, height: 1200)
+	                w.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
+	                w.isReleasedWhenClosed = false
+	                w.center()
+	                self.configureMainWindowIfNeeded(w)
+	                self.mainWindow = w
+	                window = w
+	            }
+
+	            self.configureMainWindowIfNeeded(window)
+	            NSApp.activate(ignoringOtherApps: true)
+	            window.makeKeyAndOrderFront(nil)
+	        }
+	    }
+
+	    private func configureMainWindowIfNeeded(_ window: NSWindow) {
+	        if !window.isOpaque {
+	            window.isOpaque = true
+	        }
+	        if window.backgroundColor != .windowBackgroundColor {
+	            window.backgroundColor = .windowBackgroundColor
+	        }
+	        if window.appearance?.name != .vibrantLight {
+	            window.appearance = NSAppearance(named: .vibrantLight)
 	        }
 	    }
 
@@ -1450,6 +1716,8 @@ final class AppModel: ObservableObject {
             let state = obj["state"] as? String ?? ""
             let kind = obj["kind"] as? String ?? ""
             DispatchQueue.main.async {
+                self.lastTaskKind = kind
+                self.lastTaskState = state
                 if state == "running" {
                     self.isRunning = true
                     self.phase = kind
@@ -1481,7 +1749,18 @@ final class AppModel: ObservableObject {
                     self.currentBytesUploaded = bytesUploaded
                     self.currentBytesDeduped = bytesDeduped
                 }
-                refreshSettings(withSecrets: false)
+                if kind == "backup" {
+                    refreshSettings(withSecrets: false)
+                }
+                showToast(kind == "restore" ? "Restore complete" : (kind == "verify" ? "Verify complete" : "Backup complete"), isError: false)
+                refreshRunHistory()
+            } else if state == "failed" {
+                DispatchQueue.main.async {
+                    self.lastRunOk = false
+                    self.lastRunAt = Date()
+                }
+                showToast(kind == "restore" ? "Restore failed" : (kind == "verify" ? "Verify failed" : "Backup failed"), isError: true)
+                refreshRunHistory()
             }
         }
     }
@@ -1511,6 +1790,8 @@ final class AppModel: ObservableObject {
             DispatchQueue.main.async {
                 self.isRunning = true
                 self.phase = "running"
+                self.lastTaskKind = nil
+                self.lastTaskState = nil
             }
         }
         appendLog("$ \(exe) \(args.joined(separator: " "))")
@@ -1603,7 +1884,10 @@ final class AppModel: ObservableObject {
                         }
                         self.lastRunAt = Date()
                         self.taskStartedAt = nil
-                        self.showToast("Backup failed", isError: true)
+                        if self.lastTaskState != "failed" {
+                            let k = self.lastTaskKind ?? "task"
+                            self.showToast("\(k.capitalized) failed", isError: true)
+                        }
                     }
                 }
                 out.fileHandleForReading.readabilityHandler = nil
@@ -1835,9 +2119,9 @@ struct PopoverRootView: View {
                 StatusLED(color: statusColor)
 
                 Button {
-                    model.openSettingsWindow()
+                    model.openMainWindow()
                 } label: {
-                    Image(systemName: "gearshape.fill")
+                    Image(systemName: "rectangle.grid.2x2.fill")
                         .font(.system(size: 13, weight: .semibold))
                         .frame(width: 22, height: 22)
                         .background(Color.white.opacity(0.26), in: RoundedRectangle(cornerRadius: 10))
@@ -1847,6 +2131,7 @@ struct PopoverRootView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .help("Open main window")
             }
             .padding(.bottom, 12)
 
