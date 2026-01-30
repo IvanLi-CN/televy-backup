@@ -2966,6 +2966,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.showPopover(nil)
             }
         }
+
+        let env = ProcessInfo.processInfo.environment
+        if env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1" || env["TELEVYBACKUP_UI_DEMO"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                ModelStore.shared.openSettingsWindow()
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

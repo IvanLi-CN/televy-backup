@@ -196,6 +196,81 @@ private struct EmptyStateView: View {
     }
 }
 
+private enum SettingsUIDemo {
+    static var enabled: Bool {
+        ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1"
+    }
+
+    static var scene: String {
+        ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
+    }
+
+    static var disableAutoSelect: Bool {
+        enabled && scene.contains("unselected")
+    }
+
+    static var initialSection: SettingsSection {
+        if scene.hasPrefix("endpoints") { return .endpoints }
+        return .targets
+    }
+
+    static func makeSettings(scene: String) -> SettingsV2 {
+        let epA = TelegramEndpointV2(
+            id: "ep_demo_a",
+            mode: "mtproto",
+            chat_id: "123456",
+            bot_token_key: "telegram.bot_token.ep_demo_a",
+            mtproto: TelegramEndpointMtprotoV2(session_key: "telegram.mtproto.session.ep_demo_a"),
+            rate_limit: TelegramRateLimitV2(max_concurrent_uploads: 2, min_delay_ms: 250)
+        )
+        let epB = TelegramEndpointV2(
+            id: "ep_demo_b",
+            mode: "mtproto",
+            chat_id: "987654",
+            bot_token_key: "telegram.bot_token.ep_demo_b",
+            mtproto: TelegramEndpointMtprotoV2(session_key: "telegram.mtproto.session.ep_demo_b"),
+            rate_limit: TelegramRateLimitV2(max_concurrent_uploads: 2, min_delay_ms: 250)
+        )
+
+        let targets: [TargetV2] = {
+            if scene == "targets-empty" || scene == "endpoints-empty" { return [] }
+            return [
+                TargetV2(
+                    id: "t_demo_a",
+                    source_path: "/Users/ivan/Demo/Photos",
+                    label: "photos",
+                    endpoint_id: epA.id,
+                    enabled: true,
+                    schedule: nil
+                ),
+                TargetV2(
+                    id: "t_demo_b",
+                    source_path: "/Users/ivan/Demo/Documents",
+                    label: "docs",
+                    endpoint_id: epA.id,
+                    enabled: true,
+                    schedule: nil
+                ),
+            ]
+        }()
+
+        let endpoints: [TelegramEndpointV2] = {
+            if scene == "endpoints-empty" { return [] }
+            return [epA, epB]
+        }()
+
+        return SettingsV2(
+            version: 2,
+            schedule: ScheduleV2(enabled: true, kind: "hourly", hourly_minute: 0, daily_at: "02:00", timezone: "UTC"),
+            retention: RetentionV2(keep_last_snapshots: 7),
+            chunking: ChunkingV2(min_bytes: 1024 * 1024, avg_bytes: 8 * 1024 * 1024, max_bytes: 64 * 1024 * 1024),
+            telegram: TelegramGlobalV2(mode: "mtproto", mtproto: TelegramMtprotoGlobalV2(api_id: 0, api_hash_key: "telegram.mtproto.api_hash")),
+            telegram_endpoints: endpoints,
+            targets: targets
+        )
+    }
+}
+
 struct SettingsWindowRootView: View {
     @EnvironmentObject var model: AppModel
     @State private var section: SettingsSection = .targets
@@ -332,6 +407,7 @@ struct SettingsWindowRootView: View {
                 .background(Color.clear)
                 .onChange(of: targets.map(\.id)) { _, ids in
                     guard settings != nil else { return }
+                    guard !SettingsUIDemo.disableAutoSelect else { return }
                     if let selectedTargetId, ids.contains(selectedTargetId) { return }
                     selectedTargetId = ids.first
                 }
@@ -536,11 +612,13 @@ struct SettingsWindowRootView: View {
         }
         .onAppear {
             if selectedEndpointId == nil {
+                guard !SettingsUIDemo.disableAutoSelect else { return }
                 selectedEndpointId = endpoints.first?.id
             }
         }
         .onChange(of: endpoints.map(\.id)) { _, ids in
             guard settings != nil else { return }
+            guard !SettingsUIDemo.disableAutoSelect else { return }
             if let selectedEndpointId, ids.contains(selectedEndpointId) { return }
             selectedEndpointId = ids.first
         }
@@ -742,6 +820,29 @@ struct SettingsWindowRootView: View {
     }
 
     private func reload() {
+        if SettingsUIDemo.enabled {
+            DispatchQueue.main.async {
+                self.vaultKeyPresent = false
+                self.secrets = nil
+                self.loadError = nil
+                self.section = SettingsUIDemo.initialSection
+                self.settings = SettingsUIDemo.makeSettings(scene: SettingsUIDemo.scene)
+
+                if !SettingsUIDemo.disableAutoSelect {
+                    if self.selectedTargetId == nil {
+                        self.selectedTargetId = self.settings?.targets.first?.id
+                    }
+                    if self.selectedEndpointId == nil {
+                        self.selectedEndpointId = self.sortedEndpoints().first?.id
+                    }
+                } else {
+                    if SettingsUIDemo.scene == "targets-unselected" { self.selectedTargetId = nil }
+                    if SettingsUIDemo.scene == "endpoints-unselected" { self.selectedEndpointId = nil }
+                }
+            }
+            return
+        }
+
         guard let cli = model.cliPath() else {
             loadError = "televybackup CLI not found (set TELEVYBACKUP_CLI_PATH)"
             return
@@ -796,13 +897,15 @@ struct SettingsWindowRootView: View {
                 self.settings = decoded.settings
                 self.secrets = decoded.secrets
                 self.loadError = nil
-                if let selected = self.selectedTargetId {
-                    let ids = Set(decoded.settings.targets.map(\.id))
-                    if !ids.contains(selected) {
+                if !SettingsUIDemo.disableAutoSelect {
+                    if let selected = self.selectedTargetId {
+                        let ids = Set(decoded.settings.targets.map(\.id))
+                        if !ids.contains(selected) {
+                            self.selectedTargetId = decoded.settings.targets.first?.id
+                        }
+                    } else {
                         self.selectedTargetId = decoded.settings.targets.first?.id
                     }
-                } else {
-                    self.selectedTargetId = decoded.settings.targets.first?.id
                 }
                 if let selected = self.selectedEndpointId {
                     let ids = Set(decoded.settings.telegram_endpoints.map(\.id))
@@ -810,7 +913,7 @@ struct SettingsWindowRootView: View {
                         self.selectedEndpointId = nil
                     }
                 }
-                if self.selectedEndpointId == nil {
+                if !SettingsUIDemo.disableAutoSelect, self.selectedEndpointId == nil {
                     self.selectedEndpointId = self.sortedEndpoints(settings: decoded.settings).first?.id
                 }
             }
