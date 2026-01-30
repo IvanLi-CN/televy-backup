@@ -370,6 +370,8 @@ struct SettingsWindowRootView: View {
                         .padding(.vertical, 14)
                         .padding(.horizontal, 12)
                 }
+            } label: {
+                EmptyView()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -460,6 +462,8 @@ struct SettingsWindowRootView: View {
                         .padding(.vertical, 14)
                         .padding(.horizontal, 12)
                 }
+            } label: {
+                EmptyView()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -503,7 +507,7 @@ struct SettingsWindowRootView: View {
                         Spacer()
                         Text(showUnavailable ? "Unavailable" : (vaultKeyPresent ? "Present" : "Missing"))
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(showUnavailable ? .secondary : (vaultKeyPresent ? .green : .red))
+                            .foregroundStyle(showUnavailable ? Color.secondary : (vaultKeyPresent ? Color.green : Color.red))
                         Text("· Keychain")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
@@ -586,6 +590,8 @@ struct SettingsWindowRootView: View {
                 }
                 .padding(.vertical, 2)
                 .padding(.horizontal, 12)
+            } label: {
+                EmptyView()
             }
 
             Text("New Mac restore requires: recovery key + bot token + chat_id.")
