@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-30
 - Last: 2026-01-30
 
@@ -119,10 +119,10 @@ None
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: 复现用例与回归测试（IPC sockets 可连接）
-- [ ] M2: daemon：修复/增强 control+vault IPC 的启动可靠性与可观测性
-- [ ] M3: macOS GUI：Recovery Key/Verify 错误态区分与可操作提示
-- [ ] M4: 文档补齐（Troubleshooting + IPC 说明）
+- [x] M1: 复现用例与回归测试（IPC sockets 可连接）
+- [x] M2: daemon：修复/增强 control+vault IPC 的启动可靠性与可观测性
+- [x] M3: macOS GUI：Recovery Key/Verify 错误态区分与可操作提示
+- [x] M4: 文档补齐（Troubleshooting + IPC 说明）
 
 ## 方案概述（Approach, high-level）
 
@@ -138,6 +138,7 @@ None
 ## 变更记录（Change log）
 
 - 2026-01-30: 冻结关键决策（UI 文案口径 + daemon 自愈 + GUI preflight + 测试禁用 Keychain），状态切换为 `待实现`
+- 2026-01-30: 完成实现（daemon IPC 启动鲁棒性 + GUI preflight/Unavailable + Troubleshooting 文档）；等待主人验收后推进后续合并/PR
 
 ## 参考（References）
 
