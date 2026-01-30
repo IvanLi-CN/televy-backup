@@ -569,6 +569,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ) {
         Ok(h) => Some(h),
         Err(e) => {
+            eprintln!(
+                "WARN: status.ipc_bind_failed: path={} error={}",
+                ipc_socket_path.display(),
+                e
+            );
             tracing::warn!(
                 event = "status.ipc_bind_failed",
                 error = %e,
@@ -583,6 +588,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _vault_ipc_server = match vault_ipc::spawn_vault_ipc_server(vault_socket_path.clone()) {
         Ok(h) => Some(h),
         Err(e) => {
+            eprintln!(
+                "WARN: vault.ipc_bind_failed: path={} error={}",
+                vault_socket_path.display(),
+                e
+            );
             tracing::warn!(
                 event = "vault.ipc_bind_failed",
                 error = %e,
@@ -603,6 +613,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ) {
         Ok(h) => Some(h),
         Err(e) => {
+            eprintln!(
+                "WARN: control.ipc_bind_failed: path={} error={}",
+                control_socket_path.display(),
+                e
+            );
             tracing::warn!(
                 event = "control.ipc_bind_failed",
                 error = %e,

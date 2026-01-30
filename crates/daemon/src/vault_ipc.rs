@@ -69,7 +69,15 @@ pub fn spawn_vault_ipc_server(socket_path: PathBuf) -> std::io::Result<VaultIpcS
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            {
+                tracing::warn!(
+                    event = "vault.ipc_permissions_failed",
+                    error = %e,
+                    path = %parent.display(),
+                    "vault.ipc_permissions_failed"
+                );
+            }
         }
     }
 
@@ -83,7 +91,15 @@ pub fn spawn_vault_ipc_server(socket_path: PathBuf) -> std::io::Result<VaultIpcS
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+        if let Err(e) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        {
+            tracing::warn!(
+                event = "vault.ipc_permissions_failed",
+                error = %e,
+                path = %socket_path.display(),
+                "vault.ipc_permissions_failed"
+            );
+        }
     }
 
     let handle_socket_path = socket_path.clone();
@@ -271,6 +287,26 @@ async fn handle_vault_ipc_client(
 
     write_json_line(&mut w, resp).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn creates_socket_and_accepts_connections() {
+        unsafe {
+            std::env::set_var("TELEVYBACKUP_DISABLE_KEYCHAIN", "1");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ipc").join("vault.sock");
+
+        let server = spawn_vault_ipc_server(socket_path.clone()).unwrap();
+
+        let _ = UnixStream::connect(&socket_path).await.unwrap();
+
+        server.shutdown().await;
+    }
 }
 
 async fn write_json_line<W: tokio::io::AsyncWrite + Unpin>(
