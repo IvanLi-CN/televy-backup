@@ -1,5 +1,4 @@
 import AppKit
-import Security
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -848,11 +847,6 @@ struct SettingsWindowRootView: View {
             return
         }
 
-        let vaultPresent = keychainHasGenericPassword(
-            service: "TelevyBackup",
-            account: "televybackup.vault_key"
-        )
-
         reloadSeq += 1
         let seq = reloadSeq
 
@@ -865,7 +859,7 @@ struct SettingsWindowRootView: View {
             if res.status != 0 {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = vaultPresent
+                    self.vaultKeyPresent = false
                     self.loadError = "settings get failed: exit=\(res.status)"
                 }
                 return
@@ -873,7 +867,7 @@ struct SettingsWindowRootView: View {
             guard let data = res.stdout.data(using: .utf8) else {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = vaultPresent
+                    self.vaultKeyPresent = false
                     self.loadError = "settings get: bad output"
                 }
                 return
@@ -885,7 +879,7 @@ struct SettingsWindowRootView: View {
             } catch {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = vaultPresent
+                    self.vaultKeyPresent = false
                     self.loadError = "settings get: JSON decode failed"
                 }
                 return
@@ -893,9 +887,9 @@ struct SettingsWindowRootView: View {
 
             DispatchQueue.main.async {
                 guard seq == self.reloadSeq else { return }
-                self.vaultKeyPresent = vaultPresent
                 self.settings = decoded.settings
                 self.secrets = decoded.secrets
+                self.vaultKeyPresent = (decoded.secrets != nil)
                 self.loadError = nil
                 if !SettingsUIDemo.disableAutoSelect {
                     if let selected = self.selectedTargetId {
@@ -938,18 +932,6 @@ struct SettingsWindowRootView: View {
         } catch {
             // Best-effort UX: keep the view responsive; user can retry.
         }
-    }
-
-    private func keychainHasGenericPassword(service: String, account: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: false,
-        ]
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        return status == errSecSuccess
     }
 
     private func queueAutoSave() {
@@ -1610,6 +1592,35 @@ struct EndpointEditor: View {
     @State private var apiHashDraftMasked: Bool = false
     @State private var validateText: String = "Not validated"
     @State private var validateOk: Bool? = nil
+    @State private var dialogsLoading: Bool = false
+    @State private var dialogsError: String? = nil
+    @State private var dialogs: [TelegramDialogItem] = []
+    @State private var dialogsSearch: String = ""
+    @State private var dialogsPickerShown: Bool = false
+
+    struct TelegramWaitChatResponse: Decodable {
+        let chat: TelegramDialogItem
+    }
+
+    struct CliErrorEnvelope: Decodable {
+        let code: String
+        let message: String
+    }
+
+    struct TelegramDialogItem: Decodable {
+        let kind: String
+        let title: String
+        let username: String?
+        let peerId: Int64
+        let configChatId: String
+        let bootstrapHint: Bool
+
+        var id: String { "\(kind):\(peerId)" }
+        var displayTitle: String {
+            let u = username.map { "@\($0)" } ?? "-"
+            return "\(configChatId)  \(title)  (\(kind), \(u))"
+        }
+    }
 
     var body: some View {
         let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == endpointId })
@@ -1653,6 +1664,28 @@ struct EndpointEditor: View {
                     ))
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 260)
+
+                    Button(dialogsLoading ? "Listening…" : "Listen…") {
+                        dialogsError = nil
+                        dialogsSearch = ""
+                        dialogsPickerShown = true
+                    }
+                        .buttonStyle(.bordered)
+                        .disabled(dialogsLoading)
+                }
+
+                let chatIdTrimmed = settings.telegram_endpoints[epIndex].chat_id.trimmingCharacters(in: .whitespacesAndNewlines)
+                let chatIdInt = Int64(chatIdTrimmed)
+                let isLikelyPrivateChat = (chatIdInt ?? 0) > 0
+                if isLikelyPrivateChat {
+                    Text("Heads up: private 1:1 chats don’t support the pinned bootstrap catalog, so cross-device restore / remote-first index sync won’t work. Use a group/channel (e.g. -100...) or @username.")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.orange)
+                }
+                if let dialogsError {
+                    Text(dialogsError)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.red)
                 }
 
                 HStack {
@@ -1791,6 +1824,9 @@ struct EndpointEditor: View {
                 saveApiHash(endpointId: endpointId)
             }
         }
+        .sheet(isPresented: $dialogsPickerShown) {
+            dialogPickerSheet(endpointId: endpointId)
+        }
     }
 
     private func saveBotToken(endpointId: String) {
@@ -1845,6 +1881,11 @@ struct EndpointEditor: View {
 
     private func testConnection(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == endpointId })
+        let chatIdTrimmed = epIndex.map { settings.telegram_endpoints[$0].chat_id.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        let chatIdInt = Int64(chatIdTrimmed)
+        let isLikelyPrivateChat = (chatIdInt ?? 0) > 0
+
         let res = model.runCommandCapture(
             exe: cli,
             args: ["--json", "telegram", "validate", "--endpoint-id", endpointId],
@@ -1852,11 +1893,105 @@ struct EndpointEditor: View {
         )
         if res.status == 0 {
             validateOk = true
-            validateText = "Connected"
+            validateText = isLikelyPrivateChat ? "Connected (bootstrap unsupported: private chat)" : "Connected"
             onReload()
         } else {
             validateOk = false
             validateText = "Failed (see ui.log)"
+        }
+    }
+
+    @ViewBuilder
+    private func dialogPickerSheet(endpointId: String) -> some View {
+        let filtered = dialogs
+            .filter { $0.bootstrapHint }
+            .filter { dialogsSearch.isEmpty || $0.displayTitle.localizedCaseInsensitiveContains(dialogsSearch) }
+
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Discover chat_id for storage / bootstrap")
+                .font(.system(size: 16, weight: .bold))
+
+            Text("Telegram bots cannot list all joined chats. To discover a group/channel, click Listen and then send a message in the target chat (mention the bot if needed).")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            TextField("Search…", text: $dialogsSearch)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Button(dialogsLoading ? "Listening…" : "Listen (60s)") { loadDialogs(endpointId: endpointId) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(dialogsLoading)
+                Spacer()
+                if let dialogsError {
+                    Text(dialogsError)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.red)
+                }
+            }
+
+            List(filtered, id: \.id) { item in
+                Button(item.displayTitle) {
+                    if let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == endpointId }) {
+                        settings.telegram_endpoints[epIndex].chat_id = item.configChatId
+                        onEndpointTouchedPending(endpointId)
+                    }
+                    dialogsPickerShown = false
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(minWidth: 640, minHeight: 420)
+
+            HStack {
+                Text("Only group/channel chats are shown (bootstrapHint=true).")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Close") { dialogsPickerShown = false }
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(16)
+    }
+
+    private func loadDialogs(endpointId: String) {
+        guard let cli = model.cliPath() else { return }
+        dialogsLoading = true
+        dialogsError = nil
+        dialogsSearch = ""
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let res = model.runCommandCapture(
+                exe: cli,
+                args: ["--json", "telegram", "wait-chat", "--endpoint-id", endpointId, "--timeout-secs", "60"],
+                timeoutSeconds: 75
+            )
+
+            DispatchQueue.main.async {
+                dialogsLoading = false
+                if res.status != 0 {
+                    if let data = res.stderr.data(using: .utf8),
+                       let decoded = try? JSONDecoder().decode(CliErrorEnvelope.self, from: data) {
+                        dialogsError = decoded.message
+                    } else {
+                        dialogsError = "Failed to discover chat (see ui.log)"
+                    }
+                    return
+                }
+                guard let data = res.stdout.data(using: .utf8) else {
+                    dialogsError = "Failed to parse chat (empty output)"
+                    return
+                }
+                do {
+                    let decoded = try JSONDecoder().decode(TelegramWaitChatResponse.self, from: data)
+                    let item = decoded.chat
+                    if !dialogs.contains(where: { $0.id == item.id }) {
+                        dialogs.append(item)
+                    }
+                } catch {
+                    dialogsError = "Failed to parse chat (see ui.log)"
+                }
+            }
         }
     }
 }

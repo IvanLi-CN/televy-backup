@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use base64::Engine;
 use chrono::{Datelike, Timelike};
@@ -18,10 +19,13 @@ use televy_backup_core::{
 };
 use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
+use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
+mod control_ipc;
 mod status_ipc;
+mod vault_ipc;
 
 #[derive(Default, Clone)]
 struct TargetScheduleState {
@@ -48,6 +52,11 @@ struct TargetRuntime {
     running_since: Option<u64>,
     progress: Option<Progress>,
     last_run: Option<TargetRunSummary>,
+
+    up_bps: Option<u64>,
+    up_total_bytes: Option<u64>,
+    last_up_sample_bytes: Option<u64>,
+    last_up_sample_at_ms: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -78,6 +87,10 @@ impl StatusRuntimeState {
                     running_since: None,
                     progress: None,
                     last_run: None,
+                    up_bps: None,
+                    up_total_bytes: None,
+                    last_up_sample_bytes: None,
+                    last_up_sample_at_ms: None,
                 },
             );
         }
@@ -87,12 +100,52 @@ impl StatusRuntimeState {
         }
     }
 
+    fn apply_settings(&mut self, settings: &settings_config::SettingsV2) {
+        let mut target_order = Vec::new();
+        let mut targets = HashMap::new();
+
+        for t in &settings.targets {
+            target_order.push(t.id.clone());
+
+            let mut rt = self.targets.get(&t.id).cloned().unwrap_or(TargetRuntime {
+                target_id: t.id.clone(),
+                label: None,
+                source_path: t.source_path.clone(),
+                endpoint_id: t.endpoint_id.clone(),
+                enabled: t.enabled,
+                state: "idle".to_string(),
+                running_since: None,
+                progress: None,
+                last_run: None,
+                up_bps: None,
+                up_total_bytes: None,
+                last_up_sample_bytes: None,
+                last_up_sample_at_ms: None,
+            });
+
+            rt.label = if t.label.trim().is_empty() {
+                None
+            } else {
+                Some(t.label.clone())
+            };
+            rt.source_path = t.source_path.clone();
+            rt.endpoint_id = t.endpoint_id.clone();
+            rt.enabled = t.enabled;
+
+            targets.insert(t.id.clone(), rt);
+        }
+
+        self.target_order = target_order;
+        self.targets = targets;
+    }
+
     fn mark_run_start(&mut self, target_id: &str) {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
         t.state = "running".to_string();
-        t.running_since = Some(now_unix_ms());
+        let now = now_unix_ms();
+        t.running_since = Some(now);
         t.progress = Some(Progress {
             phase: "running".to_string(),
             files_total: None,
@@ -103,6 +156,10 @@ impl StatusRuntimeState {
             bytes_uploaded: Some(0),
             bytes_deduped: Some(0),
         });
+        t.up_total_bytes = Some(0);
+        t.up_bps = Some(0);
+        t.last_up_sample_bytes = Some(0);
+        t.last_up_sample_at_ms = Some(now);
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -125,6 +182,27 @@ impl StatusRuntimeState {
             bytes_uploaded: p.bytes_uploaded,
             bytes_deduped: p.bytes_deduped,
         });
+
+        if let Some(bytes) = p.bytes_uploaded {
+            let now = now_unix_ms();
+            t.up_total_bytes = Some(bytes);
+            match (t.last_up_sample_bytes, t.last_up_sample_at_ms) {
+                (Some(prev_bytes), Some(prev_at)) => {
+                    let dt_ms = now.saturating_sub(prev_at).max(1);
+                    let db = bytes.saturating_sub(prev_bytes);
+                    // Avoid oscillating noise when updates are too frequent.
+                    if dt_ms >= 50 {
+                        t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
+                        t.last_up_sample_bytes = Some(bytes);
+                        t.last_up_sample_at_ms = Some(now);
+                    }
+                }
+                _ => {
+                    t.last_up_sample_bytes = Some(bytes);
+                    t.last_up_sample_at_ms = Some(now);
+                }
+            }
+        }
     }
 
     fn mark_run_finish_success(
@@ -141,6 +219,10 @@ impl StatusRuntimeState {
         t.state = "idle".to_string();
         t.running_since = None;
         t.progress = None;
+        t.up_bps = None;
+        t.up_total_bytes = None;
+        t.last_up_sample_bytes = None;
+        t.last_up_sample_at_ms = None;
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -166,6 +248,10 @@ impl StatusRuntimeState {
         t.state = "failed".to_string();
         t.running_since = None;
         t.progress = None;
+        t.up_bps = None;
+        t.up_total_bytes = None;
+        t.last_up_sample_bytes = None;
+        t.last_up_sample_at_ms = None;
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -184,11 +270,23 @@ impl StatusRuntimeState {
     }
 
     fn build_snapshot(&self, now_ms: u64) -> StatusSnapshot {
+        let mut global_up_bps: u64 = 0;
+        let mut global_up_total: u64 = 0;
+        let mut have_global_up = false;
+
         let mut out_targets = Vec::new();
         for id in &self.target_order {
             let Some(t) = self.targets.get(id) else {
                 continue;
             };
+            if let Some(bps) = t.up_bps {
+                global_up_bps = global_up_bps.saturating_add(bps);
+                have_global_up = true;
+            }
+            if let Some(bytes) = t.up_total_bytes {
+                global_up_total = global_up_total.saturating_add(bytes);
+                have_global_up = true;
+            }
             out_targets.push(TargetState {
                 target_id: t.target_id.clone(),
                 label: t.label.clone(),
@@ -198,9 +296,11 @@ impl StatusRuntimeState {
                 state: t.state.clone(),
                 running_since: t.running_since,
                 up: Rate {
-                    bytes_per_second: None,
+                    bytes_per_second: t.up_bps,
                 },
-                up_total: Counter { bytes: None },
+                up_total: Counter {
+                    bytes: t.up_total_bytes,
+                },
                 progress: t.progress.clone(),
                 last_run: t.last_run.clone(),
                 extra: Default::default(),
@@ -217,12 +317,14 @@ impl StatusRuntimeState {
             },
             global: GlobalStatus {
                 up: Rate {
-                    bytes_per_second: None,
+                    bytes_per_second: have_global_up.then_some(global_up_bps),
                 },
                 down: Rate {
                     bytes_per_second: None,
                 },
-                up_total: Counter { bytes: None },
+                up_total: Counter {
+                    bytes: have_global_up.then_some(global_up_total),
+                },
                 down_total: Counter { bytes: None },
                 ui_uptime_seconds: None,
             },
@@ -243,6 +345,76 @@ impl ProgressSink for StatusProgressSink {
         if let Ok(mut st) = self.state.lock() {
             st.on_progress(&self.target_id, progress);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::*;
+
+    fn state_one_target() -> StatusRuntimeState {
+        let mut st = StatusRuntimeState {
+            target_order: vec!["t1".to_string()],
+            targets: HashMap::new(),
+        };
+        st.targets.insert(
+            "t1".to_string(),
+            TargetRuntime {
+                target_id: "t1".to_string(),
+                label: None,
+                source_path: "/tmp".to_string(),
+                endpoint_id: "ep".to_string(),
+                enabled: true,
+                state: "idle".to_string(),
+                running_since: None,
+                progress: None,
+                last_run: None,
+                up_bps: None,
+                up_total_bytes: None,
+                last_up_sample_bytes: None,
+                last_up_sample_at_ms: None,
+            },
+        );
+        st
+    }
+
+    fn progress(bytes_uploaded: u64) -> TaskProgress {
+        TaskProgress {
+            phase: "upload".to_string(),
+            files_total: None,
+            files_done: None,
+            chunks_total: None,
+            chunks_done: None,
+            bytes_read: None,
+            bytes_uploaded: Some(bytes_uploaded),
+            bytes_deduped: None,
+        }
+    }
+
+    #[test]
+    fn up_total_tracks_progress_bytes_uploaded() {
+        let mut st = state_one_target();
+        st.mark_run_start("t1");
+        st.on_progress("t1", progress(123));
+        assert_eq!(st.targets.get("t1").unwrap().up_total_bytes, Some(123));
+    }
+
+    #[test]
+    fn up_bps_updates_even_with_frequent_progress_calls() {
+        let mut st = state_one_target();
+        st.mark_run_start("t1");
+
+        for n in 0..200u64 {
+            st.on_progress("t1", progress(n));
+        }
+
+        std::thread::sleep(Duration::from_millis(80));
+        st.on_progress("t1", progress(2000));
+
+        let t = st.targets.get("t1").unwrap();
+        assert_eq!(t.up_total_bytes, Some(2000));
+        assert!(t.up_bps.unwrap_or(0) > 0);
     }
 }
 
@@ -327,6 +499,10 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
     }
 }
 
+fn file_mtime(path: &PathBuf) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = std::env::var("TELEVYBACKUP_CONFIG_DIR")
@@ -340,8 +516,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_root = data_dir.unwrap_or_else(default_data_dir);
     let db_path = data_root.join("index").join("index.sqlite");
 
-    let settings = settings_config::load_settings_v2(&config_root)?;
+    let config_path = settings_config::config_path(&config_root);
+    let mut settings = settings_config::load_settings_v2(&config_root)?;
+    let _ = CONFIG_ROOT_CACHE.set(config_root.clone());
     settings_config::validate_settings_schema_v2(&settings)?;
+    let mut last_config_mtime = file_mtime(&config_path);
 
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
     let status_path = status_json_path(&data_root);
@@ -400,29 +579,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    if settings.telegram.mtproto.api_id <= 0 {
-        return Err("telegram.mtproto.api_id must be > 0".into());
-    }
-    if settings.telegram.mtproto.api_hash_key.trim().is_empty() {
-        return Err("telegram.mtproto.api_hash_key must not be empty".into());
-    }
+    let vault_socket_path = televy_backup_core::secrets::vault_ipc_socket_path(&data_root);
+    let _vault_ipc_server = match vault_ipc::spawn_vault_ipc_server(vault_socket_path.clone()) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!(
+                event = "vault.ipc_bind_failed",
+                error = %e,
+                path = %vault_socket_path.display(),
+                "vault.ipc_bind_failed"
+            );
+            None
+        }
+    };
 
+    let control_ipc_settings = Arc::new(RwLock::new(settings.clone()));
+
+    let control_socket_path = televy_backup_core::control::control_ipc_socket_path(&data_root);
+    let _control_ipc_server = match control_ipc::spawn_control_ipc_server(
+        control_socket_path.clone(),
+        config_root.clone(),
+        control_ipc_settings.clone(),
+    ) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!(
+                event = "control.ipc_bind_failed",
+                error = %e,
+                path = %control_socket_path.display(),
+                "control.ipc_bind_failed"
+            );
+            None
+        }
+    };
+
+    let has_enabled_targets = settings.targets.iter().any(|t| t.enabled);
+    if has_enabled_targets {
+        if settings.telegram.mtproto.api_id <= 0 {
+            return Err("telegram.mtproto.api_id must be > 0".into());
+        }
+        if settings.telegram.mtproto.api_hash_key.trim().is_empty() {
+            return Err("telegram.mtproto.api_hash_key must not be empty".into());
+        }
+    }
     let vault_key = load_or_create_vault_key()?;
     let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
+    let secrets_file_exists = secrets_path.exists();
     let mut secrets_store =
         televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
+    let mut last_secrets_mtime = file_mtime(&secrets_path);
 
-    let master_key_b64 = get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
-        .or_else(|| keychain_get_secret(MASTER_KEY_KEY).ok().flatten())
-        .ok_or("master key missing")?;
-    let master_key = decode_base64_32(&master_key_b64)?;
+    let mut master_key_b64 = match get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
+        .or_else(|| maybe_keychain_get_secret(MASTER_KEY_KEY))
+    {
+        Some(v) => v,
+        None if keychain_disabled() && !secrets_file_exists => {
+            let mut bytes = [0u8; 32];
+            getrandom::getrandom(&mut bytes)
+                .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
+            let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
+            secrets_store.set(MASTER_KEY_KEY, b64.clone());
+            televy_backup_core::secrets::save_secrets_store(
+                &secrets_path,
+                &vault_key,
+                &secrets_store,
+            )?;
+            b64
+        }
+        None => return Err("master key missing".into()),
+    };
+    let mut master_key = decode_base64_32(&master_key_b64)?;
 
-    let api_hash = get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
-        .ok_or("telegram api_hash missing")?;
-
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let mut api_hash = if has_enabled_targets {
+        Some(
+            get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
+                .or_else(|| maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key))
+                .ok_or("telegram api_hash missing")?,
+        )
+    } else {
+        None
+    };
 
     let mut schedule_state_by_target = HashMap::<String, TargetScheduleState>::new();
     let mut storage_by_endpoint = HashMap::<String, TelegramMtProtoStorage>::new();
@@ -436,6 +672,113 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let now = chrono::Local::now();
         let manual_triggered = manual_trigger_pending.swap(false, Ordering::SeqCst);
+
+        // Hot-reload settings + secrets when files change. This avoids confusing situations where the
+        // UI saved new endpoint chat_id but the long-running daemon kept using the old one.
+        let has_running = status_state.lock().ok().is_some_and(|st| st.has_running());
+        if !has_running {
+            let config_mtime = file_mtime(&config_path);
+            let secrets_mtime = file_mtime(&secrets_path);
+            let config_changed = config_mtime.is_some() && config_mtime != last_config_mtime;
+            let secrets_changed = secrets_mtime.is_some() && secrets_mtime != last_secrets_mtime;
+
+            if config_changed || secrets_changed {
+                if config_changed {
+                    match settings_config::load_settings_v2(&config_root) {
+                        Ok(new_settings) => {
+                            if let Err(e) =
+                                settings_config::validate_settings_schema_v2(&new_settings)
+                            {
+                                tracing::warn!(
+                                    event = "config.reload_failed",
+                                    error = %e,
+                                    path = %config_path.display(),
+                                    "config.reload_failed"
+                                );
+                            } else {
+                                settings = new_settings;
+                                *control_ipc_settings.write().await = settings.clone();
+                                last_config_mtime = config_mtime;
+                                storage_by_endpoint.clear();
+                                schedule_state_by_target
+                                    .retain(|k, _| settings.targets.iter().any(|t| t.id == *k));
+                                if let Ok(mut st) = status_state.lock() {
+                                    st.apply_settings(&settings);
+                                }
+                                tracing::info!(
+                                    event = "config.reloaded",
+                                    path = %config_path.display(),
+                                    "config.reloaded"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "config.reload_failed",
+                                error = %e,
+                                path = %config_path.display(),
+                                "config.reload_failed"
+                            );
+                        }
+                    }
+                }
+
+                if secrets_changed {
+                    match televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)
+                    {
+                        Ok(new_store) => {
+                            secrets_store = new_store;
+                            last_secrets_mtime = secrets_mtime;
+                            storage_by_endpoint.clear();
+
+                            if let Some(v) = get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
+                                .or_else(|| maybe_keychain_get_secret(MASTER_KEY_KEY))
+                            {
+                                master_key_b64 = v;
+                                if let Ok(k) = decode_base64_32(&master_key_b64) {
+                                    master_key = k;
+                                }
+                            }
+                            if let Some(h) = get_secret_from_store(
+                                &secrets_store,
+                                &settings.telegram.mtproto.api_hash_key,
+                            )
+                            .or_else(|| {
+                                maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key)
+                            }) {
+                                api_hash = Some(h);
+                            }
+
+                            tracing::info!(
+                                event = "secrets.reloaded",
+                                path = %secrets_path.display(),
+                                "secrets.reloaded"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "secrets.reload_failed",
+                                error = %e,
+                                path = %secrets_path.display(),
+                                "secrets.reload_failed"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if settings.telegram.mtproto.api_id <= 0
+            || settings.telegram.mtproto.api_hash_key.trim().is_empty()
+        {
+            // Keep the daemon alive so the UI can show status, but skip running backups until config is fixed.
+            sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         for target in &settings.targets {
             if !target.enabled {
@@ -526,7 +869,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let bot_token = get_secret_from_store(&secrets_store, &ep.bot_token_key)
-                .or_else(|| keychain_get_secret(&ep.bot_token_key).ok().flatten());
+                .or_else(|| maybe_keychain_get_secret(&ep.bot_token_key));
             let Some(bot_token) = bot_token else {
                 tracing::error!(
                     event = "run.finish",
@@ -556,7 +899,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
                     provider,
                     api_id: settings.telegram.mtproto.api_id,
-                    api_hash: api_hash.clone(),
+                    api_hash: api_hash.clone().ok_or("telegram api_hash missing")?,
                     bot_token: bot_token.clone(),
                     chat_id: ep.chat_id.clone(),
                     session,
@@ -850,6 +1193,9 @@ fn default_data_dir() -> PathBuf {
 }
 
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
+static CONFIG_ROOT_CACHE: OnceLock<PathBuf> = OnceLock::new();
+static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
+static VAULT_KEY_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn get_secret_from_store(
     store: &televy_backup_core::secrets::SecretsStore,
@@ -864,9 +1210,27 @@ fn decode_base64_32(b64: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     Ok(arr)
 }
 
+fn keychain_disabled() -> bool {
+    matches!(
+        std::env::var("TELEVYBACKUP_DISABLE_KEYCHAIN").as_deref(),
+        Ok("1")
+    )
+}
+
+fn maybe_keychain_get_secret(key: &str) -> Option<String> {
+    if keychain_disabled() {
+        return None;
+    }
+    keychain_get_secret(key).ok().flatten()
+}
+
 #[cfg(target_os = "macos")]
-fn keychain_get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub(crate) fn keychain_get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
     use security_framework::passwords::{PasswordOptions, generic_password};
+
+    if keychain_disabled() {
+        return Err("keychain disabled".into());
+    }
 
     let opts = PasswordOptions::new_generic_password(televy_backup_core::APP_NAME, key);
     match generic_password(opts) {
@@ -882,15 +1246,44 @@ fn keychain_get_secret(key: &str) -> Result<Option<String>, Box<dyn std::error::
 }
 
 #[cfg(not(target_os = "macos"))]
-fn keychain_get_secret(_key: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub(crate) fn keychain_get_secret(
+    _key: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     Err("keychain only supported on macOS".into())
 }
 
 #[cfg(target_os = "macos")]
 fn keychain_set_secret(key: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
     use security_framework::passwords::set_generic_password;
+    if keychain_disabled() {
+        return Err("keychain disabled".into());
+    }
     set_generic_password(televy_backup_core::APP_NAME, key, value.as_bytes())?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn keychain_delete_secret(key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    use security_framework::passwords::delete_generic_password;
+
+    if keychain_disabled() {
+        return Err("keychain disabled".into());
+    }
+
+    match delete_generic_password(televy_backup_core::APP_NAME, key) {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            if is_keychain_not_found(&e) {
+                return Ok(false);
+            }
+            Err(Box::new(e))
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn keychain_delete_secret(_key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    Err("keychain only supported on macOS".into())
 }
 
 #[cfg(target_os = "macos")]
@@ -899,24 +1292,74 @@ fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
     e.code() == -25300
 }
 
-#[cfg(target_os = "macos")]
-fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    let existing = keychain_get_secret(televy_backup_core::secrets::VAULT_KEY_KEY)?
-        .map(|s| s.trim().to_string());
-
-    if let Some(b64) = existing {
-        return Ok(televy_backup_core::secrets::vault_key_from_base64(&b64)?);
+pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    if let Some(key) = VAULT_KEY_CACHE.get() {
+        return Ok(*key);
     }
 
-    let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes)
-        .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
-    let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
-    keychain_set_secret(televy_backup_core::secrets::VAULT_KEY_KEY, &b64)?;
-    Ok(bytes)
+    // With concurrent IPC requests, ensure only one initializer runs.
+    let lock = VAULT_KEY_INIT_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().map_err(|_| "vault key init lock poisoned")?;
+
+    if let Some(key) = VAULT_KEY_CACHE.get() {
+        return Ok(*key);
+    }
+
+    let key = load_or_create_vault_key_uncached()?;
+    let _ = VAULT_KEY_CACHE.set(key);
+    Ok(*VAULT_KEY_CACHE.get().unwrap_or(&key))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    Err("vault key only supported on macOS".into())
+fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    let config_root = CONFIG_ROOT_CACHE
+        .get()
+        .cloned()
+        .unwrap_or_else(default_config_dir);
+
+    let key_file_path = std::env::var("TELEVYBACKUP_VAULT_KEY_FILE")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| televy_backup_core::secrets::vault_key_file_path(&config_root));
+
+    if let Ok(b64) = std::env::var("TELEVYBACKUP_VAULT_KEY_B64") {
+        let key = televy_backup_core::secrets::vault_key_from_base64(b64.trim())?;
+        televy_backup_core::secrets::write_vault_key_file_private(&key_file_path, &key)?;
+        return Ok(key);
+    }
+
+    if keychain_disabled() {
+        match televy_backup_core::secrets::read_vault_key_file(&key_file_path) {
+            Ok(key) => return Ok(key),
+            Err(televy_backup_core::secrets::SecretsStoreError::Io(e))
+                if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Box::new(e)),
+        }
+
+        let mut bytes = [0u8; 32];
+        getrandom::getrandom(&mut bytes)
+            .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
+        televy_backup_core::secrets::write_vault_key_file_private(&key_file_path, &bytes)?;
+        return Ok(bytes);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let existing = keychain_get_secret(televy_backup_core::secrets::VAULT_KEY_KEY)?
+            .map(|s| s.trim().to_string());
+        if let Some(b64) = existing {
+            return Ok(televy_backup_core::secrets::vault_key_from_base64(&b64)?);
+        }
+
+        let mut bytes = [0u8; 32];
+        getrandom::getrandom(&mut bytes)
+            .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
+        let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
+        keychain_set_secret(televy_backup_core::secrets::VAULT_KEY_KEY, &b64)?;
+        Ok(bytes)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("vault key unavailable (keychain unsupported)".into())
+    }
 }

@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-28
 - Last: 2026-01-28
 
@@ -135,10 +135,10 @@ None
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: 定稿 `contracts/config.md` 与 `contracts/file-formats.md`，并补充 `README.md`/`docs/*` 的开发口径说明
-- [ ] M2: 实现 vault key backend 切换（Keychain vs `vault.key`）与 `TELEVYBACKUP_DISABLE_KEYCHAIN` 行为（daemon）
-- [ ] M3: 实现 daemon control IPC，并让 CLI/macOS app 通过该 IPC 完成“presence/状态/写入动作”，移除其直接 Keychain 访问
-- [ ] M4: 补齐测试与失败场景（`vault.key` 缺失自动创建、非法 Base64/长度、权限/IO 错误、`TELEVYBACKUP_VAULT_KEY_B64` 持久化写入失败、IPC 不可用/超时等）
+- [x] M1: 定稿 `contracts/config.md` 与 `contracts/file-formats.md`，并补充 `README.md`/`docs/*` 的开发口径说明
+- [x] M2: 实现 vault key backend 切换（Keychain vs `vault.key`）与 `TELEVYBACKUP_DISABLE_KEYCHAIN` 行为（daemon）
+- [x] M3: 实现 daemon control IPC，并让 CLI/macOS app 通过该 IPC 完成“presence/状态/写入动作”，移除其直接 Keychain 访问
+- [x] M4: 补齐测试与失败场景（`vault.key` 缺失自动创建、非法 Base64/长度、权限/IO 错误、`TELEVYBACKUP_VAULT_KEY_B64` 持久化写入失败、IPC 不可用/超时等）
 
 ## 方案概述（Approach, high-level）
 
@@ -159,6 +159,10 @@ None
 
 - 2026-01-28: 创建计划，确认范围：提供 `TELEVYBACKUP_DISABLE_KEYCHAIN` 强制使用 `vault.key`，默认路径 `TELEVYBACKUP_CONFIG_DIR/vault.key`，并要求无交互中断（缺失自动创建）。
 - 2026-01-28: 冻结口径：收敛为 daemon-only（CLI/macOS app 不直接访问 Keychain），并新增 daemon control IPC（见 `contracts/rpc.md`）。
+- 2026-01-28: 完成 M1（contracts + docs 口径补齐）。
+- 2026-01-28: 完成 M2（daemon 支持 `vault.key` backend + `TELEVYBACKUP_DISABLE_KEYCHAIN`）。
+- 2026-01-28: 完成 M3（daemon control IPC + CLI 路由 secrets 操作）。
+- 2026-01-28: 完成 M4（补齐 `vault.key` 与 control IPC 失败场景测试）。
 
 ## 参考（References）
 

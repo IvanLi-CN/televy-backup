@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-27
 - Last: 2026-01-27
 
@@ -124,7 +124,9 @@
 
 - 已确认 CLI flag：`--no-remote-index-sync`（默认不传则启用远端对齐）。
 - 已确认“远端 latest 检查”策略：每次备份启动都读取 pinned catalog；仅当本地缺失/判定 stale 时才下载远端索引并替换本地。
-- 已确认 pinned catalog 解密失败时的策略：默认阻断，不覆盖 pinned；用户应导入正确 master key（TBK1）。
+- 已确认 pinned catalog 异常时的策略：
+  - 若 pinned 不是 TelevyBackup catalog（framing invalid）：忽略并允许覆盖（输出告警）。
+  - 若 pinned 看似是 catalog 但解密/解析失败：阻断并返回 `bootstrap.decrypt_failed`（提示导入正确 master key：TBK1）。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -133,7 +135,8 @@
 - Unit: 远端 latest 与本地 index 状态判定（missing/stale/match）。
 - Integration: 使用 mock storage/pinned storage 验证：
   - 本地缺失 → 自动下载并替换；
-  - pinned 不可解密 → 默认拒绝覆盖；
+  - pinned 非 catalog → 忽略并覆盖（输出告警）；
+  - pinned 解密/解析失败（疑似 catalog，但 key 不匹配/损坏）→ 阻断并返回 `bootstrap.decrypt_failed`；
   - `--no-remote-index-sync` → 不触发下载。
 
 ### Reliability
@@ -148,13 +151,19 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: Core 抽取并复用“download remote index db（manifest → sqlite）”能力（支持原子落盘）
-- [ ] M2: CLI `backup run` 接入 preflight index sync（默认启用 + 开关）
-- [ ] M3: pinned catalog 覆盖策略收紧（decrypt 失败默认拒绝覆盖 + 明确错误指引）
-- [ ] M4: 测试覆盖（unit + integration）
-- [ ] M5: 文档与 release notes 更新
+- [x] M1: Core 抽取并复用“download remote index db（manifest → sqlite）”能力（支持原子落盘）
+- [x] M2: CLI `backup run` 接入 preflight index sync（默认启用 + 开关）
+- [x] M3: pinned catalog 覆盖策略收敛（非 catalog 可覆盖；decrypt/parse 失败默认拒绝覆盖 + 明确错误指引）
+- [x] M4: 测试覆盖（unit + integration）
+- [x] M5: 文档与 release notes 更新
 
 ## 风险与开放问题（Risks / Open Questions）
 
 - 远端索引体积增长：整库下载可能变慢；是否需要后续计划做“增量索引”或“分层索引”（不在本计划内）。
 - 两设备交替备份：latest 指针可能频繁变化；是否需要“备份开始时锁定 head，并在结束时更新 latest”策略（当前倾向：开始时对齐最新即可）。
+
+## Change log
+
+- 2026-01-27: 实现 `index_sync` 备份前置对齐（remote-first），新增 `--no-remote-index-sync`，并完善 pinned catalog 异常路径（非 catalog 可覆盖；decrypt/parse 失败默认阻断 + 明确指引）。
+- 2026-01-29: 远端索引下载后归一化 provider（跨设备 endpoint_id 不一致仍能复用去重/恢复），并避免 bootstrap decrypt 失败被误判为 missing。
+- 2026-01-27: 针对私聊 `chat_id` 增加提前拦截与更明确的错误/告警（bootstrap 依赖 pinned，需群/频道或 `@username`）。

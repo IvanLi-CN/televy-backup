@@ -1,13 +1,16 @@
 mod backup;
 pub mod bootstrap;
 pub mod config;
+pub mod control;
 mod crypto;
 mod error;
 pub mod gold_key;
 pub mod index_db;
 mod index_manifest;
+pub mod index_sync;
 mod pack;
 mod progress;
+pub mod remote_index_db;
 mod restore;
 pub mod run_log;
 pub mod secrets;
@@ -31,7 +34,8 @@ pub use status::{
     write_status_snapshot_json_atomic,
 };
 pub use storage::{
-    ChunkObjectRef, InMemoryStorage, Storage, TelegramMtProtoStorage, TelegramMtProtoStorageConfig,
-    TgMtProtoObjectIdV1, encode_tgfile_object_id, encode_tgmtproto_object_id_v1,
-    encode_tgpack_object_id, parse_chunk_object_ref, parse_tgmtproto_object_id_v1,
+    ChunkObjectRef, InMemoryStorage, Storage, TelegramDialogInfo, TelegramMtProtoStorage,
+    TelegramMtProtoStorageConfig, TgMtProtoObjectIdV1, encode_tgfile_object_id,
+    encode_tgmtproto_object_id_v1, encode_tgpack_object_id, parse_chunk_object_ref,
+    parse_tgmtproto_object_id_v1,
 };
