@@ -15,6 +15,12 @@ done
 
 app="$root_dir/target/macos-app/TelevyBackup.app"
 if [ "${TELEVYBACKUP_DISABLE_KEYCHAIN:-}" = "1" ]; then
+  if [ -z "${TELEVYBACKUP_DATA_DIR:-}" ]; then
+    tmpdir="$(mktemp -d)"
+    export TELEVYBACKUP_DATA_DIR="$tmpdir"
+    export TELEVYBACKUP_CONFIG_DIR="$tmpdir"
+    echo "TELEVYBACKUP_DISABLE_KEYCHAIN=1: using temp dir: $tmpdir" >&2
+  fi
   "$app/Contents/MacOS/TelevyBackup" >/dev/null 2>&1 &
 else
   open "$app"
