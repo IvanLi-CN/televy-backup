@@ -490,6 +490,8 @@ struct SettingsWindowRootView: View {
         let masterKeyPresent = secrets?.masterKeyPresent ?? false
         let showMissing = !secretsUnavailable && !masterKeyPresent
         let showUnavailable = secretsUnavailable
+        let keychainDisabled = ProcessInfo.processInfo.environment["TELEVYBACKUP_DISABLE_KEYCHAIN"] == "1"
+        let secretsStoreLabel = keychainDisabled ? "· Dev (no keychain)" : "· Keychain"
 
         return VStack(alignment: .leading, spacing: 14) {
             Text("Recovery Key")
@@ -508,7 +510,7 @@ struct SettingsWindowRootView: View {
                         Text(showUnavailable ? "Unavailable" : (vaultKeyPresent ? "Present" : "Missing"))
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(showUnavailable ? Color.secondary : (vaultKeyPresent ? Color.green : Color.red))
-                        Text("· Keychain")
+                        Text(secretsStoreLabel)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
