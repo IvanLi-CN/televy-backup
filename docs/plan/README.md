@@ -4,10 +4,7 @@
 
 ## 快速新增一个计划
 
-1. 分配一个新的 `ID`：
-   - 新计划推荐使用 **5 位** nanoId 风格（`[23456789abcdefghjkmnpqrstuvwxyz]{5}`；推荐用 `docs-plan-id` 生成，避免并行分支撞 ID）。
-   - 历史计划可能是四位数字（例如 `0001`），允许继续引用与更新。
-   - 创建前查看下方 Index，确保未被占用。
+1. 分配一个新的 `ID`（推荐 5 位 nanoId 风格；兼容四位数字；查看下方 Index，确保未被占用）。
 2. 新建目录：`docs/plan/<id>:<title>/`（`<title>` 必须为 kebab-case 的短 slug）。
 3. 在该目录下创建 `PLAN.md`（模板见下方“PLAN.md 写法（简要）”）。
 4. 在下方 Index 表新增一行，并把 `Status` 设为 `待设计` 或 `待实现`（取决于是否已冻结验收标准），并填入 `Last`（通常为当天）。
@@ -68,7 +65,8 @@
 | 0009 | Settings：Endpoints 独立配置页（Targets 仅绑定） | 已完成 | `0009:endpoints-settings-page/PLAN.md` | 2026-01-24 |  |
 | 0010 | 状态弹窗重做：全局网络 + 多目标面板 + 开发者视图 | 已完成 | `0010:status-popover-dashboard/PLAN.md` | 2026-01-26 | 实现分支：`feat/0010-status-popover-dashboard` |
 | 0011 | daemon 状态 IPC：替换 file-based 状态源 | 已完成 | `0011:daemon-status-ipc/PLAN.md` | 2026-01-26 | 实现分支：`feat/0011-daemon-status-ipc` |
-| 0012 | 备份远端索引权威 + 本地自动同步（remote-first） | 已完成 | `0012:remote-first-index-sync/PLAN.md` | 2026-01-29 | 实现分支：`feat/0012-remote-first-index-sync` |
-| 0013 | MTProto dialogs picker（自动选可用 chat_id） | 已完成 | `0013:mtproto-dialogs-picker/PLAN.md` | 2026-01-29 | CLI+UI e2e 已确认；状态面板 Up/UpTotal 上传中实时更新 |
-| kaa5e | Targets 主界面与执行记录（按目标聚合 backup/restore/verify） | 待实现 | `kaa5e:targets-runs-main-window/PLAN.md` | 2026-01-29 |  |
-| nvr79 | 开发期绕过 Keychain（codesign + vault key；daemon-only） | 已完成 | `nvr79:avoid-keychain-in-dev/PLAN.md` | 2026-01-28 | 已落地：`TELEVYBACKUP_DISABLE_KEYCHAIN` + `vault.key` + daemon control IPC + tests |
+| 0012 | 备份远端索引权威 + 本地自动同步（remote-first） | 待实现 | `0012:remote-first-index-sync/PLAN.md` | 2026-01-27 |  |
+| nvr79 | 开发期绕过 Keychain（codesign + vault key；daemon-only） | 待实现 | `nvr79:avoid-keychain-in-dev/PLAN.md` | 2026-01-28 | 已冻结：`TELEVYBACKUP_DISABLE_KEYCHAIN` + `vault.key` + daemon control IPC |
+| kpmqp | 修复 daemon IPC 可靠性（解锁 Recovery Key/Verify） | 待实现 | `kpmqp:fix-daemon-ipc-sockets/PLAN.md` | 2026-01-30 |  |
+
+| kpmqp | 修复 daemon IPC 可靠性（解锁 Recovery Key/Verify） | 待实现 |  | 2026-01-30 |  |
