@@ -1888,51 +1888,59 @@ async fn backup_run(
     let run_log = televy_backup_core::run_log::start_run_log("backup", &task_id, data_dir)
         .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
+    let settings = load_settings(config_dir)?;
+    let target = select_target(&settings, target_id.as_deref(), source.as_deref())?;
+    let ep = settings
+        .telegram_endpoints
+        .iter()
+        .find(|e| e.id == target.endpoint_id)
+        .ok_or_else(|| {
+            CliError::new(
+                "config.invalid",
+                format!(
+                    "target references unknown endpoint_id: target_id={} endpoint_id={}",
+                    target.id, target.endpoint_id
+                ),
+            )
+        })?;
+
+    if settings.telegram.mtproto.api_id <= 0 {
+        return Err(CliError::new(
+            "config.invalid",
+            "telegram.mtproto.api_id must be > 0",
+        ));
+    }
+    if settings.telegram.mtproto.api_hash_key.is_empty() {
+        return Err(CliError::new(
+            "config.invalid",
+            "telegram.mtproto.api_hash_key must not be empty",
+        ));
+    }
+    if ep.chat_id.is_empty() {
+        return Err(CliError::new(
+            "config.invalid",
+            format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
+        ));
+    }
+
+    let ctx_target_id = target.id.clone();
+    let ctx_endpoint_id = ep.id.clone();
+    let ctx_source_path = target.source_path.clone();
+
     tracing::info!(
         event = "run.start",
         kind = "backup",
         run_id = %task_id,
         task_id = %task_id,
+        target_id = %ctx_target_id,
+        endpoint_id = %ctx_endpoint_id,
+        source_path = %ctx_source_path,
         log_path = %run_log.path().display(),
         "run.start"
     );
 
     let started = std::time::Instant::now();
     let result: Result<televy_backup_core::BackupResult, CliError> = async {
-        let settings = load_settings(config_dir)?;
-        let target = select_target(&settings, target_id.as_deref(), source.as_deref())?;
-        let ep = settings
-            .telegram_endpoints
-            .iter()
-            .find(|e| e.id == target.endpoint_id)
-            .ok_or_else(|| {
-                CliError::new(
-                    "config.invalid",
-                    format!(
-                        "target references unknown endpoint_id: target_id={} endpoint_id={}",
-                        target.id, target.endpoint_id
-                    ),
-                )
-            })?;
-
-        if settings.telegram.mtproto.api_id <= 0 {
-            return Err(CliError::new(
-                "config.invalid",
-                "telegram.mtproto.api_id must be > 0",
-            ));
-        }
-        if settings.telegram.mtproto.api_hash_key.is_empty() {
-            return Err(CliError::new(
-                "config.invalid",
-                "telegram.mtproto.api_hash_key must not be empty",
-            ));
-        }
-        if ep.chat_id.is_empty() {
-            return Err(CliError::new(
-                "config.invalid",
-                format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
-            ));
-        }
 
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
@@ -1951,7 +1959,8 @@ async fn backup_run(
                     "type": "task.state",
                     "taskId": task_id,
                     "kind": "backup",
-                    "state": "running"
+                    "state": "running",
+                    "targetId": target.id,
                 })
             );
         }
@@ -2090,6 +2099,9 @@ async fn backup_run(
                 kind = "backup",
                 run_id = %task_id,
                 task_id = %task_id,
+                target_id = %ctx_target_id,
+                endpoint_id = %ctx_endpoint_id,
+                source_path = %ctx_source_path,
                 status = "succeeded",
                 duration_seconds,
                 snapshot_id = %res.snapshot_id,
@@ -2112,6 +2124,7 @@ async fn backup_run(
                         "kind": "backup",
                         "state": "succeeded",
                         "snapshotId": res.snapshot_id,
+                        "targetId": ctx_target_id,
                             "result": {
                                 "filesIndexed": res.files_indexed,
                                 "chunksUploaded": res.chunks_uploaded,
@@ -2153,6 +2166,9 @@ async fn backup_run(
                 kind = "backup",
                 run_id = %task_id,
                 task_id = %task_id,
+                target_id = %ctx_target_id,
+                endpoint_id = %ctx_endpoint_id,
+                source_path = %ctx_source_path,
                 status = "failed",
                 duration_seconds,
                 error_code = e.code,

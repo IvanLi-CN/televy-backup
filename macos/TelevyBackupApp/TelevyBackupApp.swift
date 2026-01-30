@@ -294,26 +294,39 @@ final class AppModel: ObservableObject {
         task.standardOutput = out
         task.standardError = err
 
+        let bufLock = NSLock()
         var stdoutBuf = ""
         var stderrBuf = ""
 
         out.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
+            bufLock.lock()
             stdoutBuf += String(decoding: data, as: UTF8.self)
+            var lines: [String] = []
             while let idx = stdoutBuf.firstIndex(of: "\n") {
                 let line = String(stdoutBuf[..<idx])
                 stdoutBuf.removeSubrange(...idx)
+                lines.append(line)
+            }
+            bufLock.unlock()
+            for line in lines {
                 self.handleOutputLine(line)
             }
         }
         err.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
+            bufLock.lock()
             stderrBuf += String(decoding: data, as: UTF8.self)
+            var lines: [String] = []
             while let idx = stderrBuf.firstIndex(of: "\n") {
                 let line = String(stderrBuf[..<idx])
                 stderrBuf.removeSubrange(...idx)
+                lines.append(line)
+            }
+            bufLock.unlock()
+            for line in lines {
                 self.handleOutputLine(line)
             }
         }
@@ -1020,10 +1033,12 @@ final class AppModel: ObservableObject {
     }
 
     func refreshRunHistory(limit: Int = 200) {
-        if runHistoryRefreshInFlight { return }
-        DispatchQueue.main.async {
-            self.runHistoryRefreshInFlight = true
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.refreshRunHistory(limit: limit) }
+            return
         }
+        if runHistoryRefreshInFlight { return }
+        runHistoryRefreshInFlight = true
 
         let dir = logDirURL()
         DispatchQueue.global(qos: .utility).async {
@@ -1037,12 +1052,19 @@ final class AppModel: ObservableObject {
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 let files = try FileManager.default.contentsOfDirectory(
                     at: dir,
-                    includingPropertiesForKeys: nil,
+                    includingPropertiesForKeys: [.contentModificationDateKey],
                     options: [.skipsHiddenFiles]
                 )
                 let ndjson = files
                     .filter { $0.lastPathComponent.hasPrefix("sync-") && $0.pathExtension == "ndjson" }
-                    .sorted { $0.lastPathComponent > $1.lastPathComponent }
+                    .sorted { a, b in
+                        let ad = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+                            ?? .distantPast
+                        let bd = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+                            ?? .distantPast
+                        if ad != bd { return ad > bd }
+                        return a.lastPathComponent > b.lastPathComponent
+                    }
 
                 var out: [RunLogSummary] = []
                 out.reserveCapacity(min(limit, ndjson.count))
@@ -1071,6 +1093,8 @@ final class AppModel: ObservableObject {
 
         var kind: String?
         var targetId: String?
+        var endpointId: String?
+        var sourcePath: String?
         var status: String?
         var errorCode: String?
         var durationSeconds: Double?
@@ -1097,6 +1121,8 @@ final class AppModel: ObservableObject {
             if event == "run.start" {
                 kind = fields?["kind"] as? String ?? kind
                 targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
+                endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
+                sourcePath = (fields?["source_path"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sourcePath
                 snapshotId = fields?["snapshot_id"] as? String ?? snapshotId
                 continue
             }
@@ -1104,6 +1130,8 @@ final class AppModel: ObservableObject {
             if event == "run.finish" {
                 kind = fields?["kind"] as? String ?? kind
                 targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
+                endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
+                sourcePath = (fields?["source_path"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sourcePath
                 status = fields?["status"] as? String ?? status
                 errorCode = fields?["error_code"] as? String ?? errorCode
                 durationSeconds = (fields?["duration_seconds"] as? NSNumber)?.doubleValue ?? durationSeconds
@@ -1130,6 +1158,8 @@ final class AppModel: ObservableObject {
             id: url.lastPathComponent,
             kind: kind,
             targetId: targetId,
+            endpointId: endpointId,
+            sourcePath: sourcePath,
             snapshotId: snapshotId,
             status: status,
             errorCode: errorCode,
@@ -1871,6 +1901,33 @@ final class AppModel: ObservableObject {
             } catch {
                 self.handleOutputLine("ERROR: failed to run process: \(error)")
             }
+            // Stop streaming, read remaining output, and drain buffered lines BEFORE deciding whether
+            // to show a generic failure toast (prevents duplicate failure toasts).
+            out.fileHandleForReading.readabilityHandler = nil
+            err.fileHandleForReading.readabilityHandler = nil
+
+            let outRest = out.fileHandleForReading.readDataToEndOfFile()
+            let errRest = err.fileHandleForReading.readDataToEndOfFile()
+
+            bufLock.lock()
+            if !outRest.isEmpty { stdoutBuf += String(decoding: outRest, as: UTF8.self) }
+            if !errRest.isEmpty { stderrBuf += String(decoding: errRest, as: UTF8.self) }
+            let stdoutRemaining = stdoutBuf
+            let stderrRemaining = stderrBuf
+            stdoutBuf = ""
+            stderrBuf = ""
+            bufLock.unlock()
+
+            for line in stdoutRemaining.split(separator: "\n", omittingEmptySubsequences: true) {
+                self.handleOutputLine(String(line))
+            }
+            for line in stderrRemaining.split(separator: "\n", omittingEmptySubsequences: true) {
+                self.handleOutputLine(String(line))
+            }
+
+            // Ensure any queued `handleOutputLine` UI updates have been applied.
+            DispatchQueue.main.sync {}
+
             DispatchQueue.main.async {
                 if updateTaskState {
                     self.isRunning = false
@@ -1890,14 +1947,6 @@ final class AppModel: ObservableObject {
                         }
                     }
                 }
-                out.fileHandleForReading.readabilityHandler = nil
-                err.fileHandleForReading.readabilityHandler = nil
-            }
-            if !stdoutBuf.isEmpty {
-                self.handleOutputLine(stdoutBuf.trimmingCharacters(in: .newlines))
-            }
-            if !stderrBuf.isEmpty {
-                self.handleOutputLine(stderrBuf.trimmingCharacters(in: .newlines))
             }
             if let onExit {
                 DispatchQueue.main.async { onExit(status) }

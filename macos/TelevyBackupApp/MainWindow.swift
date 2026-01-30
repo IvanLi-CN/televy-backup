@@ -6,6 +6,8 @@ struct RunLogSummary: Identifiable {
     let id: String
     let kind: String
     let targetId: String?
+    let endpointId: String?
+    let sourcePath: String?
     let snapshotId: String?
     let status: String?
     let errorCode: String?
@@ -219,7 +221,12 @@ private struct TargetDetailView: View {
 
     private var runs: [RunLogSummary] {
         model.runHistory
-            .filter { $0.targetId == target.targetId }
+            .filter { run in
+                if run.targetId == target.targetId { return true }
+                return run.targetId == nil
+                    && run.endpointId == target.endpointId
+                    && run.sourcePath == target.sourcePath
+            }
             .sorted { ($0.finishedAt ?? .distantPast) > ($1.finishedAt ?? .distantPast) }
     }
 
