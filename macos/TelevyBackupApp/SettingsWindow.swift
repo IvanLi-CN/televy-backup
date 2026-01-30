@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct CliSettingsGetResponse: Decodable {
     let settings: SettingsV2
     let secrets: CliSecretsPresence?
+    let secretsError: CliSecretsError?
 }
 
 struct CliSecretsPresence: Decodable {
@@ -19,6 +20,12 @@ struct CliSecretsPresence: Decodable {
         case telegramBotTokenPresentByEndpoint
         case telegramMtprotoSessionPresentByEndpoint
     }
+}
+
+struct CliSecretsError: Decodable {
+    let code: String
+    let message: String
+    let retryable: Bool?
 }
 
 struct SettingsV2: Codable {
@@ -170,6 +177,7 @@ struct SettingsWindowRootView: View {
 
     @State private var settings: SettingsV2?
     @State private var secrets: CliSecretsPresence?
+    @State private var secretsError: CliSecretsError?
     @State private var vaultKeyPresent: Bool = false
     @State private var loadError: String?
 
@@ -474,7 +482,10 @@ struct SettingsWindowRootView: View {
     }
 
     private var recoveryKeyView: some View {
+        let secretsUnavailable = secretsError != nil
         let masterKeyPresent = secrets?.masterKeyPresent ?? false
+        let showMissing = !secretsUnavailable && !masterKeyPresent
+        let showUnavailable = secretsUnavailable
 
         return VStack(alignment: .leading, spacing: 14) {
             Text("Recovery Key")
@@ -490,9 +501,9 @@ struct SettingsWindowRootView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .frame(width: 110, alignment: .leading)
                         Spacer()
-                        Text(vaultKeyPresent ? "Present" : "Missing")
+                        Text(showUnavailable ? "Unavailable" : (vaultKeyPresent ? "Present" : "Missing"))
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(vaultKeyPresent ? .green : .red)
+                            .foregroundStyle(showUnavailable ? .secondary : (vaultKeyPresent ? .green : .red))
                         Text("· Keychain")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
@@ -521,16 +532,21 @@ struct SettingsWindowRootView: View {
 
                         Button(goldKeyRevealed ? "Hide" : "Reveal") { toggleRevealRecoveryKey() }
                             .buttonStyle(.bordered)
-                            .disabled(!masterKeyPresent)
+                            .disabled(showUnavailable || !masterKeyPresent)
 
                         Button("Copy") { copyRecoveryKeyToClipboard() }
                             .buttonStyle(.borderedProminent)
-                            .disabled(!masterKeyPresent)
+                            .disabled(showUnavailable || !masterKeyPresent)
 
-                        if !masterKeyPresent {
+                        if showMissing {
                             Text("Missing")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.red)
+                                .frame(width: 64, alignment: .trailing)
+                        } else if showUnavailable {
+                            Text("Unavailable")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
                                 .frame(width: 64, alignment: .trailing)
                         }
                     }
@@ -548,7 +564,7 @@ struct SettingsWindowRootView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Button("Export…") { exportRecoveryKeyToFile() }
                             .buttonStyle(.bordered)
-                            .disabled(!masterKeyPresent)
+                            .disabled(showUnavailable || !masterKeyPresent)
                     }
                     .padding(.vertical, 10)
 
@@ -564,6 +580,7 @@ struct SettingsWindowRootView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Button("Import…") { showImportRecoveryKeySheet = true }
                             .buttonStyle(.bordered)
+                            .disabled(showUnavailable)
                     }
                     .padding(.vertical, 10)
                 }
@@ -716,6 +733,7 @@ struct SettingsWindowRootView: View {
                 guard seq == self.reloadSeq else { return }
                 self.settings = decoded.settings
                 self.secrets = decoded.secrets
+                self.secretsError = decoded.secretsError
                 self.vaultKeyPresent = (decoded.secrets != nil)
                 self.loadError = nil
                 if self.selectedTargetId == nil {
@@ -997,6 +1015,9 @@ struct SettingsWindowRootView: View {
     }
 
     private func recoveryKeyDisplayText() -> String {
+        if secretsError != nil {
+            return "Unavailable"
+        }
         guard let goldKey else {
             return (secrets?.masterKeyPresent ?? false) ? "TBK1:••••••••••••••••" : "—"
         }
@@ -1005,6 +1026,7 @@ struct SettingsWindowRootView: View {
 
     private func loadRecoveryKeyIfNeeded() {
         if goldKey != nil { return }
+        model.ensureDaemonRunning()
         guard let cli = model.cliPath() else { return }
         let res = model.runCommandCapture(
             exe: cli,
@@ -1034,6 +1056,7 @@ struct SettingsWindowRootView: View {
     }
 
     private func importRecoveryKey(key: String, force: Bool) {
+        model.ensureDaemonRunning()
         guard let cli = model.cliPath() else { return }
         var args = ["--json", "secrets", "import-master-key"]
         if force { args.append("--force") }

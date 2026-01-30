@@ -386,12 +386,14 @@ final class AppModel: ObservableObject {
         lastDaemonStartAttemptAt = now
 
         if isDaemonRunning() {
+            _ = waitForDaemonIpcReady(timeoutSeconds: 1.5)
             return
         }
 
         // Prefer launchd service if installed (Homebrew services).
         if kickstartLaunchAgent(label: "homebrew.mxcl.televybackupd") {
             appendStatusActivity("Daemon kickstarted via launchd (homebrew.mxcl.televybackupd)")
+            _ = waitForDaemonIpcReady(timeoutSeconds: 2.0)
             return
         }
 
@@ -441,10 +443,34 @@ final class AppModel: ObservableObject {
             try task.run()
             daemonTask = task
             appendStatusActivity("Daemon spawned (\(daemon))")
+            _ = waitForDaemonIpcReady(timeoutSeconds: 2.0)
         } catch {
             appendLog("ERROR: failed to start daemon: \(error)")
             showToast("Failed to start daemon (see ui.log)", isError: true)
         }
+    }
+
+    private func waitForDaemonIpcReady(timeoutSeconds: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        let dataDir: URL = {
+            if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
+                return URL(fileURLWithPath: env)
+            }
+            return defaultDataDir()
+        }()
+
+        let controlSock = dataDir.appendingPathComponent("ipc").appendingPathComponent("control.sock").path
+        let vaultSock = dataDir.appendingPathComponent("ipc").appendingPathComponent("vault.sock").path
+
+        while Date() < deadline {
+            if FileManager.default.fileExists(atPath: controlSock)
+                && FileManager.default.fileExists(atPath: vaultSock)
+            {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return false
     }
 
     private func isDaemonRunning() -> Bool {
@@ -959,6 +985,7 @@ final class AppModel: ObservableObject {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
+        ensureDaemonRunning()
         showToast("Starting restore…", isError: false)
         runProcess(
             exe: cli,
@@ -983,6 +1010,7 @@ final class AppModel: ObservableObject {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
+        ensureDaemonRunning()
         showToast("Starting verify…", isError: false)
         runProcess(
             exe: cli,
@@ -1657,6 +1685,15 @@ final class AppModel: ObservableObject {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
+
+        var env = ProcessInfo.processInfo.environment
+        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
+            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
+        }
+        if env["TELEVYBACKUP_DATA_DIR"] == nil {
+            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
+        }
+        task.environment = env
 
         let out = Pipe()
         let err = Pipe()
