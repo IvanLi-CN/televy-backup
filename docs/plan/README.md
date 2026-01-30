@@ -67,3 +67,4 @@
 | 0011 | daemon 状态 IPC：替换 file-based 状态源 | 已完成 | `0011:daemon-status-ipc/PLAN.md` | 2026-01-26 | 实现分支：`feat/0011-daemon-status-ipc` |
 | 0012 | 备份远端索引权威 + 本地自动同步（remote-first） | 待实现 | `0012:remote-first-index-sync/PLAN.md` | 2026-01-27 |  |
 | nvr79 | 开发期绕过 Keychain（codesign + vault key；daemon-only） | 待实现 | `nvr79:avoid-keychain-in-dev/PLAN.md` | 2026-01-28 | 已冻结：`TELEVYBACKUP_DISABLE_KEYCHAIN` + `vault.key` + daemon control IPC |
+| kpmqp | 修复 daemon IPC 可靠性（解锁 Recovery Key/Verify） | 待实现 | `kpmqp:fix-daemon-ipc-sockets/PLAN.md` | 2026-01-30 |  |
