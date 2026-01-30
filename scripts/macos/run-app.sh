@@ -13,4 +13,9 @@ for _ in {1..40}; do
   sleep 0.1
 done
 
-open "$root_dir/target/macos-app/TelevyBackup.app"
+app="$root_dir/target/macos-app/TelevyBackup.app"
+if [ "${TELEVYBACKUP_DISABLE_KEYCHAIN:-}" = "1" ]; then
+  "$app/Contents/MacOS/TelevyBackup" >/dev/null 2>&1 &
+else
+  open "$app"
+fi
