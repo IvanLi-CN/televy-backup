@@ -1682,6 +1682,7 @@ struct EndpointEditor: View {
 
     private func saveBotToken(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         let token = botTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if token.isEmpty { return }
         let res = model.runCommandCapture(
@@ -1700,6 +1701,7 @@ struct EndpointEditor: View {
 
     private func saveApiHash(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         if apiHashDraftMasked { return }
         let apiHash = apiHashDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if apiHash.isEmpty { return }
@@ -1719,6 +1721,7 @@ struct EndpointEditor: View {
 
     private func clearSessions(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         let res = model.runCommandCapture(
             exe: cli,
             args: ["--json", "secrets", "clear-telegram-mtproto-session"],
@@ -1732,6 +1735,7 @@ struct EndpointEditor: View {
 
     private func testConnection(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == endpointId })
         let chatIdTrimmed = epIndex.map { settings.telegram_endpoints[$0].chat_id.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
         let chatIdInt = Int64(chatIdTrimmed)
