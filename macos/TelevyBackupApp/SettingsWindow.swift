@@ -165,6 +165,37 @@ private struct EndpointListRow: View {
     }
 }
 
+private struct EmptyStateView: View {
+    let systemImage: String
+    let title: String
+    var message: String? = nil
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 36, weight: .semibold))
+                .foregroundStyle(.tertiary)
+
+            VStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                if let message {
+                    Text(message)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 340)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 18)
+        .padding(.horizontal, 12)
+    }
+}
+
 struct SettingsWindowRootView: View {
     @EnvironmentObject var model: AppModel
     @State private var section: SettingsSection = .targets
@@ -268,11 +299,13 @@ struct SettingsWindowRootView: View {
     }
 
     private var targetsView: some View {
-        HStack(spacing: 0) {
+        let targets = settings?.targets ?? []
+
+        return HStack(spacing: 0) {
             VStack(spacing: 0) {
                 ScrollViewReader { proxy in
                     List(selection: $selectedTargetId) {
-                        ForEach(settings?.targets ?? []) { t in
+                        ForEach(targets) { t in
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(t.label.isEmpty ? t.id : t.label)
                                     .font(.system(size: 13, weight: .semibold))
@@ -297,6 +330,11 @@ struct SettingsWindowRootView: View {
                 }
                 .scrollContentBackground(.hidden)
                 .background(Color.clear)
+                .onChange(of: targets.map(\.id)) { _, ids in
+                    guard settings != nil else { return }
+                    if let selectedTargetId, ids.contains(selectedTargetId) { return }
+                    selectedTargetId = ids.first
+                }
 
                 Divider()
 
@@ -306,6 +344,7 @@ struct SettingsWindowRootView: View {
                             .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.bordered)
+                    .disabled(settings == nil)
 
                     Button { deleteSelectedTarget() } label: {
                         Image(systemName: "minus")
@@ -358,10 +397,24 @@ struct SettingsWindowRootView: View {
                         }
                     }
                 } else {
-                    Text("Select a target")
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 14)
-                        .padding(.horizontal, 12)
+                    if settings == nil {
+                        EmptyStateView(
+                            systemImage: "exclamationmark.triangle",
+                            title: "Cannot load settings",
+                            message: loadError ?? "Please check CLI configuration and try again."
+                        )
+                    } else if targets.isEmpty {
+                        EmptyStateView(
+                            systemImage: "plus.circle",
+                            title: "No targets yet",
+                            message: "Create your first target with the + button."
+                        )
+                    } else {
+                        EmptyStateView(
+                            systemImage: "hand.tap",
+                            title: "Select a target"
+                        )
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -448,10 +501,24 @@ struct SettingsWindowRootView: View {
                         }
                     }
                 } else {
-                    Text("Select an endpoint")
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 14)
-                        .padding(.horizontal, 12)
+                    if settings == nil {
+                        EmptyStateView(
+                            systemImage: "exclamationmark.triangle",
+                            title: "Cannot load settings",
+                            message: loadError ?? "Please check CLI configuration and try again."
+                        )
+                    } else if endpoints.isEmpty {
+                        EmptyStateView(
+                            systemImage: "plus.circle",
+                            title: "No endpoints yet",
+                            message: "Create your first endpoint with the + button."
+                        )
+                    } else {
+                        EmptyStateView(
+                            systemImage: "hand.tap",
+                            title: "Select an endpoint"
+                        )
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -468,9 +535,14 @@ struct SettingsWindowRootView: View {
             Text("This endpoint is still referenced by at least one target. Rebind/unbind it in Targets, then retry deletion.")
         }
         .onAppear {
-            if selectedEndpointId == nil, let s = settings {
-                selectedEndpointId = EndpointHeuristicsDefaults.preferredEndpointId(endpointsSorted: sortedEndpoints(settings: s))
+            if selectedEndpointId == nil {
+                selectedEndpointId = endpoints.first?.id
             }
+        }
+        .onChange(of: endpoints.map(\.id)) { _, ids in
+            guard settings != nil else { return }
+            if let selectedEndpointId, ids.contains(selectedEndpointId) { return }
+            selectedEndpointId = ids.first
         }
     }
 
@@ -724,7 +796,12 @@ struct SettingsWindowRootView: View {
                 self.settings = decoded.settings
                 self.secrets = decoded.secrets
                 self.loadError = nil
-                if self.selectedTargetId == nil {
+                if let selected = self.selectedTargetId {
+                    let ids = Set(decoded.settings.targets.map(\.id))
+                    if !ids.contains(selected) {
+                        self.selectedTargetId = decoded.settings.targets.first?.id
+                    }
+                } else {
                     self.selectedTargetId = decoded.settings.targets.first?.id
                 }
                 if let selected = self.selectedEndpointId {
@@ -734,9 +811,7 @@ struct SettingsWindowRootView: View {
                     }
                 }
                 if self.selectedEndpointId == nil {
-                    self.selectedEndpointId = EndpointHeuristicsDefaults.preferredEndpointId(
-                        endpointsSorted: self.sortedEndpoints(settings: decoded.settings)
-                    )
+                    self.selectedEndpointId = self.sortedEndpoints(settings: decoded.settings).first?.id
                 }
             }
         }
@@ -1010,7 +1085,7 @@ struct SettingsWindowRootView: View {
 
         s.telegram_endpoints.removeAll { $0.id == endpointId }
         settings = s
-        selectedEndpointId = preferredEndpointId(settings: s)
+        selectedEndpointId = sortedEndpoints(settings: s).first?.id
         queueAutoSave()
     }
 
