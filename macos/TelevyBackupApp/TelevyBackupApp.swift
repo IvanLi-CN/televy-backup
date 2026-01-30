@@ -1851,26 +1851,39 @@ final class AppModel: ObservableObject {
             try? input.fileHandleForWriting.close()
         }
 
+        let bufLock = NSLock()
         var stdoutBuf = ""
         var stderrBuf = ""
 
         out.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
+            bufLock.lock()
             stdoutBuf += String(decoding: data, as: UTF8.self)
+            var lines: [String] = []
             while let idx = stdoutBuf.firstIndex(of: "\n") {
                 let line = String(stdoutBuf[..<idx])
                 stdoutBuf.removeSubrange(...idx)
+                lines.append(line)
+            }
+            bufLock.unlock()
+            for line in lines {
                 self.handleOutputLine(line)
             }
         }
         err.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
+            bufLock.lock()
             stderrBuf += String(decoding: data, as: UTF8.self)
+            var lines: [String] = []
             while let idx = stderrBuf.firstIndex(of: "\n") {
                 let line = String(stderrBuf[..<idx])
                 stderrBuf.removeSubrange(...idx)
+                lines.append(line)
+            }
+            bufLock.unlock()
+            for line in lines {
                 self.handleOutputLine(line)
             }
         }
