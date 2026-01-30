@@ -385,16 +385,31 @@ final class AppModel: ObservableObject {
         }
         lastDaemonStartAttemptAt = now
 
-        if isDaemonRunning() {
-            _ = waitForDaemonIpcReady(timeoutSeconds: 1.5)
+        let preferBundled = preferBundledDaemonForCurrentEnvironment()
+
+        // If IPC is already ready in our configured data dir, we are done (regardless of other
+        // televybackupd processes that might exist on the system).
+        if waitForDaemonIpcReady(timeoutSeconds: 0.05) {
             return
         }
 
-        // Prefer launchd service if installed (Homebrew services).
-        if kickstartLaunchAgent(label: "homebrew.mxcl.televybackupd") {
-            appendStatusActivity("Daemon kickstarted via launchd (homebrew.mxcl.televybackupd)")
-            _ = waitForDaemonIpcReady(timeoutSeconds: 2.0)
-            return
+        // If we are running in a dev/automation environment (custom dirs and/or keychain disabled),
+        // a system launchd service won't inherit our env vars and will likely bind a different
+        // data dir, so skip it and spawn our bundled daemon instead.
+        if !preferBundled {
+            if isDaemonRunning() {
+                if waitForDaemonIpcReady(timeoutSeconds: 1.5) {
+                    return
+                }
+            }
+
+            // Prefer launchd service if installed (Homebrew services).
+            if kickstartLaunchAgent(label: "homebrew.mxcl.televybackupd") {
+                appendStatusActivity("Daemon kickstarted via launchd (homebrew.mxcl.televybackupd)")
+                if waitForDaemonIpcReady(timeoutSeconds: 2.0) {
+                    return
+                }
+            }
         }
 
         // Fallback: spawn a bundled or PATH daemon for local/dev runs.
@@ -448,6 +463,14 @@ final class AppModel: ObservableObject {
             appendLog("ERROR: failed to start daemon: \(error)")
             showToast("Failed to start daemon (see ui.log)", isError: true)
         }
+    }
+
+    private func preferBundledDaemonForCurrentEnvironment() -> Bool {
+        let env = ProcessInfo.processInfo.environment
+        if env["TELEVYBACKUP_DISABLE_KEYCHAIN"] == "1" { return true }
+        if let v = env["TELEVYBACKUP_DATA_DIR"], !v.isEmpty { return true }
+        if let v = env["TELEVYBACKUP_CONFIG_DIR"], !v.isEmpty { return true }
+        return false
     }
 
     private func waitForDaemonIpcReady(timeoutSeconds: Double) -> Bool {
