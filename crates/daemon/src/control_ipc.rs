@@ -57,12 +57,13 @@ pub fn spawn_control_ipc_server(
             use std::os::unix::fs::PermissionsExt;
             if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
             {
-                tracing::warn!(
+                tracing::error!(
                     event = "control.ipc_permissions_failed",
                     error = %e,
                     path = %parent.display(),
                     "control.ipc_permissions_failed"
                 );
+                return Err(e);
             }
         }
     }
@@ -80,12 +81,15 @@ pub fn spawn_control_ipc_server(
         if let Err(e) =
             std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
         {
-            tracing::warn!(
+            tracing::error!(
                 event = "control.ipc_permissions_failed",
                 error = %e,
                 path = %socket_path.display(),
                 "control.ipc_permissions_failed"
             );
+            drop(listener);
+            let _ = std::fs::remove_file(&socket_path);
+            return Err(e);
         }
     }
 

@@ -71,12 +71,13 @@ pub fn spawn_vault_ipc_server(socket_path: PathBuf) -> std::io::Result<VaultIpcS
             use std::os::unix::fs::PermissionsExt;
             if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
             {
-                tracing::warn!(
+                tracing::error!(
                     event = "vault.ipc_permissions_failed",
                     error = %e,
                     path = %parent.display(),
                     "vault.ipc_permissions_failed"
                 );
+                return Err(e);
             }
         }
     }
@@ -94,12 +95,15 @@ pub fn spawn_vault_ipc_server(socket_path: PathBuf) -> std::io::Result<VaultIpcS
         if let Err(e) =
             std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
         {
-            tracing::warn!(
+            tracing::error!(
                 event = "vault.ipc_permissions_failed",
                 error = %e,
                 path = %socket_path.display(),
                 "vault.ipc_permissions_failed"
             );
+            drop(listener);
+            let _ = std::fs::remove_file(&socket_path);
+            return Err(e);
         }
     }
 
@@ -308,9 +312,6 @@ mod tests {
 
     #[tokio::test]
     async fn creates_socket_and_accepts_connections() {
-        unsafe {
-            std::env::set_var("TELEVYBACKUP_DISABLE_KEYCHAIN", "1");
-        }
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("ipc").join("vault.sock");
 
