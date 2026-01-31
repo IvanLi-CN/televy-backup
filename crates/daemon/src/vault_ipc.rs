@@ -91,7 +91,8 @@ pub fn spawn_vault_ipc_server(socket_path: PathBuf) -> std::io::Result<VaultIpcS
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        if let Err(e) =
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
         {
             tracing::warn!(
                 event = "vault.ipc_permissions_failed",
