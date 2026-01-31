@@ -290,6 +290,18 @@ async fn handle_vault_ipc_client(
     Ok(())
 }
 
+async fn write_json_line<W: tokio::io::AsyncWrite + Unpin>(
+    w: &mut BufWriter<W>,
+    v: VaultIpcResponse,
+) -> std::io::Result<()> {
+    let line = serde_json::to_string(&v)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    w.write_all(line.as_bytes()).await?;
+    w.write_all(b"\n").await?;
+    w.flush().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,16 +320,4 @@ mod tests {
 
         server.shutdown().await;
     }
-}
-
-async fn write_json_line<W: tokio::io::AsyncWrite + Unpin>(
-    w: &mut BufWriter<W>,
-    v: VaultIpcResponse,
-) -> std::io::Result<()> {
-    let line = serde_json::to_string(&v)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    w.write_all(line.as_bytes()).await?;
-    w.write_all(b"\n").await?;
-    w.flush().await?;
-    Ok(())
 }
