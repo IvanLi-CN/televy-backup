@@ -521,7 +521,14 @@ final class AppModel: ObservableObject {
             if isUnixSocketConnectable(controlSock) && isUnixSocketConnectable(vaultSock) {
                 return true
             }
-            Thread.sleep(forTimeInterval: 0.05)
+            let tick = min(0.05, max(0, deadline.timeIntervalSinceNow))
+            if tick <= 0 { break }
+            if Thread.isMainThread {
+                // Avoid freezing the UI while waiting for daemon IPC readiness.
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(tick))
+            } else {
+                Thread.sleep(forTimeInterval: tick)
+            }
         }
         return false
     }
