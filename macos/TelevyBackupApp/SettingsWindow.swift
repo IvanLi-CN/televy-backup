@@ -637,6 +637,7 @@ struct SettingsWindowRootView: View {
 
     private var recoveryKeyView: some View {
         let secretsUnavailable = secretsError != nil
+        let secretsRetryable = secretsError?.retryable ?? true
         let masterKeyPresent = secrets?.masterKeyPresent ?? false
         let showMissing = !secretsUnavailable && !masterKeyPresent
         let showUnavailable = secretsUnavailable
@@ -734,9 +735,15 @@ struct SettingsWindowRootView: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Button("Import…") { showImportRecoveryKeySheet = true }
+                        Button("Import…") {
+                            if showUnavailable && secretsRetryable {
+                                model.ensureDaemonRunning()
+                                reload()
+                            }
+                            showImportRecoveryKeySheet = true
+                        }
                             .buttonStyle(.bordered)
-                            .disabled(showUnavailable)
+                            .disabled(showUnavailable && !secretsRetryable)
                     }
                     .padding(.vertical, 10)
                 }
