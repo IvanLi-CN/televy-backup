@@ -72,3 +72,4 @@
 | 0013 | MTProto dialogs picker（自动选可用 chat_id） | 已完成 | `0013:mtproto-dialogs-picker/PLAN.md` | 2026-01-29 | CLI+UI e2e 已确认；状态面板 Up/UpTotal 上传中实时更新 |
 | kaa5e | Targets 主界面与执行记录（按目标聚合 backup/restore/verify） | 待实现 | `kaa5e:targets-runs-main-window/PLAN.md` | 2026-01-29 |  |
 | nvr79 | 开发期绕过 Keychain（codesign + vault key；daemon-only） | 已完成 | `nvr79:avoid-keychain-in-dev/PLAN.md` | 2026-01-28 | 已落地：`TELEVYBACKUP_DISABLE_KEYCHAIN` + `vault.key` + daemon control IPC + tests |
+| kpmqp | 修复 daemon IPC 可靠性（解锁 Recovery Key/Verify） | 待实现 | `kpmqp:fix-daemon-ipc-sockets/PLAN.md` | 2026-01-30 |  |

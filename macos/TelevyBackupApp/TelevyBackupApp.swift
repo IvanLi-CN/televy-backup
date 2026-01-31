@@ -3314,9 +3314,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        let env = ProcessInfo.processInfo.environment
+        if env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1" || env["TELEVYBACKUP_UI_DEMO"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                NSApp.activate(ignoringOtherApps: true)
+                ModelStore.shared.openSettingsWindow()
+            }
+        }
+
         // Fallback: if the status item/popover isn't visible (common when launching from Terminal or
         // when the menu bar is hidden), open Settings so the user has a visible UI entrypoint.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
+            if env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1" || env["TELEVYBACKUP_UI_DEMO"] == "1" {
+                return
+            }
             if self.statusItem?.button == nil {
                 NSApp.activate(ignoringOtherApps: true)
                 ModelStore.shared.openSettingsWindow()
