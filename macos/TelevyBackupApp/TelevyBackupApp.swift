@@ -109,6 +109,7 @@ final class AppModel: ObservableObject {
     private var statusStreamReconnectWork: DispatchWorkItem? = nil
     private var statusStreamBackoffSeconds: Double = 0.5
     private var daemonTask: Process? = nil
+    private var daemonIpcRetryWork: DispatchWorkItem? = nil
     private var lastDaemonStartAttemptAt: Date? = nil
 
     private enum PopoverSizing {
@@ -451,6 +452,9 @@ final class AppModel: ObservableObject {
                 if waitForDaemonIpcReady(timeoutSeconds: 2.0) {
                     return
                 }
+                appendStatusActivity("Daemon starting (IPC not ready yet)")
+                scheduleDaemonIpcRetry()
+                return
             }
         }
 
@@ -496,6 +500,17 @@ final class AppModel: ObservableObject {
         } catch {
             appendLog("ERROR: failed to start daemon: \(error)")
             showToast("Failed to start daemon (see ui.log)", isError: true)
+        }
+    }
+
+    private func scheduleDaemonIpcRetry() {
+        DispatchQueue.main.async {
+            self.daemonIpcRetryWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.ensureDaemonRunning()
+            }
+            self.daemonIpcRetryWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.2, execute: work)
         }
     }
 
