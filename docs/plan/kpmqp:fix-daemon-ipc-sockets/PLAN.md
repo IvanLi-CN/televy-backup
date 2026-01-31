@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-01-30
-- Last: 2026-01-30
+- Last: 2026-01-31
 
 ## 背景 / 问题陈述
 
@@ -139,6 +139,7 @@ None
 
 - 2026-01-30: 冻结关键决策（UI 文案口径 + daemon 自愈 + GUI preflight + 测试禁用 Keychain），状态切换为 `待实现`
 - 2026-01-30: 完成实现（daemon IPC 启动鲁棒性 + GUI preflight/Unavailable + Troubleshooting 文档）；等待主人验收后推进后续合并/PR
+- 2026-01-31: dev/automation 启动改为 `open --args` 传参并默认使用 workspace `.dev/` 目录；修复 IPC 就绪判定（避免残留 socket 假阳性）与手动备份触发路径。
 
 ## 参考（References）
 
