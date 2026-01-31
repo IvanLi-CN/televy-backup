@@ -65,6 +65,6 @@
 | 0009 | Settings：Endpoints 独立配置页（Targets 仅绑定） | 已完成 | `0009:endpoints-settings-page/PLAN.md` | 2026-01-24 |  |
 | 0010 | 状态弹窗重做：全局网络 + 多目标面板 + 开发者视图 | 已完成 | `0010:status-popover-dashboard/PLAN.md` | 2026-01-26 | 实现分支：`feat/0010-status-popover-dashboard` |
 | 0011 | daemon 状态 IPC：替换 file-based 状态源 | 已完成 | `0011:daemon-status-ipc/PLAN.md` | 2026-01-26 | 实现分支：`feat/0011-daemon-status-ipc` |
-| 0012 | 备份远端索引权威 + 本地自动同步（remote-first） | 待实现 | `0012:remote-first-index-sync/PLAN.md` | 2026-01-27 |  |
-| nvr79 | 开发期绕过 Keychain（codesign + vault key；daemon-only） | 待实现 | `nvr79:avoid-keychain-in-dev/PLAN.md` | 2026-01-28 | 已冻结：`TELEVYBACKUP_DISABLE_KEYCHAIN` + `vault.key` + daemon control IPC |
+| 0012 | 备份远端索引权威 + 本地自动同步（remote-first） | 已完成 | `0012:remote-first-index-sync/PLAN.md` | 2026-01-27 |  |
+| nvr79 | 开发期绕过 Keychain（codesign + vault key；daemon-only） | 已完成 | `nvr79:avoid-keychain-in-dev/PLAN.md` | 2026-01-28 | 已落地：`TELEVYBACKUP_DISABLE_KEYCHAIN` + `vault.key` + daemon control IPC |
 | kpmqp | 修复 daemon IPC 可靠性（解锁 Recovery Key/Verify） | 已完成 | `kpmqp:fix-daemon-ipc-sockets/PLAN.md` | 2026-01-31 | 实现分支：`fix/kpmqp-daemon-ipc-sockets`；待主人验收（补齐 dev 启动与手动备份触发修复） |
