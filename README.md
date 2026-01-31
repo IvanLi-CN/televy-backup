@@ -94,6 +94,21 @@ To move restore capability across devices:
 - Export (prints secret; requires explicit confirmation): `televybackup secrets export-master-key --i-understand`
 - Import on a new device (reads from stdin): `televybackup secrets import-master-key`
 
+## Troubleshooting
+
+If the macOS app shows **Recovery Key = Unavailable** or `Verify` fails with `daemon.unavailable` / `control.unavailable`:
+
+- Ensure the daemon is running: `pgrep -x televybackupd` (the UI will also try to auto-start it).
+- Ensure the UI/CLI/daemon use the same data dir:
+  - Defaults: `~/Library/Application Support/TelevyBackup`
+  - Overrides: `TELEVYBACKUP_CONFIG_DIR` / `TELEVYBACKUP_DATA_DIR`
+- Check IPC sockets exist under the data dir:
+  - `ipc/control.sock` (secrets presence / write actions)
+  - `ipc/vault.sock` (vault/keychain ops)
+- Check logs:
+  - UI log: `TELEVYBACKUP_LOG_DIR/ui.log` (or `TELEVYBACKUP_DATA_DIR/logs/ui.log`)
+  - Per-run logs (backup/restore/verify): `TELEVYBACKUP_DATA_DIR/logs/`
+
 ## Cross-device restore (latest)
 
 After at least one successful backup, TelevyBackup updates a per-endpoint encrypted bootstrap catalog and pins it in the chat.

@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 struct CliSettingsGetResponse: Decodable {
     let settings: SettingsV2
     let secrets: CliSecretsPresence?
+    let secretsError: CliSecretsError?
 }
 
 struct CliSecretsPresence: Decodable {
@@ -19,6 +20,12 @@ struct CliSecretsPresence: Decodable {
         case telegramBotTokenPresentByEndpoint
         case telegramMtprotoSessionPresentByEndpoint
     }
+}
+
+struct CliSecretsError: Decodable {
+    let code: String
+    let message: String
+    let retryable: Bool?
 }
 
 struct SettingsV2: Codable {
@@ -276,6 +283,7 @@ struct SettingsWindowRootView: View {
 
     @State private var settings: SettingsV2?
     @State private var secrets: CliSecretsPresence?
+    @State private var secretsError: CliSecretsError?
     @State private var vaultKeyPresent: Bool = false
     @State private var loadError: String?
 
@@ -491,6 +499,8 @@ struct SettingsWindowRootView: View {
                         )
                     }
                 }
+            } label: {
+                EmptyView()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -595,6 +605,8 @@ struct SettingsWindowRootView: View {
                         )
                     }
                 }
+            } label: {
+                EmptyView()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -624,7 +636,13 @@ struct SettingsWindowRootView: View {
     }
 
     private var recoveryKeyView: some View {
+        let secretsUnavailable = secretsError != nil
+        let secretsRetryable = secretsError?.retryable ?? true
         let masterKeyPresent = secrets?.masterKeyPresent ?? false
+        let showMissing = !secretsUnavailable && !masterKeyPresent
+        let showUnavailable = secretsUnavailable
+        let keychainDisabled = model.isKeychainDisabled()
+        let secretsStoreLabel = keychainDisabled ? "· Dev (no keychain)" : "· Keychain"
 
         return VStack(alignment: .leading, spacing: 14) {
             Text("Recovery Key")
@@ -640,10 +658,10 @@ struct SettingsWindowRootView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .frame(width: 110, alignment: .leading)
                         Spacer()
-                        Text(vaultKeyPresent ? "Present" : "Missing")
+                        Text(showUnavailable ? "Unavailable" : (vaultKeyPresent ? "Present" : "Missing"))
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(vaultKeyPresent ? .green : .red)
-                        Text("· Keychain")
+                            .foregroundStyle(showUnavailable ? Color.secondary : (vaultKeyPresent ? Color.green : Color.red))
+                        Text(secretsStoreLabel)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
@@ -671,16 +689,21 @@ struct SettingsWindowRootView: View {
 
                         Button(goldKeyRevealed ? "Hide" : "Reveal") { toggleRevealRecoveryKey() }
                             .buttonStyle(.bordered)
-                            .disabled(!masterKeyPresent)
+                            .disabled(showUnavailable || !masterKeyPresent)
 
                         Button("Copy") { copyRecoveryKeyToClipboard() }
                             .buttonStyle(.borderedProminent)
-                            .disabled(!masterKeyPresent)
+                            .disabled(showUnavailable || !masterKeyPresent)
 
-                        if !masterKeyPresent {
+                        if showMissing {
                             Text("Missing")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.red)
+                                .frame(width: 64, alignment: .trailing)
+                        } else if showUnavailable {
+                            Text("Unavailable")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
                                 .frame(width: 64, alignment: .trailing)
                         }
                     }
@@ -698,7 +721,7 @@ struct SettingsWindowRootView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Button("Export…") { exportRecoveryKeyToFile() }
                             .buttonStyle(.bordered)
-                            .disabled(!masterKeyPresent)
+                            .disabled(showUnavailable || !masterKeyPresent)
                     }
                     .padding(.vertical, 10)
 
@@ -712,13 +735,22 @@ struct SettingsWindowRootView: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Button("Import…") { showImportRecoveryKeySheet = true }
+                        Button("Import…") {
+                            if showUnavailable && secretsRetryable {
+                                model.ensureDaemonRunning()
+                                reload()
+                            }
+                            showImportRecoveryKeySheet = true
+                        }
                             .buttonStyle(.bordered)
+                            .disabled(showUnavailable && !secretsRetryable)
                     }
                     .padding(.vertical, 10)
                 }
                 .padding(.vertical, 2)
                 .padding(.horizontal, 12)
+            } label: {
+                EmptyView()
             }
 
             Text("New Mac restore requires: recovery key + bot token + chat_id.")
@@ -889,6 +921,7 @@ struct SettingsWindowRootView: View {
                 guard seq == self.reloadSeq else { return }
                 self.settings = decoded.settings
                 self.secrets = decoded.secrets
+                self.secretsError = decoded.secretsError
                 self.vaultKeyPresent = (decoded.secrets != nil)
                 self.loadError = nil
                 if !SettingsUIDemo.disableAutoSelect {
@@ -1175,6 +1208,9 @@ struct SettingsWindowRootView: View {
     }
 
     private func recoveryKeyDisplayText() -> String {
+        if secretsError != nil {
+            return "Unavailable"
+        }
         guard let goldKey else {
             return (secrets?.masterKeyPresent ?? false) ? "TBK1:••••••••••••••••" : "—"
         }
@@ -1183,6 +1219,7 @@ struct SettingsWindowRootView: View {
 
     private func loadRecoveryKeyIfNeeded() {
         if goldKey != nil { return }
+        model.ensureDaemonRunning()
         guard let cli = model.cliPath() else { return }
         let res = model.runCommandCapture(
             exe: cli,
@@ -1212,6 +1249,7 @@ struct SettingsWindowRootView: View {
     }
 
     private func importRecoveryKey(key: String, force: Bool) {
+        model.ensureDaemonRunning()
         guard let cli = model.cliPath() else { return }
         var args = ["--json", "secrets", "import-master-key"]
         if force { args.append("--force") }
@@ -1831,6 +1869,7 @@ struct EndpointEditor: View {
 
     private func saveBotToken(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         let token = botTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if token.isEmpty { return }
         let res = model.runCommandCapture(
@@ -1849,6 +1888,7 @@ struct EndpointEditor: View {
 
     private func saveApiHash(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         if apiHashDraftMasked { return }
         let apiHash = apiHashDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if apiHash.isEmpty { return }
@@ -1868,6 +1908,7 @@ struct EndpointEditor: View {
 
     private func clearSessions(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         let res = model.runCommandCapture(
             exe: cli,
             args: ["--json", "secrets", "clear-telegram-mtproto-session"],
@@ -1881,6 +1922,7 @@ struct EndpointEditor: View {
 
     private func testConnection(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == endpointId })
         let chatIdTrimmed = epIndex.map { settings.telegram_endpoints[$0].chat_id.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
         let chatIdInt = Int64(chatIdTrimmed)

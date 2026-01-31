@@ -55,7 +55,16 @@ pub fn spawn_control_ipc_server(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            {
+                tracing::error!(
+                    event = "control.ipc_permissions_failed",
+                    error = %e,
+                    path = %parent.display(),
+                    "control.ipc_permissions_failed"
+                );
+                return Err(e);
+            }
         }
     }
 
@@ -69,7 +78,19 @@ pub fn spawn_control_ipc_server(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+        if let Err(e) =
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        {
+            tracing::error!(
+                event = "control.ipc_permissions_failed",
+                error = %e,
+                path = %socket_path.display(),
+                "control.ipc_permissions_failed"
+            );
+            drop(listener);
+            let _ = std::fs::remove_file(&socket_path);
+            return Err(e);
+        }
     }
 
     let handle_socket_path = socket_path.clone();

@@ -41,6 +41,16 @@ In addition to the status stream socket, there is a separate daemon “control p
 - Security posture: the control IPC must not return vault key plaintext; access is scoped by Unix socket file
   permissions.
 
+## Daemon vault IPC (vault/keychain operations)
+
+The daemon also exposes a dedicated “vault” socket used by the CLI/macOS app to access vault/keychain operations via
+daemon-only boundary:
+
+- Socket: `<TELEVYBACKUP_DATA_DIR>/ipc/vault.sock`
+- Purpose: allow other components to request “vault key get-or-create” and limited Keychain actions without directly
+  linking to Keychain APIs.
+- Security posture: must not expose the vault key plaintext; access is scoped by Unix socket file permissions.
+
 ## Data locations
 
 The app and daemon can share the same data locations via env vars:
