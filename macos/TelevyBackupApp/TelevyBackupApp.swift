@@ -91,6 +91,7 @@ final class AppModel: ObservableObject {
     private var developerWindow: NSWindow? = nil
     private var lastTaskKind: String? = nil
     private var lastTaskState: String? = nil
+    private let launchOverrides: LaunchOverrides = .parse(CommandLine.arguments)
 
     struct StatusActivityItem: Identifiable {
         let id = UUID()
@@ -135,6 +136,31 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private struct LaunchOverrides {
+        var disableKeychain: Bool = false
+        var dataDir: String? = nil
+        var configDir: String? = nil
+
+        static func parse(_ args: [String]) -> LaunchOverrides {
+            var out = LaunchOverrides()
+            var i = 1
+            while i < args.count {
+                switch args[i] {
+                case "--disable-keychain":
+                    out.disableKeychain = true
+                case "--data-dir":
+                    if i + 1 < args.count { out.dataDir = args[i + 1]; i += 1 }
+                case "--config-dir":
+                    if i + 1 < args.count { out.configDir = args[i + 1]; i += 1 }
+                default:
+                    break
+                }
+                i += 1
+            }
+            return out
+        }
+    }
+
     func defaultConfigDir() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home
@@ -148,13 +174,43 @@ final class AppModel: ObservableObject {
         defaultConfigDir()
     }
 
-    private func statusJsonURL() -> URL {
+    func isKeychainDisabled() -> Bool {
+        effectiveDisableKeychain()
+    }
+
+    private func effectiveDisableKeychain() -> Bool {
+        if launchOverrides.disableKeychain { return true }
+        return ProcessInfo.processInfo.environment["TELEVYBACKUP_DISABLE_KEYCHAIN"] == "1"
+    }
+
+    private func effectiveConfigDirURL() -> URL {
+        if let p = launchOverrides.configDir, !p.isEmpty { return URL(fileURLWithPath: p) }
+        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_CONFIG_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
+        return defaultConfigDir()
+    }
+
+    private func effectiveDataDirURL() -> URL {
+        if let p = launchOverrides.dataDir, !p.isEmpty { return URL(fileURLWithPath: p) }
         if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
             return URL(fileURLWithPath: env)
-                .appendingPathComponent("status")
-                .appendingPathComponent("status.json")
         }
         return defaultDataDir()
+    }
+
+    private func televybackupToolEnv() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["TELEVYBACKUP_CONFIG_DIR"] = effectiveConfigDirURL().path
+        env["TELEVYBACKUP_DATA_DIR"] = effectiveDataDirURL().path
+        if effectiveDisableKeychain() {
+            env["TELEVYBACKUP_DISABLE_KEYCHAIN"] = "1"
+        }
+        return env
+    }
+
+    private func statusJsonURL() -> URL {
+        effectiveDataDirURL()
             .appendingPathComponent("status")
             .appendingPathComponent("status.json")
     }
@@ -163,17 +219,11 @@ final class AppModel: ObservableObject {
         if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_LOG_DIR"], !env.isEmpty {
             return URL(fileURLWithPath: env)
         }
-        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
-            return URL(fileURLWithPath: env).appendingPathComponent("logs")
-        }
-        return defaultDataDir().appendingPathComponent("logs")
+        return effectiveDataDirURL().appendingPathComponent("logs")
     }
 
     func configTomlPath() -> URL {
-        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_CONFIG_DIR"] {
-            return URL(fileURLWithPath: env).appendingPathComponent("config.toml")
-        }
-        return defaultConfigDir().appendingPathComponent("config.toml")
+        effectiveConfigDirURL().appendingPathComponent("config.toml")
     }
 
     func cliPath() -> String? {
@@ -279,15 +329,7 @@ final class AppModel: ObservableObject {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: cli)
         task.arguments = ["--json", "status", "stream"]
-
-        var env = ProcessInfo.processInfo.environment
-        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
-            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
-        }
-        if env["TELEVYBACKUP_DATA_DIR"] == nil {
-            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
-        }
-        task.environment = env
+        task.environment = televybackupToolEnv()
 
         let out = Pipe()
         let err = Pipe()
@@ -425,15 +467,7 @@ final class AppModel: ObservableObject {
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: daemon)
-
-        var env = ProcessInfo.processInfo.environment
-        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
-            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
-        }
-        if env["TELEVYBACKUP_DATA_DIR"] == nil {
-            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
-        }
-        task.environment = env
+        task.environment = televybackupToolEnv()
 
         // Best-effort logging for the spawned daemon (dev fallback).
         let logDir = logDirURL()
@@ -466,8 +500,11 @@ final class AppModel: ObservableObject {
     }
 
     private func preferBundledDaemonForCurrentEnvironment() -> Bool {
+        if effectiveDisableKeychain() { return true }
+        if launchOverrides.dataDir != nil { return true }
+        if launchOverrides.configDir != nil { return true }
+
         let env = ProcessInfo.processInfo.environment
-        if env["TELEVYBACKUP_DISABLE_KEYCHAIN"] == "1" { return true }
         if let v = env["TELEVYBACKUP_DATA_DIR"], !v.isEmpty { return true }
         if let v = env["TELEVYBACKUP_CONFIG_DIR"], !v.isEmpty { return true }
         return false
@@ -475,25 +512,47 @@ final class AppModel: ObservableObject {
 
     private func waitForDaemonIpcReady(timeoutSeconds: Double) -> Bool {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
-        let dataDir: URL = {
-            if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
-                return URL(fileURLWithPath: env)
-            }
-            return defaultDataDir()
-        }()
+        let dataDir = effectiveDataDirURL()
 
         let controlSock = dataDir.appendingPathComponent("ipc").appendingPathComponent("control.sock").path
         let vaultSock = dataDir.appendingPathComponent("ipc").appendingPathComponent("vault.sock").path
 
         while Date() < deadline {
-            if FileManager.default.fileExists(atPath: controlSock)
-                && FileManager.default.fileExists(atPath: vaultSock)
-            {
+            if isUnixSocketConnectable(controlSock) && isUnixSocketConnectable(vaultSock) {
                 return true
             }
             Thread.sleep(forTimeInterval: 0.05)
         }
         return false
+    }
+
+    private func isUnixSocketConnectable(_ path: String) -> Bool {
+        // Existence is not enough: stale socket files may remain after a crash.
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+
+        // Keep it simple and portable: attempt a connect() to an AF_UNIX socket.
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+
+        // sun_path is a fixed-size tuple; ensure we don't overflow it.
+        let maxLen = MemoryLayout.size(ofValue: addr.sun_path) - 1
+        guard path.utf8.count <= maxLen else { return false }
+
+        _ = path.withCString { cs in
+            strncpy(&addr.sun_path.0, cs, maxLen)
+        }
+
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let rc: Int32 = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                connect(fd, sa, len)
+            }
+        }
+        return rc == 0
     }
 
     private func isDaemonRunning() -> Bool {
@@ -1708,15 +1767,7 @@ final class AppModel: ObservableObject {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
-
-        var env = ProcessInfo.processInfo.environment
-        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
-            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
-        }
-        if env["TELEVYBACKUP_DATA_DIR"] == nil {
-            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
-        }
-        task.environment = env
+        task.environment = televybackupToolEnv()
 
         let out = Pipe()
         let err = Pipe()
@@ -1889,15 +1940,7 @@ final class AppModel: ObservableObject {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
-
-        var env = ProcessInfo.processInfo.environment
-        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
-            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
-        }
-        if env["TELEVYBACKUP_DATA_DIR"] == nil {
-            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
-        }
-        task.environment = env
+        task.environment = televybackupToolEnv()
 
         let out = Pipe()
         let err = Pipe()
@@ -2028,10 +2071,7 @@ final class AppModel: ObservableObject {
     }
 
     private func controlDirURL() -> URL {
-        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
-            return URL(fileURLWithPath: env).appendingPathComponent("control")
-        }
-        return defaultDataDir().appendingPathComponent("control")
+        effectiveDataDirURL().appendingPathComponent("control")
     }
 
     func triggerBackupNowAllEnabled() {
@@ -2058,7 +2098,9 @@ final class AppModel: ObservableObject {
                 }
                 try FileManager.default.moveItem(at: tmp, to: path)
 
+                let finalPath = path.path
                 DispatchQueue.main.async {
+                    self.appendLog("Manual backup trigger written: \(finalPath)")
                     self.appendStatusActivity("Manual backup trigger written (all enabled targets)")
                     self.showToast(anyRunning ? "Queued backup…" : "Starting backup…", isError: false)
                 }

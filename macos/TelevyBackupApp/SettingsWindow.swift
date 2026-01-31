@@ -490,7 +490,7 @@ struct SettingsWindowRootView: View {
         let masterKeyPresent = secrets?.masterKeyPresent ?? false
         let showMissing = !secretsUnavailable && !masterKeyPresent
         let showUnavailable = secretsUnavailable
-        let keychainDisabled = ProcessInfo.processInfo.environment["TELEVYBACKUP_DISABLE_KEYCHAIN"] == "1"
+        let keychainDisabled = model.isKeychainDisabled()
         let secretsStoreLabel = keychainDisabled ? "· Dev (no keychain)" : "· Keychain"
 
         return VStack(alignment: .leading, spacing: 14) {

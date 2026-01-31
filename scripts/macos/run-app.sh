@@ -15,13 +15,20 @@ done
 
 app="$root_dir/target/macos-app/TelevyBackup.app"
 if [ "${TELEVYBACKUP_DISABLE_KEYCHAIN:-}" = "1" ]; then
-  if [ -z "${TELEVYBACKUP_DATA_DIR:-}" ]; then
-    tmpdir="$(mktemp -d)"
-    export TELEVYBACKUP_DATA_DIR="$tmpdir"
-    export TELEVYBACKUP_CONFIG_DIR="$tmpdir"
-    echo "TELEVYBACKUP_DISABLE_KEYCHAIN=1: using temp dir: $tmpdir" >&2
+  data_dir="${TELEVYBACKUP_DATA_DIR:-}"
+  config_dir="${TELEVYBACKUP_CONFIG_DIR:-}"
+  if [ -z "$data_dir" ] || [ -z "$config_dir" ]; then
+    dev_root="$root_dir/.dev/televybackup"
+    data_dir="${data_dir:-$dev_root/data}"
+    config_dir="${config_dir:-$dev_root/config}"
+    mkdir -p "$data_dir" "$config_dir"
+    echo "TELEVYBACKUP_DISABLE_KEYCHAIN=1: using workspace dirs:" >&2
+    echo "  TELEVYBACKUP_DATA_DIR=$data_dir" >&2
+    echo "  TELEVYBACKUP_CONFIG_DIR=$config_dir" >&2
   fi
-  "$app/Contents/MacOS/TelevyBackup" >/dev/null 2>&1 &
+  # NOTE: launching via LaunchServices keeps the menu bar app alive; env vars are not reliably
+  # inherited by `open`, so pass overrides via `--args` and let the app propagate to subprocesses.
+  open -n "$app" --args --disable-keychain --data-dir "$data_dir" --config-dir "$config_dir"
 else
   open "$app"
 fi
