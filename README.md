@@ -11,7 +11,7 @@ macOS desktop backup app + Rust backend (work in progress).
 
 - Build CLI/daemon: `cargo build`
 - Build macOS app: `./scripts/macos/build-app.sh`
-- Run macOS app: `./scripts/macos/run-app.sh`
+- Run macOS app (dev default: Keychain disabled): `./scripts/macos/run-app.sh`
 
 ## Development: bypass Keychain (codesign + vault key)
 
@@ -36,8 +36,8 @@ TELEVYBACKUP_CODESIGN_IDENTITY=- ./scripts/macos/run-app.sh
 
 ### Runtime: disable Keychain for the daemon (security downgrade)
 
-Set `TELEVYBACKUP_DISABLE_KEYCHAIN=1` when starting the daemon. In this mode, the daemon will **not** access Keychain
-and will use a local vault key file instead:
+`./scripts/macos/run-app.sh` defaults to `TELEVYBACKUP_DISABLE_KEYCHAIN=1`. In this mode, the daemon will **not**
+access Keychain and will use a local vault key file instead:
 
 - Default: `TELEVYBACKUP_CONFIG_DIR/vault.key` (default config dir: `~/Library/Application Support/TelevyBackup/`)
 - Override: `TELEVYBACKUP_VAULT_KEY_FILE=<path>`
@@ -49,6 +49,12 @@ TELEVYBACKUP_DISABLE_KEYCHAIN=1 televybackupd
 ```
 
 Important: `vault.key` on disk is a **security downgrade**. Treat it like a secret and only use this mode for local dev.
+
+To enable Keychain (production-like), run:
+
+```bash
+TELEVYBACKUP_DISABLE_KEYCHAIN=0 ./scripts/macos/run-app.sh
+```
 
 ### Daemon-only boundary (secrets)
 

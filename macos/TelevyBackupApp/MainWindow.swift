@@ -12,6 +12,7 @@ struct RunLogSummary: Identifiable {
     let status: String?
     let errorCode: String?
     let durationSeconds: Double?
+    let startedAt: Date?
     let finishedAt: Date?
     let logURL: URL
 
@@ -28,6 +29,10 @@ struct MainWindowRootView: View {
     @EnvironmentObject var model: AppModel
     @State private var selection: String?
 
+    private enum Selection {
+        static let unknownTarget = "__unknown_target__"
+    }
+
     var body: some View {
         ZStack {
             VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow, state: .active)
@@ -41,7 +46,13 @@ struct MainWindowRootView: View {
             }
         }
         .onAppear {
-            model.refreshRunHistory()
+            if MainWindowUIDemo.enabled {
+                if selection == nil {
+                    selection = MainWindowUIDemo.initialSelection(targets: model.statusSnapshot?.targets ?? [])
+                }
+            } else {
+                model.refreshRunHistory()
+            }
         }
         .toolbar {
             ToolbarItemGroup {
@@ -70,6 +81,7 @@ struct MainWindowRootView: View {
 
     private var sidebar: some View {
         let targets = model.statusSnapshot?.targets ?? []
+        let unknownCount = model.runHistory.filter { $0.targetId == nil }.count
         return VStack(spacing: 0) {
             HStack {
                 Text("Targets")
@@ -103,6 +115,17 @@ struct MainWindowRootView: View {
                     )
                     .tag(target.targetId)
                 }
+
+                if unknownCount > 0 {
+                    UnknownTargetListRow(
+                        isSelected: selection == Selection.unknownTarget,
+                        count: unknownCount,
+                        onSelect: {
+                            selection = Selection.unknownTarget
+                        }
+                    )
+                    .tag(Selection.unknownTarget)
+                }
             }
         }
     }
@@ -110,20 +133,47 @@ struct MainWindowRootView: View {
     @ViewBuilder
     private var detail: some View {
         let targets = model.statusSnapshot?.targets ?? []
-        if let selection,
+        if selection == Selection.unknownTarget {
+            UnknownTargetDetailView()
+        } else if let selection,
            let target = targets.first(where: { $0.targetId == selection })
         {
             TargetDetailView(target: target)
         } else {
-            VStack(spacing: 10) {
+            VStack(spacing: 12) {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 44, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+
                 Text("Select a target")
                     .font(.system(size: 18, weight: .bold))
+
                 Text("Pick a target on the left to see backup / restore / verify history.")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+}
+
+private enum MainWindowUIDemo {
+    static var enabled: Bool {
+        ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1"
+    }
+
+    static var scene: String {
+        ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
+    }
+
+    static func initialSelection(targets: [StatusTarget]) -> String? {
+        guard enabled else { return nil }
+        if scene == "main-window-target-detail" {
+            return targets.first?.targetId
+        }
+        return nil
     }
 }
 
@@ -221,12 +271,7 @@ private struct TargetDetailView: View {
 
     private var runs: [RunLogSummary] {
         model.runHistory
-            .filter { run in
-                if run.targetId == target.targetId { return true }
-                return run.targetId == nil
-                    && run.endpointId == target.endpointId
-                    && run.sourcePath == target.sourcePath
-            }
+            .filter { run in run.targetId == target.targetId }
             .sorted { ($0.finishedAt ?? .distantPast) > ($1.finishedAt ?? .distantPast) }
     }
 
@@ -293,6 +338,72 @@ private struct TargetDetailView: View {
                 .listStyle(.inset)
             }
         }
+    }
+}
+
+private struct UnknownTargetListRow: View {
+    let isSelected: Bool
+    let count: Int
+    let onSelect: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Unknown target")
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .lineLimit(1)
+                Text("\(count) run(s)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+
+            Image(systemName: "questionmark.circle")
+                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.secondary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect() }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct UnknownTargetDetailView: View {
+    @EnvironmentObject var model: AppModel
+
+    private var runs: [RunLogSummary] {
+        model.runHistory
+            .filter { $0.targetId == nil }
+            .sorted { ($0.finishedAt ?? .distantPast) > ($1.finishedAt ?? .distantPast) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Unknown target")
+                    .font(.system(size: 20, weight: .bold))
+                Text("Runs with missing target_id (legacy logs).")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            if runs.isEmpty {
+                Text("No legacy run logs.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 6)
+            } else {
+                List(runs) { run in
+                    RunLogRow(run: run)
+                }
+                .listStyle(.inset)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 }
 

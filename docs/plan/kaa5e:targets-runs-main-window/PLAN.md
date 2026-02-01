@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-29
-- Last: 2026-01-29
+- Last: 2026-02-01
 
 ## 背景 / 问题陈述
 
@@ -110,17 +110,25 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: macOS 主界面窗口（Targets 列表/详情路由）与浮窗入口调整
-- [ ] M2: Restore UI（空目录校验 + 触发 restore latest + 任务反馈）
-- [ ] M3: Verify UI（触发 verify latest + 任务反馈）
-- [ ] M4: CLI `verify latest` + `restore/verify` run log 补齐 `target_id`
-- [ ] M5: 执行记录摘要聚合展示（按 target 分组 + 最近 N 条）与端到端验收
+- [x] M1: macOS 主界面窗口（Targets 列表/详情路由）与浮窗入口调整
+- [x] M2: Restore UI（空目录校验 + 触发 restore latest + 任务反馈）
+- [x] M3: Verify UI（触发 verify latest + 任务反馈）
+- [x] M4: CLI `verify latest` + `restore/verify` run log 补齐 `target_id`
+- [x] M5: 执行记录摘要聚合展示（按 target 分组 + 最近 N 条）与端到端验收
 
 ## 风险与开放问题
 
 - 日志体量增长：目录扫描可能变慢，需要增量缓存或上限策略（默认仅展示最近 N 条）。
 - 任务并发：UI 侧需明确“同一时间仅允许一个任务运行”的行为与提示（沿用现有 isRunning 语义）。
 
+## UI 设计（Design assets）
+
+- Main window（Targets list）：[design/main-window-targets.png](./design/main-window-targets.png)
+- Main window（Target detail / runs）：[design/main-window-target-detail.png](./design/main-window-target-detail.png)
+- 生成脚本：`scripts/macos/capture-main-window.sh`
+
 ## Change log
 
 - 2026-01-29: 使用 `docs-plan-id` 生成 `kaa5e`。
+- 2026-01-31: 落地主界面 Targets/详情与 Restore/Verify（latest），并补齐 run log 的按 target 归档（含 Unknown target 兜底）。
+- 2026-02-01: 补齐主界面 UI 截图（用于计划产物归档与回顾）。
