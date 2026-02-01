@@ -70,8 +70,8 @@
 #### 1) Bundle 覆盖范围（Settings + secrets）
 
 - Bundle 必须包含 `SettingsV2` 的完整内容（schema version=2）。
-- Bundle 必须包含所有被 `SettingsV2` 引用的 secrets key/value（若缺失则显式记录为缺失，并在导入摘要中展示）：
-  - `televybackup.master_key`（master key；TBK1 解码后落盘用的 base64）
+- Bundle 必须包含所有被 `SettingsV2` 引用的 secrets key/value（若缺失则显式记录为缺失，并在导入摘要中展示）；其中：
+  - master key 的材料通过 bundle 的 TBK1（outer `goldKey`）承载，导入时落盘为 `televybackup.master_key`（payload 内不重复携带 master key value）
   - `settings.telegram.mtproto.api_hash_key`
   - `settings.telegram_endpoints[*].bot_token_key`
 - Bundle **不得**导出 MTProto session（`settings.telegram_endpoints[*].mtproto.session_key` 对应的 secrets entry value）。导入后由程序按需重新生成并落盘。

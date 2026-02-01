@@ -46,7 +46,8 @@ televybackup [--config-dir <path>] [--data-dir <path>] --json settings import-bu
 ### 输入（Inputs）
 
 - stdin：单行 `TBC1:...`
-- 运行时需要访问 Telegram 远端进行预检时，使用 bundle 内的 endpoint 信息与 secrets（bot token / mtproto api hash / session）进行访问。
+- 运行时需要访问 Telegram 远端进行预检时，使用 bundle 内的 endpoint 信息与 secrets（bot token / mtproto api hash）进行访问。
+  - MTProto session **不在 bundle 中导出/导入**；预检过程中如需要建立 MTProto 连接，允许生成临时 session（仅内存使用，不落盘）。
 
 ### 输出（Output, JSON）
 
