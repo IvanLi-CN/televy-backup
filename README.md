@@ -13,10 +13,58 @@ macOS desktop backup app + Rust backend (work in progress).
 - Build macOS app: `./scripts/macos/build-app.sh`
 - Run macOS app: `./scripts/macos/run-app.sh`
 
+## Development: bypass Keychain (codesign + vault key)
+
+There are two separate “Keychain touchpoints” during development:
+
+1) **Build-time codesign** (the build script may query Keychain for signing identities)
+2) **Runtime vault key** (the daemon normally reads/writes the vault key via Keychain to decrypt `secrets.enc`)
+
+### Build-time: ad-hoc signing (no identity lookup)
+
+Force ad-hoc signing by setting `TELEVYBACKUP_CODESIGN_IDENTITY=-`:
+
+```bash
+TELEVYBACKUP_CODESIGN_IDENTITY=- ./scripts/macos/build-app.sh
+```
+
+or:
+
+```bash
+TELEVYBACKUP_CODESIGN_IDENTITY=- ./scripts/macos/run-app.sh
+```
+
+### Runtime: disable Keychain for the daemon (security downgrade)
+
+Set `TELEVYBACKUP_DISABLE_KEYCHAIN=1` when starting the daemon. In this mode, the daemon will **not** access Keychain
+and will use a local vault key file instead:
+
+- Default: `TELEVYBACKUP_CONFIG_DIR/vault.key` (default config dir: `~/Library/Application Support/TelevyBackup/`)
+- Override: `TELEVYBACKUP_VAULT_KEY_FILE=<path>`
+
+Example:
+
+```bash
+TELEVYBACKUP_DISABLE_KEYCHAIN=1 televybackupd
+```
+
+Important: `vault.key` on disk is a **security downgrade**. Treat it like a secret and only use this mode for local dev.
+
+### Daemon-only boundary (secrets)
+
+Keychain / `vault.key` / `secrets.enc` are **daemon-only**:
+
+- `televybackupd` is the only component that may read/write the vault key backend (Keychain or `vault.key`) and decrypt
+  `secrets.enc`.
+- The CLI (`televybackup`) and macOS app must not access Keychain / `vault.key` / `secrets.enc` directly; use daemon IPC
+  (see `docs/architecture.md`).
+
 ## Configuration
 
-The app stores non-secret settings in `config.toml`, and secrets in an encrypted local secrets store (`secrets.enc`).
-macOS Keychain stores **only** the vault key used to decrypt `secrets.enc`.
+TelevyBackup stores non-secret settings in `config.toml`, and secrets in an encrypted local secrets store (`secrets.enc`).
+
+- Production default: macOS Keychain stores **only** the vault key used to decrypt `secrets.enc`.
+- Development optional: set `TELEVYBACKUP_DISABLE_KEYCHAIN=1` to store the vault key in `vault.key` (security downgrade).
 
 - Telegram storage is **MTProto-only** (`telegram.mode = "mtproto"`). Telegram Bot API is no longer supported; older `telegram.botapi` snapshots require a new backup.
 - `config.toml` schema is **v2** (`version = 2`) and supports multiple backup targets and multiple Telegram endpoints:
@@ -46,12 +94,41 @@ To move restore capability across devices:
 - Export (prints secret; requires explicit confirmation): `televybackup secrets export-master-key --i-understand`
 - Import on a new device (reads from stdin): `televybackup secrets import-master-key`
 
+## Troubleshooting
+
+If the macOS app shows **Recovery Key = Unavailable** or `Verify` fails with `daemon.unavailable` / `control.unavailable`:
+
+- Ensure the daemon is running: `pgrep -x televybackupd` (the UI will also try to auto-start it).
+- Ensure the UI/CLI/daemon use the same data dir:
+  - Defaults: `~/Library/Application Support/TelevyBackup`
+  - Overrides: `TELEVYBACKUP_CONFIG_DIR` / `TELEVYBACKUP_DATA_DIR`
+- Check IPC sockets exist under the data dir:
+  - `ipc/control.sock` (secrets presence / write actions)
+  - `ipc/vault.sock` (vault/keychain ops)
+- Check logs:
+  - UI log: `TELEVYBACKUP_LOG_DIR/ui.log` (or `TELEVYBACKUP_DATA_DIR/logs/ui.log`)
+  - Per-run logs (backup/restore/verify): `TELEVYBACKUP_DATA_DIR/logs/`
+
 ## Cross-device restore (latest)
 
 After at least one successful backup, TelevyBackup updates a per-endpoint encrypted bootstrap catalog and pins it in the chat.
 On a new device, you can restore without the old local SQLite:
 
 - `televybackup restore latest --target-id <target_id> --target <path>`
+
+Note: the pinned bootstrap catalog requires message pinning, so the endpoint chat should be a group/channel (or an `@username`), not a private 1:1 chat id.
+
+## Cross-device incremental backup (remote-first index)
+
+If you move to a new machine (or lose `index/index.sqlite`), TelevyBackup can continue incremental backups as long as:
+
+- The pinned bootstrap catalog exists in the Telegram chat, and
+- You imported the correct master key (`TBK1`) via `televybackup secrets import-master-key`.
+
+By default, `televybackup backup run` performs a preflight `index_sync` step before `scan`:
+
+- If needed, it downloads the remote latest index DB and atomically writes `TELEVYBACKUP_DATA_DIR/index/index.sqlite`.
+- To force local-only behavior (offline/debug): `televybackup backup run --no-remote-index-sync`.
 
 ## Daemon (scheduled backups)
 

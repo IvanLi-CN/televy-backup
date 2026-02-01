@@ -1,11 +1,11 @@
 import AppKit
-import Security
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct CliSettingsGetResponse: Decodable {
     let settings: SettingsV2
     let secrets: CliSecretsPresence?
+    let secretsError: CliSecretsError?
 }
 
 struct CliSecretsPresence: Decodable {
@@ -20,6 +20,12 @@ struct CliSecretsPresence: Decodable {
         case telegramBotTokenPresentByEndpoint
         case telegramMtprotoSessionPresentByEndpoint
     }
+}
+
+struct CliSecretsError: Decodable {
+    let code: String
+    let message: String
+    let retryable: Bool?
 }
 
 struct SettingsV2: Codable {
@@ -165,12 +171,119 @@ private struct EndpointListRow: View {
     }
 }
 
+private struct EmptyStateView: View {
+    let systemImage: String
+    let title: String
+    var message: String? = nil
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 36, weight: .semibold))
+                .foregroundStyle(.tertiary)
+
+            VStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                if let message {
+                    Text(message)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 340)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 18)
+        .padding(.horizontal, 12)
+    }
+}
+
+private enum SettingsUIDemo {
+    static var enabled: Bool {
+        ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1"
+    }
+
+    static var scene: String {
+        ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
+    }
+
+    static var disableAutoSelect: Bool {
+        enabled && scene.contains("unselected")
+    }
+
+    static var initialSection: SettingsSection {
+        if scene.hasPrefix("endpoints") { return .endpoints }
+        return .targets
+    }
+
+    static func makeSettings(scene: String) -> SettingsV2 {
+        let epA = TelegramEndpointV2(
+            id: "ep_demo_a",
+            mode: "mtproto",
+            chat_id: "123456",
+            bot_token_key: "telegram.bot_token.ep_demo_a",
+            mtproto: TelegramEndpointMtprotoV2(session_key: "telegram.mtproto.session.ep_demo_a"),
+            rate_limit: TelegramRateLimitV2(max_concurrent_uploads: 2, min_delay_ms: 250)
+        )
+        let epB = TelegramEndpointV2(
+            id: "ep_demo_b",
+            mode: "mtproto",
+            chat_id: "987654",
+            bot_token_key: "telegram.bot_token.ep_demo_b",
+            mtproto: TelegramEndpointMtprotoV2(session_key: "telegram.mtproto.session.ep_demo_b"),
+            rate_limit: TelegramRateLimitV2(max_concurrent_uploads: 2, min_delay_ms: 250)
+        )
+
+        let targets: [TargetV2] = {
+            if scene == "targets-empty" || scene == "endpoints-empty" { return [] }
+            return [
+                TargetV2(
+                    id: "t_demo_a",
+                    source_path: "/Users/ivan/Demo/Photos",
+                    label: "photos",
+                    endpoint_id: epA.id,
+                    enabled: true,
+                    schedule: nil
+                ),
+                TargetV2(
+                    id: "t_demo_b",
+                    source_path: "/Users/ivan/Demo/Documents",
+                    label: "docs",
+                    endpoint_id: epA.id,
+                    enabled: true,
+                    schedule: nil
+                ),
+            ]
+        }()
+
+        let endpoints: [TelegramEndpointV2] = {
+            if scene == "endpoints-empty" { return [] }
+            return [epA, epB]
+        }()
+
+        return SettingsV2(
+            version: 2,
+            schedule: ScheduleV2(enabled: true, kind: "hourly", hourly_minute: 0, daily_at: "02:00", timezone: "UTC"),
+            retention: RetentionV2(keep_last_snapshots: 7),
+            chunking: ChunkingV2(min_bytes: 1024 * 1024, avg_bytes: 8 * 1024 * 1024, max_bytes: 64 * 1024 * 1024),
+            telegram: TelegramGlobalV2(mode: "mtproto", mtproto: TelegramMtprotoGlobalV2(api_id: 0, api_hash_key: "telegram.mtproto.api_hash")),
+            telegram_endpoints: endpoints,
+            targets: targets
+        )
+    }
+}
+
 struct SettingsWindowRootView: View {
     @EnvironmentObject var model: AppModel
     @State private var section: SettingsSection = .targets
 
     @State private var settings: SettingsV2?
     @State private var secrets: CliSecretsPresence?
+    @State private var secretsError: CliSecretsError?
     @State private var vaultKeyPresent: Bool = false
     @State private var loadError: String?
 
@@ -268,11 +381,13 @@ struct SettingsWindowRootView: View {
     }
 
     private var targetsView: some View {
-        HStack(spacing: 0) {
+        let targets = settings?.targets ?? []
+
+        return HStack(spacing: 0) {
             VStack(spacing: 0) {
                 ScrollViewReader { proxy in
                     List(selection: $selectedTargetId) {
-                        ForEach(settings?.targets ?? []) { t in
+                        ForEach(targets) { t in
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(t.label.isEmpty ? t.id : t.label)
                                     .font(.system(size: 13, weight: .semibold))
@@ -297,6 +412,12 @@ struct SettingsWindowRootView: View {
                 }
                 .scrollContentBackground(.hidden)
                 .background(Color.clear)
+                .onChange(of: targets.map(\.id)) { _, ids in
+                    guard settings != nil else { return }
+                    guard !SettingsUIDemo.disableAutoSelect else { return }
+                    if let selectedTargetId, ids.contains(selectedTargetId) { return }
+                    selectedTargetId = ids.first
+                }
 
                 Divider()
 
@@ -306,6 +427,7 @@ struct SettingsWindowRootView: View {
                             .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.bordered)
+                    .disabled(settings == nil)
 
                     Button { deleteSelectedTarget() } label: {
                         Image(systemName: "minus")
@@ -358,11 +480,27 @@ struct SettingsWindowRootView: View {
                         }
                     }
                 } else {
-                    Text("Select a target")
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 14)
-                        .padding(.horizontal, 12)
+                    if settings == nil {
+                        EmptyStateView(
+                            systemImage: "exclamationmark.triangle",
+                            title: "Cannot load settings",
+                            message: loadError ?? "Please check CLI configuration and try again."
+                        )
+                    } else if targets.isEmpty {
+                        EmptyStateView(
+                            systemImage: "plus.circle",
+                            title: "No targets yet",
+                            message: "Create your first target with the + button."
+                        )
+                    } else {
+                        EmptyStateView(
+                            systemImage: "hand.tap",
+                            title: "Select a target"
+                        )
+                    }
                 }
+            } label: {
+                EmptyView()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -448,11 +586,27 @@ struct SettingsWindowRootView: View {
                         }
                     }
                 } else {
-                    Text("Select an endpoint")
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 14)
-                        .padding(.horizontal, 12)
+                    if settings == nil {
+                        EmptyStateView(
+                            systemImage: "exclamationmark.triangle",
+                            title: "Cannot load settings",
+                            message: loadError ?? "Please check CLI configuration and try again."
+                        )
+                    } else if endpoints.isEmpty {
+                        EmptyStateView(
+                            systemImage: "plus.circle",
+                            title: "No endpoints yet",
+                            message: "Create your first endpoint with the + button."
+                        )
+                    } else {
+                        EmptyStateView(
+                            systemImage: "hand.tap",
+                            title: "Select an endpoint"
+                        )
+                    }
                 }
+            } label: {
+                EmptyView()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -468,14 +622,27 @@ struct SettingsWindowRootView: View {
             Text("This endpoint is still referenced by at least one target. Rebind/unbind it in Targets, then retry deletion.")
         }
         .onAppear {
-            if selectedEndpointId == nil, let s = settings {
-                selectedEndpointId = EndpointHeuristicsDefaults.preferredEndpointId(endpointsSorted: sortedEndpoints(settings: s))
+            if selectedEndpointId == nil {
+                guard !SettingsUIDemo.disableAutoSelect else { return }
+                selectedEndpointId = endpoints.first?.id
             }
+        }
+        .onChange(of: endpoints.map(\.id)) { _, ids in
+            guard settings != nil else { return }
+            guard !SettingsUIDemo.disableAutoSelect else { return }
+            if let selectedEndpointId, ids.contains(selectedEndpointId) { return }
+            selectedEndpointId = ids.first
         }
     }
 
     private var recoveryKeyView: some View {
+        let secretsUnavailable = secretsError != nil
+        let secretsRetryable = secretsError?.retryable ?? true
         let masterKeyPresent = secrets?.masterKeyPresent ?? false
+        let showMissing = !secretsUnavailable && !masterKeyPresent
+        let showUnavailable = secretsUnavailable
+        let keychainDisabled = model.isKeychainDisabled()
+        let secretsStoreLabel = keychainDisabled ? "· Dev (no keychain)" : "· Keychain"
 
         return VStack(alignment: .leading, spacing: 14) {
             Text("Recovery Key")
@@ -491,10 +658,10 @@ struct SettingsWindowRootView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .frame(width: 110, alignment: .leading)
                         Spacer()
-                        Text(vaultKeyPresent ? "Present" : "Missing")
+                        Text(showUnavailable ? "Unavailable" : (vaultKeyPresent ? "Present" : "Missing"))
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(vaultKeyPresent ? .green : .red)
-                        Text("· Keychain")
+                            .foregroundStyle(showUnavailable ? Color.secondary : (vaultKeyPresent ? Color.green : Color.red))
+                        Text(secretsStoreLabel)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
@@ -522,16 +689,21 @@ struct SettingsWindowRootView: View {
 
                         Button(goldKeyRevealed ? "Hide" : "Reveal") { toggleRevealRecoveryKey() }
                             .buttonStyle(.bordered)
-                            .disabled(!masterKeyPresent)
+                            .disabled(showUnavailable || !masterKeyPresent)
 
                         Button("Copy") { copyRecoveryKeyToClipboard() }
                             .buttonStyle(.borderedProminent)
-                            .disabled(!masterKeyPresent)
+                            .disabled(showUnavailable || !masterKeyPresent)
 
-                        if !masterKeyPresent {
+                        if showMissing {
                             Text("Missing")
                                 .font(.system(size: 12, weight: .semibold))
                                 .foregroundStyle(.red)
+                                .frame(width: 64, alignment: .trailing)
+                        } else if showUnavailable {
+                            Text("Unavailable")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
                                 .frame(width: 64, alignment: .trailing)
                         }
                     }
@@ -549,7 +721,7 @@ struct SettingsWindowRootView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Button("Export…") { exportRecoveryKeyToFile() }
                             .buttonStyle(.bordered)
-                            .disabled(!masterKeyPresent)
+                            .disabled(showUnavailable || !masterKeyPresent)
                     }
                     .padding(.vertical, 10)
 
@@ -563,13 +735,22 @@ struct SettingsWindowRootView: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Button("Import…") { showImportRecoveryKeySheet = true }
+                        Button("Import…") {
+                            if showUnavailable && secretsRetryable {
+                                model.ensureDaemonRunning()
+                                reload()
+                            }
+                            showImportRecoveryKeySheet = true
+                        }
                             .buttonStyle(.bordered)
+                            .disabled(showUnavailable && !secretsRetryable)
                     }
                     .padding(.vertical, 10)
                 }
                 .padding(.vertical, 2)
                 .padding(.horizontal, 12)
+            } label: {
+                EmptyView()
             }
 
             Text("New Mac restore requires: recovery key + bot token + chat_id.")
@@ -670,15 +851,33 @@ struct SettingsWindowRootView: View {
     }
 
     private func reload() {
+        if SettingsUIDemo.enabled {
+            DispatchQueue.main.async {
+                self.vaultKeyPresent = false
+                self.secrets = nil
+                self.loadError = nil
+                self.section = SettingsUIDemo.initialSection
+                self.settings = SettingsUIDemo.makeSettings(scene: SettingsUIDemo.scene)
+
+                if !SettingsUIDemo.disableAutoSelect {
+                    if self.selectedTargetId == nil {
+                        self.selectedTargetId = self.settings?.targets.first?.id
+                    }
+                    if self.selectedEndpointId == nil {
+                        self.selectedEndpointId = self.sortedEndpoints().first?.id
+                    }
+                } else {
+                    if SettingsUIDemo.scene == "targets-unselected" { self.selectedTargetId = nil }
+                    if SettingsUIDemo.scene == "endpoints-unselected" { self.selectedEndpointId = nil }
+                }
+            }
+            return
+        }
+
         guard let cli = model.cliPath() else {
             loadError = "televybackup CLI not found (set TELEVYBACKUP_CLI_PATH)"
             return
         }
-
-        let vaultPresent = keychainHasGenericPassword(
-            service: "TelevyBackup",
-            account: "televybackup.vault_key"
-        )
 
         reloadSeq += 1
         let seq = reloadSeq
@@ -692,7 +891,7 @@ struct SettingsWindowRootView: View {
             if res.status != 0 {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = vaultPresent
+                    self.vaultKeyPresent = false
                     self.loadError = "settings get failed: exit=\(res.status)"
                 }
                 return
@@ -700,7 +899,7 @@ struct SettingsWindowRootView: View {
             guard let data = res.stdout.data(using: .utf8) else {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = vaultPresent
+                    self.vaultKeyPresent = false
                     self.loadError = "settings get: bad output"
                 }
                 return
@@ -712,7 +911,7 @@ struct SettingsWindowRootView: View {
             } catch {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = vaultPresent
+                    self.vaultKeyPresent = false
                     self.loadError = "settings get: JSON decode failed"
                 }
                 return
@@ -720,12 +919,20 @@ struct SettingsWindowRootView: View {
 
             DispatchQueue.main.async {
                 guard seq == self.reloadSeq else { return }
-                self.vaultKeyPresent = vaultPresent
                 self.settings = decoded.settings
                 self.secrets = decoded.secrets
+                self.secretsError = decoded.secretsError
+                self.vaultKeyPresent = (decoded.secrets != nil)
                 self.loadError = nil
-                if self.selectedTargetId == nil {
-                    self.selectedTargetId = decoded.settings.targets.first?.id
+                if !SettingsUIDemo.disableAutoSelect {
+                    if let selected = self.selectedTargetId {
+                        let ids = Set(decoded.settings.targets.map(\.id))
+                        if !ids.contains(selected) {
+                            self.selectedTargetId = decoded.settings.targets.first?.id
+                        }
+                    } else {
+                        self.selectedTargetId = decoded.settings.targets.first?.id
+                    }
                 }
                 if let selected = self.selectedEndpointId {
                     let ids = Set(decoded.settings.telegram_endpoints.map(\.id))
@@ -733,10 +940,8 @@ struct SettingsWindowRootView: View {
                         self.selectedEndpointId = nil
                     }
                 }
-                if self.selectedEndpointId == nil {
-                    self.selectedEndpointId = EndpointHeuristicsDefaults.preferredEndpointId(
-                        endpointsSorted: self.sortedEndpoints(settings: decoded.settings)
-                    )
+                if !SettingsUIDemo.disableAutoSelect, self.selectedEndpointId == nil {
+                    self.selectedEndpointId = self.sortedEndpoints(settings: decoded.settings).first?.id
                 }
             }
         }
@@ -760,18 +965,6 @@ struct SettingsWindowRootView: View {
         } catch {
             // Best-effort UX: keep the view responsive; user can retry.
         }
-    }
-
-    private func keychainHasGenericPassword(service: String, account: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: false,
-        ]
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        return status == errSecSuccess
     }
 
     private func queueAutoSave() {
@@ -1010,11 +1203,14 @@ struct SettingsWindowRootView: View {
 
         s.telegram_endpoints.removeAll { $0.id == endpointId }
         settings = s
-        selectedEndpointId = preferredEndpointId(settings: s)
+        selectedEndpointId = sortedEndpoints(settings: s).first?.id
         queueAutoSave()
     }
 
     private func recoveryKeyDisplayText() -> String {
+        if secretsError != nil {
+            return "Unavailable"
+        }
         guard let goldKey else {
             return (secrets?.masterKeyPresent ?? false) ? "TBK1:••••••••••••••••" : "—"
         }
@@ -1023,6 +1219,7 @@ struct SettingsWindowRootView: View {
 
     private func loadRecoveryKeyIfNeeded() {
         if goldKey != nil { return }
+        model.ensureDaemonRunning()
         guard let cli = model.cliPath() else { return }
         let res = model.runCommandCapture(
             exe: cli,
@@ -1052,6 +1249,7 @@ struct SettingsWindowRootView: View {
     }
 
     private func importRecoveryKey(key: String, force: Bool) {
+        model.ensureDaemonRunning()
         guard let cli = model.cliPath() else { return }
         var args = ["--json", "secrets", "import-master-key"]
         if force { args.append("--force") }
@@ -1432,6 +1630,35 @@ struct EndpointEditor: View {
     @State private var apiHashDraftMasked: Bool = false
     @State private var validateText: String = "Not validated"
     @State private var validateOk: Bool? = nil
+    @State private var dialogsLoading: Bool = false
+    @State private var dialogsError: String? = nil
+    @State private var dialogs: [TelegramDialogItem] = []
+    @State private var dialogsSearch: String = ""
+    @State private var dialogsPickerShown: Bool = false
+
+    struct TelegramWaitChatResponse: Decodable {
+        let chat: TelegramDialogItem
+    }
+
+    struct CliErrorEnvelope: Decodable {
+        let code: String
+        let message: String
+    }
+
+    struct TelegramDialogItem: Decodable {
+        let kind: String
+        let title: String
+        let username: String?
+        let peerId: Int64
+        let configChatId: String
+        let bootstrapHint: Bool
+
+        var id: String { "\(kind):\(peerId)" }
+        var displayTitle: String {
+            let u = username.map { "@\($0)" } ?? "-"
+            return "\(configChatId)  \(title)  (\(kind), \(u))"
+        }
+    }
 
     var body: some View {
         let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == endpointId })
@@ -1475,6 +1702,28 @@ struct EndpointEditor: View {
                     ))
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 260)
+
+                    Button(dialogsLoading ? "Listening…" : "Listen…") {
+                        dialogsError = nil
+                        dialogsSearch = ""
+                        dialogsPickerShown = true
+                    }
+                        .buttonStyle(.bordered)
+                        .disabled(dialogsLoading)
+                }
+
+                let chatIdTrimmed = settings.telegram_endpoints[epIndex].chat_id.trimmingCharacters(in: .whitespacesAndNewlines)
+                let chatIdInt = Int64(chatIdTrimmed)
+                let isLikelyPrivateChat = (chatIdInt ?? 0) > 0
+                if isLikelyPrivateChat {
+                    Text("Heads up: private 1:1 chats don’t support the pinned bootstrap catalog, so cross-device restore / remote-first index sync won’t work. Use a group/channel (e.g. -100...) or @username.")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.orange)
+                }
+                if let dialogsError {
+                    Text(dialogsError)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.red)
                 }
 
                 HStack {
@@ -1613,10 +1862,14 @@ struct EndpointEditor: View {
                 saveApiHash(endpointId: endpointId)
             }
         }
+        .sheet(isPresented: $dialogsPickerShown) {
+            dialogPickerSheet(endpointId: endpointId)
+        }
     }
 
     private func saveBotToken(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         let token = botTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if token.isEmpty { return }
         let res = model.runCommandCapture(
@@ -1635,6 +1888,7 @@ struct EndpointEditor: View {
 
     private func saveApiHash(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         if apiHashDraftMasked { return }
         let apiHash = apiHashDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if apiHash.isEmpty { return }
@@ -1654,6 +1908,7 @@ struct EndpointEditor: View {
 
     private func clearSessions(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
         let res = model.runCommandCapture(
             exe: cli,
             args: ["--json", "secrets", "clear-telegram-mtproto-session"],
@@ -1667,6 +1922,12 @@ struct EndpointEditor: View {
 
     private func testConnection(endpointId: String) {
         guard let cli = model.cliPath() else { return }
+        model.ensureDaemonRunning()
+        let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == endpointId })
+        let chatIdTrimmed = epIndex.map { settings.telegram_endpoints[$0].chat_id.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        let chatIdInt = Int64(chatIdTrimmed)
+        let isLikelyPrivateChat = (chatIdInt ?? 0) > 0
+
         let res = model.runCommandCapture(
             exe: cli,
             args: ["--json", "telegram", "validate", "--endpoint-id", endpointId],
@@ -1674,11 +1935,105 @@ struct EndpointEditor: View {
         )
         if res.status == 0 {
             validateOk = true
-            validateText = "Connected"
+            validateText = isLikelyPrivateChat ? "Connected (bootstrap unsupported: private chat)" : "Connected"
             onReload()
         } else {
             validateOk = false
             validateText = "Failed (see ui.log)"
+        }
+    }
+
+    @ViewBuilder
+    private func dialogPickerSheet(endpointId: String) -> some View {
+        let filtered = dialogs
+            .filter { $0.bootstrapHint }
+            .filter { dialogsSearch.isEmpty || $0.displayTitle.localizedCaseInsensitiveContains(dialogsSearch) }
+
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Discover chat_id for storage / bootstrap")
+                .font(.system(size: 16, weight: .bold))
+
+            Text("Telegram bots cannot list all joined chats. To discover a group/channel, click Listen and then send a message in the target chat (mention the bot if needed).")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            TextField("Search…", text: $dialogsSearch)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Button(dialogsLoading ? "Listening…" : "Listen (60s)") { loadDialogs(endpointId: endpointId) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(dialogsLoading)
+                Spacer()
+                if let dialogsError {
+                    Text(dialogsError)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.red)
+                }
+            }
+
+            List(filtered, id: \.id) { item in
+                Button(item.displayTitle) {
+                    if let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == endpointId }) {
+                        settings.telegram_endpoints[epIndex].chat_id = item.configChatId
+                        onEndpointTouchedPending(endpointId)
+                    }
+                    dialogsPickerShown = false
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(minWidth: 640, minHeight: 420)
+
+            HStack {
+                Text("Only group/channel chats are shown (bootstrapHint=true).")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Close") { dialogsPickerShown = false }
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(16)
+    }
+
+    private func loadDialogs(endpointId: String) {
+        guard let cli = model.cliPath() else { return }
+        dialogsLoading = true
+        dialogsError = nil
+        dialogsSearch = ""
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let res = model.runCommandCapture(
+                exe: cli,
+                args: ["--json", "telegram", "wait-chat", "--endpoint-id", endpointId, "--timeout-secs", "60"],
+                timeoutSeconds: 75
+            )
+
+            DispatchQueue.main.async {
+                dialogsLoading = false
+                if res.status != 0 {
+                    if let data = res.stderr.data(using: .utf8),
+                       let decoded = try? JSONDecoder().decode(CliErrorEnvelope.self, from: data) {
+                        dialogsError = decoded.message
+                    } else {
+                        dialogsError = "Failed to discover chat (see ui.log)"
+                    }
+                    return
+                }
+                guard let data = res.stdout.data(using: .utf8) else {
+                    dialogsError = "Failed to parse chat (empty output)"
+                    return
+                }
+                do {
+                    let decoded = try JSONDecoder().decode(TelegramWaitChatResponse.self, from: data)
+                    let item = decoded.chat
+                    if !dialogs.contains(where: { $0.id == item.id }) {
+                        dialogs.append(item)
+                    }
+                } catch {
+                    dialogsError = "Failed to parse chat (see ui.log)"
+                }
+            }
         }
     }
 }

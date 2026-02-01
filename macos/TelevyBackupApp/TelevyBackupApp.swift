@@ -80,12 +80,18 @@ final class AppModel: ObservableObject {
     @Published var statusSnapshotReceivedAt: Date? = nil
     @Published var statusStreamFrozen: Bool = false
     @Published var popoverDesiredHeight: CGFloat = 460
+    @Published var runHistory: [RunLogSummary] = []
+    @Published var runHistoryRefreshInFlight: Bool = false
 
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
     private var didShowUiLogWriteErrorToast: Bool = false
     private var settingsWindow: NSWindow? = nil
+    private var mainWindow: NSWindow? = nil
     private var developerWindow: NSWindow? = nil
+    private var lastTaskKind: String? = nil
+    private var lastTaskState: String? = nil
+    private let launchOverrides: LaunchOverrides = .parse(CommandLine.arguments)
 
     struct StatusActivityItem: Identifiable {
         let id = UUID()
@@ -103,6 +109,7 @@ final class AppModel: ObservableObject {
     private var statusStreamReconnectWork: DispatchWorkItem? = nil
     private var statusStreamBackoffSeconds: Double = 0.5
     private var daemonTask: Process? = nil
+    private var daemonIpcRetryWork: DispatchWorkItem? = nil
     private var lastDaemonStartAttemptAt: Date? = nil
 
     private enum PopoverSizing {
@@ -130,6 +137,31 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private struct LaunchOverrides {
+        var disableKeychain: Bool = false
+        var dataDir: String? = nil
+        var configDir: String? = nil
+
+        static func parse(_ args: [String]) -> LaunchOverrides {
+            var out = LaunchOverrides()
+            var i = 1
+            while i < args.count {
+                switch args[i] {
+                case "--disable-keychain":
+                    out.disableKeychain = true
+                case "--data-dir":
+                    if i + 1 < args.count { out.dataDir = args[i + 1]; i += 1 }
+                case "--config-dir":
+                    if i + 1 < args.count { out.configDir = args[i + 1]; i += 1 }
+                default:
+                    break
+                }
+                i += 1
+            }
+            return out
+        }
+    }
+
     func defaultConfigDir() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home
@@ -143,32 +175,56 @@ final class AppModel: ObservableObject {
         defaultConfigDir()
     }
 
-    private func statusJsonURL() -> URL {
+    func isKeychainDisabled() -> Bool {
+        effectiveDisableKeychain()
+    }
+
+    private func effectiveDisableKeychain() -> Bool {
+        if launchOverrides.disableKeychain { return true }
+        return ProcessInfo.processInfo.environment["TELEVYBACKUP_DISABLE_KEYCHAIN"] == "1"
+    }
+
+    private func effectiveConfigDirURL() -> URL {
+        if let p = launchOverrides.configDir, !p.isEmpty { return URL(fileURLWithPath: p) }
+        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_CONFIG_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
+        return defaultConfigDir()
+    }
+
+    private func effectiveDataDirURL() -> URL {
+        if let p = launchOverrides.dataDir, !p.isEmpty { return URL(fileURLWithPath: p) }
         if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
             return URL(fileURLWithPath: env)
-                .appendingPathComponent("status")
-                .appendingPathComponent("status.json")
         }
         return defaultDataDir()
+    }
+
+    private func televybackupToolEnv() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["TELEVYBACKUP_CONFIG_DIR"] = effectiveConfigDirURL().path
+        env["TELEVYBACKUP_DATA_DIR"] = effectiveDataDirURL().path
+        if effectiveDisableKeychain() {
+            env["TELEVYBACKUP_DISABLE_KEYCHAIN"] = "1"
+        }
+        return env
+    }
+
+    private func statusJsonURL() -> URL {
+        effectiveDataDirURL()
             .appendingPathComponent("status")
             .appendingPathComponent("status.json")
     }
 
-    private func logDirURL() -> URL {
+    func logDirURL() -> URL {
         if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_LOG_DIR"], !env.isEmpty {
             return URL(fileURLWithPath: env)
         }
-        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
-            return URL(fileURLWithPath: env).appendingPathComponent("logs")
-        }
-        return defaultDataDir().appendingPathComponent("logs")
+        return effectiveDataDirURL().appendingPathComponent("logs")
     }
 
     func configTomlPath() -> URL {
-        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_CONFIG_DIR"] {
-            return URL(fileURLWithPath: env).appendingPathComponent("config.toml")
-        }
-        return defaultConfigDir().appendingPathComponent("config.toml")
+        effectiveConfigDirURL().appendingPathComponent("config.toml")
     }
 
     func cliPath() -> String? {
@@ -274,41 +330,46 @@ final class AppModel: ObservableObject {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: cli)
         task.arguments = ["--json", "status", "stream"]
-
-        var env = ProcessInfo.processInfo.environment
-        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
-            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
-        }
-        if env["TELEVYBACKUP_DATA_DIR"] == nil {
-            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
-        }
-        task.environment = env
+        task.environment = televybackupToolEnv()
 
         let out = Pipe()
         let err = Pipe()
         task.standardOutput = out
         task.standardError = err
 
+        let bufLock = NSLock()
         var stdoutBuf = ""
         var stderrBuf = ""
 
         out.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
+            bufLock.lock()
             stdoutBuf += String(decoding: data, as: UTF8.self)
+            var lines: [String] = []
             while let idx = stdoutBuf.firstIndex(of: "\n") {
                 let line = String(stdoutBuf[..<idx])
                 stdoutBuf.removeSubrange(...idx)
+                lines.append(line)
+            }
+            bufLock.unlock()
+            for line in lines {
                 self.handleOutputLine(line)
             }
         }
         err.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
+            bufLock.lock()
             stderrBuf += String(decoding: data, as: UTF8.self)
+            var lines: [String] = []
             while let idx = stderrBuf.firstIndex(of: "\n") {
                 let line = String(stderrBuf[..<idx])
                 stderrBuf.removeSubrange(...idx)
+                lines.append(line)
+            }
+            bufLock.unlock()
+            for line in lines {
                 self.handleOutputLine(line)
             }
         }
@@ -367,14 +428,34 @@ final class AppModel: ObservableObject {
         }
         lastDaemonStartAttemptAt = now
 
-        if isDaemonRunning() {
+        let preferBundled = preferBundledDaemonForCurrentEnvironment()
+
+        // If IPC is already ready in our configured data dir, we are done (regardless of other
+        // televybackupd processes that might exist on the system).
+        if waitForDaemonIpcReady(timeoutSeconds: 0.05) {
             return
         }
 
-        // Prefer launchd service if installed (Homebrew services).
-        if kickstartLaunchAgent(label: "homebrew.mxcl.televybackupd") {
-            appendStatusActivity("Daemon kickstarted via launchd (homebrew.mxcl.televybackupd)")
-            return
+        // If we are running in a dev/automation environment (custom dirs and/or keychain disabled),
+        // a system launchd service won't inherit our env vars and will likely bind a different
+        // data dir, so skip it and spawn our bundled daemon instead.
+        if !preferBundled {
+            if isDaemonRunning() {
+                if waitForDaemonIpcReady(timeoutSeconds: 1.5) {
+                    return
+                }
+            }
+
+            // Prefer launchd service if installed (Homebrew services).
+            if kickstartLaunchAgent(label: "homebrew.mxcl.televybackupd") {
+                appendStatusActivity("Daemon kickstarted via launchd (homebrew.mxcl.televybackupd)")
+                if waitForDaemonIpcReady(timeoutSeconds: 2.0) {
+                    return
+                }
+                appendStatusActivity("Daemon starting (IPC not ready yet)")
+                scheduleDaemonIpcRetry()
+                return
+            }
         }
 
         // Fallback: spawn a bundled or PATH daemon for local/dev runs.
@@ -390,15 +471,7 @@ final class AppModel: ObservableObject {
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: daemon)
-
-        var env = ProcessInfo.processInfo.environment
-        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
-            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
-        }
-        if env["TELEVYBACKUP_DATA_DIR"] == nil {
-            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
-        }
-        task.environment = env
+        task.environment = televybackupToolEnv()
 
         // Best-effort logging for the spawned daemon (dev fallback).
         let logDir = logDirURL()
@@ -423,10 +496,85 @@ final class AppModel: ObservableObject {
             try task.run()
             daemonTask = task
             appendStatusActivity("Daemon spawned (\(daemon))")
+            _ = waitForDaemonIpcReady(timeoutSeconds: 2.0)
         } catch {
             appendLog("ERROR: failed to start daemon: \(error)")
             showToast("Failed to start daemon (see ui.log)", isError: true)
         }
+    }
+
+    private func scheduleDaemonIpcRetry() {
+        DispatchQueue.main.async {
+            self.daemonIpcRetryWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                self?.ensureDaemonRunning()
+            }
+            self.daemonIpcRetryWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.2, execute: work)
+        }
+    }
+
+    private func preferBundledDaemonForCurrentEnvironment() -> Bool {
+        if effectiveDisableKeychain() { return true }
+        if launchOverrides.dataDir != nil { return true }
+        if launchOverrides.configDir != nil { return true }
+
+        let env = ProcessInfo.processInfo.environment
+        if let v = env["TELEVYBACKUP_DATA_DIR"], !v.isEmpty { return true }
+        if let v = env["TELEVYBACKUP_CONFIG_DIR"], !v.isEmpty { return true }
+        return false
+    }
+
+    private func waitForDaemonIpcReady(timeoutSeconds: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        let dataDir = effectiveDataDirURL()
+
+        let controlSock = dataDir.appendingPathComponent("ipc").appendingPathComponent("control.sock").path
+        let vaultSock = dataDir.appendingPathComponent("ipc").appendingPathComponent("vault.sock").path
+
+        while Date() < deadline {
+            if isUnixSocketConnectable(controlSock) && isUnixSocketConnectable(vaultSock) {
+                return true
+            }
+            let tick = min(0.05, max(0, deadline.timeIntervalSinceNow))
+            if tick <= 0 { break }
+            if Thread.isMainThread {
+                // Avoid freezing the UI while waiting for daemon IPC readiness.
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(tick))
+            } else {
+                Thread.sleep(forTimeInterval: tick)
+            }
+        }
+        return false
+    }
+
+    private func isUnixSocketConnectable(_ path: String) -> Bool {
+        // Existence is not enough: stale socket files may remain after a crash.
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+
+        // Keep it simple and portable: attempt a connect() to an AF_UNIX socket.
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+
+        // sun_path is a fixed-size tuple; ensure we don't overflow it.
+        let maxLen = MemoryLayout.size(ofValue: addr.sun_path) - 1
+        guard path.utf8.count <= maxLen else { return false }
+
+        _ = path.withCString { cs in
+            strncpy(&addr.sun_path.0, cs, maxLen)
+        }
+
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        let rc: Int32 = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                connect(fd, sa, len)
+            }
+        }
+        return rc == 0
     }
 
     private func isDaemonRunning() -> Bool {
@@ -908,6 +1056,82 @@ final class AppModel: ObservableObject {
         runProcess(exe: cli, args: ["--events", "backup", "run", "--source", sourcePath, "--label", label])
     }
 
+    func promptRestoreLatest(targetId: String) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Restore"
+        panel.message = "Choose an empty folder to restore into"
+
+        let response = panel.runModal()
+        guard response == .OK, let url = panel.url else { return }
+
+        let path = url.path
+        do {
+            let items = try FileManager.default.contentsOfDirectory(atPath: path)
+            if !items.isEmpty {
+                showToast("Folder must be empty", isError: true)
+                return
+            }
+        } catch {
+            appendLog("ERROR: failed to read restore destination: \(error)")
+            showToast("Failed to read folder (see ui.log)", isError: true)
+            return
+        }
+
+        restoreLatest(targetId: targetId, destinationPath: path)
+    }
+
+    func restoreLatest(targetId: String, destinationPath: String) {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        ensureDaemonRunning()
+        showToast("Starting restore…", isError: false)
+        runProcess(
+            exe: cli,
+            args: [
+                "--events",
+                "restore",
+                "latest",
+                "--target-id",
+                targetId,
+                "--target",
+                destinationPath,
+            ],
+            timeoutSeconds: nil,
+            onExit: { _ in
+                self.refreshRunHistory()
+            }
+        )
+    }
+
+    func verifyLatest(targetId: String) {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        ensureDaemonRunning()
+        showToast("Starting verify…", isError: false)
+        runProcess(
+            exe: cli,
+            args: [
+                "--events",
+                "verify",
+                "latest",
+                "--target-id",
+                targetId,
+            ],
+            timeoutSeconds: nil,
+            onExit: { _ in
+                self.refreshRunHistory()
+            }
+        )
+    }
+
     func chooseSourceFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
@@ -938,6 +1162,159 @@ final class AppModel: ObservableObject {
         if !NSWorkspace.shared.open(dir) {
             showToast("Failed to open logs folder", isError: true)
         }
+    }
+
+    func refreshRunHistory(limit: Int = 200) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.refreshRunHistory(limit: limit) }
+            return
+        }
+        if runHistoryRefreshInFlight { return }
+        runHistoryRefreshInFlight = true
+
+        let dir = logDirURL()
+        DispatchQueue.global(qos: .utility).async {
+            defer {
+                DispatchQueue.main.async {
+                    self.runHistoryRefreshInFlight = false
+                }
+            }
+
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let files = try FileManager.default.contentsOfDirectory(
+                    at: dir,
+                    includingPropertiesForKeys: [.contentModificationDateKey],
+                    options: [.skipsHiddenFiles]
+                )
+                let ndjson = files
+                    .filter { $0.lastPathComponent.hasPrefix("sync-") && $0.pathExtension == "ndjson" }
+                    .sorted { a, b in
+                        let ad = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+                            ?? .distantPast
+                        let bd = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+                            ?? .distantPast
+                        if ad != bd { return ad > bd }
+                        return a.lastPathComponent > b.lastPathComponent
+                    }
+
+                var out: [RunLogSummary] = []
+                out.reserveCapacity(min(limit, ndjson.count))
+                for url in ndjson {
+                    if out.count >= limit { break }
+                    if let item = self.parseRunLogSummary(url: url) {
+                        out.append(item)
+                    }
+                }
+
+                DispatchQueue.main.async {
+                    self.runHistory = out
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.appendLog("ERROR: refresh run history failed: \(error)")
+                    self.showToast("Failed to read run logs", isError: true)
+                    self.runHistory = []
+                }
+            }
+        }
+    }
+
+    private func parseRunLogSummary(url: URL) -> RunLogSummary? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+
+        var kind: String?
+        var targetId: String?
+        var endpointId: String?
+        var sourcePath: String?
+        var status: String?
+        var errorCode: String?
+        var durationSeconds: Double?
+        var snapshotId: String?
+
+        var bytesUploaded: Int64?
+        var bytesDeduped: Int64?
+        var bytesWritten: Int64?
+        var bytesChecked: Int64?
+        var filesRestored: Int64?
+        var chunksDownloaded: Int64?
+        var chunksChecked: Int64?
+
+        var finishedAt: Date?
+
+        for line in text.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+
+            let ts = obj["timestamp"] as? String
+            let fields = obj["fields"] as? [String: Any]
+            let event = fields?["event"] as? String
+            if event == "run.start" {
+                kind = fields?["kind"] as? String ?? kind
+                targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
+                endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
+                sourcePath = (fields?["source_path"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sourcePath
+                snapshotId = fields?["snapshot_id"] as? String ?? snapshotId
+                continue
+            }
+
+            if event == "run.finish" {
+                kind = fields?["kind"] as? String ?? kind
+                targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
+                endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
+                sourcePath = (fields?["source_path"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sourcePath
+                status = fields?["status"] as? String ?? status
+                errorCode = fields?["error_code"] as? String ?? errorCode
+                durationSeconds = (fields?["duration_seconds"] as? NSNumber)?.doubleValue ?? durationSeconds
+                snapshotId = fields?["snapshot_id"] as? String ?? snapshotId
+
+                bytesUploaded = (fields?["bytes_uploaded"] as? NSNumber)?.int64Value ?? bytesUploaded
+                bytesDeduped = (fields?["bytes_deduped"] as? NSNumber)?.int64Value ?? bytesDeduped
+                bytesWritten = (fields?["bytes_written"] as? NSNumber)?.int64Value ?? bytesWritten
+                bytesChecked = (fields?["bytes_checked"] as? NSNumber)?.int64Value ?? bytesChecked
+                filesRestored = (fields?["files_restored"] as? NSNumber)?.int64Value ?? filesRestored
+                chunksDownloaded = (fields?["chunks_downloaded"] as? NSNumber)?.int64Value ?? chunksDownloaded
+                chunksChecked = (fields?["chunks_checked"] as? NSNumber)?.int64Value ?? chunksChecked
+
+                if let ts, let d = Self.parseIso8601(ts) {
+                    finishedAt = d
+                }
+            }
+        }
+
+        guard let kind else { return nil }
+        if kind != "backup" && kind != "restore" && kind != "verify" { return nil }
+
+        return RunLogSummary(
+            id: url.lastPathComponent,
+            kind: kind,
+            targetId: targetId,
+            endpointId: endpointId,
+            sourcePath: sourcePath,
+            snapshotId: snapshotId,
+            status: status,
+            errorCode: errorCode,
+            durationSeconds: durationSeconds,
+            finishedAt: finishedAt,
+            logURL: url,
+            bytesUploaded: bytesUploaded,
+            bytesDeduped: bytesDeduped,
+            bytesWritten: bytesWritten,
+            bytesChecked: bytesChecked,
+            filesRestored: filesRestored,
+            chunksDownloaded: chunksDownloaded,
+            chunksChecked: chunksChecked
+        )
+    }
+
+    private static func parseIso8601(_ s: String) -> Date? {
+        let f1 = ISO8601DateFormatter()
+        f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f1.date(from: s) { return d }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: s)
     }
 
     private func writeConfigToml() throws {
@@ -1194,6 +1571,57 @@ final class AppModel: ObservableObject {
 	        }
 	    }
 
+	    func openMainWindow() {
+	        DispatchQueue.main.async {
+	            self.ensureDaemonRunning()
+	            self.ensureStatusStreamRunning()
+	            self.refresh()
+	            self.refreshRunHistory()
+
+	            let window: NSWindow
+	            if let existing = self.mainWindow {
+	                window = existing
+	            } else {
+	                let root = MainWindowRootView()
+	                    .environmentObject(self)
+	                let controller = NSHostingController(rootView: root)
+	                controller.view.wantsLayer = true
+	                controller.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+	                let w = NSWindow(contentViewController: controller)
+	                w.title = "TelevyBackup"
+	                w.titleVisibility = .visible
+	                if #available(macOS 11.0, *) {
+	                    w.toolbarStyle = .unified
+	                }
+	                w.setContentSize(NSSize(width: 980, height: 640))
+	                w.minSize = NSSize(width: 860, height: 520)
+	                w.maxSize = NSSize(width: 1600, height: 1200)
+	                w.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
+	                w.isReleasedWhenClosed = false
+	                w.center()
+	                self.configureMainWindowIfNeeded(w)
+	                self.mainWindow = w
+	                window = w
+	            }
+
+	            self.configureMainWindowIfNeeded(window)
+	            NSApp.activate(ignoringOtherApps: true)
+	            window.makeKeyAndOrderFront(nil)
+	        }
+	    }
+
+	    private func configureMainWindowIfNeeded(_ window: NSWindow) {
+	        if !window.isOpaque {
+	            window.isOpaque = true
+	        }
+	        if window.backgroundColor != .windowBackgroundColor {
+	            window.backgroundColor = .windowBackgroundColor
+	        }
+	        if window.appearance?.name != .vibrantLight {
+	            window.appearance = NSAppearance(named: .vibrantLight)
+	        }
+	    }
+
     private func appendLog(_ line: String) {
         let trimmed = sanitizeLogLine(line.trimmingCharacters(in: .newlines))
         guard !trimmed.isEmpty else { return }
@@ -1361,6 +1789,7 @@ final class AppModel: ObservableObject {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
+        task.environment = televybackupToolEnv()
 
         let out = Pipe()
         let err = Pipe()
@@ -1450,6 +1879,8 @@ final class AppModel: ObservableObject {
             let state = obj["state"] as? String ?? ""
             let kind = obj["kind"] as? String ?? ""
             DispatchQueue.main.async {
+                self.lastTaskKind = kind
+                self.lastTaskState = state
                 if state == "running" {
                     self.isRunning = true
                     self.phase = kind
@@ -1481,7 +1912,18 @@ final class AppModel: ObservableObject {
                     self.currentBytesUploaded = bytesUploaded
                     self.currentBytesDeduped = bytesDeduped
                 }
-                refreshSettings(withSecrets: false)
+                if kind == "backup" {
+                    refreshSettings(withSecrets: false)
+                }
+                showToast(kind == "restore" ? "Restore complete" : (kind == "verify" ? "Verify complete" : "Backup complete"), isError: false)
+                refreshRunHistory()
+            } else if state == "failed" {
+                DispatchQueue.main.async {
+                    self.lastRunOk = false
+                    self.lastRunAt = Date()
+                }
+                showToast(kind == "restore" ? "Restore failed" : (kind == "verify" ? "Verify failed" : "Backup failed"), isError: true)
+                refreshRunHistory()
             }
         }
     }
@@ -1511,6 +1953,8 @@ final class AppModel: ObservableObject {
             DispatchQueue.main.async {
                 self.isRunning = true
                 self.phase = "running"
+                self.lastTaskKind = nil
+                self.lastTaskState = nil
             }
         }
         appendLog("$ \(exe) \(args.joined(separator: " "))")
@@ -1518,15 +1962,7 @@ final class AppModel: ObservableObject {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
-
-        var env = ProcessInfo.processInfo.environment
-        if env["TELEVYBACKUP_CONFIG_DIR"] == nil {
-            env["TELEVYBACKUP_CONFIG_DIR"] = defaultConfigDir().path
-        }
-        if env["TELEVYBACKUP_DATA_DIR"] == nil {
-            env["TELEVYBACKUP_DATA_DIR"] = defaultDataDir().path
-        }
-        task.environment = env
+        task.environment = televybackupToolEnv()
 
         let out = Pipe()
         let err = Pipe()
@@ -1540,26 +1976,39 @@ final class AppModel: ObservableObject {
             try? input.fileHandleForWriting.close()
         }
 
+        let bufLock = NSLock()
         var stdoutBuf = ""
         var stderrBuf = ""
 
         out.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
+            bufLock.lock()
             stdoutBuf += String(decoding: data, as: UTF8.self)
+            var lines: [String] = []
             while let idx = stdoutBuf.firstIndex(of: "\n") {
                 let line = String(stdoutBuf[..<idx])
                 stdoutBuf.removeSubrange(...idx)
+                lines.append(line)
+            }
+            bufLock.unlock()
+            for line in lines {
                 self.handleOutputLine(line)
             }
         }
         err.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty { return }
+            bufLock.lock()
             stderrBuf += String(decoding: data, as: UTF8.self)
+            var lines: [String] = []
             while let idx = stderrBuf.firstIndex(of: "\n") {
                 let line = String(stderrBuf[..<idx])
                 stderrBuf.removeSubrange(...idx)
+                lines.append(line)
+            }
+            bufLock.unlock()
+            for line in lines {
                 self.handleOutputLine(line)
             }
         }
@@ -1590,6 +2039,33 @@ final class AppModel: ObservableObject {
             } catch {
                 self.handleOutputLine("ERROR: failed to run process: \(error)")
             }
+            // Stop streaming, read remaining output, and drain buffered lines BEFORE deciding whether
+            // to show a generic failure toast (prevents duplicate failure toasts).
+            out.fileHandleForReading.readabilityHandler = nil
+            err.fileHandleForReading.readabilityHandler = nil
+
+            let outRest = out.fileHandleForReading.readDataToEndOfFile()
+            let errRest = err.fileHandleForReading.readDataToEndOfFile()
+
+            bufLock.lock()
+            if !outRest.isEmpty { stdoutBuf += String(decoding: outRest, as: UTF8.self) }
+            if !errRest.isEmpty { stderrBuf += String(decoding: errRest, as: UTF8.self) }
+            let stdoutRemaining = stdoutBuf
+            let stderrRemaining = stderrBuf
+            stdoutBuf = ""
+            stderrBuf = ""
+            bufLock.unlock()
+
+            for line in stdoutRemaining.split(separator: "\n", omittingEmptySubsequences: true) {
+                self.handleOutputLine(String(line))
+            }
+            for line in stderrRemaining.split(separator: "\n", omittingEmptySubsequences: true) {
+                self.handleOutputLine(String(line))
+            }
+
+            // Ensure any queued `handleOutputLine` UI updates have been applied.
+            DispatchQueue.main.sync {}
+
             DispatchQueue.main.async {
                 if updateTaskState {
                     self.isRunning = false
@@ -1603,17 +2079,12 @@ final class AppModel: ObservableObject {
                         }
                         self.lastRunAt = Date()
                         self.taskStartedAt = nil
-                        self.showToast("Backup failed", isError: true)
+                        if self.lastTaskState != "failed" {
+                            let k = self.lastTaskKind ?? "task"
+                            self.showToast("\(k.capitalized) failed", isError: true)
+                        }
                     }
                 }
-                out.fileHandleForReading.readabilityHandler = nil
-                err.fileHandleForReading.readabilityHandler = nil
-            }
-            if !stdoutBuf.isEmpty {
-                self.handleOutputLine(stdoutBuf.trimmingCharacters(in: .newlines))
-            }
-            if !stderrBuf.isEmpty {
-                self.handleOutputLine(stderrBuf.trimmingCharacters(in: .newlines))
             }
             if let onExit {
                 DispatchQueue.main.async { onExit(status) }
@@ -1622,10 +2093,7 @@ final class AppModel: ObservableObject {
     }
 
     private func controlDirURL() -> URL {
-        if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
-            return URL(fileURLWithPath: env).appendingPathComponent("control")
-        }
-        return defaultDataDir().appendingPathComponent("control")
+        effectiveDataDirURL().appendingPathComponent("control")
     }
 
     func triggerBackupNowAllEnabled() {
@@ -1652,7 +2120,9 @@ final class AppModel: ObservableObject {
                 }
                 try FileManager.default.moveItem(at: tmp, to: path)
 
+                let finalPath = path.path
                 DispatchQueue.main.async {
+                    self.appendLog("Manual backup trigger written: \(finalPath)")
                     self.appendStatusActivity("Manual backup trigger written (all enabled targets)")
                     self.showToast(anyRunning ? "Queued backup…" : "Starting backup…", isError: false)
                 }
@@ -1835,9 +2305,9 @@ struct PopoverRootView: View {
                 StatusLED(color: statusColor)
 
                 Button {
-                    model.openSettingsWindow()
+                    model.openMainWindow()
                 } label: {
-                    Image(systemName: "gearshape.fill")
+                    Image(systemName: "rectangle.grid.2x2.fill")
                         .font(.system(size: 13, weight: .semibold))
                         .frame(width: 22, height: 22)
                         .background(Color.white.opacity(0.26), in: RoundedRectangle(cornerRadius: 10))
@@ -1847,6 +2317,7 @@ struct PopoverRootView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                .help("Open main window")
             }
             .padding(.bottom, 12)
 
@@ -2964,6 +3435,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if ProcessInfo.processInfo.environment["TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH"] != "0" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 self.showPopover(nil)
+            }
+        }
+
+        let env = ProcessInfo.processInfo.environment
+        if env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1" || env["TELEVYBACKUP_UI_DEMO"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                NSApp.activate(ignoringOtherApps: true)
+                ModelStore.shared.openSettingsWindow()
+            }
+        }
+
+        // Fallback: if the status item/popover isn't visible (common when launching from Terminal or
+        // when the menu bar is hidden), open Settings so the user has a visible UI entrypoint.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
+            if env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1" || env["TELEVYBACKUP_UI_DEMO"] == "1" {
+                return
+            }
+            if self.statusItem?.button == nil {
+                NSApp.activate(ignoringOtherApps: true)
+                ModelStore.shared.openSettingsWindow()
+                return
+            }
+            if ProcessInfo.processInfo.environment["TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH"] != "0",
+               !self.popover.isShown
+            {
+                self.showPopover(nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    if !self.popover.isShown {
+                        NSApp.activate(ignoringOtherApps: true)
+                        ModelStore.shared.openSettingsWindow()
+                    }
+                }
             }
         }
     }

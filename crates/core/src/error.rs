@@ -7,6 +7,12 @@ pub enum Error {
     #[error("invalid config: {message}")]
     InvalidConfig { message: String },
 
+    #[error("bootstrap missing: {message}")]
+    BootstrapMissing { message: String },
+
+    #[error("bootstrap decrypt failed: {message}")]
+    BootstrapDecryptFailed { message: String },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -45,6 +51,8 @@ impl Error {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidConfig { .. } => "config.invalid",
+            Self::BootstrapMissing { .. } => "bootstrap.missing",
+            Self::BootstrapDecryptFailed { .. } => "bootstrap.decrypt_failed",
             Self::Io(_) => "io",
             Self::Sqlite(_) => "sqlite",
             Self::SqliteMigrate(_) => "sqlite.migrate",
