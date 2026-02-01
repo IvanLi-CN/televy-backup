@@ -67,3 +67,6 @@
 | 0011 | daemon 状态 IPC：替换 file-based 状态源 | 已完成 | `0011:daemon-status-ipc/PLAN.md` | 2026-01-26 | 实现分支：`feat/0011-daemon-status-ipc` |
 | 0012 | 备份远端索引权威 + 本地自动同步（remote-first） | 待实现 | `0012:remote-first-index-sync/PLAN.md` | 2026-01-27 |  |
 | nvr79 | 开发期绕过 Keychain（codesign + vault key；daemon-only） | 待实现 | `nvr79:avoid-keychain-in-dev/PLAN.md` | 2026-01-28 | 已冻结：`TELEVYBACKUP_DISABLE_KEYCHAIN` + `vault.key` + daemon control IPC |
+| fn4ny | Settings：配置整包导出/导入（keyed config bundle） | 待实现 | `fn4ny:config-bundle-export-import/PLAN.md` | 2026-02-01 |  |
+| r6ceq | 索引按 Endpoint 隔离 + 禁止 chat 复用 | 待实现 | `r6ceq:endpoint-scoped-index-chat-uniqueness/PLAN.md` | 2026-02-01 |  |
+| 4fexy | Master key 轮换（可暂停/继续/取消） | 待实现 | `4fexy:master-key-rotation/PLAN.md` | 2026-02-01 | 依赖：`r6ceq` |
