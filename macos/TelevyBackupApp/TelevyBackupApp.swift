@@ -93,6 +93,20 @@ final class AppModel: ObservableObject {
     private var lastTaskState: String? = nil
     private let launchOverrides: LaunchOverrides = .parse(CommandLine.arguments)
 
+    private enum UIDemo {
+        static var enabled: Bool {
+            ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1"
+        }
+
+        static var scene: String {
+            ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
+        }
+
+        static var isMainWindow: Bool {
+            enabled && scene.hasPrefix("main-window")
+        }
+    }
+
     struct StatusActivityItem: Identifiable {
         let id = UUID()
         let at: Date
@@ -124,6 +138,156 @@ final class AppModel: ObservableObject {
 
     init() {
         startStatusStaleTimer()
+        installUIDemoDataIfNeeded()
+    }
+
+    private func installUIDemoDataIfNeeded() {
+        guard UIDemo.isMainWindow else { return }
+        if statusSnapshot == nil {
+            let now = Date()
+            let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
+
+            statusSnapshot = StatusSnapshot(
+                type: "status.snapshot",
+                schemaVersion: 1,
+                generatedAt: nowMs,
+                source: StatusSource(kind: "demo", detail: UIDemo.scene),
+                global: StatusGlobal(
+                    up: StatusRate(bytesPerSecond: 0),
+                    down: StatusRate(bytesPerSecond: 0),
+                    upTotal: StatusCounter(bytes: 0),
+                    downTotal: StatusCounter(bytes: 0),
+                    uiUptimeSeconds: 42.0
+                ),
+                targets: [
+                    StatusTarget(
+                        targetId: "t_demo_a",
+                        label: "photos",
+                        sourcePath: "/Users/ivan/Demo/Photos",
+                        endpointId: "ep_demo_a",
+                        enabled: true,
+                        state: "idle",
+                        runningSince: nil,
+                        up: StatusRate(bytesPerSecond: nil),
+                        upTotal: StatusCounter(bytes: 1_234_567_890),
+                        progress: nil,
+                        lastRun: StatusTargetRunSummary(
+                            finishedAt: "2026-02-01T06:12:00Z",
+                            durationSeconds: 723.4,
+                            status: "succeeded",
+                            errorCode: nil,
+                            filesIndexed: 12_345,
+                            bytesUploaded: 1_835_239_424,
+                            bytesDeduped: 12_345_678
+                        )
+                    ),
+                    StatusTarget(
+                        targetId: "t_demo_b",
+                        label: "docs",
+                        sourcePath: "/Users/ivan/Demo/Documents",
+                        endpointId: "ep_demo_a",
+                        enabled: true,
+                        state: "idle",
+                        runningSince: nil,
+                        up: StatusRate(bytesPerSecond: nil),
+                        upTotal: StatusCounter(bytes: 98_765_432),
+                        progress: nil,
+                        lastRun: StatusTargetRunSummary(
+                            finishedAt: "2026-02-01T06:25:00Z",
+                            durationSeconds: 152.0,
+                            status: "failed",
+                            errorCode: "config.invalid",
+                            filesIndexed: 234,
+                            bytesUploaded: 0,
+                            bytesDeduped: 0
+                        )
+                    ),
+                    StatusTarget(
+                        targetId: "t_demo_c",
+                        label: "music",
+                        sourcePath: "/Users/ivan/Demo/Music",
+                        endpointId: "ep_demo_b",
+                        enabled: false,
+                        state: "idle",
+                        runningSince: nil,
+                        up: StatusRate(bytesPerSecond: nil),
+                        upTotal: StatusCounter(bytes: 0),
+                        progress: nil,
+                        lastRun: nil
+                    ),
+                ]
+            )
+            statusSnapshotReceivedAt = now
+        }
+
+        if runHistory.isEmpty {
+            let logDir = logDirURL()
+            runHistory = [
+                RunLogSummary(
+                    id: "r_demo_backup",
+                    kind: "backup",
+                    targetId: "t_demo_a",
+                    endpointId: "ep_demo_a",
+                    sourcePath: "/Users/ivan/Demo/Photos",
+                    snapshotId: "s_demo_001",
+                    status: "succeeded",
+                    errorCode: nil,
+                    durationSeconds: 723.4,
+                    startedAt: Date(timeIntervalSince1970: 1_706_000_000),
+                    finishedAt: Date(timeIntervalSince1970: 1_706_000_723),
+                    logURL: logDir.appendingPathComponent("demo-backup.ndjson"),
+                    bytesUploaded: 1_835_239_424,
+                    bytesDeduped: 12_345_678,
+                    bytesWritten: nil,
+                    bytesChecked: nil,
+                    filesRestored: nil,
+                    chunksDownloaded: nil,
+                    chunksChecked: nil
+                ),
+                RunLogSummary(
+                    id: "r_demo_verify",
+                    kind: "verify",
+                    targetId: "t_demo_b",
+                    endpointId: "ep_demo_a",
+                    sourcePath: "/Users/ivan/Demo/Documents",
+                    snapshotId: "s_demo_001",
+                    status: "failed",
+                    errorCode: "config.invalid",
+                    durationSeconds: 5.2,
+                    startedAt: Date(timeIntervalSince1970: 1_706_000_900),
+                    finishedAt: Date(timeIntervalSince1970: 1_706_000_905),
+                    logURL: logDir.appendingPathComponent("demo-verify.ndjson"),
+                    bytesUploaded: 0,
+                    bytesDeduped: 0,
+                    bytesWritten: nil,
+                    bytesChecked: 0,
+                    filesRestored: nil,
+                    chunksDownloaded: nil,
+                    chunksChecked: 0
+                ),
+                RunLogSummary(
+                    id: "r_demo_unknown",
+                    kind: "restore",
+                    targetId: nil,
+                    endpointId: "ep_demo_a",
+                    sourcePath: nil,
+                    snapshotId: "s_demo_000",
+                    status: "succeeded",
+                    errorCode: nil,
+                    durationSeconds: 61.0,
+                    startedAt: Date(timeIntervalSince1970: 1_706_000_100),
+                    finishedAt: Date(timeIntervalSince1970: 1_706_000_161),
+                    logURL: logDir.appendingPathComponent("demo-restore.ndjson"),
+                    bytesUploaded: nil,
+                    bytesDeduped: nil,
+                    bytesWritten: 123_456_789,
+                    bytesChecked: nil,
+                    filesRestored: 42,
+                    chunksDownloaded: 128,
+                    chunksChecked: nil
+                ),
+            ]
+        }
     }
 
     private enum LegacyConfigWriteError: LocalizedError {
@@ -1578,10 +1742,14 @@ final class AppModel: ObservableObject {
 
 	    func openMainWindow() {
 	        DispatchQueue.main.async {
-	            self.ensureDaemonRunning()
-	            self.ensureStatusStreamRunning()
-	            self.refresh()
-	            self.refreshRunHistory()
+	            if UIDemo.isMainWindow {
+	                self.installUIDemoDataIfNeeded()
+	            } else {
+	                self.ensureDaemonRunning()
+	                self.ensureStatusStreamRunning()
+	                self.refresh()
+	                self.refreshRunHistory()
+	            }
 
 	            let window: NSWindow
 	            if let existing = self.mainWindow {
@@ -3422,6 +3590,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Best-effort: keep daemon running even if the popover is not opened yet.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            // UI demo (used for scripted screenshots) should not depend on daemon/keychain.
+            if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1" {
+                return
+            }
             ModelStore.shared.ensureDaemonRunning()
             ModelStore.shared.ensureStatusStreamRunning()
         }
@@ -3444,7 +3616,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let env = ProcessInfo.processInfo.environment
-        if env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1" || env["TELEVYBACKUP_UI_DEMO"] == "1" {
+        let shouldOpenSettings = env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1"
+        let shouldOpenMainWindow = env["TELEVYBACKUP_OPEN_MAIN_WINDOW_ON_LAUNCH"] == "1"
+
+        if shouldOpenMainWindow {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                NSApp.activate(ignoringOtherApps: true)
+                ModelStore.shared.openMainWindow()
+            }
+        }
+
+        if shouldOpenSettings {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 NSApp.activate(ignoringOtherApps: true)
                 ModelStore.shared.openSettingsWindow()
@@ -3454,7 +3636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Fallback: if the status item/popover isn't visible (common when launching from Terminal or
         // when the menu bar is hidden), open Settings so the user has a visible UI entrypoint.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.70) {
-            if env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1" || env["TELEVYBACKUP_UI_DEMO"] == "1" {
+            if shouldOpenSettings || shouldOpenMainWindow {
                 return
             }
             if self.statusItem?.button == nil {

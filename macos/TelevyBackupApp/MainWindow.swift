@@ -46,7 +46,13 @@ struct MainWindowRootView: View {
             }
         }
         .onAppear {
-            model.refreshRunHistory()
+            if MainWindowUIDemo.enabled {
+                if selection == nil {
+                    selection = MainWindowUIDemo.initialSelection(targets: model.statusSnapshot?.targets ?? [])
+                }
+            } else {
+                model.refreshRunHistory()
+            }
         }
         .toolbar {
             ToolbarItemGroup {
@@ -134,15 +140,40 @@ struct MainWindowRootView: View {
         {
             TargetDetailView(target: target)
         } else {
-            VStack(spacing: 10) {
+            VStack(spacing: 12) {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 44, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+
                 Text("Select a target")
                     .font(.system(size: 18, weight: .bold))
+
                 Text("Pick a target on the left to see backup / restore / verify history.")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+}
+
+private enum MainWindowUIDemo {
+    static var enabled: Bool {
+        ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1"
+    }
+
+    static var scene: String {
+        ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
+    }
+
+    static func initialSelection(targets: [StatusTarget]) -> String? {
+        guard enabled else { return nil }
+        if scene == "main-window-target-detail" {
+            return targets.first?.targetId
+        }
+        return nil
     }
 }
 

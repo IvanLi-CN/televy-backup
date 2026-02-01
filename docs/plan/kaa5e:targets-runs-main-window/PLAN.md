@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-01-29
-- Last: 2026-01-31
+- Last: 2026-02-01
 
 ## 背景 / 问题陈述
 
@@ -121,7 +121,14 @@
 - 日志体量增长：目录扫描可能变慢，需要增量缓存或上限策略（默认仅展示最近 N 条）。
 - 任务并发：UI 侧需明确“同一时间仅允许一个任务运行”的行为与提示（沿用现有 isRunning 语义）。
 
+## UI 设计（Design assets）
+
+- Main window（Targets list）：[design/main-window-targets.png](./design/main-window-targets.png)
+- Main window（Target detail / runs）：[design/main-window-target-detail.png](./design/main-window-target-detail.png)
+- 生成脚本：`scripts/macos/capture-main-window.sh`
+
 ## Change log
 
 - 2026-01-29: 使用 `docs-plan-id` 生成 `kaa5e`。
 - 2026-01-31: 落地主界面 Targets/详情与 Restore/Verify（latest），并补齐 run log 的按 target 归档（含 Unknown target 兜底）。
+- 2026-02-01: 补齐主界面 UI 截图（用于计划产物归档与回顾）。
