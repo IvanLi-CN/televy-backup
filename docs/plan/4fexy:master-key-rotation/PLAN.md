@@ -9,7 +9,7 @@
 ## 背景 / 问题陈述
 
 - 系统内长期只允许一个 active master key（`televybackup.master_key`）。
-- 为了实现“未完成前旧 master key 仍可用”且可断点续跑，轮换期间会在本地 secrets store 暂存一个 **pending master key**（`televybackup.master_key.next`）：它不是 active key，普通 backup/restore/verify 仍只使用 `televybackup.master_key`。
+- 为了实现“未完成前旧 master key 仍可用”且可断点续跑，轮换期间会在本地 secrets store 暂存一个 **pending master key**（`televybackup.master_key.next`）：它不是 active key；在轮换结束前，旧世界语义上仍由 `televybackup.master_key` 解密（不会隐式切换到 `.next`），但在 `staged|running|paused` 期间系统会拒绝启动新的 backup/restore/verify（详见 Requirements）。
 - 在导入 Config Bundle 时，可能出现“bundle TBK1（新 master key）与本机 master key 不一致”，同时本机已配置 targets（正在使用旧 master key 的备份世界）。
 - 需求：提供一个 **master key 轮换**流程：
   - 可暂停/继续/取消；
