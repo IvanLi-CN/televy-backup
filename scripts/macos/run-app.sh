@@ -14,7 +14,11 @@ for _ in {1..40}; do
 done
 
 app="$root_dir/target/macos-app/TelevyBackup.app"
-if [ "${TELEVYBACKUP_DISABLE_KEYCHAIN:-}" = "1" ]; then
+
+# Development default: disable Keychain to avoid prompts and keep local runs reproducible.
+# Override with `TELEVYBACKUP_DISABLE_KEYCHAIN=0` for production-like behavior.
+disable_keychain="${TELEVYBACKUP_DISABLE_KEYCHAIN:-1}"
+if [ "$disable_keychain" = "1" ]; then
   data_dir="${TELEVYBACKUP_DATA_DIR:-}"
   config_dir="${TELEVYBACKUP_CONFIG_DIR:-}"
   if [ -z "$data_dir" ] || [ -z "$config_dir" ]; then

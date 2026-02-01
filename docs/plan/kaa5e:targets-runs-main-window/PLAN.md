@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-29
-- Last: 2026-01-29
+- Last: 2026-01-31
 
 ## 背景 / 问题陈述
 
@@ -110,11 +110,11 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: macOS 主界面窗口（Targets 列表/详情路由）与浮窗入口调整
-- [ ] M2: Restore UI（空目录校验 + 触发 restore latest + 任务反馈）
-- [ ] M3: Verify UI（触发 verify latest + 任务反馈）
-- [ ] M4: CLI `verify latest` + `restore/verify` run log 补齐 `target_id`
-- [ ] M5: 执行记录摘要聚合展示（按 target 分组 + 最近 N 条）与端到端验收
+- [x] M1: macOS 主界面窗口（Targets 列表/详情路由）与浮窗入口调整
+- [x] M2: Restore UI（空目录校验 + 触发 restore latest + 任务反馈）
+- [x] M3: Verify UI（触发 verify latest + 任务反馈）
+- [x] M4: CLI `verify latest` + `restore/verify` run log 补齐 `target_id`
+- [x] M5: 执行记录摘要聚合展示（按 target 分组 + 最近 N 条）与端到端验收
 
 ## 风险与开放问题
 
@@ -124,3 +124,4 @@
 ## Change log
 
 - 2026-01-29: 使用 `docs-plan-id` 生成 `kaa5e`。
+- 2026-01-31: 落地主界面 Targets/详情与 Restore/Verify（latest），并补齐 run log 的按 target 归档（含 Unknown target 兜底）。

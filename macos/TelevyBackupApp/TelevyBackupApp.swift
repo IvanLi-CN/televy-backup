@@ -1240,6 +1240,7 @@ final class AppModel: ObservableObject {
         var chunksDownloaded: Int64?
         var chunksChecked: Int64?
 
+        var startedAt: Date?
         var finishedAt: Date?
 
         for line in text.split(separator: "\n") {
@@ -1256,6 +1257,9 @@ final class AppModel: ObservableObject {
                 endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
                 sourcePath = (fields?["source_path"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sourcePath
                 snapshotId = fields?["snapshot_id"] as? String ?? snapshotId
+                if startedAt == nil, let ts, let d = Self.parseIso8601(ts) {
+                    startedAt = d
+                }
                 continue
             }
 
@@ -1296,6 +1300,7 @@ final class AppModel: ObservableObject {
             status: status,
             errorCode: errorCode,
             durationSeconds: durationSeconds,
+            startedAt: startedAt,
             finishedAt: finishedAt,
             logURL: url,
             bytesUploaded: bytesUploaded,

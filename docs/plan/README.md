@@ -67,6 +67,6 @@
 | 0011 | daemon 状态 IPC：替换 file-based 状态源 | 已完成 | `0011:daemon-status-ipc/PLAN.md` | 2026-01-26 | 实现分支：`feat/0011-daemon-status-ipc` |
 | 0012 | 备份远端索引权威 + 本地自动同步（remote-first） | 已完成 | `0012:remote-first-index-sync/PLAN.md` | 2026-01-29 | 实现分支：`feat/0012-remote-first-index-sync` |
 | 0013 | MTProto dialogs picker（自动选可用 chat_id） | 已完成 | `0013:mtproto-dialogs-picker/PLAN.md` | 2026-01-29 | CLI+UI e2e 已确认；状态面板 Up/UpTotal 上传中实时更新 |
-| kaa5e | Targets 主界面与执行记录（按目标聚合 backup/restore/verify） | 待实现 | `kaa5e:targets-runs-main-window/PLAN.md` | 2026-01-29 |  |
+| kaa5e | Targets 主界面与执行记录（按目标聚合 backup/restore/verify） | 已完成 | `kaa5e:targets-runs-main-window/PLAN.md` | 2026-01-31 | 实现分支：`feat/kaa5e-targets-runs-main-window` |
 | nvr79 | 开发期绕过 Keychain（codesign + vault key；daemon-only） | 已完成 | `nvr79:avoid-keychain-in-dev/PLAN.md` | 2026-01-28 | 已落地：`TELEVYBACKUP_DISABLE_KEYCHAIN` + `vault.key` + daemon control IPC + tests |
 | kpmqp | 修复 daemon IPC 可靠性（解锁 Recovery Key/Verify） | 已完成 | `kpmqp:fix-daemon-ipc-sockets/PLAN.md` | 2026-01-31 | PR #30；实现分支：`fix/kpmqp-daemon-ipc-sockets`；待主人验收 |
