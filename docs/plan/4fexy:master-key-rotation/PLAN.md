@@ -23,7 +23,7 @@
 
 - 提供可恢复的 master key 轮换工作流（start/pause/resume/cancel/status），并把状态持久化到本地，支持重启后继续。
 - 轮换期间并行存在：
-  - active world（旧 master key）：继续可 backup/restore/verify（不回归）。
+  - active world（旧 master key）：旧世界保持可用且不被破坏（可在轮换结束/取消后继续 backup/restore/verify）。
   - pending world（新 master key）：执行“全量备份重建”直到完成。
 - 轮换完成（commit）后：
   - active master key 切换为新 master key；
@@ -74,7 +74,7 @@
 - 在 `staged|running|paused` 期间：
   - active 仍为旧 master key；
   - pinned bootstrap/catalog 不得切换；
-  - 旧 per-endpoint 索引库不得被覆盖（只读/继续服务旧世界）。
+  - 旧 per-endpoint 索引库不得被覆盖（用于回退与轮换结束后继续使用旧世界）。
 
 #### 3.1) 互斥与限流（frozen）
 
@@ -92,11 +92,11 @@
 #### 5) per-endpoint 索引库双轨（依赖 #r6ceq）
 
 - 轮换期间对每个 endpoint 必须维护两份本地索引库：
-  - 当前：`index.<endpoint_id>.sqlite`（旧世界）
-  - next：`index.<endpoint_id>.sqlite.next`（新世界，轮换备份写入）
+  - 当前：`TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite`（旧世界）
+  - next：`TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite.next`（新世界，轮换备份写入）
 - commit 时进行原子切换：
-  - 旧 `index.<endpoint_id>.sqlite` → `.bak.rotated.<timestamp>`
-  - `index.<endpoint_id>.sqlite.next` → `index.<endpoint_id>.sqlite`
+  - 旧 `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite` → `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite.bak.rotated.<timestamp>`
+  - `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite.next` → `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite`
 
 #### 6) 远端 bootstrap/catalog 双轨
 
