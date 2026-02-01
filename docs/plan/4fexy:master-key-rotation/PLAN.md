@@ -61,10 +61,11 @@
 
 - Rotation state 必须至少包含状态：
   - `idle` / `staged` / `running` / `paused` / `cancelled` / `completed`
+- `staged`（frozen）：轮换请求已被接受，daemon 已写入 rotation state + `master_key.next` 等必要元数据，但“新世界全量备份重建”尚未开始或尚未进入第一个可计量的处理单元；该状态用于支持 daemon 异步启动与断点续跑。
 - 支持操作：
-  - `start`：进入 `running`
-  - `pause`：`running` → `paused`
-  - `resume`：`paused` → `running`
+  - `start`：`idle` → `staged`（daemon 异步执行；随后进入 `running`）
+  - `pause`：`staged|running` → `paused`
+  - `resume`：`paused` → `staged`（daemon 异步继续；随后进入 `running`）
   - `cancel`：`staged|running|paused` → `cancelled`（回到旧世界；不触碰旧 key）
 - `status` 必须可查询：返回当前状态、进度（每 endpoint/target）、以及下一步建议动作。
 - `pause/cancel` 必须可在轮换任务运行时由“另一个进程”触发：实现上通过更新 rotation state 的 `requestedAction` 字段，并由运行中的轮换任务在安全检查点尽快停下（见 `./contracts/file-formats.md`）。

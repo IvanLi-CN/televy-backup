@@ -40,6 +40,8 @@
 
 - rotation state 文件不得包含 master key 明文；master key（old/new）必须存放在 secrets store（加密）。
 - `requestedAction` 用于跨进程控制（实现 pause/cancel）：当运行中的轮换任务检测到 `pause|cancel` 时，应在安全检查点（例如完成一个文件/pack 上传后）尽快停下，并将 `state` 置为 `paused|cancelled`。
+- `staged`：轮换请求已被接受且必要元数据已写入（rotation state / `master_key.next`），daemon 可能尚未开始处理或尚未进入第一个可计量单元；该状态用于支持 daemon 异步启动与断点续跑。
+- `requestedAction` 在 `staged` 也生效：若在 daemon 开始处理前就收到 `pause|cancel`，应优先使轮换停留在 `paused` 或进入 `cancelled`。
 - `pendingCatalogObjectIdByEndpoint` 用于“新世界 catalog 的 unpinned 指针”：轮换期间每个 endpoint 都会生成/更新一个 catalog 文档但不 pin；其 object_id 仅记录在本地 rotation state，commit 时才设置为 pinned。
 
 ## Index DB dual-track paths（依赖 #r6ceq）

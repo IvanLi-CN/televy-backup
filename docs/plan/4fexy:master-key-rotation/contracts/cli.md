@@ -40,8 +40,8 @@ televybackup --json secrets rotate-master-key start
 
 语义：
 
-- `start` 为长耗时操作：执行“新世界全量备份重建”直到完成、被 pause/cancel、或遇到不可恢复错误。
-- GUI/CLI 可通过 `status` 轮询或事件流展示进度；`pause/cancel` 可由另一个进程触发（见下文）。
+- `start` 为控制面操作：将轮换请求写入 rotation state 并让 daemon 异步开始执行（状态先进入 `staged`，随后进入 `running`）。
+- GUI/CLI 通过 `status` 轮询或事件流展示进度；`pause/cancel` 可由另一个进程触发（见下文）。
 
 Input (JSON on stdin):
 
@@ -72,9 +72,9 @@ televybackup --json secrets rotate-master-key cancel
 
 语义（跨进程控制，frozen）：
 
-- `pause`：将 rotation state 的 `requestedAction` 置为 `pause`。运行中的轮换任务在安全检查点尽快停下，并将 `state` 置为 `paused`（不清理 pending 信息）。
+- `pause`：将 rotation state 的 `requestedAction` 置为 `pause`。daemon 在安全检查点尽快停下，并将 `state` 置为 `paused`（不清理 pending 信息）。
 - `cancel`：将 `requestedAction` 置为 `cancel`。运行中的轮换任务在安全检查点尽快停下，并将 `state` 置为 `cancelled`，随后清理 `master_key.next` 与 rotation state（见 `contracts/config.md`）。
-- `resume`：清除 `requestedAction`，并继续执行尚未完成的 targets（长耗时）。
+- `resume`：清除 `requestedAction`，并将状态推进为 `staged`（daemon 异步继续；随后进入 `running`）。
 
 ## `televybackup secrets rotate-master-key commit`
 
