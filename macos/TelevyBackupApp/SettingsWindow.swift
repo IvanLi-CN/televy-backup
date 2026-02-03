@@ -28,6 +28,89 @@ struct CliSecretsError: Decodable {
     let retryable: Bool?
 }
 
+struct CliSettingsExportBundleResponse: Decodable {
+    let bundleKey: String
+    let format: String
+}
+
+struct CliSettingsImportBundleDryRunResponse: Decodable {
+    struct LocalMasterKey: Decodable {
+        let state: String
+    }
+
+    struct BundleTarget: Decodable, Identifiable {
+        let id: String
+        let sourcePath: String
+        let endpointId: String
+        let label: String
+    }
+
+    struct BundleEndpoint: Decodable, Identifiable {
+        let id: String
+        let chatId: String
+        let mode: String
+    }
+
+    struct SecretsCoverage: Decodable {
+        let presentKeys: [String]
+        let excludedKeys: [String]
+        let missingKeys: [String]
+    }
+
+    struct Bundle: Decodable {
+        let settingsVersion: Int
+        let targets: [BundleTarget]
+        let endpoints: [BundleEndpoint]
+        let secretsCoverage: SecretsCoverage
+    }
+
+    struct Bootstrap: Decodable {
+        let state: String
+        let details: [String: String]?
+    }
+
+    struct RemoteLatest: Decodable {
+        let state: String
+        let snapshotId: String?
+        let manifestObjectId: String?
+    }
+
+    struct LocalIndex: Decodable {
+        let state: String
+        let details: [String: String]?
+    }
+
+    struct Conflict: Decodable {
+        let state: String
+        let reasons: [String]
+    }
+
+    struct PreflightTarget: Decodable, Identifiable {
+        var id: String { targetId }
+        let targetId: String
+        let sourcePathExists: Bool
+        let bootstrap: Bootstrap
+        let remoteLatest: RemoteLatest
+        let localIndex: LocalIndex
+        let conflict: Conflict
+    }
+
+    struct Preflight: Decodable {
+        let targets: [PreflightTarget]
+    }
+
+    let format: String
+    let localMasterKey: LocalMasterKey
+    let localHasTargets: Bool
+    let nextAction: String
+    let bundle: Bundle
+    let preflight: Preflight
+}
+
+struct CliSettingsImportBundleApplyResponse: Decodable {
+    let ok: Bool
+}
+
 struct SettingsV2: Codable {
     var version: Int
     var schedule: ScheduleV2
@@ -103,7 +186,7 @@ struct TargetScheduleOverrideV2: Codable {
 enum SettingsSection: String, CaseIterable, Identifiable {
     case targets = "Targets"
     case endpoints = "Endpoints"
-    case recoveryKey = "Recovery Key"
+    case recoveryKey = "Backup Config"
     case schedule = "Schedule"
 
     var id: String { rawValue }
@@ -284,7 +367,6 @@ struct SettingsWindowRootView: View {
     @State private var settings: SettingsV2?
     @State private var secrets: CliSecretsPresence?
     @State private var secretsError: CliSecretsError?
-    @State private var vaultKeyPresent: Bool = false
     @State private var loadError: String?
 
     @State private var selectedTargetId: String?
@@ -294,9 +376,7 @@ struct SettingsWindowRootView: View {
     @State private var saveSeq: Int = 0
     @State private var reloadSeq: Int = 0
 
-    @State private var goldKey: String?
-    @State private var goldKeyRevealed: Bool = false
-    @State private var showImportRecoveryKeySheet: Bool = false
+    @State private var showImportConfigBundleSheet: Bool = false
 
     @State private var pendingLastTouchedEndpointId: String?
     @State private var pendingLastSelectedEndpointId: String?
@@ -374,7 +454,7 @@ struct SettingsWindowRootView: View {
         case .endpoints:
             endpointsView
         case .recoveryKey:
-            recoveryKeyView
+            configBundleView
         case .schedule:
             scheduleView
         }
@@ -635,115 +715,50 @@ struct SettingsWindowRootView: View {
         }
     }
 
-    private var recoveryKeyView: some View {
+    private var configBundleView: some View {
         let secretsUnavailable = secretsError != nil
         let secretsRetryable = secretsError?.retryable ?? true
         let masterKeyPresent = secrets?.masterKeyPresent ?? false
-        let showMissing = !secretsUnavailable && !masterKeyPresent
-        let showUnavailable = secretsUnavailable
-        let keychainDisabled = model.isKeychainDisabled()
-        let secretsStoreLabel = keychainDisabled ? "· Dev (no keychain)" : "· Keychain"
 
         return VStack(alignment: .leading, spacing: 14) {
-            Text("Recovery Key")
+            Text("Backup Config")
                 .font(.system(size: 18, weight: .bold))
-            Text("Export/import the gold key (TBK1) to move restore capability across devices.")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
 
             GroupBox {
                 VStack(spacing: 0) {
                     HStack(spacing: 12) {
-                        Text("Vault key")
+                        Text("Export backup config")
                             .font(.system(size: 13, weight: .semibold))
-                            .frame(width: 110, alignment: .leading)
+                            .frame(width: 160, alignment: .leading)
                         Spacer()
-                        Text(showUnavailable ? "Unavailable" : (vaultKeyPresent ? "Present" : "Missing"))
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(showUnavailable ? Color.secondary : (vaultKeyPresent ? Color.green : Color.red))
-                        Text(secretsStoreLabel)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 10)
-
-                    Divider()
-
-                    HStack(spacing: 12) {
-                        Text("Recovery key")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(width: 110, alignment: .leading)
-
-                        Text(recoveryKeyDisplayText())
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(.background)
-                            .clipShape(RoundedRectangle(cornerRadius: 7))
-                            .overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary))
-
-                        Button(goldKeyRevealed ? "Hide" : "Reveal") { toggleRevealRecoveryKey() }
-                            .buttonStyle(.bordered)
-                            .disabled(showUnavailable || !masterKeyPresent)
-
-                        Button("Copy") { copyRecoveryKeyToClipboard() }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(showUnavailable || !masterKeyPresent)
-
-                        if showMissing {
-                            Text("Missing")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.red)
-                                .frame(width: 64, alignment: .trailing)
-                        } else if showUnavailable {
-                            Text("Unavailable")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 64, alignment: .trailing)
-                        }
-                    }
-                    .padding(.vertical, 10)
-
-                    Divider()
-
-                    HStack(spacing: 12) {
-                        Text("Export")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(width: 110, alignment: .leading)
-                        Text("Format: TBK1:<base64url_no_pad>")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Button("Export…") { exportRecoveryKeyToFile() }
-                            .buttonStyle(.bordered)
-                            .disabled(showUnavailable || !masterKeyPresent)
-                    }
-                    .padding(.vertical, 10)
-
-                    Divider()
-
-                    HStack(spacing: 12) {
-                        Text("Import")
-                            .font(.system(size: 13, weight: .semibold))
-                            .frame(width: 110, alignment: .leading)
-                        Text("Import opens a sheet and requires confirmation.")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Button("Import…") {
-                            if showUnavailable && secretsRetryable {
+                        Button("Export…") {
+                            if secretsUnavailable && secretsRetryable {
                                 model.ensureDaemonRunning()
                                 reload()
                             }
-                            showImportRecoveryKeySheet = true
+                            exportBackupConfig()
                         }
-                            .buttonStyle(.bordered)
-                            .disabled(showUnavailable && !secretsRetryable)
+                        .buttonStyle(.bordered)
+                        .disabled(secretsUnavailable || !masterKeyPresent)
+                    }
+                    .padding(.vertical, 10)
+
+                    Divider()
+
+                    HStack(spacing: 12) {
+                        Text("Import backup config")
+                            .font(.system(size: 13, weight: .semibold))
+                            .frame(width: 160, alignment: .leading)
+                        Spacer()
+                        Button("Import…") {
+                            if secretsUnavailable && secretsRetryable {
+                                model.ensureDaemonRunning()
+                                reload()
+                            }
+                            showImportConfigBundleSheet = true
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(secretsUnavailable && !secretsRetryable)
                     }
                     .padding(.vertical, 10)
                 }
@@ -753,21 +768,12 @@ struct SettingsWindowRootView: View {
                 EmptyView()
             }
 
-            Text("New Mac restore requires: recovery key + bot token + chat_id.")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-
             Spacer()
         }
         .padding()
-        .sheet(isPresented: $showImportRecoveryKeySheet) {
-            ImportRecoveryKeySheet(
-                masterKeyPresent: secrets?.masterKeyPresent ?? false,
-                onImport: { key, force in
-                    importRecoveryKey(key: key, force: force)
-                }
-            )
-            .environmentObject(model)
+        .sheet(isPresented: $showImportConfigBundleSheet) {
+            ImportConfigBundleSheet(onApplied: { reload() })
+                .environmentObject(model)
         }
     }
 
@@ -853,7 +859,6 @@ struct SettingsWindowRootView: View {
     private func reload() {
         if SettingsUIDemo.enabled {
             DispatchQueue.main.async {
-                self.vaultKeyPresent = false
                 self.secrets = nil
                 self.loadError = nil
                 self.section = SettingsUIDemo.initialSection
@@ -891,7 +896,6 @@ struct SettingsWindowRootView: View {
             if res.status != 0 {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = false
                     self.loadError = "settings get failed: exit=\(res.status)"
                 }
                 return
@@ -899,7 +903,6 @@ struct SettingsWindowRootView: View {
             guard let data = res.stdout.data(using: .utf8) else {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = false
                     self.loadError = "settings get: bad output"
                 }
                 return
@@ -911,7 +914,6 @@ struct SettingsWindowRootView: View {
             } catch {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.vaultKeyPresent = false
                     self.loadError = "settings get: JSON decode failed"
                 }
                 return
@@ -922,7 +924,6 @@ struct SettingsWindowRootView: View {
                 self.settings = decoded.settings
                 self.secrets = decoded.secrets
                 self.secretsError = decoded.secretsError
-                self.vaultKeyPresent = (decoded.secrets != nil)
                 self.loadError = nil
                 if !SettingsUIDemo.disableAutoSelect {
                     if let selected = self.selectedTargetId {
@@ -947,23 +948,196 @@ struct SettingsWindowRootView: View {
         }
     }
 
-    private func exportRecoveryKeyToFile() {
-        loadRecoveryKeyIfNeeded()
-        guard let goldKey else { return }
+    private func showToast(_ text: String, isError: Bool) {
+        DispatchQueue.main.async {
+            model.toastText = text
+            model.toastIsError = isError
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
+            if model.toastText == text {
+                model.toastText = nil
+            }
+        }
+    }
+
+    private func exportBackupConfig() {
+        model.ensureDaemonRunning()
+        guard let cli = model.cliPath() else {
+            showToast("televybackup CLI not found", isError: true)
+            return
+        }
 
         let panel = NSSavePanel()
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "televybackup-recovery-key.txt"
-        panel.allowedContentTypes = [UTType.plainText]
+        panel.title = "Export backup config"
         panel.prompt = "Export"
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.showsTagField = false
 
-        if panel.runModal() != .OK { return }
-        guard let url = panel.url else { return }
+        let tbconfig = UTType(filenameExtension: "tbconfig")
+        panel.allowedContentTypes = [tbconfig ?? .data]
 
-        do {
-            try goldKey.write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            // Best-effort UX: keep the view responsive; user can retry.
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyyMMdd-HHmmss"
+        let ts = fmt.string(from: Date())
+        panel.nameFieldStringValue = "televybackup-backup-config-\(ts).tbconfig"
+
+        let passphraseLabel = NSTextField(labelWithString: "Passphrase / PIN")
+        passphraseLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+
+        let passphraseField = NSSecureTextField()
+        passphraseField.placeholderString = "Required"
+        passphraseField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+        let messageLabel = NSTextField(labelWithString: "Message (optional)")
+        messageLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+
+        let messageView = CaretFixedNSTextView()
+        messageView.frame = NSRect(x: 0, y: 0, width: 360, height: 88)
+        messageView.isRichText = false
+        messageView.isEditable = true
+        messageView.isSelectable = true
+        messageView.drawsBackground = true
+        messageView.backgroundColor = .textBackgroundColor
+        messageView.textColor = .labelColor
+        messageView.insertionPointColor = .labelColor
+        messageView.focusRingType = .exterior
+        messageView.font = NSFont.systemFont(ofSize: 12)
+        messageView.textContainerInset = NSSize(width: 5, height: 6)
+        messageView.isHorizontallyResizable = false
+        messageView.isVerticallyResizable = true
+        messageView.autoresizingMask = [.width]
+        messageView.textContainer?.widthTracksTextView = true
+        messageView.textContainer?.containerSize = NSSize(
+            width: 360,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+
+        let messageScroll = NSScrollView()
+        messageScroll.hasVerticalScroller = true
+        messageScroll.borderType = .bezelBorder
+        messageScroll.drawsBackground = true
+        messageScroll.documentView = messageView
+
+        let accessory = NSStackView()
+        accessory.orientation = .vertical
+        accessory.spacing = 8
+        accessory.alignment = .leading
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+
+        passphraseField.translatesAutoresizingMaskIntoConstraints = false
+        messageScroll.translatesAutoresizingMaskIntoConstraints = false
+
+        accessory.addArrangedSubview(passphraseLabel)
+        accessory.addArrangedSubview(passphraseField)
+        accessory.addArrangedSubview(messageLabel)
+        accessory.addArrangedSubview(messageScroll)
+
+        NSLayoutConstraint.activate([
+            accessory.widthAnchor.constraint(equalToConstant: 360),
+            passphraseField.widthAnchor.constraint(equalTo: accessory.widthAnchor),
+            messageScroll.widthAnchor.constraint(equalTo: accessory.widthAnchor),
+            messageScroll.heightAnchor.constraint(equalToConstant: 88),
+        ])
+
+        panel.accessoryView = accessory
+
+        let delegate = BackupConfigExportSavePanelDelegate(passphraseField: passphraseField)
+        panel.delegate = delegate
+
+        func base64UrlNoPadDecode(_ s: String) -> Data? {
+            var t = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+            let rem = t.count % 4
+            if rem == 2 {
+                t.append("==")
+            } else if rem == 3 {
+                t.append("=")
+            } else if rem != 0 {
+                return nil
+            }
+            return Data(base64Encoded: t)
+        }
+
+        func handleResult(_ result: NSApplication.ModalResponse) {
+            guard result == .OK, let url = panel.url else { return }
+
+            let passphrase = passphraseField.stringValue
+            let message = messageView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                var args = ["--json", "settings", "export-bundle"]
+                if !message.isEmpty {
+                    args.append(contentsOf: ["--hint", message])
+                }
+
+                let res = model.runCommandCapture(
+                    exe: cli,
+                    args: args,
+                    timeoutSeconds: 60,
+                    env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": passphrase]
+                )
+                guard res.status == 0, let data = res.stdout.data(using: .utf8) else {
+                    DispatchQueue.main.async {
+                        let text = res.stderr.isEmpty ? "Export failed: exit=\(res.status)" : res.stderr
+                        showToast(text, isError: true)
+                    }
+                    return
+                }
+
+                guard let decoded = try? JSONDecoder().decode(CliSettingsExportBundleResponse.self, from: data) else {
+                    DispatchQueue.main.async { showToast("Export JSON decode failed", isError: true) }
+                    return
+                }
+
+                let key = decoded.bundleKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard key.hasPrefix("TBC2:") else {
+                    DispatchQueue.main.async { showToast("Export returned invalid bundle", isError: true) }
+                    return
+                }
+
+                let body = String(key.dropFirst("TBC2:".count))
+                guard let outerJson = base64UrlNoPadDecode(body) else {
+                    DispatchQueue.main.async { showToast("Export returned invalid bundle", isError: true) }
+                    return
+                }
+                guard
+                    let outerObj = try? JSONSerialization.jsonObject(with: outerJson, options: []),
+                    PropertyListSerialization.propertyList(outerObj, isValidFor: .binary)
+                else {
+                    DispatchQueue.main.async { showToast("Export returned invalid bundle", isError: true) }
+                    return
+                }
+
+                let plist: Data
+                do {
+                    plist = try PropertyListSerialization.data(
+                        fromPropertyList: outerObj,
+                        format: .binary,
+                        options: 0
+                    )
+                } catch {
+                    DispatchQueue.main.async { showToast("Failed to encode export file", isError: true) }
+                    return
+                }
+
+                do {
+                    try plist.write(to: url, options: [.atomic])
+                } catch {
+                    DispatchQueue.main.async { showToast("Failed to write export file", isError: true) }
+                    return
+                }
+
+                DispatchQueue.main.async {
+                    showToast("Saved backup config", isError: false)
+                }
+            }
+        }
+
+        if let window = NSApp.keyWindow {
+            panel.beginSheetModal(for: window, completionHandler: handleResult)
+        } else {
+            handleResult(panel.runModal())
         }
     }
 
@@ -1206,113 +1380,640 @@ struct SettingsWindowRootView: View {
         selectedEndpointId = sortedEndpoints(settings: s).first?.id
         queueAutoSave()
     }
+}
 
-    private func recoveryKeyDisplayText() -> String {
-        if secretsError != nil {
-            return "Unavailable"
+private final class BackupConfigExportSavePanelDelegate: NSObject, NSOpenSavePanelDelegate {
+    private enum ValidationError: LocalizedError {
+        case passphraseRequired
+        case extensionRequired
+
+        var errorDescription: String? {
+            switch self {
+            case .passphraseRequired:
+                return "Passphrase is required."
+            case .extensionRequired:
+                return "File extension must be .tbconfig."
+            }
         }
-        guard let goldKey else {
-            return (secrets?.masterKeyPresent ?? false) ? "TBK1:••••••••••••••••" : "—"
+
+        var recoverySuggestion: String? {
+            switch self {
+            case .passphraseRequired:
+                return "Enter a passphrase / PIN, then try again."
+            case .extensionRequired:
+                return "Use a file name that ends with .tbconfig."
+            }
         }
-        return goldKeyRevealed ? goldKey : "TBK1:••••••••••••••••"
     }
 
-    private func loadRecoveryKeyIfNeeded() {
-        if goldKey != nil { return }
-        model.ensureDaemonRunning()
-        guard let cli = model.cliPath() else { return }
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "secrets", "export-master-key", "--i-understand"],
-            timeoutSeconds: 30
-        )
-        guard res.status == 0, let data = res.stdout.data(using: .utf8) else { return }
-        guard
-            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let key = obj["goldKey"] as? String
-        else { return }
-        goldKey = key
+    private let passphraseField: NSSecureTextField
+
+    init(passphraseField: NSSecureTextField) {
+        self.passphraseField = passphraseField
     }
 
-    private func toggleRevealRecoveryKey() {
-        loadRecoveryKeyIfNeeded()
-        if goldKey == nil { return }
-        goldKeyRevealed.toggle()
-    }
-
-    private func copyRecoveryKeyToClipboard() {
-        loadRecoveryKeyIfNeeded()
-        guard let goldKey else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(goldKey, forType: .string)
-        reload()
-    }
-
-    private func importRecoveryKey(key: String, force: Bool) {
-        model.ensureDaemonRunning()
-        guard let cli = model.cliPath() else { return }
-        var args = ["--json", "secrets", "import-master-key"]
-        if force { args.append("--force") }
-        _ = model.runCommandCapture(
-            exe: cli,
-            args: args,
-            stdin: key + "\n",
-            timeoutSeconds: 30
-        )
-        goldKey = nil
-        goldKeyRevealed = false
-        reload()
+    func panel(_ sender: Any, validate url: URL) throws {
+        if passphraseField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ValidationError.passphraseRequired
+        }
+        if url.pathExtension.lowercased() != "tbconfig" {
+            throw ValidationError.extensionRequired
+        }
     }
 }
 
-private struct ImportRecoveryKeySheet: View {
+private final class CaretFixedNSTextView: NSTextView {
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok && string.isEmpty {
+            // Workaround: in some contexts (e.g. NSSavePanel accessory views), an empty NSTextView
+            // may accept input but not show the insertion point until after the first character.
+            string = ""
+            setSelectedRange(NSRange(location: 0, length: 0))
+            needsDisplay = true
+        }
+        return ok
+    }
+}
+
+private struct ImportConfigBundleSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var draft: String = ""
-    @State private var confirmShown: Bool = false
+    @EnvironmentObject var model: AppModel
 
-    let masterKeyPresent: Bool
-    let onImport: (_ key: String, _ force: Bool) -> Void
+    let onApplied: () -> Void
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Import Recovery Key")
-                .font(.system(size: 18, weight: .bold))
-            Text("Paste TBK1:… and confirm to import. This will enable restores on this device.")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
+    @FocusState private var passphraseFocused: Bool
 
-            TextField("TBK1:…", text: $draft)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
+    private enum Stage {
+        case chooseFile
+        case enterPassphrase
+    }
 
-            Spacer()
+    @State private var stage: Stage = .chooseFile
+    @State private var fileEncrypted: Bool = true
+    @State private var fileUrl: URL?
+    @State private var bundleKey: String = ""
+    @State private var hintPreview: String?
+    @State private var passphrase: String = ""
+    @State private var inspecting: Bool = false
+    @State private var inspection: CliSettingsImportBundleDryRunResponse?
+    @State private var inspectError: String?
 
-            HStack {
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Spacer()
-                Button("Import…") { confirmShown = true }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    @State private var selectedTargetIds: Set<String> = []
+    @State private var resolutions: [String: ResolutionState] = [:]
+
+    @State private var ackRisks: Bool = false
+    @State private var phrase: String = ""
+    @State private var applying: Bool = false
+    @State private var applyError: String?
+
+    private struct ConfigBundleOuterPreview: Decodable {
+        let hint: String?
+    }
+
+    private func base64UrlNoPadDecode(_ s: String) -> Data? {
+        var t = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        let rem = t.count % 4
+        if rem == 2 {
+            t.append("==")
+        } else if rem == 3 {
+            t.append("=")
+        } else if rem != 0 {
+            return nil
+        }
+        return Data(base64Encoded: t)
+    }
+
+    private func base64UrlNoPadEncode(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private func hintFromBundleKey(_ key: String) -> String? {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("TBC2:") else { return nil }
+        let body = String(trimmed.dropFirst("TBC2:".count))
+        guard let data = base64UrlNoPadDecode(body) else { return nil }
+        guard let preview = try? JSONDecoder().decode(ConfigBundleOuterPreview.self, from: data) else { return nil }
+        return preview.hint
+    }
+
+    private func readFirstNonEmptyLine(url: URL) -> String? {
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let line = content
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty })
+        return line
+    }
+
+    private func normalizeBundleKey(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return nil }
+        if trimmed.hasPrefix("TBC2:") { return trimmed }
+        return "TBC2:" + trimmed
+    }
+
+    private func chooseFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        let tbconfig = UTType(filenameExtension: "tbconfig")
+        panel.allowedContentTypes = [
+            tbconfig ?? .data,
+            .plainText,
+        ]
+        panel.prompt = "Choose"
+
+        if panel.runModal() != .OK { return }
+        guard let url = panel.url else { return }
+
+        fileUrl = url
+        inspection = nil
+        applyError = nil
+        passphrase = ""
+        stage = .chooseFile
+
+        if let data = try? Data(contentsOf: url),
+           let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+           let dict = plist as? [String: Any],
+           PropertyListSerialization.propertyList(dict, isValidFor: .binary),
+           let json = try? JSONSerialization.data(withJSONObject: dict, options: [])
+        {
+            hintPreview = dict["hint"] as? String
+            fileEncrypted = (dict["payloadEnc"] != nil) || (dict["goldKeyEnc"] != nil)
+            bundleKey = "TBC2:" + base64UrlNoPadEncode(json)
+            inspectError = nil
+            if fileEncrypted {
+                stage = .enterPassphrase
+                passphraseFocused = true
+            }
+            return
+        }
+
+        if let raw = readFirstNonEmptyLine(url: url), let key = normalizeBundleKey(raw) {
+            bundleKey = key
+            hintPreview = hintFromBundleKey(key)
+            fileEncrypted = true
+            inspectError = nil
+            stage = .enterPassphrase
+            passphraseFocused = true
+            return
+        }
+
+        bundleKey = ""
+        hintPreview = nil
+        inspectError = "Invalid backup config file"
+    }
+
+    private struct ResolutionState {
+        var mode: ResolutionMode
+        var newSourcePath: String
+    }
+
+    private enum ResolutionMode: String, CaseIterable, Identifiable {
+        case overwrite_local
+        case overwrite_remote
+        case rebind
+        case skip
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .overwrite_local: return "Overwrite local (local ← remote)"
+            case .overwrite_remote: return "Overwrite remote (remote ← local)"
+            case .rebind: return "Rebind source path"
+            case .skip: return "Skip this target"
+            }
+        }
+    }
+
+    private var preflightByTargetId: [String: CliSettingsImportBundleDryRunResponse.PreflightTarget] {
+        guard let inspection else { return [:] }
+        return Dictionary(uniqueKeysWithValues: inspection.preflight.targets.map { ($0.targetId, $0) })
+    }
+
+    private func needsResolution(targetId: String) -> Bool {
+        guard let pf = preflightByTargetId[targetId] else { return false }
+        return pf.conflict.state == "needs_resolution"
+    }
+
+    private func resolveState(targetId: String) -> ResolutionState {
+        if let v = resolutions[targetId] { return v }
+        return ResolutionState(mode: .overwrite_local, newSourcePath: "")
+    }
+
+    private func setResolveState(targetId: String, _ state: ResolutionState) {
+        resolutions[targetId] = state
+    }
+
+    private func targetToggleBinding(id: String) -> Binding<Bool> {
+        Binding(
+            get: { selectedTargetIds.contains(id) },
+            set: { on in
+                if on {
+                    selectedTargetIds.insert(id)
+                } else {
+                    selectedTargetIds.remove(id)
+                }
+            }
+        )
+    }
+
+    private func applyDefaults(from inspection: CliSettingsImportBundleDryRunResponse) {
+        selectedTargetIds = Set(inspection.bundle.targets.map(\.id))
+
+        var next: [String: ResolutionState] = [:]
+        for pf in inspection.preflight.targets {
+            guard pf.conflict.state == "needs_resolution" else { continue }
+            if pf.conflict.reasons.contains("bootstrap_invalid") {
+                next[pf.targetId] = ResolutionState(mode: .skip, newSourcePath: "")
+            } else if pf.conflict.reasons.contains("missing_path") {
+                next[pf.targetId] = ResolutionState(mode: .rebind, newSourcePath: "")
+            } else if pf.conflict.reasons.contains("local_vs_remote_mismatch") {
+                next[pf.targetId] = ResolutionState(mode: .overwrite_local, newSourcePath: "")
+            } else {
+                next[pf.targetId] = ResolutionState(mode: .overwrite_local, newSourcePath: "")
+            }
+        }
+        resolutions = next
+
+        ackRisks = false
+        phrase = ""
+    }
+
+    private func inspectBundle() {
+        let key = bundleKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if key.isEmpty { return }
+        if passphrase.isEmpty {
+            inspectError = "Passphrase is required"
+            return
+        }
+
+        inspecting = true
+        inspectError = nil
+        applyError = nil
+        inspection = nil
+
+        model.ensureDaemonRunning()
+        guard let cli = model.cliPath() else {
+            inspectError = "televybackup CLI not found"
+            inspecting = false
+            return
+        }
+
+        let res = model.runCommandCapture(
+            exe: cli,
+            args: ["--json", "settings", "import-bundle", "--dry-run"],
+            stdin: key + "\n",
+            timeoutSeconds: 120,
+            env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": passphrase]
+        )
+        guard res.status == 0, let data = res.stdout.data(using: .utf8) else {
+            inspectError = res.stderr.isEmpty ? "Inspect failed: exit=\(res.status)" : res.stderr
+            inspecting = false
+            return
+        }
+
+        do {
+            let decoded = try JSONDecoder().decode(CliSettingsImportBundleDryRunResponse.self, from: data)
+            inspection = decoded
+            applyDefaults(from: decoded)
+        } catch {
+            inspectError = "Inspect JSON decode failed"
+        }
+
+        inspecting = false
+    }
+
+    private func canApply() -> Bool {
+        guard let inspection else { return false }
+        if inspection.nextAction == "start_key_rotation" { return false }
+        if selectedTargetIds.isEmpty { return false }
+        if passphrase.isEmpty { return false }
+        if !ackRisks { return false }
+        if phrase != "ROTATE" { return false }
+
+        for id in selectedTargetIds {
+            if needsResolution(targetId: id) {
+                guard let pf = preflightByTargetId[id] else { return false }
+                let s = resolveState(targetId: id)
+
+                if pf.conflict.reasons.contains("bootstrap_invalid") && s.mode != .skip {
+                    return false
+                }
+
+                if pf.conflict.reasons.contains("missing_path") {
+                    if s.mode == .rebind {
+                        if s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            return false
+                        }
+                    } else if s.mode == .skip {
+                        // ok
+                    } else {
+                        return false
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    private func applyBundle() {
+        guard canApply() else { return }
+        guard let cli = model.cliPath() else { return }
+
+        applying = true
+        applyError = nil
+
+        let key = bundleKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selected = Array(selectedTargetIds).sorted()
+
+        var resolutionsObj: [String: Any] = [:]
+        for id in selected {
+            guard needsResolution(targetId: id) else { continue }
+            let state = resolveState(targetId: id)
+            var obj: [String: Any] = ["mode": state.mode.rawValue]
+            if state.mode == .rebind {
+                obj["newSourcePath"] = state.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            resolutionsObj[id] = obj
+        }
+
+        let payload: [String: Any] = [
+            "bundleKey": key,
+            "selectedTargetIds": selected,
+            "confirm": [
+                "ackRisks": ackRisks,
+                "phrase": phrase,
+            ],
+            "resolutions": resolutionsObj,
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+              let stdin = String(data: data, encoding: .utf8)
+        else {
+            applyError = "Failed to encode apply JSON"
+            applying = false
+            return
+        }
+
+        model.ensureDaemonRunning()
+        let res = model.runCommandCapture(
+            exe: cli,
+            args: ["--json", "settings", "import-bundle", "--apply"],
+            stdin: stdin + "\n",
+            timeoutSeconds: 180,
+            env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": passphrase]
+        )
+
+        guard res.status == 0, let outData = res.stdout.data(using: .utf8) else {
+            applyError = res.stderr.isEmpty ? "Apply failed: exit=\(res.status)" : res.stderr
+            applying = false
+            return
+        }
+
+        do {
+            let decoded = try JSONDecoder().decode(CliSettingsImportBundleApplyResponse.self, from: outData)
+            if decoded.ok {
+                onApplied()
+                dismiss()
+            } else {
+                applyError = "Apply failed"
+            }
+        } catch {
+            applyError = "Apply JSON decode failed"
+        }
+
+        applying = false
+    }
+
+	    var body: some View {
+	        VStack(alignment: .leading, spacing: 14) {
+	            Text("Import Backup Config")
+	                .font(.system(size: 18, weight: .bold))
+	            Text("Choose a backup config file, then inspect before apply.")
+	                .font(.system(size: 12, weight: .semibold))
+	                .foregroundStyle(.secondary)
+
+	            if inspection == nil {
+	                if stage == .chooseFile {
+	                    HStack(spacing: 8) {
+	                        Text(fileUrl?.lastPathComponent ?? "No file selected")
+	                            .font(.system(size: 12, weight: .semibold))
+	                            .foregroundStyle(.secondary)
+	                            .lineLimit(1)
+	                            .truncationMode(.middle)
+	                            .frame(maxWidth: .infinity, alignment: .leading)
+
+	                        Button("Choose…") { chooseFile() }
+	                            .buttonStyle(.bordered)
+	                    }
+
+	                    if let inspectError {
+	                        Text(inspectError)
+	                            .font(.system(size: 12, weight: .semibold))
+	                            .foregroundStyle(.red)
+	                    }
+
+	                    HStack(spacing: 8) {
+	                        Button("Cancel") { dismiss() }
+	                            .keyboardShortcut(.cancelAction)
+	                        Spacer()
+	                    }
+	                } else {
+	                    HStack(spacing: 8) {
+	                        Text(fileUrl?.lastPathComponent ?? "No file selected")
+	                            .font(.system(size: 12, weight: .semibold))
+	                            .foregroundStyle(.secondary)
+	                            .lineLimit(1)
+	                            .truncationMode(.middle)
+	                            .frame(maxWidth: .infinity, alignment: .leading)
+
+	                        Button("Change…") { chooseFile() }
+	                            .buttonStyle(.bordered)
+	                    }
+
+	                    let h = hintPreview?.trimmingCharacters(in: .whitespacesAndNewlines)
+	                    VStack(alignment: .leading, spacing: 6) {
+	                        Text("Message")
+	                            .font(.system(size: 11, weight: .semibold))
+	                            .foregroundStyle(.secondary)
+	                        Text(h?.isEmpty == false ? h! : "—")
+	                            .font(.system(size: 12, weight: .semibold))
+	                            .foregroundStyle(.secondary)
+	                            .frame(maxWidth: .infinity, alignment: .leading)
+	                            .fixedSize(horizontal: false, vertical: true)
+	                    }
+
+	                    if fileEncrypted {
+	                        VStack(alignment: .leading, spacing: 6) {
+	                            Text("Passphrase / PIN")
+	                                .font(.system(size: 11, weight: .semibold))
+	                                .foregroundStyle(.secondary)
+	                            SecureField("", text: $passphrase)
+	                                .textFieldStyle(.roundedBorder)
+	                                .font(.system(size: 12, design: .monospaced))
+	                                .focused($passphraseFocused)
+	                                .onSubmit { inspectBundle() }
+	                        }
+	                    }
+
+	                    HStack(spacing: 8) {
+	                        Button("Cancel") { dismiss() }
+	                            .keyboardShortcut(.cancelAction)
+	                        Spacer()
+	                        Button(inspecting ? "Inspecting…" : "Inspect") { inspectBundle() }
+	                            .buttonStyle(.borderedProminent)
+	                            .disabled(
+	                                (fileEncrypted && passphrase.isEmpty)
+	                                    || bundleKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+	                                    || inspecting
+	                            )
+	                    }
+
+	                    if let inspectError {
+	                        Text(inspectError)
+	                            .font(.system(size: 12, weight: .semibold))
+	                            .foregroundStyle(.red)
+	                    }
+	                }
+	            }
+
+	            if let inspection {
+	                GroupBox {
+	                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Summary")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("nextAction: \(inspection.nextAction) · localMasterKey: \(inspection.localMasterKey.state) · localHasTargets: \(inspection.localHasTargets ? "true" : "false")")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+
+                        if inspection.nextAction == "start_key_rotation" {
+                            Text("This device already has targets and the master key does not match. Start master key rotation (plan #4fexy) and retry.")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.red)
+                        }
+
+                        Text("Missing secrets: \(inspection.bundle.secretsCoverage.missingKeys.joined(separator: ", "))")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(
+                                inspection.bundle.secretsCoverage.missingKeys.isEmpty
+                                    ? Color.secondary
+                                    : Color.red
+                            )
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                Text("Targets")
+                    .font(.system(size: 13, weight: .semibold))
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(inspection.bundle.targets.sorted { a, b in
+                            a.id.localizedStandardCompare(b.id) == .orderedAscending
+                        }) { t in
+                            let pf = preflightByTargetId[t.id]
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                Toggle(isOn: targetToggleBinding(id: t.id)) {
+                                    HStack(spacing: 10) {
+                                        Text(t.id)
+                                            .font(.system(size: 12, design: .monospaced))
+                                        Text(t.label)
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        if let pf {
+                                            Text(pf.conflict.state == "needs_resolution" ? "Needs decision" : "OK")
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .foregroundStyle(pf.conflict.state == "needs_resolution" ? .red : .secondary)
+                                        }
+                                    }
+                                }
+
+                                Text("\(t.sourcePath) · endpoint=\(t.endpointId)")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+
+                                if let pf, pf.conflict.state == "needs_resolution", selectedTargetIds.contains(t.id) {
+                                    let state = resolveState(targetId: t.id)
+
+                                    HStack(spacing: 10) {
+                                        Text("Resolution")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .frame(width: 80, alignment: .leading)
+
+                                        Picker("", selection: Binding(
+                                            get: { state.mode },
+                                            set: { newMode in
+                                                setResolveState(targetId: t.id, ResolutionState(mode: newMode, newSourcePath: state.newSourcePath))
+                                            }
+                                        )) {
+                                            ForEach(ResolutionMode.allCases) { m in
+                                                Text(m.title).tag(m)
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .frame(width: 260)
+
+                                        if state.mode == .rebind {
+                                            TextField("New source path", text: Binding(
+                                                get: { state.newSourcePath },
+                                                set: { newPath in
+                                                    setResolveState(targetId: t.id, ResolutionState(mode: state.mode, newSourcePath: newPath))
+                                                }
+                                            ))
+                                            .textFieldStyle(.roundedBorder)
+                                            .font(.system(size: 12, design: .monospaced))
+                                        }
+                                    }
+
+                                    Text("Reasons: \(pf.conflict.reasons.joined(separator: ", "))")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(10)
+                            .background(.background)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
+                        }
+                    }
+                }
+
+                Divider()
+
+                Toggle("I understand the risks (settings/secrets/index may change)", isOn: $ackRisks)
+                    .disabled(inspection.nextAction == "start_key_rotation")
+                TextField("Type ROTATE to confirm", text: $phrase)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .disabled(inspection.nextAction == "start_key_rotation")
+
+                if let applyError {
+                    Text(applyError)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.red)
+                }
+
+                HStack {
+                    Spacer()
+                    Button(applying ? "Applying…" : "Apply") { applyBundle() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(inspection.nextAction == "start_key_rotation" || applying || !canApply())
+                }
             }
         }
         .padding()
-        .frame(width: 520, height: 220)
-        .alert("Confirm Import", isPresented: $confirmShown) {
-            Button("Cancel", role: .cancel) {}
-            Button("Import", role: .destructive) {
-                let key = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                if key.isEmpty { return }
-                onImport(key, masterKeyPresent)
-                dismiss()
-            }
-        } message: {
-            if masterKeyPresent {
-                Text("This will overwrite the existing master key. Existing encrypted backups may become unreadable if the key does not match.")
-            } else {
-                Text("Import this recovery key?")
-            }
-        }
+        .frame(width: 720, height: 680)
     }
 }
 

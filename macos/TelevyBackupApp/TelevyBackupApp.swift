@@ -1957,12 +1957,13 @@ final class AppModel: ObservableObject {
         exe: String,
         args: [String],
         stdin: String? = nil,
-        timeoutSeconds: Double? = nil
+        timeoutSeconds: Double? = nil,
+        env: [String: String] = [:]
     ) -> (stdout: String, stderr: String, status: Int32, reason: Process.TerminationReason) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
-        task.environment = televybackupToolEnv()
+        task.environment = televybackupToolEnv().merging(env) { _, rhs in rhs }
 
         let out = Pipe()
         let err = Pipe()

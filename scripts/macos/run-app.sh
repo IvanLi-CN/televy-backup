@@ -5,15 +5,23 @@ root_dir="$(git rev-parse --show-toplevel)"
 
 "$root_dir/scripts/macos/build-app.sh"
 
+app="$root_dir/target/macos-app/TelevyBackup.app"
+app_bin="$app/Contents/MacOS/TelevyBackup"
+app_daemon="$app/Contents/MacOS/televybackupd"
+app_cli="$app/Contents/MacOS/televybackup-cli"
+
 osascript -e 'tell application "TelevyBackup" to quit' >/dev/null 2>&1 || true
 for _ in {1..40}; do
-  if ! pgrep -x "TelevyBackup" >/dev/null 2>&1; then
+  if ! pgrep -f "$app_bin" >/dev/null 2>&1; then
     break
   fi
   sleep 0.1
 done
-
-app="$root_dir/target/macos-app/TelevyBackup.app"
+if pgrep -f "$app_bin" >/dev/null 2>&1; then
+  pkill -f "$app_bin" >/dev/null 2>&1 || true
+  pkill -f "$app_daemon" >/dev/null 2>&1 || true
+  pkill -f "$app_cli --json status stream" >/dev/null 2>&1 || true
+fi
 
 # Development default: disable Keychain to avoid prompts and keep local runs reproducible.
 # Override with `TELEVYBACKUP_DISABLE_KEYCHAIN=0` for production-like behavior.

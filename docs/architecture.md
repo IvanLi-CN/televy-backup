@@ -56,7 +56,7 @@ daemon-only boundary:
 The app and daemon can share the same data locations via env vars:
 
 - `TELEVYBACKUP_CONFIG_DIR`: config directory (contains `config.toml`)
-- `TELEVYBACKUP_DATA_DIR`: data directory (contains `index/index.sqlite`)
+- `TELEVYBACKUP_DATA_DIR`: data directory (contains `index/index.<endpoint_id>.sqlite`)
 - `TELEVYBACKUP_LOG_DIR`: override per-run log directory (defaults to `TELEVYBACKUP_DATA_DIR/logs/`)
 
 When env vars are not set, the GUI uses `~/Library/Application Support/TelevyBackup`.
@@ -122,6 +122,20 @@ This is a security downgrade because `vault.key` is persisted on disk.
 Master key portability:
 
 - CLI can export/import a human-transferable recovery string `TBK1:<base64url_no_pad>` (aka “gold key”).
+- CLI can export/import an encrypted config bundle key `TBC2:<base64url_no_pad>` (Settings v2 + required secrets + passphrase-protected `TBK1`).
+
+### Config bundle (TBC2)
+
+The config bundle is a single copy/paste key used to restore a working setup on a new device:
+
+- **Self-contained**: includes `TBK1` (master key), but importing a `TBC2:...` key requires a user-supplied passphrase.
+- **Encrypted**:
+  - `TBK1` is framed-encrypted with a passphrase-derived key (PBKDF2-HMAC-SHA256; random salt) using AAD `televy.config.bundle.v2.gold_key`.
+  - Bundle payload plaintext is JSON and is framed-encrypted with the master key using AAD `televy.config.bundle.v2.payload`.
+- **Secrets coverage**: exports only the secrets referenced by Settings (e.g. bot tokens, MTProto api_hash); MTProto session secrets are intentionally excluded.
+- **Import flow**:
+  - Dry-run: decode + inspect + preflight (source path existence, pinned bootstrap/catalog, remote latest pointers, local index match).
+  - Apply: requires explicit confirmation and can rebuild per-endpoint index DB from remote latest (or initialize an empty DB when bootstrap is missing).
 
 ## Crypto and framing
 
@@ -175,7 +189,7 @@ Cross-device restore (without the old local SQLite) uses a per-endpoint “boots
 Remote-first index sync (backup preflight):
 
 - `backup run` treats the pinned catalog’s `latest` remote index as the **source of truth**.
-- Before entering `scan`, it may download the remote latest index DB (manifest → parts → decrypt → zstd → SQLite) and atomically replace `TELEVYBACKUP_DATA_DIR/index/index.sqlite`.
+- Before entering `scan`, it may download the remote latest index DB (manifest → parts → decrypt → zstd → SQLite) and atomically replace `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite`.
   - If the pinned catalog is missing: skip sync (first backup / no cross-device pointer).
   - If the pinned catalog exists but cannot be decrypted: fail with `bootstrap.decrypt_failed` (do not overwrite pinned).
   - Can be disabled for offline/debug via `backup run --no-remote-index-sync` (no pinned read; no remote index download).

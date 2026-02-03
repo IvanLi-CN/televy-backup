@@ -1,6 +1,7 @@
 mod backup;
 pub mod bootstrap;
 pub mod config;
+pub mod config_bundle;
 pub mod control;
 mod crypto;
 mod error;
