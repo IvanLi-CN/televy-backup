@@ -762,7 +762,7 @@ struct SettingsWindowRootView: View {
                             exportBackupConfig()
                         }
                         .buttonStyle(.bordered)
-                        .disabled(secretsUnavailable || !masterKeyPresent)
+                        .disabled((secretsUnavailable && !secretsRetryable) || (!secretsUnavailable && !masterKeyPresent))
                     }
                     .padding(.vertical, 10)
 
@@ -911,6 +911,11 @@ struct SettingsWindowRootView: View {
         let seq = reloadSeq
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // `settings get --with-secrets` queries secrets presence via control IPC, which requires
+            // the daemon to be running. Start it proactively so the Backup Config actions are not
+            // incorrectly disabled on first open.
+            model.ensureDaemonRunning()
+
             let res = model.runCommandCapture(
                 exe: cli,
                 args: ["--json", "settings", "get", "--with-secrets"],
@@ -1013,7 +1018,7 @@ struct SettingsWindowRootView: View {
         passphraseField.placeholderString = "Required"
         passphraseField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
 
-        let messageLabel = NSTextField(labelWithString: "Message (optional)")
+        let messageLabel = NSTextField(labelWithString: "Hint (optional)")
         messageLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
 
         let messageView = CaretFixedNSTextView()
@@ -1047,6 +1052,9 @@ struct SettingsWindowRootView: View {
         accessory.orientation = .vertical
         accessory.spacing = 8
         accessory.alignment = .leading
+        // NSSavePanel sizes accessory views based on their frame. Keep this deterministic so
+        // the fields don't end up collapsed/hidden.
+        accessory.frame = NSRect(x: 0, y: 0, width: 360, height: 0)
         accessory.translatesAutoresizingMaskIntoConstraints = false
 
         passphraseField.translatesAutoresizingMaskIntoConstraints = false
@@ -1063,6 +1071,9 @@ struct SettingsWindowRootView: View {
             messageScroll.widthAnchor.constraint(equalTo: accessory.widthAnchor),
             messageScroll.heightAnchor.constraint(equalToConstant: 88),
         ])
+
+        accessory.layoutSubtreeIfNeeded()
+        accessory.setFrameSize(NSSize(width: 360, height: accessory.fittingSize.height))
 
         panel.accessoryView = accessory
 
@@ -1157,8 +1168,12 @@ struct SettingsWindowRootView: View {
             }
         }
 
-        if let window = NSApp.keyWindow {
-            panel.beginSheetModal(for: window, completionHandler: handleResult)
+        let hostWindow =
+            NSApp.keyWindow ??
+            NSApp.mainWindow ??
+            NSApp.windows.first(where: { $0.title == "Settings" })
+        if let hostWindow {
+            panel.beginSheetModal(for: hostWindow, completionHandler: handleResult)
         } else {
             handleResult(panel.runModal())
         }
@@ -1486,7 +1501,6 @@ private struct ImportConfigBundleSheet: View {
     @State private var selectedTargetIds: Set<String> = []
     @State private var resolutions: [String: ResolutionState] = [:]
 
-    @State private var phrase: String = ""
     @State private var applying: Bool = false
     @State private var applyError: String?
 
@@ -1614,9 +1628,9 @@ private struct ImportConfigBundleSheet: View {
 
         var title: String {
             switch self {
-            case .overwrite_local: return "Overwrite local (local ← remote)"
-            case .overwrite_remote: return "Overwrite remote (remote ← local)"
-            case .rebind: return "Rebind source path"
+            case .overwrite_local: return "Use remote latest (replace local)"
+            case .overwrite_remote: return "Use local (update remote pin)"
+            case .rebind: return "Choose a different folder"
             case .skip: return "Skip this target"
             }
         }
@@ -1671,7 +1685,6 @@ private struct ImportConfigBundleSheet: View {
             }
         }
         resolutions = next
-        phrase = ""
     }
 
     private func inspectBundle() {
@@ -1727,7 +1740,6 @@ private struct ImportConfigBundleSheet: View {
         if inspection.nextAction == "start_key_rotation" { return false }
         if selectedTargetIds.isEmpty { return false }
         if fileEncrypted && passphrase.isEmpty { return false }
-        if phrase != "IMPORT" { return false }
 
         for id in selectedTargetIds {
             if needsResolution(targetId: id) {
@@ -1779,7 +1791,8 @@ private struct ImportConfigBundleSheet: View {
             "bundleKey": key,
             "selectedTargetIds": selected,
             "confirm": [
-                "phrase": phrase,
+                // UI already gates apply behind an explicit click; avoid a second typed confirmation.
+                "phrase": "IMPORT",
             ],
             "resolutions": resolutionsObj,
         ]
@@ -1836,8 +1849,26 @@ private struct ImportConfigBundleSheet: View {
         return out
     }
 
+    private func conflictReasonLines(_ reasons: [String]) -> [String] {
+        var out: [String] = []
+        for r in reasons {
+            switch r {
+            case "missing_path":
+                out.append("Folder not found on this Mac.")
+            case "bootstrap_invalid":
+                out.append("Remote bootstrap cannot be decrypted (wrong key or corrupted).")
+            case "local_vs_remote_mismatch":
+                out.append("Local index does not match the remote latest.")
+            default:
+                out.append("Needs review (\(r)).")
+            }
+        }
+        return out
+    }
+
     private func demoInspection(targetsCount: Int) -> CliSettingsImportBundleDryRunResponse {
         let n = max(1, targetsCount)
+        let includeConflicts = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_CONFLICTS"] == "1"
         let epA = CliSettingsImportBundleDryRunResponse.BundleEndpoint(
             id: "ep_demo_a",
             chatId: "123456",
@@ -1854,18 +1885,43 @@ private struct ImportConfigBundleSheet: View {
             )
         }
 
-        let preflightTargets: [CliSettingsImportBundleDryRunResponse.PreflightTarget] = targets.map { t in
-            CliSettingsImportBundleDryRunResponse.PreflightTarget(
+        let preflightTargets: [CliSettingsImportBundleDryRunResponse.PreflightTarget] = targets.enumerated().map { i, t in
+            var sourcePathExists = true
+            var bootstrap = CliSettingsImportBundleDryRunResponse.Bootstrap(state: "ok", details: nil)
+            let remoteLatest = CliSettingsImportBundleDryRunResponse.RemoteLatest(
+                state: "ok",
+                snapshotId: "s_demo_latest",
+                manifestObjectId: "m_demo_latest"
+            )
+            var localIndex = CliSettingsImportBundleDryRunResponse.LocalIndex(state: "match", details: nil)
+            var reasons: [String] = []
+
+            if includeConflicts {
+                // Cover the common cases we need to design around.
+                if i == 0 {
+                    sourcePathExists = false
+                    reasons = ["missing_path"]
+                } else if i == 1 {
+                    bootstrap = CliSettingsImportBundleDryRunResponse.Bootstrap(
+                        state: "invalid",
+                        details: ["error": "decrypt failed"]
+                    )
+                    reasons = ["bootstrap_invalid"]
+                } else if i == 2 {
+                    localIndex = CliSettingsImportBundleDryRunResponse.LocalIndex(state: "stale", details: nil)
+                    reasons = ["local_vs_remote_mismatch"]
+                }
+            }
+
+            let conflictState = reasons.isEmpty ? "none" : "needs_resolution"
+
+            return CliSettingsImportBundleDryRunResponse.PreflightTarget(
                 targetId: t.id,
-                sourcePathExists: true,
-                bootstrap: CliSettingsImportBundleDryRunResponse.Bootstrap(state: "ok", details: nil),
-                remoteLatest: CliSettingsImportBundleDryRunResponse.RemoteLatest(
-                    state: "ok",
-                    snapshotId: "s_demo_latest",
-                    manifestObjectId: "m_demo_latest"
-                ),
-                localIndex: CliSettingsImportBundleDryRunResponse.LocalIndex(state: "match", details: nil),
-                conflict: CliSettingsImportBundleDryRunResponse.Conflict(state: "none", reasons: [])
+                sourcePathExists: sourcePathExists,
+                bootstrap: bootstrap,
+                remoteLatest: remoteLatest,
+                localIndex: localIndex,
+                conflict: CliSettingsImportBundleDryRunResponse.Conflict(state: conflictState, reasons: reasons)
             )
         }
 
@@ -1964,7 +2020,7 @@ private struct ImportConfigBundleSheet: View {
 
 	                            let h = hintPreview?.trimmingCharacters(in: .whitespacesAndNewlines)
 	                            VStack(alignment: .leading, spacing: 6) {
-	                                Text("Message")
+	                                Text("Hint")
 	                                    .font(.system(size: 11, weight: .semibold))
 	                                    .foregroundStyle(.secondary)
 	                                Text(h?.isEmpty == false ? h! : "—")
@@ -2089,14 +2145,14 @@ private struct ImportConfigBundleSheet: View {
                                             .foregroundStyle(.secondary)
                                         Spacer()
                                         if let pf {
-                                            Text(pf.conflict.state == "needs_resolution" ? "Needs decision" : "OK")
+                                            Text(pf.conflict.state == "needs_resolution" ? "Needs action" : "OK")
                                                 .font(.system(size: 12, weight: .semibold))
                                                 .foregroundStyle(pf.conflict.state == "needs_resolution" ? .red : .secondary)
                                         }
                                     }
                                 }
 
-                                Text("\(t.sourcePath) · endpoint=\(t.endpointId)")
+                                Text(t.sourcePath)
                                     .font(.system(size: 11, weight: .semibold))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -2106,7 +2162,7 @@ private struct ImportConfigBundleSheet: View {
                                     let state = resolveState(targetId: t.id)
 
                                     HStack(spacing: 10) {
-                                        Text("Resolution")
+                                        Text("Action")
                                             .font(.system(size: 12, weight: .semibold))
                                             .frame(width: 80, alignment: .leading)
 
@@ -2135,9 +2191,16 @@ private struct ImportConfigBundleSheet: View {
                                         }
                                     }
 
-                                    Text("Reasons: \(pf.conflict.reasons.joined(separator: ", "))")
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(.secondary)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("Why it needs action")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+                                        ForEach(conflictReasonLines(pf.conflict.reasons), id: \.self) { line in
+                                            Text("• \(line)")
+                                                .font(.system(size: 11, weight: .semibold))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
                                 }
                             }
                             .padding(10)
@@ -2155,11 +2218,6 @@ private struct ImportConfigBundleSheet: View {
                 .layoutPriority(1)
 
                 Divider()
-
-                TextField("Type IMPORT to confirm", text: $phrase)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .disabled(inspection.nextAction == "start_key_rotation")
 
                 if let applyError {
                     Text(applyError)
