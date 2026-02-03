@@ -1446,7 +1446,7 @@ private struct ImportConfigBundleSheet: View {
 
     private enum Stage {
         case chooseFile
-        case enterPassphrase
+        case inspect
     }
 
     @State private var stage: Stage = .chooseFile
@@ -1536,6 +1536,9 @@ private struct ImportConfigBundleSheet: View {
         applyError = nil
         passphrase = ""
         stage = .chooseFile
+        hintPreview = nil
+        bundleKey = ""
+        inspectError = nil
 
         if let data = try? Data(contentsOf: url),
            let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
@@ -1547,9 +1550,9 @@ private struct ImportConfigBundleSheet: View {
             fileEncrypted = (dict["payloadEnc"] != nil) || (dict["goldKeyEnc"] != nil)
             bundleKey = "TBC2:" + base64UrlNoPadEncode(json)
             inspectError = nil
+            stage = .inspect
             if fileEncrypted {
-                stage = .enterPassphrase
-                passphraseFocused = true
+                DispatchQueue.main.async { passphraseFocused = true }
             }
             return
         }
@@ -1559,8 +1562,8 @@ private struct ImportConfigBundleSheet: View {
             hintPreview = hintFromBundleKey(key)
             fileEncrypted = true
             inspectError = nil
-            stage = .enterPassphrase
-            passphraseFocused = true
+            stage = .inspect
+            DispatchQueue.main.async { passphraseFocused = true }
             return
         }
 
@@ -1649,7 +1652,7 @@ private struct ImportConfigBundleSheet: View {
     private func inspectBundle() {
         let key = bundleKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if key.isEmpty { return }
-        if passphrase.isEmpty {
+        if fileEncrypted && passphrase.isEmpty {
             inspectError = "Passphrase is required"
             return
         }
@@ -1666,12 +1669,16 @@ private struct ImportConfigBundleSheet: View {
             return
         }
 
+        var env: [String: String] = [:]
+        if fileEncrypted {
+            env["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE"] = passphrase
+        }
         let res = model.runCommandCapture(
             exe: cli,
             args: ["--json", "settings", "import-bundle", "--dry-run"],
             stdin: key + "\n",
             timeoutSeconds: 120,
-            env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": passphrase]
+            env: env
         )
         guard res.status == 0, let data = res.stdout.data(using: .utf8) else {
             inspectError = res.stderr.isEmpty ? "Inspect failed: exit=\(res.status)" : res.stderr
@@ -1694,7 +1701,7 @@ private struct ImportConfigBundleSheet: View {
         guard let inspection else { return false }
         if inspection.nextAction == "start_key_rotation" { return false }
         if selectedTargetIds.isEmpty { return false }
-        if passphrase.isEmpty { return false }
+        if fileEncrypted && passphrase.isEmpty { return false }
         if !ackRisks { return false }
         if phrase != "ROTATE" { return false }
 
@@ -1792,75 +1799,104 @@ private struct ImportConfigBundleSheet: View {
         applying = false
     }
 
+    private var sheetSize: CGSize {
+        if inspection != nil {
+            return CGSize(width: 720, height: 680)
+        }
+        if stage == .chooseFile {
+            return CGSize(width: 560, height: 360)
+        }
+        return CGSize(width: 560, height: fileEncrypted ? 420 : 360)
+    }
+
 	    var body: some View {
 	        VStack(alignment: .leading, spacing: 14) {
-	            Text("Import Backup Config")
-	                .font(.system(size: 18, weight: .bold))
-	            Text("Choose a backup config file, then inspect before apply.")
-	                .font(.system(size: 12, weight: .semibold))
-	                .foregroundStyle(.secondary)
+	            if inspection != nil || stage == .inspect {
+	                Text("Import backup config")
+	                    .font(.system(size: 18, weight: .bold))
+	                Text("Choose a backup config file, then inspect before apply.")
+	                    .font(.system(size: 12, weight: .semibold))
+	                    .foregroundStyle(.secondary)
+	            }
 
 	            if inspection == nil {
 	                if stage == .chooseFile {
-	                    HStack(spacing: 8) {
-	                        Text(fileUrl?.lastPathComponent ?? "No file selected")
-	                            .font(.system(size: 12, weight: .semibold))
-	                            .foregroundStyle(.secondary)
-	                            .lineLimit(1)
-	                            .truncationMode(.middle)
-	                            .frame(maxWidth: .infinity, alignment: .leading)
-
-	                        Button("Choose…") { chooseFile() }
-	                            .buttonStyle(.bordered)
-	                    }
-
-	                    if let inspectError {
-	                        Text(inspectError)
-	                            .font(.system(size: 12, weight: .semibold))
-	                            .foregroundStyle(.red)
-	                    }
-
-	                    HStack(spacing: 8) {
-	                        Button("Cancel") { dismiss() }
-	                            .keyboardShortcut(.cancelAction)
+	                    VStack(spacing: 16) {
 	                        Spacer()
-	                    }
-	                } else {
-	                    HStack(spacing: 8) {
-	                        Text(fileUrl?.lastPathComponent ?? "No file selected")
-	                            .font(.system(size: 12, weight: .semibold))
-	                            .foregroundStyle(.secondary)
-	                            .lineLimit(1)
-	                            .truncationMode(.middle)
-	                            .frame(maxWidth: .infinity, alignment: .leading)
+	                        EmptyStateView(
+	                            systemImage: "tray.and.arrow.down",
+	                            title: "Import backup config",
+	                            message: "Choose a backup config file to inspect before apply."
+	                        )
+	                        .frame(maxWidth: .infinity)
 
-	                        Button("Change…") { chooseFile() }
-	                            .buttonStyle(.bordered)
-	                    }
-
-	                    let h = hintPreview?.trimmingCharacters(in: .whitespacesAndNewlines)
-	                    VStack(alignment: .leading, spacing: 6) {
-	                        Text("Message")
-	                            .font(.system(size: 11, weight: .semibold))
-	                            .foregroundStyle(.secondary)
-	                        Text(h?.isEmpty == false ? h! : "—")
-	                            .font(.system(size: 12, weight: .semibold))
-	                            .foregroundStyle(.secondary)
-	                            .frame(maxWidth: .infinity, alignment: .leading)
-	                            .fixedSize(horizontal: false, vertical: true)
-	                    }
-
-	                    if fileEncrypted {
-	                        VStack(alignment: .leading, spacing: 6) {
-	                            Text("Passphrase / PIN")
-	                                .font(.system(size: 11, weight: .semibold))
-	                                .foregroundStyle(.secondary)
-	                            SecureField("", text: $passphrase)
-	                                .textFieldStyle(.roundedBorder)
-	                                .font(.system(size: 12, design: .monospaced))
-	                                .focused($passphraseFocused)
-	                                .onSubmit { inspectBundle() }
+	                        if let inspectError {
+	                            Label(inspectError, systemImage: "exclamationmark.triangle.fill")
+	                                .font(.system(size: 12, weight: .semibold))
+	                                .foregroundStyle(.red)
+	                                .frame(maxWidth: .infinity, alignment: .center)
 	                        }
+
+	                        Spacer()
+
+	                        HStack(spacing: 8) {
+	                            Button("Cancel") { dismiss() }
+	                                .keyboardShortcut(.cancelAction)
+	                            Spacer()
+	                            Button("Choose…") { chooseFile() }
+	                                .buttonStyle(.borderedProminent)
+	                                .keyboardShortcut(.defaultAction)
+	                        }
+	                    }
+	                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+	                } else {
+	                    GroupBox {
+	                        VStack(alignment: .leading, spacing: 12) {
+	                            HStack(spacing: 8) {
+	                                Image(systemName: "doc")
+	                                    .foregroundStyle(.secondary)
+	                                Text(fileUrl?.lastPathComponent ?? "No file selected")
+	                                    .font(.system(size: 12, weight: .semibold))
+	                                    .foregroundStyle(.secondary)
+	                                    .lineLimit(1)
+	                                    .truncationMode(.middle)
+	                                Spacer()
+	                                Button("Change…") { chooseFile() }
+	                                    .buttonStyle(.bordered)
+	                            }
+
+	                            let h = hintPreview?.trimmingCharacters(in: .whitespacesAndNewlines)
+	                            VStack(alignment: .leading, spacing: 6) {
+	                                Text("Message")
+	                                    .font(.system(size: 11, weight: .semibold))
+	                                    .foregroundStyle(.secondary)
+	                                Text(h?.isEmpty == false ? h! : "—")
+	                                    .font(.system(size: 12, weight: .semibold))
+	                                    .foregroundStyle(.secondary)
+	                                    .frame(maxWidth: .infinity, alignment: .leading)
+	                                    .fixedSize(horizontal: false, vertical: true)
+	                            }
+
+	                            if fileEncrypted {
+	                                VStack(alignment: .leading, spacing: 6) {
+	                                    Text("Passphrase / PIN")
+	                                        .font(.system(size: 11, weight: .semibold))
+	                                        .foregroundStyle(.secondary)
+	                                    SecureField("", text: $passphrase)
+	                                        .textFieldStyle(.roundedBorder)
+	                                        .font(.system(size: 12, design: .monospaced))
+	                                        .focused($passphraseFocused)
+	                                        .onSubmit { inspectBundle() }
+	                                }
+	                            }
+
+	                            if let inspectError {
+	                                Label(inspectError, systemImage: "exclamationmark.triangle.fill")
+	                                    .font(.system(size: 12, weight: .semibold))
+	                                    .foregroundStyle(.red)
+	                            }
+	                        }
+	                        .padding(.vertical, 2)
 	                    }
 
 	                    HStack(spacing: 8) {
@@ -1869,17 +1905,12 @@ private struct ImportConfigBundleSheet: View {
 	                        Spacer()
 	                        Button(inspecting ? "Inspecting…" : "Inspect") { inspectBundle() }
 	                            .buttonStyle(.borderedProminent)
+	                            .keyboardShortcut(.defaultAction)
 	                            .disabled(
 	                                (fileEncrypted && passphrase.isEmpty)
 	                                    || bundleKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 	                                    || inspecting
 	                            )
-	                    }
-
-	                    if let inspectError {
-	                        Text(inspectError)
-	                            .font(.system(size: 12, weight: .semibold))
-	                            .foregroundStyle(.red)
 	                    }
 	                }
 	            }
@@ -2012,8 +2043,10 @@ private struct ImportConfigBundleSheet: View {
                 }
             }
         }
-        .padding()
-        .frame(width: 720, height: 680)
+        .padding(20)
+        .frame(width: sheetSize.width, height: sheetSize.height)
+        .animation(.easeInOut(duration: 0.15), value: stage)
+        .animation(.easeInOut(duration: 0.15), value: inspection != nil)
     }
 }
 
