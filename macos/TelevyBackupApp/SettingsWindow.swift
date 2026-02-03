@@ -2148,7 +2148,11 @@ private struct ImportConfigBundleSheet: View {
                     }
                 }
                 .scrollIndicators(.visible)
-                .frame(height: targetsListHeight)
+                // When the sheet is taller than the minimum list size, let the list expand so we
+                // don't end up with a large empty region at the bottom.
+                .frame(minHeight: targetsListHeight)
+                .frame(maxHeight: .infinity)
+                .layoutPriority(1)
 
                 Divider()
 
