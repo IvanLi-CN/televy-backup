@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -299,8 +300,17 @@ private enum SettingsUIDemo {
     }
 
     static var initialSection: SettingsSection {
+        if enabled && scene.hasPrefix("backup-config") { return .recoveryKey }
         if scene.hasPrefix("endpoints") { return .endpoints }
         return .targets
+    }
+
+    static var shouldOpenBackupConfigImportSheet: Bool {
+        enabled && scene.hasPrefix("backup-config-import")
+    }
+
+    static var shouldOpenBackupConfigExportPanel: Bool {
+        enabled && scene == "backup-config-export"
     }
 
     static func makeSettings(scene: String) -> SettingsV2 {
@@ -437,10 +447,23 @@ struct SettingsWindowRootView: View {
                 } label: {
                     Label("Developer…", systemImage: "wrench.and.screwdriver")
                 }
-                .help("Open Developer window")
+        .help("Open Developer window")
             }
         }
-        .onAppear { reload() }
+        .onAppear {
+            // Demo mode can force an initial Settings section/sheet to enable deterministic screenshots.
+            section = SettingsUIDemo.initialSection
+            if SettingsUIDemo.shouldOpenBackupConfigImportSheet {
+                showImportConfigBundleSheet = true
+            }
+            if SettingsUIDemo.shouldOpenBackupConfigExportPanel {
+                // Let the Settings window finish its first layout before presenting NSSavePanel.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    exportBackupConfig()
+                }
+            }
+            reload()
+        }
         .onChange(of: selectedTargetId) { _, _ in
             ensureSelectedTargetEndpointValid()
         }
@@ -1458,6 +1481,7 @@ private struct ImportConfigBundleSheet: View {
     @State private var inspecting: Bool = false
     @State private var inspection: CliSettingsImportBundleDryRunResponse?
     @State private var inspectError: String?
+    @State private var didAutoSnapshot: Bool = false
 
     @State private var selectedTargetIds: Set<String> = []
     @State private var resolutions: [String: ResolutionState] = [:]
@@ -1516,21 +1540,7 @@ private struct ImportConfigBundleSheet: View {
         return "TBC2:" + trimmed
     }
 
-    private func chooseFile() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        let tbconfig = UTType(filenameExtension: "tbconfig")
-        panel.allowedContentTypes = [
-            tbconfig ?? .data,
-            .plainText,
-        ]
-        panel.prompt = "Choose"
-
-        if panel.runModal() != .OK { return }
-        guard let url = panel.url else { return }
-
+    private func loadSelectedFile(url: URL) {
         fileUrl = url
         inspection = nil
         applyError = nil
@@ -1570,6 +1580,24 @@ private struct ImportConfigBundleSheet: View {
         bundleKey = ""
         hintPreview = nil
         inspectError = "Invalid backup config file"
+    }
+
+    private func chooseFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        let tbconfig = UTType(filenameExtension: "tbconfig")
+        panel.allowedContentTypes = [
+            tbconfig ?? .data,
+            .plainText,
+        ]
+        panel.prompt = "Choose"
+
+        if panel.runModal() != .OK { return }
+        guard let url = panel.url else { return }
+
+        loadSelectedFile(url: url)
     }
 
     private struct ResolutionState {
@@ -1703,7 +1731,7 @@ private struct ImportConfigBundleSheet: View {
         if selectedTargetIds.isEmpty { return false }
         if fileEncrypted && passphrase.isEmpty { return false }
         if !ackRisks { return false }
-        if phrase != "ROTATE" { return false }
+        if phrase != "IMPORT" { return false }
 
         for id in selectedTargetIds {
             if needsResolution(targetId: id) {
@@ -1799,24 +1827,98 @@ private struct ImportConfigBundleSheet: View {
         applying = false
     }
 
-    private var sheetSize: CGSize {
-        if inspection != nil {
-            return CGSize(width: 720, height: 680)
+    private func missingSecretLabels(keys: [String]) -> [String] {
+        var out: [String] = []
+        for k in keys {
+            if k.contains("telegram.bot_token") {
+                if !out.contains("Telegram bot token") { out.append("Telegram bot token") }
+            } else if k.contains("telegram.mtproto.api_hash") || k.contains("telegram.api_hash") {
+                if !out.contains("Telegram API hash") { out.append("Telegram API hash") }
+            } else {
+                if !out.contains("Other secrets") { out.append("Other secrets") }
+            }
         }
-        if stage == .chooseFile {
-            return CGSize(width: 560, height: 360)
+        return out
+    }
+
+    private func demoInspection(targetsCount: Int) -> CliSettingsImportBundleDryRunResponse {
+        let n = max(1, targetsCount)
+        let epA = CliSettingsImportBundleDryRunResponse.BundleEndpoint(
+            id: "ep_demo_a",
+            chatId: "123456",
+            mode: "mtproto"
+        )
+
+        let targets: [CliSettingsImportBundleDryRunResponse.BundleTarget] = (0..<n).map { i in
+            let id = String(format: "t_demo_%02d", i + 1)
+            return CliSettingsImportBundleDryRunResponse.BundleTarget(
+                id: id,
+                sourcePath: "/Users/ivan/Demo/Folder\(i + 1)",
+                endpointId: epA.id,
+                label: i == 0 ? "photos" : "target-\(i + 1)"
+            )
         }
-        return CGSize(width: 560, height: fileEncrypted ? 420 : 360)
+
+        let preflightTargets: [CliSettingsImportBundleDryRunResponse.PreflightTarget] = targets.map { t in
+            CliSettingsImportBundleDryRunResponse.PreflightTarget(
+                targetId: t.id,
+                sourcePathExists: true,
+                bootstrap: CliSettingsImportBundleDryRunResponse.Bootstrap(state: "ok", details: nil),
+                remoteLatest: CliSettingsImportBundleDryRunResponse.RemoteLatest(
+                    state: "ok",
+                    snapshotId: "s_demo_latest",
+                    manifestObjectId: "m_demo_latest"
+                ),
+                localIndex: CliSettingsImportBundleDryRunResponse.LocalIndex(state: "match", details: nil),
+                conflict: CliSettingsImportBundleDryRunResponse.Conflict(state: "none", reasons: [])
+            )
+        }
+
+        let secretsCoverage = CliSettingsImportBundleDryRunResponse.SecretsCoverage(
+            presentKeys: [],
+            excludedKeys: [],
+            missingKeys: []
+        )
+
+        return CliSettingsImportBundleDryRunResponse(
+            format: "tbc2",
+            localMasterKey: CliSettingsImportBundleDryRunResponse.LocalMasterKey(state: "match"),
+            localHasTargets: true,
+            nextAction: "apply",
+            bundle: CliSettingsImportBundleDryRunResponse.Bundle(
+                settingsVersion: 2,
+                targets: targets,
+                endpoints: [epA],
+                secretsCoverage: secretsCoverage
+            ),
+            preflight: CliSettingsImportBundleDryRunResponse.Preflight(targets: preflightTargets)
+        )
+    }
+
+    // SwiftUI sheets on macOS do not reliably resize when content size changes, so we keep a
+    // stable sheet size that fits the "inspect result" stage (the largest content).
+    private var sheetWidth: CGFloat { 720 }
+    private var sheetHeight: CGFloat { 700 }
+
+    private var targetsListHeight: CGFloat {
+        guard let inspection else { return 0 }
+        let count = inspection.bundle.targets.count
+        let rowApprox: CGFloat = 86
+        let listMax: CGFloat = 320
+        let listMin: CGFloat = 90
+        return min(listMax, max(listMin, CGFloat(max(count, 1)) * rowApprox))
     }
 
 	    var body: some View {
-	        VStack(alignment: .leading, spacing: 14) {
+	        VStack(alignment: .leading, spacing: 12) {
 	            if inspection != nil || stage == .inspect {
-	                Text("Import backup config")
-	                    .font(.system(size: 18, weight: .bold))
-	                Text("Choose a backup config file, then inspect before apply.")
-	                    .font(.system(size: 12, weight: .semibold))
-	                    .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Import backup config")
+                            .font(.system(size: 18, weight: .bold))
+                        Text("Choose a backup config file, then inspect before apply.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
 	            }
 
 	            if inspection == nil {
@@ -1916,36 +2018,67 @@ private struct ImportConfigBundleSheet: View {
 	            }
 
 	            if let inspection {
+                    let targetsCount = inspection.bundle.targets.count
+                    let endpointsCount = inspection.bundle.endpoints.count
+                    let missingKeys = inspection.bundle.secretsCoverage.missingKeys
+                    let missingLabels = missingSecretLabels(keys: missingKeys)
+                    let canImport = inspection.nextAction != "start_key_rotation"
+
+                    let primaryStatusText: String = {
+                        if canImport { return "Ready to import" }
+                        return "Import blocked"
+                    }()
+
+                    let statusDetailsText: String = {
+                        if canImport {
+                            if inspection.localHasTargets {
+                                return "This Mac already has backup config."
+                            }
+                            return "No existing backup config detected on this Mac."
+                        }
+                        return "This Mac is using a different encryption key. Import is disabled to prevent mixing unrelated backups."
+                    }()
+
+                    let secretsText: String = {
+                        if missingKeys.isEmpty { return "Credentials: complete" }
+                        if missingLabels.isEmpty { return "Credentials: missing" }
+                        return "Credentials missing: \(missingLabels.joined(separator: ", "))"
+                    }()
+
 	                GroupBox {
 	                    VStack(alignment: .leading, spacing: 10) {
                         Text("Summary")
                             .font(.system(size: 13, weight: .semibold))
-                        Text("nextAction: \(inspection.nextAction) · localMasterKey: \(inspection.localMasterKey.state) · localHasTargets: \(inspection.localHasTargets ? "true" : "false")")
+                        HStack(spacing: 10) {
+                            Image(systemName: canImport ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                                .foregroundStyle(canImport ? Color.green : Color.red)
+                            Text(primaryStatusText)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Text("\(targetsCount) target\(targetsCount == 1 ? "" : "s") · \(endpointsCount) endpoint\(endpointsCount == 1 ? "" : "s")")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Text(statusDetailsText)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
 
-                        if inspection.nextAction == "start_key_rotation" {
-                            Text("This device already has targets and the master key does not match. Start master key rotation (plan #4fexy) and retry.")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.red)
-                        }
-
-                        Text("Missing secrets: \(inspection.bundle.secretsCoverage.missingKeys.joined(separator: ", "))")
+                        Text(secretsText)
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(
-                                inspection.bundle.secretsCoverage.missingKeys.isEmpty
-                                    ? Color.secondary
-                                    : Color.red
-                            )
+                            .foregroundStyle(missingKeys.isEmpty ? Color.secondary : Color.red)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 2)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 Text("Targets")
                     .font(.system(size: 13, weight: .semibold))
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
+                    LazyVStack(alignment: .leading, spacing: 10) {
                         ForEach(inspection.bundle.targets.sorted { a, b in
                             a.id.localizedStandardCompare(b.id) == .orderedAscending
                         }) { t in
@@ -2019,12 +2152,14 @@ private struct ImportConfigBundleSheet: View {
                         }
                     }
                 }
+                .scrollIndicators(.visible)
+                .frame(height: targetsListHeight)
 
                 Divider()
 
-                Toggle("I understand the risks (settings/secrets/index may change)", isOn: $ackRisks)
+                Toggle("I understand this will apply backup configuration to this Mac.", isOn: $ackRisks)
                     .disabled(inspection.nextAction == "start_key_rotation")
-                TextField("Type ROTATE to confirm", text: $phrase)
+                TextField("Type IMPORT to confirm", text: $phrase)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
                     .disabled(inspection.nextAction == "start_key_rotation")
@@ -2042,11 +2177,75 @@ private struct ImportConfigBundleSheet: View {
                         .disabled(inspection.nextAction == "start_key_rotation" || applying || !canApply())
                 }
             }
-        }
-        .padding(20)
-        .frame(width: sheetSize.width, height: sheetSize.height)
+	        }
+	        .padding(18)
+	        .frame(width: sheetWidth, height: sheetHeight, alignment: .topLeading)
         .animation(.easeInOut(duration: 0.15), value: stage)
         .animation(.easeInOut(duration: 0.15), value: inspection != nil)
+	        .onChange(of: inspection != nil) { _, ready in
+	            guard ready else { return }
+	            guard SettingsUIDemo.enabled else { return }
+	            guard SettingsUIDemo.scene == "backup-config-import-result" else { return }
+	            guard !didAutoSnapshot else { return }
+
+            guard let dirPath = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_DIR"],
+                  !dirPath.isEmpty
+            else { return }
+
+            let mode = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_MODE"] ?? "timer"
+            // Timer-based snapshots are handled centrally in `AppDelegate`. Keep this path for
+            // the result page where we want to snapshot exactly after inspection finished.
+            guard mode == "manual" else { return }
+
+            didAutoSnapshot = true
+	            let prefix = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_PREFIX"] ?? "snapshot"
+	            let dir = URL(fileURLWithPath: dirPath, isDirectory: true)
+	            let delayMs = Int(ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_DELAY_MS"] ?? "") ?? 300
+	            DispatchQueue.main.asyncAfter(deadline: .now() + Double(delayMs) / 1000.0) {
+	                UISnapshot.captureVisibleWindows(to: dir, prefix: prefix)
+	                Darwin.exit(0)
+	            }
+	        }
+        .onAppear {
+            guard SettingsUIDemo.enabled else { return }
+            guard SettingsUIDemo.scene.hasPrefix("backup-config-import") else { return }
+
+            // Allow deterministic import UI screenshots without Accessibility scripting.
+            if stage == .chooseFile,
+               inspection == nil,
+               fileUrl == nil,
+               let p = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_FILE"],
+               !p.isEmpty
+            {
+                loadSelectedFile(url: URL(fileURLWithPath: p))
+            }
+
+            if SettingsUIDemo.scene == "backup-config-import-result",
+               inspection == nil,
+               stage == .inspect,
+               let s = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_TARGETS_COUNT"],
+               let count = Int(s)
+            {
+                let decoded = demoInspection(targetsCount: count)
+                inspection = decoded
+                applyDefaults(from: decoded)
+                return
+            }
+
+            if SettingsUIDemo.scene == "backup-config-import-result",
+               inspection == nil,
+               stage == .inspect,
+               fileEncrypted,
+               passphrase.isEmpty,
+               let pp = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_PASSPHRASE"],
+               !pp.isEmpty
+            {
+                passphrase = pp
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    inspectBundle()
+                }
+            }
+        }
     }
 }
 

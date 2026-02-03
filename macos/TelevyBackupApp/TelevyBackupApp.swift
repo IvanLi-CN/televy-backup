@@ -3657,6 +3657,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+
+        // Deterministic UI snapshots for CI/docs/debug: write PNGs of visible windows, then exit.
+        // This is intentionally implemented without OS-level screen capture APIs to avoid Screen
+        // Recording permission issues.
+        if let dirPath = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_DIR"],
+           !dirPath.isEmpty
+        {
+            let env = ProcessInfo.processInfo.environment
+            let mode = env["TELEVYBACKUP_UI_SNAPSHOT_MODE"] ?? "timer"
+            if mode == "timer" {
+                let prefix = env["TELEVYBACKUP_UI_SNAPSHOT_PREFIX"]
+                    ?? (env["TELEVYBACKUP_UI_DEMO_SCENE"] ?? "snapshot")
+                let delayMs = Int(env["TELEVYBACKUP_UI_SNAPSHOT_DELAY_MS"] ?? "") ?? 1200
+                let dir = URL(fileURLWithPath: dirPath, isDirectory: true)
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(delayMs) / 1000.0) {
+                    UISnapshot.captureVisibleWindows(to: dir, prefix: prefix)
+                    Darwin.exit(0)
+                }
+            }
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

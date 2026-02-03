@@ -1586,10 +1586,10 @@ async fn settings_import_bundle_apply(
             "selectedTargetIds must not be empty",
         ));
     }
-    if !req.confirm.ack_risks || req.confirm.phrase != "ROTATE" {
+    if !req.confirm.ack_risks || req.confirm.phrase != "IMPORT" {
         return Err(CliError::new(
             "config_bundle.confirm_required",
-            "apply requires confirm.ackRisks=true and confirm.phrase=\"ROTATE\"",
+            "apply requires confirm.ackRisks=true and confirm.phrase=\"IMPORT\"",
         ));
     }
 

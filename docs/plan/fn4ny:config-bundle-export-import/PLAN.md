@@ -130,7 +130,7 @@
     - overwrite remote 会改变跨设备 latest 指针语义（但不删除远端对象）。
     - 索引重建会改名备份旧 per-endpoint DB，并可能触发后续备份行为变化（例如重新扫描/对齐）。
     - 旧全局 `index.sqlite` 在迁移完成后会被静默删除（本地缓存清理）。
-  - 二次确认形式（frozen）：typed phrase，用户必须输入 `ROTATE`。
+  - 二次确认形式（frozen）：typed phrase，用户必须输入 `IMPORT`。
 
 #### 8) Master key 冲突处理（frozen）
 
@@ -203,7 +203,7 @@
 - 已确认导入 apply 的“索引重建”策略：备份旧 db → 拉取远端最新可用索引落盘为新 db（或 bootstrap missing 时建空库）。
 - 已确认 index 按 endpoint 隔离 + 禁止 chat 复用（见计划 `#r6ceq`），从而避免“multi-endpoint 场景下索引来源选择”的歧义。
 - 已确认迁移期兼容策略：旧全局 `index.sqlite` 存在时静默忽略；导入 apply 仅处理 per-endpoint `index.<endpoint_id>.sqlite`（见 `#r6ceq`）。
-- 已确认二次确认的具体交互形态：typed phrase（输入 `ROTATE`），并明确“哪些动作”需要额外的二次确认（例如 overwrite remote / overwrite master key）。
+- 已确认二次确认的具体交互形态：typed phrase（输入 `IMPORT`），并明确“哪些动作”需要额外的二次确认（例如 overwrite remote / overwrite master key）。
 - 已确认 master key mismatch 的策略：
   - 无 targets：允许 apply（但需二次确认）
   - 有 targets：进入 `#4fexy` 的轮换流程（可暂停/继续/取消，成功后切换）
@@ -273,7 +273,7 @@ None
 - 2026-01-31: 需求变更：master key mismatch + 已有 targets 时必须进入 `#4fexy` 轮换流程（可暂停/继续/取消）；无 targets 时允许 apply（需二次确认）
 - 2026-01-31: 更新：导入 apply 的索引重建按 per-endpoint `index.<endpoint_id>.sqlite` 执行（旧全局 `index.sqlite` 静默忽略并按 `#r6ceq` 自动清理）
 - 2026-01-31: 冻结导入默认语义：merge（保留本机额外 targets/endpoints；bundle 覆盖同 ID 与全局 settings）
-- 2026-01-31: 冻结二次确认交互：typed phrase（输入 `ROTATE`）
+- 2026-01-31: 冻结二次确认交互：typed phrase（输入 `IMPORT`）
 - 2026-02-01: 已实现：`settings export-bundle` / `settings import-bundle`（dry-run/apply）+ macOS Settings Backup Config UI 入口 + docs 同步
 - 2026-02-02: 更新：Config bundle 改为 passphrase 保护（`TBC2`；避免与 `TBK1` 同存导致单点泄露）
 - 2026-02-02: 更新：Settings 的 Config 页仅保留“导出配置 / 导入配置”入口；导入时展示明文 hint
