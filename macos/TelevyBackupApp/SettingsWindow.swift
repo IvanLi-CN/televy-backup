@@ -1486,7 +1486,6 @@ private struct ImportConfigBundleSheet: View {
     @State private var selectedTargetIds: Set<String> = []
     @State private var resolutions: [String: ResolutionState] = [:]
 
-    @State private var ackRisks: Bool = false
     @State private var phrase: String = ""
     @State private var applying: Bool = false
     @State private var applyError: String?
@@ -1672,8 +1671,6 @@ private struct ImportConfigBundleSheet: View {
             }
         }
         resolutions = next
-
-        ackRisks = false
         phrase = ""
     }
 
@@ -1730,7 +1727,6 @@ private struct ImportConfigBundleSheet: View {
         if inspection.nextAction == "start_key_rotation" { return false }
         if selectedTargetIds.isEmpty { return false }
         if fileEncrypted && passphrase.isEmpty { return false }
-        if !ackRisks { return false }
         if phrase != "IMPORT" { return false }
 
         for id in selectedTargetIds {
@@ -1783,7 +1779,6 @@ private struct ImportConfigBundleSheet: View {
             "bundleKey": key,
             "selectedTargetIds": selected,
             "confirm": [
-                "ackRisks": ackRisks,
                 "phrase": phrase,
             ],
             "resolutions": resolutionsObj,
@@ -2157,8 +2152,6 @@ private struct ImportConfigBundleSheet: View {
 
                 Divider()
 
-                Toggle("I understand this will apply backup configuration to this Mac.", isOn: $ackRisks)
-                    .disabled(inspection.nextAction == "start_key_rotation")
                 TextField("Type IMPORT to confirm", text: $phrase)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))

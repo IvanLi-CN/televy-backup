@@ -116,7 +116,6 @@ televybackup [--config-dir <path>] [--data-dir <path>] --json settings import-bu
   "bundleKey": "TBC2:...",
   "selectedTargetIds": ["t1", "t2"],
   "confirm": {
-    "ackRisks": true,
     "phrase": "IMPORT"
   },
   "resolutions": {
@@ -134,7 +133,7 @@ televybackup [--config-dir <path>] [--data-dir <path>] --json settings import-bu
   - 不删除、不修改本机 settings 中“bundle 未涉及”的 targets/endpoints（保留本机额外配置）。
 - 若 dry-run 发现 `conflict.state=needs_resolution` 且 apply 未提供对应 `resolutions[targetId]`：返回 `config_bundle.conflict`。
 - 迁移期兼容：apply 不读取/不写入旧全局 `TELEVYBACKUP_DATA_DIR/index/index.sqlite`；仅操作 per-endpoint `index.<endpoint_id>.sqlite`（按 `#r6ceq`）。
-- 必须显式确认风险（frozen）：若 `confirm.ackRisks != true` 或 `confirm.phrase != "IMPORT"`：返回 `config_bundle.confirm_required`。
+- 必须显式确认风险（frozen）：若 `confirm.phrase != "IMPORT"`：返回 `config_bundle.confirm_required`。
 - 若 dry-run 检测到 `localMasterKey.state=mismatch` 且 `localHasTargets=true`：返回 `config_bundle.rotation_required`（应走 `#4fexy` 的轮换流程）。
 - 若 dry-run 检测到 `localMasterKey.state=mismatch` 且 `localHasTargets=false`：允许 apply，但必须二次确认（仍走 `confirm.*`）。
 

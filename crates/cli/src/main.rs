@@ -1064,6 +1064,10 @@ struct SettingsImportBundleApplyRequest {
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsImportBundleApplyConfirm {
+    // Backward-compatible field: older UIs may send it, but the only user-facing confirmation
+    // we require is the phrase.
+    #[allow(dead_code)]
+    #[serde(default)]
     ack_risks: bool,
     phrase: String,
 }
@@ -1586,10 +1590,10 @@ async fn settings_import_bundle_apply(
             "selectedTargetIds must not be empty",
         ));
     }
-    if !req.confirm.ack_risks || req.confirm.phrase != "IMPORT" {
+    if req.confirm.phrase != "IMPORT" {
         return Err(CliError::new(
             "config_bundle.confirm_required",
-            "apply requires confirm.ackRisks=true and confirm.phrase=\"IMPORT\"",
+            "apply requires confirm.phrase=\"IMPORT\"",
         ));
     }
 
