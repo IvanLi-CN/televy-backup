@@ -2263,6 +2263,8 @@ private struct ImportConfigBundleSheet: View {
                 }
 
                 HStack {
+                    Button("Cancel") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
                     Spacer()
                     Button(applying ? "Applying…" : "Apply") { applyBundle() }
                         .buttonStyle(.borderedProminent)
