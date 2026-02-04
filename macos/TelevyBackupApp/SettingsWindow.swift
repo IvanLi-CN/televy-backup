@@ -2205,24 +2205,27 @@ private struct ImportConfigBundleSheet: View {
                                             }
                                         }
                                         .pickerStyle(.menu)
+                                        .controlSize(.regular)
                                         .frame(width: 260)
 
                                         if state.mode == .rebind {
                                             HStack(spacing: 8) {
-                                                Text(state.newSourcePath.isEmpty ? "No folder selected" : state.newSourcePath)
-                                                    .font(.system(size: 12, design: .monospaced))
-                                                    .foregroundStyle(state.newSourcePath.isEmpty ? .secondary : .primary)
-                                                    .lineLimit(1)
-                                                    .truncationMode(.middle)
-                                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                                    .padding(.vertical, 6)
-                                                    .padding(.horizontal, 8)
-                                                    .background(.background)
-                                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                                                TextField(
+                                                    "",
+                                                    text: Binding(
+                                                        get: { state.newSourcePath },
+                                                        set: { _ in }
+                                                    ),
+                                                    prompt: Text("No folder selected")
+                                                )
+                                                .textFieldStyle(.roundedBorder)
+                                                .font(.system(size: 12, design: .monospaced))
+                                                .controlSize(.regular)
+                                                .disabled(true)
 
                                                 Button("Choose…") { chooseFolder(targetId: t.id) }
                                                     .buttonStyle(.bordered)
+                                                    .controlSize(.regular)
                                             }
                                             .frame(maxWidth: 360)
                                         }
