@@ -387,6 +387,7 @@ struct SettingsWindowRootView: View {
     @State private var reloadSeq: Int = 0
 
     @State private var showImportConfigBundleSheet: Bool = false
+    @State private var importConfigBundleInitialFileUrl: URL?
 
     @State private var pendingLastTouchedEndpointId: String?
     @State private var pendingLastSelectedEndpointId: String?
@@ -454,6 +455,11 @@ struct SettingsWindowRootView: View {
             // Demo mode can force an initial Settings section/sheet to enable deterministic screenshots.
             section = SettingsUIDemo.initialSection
             if SettingsUIDemo.shouldOpenBackupConfigImportSheet {
+                if let p = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_FILE"],
+                   !p.isEmpty
+                {
+                    importConfigBundleInitialFileUrl = URL(fileURLWithPath: p)
+                }
                 showImportConfigBundleSheet = true
             }
             if SettingsUIDemo.shouldOpenBackupConfigExportPanel {
@@ -778,7 +784,7 @@ struct SettingsWindowRootView: View {
                                 model.ensureDaemonRunning()
                                 reload()
                             }
-                            showImportConfigBundleSheet = true
+                            chooseImportBackupConfigFile()
                         }
                         .buttonStyle(.bordered)
                         .disabled(secretsUnavailable && !secretsRetryable)
@@ -795,9 +801,35 @@ struct SettingsWindowRootView: View {
         }
         .padding()
         .sheet(isPresented: $showImportConfigBundleSheet) {
-            ImportConfigBundleSheet(onApplied: { reload() })
+            ImportConfigBundleSheet(
+                initialFileUrl: importConfigBundleInitialFileUrl,
+                onApplied: { reload() }
+            )
                 .environmentObject(model)
+                .onDisappear {
+                    // Ensure the next Import run starts clean (a new file picker flow).
+                    importConfigBundleInitialFileUrl = nil
+                }
         }
+    }
+
+    private func chooseImportBackupConfigFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        let tbconfig = UTType(filenameExtension: "tbconfig")
+        panel.allowedContentTypes = [
+            tbconfig ?? .data,
+            .plainText,
+        ]
+        panel.prompt = "Choose"
+
+        if panel.runModal() != .OK { return }
+        guard let url = panel.url else { return }
+
+        importConfigBundleInitialFileUrl = url
+        showImportConfigBundleSheet = true
     }
 
     private var scheduleView: some View {
@@ -1478,6 +1510,7 @@ private struct ImportConfigBundleSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var model: AppModel
 
+    let initialFileUrl: URL?
     let onApplied: () -> Void
 
     @FocusState private var passphraseFocused: Bool
@@ -1487,7 +1520,7 @@ private struct ImportConfigBundleSheet: View {
         case inspect
     }
 
-    @State private var stage: Stage = .chooseFile
+    @State private var stage: Stage
     @State private var fileEncrypted: Bool = true
     @State private var fileUrl: URL?
     @State private var bundleKey: String = ""
@@ -1497,6 +1530,7 @@ private struct ImportConfigBundleSheet: View {
     @State private var inspection: CliSettingsImportBundleDryRunResponse?
     @State private var inspectError: String?
     @State private var didAutoSnapshot: Bool = false
+    @State private var didLoadInitialFile: Bool = false
 
     @State private var selectedTargetIds: Set<String> = []
     @State private var resolutions: [String: ResolutionState] = [:]
@@ -1553,12 +1587,18 @@ private struct ImportConfigBundleSheet: View {
         return "TBC2:" + trimmed
     }
 
+    init(initialFileUrl: URL? = nil, onApplied: @escaping () -> Void) {
+        self.initialFileUrl = initialFileUrl
+        self.onApplied = onApplied
+        _stage = State(initialValue: initialFileUrl == nil ? .chooseFile : .inspect)
+        _fileUrl = State(initialValue: initialFileUrl)
+    }
+
     private func loadSelectedFile(url: URL) {
         fileUrl = url
         inspection = nil
         applyError = nil
         passphrase = ""
-        stage = .chooseFile
         hintPreview = nil
         bundleKey = ""
         inspectError = nil
@@ -1593,6 +1633,7 @@ private struct ImportConfigBundleSheet: View {
         bundleKey = ""
         hintPreview = nil
         inspectError = "Invalid backup config file"
+        stage = .chooseFile
     }
 
     private func chooseFile() {
@@ -1974,10 +2015,14 @@ private struct ImportConfigBundleSheet: View {
         )
     }
 
-    // SwiftUI sheets on macOS do not reliably resize when content size changes, so we keep a
-    // stable sheet size that fits the "inspect result" stage (the largest content).
+    // SwiftUI sheets on macOS do not reliably resize when content size changes. Pick a
+    // single "working" size for the import flow so the result page doesn't get clipped,
+    // while keeping the empty state compact.
     private var sheetWidth: CGFloat { 720 }
-    private var sheetHeight: CGFloat { 700 }
+    private var sheetHeight: CGFloat {
+        if stage == .chooseFile { return 360 }
+        return 560
+    }
 
     private var targetsListHeight: CGFloat {
         guard let inspection else { return 0 }
@@ -2304,6 +2349,11 @@ private struct ImportConfigBundleSheet: View {
 	            }
 	        }
         .onAppear {
+            if !didLoadInitialFile, let initialFileUrl {
+                didLoadInitialFile = true
+                loadSelectedFile(url: initialFileUrl)
+            }
+
             guard SettingsUIDemo.enabled else { return }
             guard SettingsUIDemo.scene.hasPrefix("backup-config-import") else { return }
 
