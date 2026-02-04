@@ -17,11 +17,13 @@ for _ in {1..40}; do
   fi
   sleep 0.1
 done
-if pgrep -f "$app_bin" >/dev/null 2>&1; then
-  pkill -f "$app_bin" >/dev/null 2>&1 || true
-  pkill -f "$app_daemon" >/dev/null 2>&1 || true
-  pkill -f "$app_cli --json status stream" >/dev/null 2>&1 || true
-fi
+
+# Always kill any leftover processes from previous runs (we've seen cases where the GUI exits
+# but the daemon/helper keeps running, causing the "wrong version" to be used).
+pkill -f "$app_bin" >/dev/null 2>&1 || true
+pkill -f "$app_daemon" >/dev/null 2>&1 || true
+pkill -f "$app_cli --json status stream" >/dev/null 2>&1 || true
+pkill -f "$app/Contents/MacOS/televybackup-mtproto-helper" >/dev/null 2>&1 || true
 
 # Development default: disable Keychain to avoid prompts and keep local runs reproducible.
 # Override with `TELEVYBACKUP_DISABLE_KEYCHAIN=0` for production-like behavior.
@@ -38,6 +40,7 @@ if [ "$disable_keychain" = "1" ]; then
     echo "  TELEVYBACKUP_DATA_DIR=$data_dir" >&2
     echo "  TELEVYBACKUP_CONFIG_DIR=$config_dir" >&2
   fi
+  rm -f "$data_dir/ipc/"*.sock >/dev/null 2>&1 || true
   # NOTE: launching via LaunchServices keeps the menu bar app alive; env vars are not reliably
   # inherited by `open`, so pass overrides via `--args` and let the app propagate to subprocesses.
   open -n "$app" --args --disable-keychain --data-dir "$data_dir" --config-dir "$config_dir"

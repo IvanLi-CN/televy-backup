@@ -3,7 +3,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, mpsc};
+use std::time::Duration;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,7 @@ use super::Storage;
 use crate::{Error, Result};
 
 const TG_MTPROTO_OBJECT_ID_PREFIX_V1: &str = "tgmtproto:v1:";
+const MTPROTO_HELPER_READ_TIMEOUT_SECS: u64 = 180;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TgMtProtoObjectIdV1 {
@@ -125,6 +127,11 @@ pub struct TelegramMtProtoStorageConfig {
 pub struct TelegramMtProtoStorage {
     provider: String,
     chat_id: String,
+    api_id: i32,
+    api_hash: String,
+    bot_token: String,
+    cache_dir: PathBuf,
+    helper_path: PathBuf,
     session: Mutex<Option<Vec<u8>>>,
     helper: Mutex<MtProtoHelper>,
 }
@@ -135,21 +142,34 @@ impl TelegramMtProtoStorage {
             default_helper_path().unwrap_or_else(|| PathBuf::from("televybackup-mtproto-helper"))
         });
 
+        let session_b64 = config
+            .session
+            .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
+
+        let api_id = config.api_id;
+        let api_hash = config.api_hash;
+        let bot_token = config.bot_token;
+        let cache_dir = config.cache_dir;
+        let chat_id = config.chat_id;
+
         let mut helper = MtProtoHelper::spawn(&helper_path)?;
         helper.init(InitRequest {
-            api_id: config.api_id,
-            api_hash: config.api_hash,
-            bot_token: config.bot_token,
-            chat_id: config.chat_id.clone(),
-            session_b64: config
-                .session
-                .map(|b| base64::engine::general_purpose::STANDARD.encode(b)),
-            cache_dir: config.cache_dir,
+            api_id,
+            api_hash: api_hash.clone(),
+            bot_token: bot_token.clone(),
+            chat_id: chat_id.clone(),
+            session_b64,
+            cache_dir: cache_dir.clone(),
         })?;
 
         Ok(Self {
             provider: config.provider,
-            chat_id: config.chat_id,
+            chat_id,
+            api_id,
+            api_hash,
+            bot_token,
+            cache_dir,
+            helper_path,
             session: Mutex::new(helper.session_bytes()),
             helper: Mutex::new(helper),
         })
@@ -159,26 +179,76 @@ impl TelegramMtProtoStorage {
         self.session.lock().ok().and_then(|guard| guard.clone())
     }
 
-    pub fn pinned_object_id(&self) -> Result<Option<String>> {
-        let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
-            message: "mtproto helper lock poisoned".to_string(),
+    fn should_respawn_helper_after(err: &Error) -> bool {
+        match err {
+            Error::Telegram { message } => message.contains("mtproto helper"),
+            _ => false,
+        }
+    }
+
+    fn replace_helper_locked(&self, helper: &mut MtProtoHelper) -> Result<()> {
+        helper.kill_best_effort();
+
+        let session_b64 = self
+            .session_bytes()
+            .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
+
+        let mut new_helper = MtProtoHelper::spawn(&self.helper_path)?;
+        new_helper.init(InitRequest {
+            api_id: self.api_id,
+            api_hash: self.api_hash.clone(),
+            bot_token: self.bot_token.clone(),
+            chat_id: self.chat_id.clone(),
+            session_b64,
+            cache_dir: self.cache_dir.clone(),
         })?;
-        let out = helper.get_pinned();
+
+        *helper = new_helper;
         *self.session.lock().map_err(|_| Error::Telegram {
             message: "mtproto helper session lock poisoned".to_string(),
         })? = helper.session_bytes();
-        out
+        Ok(())
+    }
+
+    fn ensure_helper_running_locked(&self, helper: &mut MtProtoHelper) -> Result<()> {
+        if helper.has_exited() {
+            self.replace_helper_locked(helper)?;
+        }
+        Ok(())
+    }
+
+    fn with_helper<T>(&self, f: impl FnOnce(&mut MtProtoHelper) -> Result<T>) -> Result<T> {
+        let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper lock poisoned".to_string(),
+        })?;
+
+        // Make sure we don't keep using a dead helper between runs.
+        self.ensure_helper_running_locked(&mut helper)?;
+
+        let res = f(&mut helper);
+
+        // Persist the latest session regardless of success/failure.
+        *self.session.lock().map_err(|_| Error::Telegram {
+            message: "mtproto helper session lock poisoned".to_string(),
+        })? = helper.session_bytes();
+
+        // If the helper process itself is unhealthy, respawn it so the next run can proceed
+        // without needing a full app/daemon restart.
+        if let Err(ref e) = res {
+            if Self::should_respawn_helper_after(e) {
+                let _ = self.replace_helper_locked(&mut helper);
+            }
+        }
+
+        res
+    }
+
+    pub fn pinned_object_id(&self) -> Result<Option<String>> {
+        self.with_helper(|helper| helper.get_pinned())
     }
 
     pub fn pin_message_id(&self, msg_id: i32) -> Result<()> {
-        let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
-            message: "mtproto helper lock poisoned".to_string(),
-        })?;
-        let out = helper.pin(msg_id);
-        *self.session.lock().map_err(|_| Error::Telegram {
-            message: "mtproto helper session lock poisoned".to_string(),
-        })? = helper.session_bytes();
-        out?;
+        self.with_helper(|helper| helper.pin(msg_id))?;
         Ok(())
     }
 
@@ -187,14 +257,7 @@ impl TelegramMtProtoStorage {
         limit: usize,
         include_users: bool,
     ) -> Result<Vec<TelegramDialogInfo>> {
-        let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
-            message: "mtproto helper lock poisoned".to_string(),
-        })?;
-        let out = helper.list_dialogs(limit, include_users);
-        *self.session.lock().map_err(|_| Error::Telegram {
-            message: "mtproto helper session lock poisoned".to_string(),
-        })? = helper.session_bytes();
-        out
+        self.with_helper(|helper| helper.list_dialogs(limit, include_users))
     }
 
     pub fn wait_for_chat(
@@ -202,14 +265,7 @@ impl TelegramMtProtoStorage {
         timeout_secs: u64,
         include_users: bool,
     ) -> Result<TelegramDialogInfo> {
-        let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
-            message: "mtproto helper lock poisoned".to_string(),
-        })?;
-        let out = helper.wait_for_chat(timeout_secs, include_users);
-        *self.session.lock().map_err(|_| Error::Telegram {
-            message: "mtproto helper session lock poisoned".to_string(),
-        })? = helper.session_bytes();
-        out
+        self.with_helper(|helper| helper.wait_for_chat(timeout_secs, include_users))
     }
 }
 
@@ -247,17 +303,13 @@ impl Storage for TelegramMtProtoStorage {
         bytes: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
-            let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
-                message: "mtproto helper lock poisoned".to_string(),
+            let resp = self.with_helper(|helper| {
+                helper.upload(UploadRequest {
+                    filename: filename.to_string(),
+                    bytes,
+                })
             })?;
-            let resp = helper.upload(UploadRequest {
-                filename: filename.to_string(),
-                bytes,
-            })?;
-            *self.session.lock().map_err(|_| Error::Telegram {
-                message: "mtproto helper session lock poisoned".to_string(),
-            })? = resp.session;
-            Ok(resp.object_id)
+            Ok(resp)
         })
     }
 
@@ -268,10 +320,7 @@ impl Storage for TelegramMtProtoStorage {
         mut progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
-            let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
-                message: "mtproto helper lock poisoned".to_string(),
-            })?;
-            let resp = {
+            let resp = self.with_helper(|helper| {
                 let progress = progress.as_deref_mut().map(|cb| cb as &mut dyn FnMut(u64));
                 helper.upload_with_progress(
                     UploadRequest {
@@ -279,12 +328,9 @@ impl Storage for TelegramMtProtoStorage {
                         bytes,
                     },
                     progress,
-                )?
-            };
-            *self.session.lock().map_err(|_| Error::Telegram {
-                message: "mtproto helper session lock poisoned".to_string(),
-            })? = resp.session;
-            Ok(resp.object_id)
+                )
+            })?;
+            Ok(resp)
         })
     }
 
@@ -303,16 +349,12 @@ impl Storage for TelegramMtProtoStorage {
                 });
             }
 
-            let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
-                message: "mtproto helper lock poisoned".to_string(),
+            let resp = self.with_helper(|helper| {
+                helper.download(DownloadRequest {
+                    object_id: object_id.to_string(),
+                })
             })?;
-            let resp = helper.download(DownloadRequest {
-                object_id: object_id.to_string(),
-            })?;
-            *self.session.lock().map_err(|_| Error::Telegram {
-                message: "mtproto helper session lock poisoned".to_string(),
-            })? = resp.session;
-            Ok(resp.bytes)
+            Ok(resp)
         })
     }
 }
@@ -467,20 +509,10 @@ struct ResponseEnvelope {
 }
 
 struct MtProtoHelper {
-    _child: Child,
+    child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     session_b64: Option<String>,
-}
-
-struct UploadResponse {
-    object_id: String,
-    session: Option<Vec<u8>>,
-}
-
-struct DownloadResponse {
-    bytes: Vec<u8>,
-    session: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -516,11 +548,31 @@ impl MtProtoHelper {
         })?;
 
         Ok(Self {
-            _child: child,
+            child,
             stdin,
             stdout: BufReader::new(stdout),
             session_b64: None,
         })
+    }
+
+    fn has_exited(&mut self) -> bool {
+        match self.child.try_wait() {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+
+    fn kill_best_effort(&mut self) {
+        let _ = self.child.kill();
+        // Avoid blocking indefinitely; the caller may respawn immediately after this.
+        for _ in 0..50 {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
     }
 
     fn session_bytes(&self) -> Option<Vec<u8>> {
@@ -543,7 +595,7 @@ impl MtProtoHelper {
         Ok(())
     }
 
-    fn upload(&mut self, req: UploadRequest) -> Result<UploadResponse> {
+    fn upload(&mut self, req: UploadRequest) -> Result<String> {
         self.upload_with_progress(req, None)
     }
 
@@ -551,7 +603,7 @@ impl MtProtoHelper {
         &mut self,
         req: UploadRequest,
         mut on_progress: Option<&mut dyn FnMut(u64)>,
-    ) -> Result<UploadResponse> {
+    ) -> Result<String> {
         let meta = UploadRequestMeta {
             filename: req.filename,
             size: req.bytes.len(),
@@ -599,14 +651,11 @@ impl MtProtoHelper {
                 })?
                 .to_string();
 
-            return Ok(UploadResponse {
-                object_id,
-                session: self.session_bytes(),
-            });
+            return Ok(object_id);
         }
     }
 
-    fn download(&mut self, req: DownloadRequest) -> Result<DownloadResponse> {
+    fn download(&mut self, req: DownloadRequest) -> Result<Vec<u8>> {
         self.send_json(&Request::Download(req))?;
 
         let env = self.read_json_line()?;
@@ -639,10 +688,7 @@ impl MtProtoHelper {
                 message: format!("mtproto download read failed: {e}"),
             })?;
 
-        Ok(DownloadResponse {
-            bytes,
-            session: self.session_bytes(),
-        })
+        Ok(bytes)
     }
 
     fn get_pinned(&mut self) -> Result<Option<String>> {
@@ -860,20 +906,59 @@ impl MtProtoHelper {
     }
 
     fn read_json_line(&mut self) -> Result<ResponseEnvelope> {
-        let mut line = String::new();
-        let n = self
-            .stdout
-            .read_line(&mut line)
-            .map_err(|e| Error::Telegram {
-                message: format!("mtproto helper read failed: {e}"),
-            })?;
-        if n == 0 {
-            return Err(Error::Telegram {
-                message: "mtproto helper closed stdout".to_string(),
+        let (child, stdout) = (&mut self.child, &mut self.stdout);
+        let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
+
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let mut line = String::new();
+                let res = stdout.read_line(&mut line).and_then(|n| {
+                    if n == 0 {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "mtproto helper closed stdout",
+                        ))
+                    } else {
+                        Ok(line)
+                    }
+                });
+                let _ = tx.send(res);
             });
-        }
-        serde_json::from_str::<ResponseEnvelope>(line.trim_end()).map_err(|e| Error::Telegram {
-            message: format!("mtproto helper invalid response: {e}"),
+
+            let line = match rx.recv_timeout(Duration::from_secs(MTPROTO_HELPER_READ_TIMEOUT_SECS)) {
+                Ok(Ok(line)) => line,
+                Ok(Err(e)) => {
+                    return Err(Error::Telegram {
+                        message: format!("mtproto helper read failed: {e}"),
+                    });
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // The helper became unresponsive. Kill it so the blocked read unblocks,
+                    // then let the caller decide whether to retry after respawn.
+                    let _ = child.kill();
+                    for _ in 0..50 {
+                        match child.try_wait() {
+                            Ok(Some(_)) => break,
+                            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                            Err(_) => break,
+                        }
+                    }
+                    return Err(Error::Telegram {
+                        message: format!(
+                            "mtproto helper timed out waiting for response after {MTPROTO_HELPER_READ_TIMEOUT_SECS}s"
+                        ),
+                    });
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::Telegram {
+                        message: "mtproto helper response channel disconnected".to_string(),
+                    });
+                }
+            };
+
+            serde_json::from_str::<ResponseEnvelope>(line.trim_end()).map_err(|e| Error::Telegram {
+                message: format!("mtproto helper invalid response: {e}"),
+            })
         })
     }
 }

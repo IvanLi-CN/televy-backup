@@ -280,3 +280,4 @@ None
 - 2026-02-03: 更新：导出改为系统保存对话框（Save Panel）选择保存位置；passphrase + 可选附言在同一对话框内填写；附言支持多行输入
 - 2026-02-03: 更新：导入（预检前）界面改为紧凑空状态 + 选择文件后再输入 passphrase/查看附言；并按阶段动态调整 sheet 尺寸
 - 2026-02-04: 更新：导入改为先用系统文件选择器选文件，再进入导入 sheet（减少空状态停留）；并将导入 sheet 预检/结果阶段尺寸固定为可用高度，避免结果页被裁剪
+- 2026-02-04: 修复：导入后备份卡在 Running 时，MTProto upload 侧增加超时保护（helper 读响应超时/分片上传超时）；verify/restore 将 Telegram download 超时按 `telegram.unavailable` 上报（可重试），避免误报为 chunk 丢失

@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use chrono::Utc;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::Dispatch;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
 
 static RUN_LOGGER: OnceLock<RunLogger> = OnceLock::new();
+static RUN_LOG_DISPATCH: OnceLock<Dispatch> = OnceLock::new();
 static TRACING_INIT: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug)]
@@ -132,12 +134,22 @@ pub fn init_run_logging() {
             .with_writer(logger);
 
         let subscriber = tracing_subscriber::registry().with(env_filter).with(layer);
-        let _ = subscriber.try_init();
+        let dispatch = Dispatch::new(subscriber);
+
+        // Keep a handle so `start_run_log` can always install a thread-local dispatcher,
+        // even if another test/app already initialized a different global subscriber.
+        let _ = RUN_LOG_DISPATCH.set(dispatch.clone());
+
+        // Best-effort global init. If something already set a global dispatcher, we'll fall back
+        // to thread-local dispatchers in `start_run_log`.
+        let _ = tracing::dispatcher::set_global_default(dispatch);
     });
 }
 
 pub struct RunLogGuard {
     path: PathBuf,
+    _dispatch: Dispatch,
+    _dispatch_guard: tracing::dispatcher::DefaultGuard,
 }
 
 impl RunLogGuard {
@@ -182,7 +194,17 @@ pub fn start_run_log(kind: &str, run_id: &str, data_dir: &Path) -> std::io::Resu
     let logger = RUN_LOGGER.get_or_init(RunLogger::new);
     logger.start(&path)?;
 
-    Ok(RunLogGuard { path })
+    let dispatch = RUN_LOG_DISPATCH
+        .get()
+        .expect("run log dispatch missing")
+        .clone();
+    let dispatch_guard = tracing::dispatcher::set_default(&dispatch);
+
+    Ok(RunLogGuard {
+        path,
+        _dispatch: dispatch,
+        _dispatch_guard: dispatch_guard,
+    })
 }
 
 fn resolve_log_dir(data_dir: &Path) -> PathBuf {
@@ -224,16 +246,17 @@ mod tests {
         let expected_dir = temp.path().join("logs");
         assert_eq!(guard.path().parent(), Some(expected_dir.as_path()));
 
-        tracing::info!(
+        // Use WARN so the test remains stable even when the test runner sets RUST_LOG to warn/error.
+        tracing::warn!(
             event = "run.start",
             kind = "backup",
             run_id = "tsk_test",
             task_id = "tsk_test",
             "run.start"
         );
-        tracing::debug!(event = "phase.start", phase = "scan", "phase.start");
-        tracing::debug!(event = "phase.finish", phase = "scan", "phase.finish");
-        tracing::info!(
+        tracing::warn!(event = "phase.start", phase = "scan", "phase.start");
+        tracing::warn!(event = "phase.finish", phase = "scan", "phase.finish");
+        tracing::warn!(
             event = "run.finish",
             kind = "backup",
             run_id = "tsk_test",

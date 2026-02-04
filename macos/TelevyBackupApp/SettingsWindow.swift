@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Darwin
 import SwiftUI
 import UniformTypeIdentifiers
@@ -1048,7 +1049,7 @@ struct SettingsWindowRootView: View {
         let passphraseLabel = NSTextField(labelWithString: "Passphrase / PIN")
         passphraseLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
 
-        let passphraseField = NSSecureTextField()
+        let passphraseField = PassphraseSecureTextField()
         passphraseField.placeholderString = "Required"
         passphraseField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
 
@@ -1494,6 +1495,134 @@ private final class BackupConfigExportSavePanelDelegate: NSObject, NSOpenSavePan
     }
 }
 
+// Password/PIN fields should avoid IME candidate windows and use secure keyboard input while focused.
+// - `allowedInputSourceLocales` restricts active keyboard input sources for this field's input context.
+// - `EnableSecureEventInput` prevents other processes from observing keystrokes while the user is
+//   entering sensitive data (must be balanced with DisableSecureEventInput).
+private final class PassphraseSecureTextField: NSSecureTextField {
+    private weak var forcedInputContext: NSTextInputContext?
+    private var previousAllowedInputSourceLocales: [String]?
+    private var didForceAllowedLocales: Bool = false
+
+    private var didEnableSecureEventInput: Bool = false
+
+    private var previousKeyboardInputSource: TISInputSource?
+    private var forcedKeyboardInputSource: TISInputSource?
+    private var didForceKeyboardInputSource: Bool = false
+
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok {
+            enableSecureInputIfNeeded()
+            forceASCIICapableKeyboardInputSourceIfNeeded()
+            // Field editor may not be ready immediately; apply twice defensively.
+            applyInputMethodRestrictions()
+            DispatchQueue.main.async { [weak self] in
+                self?.applyInputMethodRestrictions()
+            }
+        }
+        return ok
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let ok = super.resignFirstResponder()
+        if ok {
+            restoreInputMethodRestrictions()
+            restoreKeyboardInputSourceIfNeeded()
+            disableSecureInputIfNeeded()
+        }
+        return ok
+    }
+
+    deinit {
+        restoreInputMethodRestrictions()
+        restoreKeyboardInputSourceIfNeeded()
+        disableSecureInputIfNeeded()
+    }
+
+    private func enableSecureInputIfNeeded() {
+        guard !didEnableSecureEventInput else { return }
+        // `EnableSecureEventInput` is ref-counted; we track our own balance to avoid leaks.
+        if EnableSecureEventInput() == noErr {
+            didEnableSecureEventInput = true
+        }
+    }
+
+    private func disableSecureInputIfNeeded() {
+        guard didEnableSecureEventInput else { return }
+        DisableSecureEventInput()
+        didEnableSecureEventInput = false
+    }
+
+    private func forceASCIICapableKeyboardInputSourceIfNeeded() {
+        guard !didForceKeyboardInputSource else { return }
+        let current = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
+        let ascii = TISCopyCurrentASCIICapableKeyboardInputSource().takeRetainedValue()
+        // If the user is already on an ASCII-capable layout, don't disturb their input source.
+        if CFEqual(current, ascii) { return }
+
+        let err = TISSelectInputSource(ascii)
+        guard err == noErr else { return }
+
+        previousKeyboardInputSource = current
+        forcedKeyboardInputSource = ascii
+        didForceKeyboardInputSource = true
+    }
+
+    private func restoreKeyboardInputSourceIfNeeded() {
+        guard didForceKeyboardInputSource else { return }
+        defer {
+            didForceKeyboardInputSource = false
+            previousKeyboardInputSource = nil
+            forcedKeyboardInputSource = nil
+        }
+
+        guard let previous = previousKeyboardInputSource, let forced = forcedKeyboardInputSource else { return }
+
+        // If the user manually changed the input source while focused, don't override their choice.
+        let current = TISCopyCurrentKeyboardInputSource().takeRetainedValue()
+        guard CFEqual(current, forced) else { return }
+
+        _ = TISSelectInputSource(previous)
+    }
+
+    private func applyInputMethodRestrictions() {
+        // Prefer the field editor's input context when present.
+        let ctx = (currentEditor() as? NSTextView)?.inputContext
+            ?? inputContext
+            ?? NSTextInputContext.current
+        guard let ctx else { return }
+
+        // Text fields often swap the active input context once the field editor is created.
+        // If that happens, move the restriction to the new context.
+        if didForceAllowedLocales, forcedInputContext === ctx {
+            return
+        }
+        if didForceAllowedLocales, forcedInputContext !== ctx {
+            restoreInputMethodRestrictions()
+        }
+
+        forcedInputContext = ctx
+        previousAllowedInputSourceLocales = ctx.allowedInputSourceLocales
+        // Force a Latin/English input source so IME candidate windows don't show up for passwords.
+        // (Locale identifiers are BCP-47-ish; "en_US" is a safe default.)
+        ctx.allowedInputSourceLocales = ["en_US"]
+        didForceAllowedLocales = true
+    }
+
+    private func restoreInputMethodRestrictions() {
+        guard didForceAllowedLocales else { return }
+        defer {
+            didForceAllowedLocales = false
+            forcedInputContext = nil
+            previousAllowedInputSourceLocales = nil
+        }
+
+        guard let ctx = forcedInputContext else { return }
+        ctx.allowedInputSourceLocales = previousAllowedInputSourceLocales
+    }
+}
+
 private final class CaretFixedNSTextView: NSTextView {
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
@@ -1530,6 +1659,78 @@ private struct WindowAccessor: NSViewRepresentable {
     }
 }
 
+private struct SecurePassphraseField: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    let placeholder: String
+    let onSubmit: () -> Void
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        @Binding var text: String
+        @Binding var isFocused: Bool
+        let onSubmit: () -> Void
+
+        init(text: Binding<String>, isFocused: Binding<Bool>, onSubmit: @escaping () -> Void) {
+            _text = text
+            _isFocused = isFocused
+            self.onSubmit = onSubmit
+        }
+
+        func controlTextDidBeginEditing(_ obj: Notification) {
+            isFocused = true
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            isFocused = false
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let field = obj.object as? NSTextField else { return }
+            text = field.stringValue
+        }
+
+        @objc func onAction(_ sender: Any?) {
+            onSubmit()
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, isFocused: $isFocused, onSubmit: onSubmit)
+    }
+
+    func makeNSView(context: Context) -> PassphraseSecureTextField {
+        let field = PassphraseSecureTextField()
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.onAction(_:))
+        field.placeholderString = placeholder
+        field.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        field.isBezeled = true
+        field.bezelStyle = .roundedBezel
+        field.isEditable = true
+        field.isSelectable = true
+        field.drawsBackground = true
+        field.backgroundColor = .textBackgroundColor
+        field.textColor = .labelColor
+        return field
+    }
+
+    func updateNSView(_ nsView: PassphraseSecureTextField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+
+        // For NSTextField/NSSecureTextField, once editing begins the window's firstResponder is the
+        // shared field editor (NSTextView), not the text field itself. Only request focus when we
+        // are not already editing; otherwise we can disrupt typing (e.g. only the first character).
+        if isFocused, nsView.currentEditor() == nil {
+            DispatchQueue.main.async {
+                nsView.window?.makeFirstResponder(nsView)
+            }
+        }
+    }
+}
+
 private struct ImportConfigBundleSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var model: AppModel
@@ -1537,7 +1738,7 @@ private struct ImportConfigBundleSheet: View {
     let initialFileUrl: URL?
     let onApplied: () -> Void
 
-    @FocusState private var passphraseFocused: Bool
+    @State private var passphraseFocused: Bool = false
 
     @State private var fileEncrypted: Bool = true
     @State private var fileUrl: URL?
@@ -1551,6 +1752,7 @@ private struct ImportConfigBundleSheet: View {
     @State private var didLoadInitialFile: Bool = false
     @State private var sheetWindow: NSWindow?
     @State private var contentHeight: CGFloat = 0
+    @State private var targetsContentHeight: CGFloat = 0
 
     @State private var selectedTargetIds: Set<String> = []
     @State private var resolutions: [String: ResolutionState] = [:]
@@ -2021,6 +2223,14 @@ private struct ImportConfigBundleSheet: View {
         }
     }
 
+    private struct TargetsContentHeightPreferenceKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
+    }
+
     // Prefer sizing the sheet to its content; fixed heights create large empty regions
     // in the pre-inspect (password entry) stage.
     private var sheetWidth: CGFloat { 720 }
@@ -2040,13 +2250,23 @@ private struct ImportConfigBundleSheet: View {
         }
     }
 
-    private var targetsListHeight: CGFloat {
+    private var targetsListHeightFallback: CGFloat {
         guard let inspection else { return 0 }
         let count = inspection.bundle.targets.count
-        let rowApprox: CGFloat = 86
-        let listMax: CGFloat = 320
-        let listMin: CGFloat = 90
+        let rowApprox: CGFloat = 72
+        let listMax: CGFloat = 340
+        // We want the sheet to shrink-wrap when there are only a few items.
+        // Keep a tiny floor to avoid a zero-height ScrollView while still allowing
+        // the sheet to collapse tightly around content.
+        let listMin: CGFloat = 1
         return min(listMax, max(listMin, CGFloat(max(count, 1)) * rowApprox))
+    }
+
+    private var targetsScrollHeight: CGFloat {
+        let maxHeight: CGFloat = 340
+        let measured = targetsContentHeight
+        let h = measured > 1 ? measured : targetsListHeightFallback
+        return min(maxHeight, max(1, ceil(h)))
     }
 
 	    private var shouldShowHeader: Bool { inspection != nil || fileUrl != nil }
@@ -2112,11 +2332,12 @@ private struct ImportConfigBundleSheet: View {
                             Text("Passphrase / PIN")
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(.secondary)
-                            SecureField("", text: $passphrase)
-                                .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 12, design: .monospaced))
-                                .focused($passphraseFocused)
-                                .onSubmit { inspectBundle() }
+                            SecurePassphraseField(
+                                text: $passphrase,
+                                isFocused: $passphraseFocused,
+                                placeholder: "",
+                                onSubmit: { inspectBundle() }
+                            )
                         }
                     }
 
@@ -2298,11 +2519,24 @@ private struct ImportConfigBundleSheet: View {
                         .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
                     }
                 }
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: TargetsContentHeightPreferenceKey.self,
+                            value: proxy.size.height
+                        )
+                    }
+                )
             }
             .scrollIndicators(.visible)
-            // Keep the list height bounded so the sheet can size itself without leaving
-            // excessive empty space.
-            .frame(height: targetsListHeight)
+            // Fit the scroll area to the actual list content to avoid blank space.
+            .frame(height: targetsScrollHeight)
+            .onPreferenceChange(TargetsContentHeightPreferenceKey.self) { h in
+                // Avoid thrashing on minuscule changes due to text rendering/rounding.
+                guard h > 1 else { return }
+                if abs(h - targetsContentHeight) < 0.5 { return }
+                targetsContentHeight = h
+            }
 
             Divider()
 
