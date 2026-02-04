@@ -386,8 +386,12 @@ struct SettingsWindowRootView: View {
     @State private var saveSeq: Int = 0
     @State private var reloadSeq: Int = 0
 
-    @State private var showImportConfigBundleSheet: Bool = false
-    @State private var importConfigBundleInitialFileUrl: URL?
+    private struct ImportConfigBundleSheetRequest: Identifiable {
+        let id = UUID()
+        let fileUrl: URL
+    }
+
+    @State private var importConfigBundleSheetRequest: ImportConfigBundleSheetRequest?
 
     @State private var pendingLastTouchedEndpointId: String?
     @State private var pendingLastSelectedEndpointId: String?
@@ -458,9 +462,10 @@ struct SettingsWindowRootView: View {
                 if let p = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_FILE"],
                    !p.isEmpty
                 {
-                    importConfigBundleInitialFileUrl = URL(fileURLWithPath: p)
+                    importConfigBundleSheetRequest = ImportConfigBundleSheetRequest(
+                        fileUrl: URL(fileURLWithPath: p)
+                    )
                 }
-                showImportConfigBundleSheet = true
             }
             if SettingsUIDemo.shouldOpenBackupConfigExportPanel {
                 // Let the Settings window finish its first layout before presenting NSSavePanel.
@@ -800,16 +805,12 @@ struct SettingsWindowRootView: View {
             Spacer()
         }
         .padding()
-        .sheet(isPresented: $showImportConfigBundleSheet) {
+        .sheet(item: $importConfigBundleSheetRequest) { req in
             ImportConfigBundleSheet(
-                initialFileUrl: importConfigBundleInitialFileUrl,
+                initialFileUrl: req.fileUrl,
                 onApplied: { reload() }
             )
-                .environmentObject(model)
-                .onDisappear {
-                    // Ensure the next Import run starts clean (a new file picker flow).
-                    importConfigBundleInitialFileUrl = nil
-                }
+            .environmentObject(model)
         }
     }
 
@@ -828,8 +829,9 @@ struct SettingsWindowRootView: View {
         if panel.runModal() != .OK { return }
         guard let url = panel.url else { return }
 
-        importConfigBundleInitialFileUrl = url
-        showImportConfigBundleSheet = true
+        // Bind sheet presentation to the chosen file, so we never end up with a sheet that
+        // has no file and asks the user to "choose again".
+        importConfigBundleSheetRequest = ImportConfigBundleSheetRequest(fileUrl: url)
     }
 
     private var scheduleView: some View {
