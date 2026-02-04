@@ -118,6 +118,7 @@ final class AppModel: ObservableObject {
     private var statusStaleTimer: DispatchSourceTimer? = nil
     private var statusPollTimer: DispatchSourceTimer? = nil
     private var lastNotifiedRunFinishedAtByTargetId: [String: String] = [:]
+    private var lastObservedTargetStateByTargetId: [String: String] = [:]
 
     private var statusStreamTask: Process? = nil
     private var statusStreamReconnectWork: DispatchWorkItem? = nil
@@ -908,6 +909,24 @@ final class AppModel: ObservableObject {
         appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
         updatePopoverHeightForTargets(targetCount: snap.targets.count)
 
+        // Keep run history in sync with daemon-triggered runs:
+        // - Refresh when a target transitions into running so the new NDJSON file (run.start) appears immediately.
+        var observedRunStart: Bool = false
+        for t in snap.targets {
+            let prev = lastObservedTargetStateByTargetId[t.targetId]
+            if prev != t.state {
+                lastObservedTargetStateByTargetId[t.targetId] = t.state
+                if t.state == "running" {
+                    observedRunStart = true
+                }
+            }
+        }
+        if observedRunStart {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                self.refreshRunHistory()
+            }
+        }
+
         // Surface "what happened" for very short runs: show a toast when we observe a new lastRun.
         var observedNewLastRun: Bool = false
         for t in snap.targets {
@@ -1418,6 +1437,8 @@ final class AppModel: ObservableObject {
 
         var startedAt: Date?
         var finishedAt: Date?
+        var sawStart: Bool = false
+        var sawFinish: Bool = false
 
         for line in text.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
@@ -1428,6 +1449,7 @@ final class AppModel: ObservableObject {
             let fields = obj["fields"] as? [String: Any]
             let event = fields?["event"] as? String
             if event == "run.start" {
+                sawStart = true
                 kind = fields?["kind"] as? String ?? kind
                 targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
                 endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
@@ -1440,6 +1462,7 @@ final class AppModel: ObservableObject {
             }
 
             if event == "run.finish" {
+                sawFinish = true
                 kind = fields?["kind"] as? String ?? kind
                 targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
                 endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
@@ -1465,6 +1488,15 @@ final class AppModel: ObservableObject {
 
         guard let kind else { return nil }
         if kind != "backup" && kind != "restore" && kind != "verify" { return nil }
+
+        // A log file can exist while the run is still in progress; show it as "running"
+        // so the UI can surface immediate feedback without waiting for completion.
+        if sawStart && !sawFinish {
+            if status == nil { status = "running" }
+            if durationSeconds == nil, let startedAt {
+                durationSeconds = Date().timeIntervalSince(startedAt)
+            }
+        }
 
         return RunLogSummary(
             id: url.lastPathComponent,

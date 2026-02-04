@@ -272,7 +272,11 @@ private struct TargetDetailView: View {
     private var runs: [RunLogSummary] {
         model.runHistory
             .filter { run in run.targetId == target.targetId }
-            .sorted { ($0.finishedAt ?? .distantPast) > ($1.finishedAt ?? .distantPast) }
+            .sorted {
+                let a = $0.finishedAt ?? $0.startedAt ?? .distantPast
+                let b = $1.finishedAt ?? $1.startedAt ?? .distantPast
+                return a > b
+            }
     }
 
     var body: some View {
@@ -430,9 +434,17 @@ private struct RunLogRow: View {
                 HStack(spacing: 8) {
                     Text(run.kind.uppercased())
                         .font(.system(size: 11, weight: .heavy))
-                    Text(run.status ?? "—")
+                    let statusText = run.status ?? "—"
+                    Text(statusText)
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle((run.status == "succeeded") ? .green : .red)
+                        .foregroundStyle({
+                            switch run.status {
+                            case "succeeded": return Color.green
+                            case "failed": return Color.red
+                            case "running": return Color.blue
+                            default: return Color.secondary
+                            }
+                        }())
                     Spacer()
                 }
 
@@ -446,7 +458,7 @@ private struct RunLogRow: View {
             Spacer(minLength: 8)
 
             HStack(alignment: .center, spacing: 8) {
-                if let at = run.finishedAt {
+                if let at = run.finishedAt ?? run.startedAt {
                     Text(at.formatted(date: .abbreviated, time: .standard))
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)
