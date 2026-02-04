@@ -914,8 +914,10 @@ final class AppModel: ObservableObject {
             guard let finishedAt = t.lastRun?.finishedAt, !finishedAt.isEmpty else { continue }
             let prevFinishedAt = lastNotifiedRunFinishedAtByTargetId[t.targetId]
             if prevFinishedAt == nil {
-                // First time we see this target's lastRun; don't toast on startup.
+                // First time we see this target's lastRun; don't toast on startup, but refresh
+                // History so the UI can pick up the corresponding NDJSON log file.
                 lastNotifiedRunFinishedAtByTargetId[t.targetId] = finishedAt
+                observedNewLastRun = true
                 continue
             }
             guard prevFinishedAt != finishedAt else { continue }
