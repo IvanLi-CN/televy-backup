@@ -1550,6 +1550,7 @@ private struct ImportConfigBundleSheet: View {
     @State private var didAutoSnapshot: Bool = false
     @State private var didLoadInitialFile: Bool = false
     @State private var sheetWindow: NSWindow?
+    @State private var contentHeight: CGFloat = 0
 
     @State private var selectedTargetIds: Set<String> = []
     @State private var resolutions: [String: ResolutionState] = [:]
@@ -2012,18 +2013,24 @@ private struct ImportConfigBundleSheet: View {
         )
     }
 
-    // Prefer sizing the sheet to its content. A fixed height tends to create large empty
-    // regions in the pre-inspect (password entry) stage.
-    private var sheetWidth: CGFloat { 720 }
-    private var desiredSheetHeight: CGFloat {
-        // Keep pre-inspect compact to avoid large blank areas; expand for result lists.
-        if inspection != nil { return 560 }
-        return 300
+    private struct SheetContentHeightPreferenceKey: PreferenceKey {
+        static var defaultValue: CGFloat = 0
+
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = max(value, nextValue())
+        }
     }
 
-    private func resizeSheet(animated: Bool) {
+    // Prefer sizing the sheet to its content; fixed heights create large empty regions
+    // in the pre-inspect (password entry) stage.
+    private var sheetWidth: CGFloat { 720 }
+
+    private func resizeSheet(to height: CGFloat, animated: Bool) {
         guard let sheetWindow else { return }
-        let size = NSSize(width: sheetWidth, height: desiredSheetHeight)
+        let clamped = min(900, max(220, height))
+        // Add a tiny safety pad so we don't end up clipping the last pixel row due to rounding.
+        let padded = ceil(clamped + 2)
+        let size = NSSize(width: sheetWidth, height: padded)
         DispatchQueue.main.async {
             if animated {
                 sheetWindow.animator().setContentSize(size)
@@ -2330,18 +2337,31 @@ private struct ImportConfigBundleSheet: View {
                 }
 	        }
 	        .padding(18)
-	        .frame(width: sheetWidth, height: desiredSheetHeight, alignment: .topLeading)
+	        .frame(width: sheetWidth, alignment: .topLeading)
+            .fixedSize(horizontal: false, vertical: true)
             .animation(.easeInOut(duration: 0.15), value: inspection != nil)
             .background(
                 WindowAccessor { w in
                     if sheetWindow !== w {
                         sheetWindow = w
-                        resizeSheet(animated: false)
+                        if contentHeight > 1 {
+                            resizeSheet(to: contentHeight, animated: false)
+                        }
                     }
                 }
             )
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(key: SheetContentHeightPreferenceKey.self, value: proxy.size.height)
+                }
+            )
+            .onPreferenceChange(SheetContentHeightPreferenceKey.self) { h in
+                guard h > 1 else { return }
+                if abs(h - contentHeight) < 0.5 { return }
+                contentHeight = h
+                resizeSheet(to: h, animated: true)
+            }
 	        .onChange(of: inspection != nil) { _, ready in
-                resizeSheet(animated: true)
 	            guard ready else { return }
 	            guard SettingsUIDemo.enabled else { return }
 	            guard SettingsUIDemo.scene == "backup-config-import-result" else { return }
