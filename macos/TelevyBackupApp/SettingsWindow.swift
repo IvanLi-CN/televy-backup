@@ -1668,6 +1668,34 @@ private struct ImportConfigBundleSheet: View {
         )
     }
 
+    private func chooseFolder(targetId: String) {
+        let panel = NSOpenPanel()
+        panel.title = "Choose folder"
+        panel.prompt = "Choose"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+
+        func applyUrl(_ url: URL) {
+            let current = resolveState(targetId: targetId)
+            setResolveState(
+                targetId: targetId,
+                ResolutionState(mode: current.mode, newSourcePath: url.path)
+            )
+        }
+
+        if let hostWindow = NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: hostWindow) { res in
+                guard res == .OK, let url = panel.url else { return }
+                applyUrl(url)
+            }
+        } else {
+            let res = panel.runModal()
+            guard res == .OK, let url = panel.url else { return }
+            applyUrl(url)
+        }
+    }
+
     private func applyDefaults(from inspection: CliSettingsImportBundleDryRunResponse) {
         selectedTargetIds = Set(inspection.bundle.targets.map(\.id))
 
@@ -2180,14 +2208,23 @@ private struct ImportConfigBundleSheet: View {
                                         .frame(width: 260)
 
                                         if state.mode == .rebind {
-                                            TextField("New source path", text: Binding(
-                                                get: { state.newSourcePath },
-                                                set: { newPath in
-                                                    setResolveState(targetId: t.id, ResolutionState(mode: state.mode, newSourcePath: newPath))
-                                                }
-                                            ))
-                                            .textFieldStyle(.roundedBorder)
-                                            .font(.system(size: 12, design: .monospaced))
+                                            HStack(spacing: 8) {
+                                                Text(state.newSourcePath.isEmpty ? "No folder selected" : state.newSourcePath)
+                                                    .font(.system(size: 12, design: .monospaced))
+                                                    .foregroundStyle(state.newSourcePath.isEmpty ? .secondary : .primary)
+                                                    .lineLimit(1)
+                                                    .truncationMode(.middle)
+                                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                                    .padding(.vertical, 6)
+                                                    .padding(.horizontal, 8)
+                                                    .background(.background)
+                                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+
+                                                Button("Choose…") { chooseFolder(targetId: t.id) }
+                                                    .buttonStyle(.bordered)
+                                            }
+                                            .frame(maxWidth: 360)
                                         }
                                     }
 
