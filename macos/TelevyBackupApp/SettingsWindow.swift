@@ -1508,6 +1508,28 @@ private final class CaretFixedNSTextView: NSTextView {
     }
 }
 
+private struct WindowAccessor: NSViewRepresentable {
+    let onResolve: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async {
+            if let w = v.window {
+                onResolve(w)
+            }
+        }
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            if let w = nsView.window {
+                onResolve(w)
+            }
+        }
+    }
+}
+
 private struct ImportConfigBundleSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var model: AppModel
@@ -1527,6 +1549,7 @@ private struct ImportConfigBundleSheet: View {
     @State private var inspectError: String?
     @State private var didAutoSnapshot: Bool = false
     @State private var didLoadInitialFile: Bool = false
+    @State private var sheetWindow: NSWindow?
 
     @State private var selectedTargetIds: Set<String> = []
     @State private var resolutions: [String: ResolutionState] = [:]
@@ -1989,12 +2012,25 @@ private struct ImportConfigBundleSheet: View {
         )
     }
 
-    // The Import flow picks the file *before* presenting this sheet. Avoid asking the user
-    // to choose the file again inside the sheet.
+    // Prefer sizing the sheet to its content. A fixed height tends to create large empty
+    // regions in the pre-inspect (password entry) stage.
     private var sheetWidth: CGFloat { 720 }
-    private var sheetHeight: CGFloat {
-        if fileUrl == nil { return 360 }
-        return 480
+    private var desiredSheetHeight: CGFloat {
+        // Keep pre-inspect compact to avoid large blank areas; expand for result lists.
+        if inspection != nil { return 560 }
+        return 300
+    }
+
+    private func resizeSheet(animated: Bool) {
+        guard let sheetWindow else { return }
+        let size = NSSize(width: sheetWidth, height: desiredSheetHeight)
+        DispatchQueue.main.async {
+            if animated {
+                sheetWindow.animator().setContentSize(size)
+            } else {
+                sheetWindow.setContentSize(size)
+            }
+        }
     }
 
     private var targetsListHeight: CGFloat {
@@ -2022,21 +2058,19 @@ private struct ImportConfigBundleSheet: View {
         @ViewBuilder
         private var missingFileView: some View {
             VStack(spacing: 16) {
-                Spacer()
                 EmptyStateView(
                     systemImage: "tray.and.arrow.down",
                     title: "Import backup config",
                     message: "Close this window and choose a file again."
                 )
                 .frame(maxWidth: .infinity)
-                Spacer()
                 HStack(spacing: 8) {
                     Button("Cancel") { dismiss() }
                         .keyboardShortcut(.cancelAction)
                     Spacer()
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(maxWidth: .infinity)
         }
 
         @ViewBuilder
@@ -2259,11 +2293,9 @@ private struct ImportConfigBundleSheet: View {
                 }
             }
             .scrollIndicators(.visible)
-            // When the sheet is taller than the minimum list size, let the list expand so we
-            // don't end up with a large empty region at the bottom.
-            .frame(minHeight: targetsListHeight)
-            .frame(maxHeight: .infinity)
-            .layoutPriority(1)
+            // Keep the list height bounded so the sheet can size itself without leaving
+            // excessive empty space.
+            .frame(height: targetsListHeight)
 
             Divider()
 
@@ -2283,7 +2315,7 @@ private struct ImportConfigBundleSheet: View {
             }
         }
 
-	    var body: some View {
+	        var body: some View {
 	        VStack(alignment: .leading, spacing: 12) {
 	            if shouldShowHeader {
                     headerView
@@ -2298,9 +2330,18 @@ private struct ImportConfigBundleSheet: View {
                 }
 	        }
 	        .padding(18)
-	        .frame(width: sheetWidth, height: sheetHeight, alignment: .topLeading)
+	        .frame(width: sheetWidth, height: desiredSheetHeight, alignment: .topLeading)
             .animation(.easeInOut(duration: 0.15), value: inspection != nil)
+            .background(
+                WindowAccessor { w in
+                    if sheetWindow !== w {
+                        sheetWindow = w
+                        resizeSheet(animated: false)
+                    }
+                }
+            )
 	        .onChange(of: inspection != nil) { _, ready in
+                resizeSheet(animated: true)
 	            guard ready else { return }
 	            guard SettingsUIDemo.enabled else { return }
 	            guard SettingsUIDemo.scene == "backup-config-import-result" else { return }
