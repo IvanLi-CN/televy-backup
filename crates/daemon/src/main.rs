@@ -968,7 +968,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let run_log =
                 televy_backup_core::run_log::start_run_log("backup", &task_id, &data_root)?;
 
-            tracing::info!(
+            // Run summaries must appear even when the daemon is started with `RUST_LOG=warn`,
+            // otherwise successful runs create empty NDJSON files and the UI shows no history.
+            tracing::warn!(
                 event = "run.start",
                 kind = "backup",
                 run_id = %task_id,
@@ -1026,7 +1028,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match result {
                 Ok(res) => {
-                    tracing::info!(
+                    tracing::warn!(
                         event = "run.finish",
                         kind = "backup",
                         run_id = %task_id,

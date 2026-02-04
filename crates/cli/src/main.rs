@@ -3279,7 +3279,9 @@ async fn backup_run(
     let ctx_endpoint_id = ep.id.clone();
     let ctx_source_path = target.source_path.clone();
 
-    tracing::info!(
+    // Run summaries must appear even when the CLI is started with `RUST_LOG=warn`,
+    // otherwise successful runs create empty NDJSON files and the UI shows no history.
+    tracing::warn!(
         event = "run.start",
         kind = "backup",
         run_id = %task_id,
@@ -3446,7 +3448,7 @@ async fn backup_run(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(res) => {
-            tracing::info!(
+            tracing::warn!(
                 event = "run.finish",
                 kind = "backup",
                 run_id = %task_id,
@@ -3692,7 +3694,7 @@ async fn restore_run(
     let run_log = televy_backup_core::run_log::start_run_log("restore", &task_id, data_dir)
         .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    tracing::info!(
+    tracing::warn!(
         event = "run.start",
         kind = "restore",
         run_id = %task_id,
@@ -3834,7 +3836,7 @@ async fn restore_run(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(res) => {
-            tracing::info!(
+            tracing::warn!(
                 event = "run.finish",
                 kind = "restore",
                 run_id = %task_id,
@@ -4041,7 +4043,7 @@ async fn restore_latest(
     let run_log = televy_backup_core::run_log::start_run_log("restore", &task_id, data_dir)
         .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    tracing::info!(
+    tracing::warn!(
         event = "run.start",
         kind = "restore",
         run_id = %task_id,
@@ -4192,7 +4194,7 @@ async fn restore_latest(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok((snapshot_id, res)) => {
-            tracing::info!(
+            tracing::warn!(
                 event = "run.finish",
                 kind = "restore",
                 run_id = %task_id,
@@ -4290,7 +4292,7 @@ async fn verify_latest(
     let run_log = televy_backup_core::run_log::start_run_log("verify", &task_id, data_dir)
         .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    tracing::info!(
+    tracing::warn!(
         event = "run.start",
         kind = "verify",
         run_id = %task_id,
@@ -4438,7 +4440,7 @@ async fn verify_latest(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok((snapshot_id, res)) => {
-            tracing::info!(
+            tracing::warn!(
                 event = "run.finish",
                 kind = "verify",
                 run_id = %task_id,
@@ -4518,7 +4520,7 @@ async fn verify_run(
     let run_log = televy_backup_core::run_log::start_run_log("verify", &task_id, data_dir)
         .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    tracing::info!(
+    tracing::warn!(
         event = "run.start",
         kind = "verify",
         run_id = %task_id,
@@ -4659,7 +4661,7 @@ async fn verify_run(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(res) => {
-            tracing::info!(
+            tracing::warn!(
                 event = "run.finish",
                 kind = "verify",
                 run_id = %task_id,

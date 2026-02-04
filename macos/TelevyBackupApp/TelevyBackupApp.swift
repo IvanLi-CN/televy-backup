@@ -909,6 +909,7 @@ final class AppModel: ObservableObject {
         updatePopoverHeightForTargets(targetCount: snap.targets.count)
 
         // Surface "what happened" for very short runs: show a toast when we observe a new lastRun.
+        var observedNewLastRun: Bool = false
         for t in snap.targets {
             guard let finishedAt = t.lastRun?.finishedAt, !finishedAt.isEmpty else { continue }
             let prevFinishedAt = lastNotifiedRunFinishedAtByTargetId[t.targetId]
@@ -919,6 +920,7 @@ final class AppModel: ObservableObject {
             }
             guard prevFinishedAt != finishedAt else { continue }
             lastNotifiedRunFinishedAtByTargetId[t.targetId] = finishedAt
+            observedNewLastRun = true
 
             guard let d = parseIsoDate(finishedAt) else { continue }
             let ageSeconds = Int(Date().timeIntervalSince(d))
@@ -946,6 +948,14 @@ final class AppModel: ObservableObject {
                 }
                 let suffix = parts.isEmpty ? "" : (" • " + parts.joined(separator: " • "))
                 showToast("\(label) • Backup finished\(suffix)", isError: false)
+            }
+        }
+
+        // Daemon-triggered backups don't have a CLI process exit hook, so refresh the run history
+        // when we observe a new `lastRun`.
+        if observedNewLastRun {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                self.refreshRunHistory()
             }
         }
 

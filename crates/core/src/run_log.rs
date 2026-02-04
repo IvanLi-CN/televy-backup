@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::{BufWriter, Write};
+use std::io::{LineWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -13,7 +13,9 @@ static TRACING_INIT: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug)]
 struct RunState {
-    writer: Option<BufWriter<std::fs::File>>,
+    // Use line-buffering so the UI can observe run logs immediately after a run finishes,
+    // even if the daemon keeps the file open a little longer for follow-up steps (bootstrap update, etc).
+    writer: Option<LineWriter<std::fs::File>>,
 }
 
 #[derive(Debug)]
@@ -38,7 +40,7 @@ impl RunLogger {
         }
 
         let file = OpenOptions::new().create_new(true).write(true).open(path)?;
-        guard.writer = Some(BufWriter::new(file));
+        guard.writer = Some(LineWriter::new(file));
         Ok(())
     }
 
