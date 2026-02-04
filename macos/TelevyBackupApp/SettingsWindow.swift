@@ -1764,6 +1764,65 @@ private struct ImportConfigBundleSheet: View {
         let hint: String?
     }
 
+    private struct CliErrorEnvelope: Decodable {
+        let code: String
+        let message: String
+    }
+
+    private enum CliErrorHint {
+        case incorrectPassphrase
+        case invalidFile
+    }
+
+    private func decodeCliErrorEnvelope(_ stderr: String) -> CliErrorEnvelope? {
+        let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // Fast path: stderr is exactly one JSON object line.
+        if let data = trimmed.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode(CliErrorEnvelope.self, from: data)
+        {
+            return decoded
+        }
+
+        // Tolerate extra lines (e.g. stray logs). Take the last JSON-looking line.
+        let lines = trimmed
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        for line in lines.reversed() {
+            guard line.hasPrefix("{"), line.hasSuffix("}") else { continue }
+            guard let data = line.data(using: .utf8) else { continue }
+            if let decoded = try? JSONDecoder().decode(CliErrorEnvelope.self, from: data) {
+                return decoded
+            }
+        }
+        return nil
+    }
+
+    private func humanizeCliFailure(_ stderr: String, fallback: String) -> (message: String, hint: CliErrorHint?) {
+        let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return (fallback, nil) }
+
+        guard let env = decodeCliErrorEnvelope(trimmed) else { return (trimmed, nil) }
+
+        // Avoid exposing internal framing/key terms. Keep this user-facing and actionable.
+        if env.code == "crypto" {
+            if env.message.contains("decrypt failed") {
+                return ("Incorrect passphrase / PIN. Please try again.", .incorrectPassphrase)
+            }
+            if env.message.contains("invalid config bundle") || env.message.contains("config bundle") {
+                return ("Invalid backup config file.", .invalidFile)
+            }
+        }
+
+        if env.code == "config_bundle.passphrase_required" {
+            return ("Passphrase is required.", .incorrectPassphrase)
+        }
+
+        return (env.message, nil)
+    }
+
     private func base64UrlNoPadDecode(_ s: String) -> Data? {
         var t = s.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         let rem = t.count % 4
@@ -1988,7 +2047,11 @@ private struct ImportConfigBundleSheet: View {
             env: env
         )
         guard res.status == 0, let data = res.stdout.data(using: .utf8) else {
-            inspectError = res.stderr.isEmpty ? "Inspect failed: exit=\(res.status)" : res.stderr
+            let err = humanizeCliFailure(res.stderr, fallback: "Inspect failed")
+            inspectError = err.message
+            if err.hint == .incorrectPassphrase {
+                DispatchQueue.main.async { passphraseFocused = true }
+            }
             inspecting = false
             return
         }
@@ -2084,7 +2147,11 @@ private struct ImportConfigBundleSheet: View {
         )
 
         guard res.status == 0, let outData = res.stdout.data(using: .utf8) else {
-            applyError = res.stderr.isEmpty ? "Apply failed: exit=\(res.status)" : res.stderr
+            let err = humanizeCliFailure(res.stderr, fallback: "Import failed")
+            applyError = err.message
+            if err.hint == .incorrectPassphrase {
+                DispatchQueue.main.async { passphraseFocused = true }
+            }
             applying = false
             return
         }
