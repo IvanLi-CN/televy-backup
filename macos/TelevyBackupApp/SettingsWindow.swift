@@ -2021,7 +2021,7 @@ private struct ImportConfigBundleSheet: View {
     private var sheetWidth: CGFloat { 720 }
     private var sheetHeight: CGFloat {
         if stage == .chooseFile { return 360 }
-        return 560
+        return 480
     }
 
     private var targetsListHeight: CGFloat {
