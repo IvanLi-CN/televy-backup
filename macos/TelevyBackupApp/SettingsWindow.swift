@@ -1515,12 +1515,6 @@ private struct ImportConfigBundleSheet: View {
 
     @FocusState private var passphraseFocused: Bool
 
-    private enum Stage {
-        case chooseFile
-        case inspect
-    }
-
-    @State private var stage: Stage
     @State private var fileEncrypted: Bool = true
     @State private var fileUrl: URL?
     @State private var bundleKey: String = ""
@@ -1590,7 +1584,6 @@ private struct ImportConfigBundleSheet: View {
     init(initialFileUrl: URL? = nil, onApplied: @escaping () -> Void) {
         self.initialFileUrl = initialFileUrl
         self.onApplied = onApplied
-        _stage = State(initialValue: initialFileUrl == nil ? .chooseFile : .inspect)
         _fileUrl = State(initialValue: initialFileUrl)
     }
 
@@ -1613,7 +1606,6 @@ private struct ImportConfigBundleSheet: View {
             fileEncrypted = (dict["payloadEnc"] != nil) || (dict["goldKeyEnc"] != nil)
             bundleKey = "TBC2:" + base64UrlNoPadEncode(json)
             inspectError = nil
-            stage = .inspect
             if fileEncrypted {
                 DispatchQueue.main.async { passphraseFocused = true }
             }
@@ -1625,7 +1617,6 @@ private struct ImportConfigBundleSheet: View {
             hintPreview = hintFromBundleKey(key)
             fileEncrypted = true
             inspectError = nil
-            stage = .inspect
             DispatchQueue.main.async { passphraseFocused = true }
             return
         }
@@ -1633,25 +1624,6 @@ private struct ImportConfigBundleSheet: View {
         bundleKey = ""
         hintPreview = nil
         inspectError = "Invalid backup config file"
-        stage = .chooseFile
-    }
-
-    private func chooseFile() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        let tbconfig = UTType(filenameExtension: "tbconfig")
-        panel.allowedContentTypes = [
-            tbconfig ?? .data,
-            .plainText,
-        ]
-        panel.prompt = "Choose"
-
-        if panel.runModal() != .OK { return }
-        guard let url = panel.url else { return }
-
-        loadSelectedFile(url: url)
     }
 
     private struct ResolutionState {
@@ -2015,12 +1987,11 @@ private struct ImportConfigBundleSheet: View {
         )
     }
 
-    // SwiftUI sheets on macOS do not reliably resize when content size changes. Pick a
-    // single "working" size for the import flow so the result page doesn't get clipped,
-    // while keeping the empty state compact.
+    // The Import flow picks the file *before* presenting this sheet. Avoid asking the user
+    // to choose the file again inside the sheet.
     private var sheetWidth: CGFloat { 720 }
     private var sheetHeight: CGFloat {
-        if stage == .chooseFile { return 360 }
+        if fileUrl == nil { return 360 }
         return 480
     }
 
@@ -2033,297 +2004,300 @@ private struct ImportConfigBundleSheet: View {
         return min(listMax, max(listMin, CGFloat(max(count, 1)) * rowApprox))
     }
 
-	    var body: some View {
-	        VStack(alignment: .leading, spacing: 12) {
-	            if inspection != nil || stage == .inspect {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Import backup config")
-                            .font(.system(size: 18, weight: .bold))
-                        Text("Choose a backup config file, then inspect before apply.")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-	            }
+	    private var shouldShowHeader: Bool { inspection != nil || fileUrl != nil }
 
-	            if inspection == nil {
-	                if stage == .chooseFile {
-	                    VStack(spacing: 16) {
-	                        Spacer()
-	                        EmptyStateView(
-	                            systemImage: "tray.and.arrow.down",
-	                            title: "Import backup config",
-	                            message: "Choose a backup config file to inspect before apply."
-	                        )
-	                        .frame(maxWidth: .infinity)
+        @ViewBuilder
+        private var headerView: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Import backup config")
+                    .font(.system(size: 18, weight: .bold))
+                Text("Choose a backup config file, then inspect before apply.")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
 
-	                        if let inspectError {
-	                            Label(inspectError, systemImage: "exclamationmark.triangle.fill")
-	                                .font(.system(size: 12, weight: .semibold))
-	                                .foregroundStyle(.red)
-	                                .frame(maxWidth: .infinity, alignment: .center)
-	                        }
-
-	                        Spacer()
-
-	                        HStack(spacing: 8) {
-	                            Button("Cancel") { dismiss() }
-	                                .keyboardShortcut(.cancelAction)
-	                            Spacer()
-	                            Button("Choose…") { chooseFile() }
-	                                .buttonStyle(.borderedProminent)
-	                                .keyboardShortcut(.defaultAction)
-	                        }
-	                    }
-	                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-	                } else {
-	                    GroupBox {
-	                        VStack(alignment: .leading, spacing: 12) {
-	                            HStack(spacing: 8) {
-	                                Image(systemName: "doc")
-	                                    .foregroundStyle(.secondary)
-	                                Text(fileUrl?.lastPathComponent ?? "No file selected")
-	                                    .font(.system(size: 12, weight: .semibold))
-	                                    .foregroundStyle(.secondary)
-	                                    .lineLimit(1)
-	                                    .truncationMode(.middle)
-	                                Spacer()
-	                                Button("Change…") { chooseFile() }
-	                                    .buttonStyle(.bordered)
-	                            }
-
-	                            let h = hintPreview?.trimmingCharacters(in: .whitespacesAndNewlines)
-	                            VStack(alignment: .leading, spacing: 6) {
-	                                Text("Hint")
-	                                    .font(.system(size: 11, weight: .semibold))
-	                                    .foregroundStyle(.secondary)
-	                                Text(h?.isEmpty == false ? h! : "—")
-	                                    .font(.system(size: 12, weight: .semibold))
-	                                    .foregroundStyle(.secondary)
-	                                    .frame(maxWidth: .infinity, alignment: .leading)
-	                                    .fixedSize(horizontal: false, vertical: true)
-	                            }
-
-	                            if fileEncrypted {
-	                                VStack(alignment: .leading, spacing: 6) {
-	                                    Text("Passphrase / PIN")
-	                                        .font(.system(size: 11, weight: .semibold))
-	                                        .foregroundStyle(.secondary)
-	                                    SecureField("", text: $passphrase)
-	                                        .textFieldStyle(.roundedBorder)
-	                                        .font(.system(size: 12, design: .monospaced))
-	                                        .focused($passphraseFocused)
-	                                        .onSubmit { inspectBundle() }
-	                                }
-	                            }
-
-	                            if let inspectError {
-	                                Label(inspectError, systemImage: "exclamationmark.triangle.fill")
-	                                    .font(.system(size: 12, weight: .semibold))
-	                                    .foregroundStyle(.red)
-	                            }
-	                        }
-	                        .padding(.vertical, 2)
-	                    }
-
-	                    HStack(spacing: 8) {
-	                        Button("Cancel") { dismiss() }
-	                            .keyboardShortcut(.cancelAction)
-	                        Spacer()
-	                        Button(inspecting ? "Inspecting…" : "Inspect") { inspectBundle() }
-	                            .buttonStyle(.borderedProminent)
-	                            .keyboardShortcut(.defaultAction)
-	                            .disabled(
-	                                (fileEncrypted && passphrase.isEmpty)
-	                                    || bundleKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-	                                    || inspecting
-	                            )
-	                    }
-	                }
-	            }
-
-	            if let inspection {
-                    let targetsCount = inspection.bundle.targets.count
-                    let endpointsCount = inspection.bundle.endpoints.count
-                    let missingKeys = inspection.bundle.secretsCoverage.missingKeys
-                    let missingLabels = missingSecretLabels(keys: missingKeys)
-                    let canImport = inspection.nextAction != "start_key_rotation"
-
-                    let primaryStatusText: String = {
-                        if canImport { return "Ready to import" }
-                        return "Import blocked"
-                    }()
-
-                    let statusDetailsText: String = {
-                        if canImport {
-                            if inspection.localHasTargets {
-                                return "This Mac already has backup config."
-                            }
-                            return "No existing backup config detected on this Mac."
-                        }
-                        return "This Mac is using a different encryption key. Import is disabled to prevent mixing unrelated backups."
-                    }()
-
-                    let secretsText: String = {
-                        if missingKeys.isEmpty { return "Credentials: complete" }
-                        if missingLabels.isEmpty { return "Credentials: missing" }
-                        return "Credentials missing: \(missingLabels.joined(separator: ", "))"
-                    }()
-
-	                GroupBox {
-	                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Summary")
-                            .font(.system(size: 13, weight: .semibold))
-                        HStack(spacing: 10) {
-                            Image(systemName: canImport ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                                .foregroundStyle(canImport ? Color.green : Color.red)
-                            Text(primaryStatusText)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.primary)
-                            Spacer()
-                            Text("\(targetsCount) target\(targetsCount == 1 ? "" : "s") · \(endpointsCount) endpoint\(endpointsCount == 1 ? "" : "s")")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Text(statusDetailsText)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-
-                        Text(secretsText)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(missingKeys.isEmpty ? Color.secondary : Color.red)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                Text("Targets")
-                    .font(.system(size: 13, weight: .semibold))
-
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(inspection.bundle.targets.sorted { a, b in
-                            a.id.localizedStandardCompare(b.id) == .orderedAscending
-                        }) { t in
-                            let pf = preflightByTargetId[t.id]
-
-                            VStack(alignment: .leading, spacing: 6) {
-                                Toggle(isOn: targetToggleBinding(id: t.id)) {
-                                    HStack(spacing: 10) {
-                                        Text(t.id)
-                                            .font(.system(size: 12, design: .monospaced))
-                                        Text(t.label)
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .foregroundStyle(.secondary)
-                                        Spacer()
-                                        if let pf {
-                                            Text(pf.conflict.state == "needs_resolution" ? "Needs action" : "OK")
-                                                .font(.system(size: 12, weight: .semibold))
-                                                .foregroundStyle(pf.conflict.state == "needs_resolution" ? .red : .secondary)
-                                        }
-                                    }
-                                }
-
-                                Text(t.sourcePath)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-
-                                if let pf, pf.conflict.state == "needs_resolution", selectedTargetIds.contains(t.id) {
-                                    let state = resolveState(targetId: t.id)
-
-                                    HStack(spacing: 10) {
-                                        Text("Action")
-                                            .font(.system(size: 12, weight: .semibold))
-                                            .frame(width: 80, alignment: .leading)
-
-                                        Picker("", selection: Binding(
-                                            get: { state.mode },
-                                            set: { newMode in
-                                                setResolveState(targetId: t.id, ResolutionState(mode: newMode, newSourcePath: state.newSourcePath))
-                                            }
-                                        )) {
-                                            ForEach(ResolutionMode.allCases) { m in
-                                                Text(m.title).tag(m)
-                                            }
-                                        }
-                                        .pickerStyle(.menu)
-                                        .controlSize(.regular)
-                                        .frame(width: 260)
-
-                                        if state.mode == .rebind {
-                                            HStack(spacing: 8) {
-                                                TextField(
-                                                    "",
-                                                    text: Binding(
-                                                        get: { state.newSourcePath },
-                                                        set: { _ in }
-                                                    ),
-                                                    prompt: Text("No folder selected")
-                                                )
-                                                .textFieldStyle(.roundedBorder)
-                                                .font(.system(size: 12, design: .monospaced))
-                                                .controlSize(.regular)
-                                                .disabled(true)
-
-                                                Button("Choose…") { chooseFolder(targetId: t.id) }
-                                                    .buttonStyle(.bordered)
-                                                    .controlSize(.regular)
-                                            }
-                                            .frame(maxWidth: 360)
-                                        }
-                                    }
-
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text("Why it needs action")
-                                            .font(.system(size: 11, weight: .semibold))
-                                            .foregroundStyle(.secondary)
-                                        ForEach(conflictReasonLines(pf.conflict.reasons), id: \.self) { line in
-                                            Text("• \(line)")
-                                                .font(.system(size: 11, weight: .semibold))
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(12)
-                            .background(.background)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
-                        }
-                    }
-                }
-                .scrollIndicators(.visible)
-                // When the sheet is taller than the minimum list size, let the list expand so we
-                // don't end up with a large empty region at the bottom.
-                .frame(minHeight: targetsListHeight)
-                .frame(maxHeight: .infinity)
-                .layoutPriority(1)
-
-                Divider()
-
-                if let applyError {
-                    Text(applyError)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.red)
-                }
-
-                HStack {
+        @ViewBuilder
+        private var missingFileView: some View {
+            VStack(spacing: 16) {
+                Spacer()
+                EmptyStateView(
+                    systemImage: "tray.and.arrow.down",
+                    title: "Import backup config",
+                    message: "Close this window and choose a file again."
+                )
+                .frame(maxWidth: .infinity)
+                Spacer()
+                HStack(spacing: 8) {
                     Button("Cancel") { dismiss() }
                         .keyboardShortcut(.cancelAction)
                     Spacer()
-                    Button(applying ? "Applying…" : "Apply") { applyBundle() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(inspection.nextAction == "start_key_rotation" || applying || !canApply())
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+
+        @ViewBuilder
+        private func preInspectView(fileUrl: URL) -> some View {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc")
+                            .foregroundStyle(.secondary)
+                        Text(fileUrl.lastPathComponent)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                    }
+
+                    let h = hintPreview?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Hint")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text(h?.isEmpty == false ? h! : "—")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    if fileEncrypted {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Passphrase / PIN")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                            SecureField("", text: $passphrase)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 12, design: .monospaced))
+                                .focused($passphraseFocused)
+                                .onSubmit { inspectBundle() }
+                        }
+                    }
+
+                    if let inspectError {
+                        Label(inspectError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.red)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            HStack(spacing: 8) {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(inspecting ? "Inspecting…" : "Inspect") { inspectBundle() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(
+                        (fileEncrypted && passphrase.isEmpty)
+                            || bundleKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || inspecting
+                    )
+            }
+        }
+
+        @ViewBuilder
+        private func resultView(inspection: CliSettingsImportBundleDryRunResponse) -> some View {
+            let targetsCount = inspection.bundle.targets.count
+            let endpointsCount = inspection.bundle.endpoints.count
+            let missingKeys = inspection.bundle.secretsCoverage.missingKeys
+            let missingLabels = missingSecretLabels(keys: missingKeys)
+            let canImport = inspection.nextAction != "start_key_rotation"
+
+            let primaryStatusText: String = {
+                if canImport { return "Ready to import" }
+                return "Import blocked"
+            }()
+
+            let statusDetailsText: String = {
+                if canImport {
+                    if inspection.localHasTargets {
+                        return "This Mac already has backup config."
+                    }
+                    return "No existing backup config detected on this Mac."
+                }
+                return "This Mac is using a different encryption key. Import is disabled to prevent mixing unrelated backups."
+            }()
+
+            let secretsText: String = {
+                if missingKeys.isEmpty { return "Credentials: complete" }
+                if missingLabels.isEmpty { return "Credentials: missing" }
+                return "Credentials missing: \(missingLabels.joined(separator: ", "))"
+            }()
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Summary")
+                        .font(.system(size: 13, weight: .semibold))
+                    HStack(spacing: 10) {
+                        Image(systemName: canImport ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(canImport ? Color.green : Color.red)
+                        Text(primaryStatusText)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Text("\(targetsCount) target\(targetsCount == 1 ? "" : "s") · \(endpointsCount) endpoint\(endpointsCount == 1 ? "" : "s")")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text(statusDetailsText)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    Text(secretsText)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(missingKeys.isEmpty ? Color.secondary : Color.red)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text("Targets")
+                .font(.system(size: 13, weight: .semibold))
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(inspection.bundle.targets.sorted { a, b in
+                        a.id.localizedStandardCompare(b.id) == .orderedAscending
+                    }) { t in
+                        let pf = preflightByTargetId[t.id]
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Toggle(isOn: targetToggleBinding(id: t.id)) {
+                                HStack(spacing: 10) {
+                                    Text(t.id)
+                                        .font(.system(size: 12, design: .monospaced))
+                                    Text(t.label)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    if let pf {
+                                        Text(pf.conflict.state == "needs_resolution" ? "Needs action" : "OK")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(pf.conflict.state == "needs_resolution" ? .red : .secondary)
+                                    }
+                                }
+                            }
+
+                            Text(t.sourcePath)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+
+                            if let pf, pf.conflict.state == "needs_resolution", selectedTargetIds.contains(t.id) {
+                                let state = resolveState(targetId: t.id)
+
+                                HStack(spacing: 10) {
+                                    Text("Action")
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .frame(width: 80, alignment: .leading)
+
+                                    Picker("", selection: Binding(
+                                        get: { state.mode },
+                                        set: { newMode in
+                                            setResolveState(targetId: t.id, ResolutionState(mode: newMode, newSourcePath: state.newSourcePath))
+                                        }
+                                    )) {
+                                        ForEach(ResolutionMode.allCases) { m in
+                                            Text(m.title).tag(m)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                    .controlSize(.regular)
+                                    .frame(width: 260)
+
+                                    if state.mode == .rebind {
+                                        HStack(spacing: 8) {
+                                            TextField(
+                                                "",
+                                                text: Binding(
+                                                    get: { state.newSourcePath },
+                                                    set: { _ in }
+                                                ),
+                                                prompt: Text("No folder selected")
+                                            )
+                                            .textFieldStyle(.roundedBorder)
+                                            .font(.system(size: 12, design: .monospaced))
+                                            .controlSize(.regular)
+                                            .disabled(true)
+
+                                            Button("Choose…") { chooseFolder(targetId: t.id) }
+                                                .buttonStyle(.bordered)
+                                                .controlSize(.regular)
+                                        }
+                                        .frame(maxWidth: 360)
+                                    }
+                                }
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Why it needs action")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                    ForEach(conflictReasonLines(pf.conflict.reasons), id: \.self) { line in
+                                        Text("• \(line)")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .background(.background)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
+                    }
+                }
+            }
+            .scrollIndicators(.visible)
+            // When the sheet is taller than the minimum list size, let the list expand so we
+            // don't end up with a large empty region at the bottom.
+            .frame(minHeight: targetsListHeight)
+            .frame(maxHeight: .infinity)
+            .layoutPriority(1)
+
+            Divider()
+
+            if let applyError {
+                Text(applyError)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(applying ? "Applying…" : "Apply") { applyBundle() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(inspection.nextAction == "start_key_rotation" || applying || !canApply())
+            }
+        }
+
+	    var body: some View {
+	        VStack(alignment: .leading, spacing: 12) {
+	            if shouldShowHeader {
+                    headerView
+	            }
+
+	            if let inspection {
+                    resultView(inspection: inspection)
+	            } else if let fileUrl {
+                    preInspectView(fileUrl: fileUrl)
+                } else {
+                    missingFileView
+                }
 	        }
 	        .padding(18)
 	        .frame(width: sheetWidth, height: sheetHeight, alignment: .topLeading)
-        .animation(.easeInOut(duration: 0.15), value: stage)
-        .animation(.easeInOut(duration: 0.15), value: inspection != nil)
+            .animation(.easeInOut(duration: 0.15), value: inspection != nil)
 	        .onChange(of: inspection != nil) { _, ready in
 	            guard ready else { return }
 	            guard SettingsUIDemo.enabled else { return }
@@ -2358,8 +2332,7 @@ private struct ImportConfigBundleSheet: View {
             guard SettingsUIDemo.scene.hasPrefix("backup-config-import") else { return }
 
             // Allow deterministic import UI screenshots without Accessibility scripting.
-            if stage == .chooseFile,
-               inspection == nil,
+            if inspection == nil,
                fileUrl == nil,
                let p = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_FILE"],
                !p.isEmpty
@@ -2369,7 +2342,7 @@ private struct ImportConfigBundleSheet: View {
 
             if SettingsUIDemo.scene == "backup-config-import-result",
                inspection == nil,
-               stage == .inspect,
+               fileUrl != nil,
                let s = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_TARGETS_COUNT"],
                let count = Int(s)
             {
@@ -2381,7 +2354,7 @@ private struct ImportConfigBundleSheet: View {
 
             if SettingsUIDemo.scene == "backup-config-import-result",
                inspection == nil,
-               stage == .inspect,
+               fileUrl != nil,
                fileEncrypted,
                passphrase.isEmpty,
                let pp = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_PASSPHRASE"],
