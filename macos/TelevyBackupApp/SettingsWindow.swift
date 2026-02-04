@@ -2149,7 +2149,7 @@ private struct ImportConfigBundleSheet: View {
                             .foregroundStyle(missingKeys.isEmpty ? Color.secondary : Color.red)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 2)
+                    .padding(12)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -2240,7 +2240,7 @@ private struct ImportConfigBundleSheet: View {
                                     }
                                 }
                             }
-                            .padding(10)
+                            .padding(12)
                             .background(.background)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                             .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
