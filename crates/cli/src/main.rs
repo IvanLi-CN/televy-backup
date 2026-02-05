@@ -3009,42 +3009,116 @@ fn map_mtproto_validate_err(
     }
 }
 
+fn list_index_db_paths_for_read(data_dir: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let index_dir = data_dir.join("index");
+    let mut dbs = Vec::<PathBuf>::new();
+
+    match std::fs::read_dir(&index_dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+
+                let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+
+                // Legacy global DB is a fallback only; prefer per-endpoint DBs when present.
+                if name == "index.sqlite" {
+                    continue;
+                }
+                if !name.starts_with("index.") || !name.ends_with(".sqlite") {
+                    continue;
+                }
+
+                dbs.push(path);
+            }
+        }
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(CliError::new("db.failed", e.to_string()));
+            }
+        }
+    }
+
+    dbs.sort();
+    if dbs.is_empty() {
+        let legacy = legacy_global_index_db_path(data_dir);
+        if legacy.exists() {
+            dbs.push(legacy);
+        }
+    }
+
+    Ok(dbs)
+}
+
 async fn snapshots_list(data_dir: &Path, limit: u32, json: bool) -> Result<(), CliError> {
-    let db_path = data_dir.join("index").join("index.sqlite");
-    if !db_path.exists() {
+    let db_paths = list_index_db_paths_for_read(data_dir)?;
+    if db_paths.is_empty() {
         if json {
             println!("{}", serde_json::json!({ "snapshots": [] }));
         }
         return Ok(());
     }
 
-    let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
-        .await
-        .map_err(map_core_err)?;
-
-    let rows = sqlx::query(
-        r#"
-        SELECT snapshot_id, created_at, source_path, label, base_snapshot_id
-        FROM snapshots
-        ORDER BY created_at DESC
-        LIMIT ?
-        "#,
-    )
-    .bind(limit as i64)
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| CliError::new("db.failed", e.to_string()))?;
-
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(serde_json::json!({
-            "snapshotId": row.get::<String, _>("snapshot_id"),
-            "createdAt": row.get::<String, _>("created_at"),
-            "sourcePath": row.get::<String, _>("source_path"),
-            "label": row.get::<String, _>("label"),
-            "baseSnapshotId": row.get::<Option<String>, _>("base_snapshot_id"),
-        }));
+    #[derive(Debug)]
+    struct SnapshotListItem {
+        snapshot_id: String,
+        created_at: String,
+        source_path: String,
+        label: String,
+        base_snapshot_id: Option<String>,
     }
+
+    // Query each DB for its newest snapshots, then merge and keep the global top N.
+    // This matches the legacy "single global DB" behavior while the index is now per-endpoint.
+    let mut items: Vec<SnapshotListItem> = Vec::new();
+    for db_path in db_paths {
+        let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
+            .await
+            .map_err(map_core_err)?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT snapshot_id, created_at, source_path, label, base_snapshot_id
+            FROM snapshots
+            ORDER BY created_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit as i64)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+
+        for row in rows {
+            items.push(SnapshotListItem {
+                snapshot_id: row.get::<String, _>("snapshot_id"),
+                created_at: row.get::<String, _>("created_at"),
+                source_path: row.get::<String, _>("source_path"),
+                label: row.get::<String, _>("label"),
+                base_snapshot_id: row.get::<Option<String>, _>("base_snapshot_id"),
+            });
+        }
+    }
+
+    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    items.truncate(limit as usize);
+
+    let out = items
+        .into_iter()
+        .map(|i| {
+            serde_json::json!({
+                "snapshotId": i.snapshot_id,
+                "createdAt": i.created_at,
+                "sourcePath": i.source_path,
+                "label": i.label,
+                "baseSnapshotId": i.base_snapshot_id,
+            })
+        })
+        .collect::<Vec<_>>();
 
     if json {
         println!("{}", serde_json::json!({ "snapshots": out }));
@@ -3057,8 +3131,8 @@ async fn snapshots_list(data_dir: &Path, limit: u32, json: bool) -> Result<(), C
 }
 
 async fn stats_get(data_dir: &Path, json: bool) -> Result<(), CliError> {
-    let db_path = data_dir.join("index").join("index.sqlite");
-    if !db_path.exists() {
+    let db_paths = list_index_db_paths_for_read(data_dir)?;
+    if db_paths.is_empty() {
         if json {
             println!(
                 "{}",
@@ -3068,25 +3142,36 @@ async fn stats_get(data_dir: &Path, json: bool) -> Result<(), CliError> {
         return Ok(());
     }
 
-    let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
-        .await
-        .map_err(map_core_err)?;
+    let mut snapshots_total: i64 = 0;
+    let mut chunks_total: i64 = 0;
+    let mut chunks_bytes_total: i64 = 0;
+    for db_path in db_paths {
+        let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
+            .await
+            .map_err(map_core_err)?;
 
-    let snapshots_total: i64 = sqlx::query("SELECT COUNT(1) as c FROM snapshots")
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?
-        .get("c");
-    let chunks_total: i64 = sqlx::query("SELECT COUNT(1) as c FROM chunks")
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?
-        .get("c");
-    let chunks_bytes_total: i64 = sqlx::query("SELECT COALESCE(SUM(size), 0) as s FROM chunks")
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?
-        .get("s");
+        snapshots_total = snapshots_total.saturating_add(
+            sqlx::query("SELECT COUNT(1) as c FROM snapshots")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| CliError::new("db.failed", e.to_string()))?
+                .get::<i64, _>("c"),
+        );
+        chunks_total = chunks_total.saturating_add(
+            sqlx::query("SELECT COUNT(1) as c FROM chunks")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| CliError::new("db.failed", e.to_string()))?
+                .get::<i64, _>("c"),
+        );
+        chunks_bytes_total = chunks_bytes_total.saturating_add(
+            sqlx::query("SELECT COALESCE(SUM(size), 0) as s FROM chunks")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| CliError::new("db.failed", e.to_string()))?
+                .get::<i64, _>("s"),
+        );
+    }
 
     if json {
         println!(
@@ -3106,8 +3191,8 @@ async fn stats_get(data_dir: &Path, json: bool) -> Result<(), CliError> {
 }
 
 async fn stats_last(data_dir: &Path, source: Option<PathBuf>, json: bool) -> Result<(), CliError> {
-    let db_path = data_dir.join("index").join("index.sqlite");
-    if !db_path.exists() {
+    let db_paths = list_index_db_paths_for_read(data_dir)?;
+    if db_paths.is_empty() {
         if json {
             println!(
                 "{}",
@@ -3117,43 +3202,88 @@ async fn stats_last(data_dir: &Path, source: Option<PathBuf>, json: bool) -> Res
         return Ok(());
     }
 
-    let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
-        .await
-        .map_err(map_core_err)?;
+    let source_str: Option<String> = source
+        .as_ref()
+        .map(|p| {
+            p.to_str()
+                .ok_or_else(|| CliError::new("config.invalid", "source path is not valid utf-8"))
+                .map(|s| s.to_string())
+        })
+        .transpose()?;
 
-    let snapshot_row: Option<sqlx::sqlite::SqliteRow> = if let Some(source) = &source {
-        let source = source
-            .to_str()
-            .ok_or_else(|| CliError::new("config.invalid", "source path is not valid utf-8"))?
-            .to_string();
-        sqlx::query(
-            r#"
-            SELECT snapshot_id, created_at, base_snapshot_id
-            FROM snapshots
-            WHERE source_path = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(source)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?
-    } else {
-        sqlx::query(
-            r#"
-            SELECT snapshot_id, created_at, base_snapshot_id
-            FROM snapshots
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?
-    };
+    #[derive(Debug)]
+    struct LastSnapshot {
+        db_path: PathBuf,
+        snapshot_id: String,
+        created_at: String,
+        base_snapshot_id: Option<String>,
+    }
 
-    let Some(row) = snapshot_row else {
+    let mut best: Option<LastSnapshot> = None;
+    for db_path in db_paths {
+        let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
+            .await
+            .map_err(map_core_err)?;
+
+        let snapshot_row: Option<sqlx::sqlite::SqliteRow> = if let Some(source) = &source_str {
+            sqlx::query(
+                r#"
+                SELECT snapshot_id, created_at, base_snapshot_id
+                FROM snapshots
+                WHERE source_path = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(source)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT snapshot_id, created_at, base_snapshot_id
+                FROM snapshots
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?
+        };
+
+        let Some(row) = snapshot_row else {
+            continue;
+        };
+
+        let snapshot_id: String = row
+            .try_get("snapshot_id")
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+        let created_at: String = row
+            .try_get("created_at")
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+        let base_snapshot_id: Option<String> = row
+            .try_get("base_snapshot_id")
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+
+        let candidate = LastSnapshot {
+            db_path: db_path.clone(),
+            snapshot_id,
+            created_at,
+            base_snapshot_id,
+        };
+
+        let replace = match best.as_ref() {
+            None => true,
+            Some(cur) => candidate.created_at > cur.created_at,
+        };
+        if replace {
+            best = Some(candidate);
+        }
+    }
+
+    let Some(best) = best else {
         if json {
             println!(
                 "{}",
@@ -3163,15 +3293,13 @@ async fn stats_last(data_dir: &Path, source: Option<PathBuf>, json: bool) -> Res
         return Ok(());
     };
 
-    let snapshot_id: String = row
-        .try_get("snapshot_id")
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
-    let created_at: String = row
-        .try_get("created_at")
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
-    let base_snapshot_id: Option<String> = row
-        .try_get("base_snapshot_id")
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+    let snapshot_id = best.snapshot_id;
+    let created_at = best.created_at;
+    let base_snapshot_id = best.base_snapshot_id;
+
+    let pool = televy_backup_core::index_db::open_existing_index_db(&best.db_path)
+        .await
+        .map_err(map_core_err)?;
 
     let cur_bytes_unique: i64 = sqlx::query(
         r#"
