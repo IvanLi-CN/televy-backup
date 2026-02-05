@@ -279,6 +279,14 @@ private struct TargetDetailView: View {
             }
     }
 
+    private var effectiveTargetState: String {
+        if target.state == "running" { return "running" }
+        // Verify/restore runs are executed by the CLI and may not reflect in the daemon status
+        // stream immediately; infer "running" from the presence of an in-progress run log.
+        if runs.contains(where: { $0.status == "running" }) { return "running" }
+        return target.state
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
@@ -304,7 +312,7 @@ private struct TargetDetailView: View {
 
             HStack(spacing: 10) {
                 StatusChip(text: target.enabled ? "Enabled" : "Disabled", tint: target.enabled ? .green : .gray)
-                StatusChip(text: target.state, tint: target.state == "running" ? .blue : .gray)
+                StatusChip(text: effectiveTargetState, tint: effectiveTargetState == "running" ? .blue : .gray)
                 if let status = target.lastRun?.status {
                     StatusChip(text: "Last: \(status)", tint: status == "succeeded" ? .green : .red)
                 }

@@ -2107,6 +2107,9 @@ final class AppModel: ObservableObject {
                     self.taskStartedAt = Date()
                     self.lastRunOk = nil
                     self.lastRunErrorCode = nil
+                    // A run log file is created at task start; refresh so the UI surfaces the
+                    // in-progress entry immediately (without waiting for completion).
+                    self.refreshRunHistory()
                 } else {
                     self.isRunning = false
                     self.phase = "idle"
@@ -2235,6 +2238,13 @@ final class AppModel: ObservableObject {
             var status: Int32 = 1
             do {
                 try task.run()
+
+                if updateTaskState, args.contains("--events") {
+                    // Surface the run log row early (run.start is written at the beginning of the task).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        self.refreshRunHistory()
+                    }
+                }
 
                 if let timeoutSeconds {
                     let pid = task.processIdentifier
