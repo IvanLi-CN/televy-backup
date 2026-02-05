@@ -79,7 +79,8 @@ TelevyBackup stores non-secret settings in `config.toml`, and secrets in an encr
 
 - `config.toml` location: `TELEVYBACKUP_CONFIG_DIR/config.toml` (default: `~/Library/Application Support/TelevyBackup/config.toml`)
 - `secrets.enc` location: `TELEVYBACKUP_CONFIG_DIR/secrets.enc` (default: `~/Library/Application Support/TelevyBackup/secrets.enc`)
-- Local index DB: `$APP_DATA_DIR/index/index.sqlite` or `TELEVYBACKUP_DATA_DIR/index/index.sqlite`
+- Per-endpoint local index DB: `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite`
+  - Legacy (migration): `TELEVYBACKUP_DATA_DIR/index/index.sqlite` may exist but is ignored and auto-cleaned when all in-use per-endpoint DBs are usable.
 - Per-run logs (NDJSON): `TELEVYBACKUP_LOG_DIR/` (override) or `TELEVYBACKUP_DATA_DIR/logs/` (default: `~/Library/Application Support/TelevyBackup/logs/`)
   - Log level filter: `TELEVYBACKUP_LOG` → `RUST_LOG` → default `debug`
 - UI logs (macOS app): `TELEVYBACKUP_LOG_DIR/ui.log` (override) or `TELEVYBACKUP_DATA_DIR/logs/ui.log` (default: `~/Library/Application Support/TelevyBackup/logs/ui.log`)
@@ -99,6 +100,21 @@ To move restore capability across devices:
 
 - Export (prints secret; requires explicit confirmation): `televybackup secrets export-master-key --i-understand`
 - Import on a new device (reads from stdin): `televybackup secrets import-master-key`
+
+## Config bundle (TBC2)
+
+To move a whole working setup across devices (Settings v2 + required secrets), use the encrypted config bundle.
+It is protected by a user-supplied passphrase (PIN/password).
+
+- Export: set `TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE`, then run `televybackup --json settings export-bundle [--hint "<string>"]`
+- Import (inspect only; reads from stdin): set `TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE`, then run `televybackup --json settings import-bundle --dry-run`
+- Import (apply; reads JSON from stdin): set `TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE`, then run `televybackup --json settings import-bundle --apply`
+
+Notes:
+
+- The bundle is self-contained and includes `TBK1` (master key), but it is encrypted: importing a `TBC2:...` key requires the passphrase.
+- The bundle includes an optional plaintext `hint` phrase (provided at export time) which is shown during import to help verify you're using the right bundle.
+- MTProto session keys are not exported; they are regenerated on the new device as needed.
 
 ## Troubleshooting
 
@@ -133,7 +149,7 @@ If you move to a new machine (or lose `index/index.sqlite`), TelevyBackup can co
 
 By default, `televybackup backup run` performs a preflight `index_sync` step before `scan`:
 
-- If needed, it downloads the remote latest index DB and atomically writes `TELEVYBACKUP_DATA_DIR/index/index.sqlite`.
+- If needed, it downloads the remote latest index DB and atomically writes `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite`.
 - To force local-only behavior (offline/debug): `televybackup backup run --no-remote-index-sync`.
 
 ## Daemon (scheduled backups)

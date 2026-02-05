@@ -410,10 +410,31 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
 
     // Endpoints: unique ids + minimal invariants.
     let mut endpoint_ids = std::collections::HashSet::<String>::new();
+    let mut chat_ids = std::collections::HashSet::<String>::new();
     for ep in &settings.telegram_endpoints {
         if ep.id.trim().is_empty() {
             return Err(Error::InvalidConfig {
                 message: "telegram_endpoints[].id must not be empty".to_string(),
+            });
+        }
+        if ep.id != ep.id.trim() {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "telegram_endpoints[].id must not contain leading/trailing whitespace (got {:?})",
+                    ep.id
+                ),
+            });
+        }
+        if !ep
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "telegram_endpoints[].id must match [A-Za-z0-9_-]+ (got {:?})",
+                    ep.id
+                ),
             });
         }
         if !endpoint_ids.insert(ep.id.clone()) {
@@ -435,6 +456,12 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
                     "telegram_endpoints[].bot_token_key must not be empty (endpoint_id={})",
                     ep.id
                 ),
+            });
+        }
+        let chat_id = ep.chat_id.trim();
+        if !chat_id.is_empty() && !chat_ids.insert(chat_id.to_string()) {
+            return Err(Error::InvalidConfig {
+                message: format!("duplicate telegram_endpoints chat_id: {chat_id}"),
             });
         }
         if ep.mtproto.session_key.trim().is_empty() {
@@ -746,9 +773,91 @@ min_delay_ms = 250
     }
 
     #[test]
+    fn v2_chat_id_must_be_unique() {
+        let mut s = base_settings_v2();
+        s.telegram_endpoints.push(TelegramEndpoint {
+            id: "e2".to_string(),
+            mode: "mtproto".to_string(),
+            chat_id: s.telegram_endpoints[0].chat_id.clone(),
+            bot_token_key: "telegram.bot_token.e2".to_string(),
+            mtproto: TelegramEndpointMtproto {
+                session_key: "telegram.mtproto.session.e2".to_string(),
+            },
+            rate_limit: TelegramRateLimit::default(),
+        });
+
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("duplicate telegram_endpoints chat_id")
+        );
+    }
+
+    #[test]
+    fn v2_chat_id_uniqueness_ignores_empty() {
+        let mut s = base_settings_v2();
+        s.telegram_endpoints[0].chat_id = "  ".to_string();
+        s.telegram_endpoints.push(TelegramEndpoint {
+            id: "e2".to_string(),
+            mode: "mtproto".to_string(),
+            chat_id: "".to_string(),
+            bot_token_key: "telegram.bot_token.e2".to_string(),
+            mtproto: TelegramEndpointMtproto {
+                session_key: "telegram.mtproto.session.e2".to_string(),
+            },
+            rate_limit: TelegramRateLimit::default(),
+        });
+
+        validate_settings_schema_v2(&s).unwrap();
+    }
+
+    #[test]
+    fn v2_chat_id_uniqueness_trims_whitespace() {
+        let mut s = base_settings_v2();
+        s.telegram_endpoints[0].chat_id = format!("  {}  ", s.telegram_endpoints[0].chat_id);
+        s.telegram_endpoints.push(TelegramEndpoint {
+            id: "e2".to_string(),
+            mode: "mtproto".to_string(),
+            chat_id: s.telegram_endpoints[0].chat_id.trim().to_string(),
+            bot_token_key: "telegram.bot_token.e2".to_string(),
+            mtproto: TelegramEndpointMtproto {
+                session_key: "telegram.mtproto.session.e2".to_string(),
+            },
+            rate_limit: TelegramRateLimit::default(),
+        });
+
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("duplicate telegram_endpoints chat_id")
+        );
+    }
+
+    #[test]
+    fn v2_endpoint_id_must_be_filename_safe() {
+        let mut s = base_settings_v2();
+        s.telegram_endpoints[0].id = "ep/1".to_string();
+        s.targets[0].endpoint_id = "ep/1".to_string();
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("telegram_endpoints[].id must match")
+        );
+    }
+
+    #[test]
+    fn v2_endpoint_id_must_not_have_whitespace() {
+        let mut s = base_settings_v2();
+        s.telegram_endpoints[0].id = " e1".to_string();
+        s.targets[0].endpoint_id = " e1".to_string();
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(err.to_string().contains("leading/trailing whitespace"));
+    }
+
+    #[test]
     fn v2_endpoint_mtproto_session_key_defaults_per_endpoint() {
         let input = r#"
-version = 2
+	version = 2
 
 [[telegram_endpoints]]
 id = "e1"

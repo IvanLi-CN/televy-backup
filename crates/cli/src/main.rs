@@ -8,11 +8,13 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use sqlx::Row;
+use televy_backup_core::bootstrap::PinnedStorage;
 use televy_backup_core::{
     APP_NAME, BackupConfig, BackupOptions, ChunkingConfig, ProgressSink, RestoreConfig,
     RestoreOptions, Storage, TelegramMtProtoStorage, TelegramMtProtoStorageConfig, VerifyConfig,
     VerifyOptions, restore_snapshot_with, run_backup_with, verify_snapshot_with,
 };
+use televy_backup_core::{bootstrap, config_bundle};
 use televy_backup_core::{config as settings_config, gold_key};
 use tokio::io::AsyncBufReadExt;
 #[cfg(unix)]
@@ -88,6 +90,16 @@ enum SettingsCmd {
         with_secrets: bool,
     },
     Set,
+    ExportBundle {
+        #[arg(long)]
+        hint: Option<String>,
+    },
+    ImportBundle {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -315,6 +327,22 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 settings_get(&config_dir, &data_dir, cli.json, with_secrets).await
             }
             SettingsCmd::Set => settings_set(&config_dir, cli.json).await,
+            SettingsCmd::ExportBundle { hint } => {
+                settings_export_bundle(&config_dir, &data_dir, cli.json, hint).await
+            }
+            SettingsCmd::ImportBundle { dry_run, apply } => {
+                if dry_run == apply {
+                    return Err(CliError::new(
+                        "config.invalid",
+                        "must pass exactly one of: --dry-run, --apply",
+                    ));
+                }
+                if dry_run {
+                    settings_import_bundle_dry_run(&config_dir, &data_dir, cli.json).await
+                } else {
+                    settings_import_bundle_apply(&config_dir, &data_dir, cli.json).await
+                }
+            }
         },
         Command::Secrets { cmd } => match cmd {
             SecretsCmd::SetTelegramBotToken { endpoint_id } => {
@@ -856,6 +884,1388 @@ async fn settings_set(config_dir: &Path, json: bool) -> Result<(), CliError> {
     if json {
         println!("{}", serde_json::json!({ "settings": settings }));
     }
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum LocalMasterKeyState {
+    Missing,
+    Match,
+    Mismatch,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ConfigBundleNextAction {
+    Apply,
+    StartKeyRotation,
+}
+
+#[derive(Debug, serde::Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ConfigBundleBootstrapState {
+    Ok,
+    Missing,
+    Invalid,
+}
+
+#[derive(Debug, serde::Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ConfigBundleRemoteLatestState {
+    Ok,
+    Missing,
+}
+
+#[derive(Debug, serde::Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ConfigBundleLocalIndexState {
+    Match,
+    Stale,
+    Missing,
+}
+
+#[derive(Debug, serde::Serialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum ConfigBundleConflictState {
+    None,
+    NeedsResolution,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsExportBundleJson {
+    bundle_key: String,
+    format: String,
+}
+
+const CONFIG_BUNDLE_PASSPHRASE_ENV: &str = "TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE";
+
+fn load_config_bundle_passphrase() -> Result<String, CliError> {
+    let passphrase = std::env::var(CONFIG_BUNDLE_PASSPHRASE_ENV).unwrap_or_default();
+    if passphrase.trim().is_empty() {
+        return Err(CliError::new(
+            "config_bundle.passphrase_required",
+            format!("missing {CONFIG_BUNDLE_PASSPHRASE_ENV}"),
+        ));
+    }
+    Ok(passphrase)
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunJson {
+    format: String,
+    local_master_key: LocalMasterKeyJson,
+    local_has_targets: bool,
+    next_action: ConfigBundleNextAction,
+    bundle: SettingsImportBundleDryRunBundleJson,
+    preflight: SettingsImportBundleDryRunPreflightJson,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalMasterKeyJson {
+    state: LocalMasterKeyState,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunBundleJson {
+    settings_version: u32,
+    targets: Vec<SettingsImportBundleDryRunTargetJson>,
+    endpoints: Vec<SettingsImportBundleDryRunEndpointJson>,
+    secrets_coverage: SettingsImportBundleDryRunSecretsCoverageJson,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunTargetJson {
+    id: String,
+    source_path: String,
+    endpoint_id: String,
+    label: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunEndpointJson {
+    id: String,
+    chat_id: String,
+    mode: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunSecretsCoverageJson {
+    present_keys: Vec<String>,
+    excluded_keys: Vec<String>,
+    missing_keys: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunPreflightJson {
+    targets: Vec<SettingsImportBundleDryRunPreflightTargetJson>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunPreflightTargetJson {
+    target_id: String,
+    source_path_exists: bool,
+    bootstrap: SettingsImportBundleDryRunBootstrapJson,
+    remote_latest: SettingsImportBundleDryRunRemoteLatestJson,
+    local_index: SettingsImportBundleDryRunLocalIndexJson,
+    conflict: SettingsImportBundleDryRunConflictJson,
+}
+
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunBootstrapJson {
+    state: ConfigBundleBootstrapState,
+    details: serde_json::Value,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunRemoteLatestJson {
+    state: ConfigBundleRemoteLatestState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_object_id: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunLocalIndexJson {
+    state: ConfigBundleLocalIndexState,
+    details: serde_json::Value,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleDryRunConflictJson {
+    state: ConfigBundleConflictState,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleApplyRequest {
+    bundle_key: String,
+    selected_target_ids: Vec<String>,
+    confirm: SettingsImportBundleApplyConfirm,
+    #[serde(default)]
+    resolutions: HashMap<String, SettingsImportBundleApplyResolution>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleApplyConfirm {
+    // Backward-compatible field: older UIs may send it, but the only user-facing confirmation
+    // we require is the phrase.
+    #[allow(dead_code)]
+    #[serde(default)]
+    ack_risks: bool,
+    phrase: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+enum SettingsImportBundleApplyResolution {
+    OverwriteLocal,
+    OverwriteRemote,
+    Rebind { new_source_path: String },
+    Skip,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleApplyResponse {
+    ok: bool,
+    local_index: SettingsImportBundleApplyLocalIndexJson,
+    applied: SettingsImportBundleApplyAppliedJson,
+    actions: SettingsImportBundleApplyActionsJson,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleApplyLocalIndexJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_db_backup_path: Option<String>,
+    rebuilt_db_path: String,
+    rebuilt_from: SettingsImportBundleApplyRebuiltFromJson,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleApplyRebuiltFromJson {
+    mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manifest_object_id: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleApplyAppliedJson {
+    targets: Vec<String>,
+    endpoints: Vec<String>,
+    secrets_written: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleApplyActionsJson {
+    updated_pinned_catalog: Vec<SettingsImportBundleApplyPinnedUpdateJson>,
+    local_index_synced: Vec<SettingsImportBundleApplyLocalIndexSyncedJson>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleApplyPinnedUpdateJson {
+    endpoint_id: String,
+    old: String,
+    new: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleApplyLocalIndexSyncedJson {
+    target_id: String,
+    from: String,
+    to: String,
+}
+
+async fn settings_export_bundle(
+    config_dir: &Path,
+    data_dir: &Path,
+    json: bool,
+    hint: Option<String>,
+) -> Result<(), CliError> {
+    let settings = load_settings(config_dir)?;
+    let master_key = load_master_key(config_dir, data_dir)?;
+    let passphrase = load_config_bundle_passphrase()?;
+
+    let vault_key = load_or_create_vault_key(data_dir)?;
+    let secrets_path = televy_backup_core::secrets::secrets_path(config_dir);
+    let store = televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)
+        .map_err(map_secrets_store_err)?;
+
+    // Exclude MTProto sessions: session_key is kept in settings, but the session value is
+    // per-device and must not be exported.
+    let mut bundle_secrets = config_bundle::ConfigBundleSecretsV2 {
+        excluded: settings
+            .telegram_endpoints
+            .iter()
+            .map(|ep| ep.mtproto.session_key.clone())
+            .collect::<Vec<_>>(),
+        ..Default::default()
+    };
+
+    let mut required = Vec::new();
+    required.push(settings.telegram.mtproto.api_hash_key.clone());
+    for ep in &settings.telegram_endpoints {
+        required.push(ep.bot_token_key.clone());
+    }
+    required.sort();
+    required.dedup();
+
+    for key in required {
+        if let Some(value) = store.get(&key) {
+            bundle_secrets.entries.insert(key, value.to_string());
+        } else {
+            bundle_secrets.missing.push(key);
+        }
+    }
+    bundle_secrets.excluded.sort();
+    bundle_secrets.excluded.dedup();
+    bundle_secrets.missing.sort();
+    bundle_secrets.missing.dedup();
+
+    let bundle_key = config_bundle::encode_config_bundle_key_v2(
+        &master_key,
+        &settings,
+        bundle_secrets,
+        &passphrase,
+        hint.as_deref().unwrap_or(""),
+    )
+    .map_err(map_core_err)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&SettingsExportBundleJson {
+                bundle_key: bundle_key.clone(),
+                format: config_bundle::CONFIG_BUNDLE_FORMAT_V2.to_string(),
+            })
+            .map_err(|e| CliError::new("config.invalid", e.to_string()))?
+        );
+    } else {
+        println!("{bundle_key}");
+    }
+    Ok(())
+}
+
+fn read_stdin_one_line() -> Result<String, CliError> {
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|e| CliError::new("config.read_failed", e.to_string()))?;
+    let line = input
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    if line.is_empty() {
+        return Err(CliError::new("config.invalid", "stdin is empty"));
+    }
+    Ok(line.to_string())
+}
+
+fn load_optional_master_key(
+    config_dir: &Path,
+    data_dir: &Path,
+) -> Result<Option<[u8; 32]>, CliError> {
+    let Some(b64) = get_secret(config_dir, data_dir, MASTER_KEY_KEY)? else {
+        return Ok(None);
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .map_err(|e| CliError::new("config.invalid", e.to_string()))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| CliError::new("config.invalid", "invalid master key length"))?;
+    Ok(Some(arr))
+}
+
+fn endpoint_index_db_path(data_dir: &Path, endpoint_id: &str) -> PathBuf {
+    data_dir
+        .join("index")
+        .join(format!("index.{endpoint_id}.sqlite"))
+}
+
+fn legacy_global_index_db_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("index").join("index.sqlite")
+}
+
+async fn init_empty_index_db(path: &Path) -> Result<(), CliError> {
+    // When creating a brand-new per-endpoint index DB, ensure the parent directory exists.
+    // (SQLite can create the DB file, but not missing directories.)
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+    }
+    let _ = televy_backup_core::index_db::open_index_db(path)
+        .await
+        .map_err(map_core_err)?;
+    Ok(())
+}
+
+async fn settings_import_bundle_dry_run(
+    config_dir: &Path,
+    data_dir: &Path,
+    json: bool,
+) -> Result<(), CliError> {
+    if !json {
+        return Err(CliError::new(
+            "config.invalid",
+            "import-bundle requires --json",
+        ));
+    }
+
+    let bundle_key = read_stdin_one_line()?;
+    let passphrase = load_config_bundle_passphrase()?;
+    let decoded = config_bundle::decode_config_bundle_key_v2(&bundle_key, &passphrase)
+        .map_err(map_core_err)?;
+    let bundle_settings = decoded.payload.settings;
+    let bundle_secrets = decoded.payload.secrets;
+    let bundle_master_key = decoded.master_key;
+
+    let local_settings = load_settings(config_dir)?;
+    let local_has_targets = !local_settings.targets.is_empty();
+    let local_master_key = load_optional_master_key(config_dir, data_dir)?;
+    let local_master_key_state = match local_master_key {
+        None => LocalMasterKeyState::Missing,
+        Some(k) if k == bundle_master_key => LocalMasterKeyState::Match,
+        Some(_) => LocalMasterKeyState::Mismatch,
+    };
+
+    let next_action = match (local_master_key_state, local_has_targets) {
+        (LocalMasterKeyState::Mismatch, true) => ConfigBundleNextAction::StartKeyRotation,
+        _ => ConfigBundleNextAction::Apply,
+    };
+
+    let bundle_targets = bundle_settings
+        .targets
+        .iter()
+        .map(|t| SettingsImportBundleDryRunTargetJson {
+            id: t.id.clone(),
+            source_path: t.source_path.clone(),
+            endpoint_id: t.endpoint_id.clone(),
+            label: t.label.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let bundle_endpoints = bundle_settings
+        .telegram_endpoints
+        .iter()
+        .map(|ep| SettingsImportBundleDryRunEndpointJson {
+            id: ep.id.clone(),
+            chat_id: ep.chat_id.clone(),
+            mode: ep.mode.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let mut present_keys = bundle_secrets.entries.keys().cloned().collect::<Vec<_>>();
+    present_keys.sort();
+
+    let mut excluded_keys = bundle_secrets.excluded.clone();
+    excluded_keys.sort();
+
+    let mut missing_keys = bundle_secrets.missing.clone();
+    missing_keys.sort();
+
+    let secrets_coverage = SettingsImportBundleDryRunSecretsCoverageJson {
+        present_keys,
+        excluded_keys,
+        missing_keys,
+    };
+
+    let api_id = bundle_settings.telegram.mtproto.api_id;
+    let api_hash = bundle_secrets
+        .entries
+        .get(&bundle_settings.telegram.mtproto.api_hash_key)
+        .cloned();
+
+    let mut endpoint_catalogs: HashMap<String, Option<bootstrap::BootstrapCatalogV1>> =
+        HashMap::new();
+    let mut endpoint_bootstrap: HashMap<String, SettingsImportBundleDryRunBootstrapJson> =
+        HashMap::new();
+
+    for ep in &bundle_settings.telegram_endpoints {
+        let bot_token = bundle_secrets.entries.get(&ep.bot_token_key).cloned();
+        let provider = settings_config::endpoint_provider(&ep.id);
+
+        let Some(api_hash) = api_hash.clone() else {
+            endpoint_catalogs.insert(ep.id.clone(), None);
+            endpoint_bootstrap.insert(
+                ep.id.clone(),
+                SettingsImportBundleDryRunBootstrapJson {
+                    state: ConfigBundleBootstrapState::Missing,
+                    details: serde_json::json!({ "reason": "missing_api_hash" }),
+                },
+            );
+            continue;
+        };
+
+        let Some(bot_token) = bot_token else {
+            endpoint_catalogs.insert(ep.id.clone(), None);
+            endpoint_bootstrap.insert(
+                ep.id.clone(),
+                SettingsImportBundleDryRunBootstrapJson {
+                    state: ConfigBundleBootstrapState::Missing,
+                    details: serde_json::json!({ "reason": "missing_bot_token" }),
+                },
+            );
+            continue;
+        };
+
+        if api_id <= 0 {
+            endpoint_catalogs.insert(ep.id.clone(), None);
+            endpoint_bootstrap.insert(
+                ep.id.clone(),
+                SettingsImportBundleDryRunBootstrapJson {
+                    state: ConfigBundleBootstrapState::Missing,
+                    details: serde_json::json!({ "reason": "invalid_api_id" }),
+                },
+            );
+            continue;
+        }
+
+        let cache_dir = data_dir.join("cache").join("mtproto");
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+        let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+            provider: provider.clone(),
+            api_id,
+            api_hash: api_hash.clone(),
+            bot_token: bot_token.clone(),
+            chat_id: ep.chat_id.clone(),
+            session: None,
+            cache_dir,
+            helper_path: None,
+        })
+        .await
+        .map_err(|e| map_mtproto_validate_err(e, &bot_token, &api_hash))?;
+
+        let catalog = match bootstrap::load_remote_catalog(&storage, &bundle_master_key).await {
+            Ok(Some(cat)) => {
+                endpoint_bootstrap.insert(
+                    ep.id.clone(),
+                    SettingsImportBundleDryRunBootstrapJson {
+                        state: ConfigBundleBootstrapState::Ok,
+                        details: serde_json::json!({}),
+                    },
+                );
+                Some(cat)
+            }
+            Ok(None) => {
+                endpoint_bootstrap.insert(
+                    ep.id.clone(),
+                    SettingsImportBundleDryRunBootstrapJson {
+                        state: ConfigBundleBootstrapState::Missing,
+                        details: serde_json::json!({}),
+                    },
+                );
+                None
+            }
+            Err(televy_backup_core::Error::BootstrapDecryptFailed { message }) => {
+                endpoint_bootstrap.insert(
+                    ep.id.clone(),
+                    SettingsImportBundleDryRunBootstrapJson {
+                        state: ConfigBundleBootstrapState::Invalid,
+                        details: serde_json::json!({ "error": message }),
+                    },
+                );
+                None
+            }
+            Err(e) => return Err(map_core_err(e)),
+        };
+
+        endpoint_catalogs.insert(ep.id.clone(), catalog);
+    }
+
+    let mut preflight_targets = Vec::new();
+    for t in &bundle_settings.targets {
+        let source_path_exists = Path::new(&t.source_path).exists();
+        let ep_id = &t.endpoint_id;
+        let provider = settings_config::endpoint_provider(ep_id);
+
+        let bootstrap = endpoint_bootstrap.get(ep_id).cloned().unwrap_or(
+            SettingsImportBundleDryRunBootstrapJson {
+                state: ConfigBundleBootstrapState::Missing,
+                details: serde_json::json!({ "reason": "unknown_endpoint" }),
+            },
+        );
+
+        let remote_latest = match endpoint_catalogs.get(ep_id).and_then(|c| c.as_ref()) {
+            Some(cat) => {
+                let mut latest = cat
+                    .targets
+                    .iter()
+                    .find(|x| x.target_id == t.id)
+                    .and_then(|x| x.latest.clone());
+
+                if latest.is_none() {
+                    let matches = cat
+                        .targets
+                        .iter()
+                        .filter(|x| x.source_path == t.source_path)
+                        .collect::<Vec<_>>();
+                    if matches.len() == 1 {
+                        latest = matches[0].latest.clone();
+                    }
+                }
+
+                match latest {
+                    Some(l) => SettingsImportBundleDryRunRemoteLatestJson {
+                        state: ConfigBundleRemoteLatestState::Ok,
+                        snapshot_id: Some(l.snapshot_id),
+                        manifest_object_id: Some(l.manifest_object_id),
+                    },
+                    None => SettingsImportBundleDryRunRemoteLatestJson {
+                        state: ConfigBundleRemoteLatestState::Missing,
+                        snapshot_id: None,
+                        manifest_object_id: None,
+                    },
+                }
+            }
+            None => SettingsImportBundleDryRunRemoteLatestJson {
+                state: ConfigBundleRemoteLatestState::Missing,
+                snapshot_id: None,
+                manifest_object_id: None,
+            },
+        };
+
+        let local_db_path = endpoint_index_db_path(data_dir, ep_id);
+        let mut conflict_reasons = Vec::new();
+        if !source_path_exists {
+            conflict_reasons.push("missing_path".to_string());
+        }
+        if matches!(bootstrap.state, ConfigBundleBootstrapState::Invalid) {
+            conflict_reasons.push("bootstrap_invalid".to_string());
+        }
+
+        let local_index_state = if remote_latest.state == ConfigBundleRemoteLatestState::Ok {
+            let snapshot_id = remote_latest.snapshot_id.as_deref().unwrap_or("");
+            let manifest_object_id = remote_latest.manifest_object_id.as_deref().unwrap_or("");
+            if !local_db_path.exists() {
+                ConfigBundleLocalIndexState::Missing
+            } else {
+                let match_ok = televy_backup_core::index_sync::local_index_matches_remote_latest(
+                    &local_db_path,
+                    &provider,
+                    snapshot_id,
+                    manifest_object_id,
+                )
+                .await
+                .map_err(map_core_err)?;
+                if match_ok {
+                    ConfigBundleLocalIndexState::Match
+                } else {
+                    ConfigBundleLocalIndexState::Stale
+                }
+            }
+        } else {
+            ConfigBundleLocalIndexState::Missing
+        };
+
+        if remote_latest.state == ConfigBundleRemoteLatestState::Ok
+            && local_index_state == ConfigBundleLocalIndexState::Stale
+        {
+            conflict_reasons.push("local_vs_remote_mismatch".to_string());
+        }
+
+        let conflict_state = if conflict_reasons.is_empty() {
+            ConfigBundleConflictState::None
+        } else {
+            ConfigBundleConflictState::NeedsResolution
+        };
+
+        preflight_targets.push(SettingsImportBundleDryRunPreflightTargetJson {
+            target_id: t.id.clone(),
+            source_path_exists,
+            bootstrap,
+            remote_latest,
+            local_index: SettingsImportBundleDryRunLocalIndexJson {
+                state: local_index_state,
+                details: serde_json::json!({ "dbPath": local_db_path.display().to_string() }),
+            },
+            conflict: SettingsImportBundleDryRunConflictJson {
+                state: conflict_state,
+                reasons: conflict_reasons,
+            },
+        });
+    }
+
+    let out = SettingsImportBundleDryRunJson {
+        format: config_bundle::CONFIG_BUNDLE_FORMAT_V2.to_string(),
+        local_master_key: LocalMasterKeyJson {
+            state: local_master_key_state,
+        },
+        local_has_targets,
+        next_action,
+        bundle: SettingsImportBundleDryRunBundleJson {
+            settings_version: bundle_settings.version,
+            targets: bundle_targets,
+            endpoints: bundle_endpoints,
+            secrets_coverage,
+        },
+        preflight: SettingsImportBundleDryRunPreflightJson {
+            targets: preflight_targets,
+        },
+    };
+
+    println!(
+        "{}",
+        serde_json::to_string(&out).map_err(|e| CliError::new("config.invalid", e.to_string()))?
+    );
+    Ok(())
+}
+
+async fn settings_import_bundle_apply(
+    config_dir: &Path,
+    data_dir: &Path,
+    json: bool,
+) -> Result<(), CliError> {
+    if !json {
+        return Err(CliError::new(
+            "config.invalid",
+            "import-bundle --apply requires --json",
+        ));
+    }
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|e| CliError::new("config.read_failed", e.to_string()))?;
+    let req: SettingsImportBundleApplyRequest =
+        serde_json::from_str(&input).map_err(|e| CliError::new("config.invalid", e.to_string()))?;
+
+    if req.selected_target_ids.is_empty() {
+        return Err(CliError::new(
+            "config.invalid",
+            "selectedTargetIds must not be empty",
+        ));
+    }
+    if req.confirm.phrase != "IMPORT" {
+        return Err(CliError::new(
+            "config_bundle.confirm_required",
+            "apply requires confirm.phrase=\"IMPORT\"",
+        ));
+    }
+
+    let passphrase = load_config_bundle_passphrase()?;
+    let decoded = config_bundle::decode_config_bundle_key_v2(&req.bundle_key, &passphrase)
+        .map_err(map_core_err)?;
+    let bundle_settings = decoded.payload.settings;
+    let bundle_secrets = decoded.payload.secrets;
+    let bundle_master_key = decoded.master_key;
+
+    let local_settings = load_settings(config_dir)?;
+    let local_has_targets = !local_settings.targets.is_empty();
+    let local_master_key = load_optional_master_key(config_dir, data_dir)?;
+    let local_master_key_state = match local_master_key {
+        None => LocalMasterKeyState::Missing,
+        Some(k) if k == bundle_master_key => LocalMasterKeyState::Match,
+        Some(_) => LocalMasterKeyState::Mismatch,
+    };
+    if matches!(local_master_key_state, LocalMasterKeyState::Mismatch) && local_has_targets {
+        return Err(CliError::new(
+            "config_bundle.rotation_required",
+            "local master key mismatch and local targets exist; start master key rotation flow",
+        ));
+    }
+
+    let selected_ids: std::collections::HashSet<String> =
+        req.selected_target_ids.iter().cloned().collect();
+
+    let mut selected_targets = bundle_settings
+        .targets
+        .iter()
+        .filter(|t| selected_ids.contains(&t.id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if selected_targets.len() != selected_ids.len() {
+        return Err(CliError::new(
+            "config.invalid",
+            "selectedTargetIds contains unknown ids",
+        ));
+    }
+
+    // Preflight only on the selected targets.
+    let api_id = bundle_settings.telegram.mtproto.api_id;
+    let api_hash = bundle_secrets
+        .entries
+        .get(&bundle_settings.telegram.mtproto.api_hash_key)
+        .cloned();
+
+    let mut endpoint_storage: HashMap<String, TelegramMtProtoStorage> = HashMap::new();
+    let mut endpoint_catalogs: HashMap<String, Option<bootstrap::BootstrapCatalogV1>> =
+        HashMap::new();
+    let mut endpoint_bootstrap_state: HashMap<String, ConfigBundleBootstrapState> = HashMap::new();
+
+    let mut endpoints_needed = std::collections::BTreeSet::<String>::new();
+    for t in &selected_targets {
+        endpoints_needed.insert(t.endpoint_id.clone());
+    }
+
+    for ep_id in endpoints_needed {
+        let Some(ep) = bundle_settings
+            .telegram_endpoints
+            .iter()
+            .find(|e| e.id == ep_id)
+            .cloned()
+        else {
+            return Err(CliError::new(
+                "config.invalid",
+                format!("missing endpoint in bundle settings: {ep_id}"),
+            ));
+        };
+
+        let Some(api_hash) = api_hash.clone() else {
+            endpoint_catalogs.insert(ep.id.clone(), None);
+            endpoint_bootstrap_state.insert(ep.id.clone(), ConfigBundleBootstrapState::Missing);
+            continue;
+        };
+        let Some(bot_token) = bundle_secrets.entries.get(&ep.bot_token_key).cloned() else {
+            endpoint_catalogs.insert(ep.id.clone(), None);
+            endpoint_bootstrap_state.insert(ep.id.clone(), ConfigBundleBootstrapState::Missing);
+            continue;
+        };
+        if api_id <= 0 {
+            endpoint_catalogs.insert(ep.id.clone(), None);
+            endpoint_bootstrap_state.insert(ep.id.clone(), ConfigBundleBootstrapState::Missing);
+            continue;
+        }
+
+        let cache_dir = data_dir.join("cache").join("mtproto");
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+        let provider = settings_config::endpoint_provider(&ep.id);
+        let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+            provider,
+            api_id,
+            api_hash: api_hash.clone(),
+            bot_token: bot_token.clone(),
+            chat_id: ep.chat_id.clone(),
+            session: None,
+            cache_dir,
+            helper_path: None,
+        })
+        .await
+        .map_err(|e| map_mtproto_validate_err(e, &bot_token, &api_hash))?;
+
+        let cat = match bootstrap::load_remote_catalog(&storage, &bundle_master_key).await {
+            Ok(Some(cat)) => {
+                endpoint_bootstrap_state.insert(ep.id.clone(), ConfigBundleBootstrapState::Ok);
+                Some(cat)
+            }
+            Ok(None) => {
+                endpoint_bootstrap_state.insert(ep.id.clone(), ConfigBundleBootstrapState::Missing);
+                None
+            }
+            Err(televy_backup_core::Error::BootstrapDecryptFailed { .. }) => {
+                endpoint_bootstrap_state.insert(ep.id.clone(), ConfigBundleBootstrapState::Invalid);
+                None
+            }
+            Err(e) => return Err(map_core_err(e)),
+        };
+
+        endpoint_storage.insert(ep.id.clone(), storage);
+        endpoint_catalogs.insert(ep.id.clone(), cat);
+    }
+
+    // Detect conflicts (missing_path / bootstrap_invalid / local_vs_remote_mismatch) and enforce
+    // that apply provides explicit resolutions for any target needing resolution.
+    for t in &selected_targets {
+        let mut reasons = Vec::new();
+
+        if !Path::new(&t.source_path).exists() {
+            reasons.push("missing_path");
+        }
+
+        let bootstrap_state = endpoint_bootstrap_state
+            .get(&t.endpoint_id)
+            .copied()
+            .unwrap_or(ConfigBundleBootstrapState::Missing);
+        if bootstrap_state == ConfigBundleBootstrapState::Invalid {
+            reasons.push("bootstrap_invalid");
+        }
+
+        let mut remote_latest: Option<bootstrap::BootstrapLatest> = None;
+        if let Some(cat) = endpoint_catalogs
+            .get(&t.endpoint_id)
+            .and_then(|c| c.as_ref())
+        {
+            remote_latest = cat
+                .targets
+                .iter()
+                .find(|x| x.target_id == t.id)
+                .and_then(|x| x.latest.clone());
+
+            if remote_latest.is_none() {
+                let matches = cat
+                    .targets
+                    .iter()
+                    .filter(|x| x.source_path == t.source_path)
+                    .collect::<Vec<_>>();
+                if matches.len() == 1 {
+                    remote_latest = matches[0].latest.clone();
+                }
+            }
+        }
+
+        if let Some(latest) = &remote_latest {
+            let provider = settings_config::endpoint_provider(&t.endpoint_id);
+            let db_path = endpoint_index_db_path(data_dir, &t.endpoint_id);
+            if db_path.exists() {
+                let match_ok = televy_backup_core::index_sync::local_index_matches_remote_latest(
+                    &db_path,
+                    &provider,
+                    &latest.snapshot_id,
+                    &latest.manifest_object_id,
+                )
+                .await
+                .map_err(map_core_err)?;
+                if !match_ok {
+                    reasons.push("local_vs_remote_mismatch");
+                }
+            }
+        }
+
+        if reasons.is_empty() {
+            continue;
+        }
+
+        let res = req.resolutions.get(&t.id).ok_or_else(|| {
+            CliError::new(
+                "config_bundle.conflict",
+                format!(
+                    "missing resolution for target {} ({})",
+                    t.id,
+                    reasons.join(",")
+                ),
+            )
+        })?;
+
+        if reasons.contains(&"missing_path") {
+            match res {
+                SettingsImportBundleApplyResolution::Rebind { .. }
+                | SettingsImportBundleApplyResolution::Skip => {}
+                _ => {
+                    return Err(CliError::new(
+                        "config_bundle.conflict",
+                        format!("target {} missing_path; must choose rebind or skip", t.id),
+                    ));
+                }
+            }
+        }
+
+        if reasons.contains(&"bootstrap_invalid")
+            && !matches!(res, SettingsImportBundleApplyResolution::Skip)
+        {
+            return Err(CliError::new(
+                "config_bundle.conflict",
+                format!("target {} bootstrap invalid; must skip", t.id),
+            ));
+        }
+    }
+
+    let mut updated_pins = Vec::new();
+
+    // Apply resolutions that require remote writes first (overwrite_remote), so index rebuild can
+    // download the updated latest if needed.
+    for t in &selected_targets {
+        let Some(resolution) = req.resolutions.get(&t.id) else {
+            continue;
+        };
+        if !matches!(
+            resolution,
+            SettingsImportBundleApplyResolution::OverwriteRemote
+        ) {
+            continue;
+        }
+
+        let bootstrap_state = endpoint_bootstrap_state
+            .get(&t.endpoint_id)
+            .copied()
+            .unwrap_or(ConfigBundleBootstrapState::Missing);
+        if bootstrap_state == ConfigBundleBootstrapState::Invalid {
+            return Err(CliError::new(
+                "config_bundle.conflict",
+                format!("target {} bootstrap invalid; must skip", t.id),
+            ));
+        }
+
+        let Some(storage) = endpoint_storage.get(&t.endpoint_id) else {
+            return Err(CliError::new(
+                "config_bundle.conflict",
+                format!(
+                    "target {} overwrite_remote requires telegram access (missing secrets?)",
+                    t.id
+                ),
+            ));
+        };
+
+        // Determine local head from the existing per-endpoint DB.
+        let provider = settings_config::endpoint_provider(&t.endpoint_id);
+        let db_path = endpoint_index_db_path(data_dir, &t.endpoint_id);
+        if !db_path.exists() {
+            return Err(CliError::new(
+                "config_bundle.conflict",
+                format!(
+                    "target {} overwrite_remote requires existing local index DB: {}",
+                    t.id,
+                    db_path.display()
+                ),
+            ));
+        }
+
+        let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
+            .await
+            .map_err(map_core_err)?;
+
+        let row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
+            r#"
+            SELECT s.snapshot_id AS snapshot_id, r.manifest_object_id AS manifest_object_id
+            FROM snapshots s
+            JOIN remote_indexes r ON r.snapshot_id = s.snapshot_id
+            WHERE s.source_path = ? AND (r.provider = ? OR r.provider LIKE ?)
+            ORDER BY s.created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(&t.source_path)
+        .bind(&provider)
+        .bind({
+            let kind = provider
+                .split(['/', ':'])
+                .next()
+                .unwrap_or(provider.as_str());
+            format!("{kind}%")
+        })
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+
+        let Some(row) = row else {
+            return Err(CliError::new(
+                "config_bundle.conflict",
+                format!("target {} has no local snapshot to pin", t.id),
+            ));
+        };
+
+        let snapshot_id: String = row.get("snapshot_id");
+        let manifest_object_id: String = row.get("manifest_object_id");
+
+        let old = storage.get_pinned_object_id().map_err(map_core_err)?;
+        bootstrap::update_remote_latest(
+            storage,
+            &bundle_master_key,
+            &t.id,
+            &t.source_path,
+            &t.label,
+            &snapshot_id,
+            &manifest_object_id,
+        )
+        .await
+        .map_err(map_core_err)?;
+        let new = storage
+            .get_pinned_object_id()
+            .map_err(map_core_err)?
+            .unwrap_or_else(|| "—".to_string());
+
+        updated_pins.push(SettingsImportBundleApplyPinnedUpdateJson {
+            endpoint_id: t.endpoint_id.clone(),
+            old: old.unwrap_or_else(|| "—".to_string()),
+            new,
+        });
+    }
+
+    // Refresh catalogs for endpoints where we updated pins.
+    if !updated_pins.is_empty() {
+        for ep_id in updated_pins.iter().map(|p| p.endpoint_id.clone()) {
+            if let Some(storage) = endpoint_storage.get(&ep_id) {
+                let cat = match bootstrap::load_remote_catalog(storage, &bundle_master_key).await {
+                    Ok(Some(cat)) => Some(cat),
+                    Ok(None) => None,
+                    Err(televy_backup_core::Error::BootstrapDecryptFailed { .. }) => None,
+                    Err(e) => return Err(map_core_err(e)),
+                };
+                endpoint_catalogs.insert(ep_id, cat);
+            }
+        }
+    }
+
+    // Filter targets by resolutions (skip/rebind) and validate constraints.
+    selected_targets = selected_targets
+        .into_iter()
+        .filter_map(|mut t| {
+            let res = req.resolutions.get(&t.id);
+            match res {
+                Some(SettingsImportBundleApplyResolution::Skip) => None,
+                Some(SettingsImportBundleApplyResolution::Rebind { new_source_path }) => {
+                    t.source_path = new_source_path.clone();
+                    Some(t)
+                }
+                _ => Some(t),
+            }
+        })
+        .collect();
+
+    if selected_targets.is_empty() {
+        return Err(CliError::new(
+            "config.invalid",
+            "all selected targets were skipped",
+        ));
+    }
+
+    for t in &selected_targets {
+        if !Path::new(&t.source_path).exists() {
+            return Err(CliError::new(
+                "config_bundle.conflict",
+                format!(
+                    "target {} source_path does not exist after resolution; choose rebind to an existing path or skip",
+                    t.id
+                ),
+            ));
+        }
+
+        let bootstrap_state = endpoint_bootstrap_state
+            .get(&t.endpoint_id)
+            .copied()
+            .unwrap_or(ConfigBundleBootstrapState::Missing);
+        if bootstrap_state == ConfigBundleBootstrapState::Invalid {
+            return Err(CliError::new(
+                "config_bundle.conflict",
+                format!("target {} bootstrap invalid; must skip", t.id),
+            ));
+        }
+    }
+
+    // Index rebuild: per endpoint, backup existing DB then rebuild from remote latest (or empty).
+    let mut rebuilt_db_path = String::new();
+    let mut previous_backup_path: Option<String> = None;
+    let mut rebuilt_from = SettingsImportBundleApplyRebuiltFromJson {
+        mode: "empty".to_string(),
+        snapshot_id: None,
+        manifest_object_id: None,
+    };
+    let mut local_index_synced = Vec::new();
+
+    let mut endpoints_to_rebuild = std::collections::BTreeSet::<String>::new();
+    for t in &selected_targets {
+        endpoints_to_rebuild.insert(t.endpoint_id.clone());
+    }
+
+    for ep_id in endpoints_to_rebuild.iter() {
+        let db_path = endpoint_index_db_path(data_dir, ep_id);
+        let legacy_global = legacy_global_index_db_path(data_dir);
+        let _ = legacy_global; // must not read/write legacy global db here (migration compat)
+
+        // Build a replacement DB first, then swap it into place, so failures don't leave us without
+        // `index.{endpoint_id}.sqlite`.
+        let ts = config_bundle::utc_now_compact_timestamp();
+
+        let backup_path = if db_path.exists() {
+            let mut backup = db_path.clone();
+            backup.set_extension(format!("sqlite.bak.{ts}"));
+            if backup.exists() {
+                backup.set_extension(format!("sqlite.bak.{ts}.1"));
+            }
+            Some(backup)
+        } else {
+            None
+        };
+
+        let mut tmp_path = db_path.clone();
+        tmp_path.set_extension(format!("sqlite.tmp.{ts}"));
+        if tmp_path.exists() {
+            tmp_path.set_extension(format!("sqlite.tmp.{ts}.1"));
+        }
+
+        // Choose one target under this endpoint with remote latest available.
+        let mut chosen_remote: Option<(String, String, String)> = None;
+        if let Some(cat) = endpoint_catalogs.get(ep_id).and_then(|c| c.as_ref()) {
+            for t in &selected_targets {
+                if &t.endpoint_id != ep_id {
+                    continue;
+                }
+
+                let mut latest = cat
+                    .targets
+                    .iter()
+                    .find(|x| x.target_id == t.id)
+                    .and_then(|x| x.latest.clone());
+                if latest.is_none() {
+                    let matches = cat
+                        .targets
+                        .iter()
+                        .filter(|x| x.source_path == t.source_path)
+                        .collect::<Vec<_>>();
+                    if matches.len() == 1 {
+                        latest = matches[0].latest.clone();
+                    }
+                }
+
+                if let Some(latest) = latest {
+                    chosen_remote =
+                        Some((t.id.clone(), latest.snapshot_id, latest.manifest_object_id));
+                    break;
+                }
+            }
+        }
+
+        if let Some((target_id, snapshot_id, manifest_object_id)) = chosen_remote {
+            let provider = settings_config::endpoint_provider(ep_id);
+            let storage = endpoint_storage.get(ep_id).ok_or_else(|| {
+                CliError::retryable("telegram.unavailable", "telegram storage unavailable")
+            })?;
+
+            televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
+                storage,
+                &snapshot_id,
+                &manifest_object_id,
+                &bundle_master_key,
+                &tmp_path,
+                None,
+                Some(&provider),
+            )
+            .await
+            .map_err(map_core_err)?;
+
+            rebuilt_from = SettingsImportBundleApplyRebuiltFromJson {
+                mode: "remote_latest".to_string(),
+                snapshot_id: Some(snapshot_id),
+                manifest_object_id: Some(manifest_object_id),
+            };
+            local_index_synced.push(SettingsImportBundleApplyLocalIndexSyncedJson {
+                target_id,
+                from: "remoteLatest".to_string(),
+                to: "local".to_string(),
+            });
+        } else {
+            // No bootstrap/latest: initialize an empty DB so future backups can build it up.
+            init_empty_index_db(&tmp_path).await?;
+
+            rebuilt_from = SettingsImportBundleApplyRebuiltFromJson {
+                mode: "empty".to_string(),
+                snapshot_id: None,
+                manifest_object_id: None,
+            };
+        }
+
+        // Swap: move old DB to a backup path (if any), then move the new DB into place.
+        previous_backup_path = None;
+        if let Some(backup) = &backup_path {
+            if let Err(e) = std::fs::rename(&db_path, backup) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(CliError::new("config.write_failed", e.to_string()));
+            }
+            previous_backup_path = Some(backup.display().to_string());
+        }
+
+        if let Err(e) = std::fs::rename(&tmp_path, &db_path) {
+            // Best-effort rollback: restore the previous DB if we moved it.
+            if let Some(backup) = &backup_path {
+                let _ = std::fs::rename(backup, &db_path);
+            }
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(CliError::new("config.write_failed", e.to_string()));
+        }
+
+        rebuilt_db_path = db_path.display().to_string();
+    }
+
+    // Auto-clean legacy global DB if all in-use per-endpoint DBs are present and usable.
+    let legacy_db_path = legacy_global_index_db_path(data_dir);
+    if legacy_db_path.exists() {
+        let mut in_use_endpoints = std::collections::BTreeSet::<String>::new();
+
+        for t in &local_settings.targets {
+            if t.enabled {
+                in_use_endpoints.insert(t.endpoint_id.clone());
+            }
+        }
+        for t in &selected_targets {
+            in_use_endpoints.insert(t.endpoint_id.clone());
+        }
+
+        let mut all_ok = true;
+        for ep_id in in_use_endpoints {
+            let p = endpoint_index_db_path(data_dir, &ep_id);
+            if !p.exists() {
+                all_ok = false;
+                break;
+            }
+            if televy_backup_core::index_db::open_index_db(&p)
+                .await
+                .is_err()
+            {
+                all_ok = false;
+                break;
+            }
+        }
+
+        if all_ok {
+            let _ = std::fs::remove_file(&legacy_db_path);
+        }
+    }
+
+    // Write settings (merge semantics) + secrets after index rebuild succeeds.
+    let mut next_settings = local_settings.clone();
+    next_settings.schedule = bundle_settings.schedule.clone();
+    next_settings.retention = bundle_settings.retention.clone();
+    next_settings.chunking = bundle_settings.chunking.clone();
+    next_settings.telegram = bundle_settings.telegram.clone();
+
+    let mut endpoints_written = std::collections::BTreeSet::<String>::new();
+    for t in &selected_targets {
+        endpoints_written.insert(t.endpoint_id.clone());
+
+        // Upsert target.
+        match next_settings.targets.iter_mut().find(|x| x.id == t.id) {
+            Some(existing) => *existing = t.clone(),
+            None => next_settings.targets.push(t.clone()),
+        }
+    }
+
+    for ep_id in endpoints_written.iter() {
+        if let Some(ep) = bundle_settings
+            .telegram_endpoints
+            .iter()
+            .find(|e| &e.id == ep_id)
+        {
+            match next_settings
+                .telegram_endpoints
+                .iter_mut()
+                .find(|x| x.id == ep.id)
+            {
+                Some(existing) => *existing = ep.clone(),
+                None => next_settings.telegram_endpoints.push(ep.clone()),
+            }
+        }
+    }
+
+    settings_config::save_settings_v2(config_dir, &next_settings).map_err(map_core_err)?;
+
+    let vault_key = load_or_create_vault_key(data_dir)?;
+    let secrets_path = televy_backup_core::secrets::secrets_path(config_dir);
+    let mut store = televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)
+        .map_err(map_secrets_store_err)?;
+
+    let mut secrets_written = Vec::new();
+    let master_key_b64 = base64::engine::general_purpose::STANDARD.encode(bundle_master_key);
+    store.set(MASTER_KEY_KEY, master_key_b64);
+    secrets_written.push(MASTER_KEY_KEY.to_string());
+
+    for (k, v) in bundle_secrets.entries.iter() {
+        // Defense in depth: the core bundle decoder should reject this already.
+        if k == MASTER_KEY_KEY {
+            return Err(CliError::new(
+                "config.invalid",
+                "config bundle secrets must not contain televybackup.master_key",
+            ));
+        }
+        store.set(k.as_str(), v.as_str());
+        secrets_written.push(k.to_string());
+    }
+
+    televy_backup_core::secrets::save_secrets_store(&secrets_path, &vault_key, &store)
+        .map_err(map_secrets_store_err)?;
+
+    secrets_written.sort();
+    secrets_written.dedup();
+
+    let mut applied_targets = selected_targets
+        .iter()
+        .map(|t| t.id.clone())
+        .collect::<Vec<_>>();
+    applied_targets.sort();
+
+    let mut applied_endpoints = endpoints_written.into_iter().collect::<Vec<_>>();
+    applied_endpoints.sort();
+
+    let resp = SettingsImportBundleApplyResponse {
+        ok: true,
+        local_index: SettingsImportBundleApplyLocalIndexJson {
+            previous_db_backup_path: previous_backup_path,
+            rebuilt_db_path,
+            rebuilt_from,
+        },
+        applied: SettingsImportBundleApplyAppliedJson {
+            targets: applied_targets,
+            endpoints: applied_endpoints,
+            secrets_written,
+        },
+        actions: SettingsImportBundleApplyActionsJson {
+            updated_pinned_catalog: updated_pins,
+            local_index_synced,
+        },
+    };
+
+    println!(
+        "{}",
+        serde_json::to_string(&resp).map_err(|e| CliError::new("config.invalid", e.to_string()))?
+    );
+
     Ok(())
 }
 
@@ -1610,42 +3020,116 @@ fn map_mtproto_validate_err(
     }
 }
 
+fn list_index_db_paths_for_read(data_dir: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let index_dir = data_dir.join("index");
+    let mut dbs = Vec::<PathBuf>::new();
+
+    match std::fs::read_dir(&index_dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+
+                let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+
+                // Legacy global DB is a fallback only; prefer per-endpoint DBs when present.
+                if name == "index.sqlite" {
+                    continue;
+                }
+                if !name.starts_with("index.") || !name.ends_with(".sqlite") {
+                    continue;
+                }
+
+                dbs.push(path);
+            }
+        }
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(CliError::new("db.failed", e.to_string()));
+            }
+        }
+    }
+
+    dbs.sort();
+    if dbs.is_empty() {
+        let legacy = legacy_global_index_db_path(data_dir);
+        if legacy.exists() {
+            dbs.push(legacy);
+        }
+    }
+
+    Ok(dbs)
+}
+
 async fn snapshots_list(data_dir: &Path, limit: u32, json: bool) -> Result<(), CliError> {
-    let db_path = data_dir.join("index").join("index.sqlite");
-    if !db_path.exists() {
+    let db_paths = list_index_db_paths_for_read(data_dir)?;
+    if db_paths.is_empty() {
         if json {
             println!("{}", serde_json::json!({ "snapshots": [] }));
         }
         return Ok(());
     }
 
-    let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
-        .await
-        .map_err(map_core_err)?;
-
-    let rows = sqlx::query(
-        r#"
-        SELECT snapshot_id, created_at, source_path, label, base_snapshot_id
-        FROM snapshots
-        ORDER BY created_at DESC
-        LIMIT ?
-        "#,
-    )
-    .bind(limit as i64)
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| CliError::new("db.failed", e.to_string()))?;
-
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(serde_json::json!({
-            "snapshotId": row.get::<String, _>("snapshot_id"),
-            "createdAt": row.get::<String, _>("created_at"),
-            "sourcePath": row.get::<String, _>("source_path"),
-            "label": row.get::<String, _>("label"),
-            "baseSnapshotId": row.get::<Option<String>, _>("base_snapshot_id"),
-        }));
+    #[derive(Debug)]
+    struct SnapshotListItem {
+        snapshot_id: String,
+        created_at: String,
+        source_path: String,
+        label: String,
+        base_snapshot_id: Option<String>,
     }
+
+    // Query each DB for its newest snapshots, then merge and keep the global top N.
+    // This matches the legacy "single global DB" behavior while the index is now per-endpoint.
+    let mut items: Vec<SnapshotListItem> = Vec::new();
+    for db_path in db_paths {
+        let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
+            .await
+            .map_err(map_core_err)?;
+
+        let rows = sqlx::query(
+            r#"
+            SELECT snapshot_id, created_at, source_path, label, base_snapshot_id
+            FROM snapshots
+            ORDER BY created_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit as i64)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+
+        for row in rows {
+            items.push(SnapshotListItem {
+                snapshot_id: row.get::<String, _>("snapshot_id"),
+                created_at: row.get::<String, _>("created_at"),
+                source_path: row.get::<String, _>("source_path"),
+                label: row.get::<String, _>("label"),
+                base_snapshot_id: row.get::<Option<String>, _>("base_snapshot_id"),
+            });
+        }
+    }
+
+    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    items.truncate(limit as usize);
+
+    let out = items
+        .into_iter()
+        .map(|i| {
+            serde_json::json!({
+                "snapshotId": i.snapshot_id,
+                "createdAt": i.created_at,
+                "sourcePath": i.source_path,
+                "label": i.label,
+                "baseSnapshotId": i.base_snapshot_id,
+            })
+        })
+        .collect::<Vec<_>>();
 
     if json {
         println!("{}", serde_json::json!({ "snapshots": out }));
@@ -1658,8 +3142,8 @@ async fn snapshots_list(data_dir: &Path, limit: u32, json: bool) -> Result<(), C
 }
 
 async fn stats_get(data_dir: &Path, json: bool) -> Result<(), CliError> {
-    let db_path = data_dir.join("index").join("index.sqlite");
-    if !db_path.exists() {
+    let db_paths = list_index_db_paths_for_read(data_dir)?;
+    if db_paths.is_empty() {
         if json {
             println!(
                 "{}",
@@ -1669,25 +3153,36 @@ async fn stats_get(data_dir: &Path, json: bool) -> Result<(), CliError> {
         return Ok(());
     }
 
-    let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
-        .await
-        .map_err(map_core_err)?;
+    let mut snapshots_total: i64 = 0;
+    let mut chunks_total: i64 = 0;
+    let mut chunks_bytes_total: i64 = 0;
+    for db_path in db_paths {
+        let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
+            .await
+            .map_err(map_core_err)?;
 
-    let snapshots_total: i64 = sqlx::query("SELECT COUNT(1) as c FROM snapshots")
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?
-        .get("c");
-    let chunks_total: i64 = sqlx::query("SELECT COUNT(1) as c FROM chunks")
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?
-        .get("c");
-    let chunks_bytes_total: i64 = sqlx::query("SELECT COALESCE(SUM(size), 0) as s FROM chunks")
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?
-        .get("s");
+        snapshots_total = snapshots_total.saturating_add(
+            sqlx::query("SELECT COUNT(1) as c FROM snapshots")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| CliError::new("db.failed", e.to_string()))?
+                .get::<i64, _>("c"),
+        );
+        chunks_total = chunks_total.saturating_add(
+            sqlx::query("SELECT COUNT(1) as c FROM chunks")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| CliError::new("db.failed", e.to_string()))?
+                .get::<i64, _>("c"),
+        );
+        chunks_bytes_total = chunks_bytes_total.saturating_add(
+            sqlx::query("SELECT COALESCE(SUM(size), 0) as s FROM chunks")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| CliError::new("db.failed", e.to_string()))?
+                .get::<i64, _>("s"),
+        );
+    }
 
     if json {
         println!(
@@ -1707,8 +3202,8 @@ async fn stats_get(data_dir: &Path, json: bool) -> Result<(), CliError> {
 }
 
 async fn stats_last(data_dir: &Path, source: Option<PathBuf>, json: bool) -> Result<(), CliError> {
-    let db_path = data_dir.join("index").join("index.sqlite");
-    if !db_path.exists() {
+    let db_paths = list_index_db_paths_for_read(data_dir)?;
+    if db_paths.is_empty() {
         if json {
             println!(
                 "{}",
@@ -1718,43 +3213,88 @@ async fn stats_last(data_dir: &Path, source: Option<PathBuf>, json: bool) -> Res
         return Ok(());
     }
 
-    let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
-        .await
-        .map_err(map_core_err)?;
+    let source_str: Option<String> = source
+        .as_ref()
+        .map(|p| {
+            p.to_str()
+                .ok_or_else(|| CliError::new("config.invalid", "source path is not valid utf-8"))
+                .map(|s| s.to_string())
+        })
+        .transpose()?;
 
-    let snapshot_row: Option<sqlx::sqlite::SqliteRow> = if let Some(source) = &source {
-        let source = source
-            .to_str()
-            .ok_or_else(|| CliError::new("config.invalid", "source path is not valid utf-8"))?
-            .to_string();
-        sqlx::query(
-            r#"
-            SELECT snapshot_id, created_at, base_snapshot_id
-            FROM snapshots
-            WHERE source_path = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(source)
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?
-    } else {
-        sqlx::query(
-            r#"
-            SELECT snapshot_id, created_at, base_snapshot_id
-            FROM snapshots
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?
-    };
+    #[derive(Debug)]
+    struct LastSnapshot {
+        db_path: PathBuf,
+        snapshot_id: String,
+        created_at: String,
+        base_snapshot_id: Option<String>,
+    }
 
-    let Some(row) = snapshot_row else {
+    let mut best: Option<LastSnapshot> = None;
+    for db_path in db_paths {
+        let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
+            .await
+            .map_err(map_core_err)?;
+
+        let snapshot_row: Option<sqlx::sqlite::SqliteRow> = if let Some(source) = &source_str {
+            sqlx::query(
+                r#"
+                SELECT snapshot_id, created_at, base_snapshot_id
+                FROM snapshots
+                WHERE source_path = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(source)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT snapshot_id, created_at, base_snapshot_id
+                FROM snapshots
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?
+        };
+
+        let Some(row) = snapshot_row else {
+            continue;
+        };
+
+        let snapshot_id: String = row
+            .try_get("snapshot_id")
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+        let created_at: String = row
+            .try_get("created_at")
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+        let base_snapshot_id: Option<String> = row
+            .try_get("base_snapshot_id")
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+
+        let candidate = LastSnapshot {
+            db_path: db_path.clone(),
+            snapshot_id,
+            created_at,
+            base_snapshot_id,
+        };
+
+        let replace = match best.as_ref() {
+            None => true,
+            Some(cur) => candidate.created_at > cur.created_at,
+        };
+        if replace {
+            best = Some(candidate);
+        }
+    }
+
+    let Some(best) = best else {
         if json {
             println!(
                 "{}",
@@ -1764,15 +3304,13 @@ async fn stats_last(data_dir: &Path, source: Option<PathBuf>, json: bool) -> Res
         return Ok(());
     };
 
-    let snapshot_id: String = row
-        .try_get("snapshot_id")
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
-    let created_at: String = row
-        .try_get("created_at")
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
-    let base_snapshot_id: Option<String> = row
-        .try_get("base_snapshot_id")
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+    let snapshot_id = best.snapshot_id;
+    let created_at = best.created_at;
+    let base_snapshot_id = best.base_snapshot_id;
+
+    let pool = televy_backup_core::index_db::open_existing_index_db(&best.db_path)
+        .await
+        .map_err(map_core_err)?;
 
     let cur_bytes_unique: i64 = sqlx::query(
         r#"
@@ -1927,7 +3465,9 @@ async fn backup_run(
     let ctx_endpoint_id = ep.id.clone();
     let ctx_source_path = target.source_path.clone();
 
-    tracing::info!(
+    // Run summaries must appear even when the CLI is started with `RUST_LOG=warn`,
+    // otherwise successful runs create empty NDJSON files and the UI shows no history.
+    tracing::warn!(
         event = "run.start",
         kind = "backup",
         run_id = %task_id,
@@ -1946,7 +3486,7 @@ async fn backup_run(
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
         let master_key = load_master_key(config_dir, data_dir)?;
 
-        let db_path = data_dir.join("index").join("index.sqlite");
+        let db_path = endpoint_index_db_path(data_dir, &ep.id);
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
@@ -2094,7 +3634,7 @@ async fn backup_run(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(res) => {
-            tracing::info!(
+            tracing::warn!(
                 event = "run.finish",
                 kind = "backup",
                 run_id = %task_id,
@@ -2340,7 +3880,7 @@ async fn restore_run(
     let run_log = televy_backup_core::run_log::start_run_log("restore", &task_id, data_dir)
         .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    tracing::info!(
+    tracing::warn!(
         event = "run.start",
         kind = "restore",
         run_id = %task_id,
@@ -2354,9 +3894,8 @@ async fn restore_run(
     let result: Result<televy_backup_core::RestoreResult, CliError> = async {
         let settings = load_settings(config_dir)?;
 
-        let local_db_path = data_dir.join("index").join("index.sqlite");
         let (manifest_object_id, snapshot_provider) =
-            lookup_manifest_meta(&local_db_path, &snapshot_id).await?;
+            lookup_manifest_meta_any(data_dir, &snapshot_id).await?;
 
         let endpoint_id = if snapshot_provider == "telegram.mtproto" {
             None
@@ -2483,7 +4022,7 @@ async fn restore_run(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(res) => {
-            tracing::info!(
+            tracing::warn!(
                 event = "run.finish",
                 kind = "restore",
                 run_id = %task_id,
@@ -2690,7 +4229,7 @@ async fn restore_latest(
     let run_log = televy_backup_core::run_log::start_run_log("restore", &task_id, data_dir)
         .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    tracing::info!(
+    tracing::warn!(
         event = "run.start",
         kind = "restore",
         run_id = %task_id,
@@ -2841,7 +4380,7 @@ async fn restore_latest(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok((snapshot_id, res)) => {
-            tracing::info!(
+            tracing::warn!(
                 event = "run.finish",
                 kind = "restore",
                 run_id = %task_id,
@@ -2939,7 +4478,7 @@ async fn verify_latest(
     let run_log = televy_backup_core::run_log::start_run_log("verify", &task_id, data_dir)
         .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    tracing::info!(
+    tracing::warn!(
         event = "run.start",
         kind = "verify",
         run_id = %task_id,
@@ -3087,7 +4626,7 @@ async fn verify_latest(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok((snapshot_id, res)) => {
-            tracing::info!(
+            tracing::warn!(
                 event = "run.finish",
                 kind = "verify",
                 run_id = %task_id,
@@ -3167,7 +4706,7 @@ async fn verify_run(
     let run_log = televy_backup_core::run_log::start_run_log("verify", &task_id, data_dir)
         .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    tracing::info!(
+    tracing::warn!(
         event = "run.start",
         kind = "verify",
         run_id = %task_id,
@@ -3181,9 +4720,8 @@ async fn verify_run(
     let result: Result<televy_backup_core::VerifyResult, CliError> = async {
         let settings = load_settings(config_dir)?;
 
-        let local_db_path = data_dir.join("index").join("index.sqlite");
         let (manifest_object_id, snapshot_provider) =
-            lookup_manifest_meta(&local_db_path, &snapshot_id).await?;
+            lookup_manifest_meta_any(data_dir, &snapshot_id).await?;
 
         let endpoint_id = if snapshot_provider == "telegram.mtproto" {
             None
@@ -3309,7 +4847,7 @@ async fn verify_run(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(res) => {
-            tracing::info!(
+            tracing::warn!(
                 event = "run.finish",
                 kind = "verify",
                 run_id = %task_id,
@@ -3393,6 +4931,50 @@ async fn lookup_manifest_meta(
             "manifest not found in local db",
         )),
     }
+}
+
+async fn lookup_manifest_meta_any(
+    data_dir: &Path,
+    snapshot_id: &str,
+) -> Result<(String, String), CliError> {
+    let global = legacy_global_index_db_path(data_dir);
+    if global.exists()
+        && let Ok(found) = lookup_manifest_meta(&global, snapshot_id).await
+    {
+        return Ok(found);
+    }
+
+    let index_dir = data_dir.join("index");
+    let entries = std::fs::read_dir(&index_dir)
+        .map_err(|e| CliError::new("snapshot.not_found", e.to_string()))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if name == "index.sqlite" {
+            continue;
+        }
+        if !name.starts_with("index.") || !name.ends_with(".sqlite") {
+            continue;
+        }
+
+        match lookup_manifest_meta(&path, snapshot_id).await {
+            Ok(found) => return Ok(found),
+            Err(e) if e.code == "snapshot.not_found" => continue,
+            Err(_) => continue,
+        }
+    }
+
+    Err(CliError::new(
+        "snapshot.not_found",
+        "manifest not found in local db",
+    ))
 }
 
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
@@ -4029,6 +5611,19 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         dir
+    }
+
+    #[tokio::test]
+    async fn init_empty_index_db_creates_parent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_dir = dir.path().join("index");
+        let path = index_dir.join("index.ep1.sqlite.tmp");
+        assert!(!index_dir.exists());
+
+        init_empty_index_db(&path).await.unwrap();
+
+        assert!(index_dir.exists());
+        assert!(path.exists());
     }
 
     #[test]

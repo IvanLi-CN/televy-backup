@@ -272,7 +272,19 @@ private struct TargetDetailView: View {
     private var runs: [RunLogSummary] {
         model.runHistory
             .filter { run in run.targetId == target.targetId }
-            .sorted { ($0.finishedAt ?? .distantPast) > ($1.finishedAt ?? .distantPast) }
+            .sorted {
+                let a = $0.finishedAt ?? $0.startedAt ?? .distantPast
+                let b = $1.finishedAt ?? $1.startedAt ?? .distantPast
+                return a > b
+            }
+    }
+
+    private var effectiveTargetState: String {
+        if target.state == "running" { return "running" }
+        // Verify/restore runs are executed by the CLI and may not reflect in the daemon status
+        // stream immediately; infer "running" from the presence of an in-progress run log.
+        if runs.contains(where: { $0.status == "running" }) { return "running" }
+        return target.state
     }
 
     var body: some View {
@@ -300,7 +312,7 @@ private struct TargetDetailView: View {
 
             HStack(spacing: 10) {
                 StatusChip(text: target.enabled ? "Enabled" : "Disabled", tint: target.enabled ? .green : .gray)
-                StatusChip(text: target.state, tint: target.state == "running" ? .blue : .gray)
+                StatusChip(text: effectiveTargetState, tint: effectiveTargetState == "running" ? .blue : .gray)
                 if let status = target.lastRun?.status {
                     StatusChip(text: "Last: \(status)", tint: status == "succeeded" ? .green : .red)
                 }
@@ -430,9 +442,17 @@ private struct RunLogRow: View {
                 HStack(spacing: 8) {
                     Text(run.kind.uppercased())
                         .font(.system(size: 11, weight: .heavy))
-                    Text(run.status ?? "—")
+                    let statusText = run.status ?? "—"
+                    Text(statusText)
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle((run.status == "succeeded") ? .green : .red)
+                        .foregroundStyle({
+                            switch run.status {
+                            case "succeeded": return Color.green
+                            case "failed": return Color.red
+                            case "running": return Color.blue
+                            default: return Color.secondary
+                            }
+                        }())
                     Spacer()
                 }
 
@@ -446,7 +466,7 @@ private struct RunLogRow: View {
             Spacer(minLength: 8)
 
             HStack(alignment: .center, spacing: 8) {
-                if let at = run.finishedAt {
+                if let at = run.finishedAt ?? run.startedAt {
                     Text(at.formatted(date: .abbreviated, time: .standard))
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(.secondary)

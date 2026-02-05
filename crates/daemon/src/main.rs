@@ -514,7 +514,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config_root = config_dir.unwrap_or_else(default_config_dir);
     let data_root = data_dir.unwrap_or_else(default_data_dir);
-    let db_path = data_root.join("index").join("index.sqlite");
+    let index_dir = data_root.join("index");
 
     let config_path = settings_config::config_path(&config_root);
     let mut settings = settings_config::load_settings_v2(&config_root)?;
@@ -791,9 +791,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        std::fs::create_dir_all(&index_dir)?;
 
         for target in &settings.targets {
             if !target.enabled {
@@ -970,7 +968,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let run_log =
                 televy_backup_core::run_log::start_run_log("backup", &task_id, &data_root)?;
 
-            tracing::info!(
+            // Run summaries must appear even when the daemon is started with `RUST_LOG=warn`,
+            // otherwise successful runs create empty NDJSON files and the UI shows no history.
+            tracing::warn!(
                 event = "run.start",
                 kind = "backup",
                 run_id = %task_id,
@@ -994,6 +994,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
+            let db_path = index_dir.join(format!("index.{}.sqlite", ep.id));
             let cfg = BackupConfig {
                 db_path: db_path.clone(),
                 source_path: PathBuf::from(&target.source_path),
@@ -1027,7 +1028,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match result {
                 Ok(res) => {
-                    tracing::info!(
+                    tracing::warn!(
                         event = "run.finish",
                         kind = "backup",
                         run_id = %task_id,

@@ -118,6 +118,7 @@ final class AppModel: ObservableObject {
     private var statusStaleTimer: DispatchSourceTimer? = nil
     private var statusPollTimer: DispatchSourceTimer? = nil
     private var lastNotifiedRunFinishedAtByTargetId: [String: String] = [:]
+    private var lastObservedTargetStateByTargetId: [String: String] = [:]
 
     private var statusStreamTask: Process? = nil
     private var statusStreamReconnectWork: DispatchWorkItem? = nil
@@ -908,17 +909,39 @@ final class AppModel: ObservableObject {
         appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
         updatePopoverHeightForTargets(targetCount: snap.targets.count)
 
+        // Keep run history in sync with daemon-triggered runs:
+        // - Refresh when a target transitions into running so the new NDJSON file (run.start) appears immediately.
+        var observedRunStart: Bool = false
+        for t in snap.targets {
+            let prev = lastObservedTargetStateByTargetId[t.targetId]
+            if prev != t.state {
+                lastObservedTargetStateByTargetId[t.targetId] = t.state
+                if t.state == "running" {
+                    observedRunStart = true
+                }
+            }
+        }
+        if observedRunStart {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                self.refreshRunHistory()
+            }
+        }
+
         // Surface "what happened" for very short runs: show a toast when we observe a new lastRun.
+        var observedNewLastRun: Bool = false
         for t in snap.targets {
             guard let finishedAt = t.lastRun?.finishedAt, !finishedAt.isEmpty else { continue }
             let prevFinishedAt = lastNotifiedRunFinishedAtByTargetId[t.targetId]
             if prevFinishedAt == nil {
-                // First time we see this target's lastRun; don't toast on startup.
+                // First time we see this target's lastRun; don't toast on startup, but refresh
+                // History so the UI can pick up the corresponding NDJSON log file.
                 lastNotifiedRunFinishedAtByTargetId[t.targetId] = finishedAt
+                observedNewLastRun = true
                 continue
             }
             guard prevFinishedAt != finishedAt else { continue }
             lastNotifiedRunFinishedAtByTargetId[t.targetId] = finishedAt
+            observedNewLastRun = true
 
             guard let d = parseIsoDate(finishedAt) else { continue }
             let ageSeconds = Int(Date().timeIntervalSince(d))
@@ -946,6 +969,14 @@ final class AppModel: ObservableObject {
                 }
                 let suffix = parts.isEmpty ? "" : (" • " + parts.joined(separator: " • "))
                 showToast("\(label) • Backup finished\(suffix)", isError: false)
+            }
+        }
+
+        // Daemon-triggered backups don't have a CLI process exit hook, so refresh the run history
+        // when we observe a new `lastRun`.
+        if observedNewLastRun {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                self.refreshRunHistory()
             }
         }
 
@@ -1406,6 +1437,8 @@ final class AppModel: ObservableObject {
 
         var startedAt: Date?
         var finishedAt: Date?
+        var sawStart: Bool = false
+        var sawFinish: Bool = false
 
         for line in text.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
@@ -1416,6 +1449,7 @@ final class AppModel: ObservableObject {
             let fields = obj["fields"] as? [String: Any]
             let event = fields?["event"] as? String
             if event == "run.start" {
+                sawStart = true
                 kind = fields?["kind"] as? String ?? kind
                 targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
                 endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
@@ -1428,6 +1462,7 @@ final class AppModel: ObservableObject {
             }
 
             if event == "run.finish" {
+                sawFinish = true
                 kind = fields?["kind"] as? String ?? kind
                 targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
                 endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
@@ -1453,6 +1488,15 @@ final class AppModel: ObservableObject {
 
         guard let kind else { return nil }
         if kind != "backup" && kind != "restore" && kind != "verify" { return nil }
+
+        // A log file can exist while the run is still in progress; show it as "running"
+        // so the UI can surface immediate feedback without waiting for completion.
+        if sawStart && !sawFinish {
+            if status == nil { status = "running" }
+            if durationSeconds == nil, let startedAt {
+                durationSeconds = Date().timeIntervalSince(startedAt)
+            }
+        }
 
         return RunLogSummary(
             id: url.lastPathComponent,
@@ -1957,12 +2001,13 @@ final class AppModel: ObservableObject {
         exe: String,
         args: [String],
         stdin: String? = nil,
-        timeoutSeconds: Double? = nil
+        timeoutSeconds: Double? = nil,
+        env: [String: String] = [:]
     ) -> (stdout: String, stderr: String, status: Int32, reason: Process.TerminationReason) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
-        task.environment = televybackupToolEnv()
+        task.environment = televybackupToolEnv().merging(env) { _, rhs in rhs }
 
         let out = Pipe()
         let err = Pipe()
@@ -2062,6 +2107,9 @@ final class AppModel: ObservableObject {
                     self.taskStartedAt = Date()
                     self.lastRunOk = nil
                     self.lastRunErrorCode = nil
+                    // A run log file is created at task start; refresh so the UI surfaces the
+                    // in-progress entry immediately (without waiting for completion).
+                    self.refreshRunHistory()
                 } else {
                     self.isRunning = false
                     self.phase = "idle"
@@ -2190,6 +2238,13 @@ final class AppModel: ObservableObject {
             var status: Int32 = 1
             do {
                 try task.run()
+
+                if updateTaskState, args.contains("--events") {
+                    // Surface the run log row early (run.start is written at the beginning of the task).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        self.refreshRunHistory()
+                    }
+                }
 
                 if let timeoutSeconds {
                     let pid = task.processIdentifier
@@ -3653,6 +3708,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         NSApp.activate(ignoringOtherApps: true)
                         ModelStore.shared.openSettingsWindow()
                     }
+                }
+            }
+        }
+
+        // Deterministic UI snapshots for CI/docs/debug: write PNGs of visible windows, then exit.
+        // This is intentionally implemented without OS-level screen capture APIs to avoid Screen
+        // Recording permission issues.
+        if let dirPath = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_DIR"],
+           !dirPath.isEmpty
+        {
+            let env = ProcessInfo.processInfo.environment
+            let mode = env["TELEVYBACKUP_UI_SNAPSHOT_MODE"] ?? "timer"
+            if mode == "timer" {
+                let prefix = env["TELEVYBACKUP_UI_SNAPSHOT_PREFIX"]
+                    ?? (env["TELEVYBACKUP_UI_DEMO_SCENE"] ?? "snapshot")
+                let delayMs = Int(env["TELEVYBACKUP_UI_SNAPSHOT_DELAY_MS"] ?? "") ?? 1200
+                let dir = URL(fileURLWithPath: dirPath, isDirectory: true)
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + Double(delayMs) / 1000.0) {
+                    UISnapshot.captureVisibleWindows(to: dir, prefix: prefix)
+                    Darwin.exit(0)
                 }
             }
         }

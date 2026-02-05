@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-31
-- Last: 2026-02-01
+- Last: 2026-02-05
 
 ## 背景 / 问题陈述
 
@@ -17,11 +17,11 @@
 
 ### Goals
 
-- 在 macOS Settings（Recovery Key tab）提供 “Export/Import Config Bundle”：
-  - 导出：可复制与保存到文件；
-  - 导入：粘贴后先展示摘要，再允许用户确认应用。
+- 在 macOS Settings（Backup Config tab）提供 “Export/Import Config Bundle”：
+  - 导出：保存到文件；
+  - 导入：选择文件后先展示摘要，再允许用户确认应用。
 - Config Bundle 应覆盖“可恢复一套可用备份配置”所需的内容：Settings v2 + 与 Settings 引用的 secrets（详见 Requirements）。
-- Config Bundle 必须“自包含可导入”：在全新环境里只要粘贴这一个 key 就能导入（无需先单独导入 TBK1）。
+- Config Bundle 必须“自包含可导入”：在全新环境里只要导入这一个文件就能导入（无需先单独导入 TBK1）。
 - 导入时必须先列出 Config Bundle 内的信息摘要：
   - 全局设置（schedule/retention/chunking/telegram.mtproto）；
   - endpoints 列表；
@@ -51,10 +51,10 @@
 
 ### In scope
 
-- 新增 Config Bundle key string（版本化、可复制、可保存文件）与加密封装。
+- 新增 Config Bundle key string（版本化、可保存文件）与加密封装。
 - CLI 增加导出/导入（含 dry-run 预检）接口，供 GUI 调用（避免 GUI 直接拼装底层数据结构）。
-- macOS SettingsWindow（`Recovery Key`）页增加 UI：
-  - Export bundle（copy + save）
+- macOS SettingsWindow（`Backup Config`）页增加 UI：
+  - Export bundle（save file）
   - Import bundle（sheet：inspect → select targets → resolve conflicts → apply）
 - 导入预检与冲突决策模型（以 JSON 输出给 GUI；apply 时由 GUI 传回决策）。
 
@@ -78,10 +78,12 @@
 
 #### 2) Bundle 格式与加密
 
-- Bundle 以单行 key string 表示（用于复制/粘贴与保存到纯文本文件）。
+- Bundle 以单行 key string 表示（用于保存到文件；UI 不暴露 key 本体）。
 - Bundle 必须版本化，并避免与 TBK1 冲突（详见 `./contracts/file-formats.md`）。
 - Bundle 必须“自包含可导入”，因此该 key 内必须包含 TBK1（用于在导入时得到 master key）。
-- Bundle payload 明文必须在导出时使用 master key 做 framing 加密（`encrypt_framed`）；加密后的 payload 以 base64url-no-pad 编码并封装进 `TBC1` key（格式见 `./contracts/file-formats.md`）。
+- Bundle 必须加密并要求用户提供 passphrase（PIN/password）：
+  - passphrase 解锁 bundle 内的 `TBK1`（见 `./contracts/file-formats.md`）；
+  - payload 明文在导出时使用 master key 做 framing 加密（`encrypt_framed`），并封装进 `TBC2` key（base64url-no-pad）。
 
 #### 3) 导入：先 inspect，再 apply（分两步）
 
@@ -128,7 +130,7 @@
     - overwrite remote 会改变跨设备 latest 指针语义（但不删除远端对象）。
     - 索引重建会改名备份旧 per-endpoint DB，并可能触发后续备份行为变化（例如重新扫描/对齐）。
     - 旧全局 `index.sqlite` 在迁移完成后会被静默删除（本地缓存清理）。
-  - 二次确认形式（frozen）：typed phrase，用户必须输入 `ROTATE`。
+  - 二次确认形式（frozen）：typed phrase，用户必须输入 `IMPORT`。
 
 #### 8) Master key 冲突处理（frozen）
 
@@ -153,7 +155,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `televybackup settings export-bundle` | CLI | internal | New | ./contracts/cli.md | CLI | macOS GUI | 导出 bundle key（可 json） |
 | `televybackup settings import-bundle` | CLI | internal | New | ./contracts/cli.md | CLI | macOS GUI | dry-run + apply（带 preflight） |
-| `TBC1:<base64url_no_pad>` | File format | internal | New | ./contracts/file-formats.md | core | CLI/GUI | 加密的 config bundle key |
+| `TBC2:<base64url_no_pad>` | File format | internal | New | ./contracts/file-formats.md | core | CLI/GUI | 加密的 config bundle key |
 | `televybackup secrets rotate-master-key` | CLI | internal | New | （见 `#4fexy`） | CLI/daemon | macOS GUI | mismatch+targets 时进入轮换流程 |
 
 ### 契约文档
@@ -165,8 +167,8 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given 设备已存在 master key（TBK1）与完整 secrets，
-  When 用户在 Settings > Recovery Key 导出 Config Bundle，
-  Then 得到一个 `TBC1:...` key，且可成功在另一设备上完成导入并生成等价的 Settings + secrets（以 `settings get --with-secrets` 的摘要一致为准）。
+  When 用户在 Settings > Backup Config 导出 Config Bundle，
+  Then 得到一个 `TBC2:...` key，且可成功在另一设备上输入 passphrase 完成导入并生成等价的 Settings + secrets（以 `settings get --with-secrets` 的摘要一致为准）。
 
 - Given 用户导入 Config Bundle，
   When 进入导入流程，
@@ -194,14 +196,14 @@
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
-- 已确认 Config Bundle 必须“自包含可导入”（只粘贴一个 key 即可导入）。
+- 已确认 Config Bundle 必须“自包含可导入”（只导入一个文件即可导入）。
 - 已确认 overwrite remote 的语义：仅更新 pinned 指针（不删除远端对象）。
 - 已确认 MTProto session 不导出：导入后按需重新生成并落盘。
 - 已确认 “local-vs-remote mismatch” 的判定口径（以每个 target 对应 endpoint 的 `index.<endpoint_id>.sqlite` 记录为依据是否足够）。
 - 已确认导入 apply 的“索引重建”策略：备份旧 db → 拉取远端最新可用索引落盘为新 db（或 bootstrap missing 时建空库）。
 - 已确认 index 按 endpoint 隔离 + 禁止 chat 复用（见计划 `#r6ceq`），从而避免“multi-endpoint 场景下索引来源选择”的歧义。
 - 已确认迁移期兼容策略：旧全局 `index.sqlite` 存在时静默忽略；导入 apply 仅处理 per-endpoint `index.<endpoint_id>.sqlite`（见 `#r6ceq`）。
-- 已确认二次确认的具体交互形态：typed phrase（输入 `ROTATE`），并明确“哪些动作”需要额外的二次确认（例如 overwrite remote / overwrite master key）。
+- 已确认二次确认的具体交互形态：typed phrase（输入 `IMPORT`），并明确“哪些动作”需要额外的二次确认（例如 overwrite remote / overwrite master key）。
 - 已确认 master key mismatch 的策略：
   - 无 targets：允许 apply（但需二次确认）
   - 有 targets：进入 `#4fexy` 的轮换流程（可暂停/继续/取消，成功后切换）
@@ -228,7 +230,7 @@
 
 - `README.md`：补充“推荐的恢复流程”：TBK1 + Config Bundle（以及导入时的冲突处理入口）。
 - `docs/architecture.md`：补充 Config Bundle 的数据流、加密与导入预检语义（以及与 bootstrap/catalog 的关系）。
-- `docs/design/ui/settings-window/settings-window-security.svg`：补充 Recovery Key 页新增的 bundle 区块与交互（若实现阶段需要更新视觉基准）。
+- `docs/design/ui/settings-window/settings-window-security.svg`：补充 Backup Config 页新增的 bundle 区块与交互（若实现阶段需要更新视觉基准）。
 
 ## 计划资产（Plan assets）
 
@@ -271,4 +273,12 @@ None
 - 2026-01-31: 需求变更：master key mismatch + 已有 targets 时必须进入 `#4fexy` 轮换流程（可暂停/继续/取消）；无 targets 时允许 apply（需二次确认）
 - 2026-01-31: 更新：导入 apply 的索引重建按 per-endpoint `index.<endpoint_id>.sqlite` 执行（旧全局 `index.sqlite` 静默忽略并按 `#r6ceq` 自动清理）
 - 2026-01-31: 冻结导入默认语义：merge（保留本机额外 targets/endpoints；bundle 覆盖同 ID 与全局 settings）
-- 2026-01-31: 冻结二次确认交互：typed phrase（输入 `ROTATE`）
+- 2026-01-31: 冻结二次确认交互：typed phrase（输入 `IMPORT`）
+- 2026-02-01: 已实现：`settings export-bundle` / `settings import-bundle`（dry-run/apply）+ macOS Settings Backup Config UI 入口 + docs 同步
+- 2026-02-02: 更新：Config bundle 改为 passphrase 保护（`TBC2`；避免与 `TBK1` 同存导致单点泄露）
+- 2026-02-02: 更新：Settings 的 Config 页仅保留“导出配置 / 导入配置”入口；导入时展示明文 hint
+- 2026-02-03: 更新：导出改为系统保存对话框（Save Panel）选择保存位置；passphrase + 可选附言在同一对话框内填写；附言支持多行输入
+- 2026-02-03: 更新：导入（预检前）界面改为紧凑空状态 + 选择文件后再输入 passphrase/查看附言；并按阶段动态调整 sheet 尺寸
+- 2026-02-04: 更新：导入改为先用系统文件选择器选文件，再进入导入 sheet（减少空状态停留）；并将导入 sheet 预检/结果阶段尺寸固定为可用高度，避免结果页被裁剪
+- 2026-02-04: 修复：导入后备份卡在 Running 时，MTProto upload 侧增加超时保护（helper 读响应超时/分片上传超时）；verify/restore 将 Telegram download 超时按 `telegram.unavailable` 上报（可重试），避免误报为 chunk 丢失
+- 2026-02-05: 优化：导入预检/应用阶段错误提示（解析 CLI JSON 错误并将“密码错误”等常见场景映射为用户可读文案）

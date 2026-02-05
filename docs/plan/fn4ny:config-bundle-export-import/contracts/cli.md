@@ -10,8 +10,8 @@
 ### 用法（Usage）
 
 ```text
-televybackup [--config-dir <path>] --json settings export-bundle
-televybackup [--config-dir <path>] settings export-bundle
+televybackup [--config-dir <path>] --json settings export-bundle [--hint "<string>"]
+televybackup [--config-dir <path>] settings export-bundle [--hint "<string>"]
 ```
 
 ### 输入（Inputs）
@@ -23,9 +23,14 @@ televybackup [--config-dir <path>] settings export-bundle
 ### 输出（Output）
 
 - `--json`：
-  - `bundleKey`: string（`TBC1:...`）
-  - `format`: string（固定 `"tbc1"`）
-- 非 `--json`：stdout 输出单行 `TBC1:...`
+  - `bundleKey`: string（`TBC2:...`）
+  - `format`: string（固定 `"tbc2"`）
+- 非 `--json`：stdout 输出单行 `TBC2:...`
+
+额外约束：
+
+- `--hint` 可选（明文提示短语，导入时可见；可为空）。
+- 必须提供 passphrase（PIN/password）：通过环境变量 `TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE` 传入（不落盘）。
 
 ### Errors
 
@@ -45,7 +50,8 @@ televybackup [--config-dir <path>] [--data-dir <path>] --json settings import-bu
 
 ### 输入（Inputs）
 
-- stdin：单行 `TBC1:...`
+- stdin：单行 `TBC2:...`
+- 必须提供 passphrase：环境变量 `TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE`
 - 运行时需要访问 Telegram 远端进行预检时，使用 bundle 内的 endpoint 信息与 secrets（bot token / mtproto api hash）进行访问。
   - MTProto session **不在 bundle 中导出/导入**；预检过程中如需要建立 MTProto 连接，允许生成临时 session（仅内存使用，不落盘）。
 
@@ -53,7 +59,7 @@ televybackup [--config-dir <path>] [--data-dir <path>] --json settings import-bu
 
 ```json
 {
-  "format": "tbc1",
+  "format": "tbc2",
   "localMasterKey": { "state": "missing|match|mismatch" },
   "localHasTargets": true,
   "nextAction": "apply|start_key_rotation",
@@ -107,11 +113,10 @@ televybackup [--config-dir <path>] [--data-dir <path>] --json settings import-bu
 
 ```json
 {
-  "bundleKey": "TBC1:...",
+  "bundleKey": "TBC2:...",
   "selectedTargetIds": ["t1", "t2"],
   "confirm": {
-    "ackRisks": true,
-    "phrase": "ROTATE"
+    "phrase": "IMPORT"
   },
   "resolutions": {
     "t1": { "mode": "overwrite_local" },
@@ -128,7 +133,7 @@ televybackup [--config-dir <path>] [--data-dir <path>] --json settings import-bu
   - 不删除、不修改本机 settings 中“bundle 未涉及”的 targets/endpoints（保留本机额外配置）。
 - 若 dry-run 发现 `conflict.state=needs_resolution` 且 apply 未提供对应 `resolutions[targetId]`：返回 `config_bundle.conflict`。
 - 迁移期兼容：apply 不读取/不写入旧全局 `TELEVYBACKUP_DATA_DIR/index/index.sqlite`；仅操作 per-endpoint `index.<endpoint_id>.sqlite`（按 `#r6ceq`）。
-- 必须显式确认风险（frozen）：若 `confirm.ackRisks != true` 或 `confirm.phrase != "ROTATE"`：返回 `config_bundle.confirm_required`。
+- 必须显式确认风险（frozen）：若 `confirm.phrase != "IMPORT"`：返回 `config_bundle.confirm_required`。
 - 若 dry-run 检测到 `localMasterKey.state=mismatch` 且 `localHasTargets=true`：返回 `config_bundle.rotation_required`（应走 `#4fexy` 的轮换流程）。
 - 若 dry-run 检测到 `localMasterKey.state=mismatch` 且 `localHasTargets=false`：允许 apply，但必须二次确认（仍走 `confirm.*`）。
 
@@ -166,6 +171,7 @@ televybackup [--config-dir <path>] [--data-dir <path>] --json settings import-bu
 ### Errors
 
 - `config.invalid`: bundle 无效 / schema 不支持
+- `config_bundle.passphrase_required`: 未提供 `TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE`
 - `config_bundle.conflict`: 缺少冲突决策
 - `secrets.store_failed`: secrets store 写入失败
 - `telegram.unavailable`: overwrite remote / sync local 时 Telegram 访问失败（retryable）

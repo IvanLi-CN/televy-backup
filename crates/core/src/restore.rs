@@ -278,8 +278,23 @@ async fn restore_files<S: Storage>(
                             error = %e,
                             "io.telegram.download_failed"
                         );
-                        Error::MissingChunkObject {
-                            chunk_hash: chunk_hash.clone(),
+                        match e {
+                            Error::Telegram { message } => {
+                                // Treat "not found" style errors as permanent missing data, but keep
+                                // timeouts/transient failures as retryable telegram errors.
+                                if message.contains("message not found")
+                                    || message.contains("document mismatch")
+                                {
+                                    Error::MissingChunkObject {
+                                        chunk_hash: chunk_hash.clone(),
+                                    }
+                                } else {
+                                    Error::Telegram { message }
+                                }
+                            }
+                            _other => Error::MissingChunkObject {
+                                chunk_hash: chunk_hash.clone(),
+                            },
                         }
                     })?;
                     decrypt_framed(master_key, chunk_hash.as_bytes(), &framed).map_err(|e| {
@@ -313,8 +328,21 @@ async fn restore_files<S: Storage>(
                                             error = %e,
                                             "io.telegram.download_failed"
                                         );
-                                        Error::MissingChunkObject {
-                                            chunk_hash: chunk_hash.clone(),
+                                        match e {
+                                            Error::Telegram { message } => {
+                                                if message.contains("message not found")
+                                                    || message.contains("document mismatch")
+                                                {
+                                                    Error::MissingChunkObject {
+                                                        chunk_hash: chunk_hash.clone(),
+                                                    }
+                                                } else {
+                                                    Error::Telegram { message }
+                                                }
+                                            }
+                                            _other => Error::MissingChunkObject {
+                                                chunk_hash: chunk_hash.clone(),
+                                            },
                                         }
                                     })?;
                             pack_cache = Some((pack_object_id.clone(), bytes));
@@ -455,8 +483,21 @@ async fn verify_chunks<S: Storage>(
                         error = %e,
                         "io.telegram.download_failed"
                     );
-                    Error::MissingChunkObject {
-                        chunk_hash: chunk_hash.clone(),
+                    match e {
+                        Error::Telegram { message } => {
+                            if message.contains("message not found")
+                                || message.contains("document mismatch")
+                            {
+                                Error::MissingChunkObject {
+                                    chunk_hash: chunk_hash.clone(),
+                                }
+                            } else {
+                                Error::Telegram { message }
+                            }
+                        }
+                        _other => Error::MissingChunkObject {
+                            chunk_hash: chunk_hash.clone(),
+                        },
                     }
                 })?;
                 decrypt_framed(master_key, chunk_hash.as_bytes(), &framed).map_err(|e| {
@@ -490,8 +531,21 @@ async fn verify_chunks<S: Storage>(
                                         error = %e,
                                         "io.telegram.download_failed"
                                     );
-                                    Error::MissingChunkObject {
-                                        chunk_hash: chunk_hash.clone(),
+                                    match e {
+                                        Error::Telegram { message } => {
+                                            if message.contains("message not found")
+                                                || message.contains("document mismatch")
+                                            {
+                                                Error::MissingChunkObject {
+                                                    chunk_hash: chunk_hash.clone(),
+                                                }
+                                            } else {
+                                                Error::Telegram { message }
+                                            }
+                                        }
+                                        _other => Error::MissingChunkObject {
+                                            chunk_hash: chunk_hash.clone(),
+                                        },
                                     }
                                 })?;
                         pack_cache = Some((pack_object_id.clone(), bytes));
