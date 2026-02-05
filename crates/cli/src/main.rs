@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -256,27 +256,257 @@ impl CliError {
 
 struct NdjsonProgressSink {
     task_id: String,
+    throttle: Mutex<ProgressThrottle>,
 }
 
 static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
 
+#[derive(Debug)]
+struct ProgressThrottle {
+    interval: Duration,
+    last_emit_at: Option<Instant>,
+    last_phase: Option<String>,
+}
+
+impl ProgressThrottle {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_emit_at: None,
+            last_phase: None,
+        }
+    }
+
+    fn should_emit(&mut self, phase: &str) -> bool {
+        let now = Instant::now();
+
+        // Always emit the first event, and whenever the phase changes (UI wants immediate
+        // "phase flipped" feedback even if the progress cadence is throttled).
+        if self.last_phase.as_deref() != Some(phase) {
+            self.last_phase = Some(phase.to_string());
+            self.last_emit_at = Some(now);
+            return true;
+        }
+
+        match self.last_emit_at {
+            None => {
+                self.last_emit_at = Some(now);
+                true
+            }
+            Some(last) if now.duration_since(last) >= self.interval => {
+                self.last_emit_at = Some(now);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 impl ProgressSink for NdjsonProgressSink {
     fn on_progress(&self, p: televy_backup_core::TaskProgress) {
+        // Throttle progress emission to avoid overwhelming the GUI (and the UI log sink)
+        // when the core calls `on_progress` at very high frequency (e.g. per chunk).
+        let should_emit = self
+            .throttle
+            .lock()
+            .expect("progress throttle mutex poisoned")
+            .should_emit(&p.phase);
+        if !should_emit {
+            return;
+        }
+
+        // Many phases don't have a stable "total" upfront. In those cases, the core currently
+        // reports `*_total == *_done` as a "so far" counter which makes UI progress bars look
+        // stuck at 100%. Only surface totals when they look meaningful.
+        let chunks_total = match (p.phase.as_str(), p.chunks_total, p.chunks_done) {
+            ("scan" | "upload" | "index" | "index_sync", Some(total), Some(done))
+                if total > 0 && total == done =>
+            {
+                None
+            }
+            (_phase, other, _done) => other,
+        };
+
         let line = serde_json::json!({
             "type": "task.progress",
             "taskId": self.task_id,
             "phase": p.phase,
             "filesTotal": p.files_total,
             "filesDone": p.files_done,
-            "chunksTotal": p.chunks_total,
+            "chunksTotal": chunks_total,
             "chunksDone": p.chunks_done,
             "bytesRead": p.bytes_read,
             "bytesUploaded": p.bytes_uploaded,
             "bytesDeduped": p.bytes_deduped,
         });
-        println!("{line}");
-        let _ = std::io::stdout().flush();
+        emit_event_stdout(line);
     }
+}
+
+fn emit_event_stdout(line: serde_json::Value) {
+    // In `--events` mode, stdout is typically piped to the macOS GUI. Force line delivery so the
+    // UI does not get "task.state" only when the process exits (block-buffered stdout).
+    println!("{line}");
+    let _ = std::io::stdout().flush();
+}
+
+fn emit_task_state_running(
+    events: bool,
+    task_id: &str,
+    kind: &str,
+    target_id: Option<&str>,
+    snapshot_id: Option<&str>,
+) {
+    if !events {
+        return;
+    }
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "type".to_string(),
+        serde_json::Value::String("task.state".to_string()),
+    );
+    obj.insert(
+        "taskId".to_string(),
+        serde_json::Value::String(task_id.to_string()),
+    );
+    obj.insert(
+        "kind".to_string(),
+        serde_json::Value::String(kind.to_string()),
+    );
+    obj.insert(
+        "state".to_string(),
+        serde_json::Value::String("running".to_string()),
+    );
+    if let Some(t) = target_id {
+        obj.insert(
+            "targetId".to_string(),
+            serde_json::Value::String(t.to_string()),
+        );
+    }
+    if let Some(s) = snapshot_id {
+        obj.insert(
+            "snapshotId".to_string(),
+            serde_json::Value::String(s.to_string()),
+        );
+    }
+    emit_event_stdout(serde_json::Value::Object(obj));
+}
+
+fn emit_task_progress_preflight(events: bool, task_id: &str) {
+    if !events {
+        return;
+    }
+    emit_event_stdout(serde_json::json!({
+        "type": "task.progress",
+        "taskId": task_id,
+        "phase": "preflight",
+        "filesTotal": serde_json::Value::Null,
+        "filesDone": serde_json::Value::Null,
+        "chunksTotal": serde_json::Value::Null,
+        "chunksDone": serde_json::Value::Null,
+        "bytesRead": 0,
+        "bytesUploaded": 0,
+        "bytesDeduped": 0,
+    }));
+}
+
+fn emit_task_state_failed(
+    events: bool,
+    task_id: &str,
+    kind: &str,
+    target_id: Option<&str>,
+    snapshot_id: Option<&str>,
+    e: &CliError,
+) {
+    if !events {
+        return;
+    }
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "type".to_string(),
+        serde_json::Value::String("task.state".to_string()),
+    );
+    obj.insert(
+        "taskId".to_string(),
+        serde_json::Value::String(task_id.to_string()),
+    );
+    obj.insert(
+        "kind".to_string(),
+        serde_json::Value::String(kind.to_string()),
+    );
+    obj.insert(
+        "state".to_string(),
+        serde_json::Value::String("failed".to_string()),
+    );
+    if let Some(t) = target_id {
+        obj.insert(
+            "targetId".to_string(),
+            serde_json::Value::String(t.to_string()),
+        );
+    }
+    if let Some(s) = snapshot_id {
+        obj.insert(
+            "snapshotId".to_string(),
+            serde_json::Value::String(s.to_string()),
+        );
+    }
+    obj.insert(
+        "error".to_string(),
+        serde_json::json!({ "code": e.code, "message": e.message.clone() }),
+    );
+    emit_event_stdout(serde_json::Value::Object(obj));
+}
+
+#[derive(Clone, Copy)]
+struct RunCtx<'a> {
+    target_id: Option<&'a str>,
+    endpoint_id: Option<&'a str>,
+    source_path: Option<&'a str>,
+    snapshot_id: Option<&'a str>,
+}
+
+fn emit_preflight_failed(
+    events: bool,
+    task_id: &str,
+    kind: &str,
+    run_log_path: &Path,
+    started: Instant,
+    ctx: RunCtx<'_>,
+    e: CliError,
+) -> Result<(), CliError> {
+    tracing::warn!(
+        event = "run.start",
+        kind,
+        run_id = %task_id,
+        task_id = %task_id,
+        target_id = ctx.target_id.unwrap_or(""),
+        endpoint_id = ctx.endpoint_id.unwrap_or(""),
+        source_path = ctx.source_path.unwrap_or(""),
+        snapshot_id = ctx.snapshot_id.unwrap_or(""),
+        log_path = %run_log_path.display(),
+        "run.start"
+    );
+
+    let duration_seconds = started.elapsed().as_secs_f64();
+    tracing::error!(
+        event = "run.finish",
+        kind,
+        run_id = %task_id,
+        task_id = %task_id,
+        target_id = ctx.target_id.unwrap_or(""),
+        endpoint_id = ctx.endpoint_id.unwrap_or(""),
+        source_path = ctx.source_path.unwrap_or(""),
+        snapshot_id = ctx.snapshot_id.unwrap_or(""),
+        status = "failed",
+        duration_seconds,
+        error_code = e.code,
+        error_message = %e.message,
+        retryable = e.retryable,
+        "run.finish"
+    );
+
+    emit_task_state_failed(events, task_id, kind, ctx.target_id, ctx.snapshot_id, &e);
+    Err(e)
 }
 
 #[tokio::main]
@@ -3426,39 +3656,135 @@ async fn backup_run(
     let run_log = televy_backup_core::run_log::start_run_log("backup", &task_id, data_dir)
         .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
-    let settings = load_settings(config_dir)?;
-    let target = select_target(&settings, target_id.as_deref(), source.as_deref())?;
-    let ep = settings
+    let started = std::time::Instant::now();
+
+    let settings = match load_settings(config_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return emit_preflight_failed(
+                events,
+                &task_id,
+                "backup",
+                run_log.path(),
+                started,
+                RunCtx {
+                    target_id: None,
+                    endpoint_id: None,
+                    source_path: None,
+                    snapshot_id: None,
+                },
+                e,
+            );
+        }
+    };
+
+    let target = match select_target(&settings, target_id.as_deref(), source.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            return emit_preflight_failed(
+                events,
+                &task_id,
+                "backup",
+                run_log.path(),
+                started,
+                RunCtx {
+                    target_id: None,
+                    endpoint_id: None,
+                    source_path: None,
+                    snapshot_id: None,
+                },
+                e,
+            );
+        }
+    };
+
+    let ep = match settings
         .telegram_endpoints
         .iter()
         .find(|e| e.id == target.endpoint_id)
-        .ok_or_else(|| {
-            CliError::new(
+    {
+        Some(ep) => ep,
+        None => {
+            let e = CliError::new(
                 "config.invalid",
                 format!(
                     "target references unknown endpoint_id: target_id={} endpoint_id={}",
                     target.id, target.endpoint_id
                 ),
-            )
-        })?;
+            );
+            return emit_preflight_failed(
+                events,
+                &task_id,
+                "backup",
+                run_log.path(),
+                started,
+                RunCtx {
+                    target_id: Some(target.id.as_str()),
+                    endpoint_id: None,
+                    source_path: Some(target.source_path.as_str()),
+                    snapshot_id: None,
+                },
+                e,
+            );
+        }
+    };
 
     if settings.telegram.mtproto.api_id <= 0 {
-        return Err(CliError::new(
-            "config.invalid",
-            "telegram.mtproto.api_id must be > 0",
-        ));
+        let e = CliError::new("config.invalid", "telegram.mtproto.api_id must be > 0");
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "backup",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(target.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(target.source_path.as_str()),
+                snapshot_id: None,
+            },
+            e,
+        );
     }
     if settings.telegram.mtproto.api_hash_key.is_empty() {
-        return Err(CliError::new(
+        let e = CliError::new(
             "config.invalid",
             "telegram.mtproto.api_hash_key must not be empty",
-        ));
+        );
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "backup",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(target.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(target.source_path.as_str()),
+                snapshot_id: None,
+            },
+            e,
+        );
     }
     if ep.chat_id.is_empty() {
-        return Err(CliError::new(
+        let e = CliError::new(
             "config.invalid",
             format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
-        ));
+        );
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "backup",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(target.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(target.source_path.as_str()),
+                snapshot_id: None,
+            },
+            e,
+        );
     }
 
     let ctx_target_id = target.id.clone();
@@ -3479,9 +3805,16 @@ async fn backup_run(
         "run.start"
     );
 
-    let started = std::time::Instant::now();
-    let result: Result<televy_backup_core::BackupResult, CliError> = async {
+    emit_task_state_running(
+        events,
+        &task_id,
+        "backup",
+        Some(ctx_target_id.as_str()),
+        None,
+    );
+    emit_task_progress_preflight(events, &task_id);
 
+    let result: Result<televy_backup_core::BackupResult, CliError> = async {
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
         let master_key = load_master_key(config_dir, data_dir)?;
@@ -3492,21 +3825,9 @@ async fn backup_run(
                 .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
         }
 
-        if events {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "type": "task.state",
-                    "taskId": task_id,
-                    "kind": "backup",
-                    "state": "running",
-                    "targetId": target.id,
-                })
-            );
-        }
-
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
+            throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
         };
         let opts = BackupOptions {
             cancel: None,
@@ -3656,27 +3977,24 @@ async fn backup_run(
             );
 
             if events {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "type": "task.state",
-                        "taskId": task_id,
-                        "kind": "backup",
-                        "state": "succeeded",
-                        "snapshotId": res.snapshot_id,
-                        "targetId": ctx_target_id,
-                            "result": {
-                                "filesIndexed": res.files_indexed,
-                                "chunksUploaded": res.chunks_uploaded,
-                                "dataObjectsUploaded": res.data_objects_uploaded,
-                                "dataObjectsEstimatedWithoutPack": res.data_objects_estimated_without_pack,
-                                "bytesUploaded": res.bytes_uploaded,
-                                "bytesDeduped": res.bytes_deduped,
-                                "indexParts": res.index_parts,
-                                "durationSeconds": duration_seconds,
-                            }
-                    })
-                );
+                emit_event_stdout(serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "backup",
+                    "state": "succeeded",
+                    "snapshotId": res.snapshot_id,
+                    "targetId": ctx_target_id,
+                    "result": {
+                        "filesIndexed": res.files_indexed,
+                        "chunksUploaded": res.chunks_uploaded,
+                        "dataObjectsUploaded": res.data_objects_uploaded,
+                        "dataObjectsEstimatedWithoutPack": res.data_objects_estimated_without_pack,
+                        "bytesUploaded": res.bytes_uploaded,
+                        "bytesDeduped": res.bytes_deduped,
+                        "indexParts": res.index_parts,
+                        "durationSeconds": duration_seconds,
+                    }
+                }));
                 return Ok(());
             }
 
@@ -3716,6 +4034,16 @@ async fn backup_run(
                 retryable = e.retryable,
                 "run.finish"
             );
+            if events {
+                emit_event_stdout(serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "backup",
+                    "state": "failed",
+                    "targetId": ctx_target_id,
+                    "error": { "code": e.code, "message": e.message.clone() },
+                }));
+            }
             Err(e)
         }
     }
@@ -3945,20 +4273,18 @@ async fn restore_run(
         }
 
         if events {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "type": "task.state",
-                    "taskId": task_id,
-                    "kind": "restore",
-                    "state": "running",
-                    "snapshotId": snapshot_id,
-                })
-            );
+            emit_event_stdout(serde_json::json!({
+                "type": "task.state",
+                "taskId": task_id,
+                "kind": "restore",
+                "state": "running",
+                "snapshotId": snapshot_id,
+            }));
         }
 
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
+            throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
         };
         let opts = RestoreOptions {
             cancel: None,
@@ -4037,22 +4363,19 @@ async fn restore_run(
             );
 
             if events {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "type": "task.state",
-                        "taskId": task_id,
-                        "kind": "restore",
-                        "state": "succeeded",
-                        "snapshotId": snapshot_id,
-                        "result": {
-                            "filesRestored": res.files_restored,
-                            "chunksDownloaded": res.chunks_downloaded,
-                            "bytesWritten": res.bytes_written,
-                            "durationSeconds": duration_seconds,
-                        }
-                    })
-                );
+                emit_event_stdout(serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "restore",
+                    "state": "succeeded",
+                    "snapshotId": snapshot_id,
+                    "result": {
+                        "filesRestored": res.files_restored,
+                        "chunksDownloaded": res.chunks_downloaded,
+                        "bytesWritten": res.bytes_written,
+                        "durationSeconds": duration_seconds,
+                    }
+                }));
                 return Ok(());
             }
 
@@ -4077,6 +4400,16 @@ async fn restore_run(
                 retryable = e.retryable,
                 "run.finish"
             );
+            if events {
+                emit_event_stdout(serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "restore",
+                    "state": "failed",
+                    "snapshotId": snapshot_id,
+                    "error": { "code": e.code, "message": e.message.clone() },
+                }));
+            }
             Err(e)
         }
     }
@@ -4209,25 +4542,159 @@ async fn restore_latest(
     json: bool,
     events: bool,
 ) -> Result<(), CliError> {
-    let settings = load_settings(config_dir)?;
-    let t = select_target(&settings, target_id.as_deref(), source_path.as_deref())?;
-    let ep = settings
+    let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
+    let run_log = televy_backup_core::run_log::start_run_log("restore", &task_id, data_dir)
+        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
+    let started = std::time::Instant::now();
+
+    let settings = match load_settings(config_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return emit_preflight_failed(
+                events,
+                &task_id,
+                "restore",
+                run_log.path(),
+                started,
+                RunCtx {
+                    target_id: None,
+                    endpoint_id: None,
+                    source_path: None,
+                    snapshot_id: Some("latest"),
+                },
+                e,
+            );
+        }
+    };
+
+    let t = match select_target(&settings, target_id.as_deref(), source_path.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            return emit_preflight_failed(
+                events,
+                &task_id,
+                "restore",
+                run_log.path(),
+                started,
+                RunCtx {
+                    target_id: None,
+                    endpoint_id: None,
+                    source_path: None,
+                    snapshot_id: Some("latest"),
+                },
+                e,
+            );
+        }
+    };
+
+    let ep = match settings
         .telegram_endpoints
         .iter()
         .find(|e| e.id == t.endpoint_id)
-        .ok_or_else(|| {
-            CliError::new(
+    {
+        Some(ep) => ep,
+        None => {
+            let e = CliError::new(
                 "config.invalid",
                 format!(
                     "target references unknown endpoint_id: target_id={} endpoint_id={}",
                     t.id, t.endpoint_id
                 ),
-            )
-        })?;
+            );
+            return emit_preflight_failed(
+                events,
+                &task_id,
+                "restore",
+                run_log.path(),
+                started,
+                RunCtx {
+                    target_id: Some(t.id.as_str()),
+                    endpoint_id: None,
+                    source_path: Some(t.source_path.as_str()),
+                    snapshot_id: Some("latest"),
+                },
+                e,
+            );
+        }
+    };
 
-    let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
-    let run_log = televy_backup_core::run_log::start_run_log("restore", &task_id, data_dir)
-        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
+    if settings.telegram.mtproto.api_id <= 0 {
+        let e = CliError::new("config.invalid", "telegram.mtproto.api_id must be > 0");
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "restore",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(t.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(t.source_path.as_str()),
+                snapshot_id: Some("latest"),
+            },
+            e,
+        );
+    }
+    if settings.telegram.mtproto.api_hash_key.is_empty() {
+        let e = CliError::new(
+            "config.invalid",
+            "telegram.mtproto.api_hash_key must not be empty",
+        );
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "restore",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(t.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(t.source_path.as_str()),
+                snapshot_id: Some("latest"),
+            },
+            e,
+        );
+    }
+    if ep.chat_id.is_empty() {
+        let e = CliError::new(
+            "config.invalid",
+            format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
+        );
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "restore",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(t.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(t.source_path.as_str()),
+                snapshot_id: Some("latest"),
+            },
+            e,
+        );
+    }
+    if is_likely_private_chat_id(&ep.chat_id) {
+        let e = CliError::new(
+            "bootstrap.unsupported_chat",
+            "restore latest requires the pinned bootstrap catalog; private chats are not supported. Use a group/channel (e.g. -100...) or an @username chat id.".to_string(),
+        );
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "restore",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(t.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(t.source_path.as_str()),
+                snapshot_id: Some("latest"),
+            },
+            e,
+        );
+    }
 
     tracing::warn!(
         event = "run.start",
@@ -4242,33 +4709,16 @@ async fn restore_latest(
         "run.start"
     );
 
-    let started = std::time::Instant::now();
-    let result: Result<(String, televy_backup_core::RestoreResult), CliError> = async {
-        if settings.telegram.mtproto.api_id <= 0 {
-            return Err(CliError::new(
-                "config.invalid",
-                "telegram.mtproto.api_id must be > 0",
-            ));
-        }
-        if settings.telegram.mtproto.api_hash_key.is_empty() {
-            return Err(CliError::new(
-                "config.invalid",
-                "telegram.mtproto.api_hash_key must not be empty",
-            ));
-        }
-        if ep.chat_id.is_empty() {
-            return Err(CliError::new(
-                "config.invalid",
-                format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
-            ));
-        }
-        if is_likely_private_chat_id(&ep.chat_id) {
-            return Err(CliError::new(
-                "bootstrap.unsupported_chat",
-                "restore latest requires the pinned bootstrap catalog; private chats are not supported. Use a group/channel (e.g. -100...) or an @username chat id.".to_string(),
-            ));
-        }
+    emit_task_state_running(
+        events,
+        &task_id,
+        "restore",
+        Some(t.id.as_str()),
+        Some("latest"),
+    );
+    emit_task_progress_preflight(events, &task_id);
 
+    let result: Result<(String, televy_backup_core::RestoreResult), CliError> = async {
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
         let master_key = load_master_key(config_dir, data_dir)?;
@@ -4318,6 +4768,14 @@ async fn restore_latest(
         .await
         .map_err(map_core_err)?;
 
+        emit_task_state_running(
+            events,
+            &task_id,
+            "restore",
+            Some(t.id.as_str()),
+            Some(latest.snapshot_id.as_str()),
+        );
+
         let cache_db = data_dir
             .join("cache")
             .join("remote-index")
@@ -4327,22 +4785,9 @@ async fn restore_latest(
                 .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
         }
 
-        if events {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "type": "task.state",
-                    "taskId": task_id,
-                    "kind": "restore",
-                    "state": "running",
-                    "snapshotId": latest.snapshot_id,
-                    "targetId": t.id,
-                })
-            );
-        }
-
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
+            throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
         };
         let opts = RestoreOptions {
             cancel: None,
@@ -4398,22 +4843,20 @@ async fn restore_latest(
             );
 
             if events {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "type": "task.state",
-                        "taskId": task_id,
-                        "kind": "restore",
-                        "state": "succeeded",
-                        "snapshotId": snapshot_id,
-                        "result": {
-                            "filesRestored": res.files_restored,
-                            "chunksDownloaded": res.chunks_downloaded,
-                            "bytesWritten": res.bytes_written,
-                            "durationSeconds": duration_seconds,
-                        }
-                    })
-                );
+                emit_event_stdout(serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "restore",
+                    "state": "succeeded",
+                    "snapshotId": snapshot_id,
+                    "targetId": t.id,
+                    "result": {
+                        "filesRestored": res.files_restored,
+                        "chunksDownloaded": res.chunks_downloaded,
+                        "bytesWritten": res.bytes_written,
+                        "durationSeconds": duration_seconds,
+                    }
+                }));
                 return Ok(());
             }
 
@@ -4445,6 +4888,16 @@ async fn restore_latest(
                 retryable = e.retryable,
                 "run.finish"
             );
+            if events {
+                emit_event_stdout(serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "restore",
+                    "state": "failed",
+                    "targetId": t.id,
+                    "error": { "code": e.code, "message": e.message.clone() },
+                }));
+            }
             Err(e)
         }
     }
@@ -4458,25 +4911,159 @@ async fn verify_latest(
     json: bool,
     events: bool,
 ) -> Result<(), CliError> {
-    let settings = load_settings(config_dir)?;
-    let t = select_target(&settings, target_id.as_deref(), source_path.as_deref())?;
-    let ep = settings
+    let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
+    let run_log = televy_backup_core::run_log::start_run_log("verify", &task_id, data_dir)
+        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
+    let started = std::time::Instant::now();
+
+    let settings = match load_settings(config_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            return emit_preflight_failed(
+                events,
+                &task_id,
+                "verify",
+                run_log.path(),
+                started,
+                RunCtx {
+                    target_id: None,
+                    endpoint_id: None,
+                    source_path: None,
+                    snapshot_id: Some("latest"),
+                },
+                e,
+            );
+        }
+    };
+
+    let t = match select_target(&settings, target_id.as_deref(), source_path.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            return emit_preflight_failed(
+                events,
+                &task_id,
+                "verify",
+                run_log.path(),
+                started,
+                RunCtx {
+                    target_id: None,
+                    endpoint_id: None,
+                    source_path: None,
+                    snapshot_id: Some("latest"),
+                },
+                e,
+            );
+        }
+    };
+
+    let ep = match settings
         .telegram_endpoints
         .iter()
         .find(|e| e.id == t.endpoint_id)
-        .ok_or_else(|| {
-            CliError::new(
+    {
+        Some(ep) => ep,
+        None => {
+            let e = CliError::new(
                 "config.invalid",
                 format!(
                     "target references unknown endpoint_id: target_id={} endpoint_id={}",
                     t.id, t.endpoint_id
                 ),
-            )
-        })?;
+            );
+            return emit_preflight_failed(
+                events,
+                &task_id,
+                "verify",
+                run_log.path(),
+                started,
+                RunCtx {
+                    target_id: Some(t.id.as_str()),
+                    endpoint_id: None,
+                    source_path: Some(t.source_path.as_str()),
+                    snapshot_id: Some("latest"),
+                },
+                e,
+            );
+        }
+    };
 
-    let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
-    let run_log = televy_backup_core::run_log::start_run_log("verify", &task_id, data_dir)
-        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
+    if settings.telegram.mtproto.api_id <= 0 {
+        let e = CliError::new("config.invalid", "telegram.mtproto.api_id must be > 0");
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "verify",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(t.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(t.source_path.as_str()),
+                snapshot_id: Some("latest"),
+            },
+            e,
+        );
+    }
+    if settings.telegram.mtproto.api_hash_key.is_empty() {
+        let e = CliError::new(
+            "config.invalid",
+            "telegram.mtproto.api_hash_key must not be empty",
+        );
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "verify",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(t.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(t.source_path.as_str()),
+                snapshot_id: Some("latest"),
+            },
+            e,
+        );
+    }
+    if ep.chat_id.is_empty() {
+        let e = CliError::new(
+            "config.invalid",
+            format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
+        );
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "verify",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(t.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(t.source_path.as_str()),
+                snapshot_id: Some("latest"),
+            },
+            e,
+        );
+    }
+    if is_likely_private_chat_id(&ep.chat_id) {
+        let e = CliError::new(
+            "bootstrap.unsupported_chat",
+            "verify latest requires the pinned bootstrap catalog; private chats are not supported. Use a group/channel (e.g. -100...) or an @username chat id.".to_string(),
+        );
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "verify",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(t.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(t.source_path.as_str()),
+                snapshot_id: Some("latest"),
+            },
+            e,
+        );
+    }
 
     tracing::warn!(
         event = "run.start",
@@ -4491,33 +5078,16 @@ async fn verify_latest(
         "run.start"
     );
 
-    let started = std::time::Instant::now();
-    let result: Result<(String, televy_backup_core::VerifyResult), CliError> = async {
-        if settings.telegram.mtproto.api_id <= 0 {
-            return Err(CliError::new(
-                "config.invalid",
-                "telegram.mtproto.api_id must be > 0",
-            ));
-        }
-        if settings.telegram.mtproto.api_hash_key.is_empty() {
-            return Err(CliError::new(
-                "config.invalid",
-                "telegram.mtproto.api_hash_key must not be empty",
-            ));
-        }
-        if ep.chat_id.is_empty() {
-            return Err(CliError::new(
-                "config.invalid",
-                format!("telegram_endpoints[{id}].chat_id is empty", id = ep.id),
-            ));
-        }
-        if is_likely_private_chat_id(&ep.chat_id) {
-            return Err(CliError::new(
-                "bootstrap.unsupported_chat",
-                "verify latest requires the pinned bootstrap catalog; private chats are not supported. Use a group/channel (e.g. -100...) or an @username chat id.".to_string(),
-            ));
-        }
+    emit_task_state_running(
+        events,
+        &task_id,
+        "verify",
+        Some(t.id.as_str()),
+        Some("latest"),
+    );
+    emit_task_progress_preflight(events, &task_id);
 
+    let result: Result<(String, televy_backup_core::VerifyResult), CliError> = async {
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
         let master_key = load_master_key(config_dir, data_dir)?;
@@ -4567,6 +5137,14 @@ async fn verify_latest(
         .await
         .map_err(map_core_err)?;
 
+        emit_task_state_running(
+            events,
+            &task_id,
+            "verify",
+            Some(t.id.as_str()),
+            Some(latest.snapshot_id.as_str()),
+        );
+
         let cache_db = data_dir
             .join("cache")
             .join("remote-index")
@@ -4576,22 +5154,9 @@ async fn verify_latest(
                 .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
         }
 
-        if events {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "type": "task.state",
-                    "taskId": task_id,
-                    "kind": "verify",
-                    "state": "running",
-                    "snapshotId": latest.snapshot_id,
-                    "targetId": t.id,
-                })
-            );
-        }
-
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
+            throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
         };
         let opts = VerifyOptions {
             cancel: None,
@@ -4605,7 +5170,9 @@ async fn verify_latest(
             index_db_path: cache_db,
         };
 
-        let res = verify_snapshot_with(&storage, cfg, opts).await.map_err(map_core_err)?;
+        let res = verify_snapshot_with(&storage, cfg, opts)
+            .await
+            .map_err(map_core_err)?;
 
         if let Some(bytes) = storage.session_bytes() {
             let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -4643,22 +5210,19 @@ async fn verify_latest(
             );
 
             if events {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "type": "task.state",
-                        "taskId": task_id,
-                        "kind": "verify",
-                        "state": "succeeded",
-                        "snapshotId": snapshot_id,
-                        "targetId": t.id,
-                        "result": {
-                            "chunksChecked": res.chunks_checked,
-                            "bytesChecked": res.bytes_checked,
-                            "durationSeconds": duration_seconds,
-                        }
-                    })
-                );
+                emit_event_stdout(serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "verify",
+                    "state": "succeeded",
+                    "snapshotId": snapshot_id,
+                    "targetId": t.id,
+                    "result": {
+                        "chunksChecked": res.chunks_checked,
+                        "bytesChecked": res.bytes_checked,
+                        "durationSeconds": duration_seconds,
+                    }
+                }));
                 return Ok(());
             }
 
@@ -4690,6 +5254,16 @@ async fn verify_latest(
                 retryable = e.retryable,
                 "run.finish"
             );
+            if events {
+                emit_event_stdout(serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "verify",
+                    "state": "failed",
+                    "targetId": t.id,
+                    "error": { "code": e.code, "message": e.message.clone() },
+                }));
+            }
             Err(e)
         }
     }
@@ -4771,20 +5345,18 @@ async fn verify_run(
         }
 
         if events {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "type": "task.state",
-                    "taskId": task_id,
-                    "kind": "verify",
-                    "state": "running",
-                    "snapshotId": snapshot_id,
-                })
-            );
+            emit_event_stdout(serde_json::json!({
+                "type": "task.state",
+                "taskId": task_id,
+                "kind": "verify",
+                "state": "running",
+                "snapshotId": snapshot_id,
+            }));
         }
 
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
+            throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
         };
         let opts = VerifyOptions {
             cancel: None,
@@ -4861,21 +5433,18 @@ async fn verify_run(
             );
 
             if events {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "type": "task.state",
-                        "taskId": task_id,
-                        "kind": "verify",
-                        "state": "succeeded",
-                        "snapshotId": snapshot_id,
-                        "result": {
-                            "chunksChecked": res.chunks_checked,
-                            "bytesChecked": res.bytes_checked,
-                            "durationSeconds": duration_seconds,
-                        }
-                    })
-                );
+                emit_event_stdout(serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "verify",
+                    "state": "succeeded",
+                    "snapshotId": snapshot_id,
+                    "result": {
+                        "chunksChecked": res.chunks_checked,
+                        "bytesChecked": res.bytes_checked,
+                        "durationSeconds": duration_seconds,
+                    }
+                }));
                 return Ok(());
             }
 
@@ -4900,6 +5469,16 @@ async fn verify_run(
                 retryable = e.retryable,
                 "run.finish"
             );
+            if events {
+                emit_event_stdout(serde_json::json!({
+                    "type": "task.state",
+                    "taskId": task_id,
+                    "kind": "verify",
+                    "state": "failed",
+                    "snapshotId": snapshot_id,
+                    "error": { "code": e.code, "message": e.message.clone() },
+                }));
+            }
             Err(e)
         }
     }
@@ -5587,6 +6166,23 @@ fn emit_error(e: &CliError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_throttle_emits_first_event_phase_changes_and_rate_limits() {
+        let mut t = ProgressThrottle::new(Duration::from_millis(50));
+        assert!(t.should_emit("scan"));
+        assert!(!t.should_emit("scan"), "should throttle within interval");
+
+        // Phase change should bypass the cadence throttle.
+        assert!(t.should_emit("upload"));
+        assert!(
+            !t.should_emit("upload"),
+            "should throttle again after phase emit"
+        );
+
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(t.should_emit("upload"), "should emit again after interval");
+    }
 
     fn endpoint(id: &str) -> settings_config::TelegramEndpoint {
         settings_config::TelegramEndpoint {

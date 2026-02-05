@@ -281,6 +281,12 @@ private struct TargetDetailView: View {
 
     private var effectiveTargetState: String {
         if target.state == "running" { return "running" }
+        if let t = model.activeTask,
+           t.state == "running",
+           t.targetId == target.targetId
+        {
+            return "running"
+        }
         // Verify/restore runs are executed by the CLI and may not reflect in the daemon status
         // stream immediately; infer "running" from the presence of an in-progress run log.
         if runs.contains(where: { $0.status == "running" }) { return "running" }
@@ -298,7 +304,10 @@ private struct TargetDetailView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let active = model.activeTask
+        let showActive = active?.state == "running" && active?.targetId == target.targetId
+
+        return VStack(alignment: .leading, spacing: 6) {
             Text(target.label ?? target.targetId)
                 .font(.system(size: 20, weight: .bold))
             Text(target.targetId)
@@ -324,7 +333,85 @@ private struct TargetDetailView: View {
                     .buttonStyle(.bordered)
                     .disabled(model.isRunning)
             }
+
+            if showActive, let active {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(activeTaskSummary(active))
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                    if let frac = activeTaskFraction(active) {
+                        ProgressView(value: frac)
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                    }
+                }
+                .padding(.top, 2)
+            }
         }
+    }
+
+    private func activeTaskSummary(_ t: AppModel.ActiveTask) -> String {
+        let phase = t.progress?.phase ?? "running"
+        let elapsed = Date().timeIntervalSince(t.startedAt)
+        let elapsedText = formatDuration(elapsed)
+
+        var parts: [String] = []
+        parts.append("\(t.kind.uppercased()) • phase=\(phase)")
+
+        let bytesUploaded = t.progress?.bytesUploaded ?? 0
+        let bytesRead = t.progress?.bytesRead ?? 0
+        let bytesDeduped = t.progress?.bytesDeduped ?? 0
+
+        switch t.kind {
+        case "backup":
+            if bytesUploaded > 0 { parts.append("+\(formatBytes(bytesUploaded))") }
+            if bytesUploaded == 0 && bytesRead > 0 { parts.append("read \(formatBytes(bytesRead))") }
+            if bytesDeduped > 0 { parts.append("saved \(formatBytes(bytesDeduped))") }
+        case "restore":
+            if bytesRead > 0 { parts.append("written \(formatBytes(bytesRead))") }
+        case "verify":
+            if bytesRead > 0 { parts.append("checked \(formatBytes(bytesRead))") }
+        default:
+            if bytesRead > 0 { parts.append("read \(formatBytes(bytesRead))") }
+        }
+
+        if let done = t.progress?.chunksDone {
+            if let total = t.progress?.chunksTotal, total > 0 {
+                parts.append("chunks \(done)/\(total)")
+            } else {
+                parts.append("chunks \(done)")
+            }
+        } else if let done = t.progress?.filesDone {
+            if let total = t.progress?.filesTotal, total > 0 {
+                parts.append("files \(done)/\(total)")
+            } else {
+                parts.append("files \(done)")
+            }
+        }
+
+        parts.append("elapsed \(elapsedText)")
+        return parts.joined(separator: " • ")
+    }
+
+    private func activeTaskFraction(_ t: AppModel.ActiveTask) -> Double? {
+        guard let p = t.progress else { return nil }
+        if let done = p.chunksDone, let total = p.chunksTotal, total > 0 {
+            if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
+                return nil
+            }
+            return min(1.0, Double(done) / Double(total))
+        }
+        if let done = p.filesDone, let total = p.filesTotal, total > 0 {
+            if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
+                return nil
+            }
+            return min(1.0, Double(done) / Double(total))
+        }
+        return nil
     }
 
     private var history: some View {

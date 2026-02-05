@@ -66,6 +66,7 @@ final class AppModel: ObservableObject {
 
     @Published var isRunning: Bool = false
     @Published var phase: String = "idle"
+    @Published var activeTask: ActiveTask? = nil
 
     @Published var lastBytesUploaded: Int64 = 0
     @Published var lastBytesDeduped: Int64 = 0
@@ -111,6 +112,25 @@ final class AppModel: ObservableObject {
         let id = UUID()
         let at: Date
         let text: String
+    }
+
+    struct ActiveTaskError {
+        var code: String
+        var message: String?
+    }
+
+    struct ActiveTask: Identifiable {
+        var id: String // taskId
+        var kind: String
+        var state: String
+
+        var targetId: String?
+        var snapshotId: String?
+        var progress: StatusProgress?
+
+        var startedAt: Date
+        var updatedAt: Date
+        var error: ActiveTaskError?
     }
 
     @Published var statusActivity: [StatusActivityItem] = []
@@ -1454,7 +1474,7 @@ final class AppModel: ObservableObject {
                 targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
                 endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
                 sourcePath = (fields?["source_path"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sourcePath
-                snapshotId = fields?["snapshot_id"] as? String ?? snapshotId
+                snapshotId = (fields?["snapshot_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? snapshotId
                 if startedAt == nil, let ts, let d = Self.parseIso8601(ts) {
                     startedAt = d
                 }
@@ -1470,7 +1490,7 @@ final class AppModel: ObservableObject {
                 status = fields?["status"] as? String ?? status
                 errorCode = fields?["error_code"] as? String ?? errorCode
                 durationSeconds = (fields?["duration_seconds"] as? NSNumber)?.doubleValue ?? durationSeconds
-                snapshotId = fields?["snapshot_id"] as? String ?? snapshotId
+                snapshotId = (fields?["snapshot_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? snapshotId
 
                 bytesUploaded = (fields?["bytes_uploaded"] as? NSNumber)?.int64Value ?? bytesUploaded
                 bytesDeduped = (fields?["bytes_deduped"] as? NSNumber)?.int64Value ?? bytesDeduped
@@ -2082,23 +2102,116 @@ final class AppModel: ObservableObject {
         guard let type = obj["type"] as? String else { return }
 
         if type == "task.progress" {
+            let taskId = obj["taskId"] as? String ?? ""
             let phase = obj["phase"] as? String ?? "running"
-            let bytesUploaded = (obj["bytesUploaded"] as? NSNumber)?.int64Value ?? 0
-            let bytesDeduped = (obj["bytesDeduped"] as? NSNumber)?.int64Value ?? 0
-            DispatchQueue.main.async { self.phase = phase }
             DispatchQueue.main.async {
-                self.currentBytesUploaded = bytesUploaded
-                self.currentBytesDeduped = bytesDeduped
+                let filesTotal = (obj["filesTotal"] as? NSNumber)?.int64Value
+                let filesDone = (obj["filesDone"] as? NSNumber)?.int64Value
+                let chunksTotal = (obj["chunksTotal"] as? NSNumber)?.int64Value
+                let chunksDone = (obj["chunksDone"] as? NSNumber)?.int64Value
+                let bytesRead = (obj["bytesRead"] as? NSNumber)?.int64Value
+                let bytesUploaded = (obj["bytesUploaded"] as? NSNumber)?.int64Value
+                let bytesDeduped = (obj["bytesDeduped"] as? NSNumber)?.int64Value
+
+                self.phase = phase
+                self.currentBytesUploaded = bytesUploaded ?? 0
+                self.currentBytesDeduped = bytesDeduped ?? 0
+
+                if taskId.isEmpty { return }
+
+                let now = Date()
+                var task = self.activeTask
+                if task?.id != taskId {
+                    task = ActiveTask(
+                        id: taskId,
+                        kind: self.lastTaskKind ?? "task",
+                        state: "running",
+                        targetId: nil,
+                        snapshotId: nil,
+                        progress: nil,
+                        startedAt: now,
+                        updatedAt: now,
+                        error: nil
+                    )
+                }
+
+                task?.state = "running"
+                task?.updatedAt = now
+                task?.progress = StatusProgress(
+                    phase: phase,
+                    filesTotal: filesTotal,
+                    filesDone: filesDone,
+                    chunksTotal: chunksTotal,
+                    chunksDone: chunksDone,
+                    bytesRead: bytesRead,
+                    bytesUploaded: bytesUploaded,
+                    bytesDeduped: bytesDeduped
+                )
+                self.activeTask = task
             }
             return
         }
 
         if type == "task.state" {
+            let taskId = obj["taskId"] as? String ?? ""
             let state = obj["state"] as? String ?? ""
             let kind = obj["kind"] as? String ?? ""
+            let targetId = (obj["targetId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let snapshotId = (obj["snapshotId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let errorObj = obj["error"] as? [String: Any]
+            let errorCode = (errorObj?["code"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let errorMessage = (errorObj?["message"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let taskError = errorCode.map { ActiveTaskError(code: $0, message: errorMessage) }
+
             DispatchQueue.main.async {
                 self.lastTaskKind = kind
                 self.lastTaskState = state
+
+                if !taskId.isEmpty {
+                    let now = Date()
+                    var task = self.activeTask
+                    if task?.id != taskId {
+                        task = ActiveTask(
+                            id: taskId,
+                            kind: kind.isEmpty ? "task" : kind,
+                            state: state.isEmpty ? "running" : state,
+                            targetId: targetId,
+                            snapshotId: snapshotId,
+                            progress: nil,
+                            startedAt: now,
+                            updatedAt: now,
+                            error: nil
+                        )
+                    }
+                    if !kind.isEmpty { task?.kind = kind }
+                    if !state.isEmpty { task?.state = state }
+                    if let targetId { task?.targetId = targetId }
+                    if let snapshotId { task?.snapshotId = snapshotId }
+                    task?.updatedAt = now
+
+                    if state == "running" {
+                        task?.startedAt = now
+                        task?.progress = nil
+                        task?.error = nil
+                    } else if state == "failed" {
+                        if let taskError {
+                            task?.error = taskError
+                            self.lastRunErrorCode = taskError.code
+                        }
+                    }
+
+                    self.activeTask = task
+
+                    if state == "succeeded" || state == "failed" || state == "cancelled" {
+                        let finishedId = taskId
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
+                            if self.activeTask?.id == finishedId && (self.activeTask?.state ?? "") != "running" {
+                                self.activeTask = nil
+                            }
+                        }
+                    }
+                }
+
                 if state == "running" {
                     self.isRunning = true
                     self.phase = kind
@@ -2143,7 +2256,13 @@ final class AppModel: ObservableObject {
                     self.lastRunOk = false
                     self.lastRunAt = Date()
                 }
-                showToast(kind == "restore" ? "Restore failed" : (kind == "verify" ? "Verify failed" : "Backup failed"), isError: true)
+                let suffix = errorCode.map { " (\($0))" } ?? ""
+                showToast(
+                    kind == "restore"
+                        ? "Restore failed\(suffix)"
+                        : (kind == "verify" ? "Verify failed\(suffix)" : "Backup failed\(suffix)"),
+                    isError: true
+                )
                 refreshRunHistory()
             }
         }
@@ -2372,7 +2491,7 @@ private func tomlStringArray(_ items: [String]) -> String {
     items.map(tomlString).joined(separator: ", ")
 }
 
-private func formatBytes(_ bytes: Int64) -> String {
+func formatBytes(_ bytes: Int64) -> String {
     let units = ["B", "KB", "MB", "GB", "TB"]
     var value = Double(bytes)
     var idx = 0
@@ -2384,7 +2503,7 @@ private func formatBytes(_ bytes: Int64) -> String {
     return String(format: "%.1f %@", value, units[idx])
 }
 
-private func formatDuration(_ seconds: Double) -> String {
+func formatDuration(_ seconds: Double) -> String {
     if seconds <= 0 { return "-" }
     if seconds < 60 { return String(format: "%.0fs", seconds) }
     let m = Int(seconds) / 60
@@ -2923,7 +3042,10 @@ private struct TargetRowView: View {
         let isDaemon = (snapshotSourceKind == "daemon")
         let disconnected = isDaemon && staleAgeMs > StatusFreshness.disconnectedMs
 
-        let running = (target.state == "running") && !disconnected && (isDaemon && staleAgeMs <= StatusFreshness.disconnectedMs)
+        let cliRunning = (model.activeTask?.state == "running") && (model.activeTask?.targetId == target.targetId)
+        let daemonRunning =
+            (target.state == "running") && !disconnected && (isDaemon && staleAgeMs <= StatusFreshness.disconnectedMs)
+        let running = cliRunning || daemonRunning
 
         return VStack(alignment: .leading, spacing: 0) {
             if running {
@@ -2953,6 +3075,9 @@ private struct TargetRowView: View {
 
     private func stateBadge(staleAgeMs: Int64, isDaemon: Bool) -> some View {
         let (text, c): (String, Color) = {
+            if (model.activeTask?.state == "running") && (model.activeTask?.targetId == target.targetId) {
+                return ("Running", .blue)
+            }
             if !isDaemon || staleAgeMs > StatusFreshness.staleMs { return ("Stale", .orange) }
             if target.state == "running" { return ("Running", .blue) }
             if target.state == "failed" || target.lastRun?.status == "failed" { return ("Failed", .red) }
@@ -3111,17 +3236,81 @@ private struct TargetRowView: View {
     }
 
     private func runningSummary(nowMs: Int64) -> String {
-        let uploaded = target.progress?.bytesUploaded ?? 0
+        if let t = model.activeTask,
+           t.state == "running",
+           t.targetId == target.targetId
+        {
+            let phase = t.progress?.phase ?? "running"
+            let elapsed = elapsedText(nowMs: nowMs)
+            let bytesUploaded = t.progress?.bytesUploaded ?? 0
+            let bytesRead = t.progress?.bytesRead ?? 0
+            let metric: String
+            switch t.kind {
+            case "backup":
+                if bytesUploaded > 0 {
+                    metric = "Uploaded \(formatBytes(bytesUploaded))"
+                } else if bytesRead > 0 {
+                    metric = "Read \(formatBytes(bytesRead))"
+                } else if let files = t.progress?.filesDone, files > 0 {
+                    metric = "Indexed \(files) files"
+                } else if let chunks = t.progress?.chunksDone, chunks > 0 {
+                    metric = "Scanned \(chunks) chunks"
+                } else {
+                    metric = "Running"
+                }
+            case "restore":
+                metric = "Written \(formatBytes(bytesRead))"
+            case "verify":
+                metric = "Checked \(formatBytes(bytesRead))"
+            default:
+                metric = "Progress \(formatBytes(bytesRead))"
+            }
+            return "\(t.kind.capitalized) \(phase) • \(metric) • Elapsed \(elapsed)"
+        }
+
         let elapsed = elapsedText(nowMs: nowMs)
-        return "Uploaded \(formatBytes(uploaded)) • Elapsed \(elapsed)"
+        let phase = target.progress?.phase ?? "running"
+        let bytesUploaded = target.progress?.bytesUploaded ?? 0
+        let bytesRead = target.progress?.bytesRead ?? 0
+        let metric: String
+        if bytesUploaded > 0 {
+            metric = "Uploaded \(formatBytes(bytesUploaded))"
+        } else if bytesRead > 0 {
+            metric = "Read \(formatBytes(bytesRead))"
+        } else if let files = target.progress?.filesDone, files > 0 {
+            metric = "Indexed \(files) files"
+        } else if let chunks = target.progress?.chunksDone, chunks > 0 {
+            metric = "Scanned \(chunks) chunks"
+        } else {
+            metric = "Running"
+        }
+        return "Backup \(phase) • \(metric) • Elapsed \(elapsed)"
     }
 
     private func progressFraction() -> Double? {
-        if let p = target.progress {
+        let p: StatusProgress? = {
+            if let t = model.activeTask,
+               t.state == "running",
+               t.targetId == target.targetId
+            {
+                return t.progress
+            }
+            return target.progress
+        }()
+
+        if let p {
             if let done = p.chunksDone, let total = p.chunksTotal, total > 0 {
+                // For phases without a stable total, core may report `done == total` as a
+                // "so far" counter. Treat that as indeterminate to avoid a stuck 100% bar.
+                if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
+                    return nil
+                }
                 return min(1.0, Double(done) / Double(total))
             }
             if let done = p.filesDone, let total = p.filesTotal, total > 0 {
+                if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
+                    return nil
+                }
                 return min(1.0, Double(done) / Double(total))
             }
         }
@@ -3129,6 +3318,13 @@ private struct TargetRowView: View {
     }
 
     private func elapsedText(nowMs: Int64) -> String {
+        if let t = model.activeTask,
+           t.state == "running",
+           t.targetId == target.targetId
+        {
+            let seconds = Int(Date().timeIntervalSince(t.startedAt))
+            return formatElapsed(seconds: max(0, seconds))
+        }
         guard let since = target.runningSince else { return "—" }
         let seconds = max(0, (nowMs - since)) / 1000
         return formatElapsed(seconds: Int(seconds))
