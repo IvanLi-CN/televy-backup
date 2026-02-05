@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-02-05
 - Last: 2026-02-05
 
@@ -83,7 +83,6 @@
 
 ## 里程碑（Milestones）
 
-- [ ] M1: CLI `--events` 事件输出统一封装并强制 flush（含 failed 事件）
-- [ ] M2: macOS GUI 完整消费 `task.progress` 字段并展示 restore/verify 进度
-- [ ] M3: macOS GUI 引入 active task 状态机，running/finish 及时可见，端到端验收通过
-
+- [x] M1: CLI `--events` 事件输出统一封装并强制 flush（含 failed 事件）
+- [x] M2: macOS GUI 完整消费 `task.progress` 字段并展示 restore/verify 进度
+- [x] M3: macOS GUI 引入 active task 状态机，running/finish 及时可见，端到端验收通过
