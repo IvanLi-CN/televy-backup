@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::Engine;
 use pbkdf2::pbkdf2_hmac;
@@ -18,6 +18,8 @@ pub const CONFIG_BUNDLE_KDF_ITERS_V2: u32 = 200_000;
 pub const CONFIG_BUNDLE_KDF_MAX_ITERS_V2: u32 = 1_000_000;
 pub const CONFIG_BUNDLE_AAD_GOLD_KEY_V2: &[u8] = b"televy.config.bundle.v2.gold_key";
 pub const CONFIG_BUNDLE_AAD_PAYLOAD_V2: &[u8] = b"televy.config.bundle.v2.payload";
+
+const CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY: &str = "televybackup.master_key";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +97,93 @@ fn derive_bundle_passphrase_key_v2(
     Ok(out)
 }
 
+fn validate_bundle_secrets_v2(settings: &SettingsV2, secrets: &ConfigBundleSecretsV2) -> Result<()> {
+    let mut required_keys = BTreeSet::<String>::new();
+    required_keys.insert(settings.telegram.mtproto.api_hash_key.clone());
+    for ep in &settings.telegram_endpoints {
+        required_keys.insert(ep.bot_token_key.clone());
+    }
+
+    let mut excluded_keys = BTreeSet::<String>::new();
+    for ep in &settings.telegram_endpoints {
+        excluded_keys.insert(ep.mtproto.session_key.clone());
+    }
+
+    // Reject bundles that try to smuggle reserved keys into the secrets store.
+    if required_keys.contains(CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY)
+        || excluded_keys.contains(CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY)
+    {
+        return Err(Error::InvalidConfig {
+            message: format!(
+                "config bundle settings may not reference reserved secret key: {CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY}"
+            ),
+        });
+    }
+
+    for key in secrets.entries.keys() {
+        let trimmed = key.trim();
+        if trimmed.is_empty() || trimmed != key {
+            return Err(Error::InvalidConfig {
+                message: format!("config bundle secrets.entries key is invalid: {key:?}"),
+            });
+        }
+        if key == CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "config bundle secrets.entries must not contain reserved key: {key}"
+                ),
+            });
+        }
+        if !required_keys.contains(key) {
+            return Err(Error::InvalidConfig {
+                message: format!("config bundle secrets.entries contains unknown key: {key}"),
+            });
+        }
+    }
+
+    for key in &secrets.missing {
+        let trimmed = key.trim();
+        if trimmed.is_empty() || trimmed != key {
+            return Err(Error::InvalidConfig {
+                message: format!("config bundle secrets.missing key is invalid: {key:?}"),
+            });
+        }
+        if key == CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY {
+            return Err(Error::InvalidConfig {
+                message: format!("config bundle secrets.missing must not contain reserved key: {key}"),
+            });
+        }
+        if !required_keys.contains(key) {
+            return Err(Error::InvalidConfig {
+                message: format!("config bundle secrets.missing contains unknown key: {key}"),
+            });
+        }
+    }
+
+    for key in &secrets.excluded {
+        let trimmed = key.trim();
+        if trimmed.is_empty() || trimmed != key {
+            return Err(Error::InvalidConfig {
+                message: format!("config bundle secrets.excluded key is invalid: {key:?}"),
+            });
+        }
+        if key == CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "config bundle secrets.excluded must not contain reserved key: {key}"
+                ),
+            });
+        }
+        if !excluded_keys.contains(key) {
+            return Err(Error::InvalidConfig {
+                message: format!("config bundle secrets.excluded contains unknown key: {key}"),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 pub fn encode_config_bundle_key_v2(
     master_key: &[u8; 32],
     settings: &SettingsV2,
@@ -112,6 +201,7 @@ pub fn encode_config_bundle_key_v2(
         });
     }
     crate::config::validate_settings_schema_v2(settings)?;
+    validate_bundle_secrets_v2(settings, &secrets)?;
 
     let payload = ConfigBundlePayloadV2 {
         version: CONFIG_BUNDLE_VERSION_V2,
@@ -246,6 +336,7 @@ pub fn decode_config_bundle_key_v2(s: &str, passphrase: &str) -> Result<DecodedC
         });
     }
     crate::config::validate_settings_schema_v2(&payload.settings)?;
+    validate_bundle_secrets_v2(&payload.settings, &payload.secrets)?;
 
     Ok(DecodedConfigBundleV2 {
         master_key,
@@ -262,6 +353,43 @@ pub fn utc_now_compact_timestamp() -> String {
 mod tests {
     use super::*;
     use crate::config::{TelegramEndpoint, TelegramEndpointMtproto, TelegramRateLimit};
+
+    fn outer_from_bundle_key(key: &str) -> ConfigBundleOuterV2 {
+        let rest = key
+            .strip_prefix(CONFIG_BUNDLE_PREFIX_V2)
+            .expect("missing TBC2 prefix");
+        let outer_json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(rest.as_bytes())
+            .expect("outer base64 decode failed");
+        serde_json::from_slice(&outer_json).expect("outer json decode failed")
+    }
+
+    fn bundle_key_from_outer(outer: &ConfigBundleOuterV2) -> String {
+        let outer_json = serde_json::to_vec(outer).expect("outer json encode failed");
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(outer_json);
+        format!("{CONFIG_BUNDLE_PREFIX_V2}{b64}")
+    }
+
+    fn tamper_payload(
+        bundle_key: &str,
+        master_key: &[u8; 32],
+        f: impl FnOnce(&mut ConfigBundlePayloadV2),
+    ) -> String {
+        let mut outer = outer_from_bundle_key(bundle_key);
+        let payload_framed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(outer.payload_enc.as_bytes())
+            .expect("payloadEnc base64 decode failed");
+        let payload_json =
+            decrypt_framed(master_key, CONFIG_BUNDLE_AAD_PAYLOAD_V2, &payload_framed).unwrap();
+        let mut payload: ConfigBundlePayloadV2 =
+            serde_json::from_slice(&payload_json).expect("payload json decode failed");
+        f(&mut payload);
+        let new_payload_json = serde_json::to_vec(&payload).expect("payload json encode failed");
+        let new_payload_framed =
+            encrypt_framed(master_key, CONFIG_BUNDLE_AAD_PAYLOAD_V2, &new_payload_json).unwrap();
+        outer.payload_enc = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(new_payload_framed);
+        bundle_key_from_outer(&outer)
+    }
 
     fn sample_settings() -> SettingsV2 {
         SettingsV2 {
@@ -303,7 +431,7 @@ mod tests {
         secrets
             .excluded
             .push("telegram.mtproto.session.ep1".to_string());
-        secrets.missing.push("telegram.bot_token.ep2".to_string());
+        secrets.missing.push("telegram.bot_token.ep1".to_string());
 
         let key = encode_config_bundle_key_v2(
             &master_key,
@@ -371,5 +499,82 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, Error::InvalidConfig { .. }));
         assert!(err.to_string().contains("iterations too large"));
+    }
+
+    #[test]
+    fn tbc2_decode_rejects_unknown_secret_key() {
+        let master_key = [9u8; 32];
+        let settings = sample_settings();
+        let key = encode_config_bundle_key_v2(
+            &master_key,
+            &settings,
+            ConfigBundleSecretsV2::default(),
+            "hunter2",
+            "hint",
+        )
+        .unwrap();
+
+        let tampered = tamper_payload(&key, &master_key, |payload| {
+            payload
+                .secrets
+                .entries
+                .insert("unknown.secret.key".to_string(), "x".to_string());
+        });
+
+        let err = decode_config_bundle_key_v2(&tampered, "hunter2").unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("unknown key"));
+    }
+
+    #[test]
+    fn tbc2_decode_rejects_master_key_in_secrets_entries() {
+        let master_key = [9u8; 32];
+        let settings = sample_settings();
+        let key = encode_config_bundle_key_v2(
+            &master_key,
+            &settings,
+            ConfigBundleSecretsV2::default(),
+            "hunter2",
+            "hint",
+        )
+        .unwrap();
+
+        let tampered = tamper_payload(&key, &master_key, |payload| {
+            payload.secrets.entries.insert(
+                CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY.to_string(),
+                "evil".to_string(),
+            );
+        });
+
+        let err = decode_config_bundle_key_v2(&tampered, "hunter2").unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn tbc2_decode_rejects_settings_reference_to_reserved_secret_key() {
+        let master_key = [9u8; 32];
+        let settings = sample_settings();
+        let key = encode_config_bundle_key_v2(
+            &master_key,
+            &settings,
+            ConfigBundleSecretsV2::default(),
+            "hunter2",
+            "hint",
+        )
+        .unwrap();
+
+        let tampered = tamper_payload(&key, &master_key, |payload| {
+            payload.settings.telegram.mtproto.api_hash_key =
+                CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY.to_string();
+            payload.secrets.entries.insert(
+                CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY.to_string(),
+                "evil".to_string(),
+            );
+        });
+
+        let err = decode_config_bundle_key_v2(&tampered, "hunter2").unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("may not reference reserved secret key"));
     }
 }

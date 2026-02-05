@@ -417,6 +417,26 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
                 message: "telegram_endpoints[].id must not be empty".to_string(),
             });
         }
+        if ep.id != ep.id.trim() {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "telegram_endpoints[].id must not contain leading/trailing whitespace (got {:?})",
+                    ep.id
+                ),
+            });
+        }
+        if !ep
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "telegram_endpoints[].id must match [A-Za-z0-9_-]+ (got {:?})",
+                    ep.id
+                ),
+            });
+        }
         if !endpoint_ids.insert(ep.id.clone()) {
             return Err(Error::InvalidConfig {
                 message: format!("duplicate telegram_endpoints id: {}", ep.id),
@@ -811,6 +831,24 @@ min_delay_ms = 250
             err.to_string()
                 .contains("duplicate telegram_endpoints chat_id")
         );
+    }
+
+    #[test]
+    fn v2_endpoint_id_must_be_filename_safe() {
+        let mut s = base_settings_v2();
+        s.telegram_endpoints[0].id = "ep/1".to_string();
+        s.targets[0].endpoint_id = "ep/1".to_string();
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(err.to_string().contains("telegram_endpoints[].id must match"));
+    }
+
+    #[test]
+    fn v2_endpoint_id_must_not_have_whitespace() {
+        let mut s = base_settings_v2();
+        s.telegram_endpoints[0].id = " e1".to_string();
+        s.targets[0].endpoint_id = " e1".to_string();
+        let err = validate_settings_schema_v2(&s).unwrap_err();
+        assert!(err.to_string().contains("leading/trailing whitespace"));
     }
 
     #[test]

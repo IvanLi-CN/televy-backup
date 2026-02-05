@@ -2206,6 +2206,13 @@ async fn settings_import_bundle_apply(
     secrets_written.push(MASTER_KEY_KEY.to_string());
 
     for (k, v) in bundle_secrets.entries.iter() {
+        // Defense in depth: the core bundle decoder should reject this already.
+        if k == MASTER_KEY_KEY {
+            return Err(CliError::new(
+                "config.invalid",
+                "config bundle secrets must not contain televybackup.master_key",
+            ));
+        }
         store.set(k.as_str(), v.as_str());
         secrets_written.push(k.to_string());
     }
