@@ -234,10 +234,10 @@ impl TelegramMtProtoStorage {
 
         // If the helper process itself is unhealthy, respawn it so the next run can proceed
         // without needing a full app/daemon restart.
-        if let Err(ref e) = res {
-            if Self::should_respawn_helper_after(e) {
-                let _ = self.replace_helper_locked(&mut helper);
-            }
+        if let Err(ref e) = res
+            && Self::should_respawn_helper_after(e)
+        {
+            let _ = self.replace_helper_locked(&mut helper);
         }
 
         res
