@@ -839,7 +839,10 @@ min_delay_ms = 250
         s.telegram_endpoints[0].id = "ep/1".to_string();
         s.targets[0].endpoint_id = "ep/1".to_string();
         let err = validate_settings_schema_v2(&s).unwrap_err();
-        assert!(err.to_string().contains("telegram_endpoints[].id must match"));
+        assert!(
+            err.to_string()
+                .contains("telegram_endpoints[].id must match")
+        );
     }
 
     #[test]

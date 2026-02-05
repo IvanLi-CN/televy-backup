@@ -917,10 +917,23 @@ struct SettingsWindowRootView: View {
     private func reload() {
         if SettingsUIDemo.enabled {
             DispatchQueue.main.async {
-                self.secrets = nil
+                let demoSettings = SettingsUIDemo.makeSettings(scene: SettingsUIDemo.scene)
+
+                var botTokenPresent: [String: Bool] = [:]
+                var mtprotoSessionPresent: [String: Bool] = [:]
+                for ep in demoSettings.telegram_endpoints {
+                    botTokenPresent[ep.id] = true
+                    mtprotoSessionPresent[ep.id] = true
+                }
+                self.secrets = CliSecretsPresence(
+                    masterKeyPresent: true,
+                    telegramMtprotoApiHashPresent: true,
+                    telegramBotTokenPresentByEndpoint: botTokenPresent,
+                    telegramMtprotoSessionPresentByEndpoint: mtprotoSessionPresent
+                )
                 self.loadError = nil
                 self.section = SettingsUIDemo.initialSection
-                self.settings = SettingsUIDemo.makeSettings(scene: SettingsUIDemo.scene)
+                self.settings = demoSettings
 
                 if !SettingsUIDemo.disableAutoSelect {
                     if self.selectedTargetId == nil {
@@ -1076,6 +1089,16 @@ struct SettingsWindowRootView: View {
             width: 360,
             height: CGFloat.greatestFiniteMagnitude
         )
+
+        if SettingsUIDemo.enabled {
+            let env = ProcessInfo.processInfo.environment
+            if let p = env["TELEVYBACKUP_UI_DEMO_EXPORT_PASSPHRASE"], !p.isEmpty {
+                passphraseField.stringValue = p
+            }
+            if let h = env["TELEVYBACKUP_UI_DEMO_EXPORT_HINT"], !h.isEmpty {
+                messageView.string = h
+            }
+        }
 
         let messageScroll = NSScrollView()
         messageScroll.hasVerticalScroller = true

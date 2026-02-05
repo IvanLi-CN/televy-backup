@@ -97,7 +97,10 @@ fn derive_bundle_passphrase_key_v2(
     Ok(out)
 }
 
-fn validate_bundle_secrets_v2(settings: &SettingsV2, secrets: &ConfigBundleSecretsV2) -> Result<()> {
+fn validate_bundle_secrets_v2(
+    settings: &SettingsV2,
+    secrets: &ConfigBundleSecretsV2,
+) -> Result<()> {
     let mut required_keys = BTreeSet::<String>::new();
     required_keys.insert(settings.telegram.mtproto.api_hash_key.clone());
     for ep in &settings.telegram_endpoints {
@@ -150,7 +153,9 @@ fn validate_bundle_secrets_v2(settings: &SettingsV2, secrets: &ConfigBundleSecre
         }
         if key == CONFIG_BUNDLE_RESERVED_MASTER_KEY_KEY {
             return Err(Error::InvalidConfig {
-                message: format!("config bundle secrets.missing must not contain reserved key: {key}"),
+                message: format!(
+                    "config bundle secrets.missing must not contain reserved key: {key}"
+                ),
             });
         }
         if !required_keys.contains(key) {
@@ -387,7 +392,8 @@ mod tests {
         let new_payload_json = serde_json::to_vec(&payload).expect("payload json encode failed");
         let new_payload_framed =
             encrypt_framed(master_key, CONFIG_BUNDLE_AAD_PAYLOAD_V2, &new_payload_json).unwrap();
-        outer.payload_enc = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(new_payload_framed);
+        outer.payload_enc =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(new_payload_framed);
         bundle_key_from_outer(&outer)
     }
 
@@ -575,6 +581,9 @@ mod tests {
 
         let err = decode_config_bundle_key_v2(&tampered, "hunter2").unwrap_err();
         assert!(matches!(err, Error::InvalidConfig { .. }));
-        assert!(err.to_string().contains("may not reference reserved secret key"));
+        assert!(
+            err.to_string()
+                .contains("may not reference reserved secret key")
+        );
     }
 }
