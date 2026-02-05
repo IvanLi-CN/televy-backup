@@ -925,7 +925,8 @@ impl MtProtoHelper {
                 let _ = tx.send(res);
             });
 
-            let line = match rx.recv_timeout(Duration::from_secs(MTPROTO_HELPER_READ_TIMEOUT_SECS)) {
+            let line = match rx.recv_timeout(Duration::from_secs(MTPROTO_HELPER_READ_TIMEOUT_SECS))
+            {
                 Ok(Ok(line)) => line,
                 Ok(Err(e)) => {
                     return Err(Error::Telegram {
