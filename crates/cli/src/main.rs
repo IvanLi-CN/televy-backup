@@ -2007,16 +2007,25 @@ async fn settings_import_bundle_apply(
         let legacy_global = legacy_global_index_db_path(data_dir);
         let _ = legacy_global; // must not read/write legacy global db here (migration compat)
 
-        if db_path.exists() {
-            let ts = config_bundle::utc_now_compact_timestamp();
+        // Build a replacement DB first, then swap it into place, so failures don't leave us without
+        // `index.{endpoint_id}.sqlite`.
+        let ts = config_bundle::utc_now_compact_timestamp();
+
+        let backup_path = if db_path.exists() {
             let mut backup = db_path.clone();
             backup.set_extension(format!("sqlite.bak.{ts}"));
             if backup.exists() {
                 backup.set_extension(format!("sqlite.bak.{ts}.1"));
             }
-            std::fs::rename(&db_path, &backup)
-                .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
-            previous_backup_path = Some(backup.display().to_string());
+            Some(backup)
+        } else {
+            None
+        };
+
+        let mut tmp_path = db_path.clone();
+        tmp_path.set_extension(format!("sqlite.tmp.{ts}"));
+        if tmp_path.exists() {
+            tmp_path.set_extension(format!("sqlite.tmp.{ts}.1"));
         }
 
         // Choose one target under this endpoint with remote latest available.
@@ -2026,12 +2035,24 @@ async fn settings_import_bundle_apply(
                 if &t.endpoint_id != ep_id {
                     continue;
                 }
-                if let Some(latest) = cat
+
+                let mut latest = cat
                     .targets
                     .iter()
                     .find(|x| x.target_id == t.id)
-                    .and_then(|x| x.latest.clone())
-                {
+                    .and_then(|x| x.latest.clone());
+                if latest.is_none() {
+                    let matches = cat
+                        .targets
+                        .iter()
+                        .filter(|x| x.source_path == t.source_path)
+                        .collect::<Vec<_>>();
+                    if matches.len() == 1 {
+                        latest = matches[0].latest.clone();
+                    }
+                }
+
+                if let Some(latest) = latest {
                     chosen_remote =
                         Some((t.id.clone(), latest.snapshot_id, latest.manifest_object_id));
                     break;
@@ -2050,14 +2071,13 @@ async fn settings_import_bundle_apply(
                 &snapshot_id,
                 &manifest_object_id,
                 &bundle_master_key,
-                &db_path,
+                &tmp_path,
                 None,
                 Some(&provider),
             )
             .await
             .map_err(map_core_err)?;
 
-            rebuilt_db_path = db_path.display().to_string();
             rebuilt_from = SettingsImportBundleApplyRebuiltFromJson {
                 mode: "remote_latest".to_string(),
                 snapshot_id: Some(snapshot_id),
@@ -2070,17 +2090,37 @@ async fn settings_import_bundle_apply(
             });
         } else {
             // No bootstrap/latest: initialize an empty DB so future backups can build it up.
-            let _ = televy_backup_core::index_db::open_index_db(&db_path)
+            let _ = televy_backup_core::index_db::open_index_db(&tmp_path)
                 .await
                 .map_err(map_core_err)?;
 
-            rebuilt_db_path = db_path.display().to_string();
             rebuilt_from = SettingsImportBundleApplyRebuiltFromJson {
                 mode: "empty".to_string(),
                 snapshot_id: None,
                 manifest_object_id: None,
             };
         }
+
+        // Swap: move old DB to a backup path (if any), then move the new DB into place.
+        previous_backup_path = None;
+        if let Some(backup) = &backup_path {
+            if let Err(e) = std::fs::rename(&db_path, backup) {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(CliError::new("config.write_failed", e.to_string()));
+            }
+            previous_backup_path = Some(backup.display().to_string());
+        }
+
+        if let Err(e) = std::fs::rename(&tmp_path, &db_path) {
+            // Best-effort rollback: restore the previous DB if we moved it.
+            if let Some(backup) = &backup_path {
+                let _ = std::fs::rename(backup, &db_path);
+            }
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(CliError::new("config.write_failed", e.to_string()));
+        }
+
+        rebuilt_db_path = db_path.display().to_string();
     }
 
     // Auto-clean legacy global DB if all in-use per-endpoint DBs are present and usable.

@@ -15,6 +15,7 @@ pub const CONFIG_BUNDLE_VERSION_V2: u32 = 2;
 pub const CONFIG_BUNDLE_KDF_V2: &str = "pbkdf2_hmac_sha256";
 pub const CONFIG_BUNDLE_KDF_SALT_LEN_V2: usize = 16;
 pub const CONFIG_BUNDLE_KDF_ITERS_V2: u32 = 200_000;
+pub const CONFIG_BUNDLE_KDF_MAX_ITERS_V2: u32 = 1_000_000;
 pub const CONFIG_BUNDLE_AAD_GOLD_KEY_V2: &[u8] = b"televy.config.bundle.v2.gold_key";
 pub const CONFIG_BUNDLE_AAD_PAYLOAD_V2: &[u8] = b"televy.config.bundle.v2.payload";
 
@@ -81,6 +82,11 @@ fn derive_bundle_passphrase_key_v2(
     if iterations < 10_000 {
         return Err(Error::InvalidConfig {
             message: "config bundle KDF iterations too small".to_string(),
+        });
+    }
+    if iterations > CONFIG_BUNDLE_KDF_MAX_ITERS_V2 {
+        return Err(Error::InvalidConfig {
+            message: format!("config bundle KDF iterations too large: {iterations}"),
         });
     }
 
@@ -353,5 +359,17 @@ mod tests {
 
         let dec = decode_config_bundle_key_v2(&key, "hunter2").unwrap();
         assert_eq!(dec.outer.hint, "");
+    }
+
+    #[test]
+    fn tbc2_kdf_iterations_too_large_is_rejected() {
+        let err = derive_bundle_passphrase_key_v2(
+            "hunter2",
+            &[0u8; CONFIG_BUNDLE_KDF_SALT_LEN_V2],
+            CONFIG_BUNDLE_KDF_MAX_ITERS_V2 + 1,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidConfig { .. }));
+        assert!(err.to_string().contains("iterations too large"));
     }
 }
