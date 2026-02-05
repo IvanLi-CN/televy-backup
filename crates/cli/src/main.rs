@@ -1252,6 +1252,19 @@ fn legacy_global_index_db_path(data_dir: &Path) -> PathBuf {
     data_dir.join("index").join("index.sqlite")
 }
 
+async fn init_empty_index_db(path: &Path) -> Result<(), CliError> {
+    // When creating a brand-new per-endpoint index DB, ensure the parent directory exists.
+    // (SQLite can create the DB file, but not missing directories.)
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+    }
+    let _ = televy_backup_core::index_db::open_index_db(path)
+        .await
+        .map_err(map_core_err)?;
+    Ok(())
+}
+
 async fn settings_import_bundle_dry_run(
     config_dir: &Path,
     data_dir: &Path,
@@ -2090,9 +2103,7 @@ async fn settings_import_bundle_apply(
             });
         } else {
             // No bootstrap/latest: initialize an empty DB so future backups can build it up.
-            let _ = televy_backup_core::index_db::open_index_db(&tmp_path)
-                .await
-                .map_err(map_core_err)?;
+            init_empty_index_db(&tmp_path).await?;
 
             rebuilt_from = SettingsImportBundleApplyRebuiltFromJson {
                 mode: "empty".to_string(),
@@ -5600,6 +5611,19 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         dir
+    }
+
+    #[tokio::test]
+    async fn init_empty_index_db_creates_parent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_dir = dir.path().join("index");
+        let path = index_dir.join("index.ep1.sqlite.tmp");
+        assert!(!index_dir.exists());
+
+        init_empty_index_db(&path).await.unwrap();
+
+        assert!(index_dir.exists());
+        assert!(path.exists());
     }
 
     #[test]
