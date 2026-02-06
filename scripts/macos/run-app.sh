@@ -3,6 +3,16 @@ set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
 
+# Development default: disable Keychain to avoid prompts and keep local runs reproducible.
+# Override with `TELEVYBACKUP_DISABLE_KEYCHAIN=0` for production-like behavior.
+disable_keychain="${TELEVYBACKUP_DISABLE_KEYCHAIN:-1}"
+
+# When Keychain is disabled we also default to ad-hoc codesigning so `security find-identity`
+# doesn't trigger interactive Keychain authorization prompts.
+if [ "$disable_keychain" = "1" ] && [ -z "${TELEVYBACKUP_CODESIGN_IDENTITY:-}" ]; then
+  export TELEVYBACKUP_CODESIGN_IDENTITY="-"
+fi
+
 "$root_dir/scripts/macos/build-app.sh"
 
 app="$root_dir/target/macos-app/TelevyBackup.app"
@@ -25,9 +35,6 @@ pkill -f "$app_daemon" >/dev/null 2>&1 || true
 pkill -f "$app_cli --json status stream" >/dev/null 2>&1 || true
 pkill -f "$app/Contents/MacOS/televybackup-mtproto-helper" >/dev/null 2>&1 || true
 
-# Development default: disable Keychain to avoid prompts and keep local runs reproducible.
-# Override with `TELEVYBACKUP_DISABLE_KEYCHAIN=0` for production-like behavior.
-disable_keychain="${TELEVYBACKUP_DISABLE_KEYCHAIN:-1}"
 if [ "$disable_keychain" = "1" ]; then
   data_dir="${TELEVYBACKUP_DATA_DIR:-}"
   config_dir="${TELEVYBACKUP_CONFIG_DIR:-}"
@@ -43,7 +50,11 @@ if [ "$disable_keychain" = "1" ]; then
   rm -f "$data_dir/ipc/"*.sock >/dev/null 2>&1 || true
   # NOTE: launching via LaunchServices keeps the menu bar app alive; env vars are not reliably
   # inherited by `open`, so pass overrides via `--args` and let the app propagate to subprocesses.
-  open -n "$app" --args --disable-keychain --data-dir "$data_dir" --config-dir "$config_dir"
+  args=(--disable-keychain --data-dir "$data_dir" --config-dir "$config_dir")
+  if [ "${TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH:-0}" = "1" ]; then
+    args+=(--open-settings)
+  fi
+  open -n "$app" --args "${args[@]}"
 else
   open "$app"
 fi
