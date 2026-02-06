@@ -136,11 +136,17 @@ The config bundle is a single copy/paste key used to restore a working setup on 
 - **Import flow**:
   - Dry-run: decode + inspect + preflight (source path existence, pinned bootstrap/catalog, remote latest pointers).
   - Apply: requires explicit confirmation and rebuilds per-endpoint index DB from the pinned remote latest (or initializes an empty DB when bootstrap is missing).
-  - Directory selection: rebinding a target while remote latest exists is a **data-plane decision**. The UI forces an explicit choice:
-    - Restore remote latest: pick an **empty** folder (recommended), then run restore to populate it.
-    - Keep local folder: accept that the next backup may overwrite remote latest.
-    - Import does not attempt to prove "folder contents match remote latest" by trusting a local index DB.
-  - Note: local index DBs are not authoritative during import. Import never updates the remote pin based on any local index; if you want the local folder to become the source of truth, run a backup after import.
+  - Directory selection (rebind):
+    - Rebinding a target while remote latest exists is a **data-plane decision**.
+    - The UI first runs a **content-level compare** between local folder bytes and the remote latest snapshot:
+      - Downloads the remote index DB (manifest + parts) from Telegram.
+      - Uses the snapshot’s `file_chunks(offset,len)` + BLAKE3 to validate local files **without using any local index DB** as proof.
+    - If the folder is fully identical to remote latest, no prompt is shown.
+    - If differences exist, the user must choose a resolution:
+      - **Use remote latest**: restore remote latest into the chosen folder (folder must be empty).
+      - **Keep local folder**: keep local bytes; a future backup may overwrite remote latest.
+      - **Merge (Option B)**: run a backup immediately after import to update remote latest from local bytes (local -> remote new snapshot).
+  - Note: local index DBs are not authoritative during import. Import/compare never “proves equality” using a local index, and import never updates the remote pin based on any local index; remote changes must flow through a backup that computes a new snapshot from the actual filesystem.
 
 ## Crypto and framing
 
