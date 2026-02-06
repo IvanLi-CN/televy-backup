@@ -1947,7 +1947,6 @@ private struct ImportConfigBundleSheet: View {
 
     private enum ResolutionMode: String, CaseIterable, Identifiable {
         case overwrite_local
-        case overwrite_remote
         case rebind
         case skip
 
@@ -1956,7 +1955,6 @@ private struct ImportConfigBundleSheet: View {
         var title: String {
             switch self {
             case .overwrite_local: return "Use remote latest (replace local)"
-            case .overwrite_remote: return "Use local (update remote pin)"
             case .rebind: return "Choose a different folder"
             case .skip: return "Skip this target"
             }
@@ -2104,8 +2102,6 @@ private struct ImportConfigBundleSheet: View {
                 next[pf.targetId] = ResolutionState(mode: .skip, newSourcePath: "")
             } else if pf.conflict.reasons.contains("missing_path") {
                 next[pf.targetId] = ResolutionState(mode: .rebind, newSourcePath: "")
-            } else if pf.conflict.reasons.contains("local_vs_remote_mismatch") {
-                next[pf.targetId] = ResolutionState(mode: .overwrite_local, newSourcePath: "")
             } else {
                 next[pf.targetId] = ResolutionState(mode: .overwrite_local, newSourcePath: "")
             }
@@ -2310,8 +2306,6 @@ private struct ImportConfigBundleSheet: View {
                 out.append("Folder not found on this Mac.")
             case "bootstrap_invalid":
                 out.append("Remote bootstrap cannot be decrypted (wrong key or corrupted).")
-            case "local_vs_remote_mismatch":
-                out.append("Local index does not match the remote latest.")
             default:
                 out.append("Needs review (\(r)).")
             }
@@ -2346,7 +2340,7 @@ private struct ImportConfigBundleSheet: View {
                 snapshotId: "s_demo_latest",
                 manifestObjectId: "m_demo_latest"
             )
-            var localIndex = CliSettingsImportBundleDryRunResponse.LocalIndex(state: "match", details: nil)
+            let localIndex = CliSettingsImportBundleDryRunResponse.LocalIndex(state: "match", details: nil)
             var reasons: [String] = []
 
             if includeConflicts {
@@ -2360,9 +2354,6 @@ private struct ImportConfigBundleSheet: View {
                         details: ["error": "decrypt failed"]
                     )
                     reasons = ["bootstrap_invalid"]
-                } else if i == 2 {
-                    localIndex = CliSettingsImportBundleDryRunResponse.LocalIndex(state: "stale", details: nil)
-                    reasons = ["local_vs_remote_mismatch"]
                 }
             }
 

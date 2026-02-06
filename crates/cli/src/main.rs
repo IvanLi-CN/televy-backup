@@ -8,7 +8,6 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use sqlx::Row;
-use televy_backup_core::bootstrap::PinnedStorage;
 use televy_backup_core::{
     APP_NAME, BackupConfig, BackupOptions, ChunkingConfig, ProgressSink, RestoreConfig,
     RestoreOptions, Storage, TelegramMtProtoStorage, TelegramMtProtoStorageConfig, VerifyConfig,
@@ -1755,12 +1754,6 @@ async fn settings_import_bundle_dry_run(
             ConfigBundleLocalIndexState::Missing
         };
 
-        if remote_latest.state == ConfigBundleRemoteLatestState::Ok
-            && local_index_state == ConfigBundleLocalIndexState::Stale
-        {
-            conflict_reasons.push("local_vs_remote_mismatch".to_string());
-        }
-
         let conflict_state = if conflict_reasons.is_empty() {
             ConfigBundleConflictState::None
         } else {
@@ -1860,6 +1853,25 @@ async fn settings_import_bundle_apply(
             "config_bundle.rotation_required",
             "local master key mismatch and local targets exist; start master key rotation flow",
         ));
+    }
+
+    // Guardrail: overwrite_remote used to update the pinned remote latest based on the local index.
+    // That is not safe during config restore/import because local indexes are not authoritative.
+    // If the user intends the local folder to become the source of truth, they must run a backup
+    // (which computes a new snapshot from the actual filesystem) and let it update the pin.
+    for (target_id, resolution) in req.resolutions.iter() {
+        if matches!(
+            resolution,
+            SettingsImportBundleApplyResolution::OverwriteRemote
+        ) {
+            return Err(CliError::new(
+                "config_bundle.conflict",
+                format!(
+                    "target {} overwrite_remote is not supported during import; run a backup to update remote latest",
+                    target_id
+                ),
+            ));
+        }
     }
 
     let selected_ids: std::collections::HashSet<String> =
@@ -1962,7 +1974,7 @@ async fn settings_import_bundle_apply(
         endpoint_catalogs.insert(ep.id.clone(), cat);
     }
 
-    // Detect conflicts (missing_path / bootstrap_invalid / local_vs_remote_mismatch) and enforce
+    // Detect conflicts (missing_path / bootstrap_invalid) and enforce
     // that apply provides explicit resolutions for any target needing resolution.
     for t in &selected_targets {
         let mut reasons = Vec::new();
@@ -1977,47 +1989,6 @@ async fn settings_import_bundle_apply(
             .unwrap_or(ConfigBundleBootstrapState::Missing);
         if bootstrap_state == ConfigBundleBootstrapState::Invalid {
             reasons.push("bootstrap_invalid");
-        }
-
-        let mut remote_latest: Option<bootstrap::BootstrapLatest> = None;
-        if let Some(cat) = endpoint_catalogs
-            .get(&t.endpoint_id)
-            .and_then(|c| c.as_ref())
-        {
-            remote_latest = cat
-                .targets
-                .iter()
-                .find(|x| x.target_id == t.id)
-                .and_then(|x| x.latest.clone());
-
-            if remote_latest.is_none() {
-                let matches = cat
-                    .targets
-                    .iter()
-                    .filter(|x| x.source_path == t.source_path)
-                    .collect::<Vec<_>>();
-                if matches.len() == 1 {
-                    remote_latest = matches[0].latest.clone();
-                }
-            }
-        }
-
-        if let Some(latest) = &remote_latest {
-            let provider = settings_config::endpoint_provider(&t.endpoint_id);
-            let db_path = endpoint_index_db_path(data_dir, &t.endpoint_id);
-            if db_path.exists() {
-                let match_ok = televy_backup_core::index_sync::local_index_matches_remote_latest(
-                    &db_path,
-                    &provider,
-                    &latest.snapshot_id,
-                    &latest.manifest_object_id,
-                )
-                .await
-                .map_err(map_core_err)?;
-                if !match_ok {
-                    reasons.push("local_vs_remote_mismatch");
-                }
-            }
         }
 
         if reasons.is_empty() {
@@ -2058,131 +2029,7 @@ async fn settings_import_bundle_apply(
         }
     }
 
-    let mut updated_pins = Vec::new();
-
-    // Apply resolutions that require remote writes first (overwrite_remote), so index rebuild can
-    // download the updated latest if needed.
-    for t in &selected_targets {
-        let Some(resolution) = req.resolutions.get(&t.id) else {
-            continue;
-        };
-        if !matches!(
-            resolution,
-            SettingsImportBundleApplyResolution::OverwriteRemote
-        ) {
-            continue;
-        }
-
-        let bootstrap_state = endpoint_bootstrap_state
-            .get(&t.endpoint_id)
-            .copied()
-            .unwrap_or(ConfigBundleBootstrapState::Missing);
-        if bootstrap_state == ConfigBundleBootstrapState::Invalid {
-            return Err(CliError::new(
-                "config_bundle.conflict",
-                format!("target {} bootstrap invalid; must skip", t.id),
-            ));
-        }
-
-        let Some(storage) = endpoint_storage.get(&t.endpoint_id) else {
-            return Err(CliError::new(
-                "config_bundle.conflict",
-                format!(
-                    "target {} overwrite_remote requires telegram access (missing secrets?)",
-                    t.id
-                ),
-            ));
-        };
-
-        // Determine local head from the existing per-endpoint DB.
-        let provider = settings_config::endpoint_provider(&t.endpoint_id);
-        let db_path = endpoint_index_db_path(data_dir, &t.endpoint_id);
-        if !db_path.exists() {
-            return Err(CliError::new(
-                "config_bundle.conflict",
-                format!(
-                    "target {} overwrite_remote requires existing local index DB: {}",
-                    t.id,
-                    db_path.display()
-                ),
-            ));
-        }
-
-        let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
-            .await
-            .map_err(map_core_err)?;
-
-        let row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
-            r#"
-            SELECT s.snapshot_id AS snapshot_id, r.manifest_object_id AS manifest_object_id
-            FROM snapshots s
-            JOIN remote_indexes r ON r.snapshot_id = s.snapshot_id
-            WHERE s.source_path = ? AND (r.provider = ? OR r.provider LIKE ?)
-            ORDER BY s.created_at DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(&t.source_path)
-        .bind(&provider)
-        .bind({
-            let kind = provider
-                .split(['/', ':'])
-                .next()
-                .unwrap_or(provider.as_str());
-            format!("{kind}%")
-        })
-        .fetch_optional(&pool)
-        .await
-        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
-
-        let Some(row) = row else {
-            return Err(CliError::new(
-                "config_bundle.conflict",
-                format!("target {} has no local snapshot to pin", t.id),
-            ));
-        };
-
-        let snapshot_id: String = row.get("snapshot_id");
-        let manifest_object_id: String = row.get("manifest_object_id");
-
-        let old = storage.get_pinned_object_id().map_err(map_core_err)?;
-        bootstrap::update_remote_latest(
-            storage,
-            &bundle_master_key,
-            &t.id,
-            &t.source_path,
-            &t.label,
-            &snapshot_id,
-            &manifest_object_id,
-        )
-        .await
-        .map_err(map_core_err)?;
-        let new = storage
-            .get_pinned_object_id()
-            .map_err(map_core_err)?
-            .unwrap_or_else(|| "—".to_string());
-
-        updated_pins.push(SettingsImportBundleApplyPinnedUpdateJson {
-            endpoint_id: t.endpoint_id.clone(),
-            old: old.unwrap_or_else(|| "—".to_string()),
-            new,
-        });
-    }
-
-    // Refresh catalogs for endpoints where we updated pins.
-    if !updated_pins.is_empty() {
-        for ep_id in updated_pins.iter().map(|p| p.endpoint_id.clone()) {
-            if let Some(storage) = endpoint_storage.get(&ep_id) {
-                let cat = match bootstrap::load_remote_catalog(storage, &bundle_master_key).await {
-                    Ok(Some(cat)) => Some(cat),
-                    Ok(None) => None,
-                    Err(televy_backup_core::Error::BootstrapDecryptFailed { .. }) => None,
-                    Err(e) => return Err(map_core_err(e)),
-                };
-                endpoint_catalogs.insert(ep_id, cat);
-            }
-        }
-    }
+    let updated_pins = Vec::new();
 
     // Filter targets by resolutions (skip/rebind) and validate constraints.
     selected_targets = selected_targets

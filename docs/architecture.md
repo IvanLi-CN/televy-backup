@@ -134,8 +134,9 @@ The config bundle is a single copy/paste key used to restore a working setup on 
   - Bundle payload plaintext is JSON and is framed-encrypted with the master key using AAD `televy.config.bundle.v2.payload`.
 - **Secrets coverage**: exports only the secrets referenced by Settings (e.g. bot tokens, MTProto api_hash); MTProto session secrets are intentionally excluded.
 - **Import flow**:
-  - Dry-run: decode + inspect + preflight (source path existence, pinned bootstrap/catalog, remote latest pointers, local index match).
-  - Apply: requires explicit confirmation and can rebuild per-endpoint index DB from remote latest (or initialize an empty DB when bootstrap is missing).
+  - Dry-run: decode + inspect + preflight (source path existence, pinned bootstrap/catalog, remote latest pointers).
+  - Apply: requires explicit confirmation and rebuilds per-endpoint index DB from the pinned remote latest (or initializes an empty DB when bootstrap is missing).
+  - Note: local index DBs are not authoritative during import. Import never updates the remote pin based on any local index; if you want the local folder to become the source of truth, run a backup after import.
 
 ## Crypto and framing
 
