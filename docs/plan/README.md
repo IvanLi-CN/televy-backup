@@ -71,5 +71,6 @@
 | nvr79 | 开发期绕过 Keychain（codesign + vault key；daemon-only） | 已完成 | `nvr79:avoid-keychain-in-dev/PLAN.md` | 2026-01-28 | 已落地：`TELEVYBACKUP_DISABLE_KEYCHAIN` + `vault.key` + daemon control IPC + tests |
 | kpmqp | 修复 daemon IPC 可靠性（解锁 Recovery Key/Verify） | 已完成 | `kpmqp:fix-daemon-ipc-sockets/PLAN.md` | 2026-01-31 | PR #30；实现分支：`fix/kpmqp-daemon-ipc-sockets`；待主人验收 |
 | fn4ny | Settings：配置整包导出/导入（keyed config bundle） | 已完成 | `fn4ny:config-bundle-export-import/PLAN.md` | 2026-02-05 | 实现分支：`feat/fn4ny-config-bundle-export-import`；待主人验收 |
+| fwwqp | CLI events 实时状态与 GUI 进度一致性修复（flush + progress） | 已完成 | `fwwqp:events-live-task-ui/PLAN.md` | 2026-02-05 | PR #34 |
 | r6ceq | 索引按 Endpoint 隔离 + 禁止 chat 复用 | 待实现 | `r6ceq:endpoint-scoped-index-chat-uniqueness/PLAN.md` | 2026-02-01 |  |
 | 4fexy | Master key 轮换（可暂停/继续/取消） | 待实现 | `4fexy:master-key-rotation/PLAN.md` | 2026-02-01 | 依赖：`r6ceq` |
