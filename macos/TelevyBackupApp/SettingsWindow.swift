@@ -2000,10 +2000,9 @@ private struct ImportConfigBundleSheet: View {
         panel.allowsMultipleSelection = false
 
         func applyUrl(_ url: URL) {
-            let current = resolveState(targetId: targetId)
             setResolveState(
                 targetId: targetId,
-                ResolutionState(mode: current.mode, newSourcePath: url.path)
+                ResolutionState(mode: .rebind, newSourcePath: url.path)
             )
         }
 
@@ -2097,9 +2096,15 @@ private struct ImportConfigBundleSheet: View {
         if fileEncrypted && passphrase.isEmpty { return false }
 
         for id in selectedTargetIds {
+            let s = resolveState(targetId: id)
+            if s.mode == .rebind {
+                if s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return false
+                }
+            }
+
             if needsResolution(targetId: id) {
                 guard let pf = preflightByTargetId[id] else { return false }
-                let s = resolveState(targetId: id)
 
                 if pf.conflict.reasons.contains("bootstrap_invalid") && s.mode != .skip {
                     return false
@@ -2133,7 +2138,7 @@ private struct ImportConfigBundleSheet: View {
 
         var resolutionsObj: [String: Any] = [:]
         for id in selected {
-            guard needsResolution(targetId: id) else { continue }
+            guard needsResolution(targetId: id) || resolutions[id] != nil else { continue }
             let state = resolveState(targetId: id)
             var obj: [String: Any] = ["mode": state.mode.rawValue]
             if state.mode == .rebind {
@@ -2522,6 +2527,10 @@ private struct ImportConfigBundleSheet: View {
                         a.id.localizedStandardCompare(b.id) == .orderedAscending
                     }) { t in
                         let pf = preflightByTargetId[t.id]
+                        let state = resolveState(targetId: t.id)
+                        let trimmedNewSourcePath = state.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let effectiveSourcePath =
+                            (state.mode == .rebind && !trimmedNewSourcePath.isEmpty) ? trimmedNewSourcePath : t.sourcePath
 
                         VStack(alignment: .leading, spacing: 6) {
                             Toggle(isOn: targetToggleBinding(id: t.id)) {
@@ -2540,11 +2549,22 @@ private struct ImportConfigBundleSheet: View {
                                 }
                             }
 
-                            Text(t.sourcePath)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                            HStack(spacing: 8) {
+                                Text(effectiveSourcePath)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Button("Change…") {
+                                    // Clicking "Change…" implies the user intends to import this target.
+                                    selectedTargetIds.insert(t.id)
+                                    chooseFolder(targetId: t.id)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
 
                             if let pf, pf.conflict.state == "needs_resolution", selectedTargetIds.contains(t.id) {
                                 let state = resolveState(targetId: t.id)
