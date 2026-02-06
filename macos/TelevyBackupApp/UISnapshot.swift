@@ -20,6 +20,15 @@ enum UISnapshot {
         // composite on a neutral background instead of leaving alpha as-is.
         let backgroundColor: NSColor = .windowBackgroundColor
 
+        // NSOpenPanel (folder picker) embeds a remote view; make a best-effort to flush layout
+        // before capturing. This still won't be perfect on every macOS version, but avoids
+        // frequently capturing a blank surface in demo/snapshot mode.
+        if window is NSOpenPanel {
+            window.displayIfNeeded()
+            view.layoutSubtreeIfNeeded()
+            view.displayIfNeeded()
+        }
+
         // Prefer PDF-rendering for panels like NSSavePanel/NSTexturedFullScreenWindow.
         // Some system windows do not render correctly with `cacheDisplay`.
         //

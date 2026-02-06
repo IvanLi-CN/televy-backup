@@ -2360,9 +2360,12 @@ private struct ImportConfigBundleSheet: View {
                 applyUrl(url)
             }
         } else {
-            let res = panel.runModal()
-            guard res == .OK, let url = panel.url else { return }
-            applyUrl(url)
+            // Avoid blocking the main thread in edge cases where we don't have a host window
+            // (e.g. UI snapshot/demo mode). `begin` is non-blocking and still shows the panel.
+            panel.begin { res in
+                guard res == .OK, let url = panel.url else { return }
+                applyUrl(url)
+            }
         }
     }
 
