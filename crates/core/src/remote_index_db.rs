@@ -17,6 +17,7 @@ pub struct DownloadedIndexDbStats {
     pub bytes_written: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn download_and_write_index_db_atomic<S: Storage>(
     storage: &S,
     snapshot_id: &str,

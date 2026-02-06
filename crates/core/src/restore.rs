@@ -202,6 +202,7 @@ async fn restore_dirs(pool: &SqlitePool, snapshot_id: &str, target: &Path) -> Re
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn restore_files<S: Storage>(
     storage: &S,
     pool: &SqlitePool,
@@ -446,6 +447,7 @@ async fn restore_files<S: Storage>(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn verify_chunks<S: Storage>(
     storage: &S,
     pool: &SqlitePool,
