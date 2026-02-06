@@ -1995,6 +1995,7 @@ private struct ImportConfigBundleSheet: View {
         let panel = NSOpenPanel()
         panel.title = "Choose folder"
         panel.prompt = "Choose"
+        panel.canCreateDirectories = true
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
