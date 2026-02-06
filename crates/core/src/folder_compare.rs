@@ -97,11 +97,12 @@ pub async fn compare_local_folder_against_index_db(
             continue;
         }
 
-        let rel = entry.path().strip_prefix(local_root).map_err(|_| {
-            Error::InvalidConfig {
+        let rel = entry
+            .path()
+            .strip_prefix(local_root)
+            .map_err(|_| Error::InvalidConfig {
                 message: "strip_prefix failed".to_string(),
-            }
-        })?;
+            })?;
         let rel_str = rel.to_str().ok_or_else(|| Error::InvalidConfig {
             message: "local path is not valid utf-8".to_string(),
         })?;
@@ -350,10 +351,9 @@ mod tests {
         let hash = blake3::hash(b"hello").to_hex().to_string();
         insert_file_one_chunk(&pool, "s1", "f1", "a.txt", b"hello", &hash).await;
 
-        let report =
-            compare_local_folder_against_index_db(&db_path, "s1", &local, 10)
-                .await
-                .unwrap();
+        let report = compare_local_folder_against_index_db(&db_path, "s1", &local, 10)
+            .await
+            .unwrap();
         assert!(report.is_match());
     }
 
@@ -368,10 +368,9 @@ mod tests {
         let hash = blake3::hash(b"hello").to_hex().to_string();
         insert_file_one_chunk(&pool, "s1", "f1", "a.txt", b"hello", &hash).await;
 
-        let report =
-            compare_local_folder_against_index_db(&db_path, "s1", &local, 10)
-                .await
-                .unwrap();
+        let report = compare_local_folder_against_index_db(&db_path, "s1", &local, 10)
+            .await
+            .unwrap();
         assert!(!report.is_match());
         assert_eq!(report.missing_local_files, 1);
     }
@@ -386,10 +385,9 @@ mod tests {
         let db_path = dir.path().join("index.sqlite");
         init_test_db(&db_path, "s1").await;
 
-        let report =
-            compare_local_folder_against_index_db(&db_path, "s1", &local, 10)
-                .await
-                .unwrap();
+        let report = compare_local_folder_against_index_db(&db_path, "s1", &local, 10)
+            .await
+            .unwrap();
         assert!(!report.is_match());
         assert_eq!(report.extra_local_files, 1);
     }
@@ -406,12 +404,10 @@ mod tests {
         let wrong = blake3::hash(b"world").to_hex().to_string();
         insert_file_one_chunk(&pool, "s1", "f1", "a.txt", b"hello", &wrong).await;
 
-        let report =
-            compare_local_folder_against_index_db(&db_path, "s1", &local, 10)
-                .await
-                .unwrap();
+        let report = compare_local_folder_against_index_db(&db_path, "s1", &local, 10)
+            .await
+            .unwrap();
         assert!(!report.is_match());
         assert_eq!(report.hash_mismatch_files, 1);
     }
 }
-

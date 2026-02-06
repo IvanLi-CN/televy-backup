@@ -1893,7 +1893,11 @@ async fn settings_import_bundle_compare_folder(
     let bundle_secrets = decoded.payload.secrets;
     let bundle_master_key = decoded.master_key;
 
-    let Some(target) = bundle_settings.targets.iter().find(|t| t.id == req.target_id) else {
+    let Some(target) = bundle_settings
+        .targets
+        .iter()
+        .find(|t| t.id == req.target_id)
+    else {
         return Err(CliError::new(
             "config.invalid",
             format!("unknown targetId: {}", req.target_id),
@@ -1907,7 +1911,10 @@ async fn settings_import_bundle_compare_folder(
     else {
         return Err(CliError::new(
             "config.invalid",
-            format!("missing endpoint in bundle settings: {}", target.endpoint_id),
+            format!(
+                "missing endpoint in bundle settings: {}",
+                target.endpoint_id
+            ),
         ));
     };
 
