@@ -2064,15 +2064,16 @@ async fn settings_import_bundle_compare_folder(
 
     let is_match = report.is_match();
 
-    let mut diff = SettingsImportBundleCompareFolderDiffJson::default();
-    diff.missing_local_files = report.missing_local_files;
-    diff.extra_local_files = report.extra_local_files;
-    diff.size_mismatch_files = report.size_mismatch_files;
-    diff.hash_mismatch_files = report.hash_mismatch_files;
-    diff.io_error_files = report.io_error_files;
-    diff.missing_local_examples = report.missing_local_examples;
-    diff.extra_local_examples = report.extra_local_examples;
-    diff.mismatch_examples = report.mismatch_examples;
+    let diff = SettingsImportBundleCompareFolderDiffJson {
+        missing_local_files: report.missing_local_files,
+        extra_local_files: report.extra_local_files,
+        size_mismatch_files: report.size_mismatch_files,
+        hash_mismatch_files: report.hash_mismatch_files,
+        io_error_files: report.io_error_files,
+        missing_local_examples: report.missing_local_examples,
+        extra_local_examples: report.extra_local_examples,
+        mismatch_examples: report.mismatch_examples,
+    };
 
     let state = if is_match {
         ConfigBundleFolderCompareState::Match

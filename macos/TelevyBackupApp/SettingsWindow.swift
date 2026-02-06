@@ -2213,7 +2213,7 @@ private struct ImportConfigBundleSheet: View {
         let pp = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !key.isEmpty else { return }
-        guard !pp.isEmpty else { return }
+        if fileEncrypted && pp.isEmpty { return }
 
         guard let cli = model.cliPath() else { return }
 

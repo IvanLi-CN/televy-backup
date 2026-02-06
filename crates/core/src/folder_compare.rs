@@ -109,9 +109,11 @@ pub async fn compare_local_folder_against_index_db(
         local_files.insert(rel_str.to_string());
     }
 
-    let mut report = FolderCompareReport::default();
-    report.remote_files_total = remote_files.len() as u64;
-    report.local_files_total = local_files.len() as u64;
+    let mut report = FolderCompareReport {
+        remote_files_total: remote_files.len() as u64,
+        local_files_total: local_files.len() as u64,
+        ..Default::default()
+    };
 
     // Fast mismatch checks: missing/extra files.
     for p in remote_files.iter() {
