@@ -2062,18 +2062,9 @@ private struct ImportConfigBundleSheet: View {
         inspectError = "Invalid backup config file"
     }
 
-    private enum RebindCompareState: String {
-        case unknown
-        case checking
-        case match
-        case mismatch
-        case remote_missing
-        case error
-    }
-
-    private struct ResolutionState {
-        var mode: ResolutionMode
-        var newSourcePath: String
+	    private struct ResolutionState {
+	        var mode: ResolutionMode
+	        var newSourcePath: String
         // When rebinding a target to a new folder while remote latest exists, the user must decide
         // whether they intend to restore remote data into the new folder or keep the local folder
         // contents and potentially overwrite remote on the next backup.
@@ -2090,52 +2081,21 @@ private struct ImportConfigBundleSheet: View {
         case rebind
         case skip
 
-        var id: String { rawValue }
+	        var id: String { rawValue }
 
-        var title: String {
+	        var title: String {
             switch self {
             case .overwrite_local: return "Use remote latest (replace local)"
             case .rebind: return "Choose a different folder"
             case .skip: return "Skip this target"
             }
-        }
-    }
+	        }
+	    }
 
-    private enum RebindDataDecision: String, CaseIterable, Identifiable {
-        case undecided
-        case use_remote_latest
-        case keep_local
-        case merge_local_to_remote
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .undecided: return "Choose…"
-            case .use_remote_latest: return "Use remote latest"
-            case .keep_local: return "Keep local folder"
-            case .merge_local_to_remote: return "Merge (backup local to remote)"
-            }
-        }
-
-        var detail: String {
-            switch self {
-            case .undecided:
-                return "Pick which side should be treated as the source of truth."
-            case .use_remote_latest:
-                return "Recommended for restore. The folder must be empty."
-            case .keep_local:
-                return "Local folder becomes the source of truth; next backup may overwrite remote latest."
-            case .merge_local_to_remote:
-                return "Runs a backup after import to update remote latest from the local folder."
-            }
-        }
-    }
-
-    private var preflightByTargetId: [String: CliSettingsImportBundleDryRunResponse.PreflightTarget] {
-        guard let inspection else { return [:] }
-        return Dictionary(uniqueKeysWithValues: inspection.preflight.targets.map { ($0.targetId, $0) })
-    }
+	    private var preflightByTargetId: [String: CliSettingsImportBundleDryRunResponse.PreflightTarget] {
+	        guard let inspection else { return [:] }
+	        return Dictionary(uniqueKeysWithValues: inspection.preflight.targets.map { ($0.targetId, $0) })
+	    }
 
     private func needsResolution(targetId: String) -> Bool {
         guard let pf = preflightByTargetId[targetId] else { return false }
@@ -2369,30 +2329,29 @@ private struct ImportConfigBundleSheet: View {
 
         func applyUrl(_ url: URL) {
             let newPath = url.path
-            if let inspection,
-               let t = inspection.bundle.targets.first(where: { $0.id == targetId }),
-               t.sourcePath == newPath
-            {
-                // If the user explicitly opened the picker and re-selected the same path, treat
-                // it as "no change" unless remote latest exists. In that case, treat it as a
-                // rebind so we can run a content-level compare against remote latest and only
-                // prompt for a data decision if it actually differs.
-                if remoteLatestExists(targetId: targetId) {
-                    setResolveState(
-                        targetId: targetId,
-                        ResolutionState(mode: .rebind, newSourcePath: newPath)
-                    )
-                    startRebindCompare(targetId: targetId, sourcePath: newPath)
-                } else {
-                    resolutions.removeValue(forKey: targetId)
-                }
-                return
-            }
-            setResolveState(
-                targetId: targetId,
-                ResolutionState(mode: .rebind, newSourcePath: newPath)
+
+            let originalPath = inspection?
+                .bundle
+                .targets
+                .first(where: { $0.id == targetId })?
+                .sourcePath
+
+            let action = RebindApplyGate.selectionAction(
+                originalSourcePath: originalPath,
+                selectedSourcePath: newPath,
+                remoteLatestExists: remoteLatestExists(targetId: targetId)
             )
-            startRebindCompare(targetId: targetId, sourcePath: newPath)
+
+            switch action {
+            case .clearResolution:
+                resolutions.removeValue(forKey: targetId)
+            case let .rebindAndCompare(newSourcePath):
+                setResolveState(
+                    targetId: targetId,
+                    ResolutionState(mode: .rebind, newSourcePath: newSourcePath)
+                )
+                startRebindCompare(targetId: targetId, sourcePath: newSourcePath)
+            }
         }
 
         if let hostWindow = NSApp.keyWindow ?? NSApp.mainWindow {
@@ -2494,21 +2453,18 @@ private struct ImportConfigBundleSheet: View {
                 // First do a content-level compare (remote index DB vs local bytes). Only prompt
                 // the user when there are actual differences.
                 if remoteLatestExists(targetId: id) {
-                    switch s.rebindCompareState {
-                    case .unknown, .checking:
-                        return false
-                    case .error:
-                        return false
-                    case .match, .remote_missing:
-                        break
-                    case .mismatch:
-                        let decision = s.rebindDataDecision
-                        if decision == .undecided { return false }
-                        if decision == .use_remote_latest {
-                            // Restore semantics require an empty directory.
-                            guard isEmptyDirectory(path: trimmed) == true else { return false }
-                        }
+                    var empty: Bool? = nil
+                    if s.rebindCompareState == .mismatch, s.rebindDataDecision == .use_remote_latest {
+                        // Restore semantics require an empty directory.
+                        empty = isEmptyDirectory(path: trimmed)
                     }
+
+                    let gate = RebindApplyGate.evaluate(
+                        compareState: s.rebindCompareState,
+                        decision: s.rebindDataDecision,
+                        isEmptyDirectory: empty
+                    )
+                    if gate != .allowed { return false }
                 }
             }
 
