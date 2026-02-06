@@ -124,7 +124,25 @@ TELEVYBACKUP_DATA_DIR="$data_dir" \
 TELEVYBACKUP_CONFIG_DIR="$config_dir" \
 "$app_bin"
 
+# Import result page with the Change folder picker open (to validate NSOpenPanel UI).
+quit_app
+TELEVYBACKUP_UI_DEMO=1 \
+TELEVYBACKUP_UI_DEMO_SCENE="backup-config-import-result-change-folder-picker" \
+TELEVYBACKUP_UI_DEMO_IMPORT_FILE="$demo_file" \
+TELEVYBACKUP_UI_DEMO_IMPORT_PASSPHRASE="1234" \
+TELEVYBACKUP_UI_DEMO_IMPORT_TARGETS_COUNT="8" \
+TELEVYBACKUP_UI_DEMO_IMPORT_CONFLICTS="1" \
+TELEVYBACKUP_UI_SNAPSHOT_DIR="$out_dir" \
+TELEVYBACKUP_UI_SNAPSHOT_PREFIX="settings-demo-backup-config-import-result-change-folder-picker" \
+TELEVYBACKUP_UI_SNAPSHOT_DELAY_MS="1400" \
+TELEVYBACKUP_UI_SNAPSHOT_MODE=manual \
+TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH=0 \
+TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH=1 \
+TELEVYBACKUP_DISABLE_KEYCHAIN=1 \
+TELEVYBACKUP_DATA_DIR="$data_dir" \
+TELEVYBACKUP_CONFIG_DIR="$config_dir" \
+"$app_bin"
+
 quit_app
 
 echo "Wrote snapshots under: $out_dir" >&2
-

@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import Darwin
+import ObjectiveC
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -1754,6 +1755,109 @@ private struct SecurePassphraseField: NSViewRepresentable {
     }
 }
 
+private enum OpenPanelAssociatedKeys {
+    static var newFolderAccessory: UInt8 = 0
+}
+
+// Some macOS configurations hide the built-in "New Folder" affordance in NSOpenPanel.
+// Provide an explicit accessory button so users can always create a fresh directory when rebinding.
+private final class OpenPanelNewFolderAccessory: NSObject {
+    private weak var panel: NSOpenPanel?
+    let view: NSView
+
+    init(panel: NSOpenPanel) {
+        self.panel = panel
+
+        let button = NSButton(title: "New Folder…", target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 140, height: 26))
+        v.addSubview(button)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: v.leadingAnchor),
+            button.topAnchor.constraint(equalTo: v.topAnchor),
+            button.bottomAnchor.constraint(equalTo: v.bottomAnchor),
+        ])
+
+        self.view = v
+
+        super.init()
+
+        button.target = self
+        button.action = #selector(onNewFolder(_:))
+    }
+
+    private func currentDirectoryURL() -> URL {
+        guard let panel else { return FileManager.default.homeDirectoryForCurrentUser }
+
+        if let selected = panel.url {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: selected.path, isDirectory: &isDir), isDir.boolValue {
+                return selected
+            }
+            return selected.deletingLastPathComponent()
+        }
+
+        if let dir = panel.directoryURL {
+            return dir
+        }
+
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    private func showError(message: String, info: String? = nil) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = message
+        if let info { alert.informativeText = info }
+        alert.addButton(withTitle: "OK")
+        _ = alert.runModal()
+    }
+
+    @objc private func onNewFolder(_ sender: Any?) {
+        guard let panel else { return }
+
+        let parent = currentDirectoryURL()
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "New folder"
+        alert.informativeText = "Create a folder inside:\n\(parent.path)"
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "Folder name"
+        alert.accessoryView = field
+
+        let res = alert.runModal()
+        guard res == .alertFirstButtonReturn else { return }
+
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty {
+            showError(message: "Folder name is required.")
+            return
+        }
+        if name.contains("/") {
+            showError(message: "Invalid folder name.", info: "Folder names must not contain “/”.")
+            return
+        }
+
+        let newURL = parent.appendingPathComponent(name, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: newURL, withIntermediateDirectories: false)
+        } catch {
+            showError(message: "Failed to create folder.", info: error.localizedDescription)
+            return
+        }
+
+        // Navigate the open panel into the newly created folder so it's easy to select.
+        panel.directoryURL = newURL
+    }
+}
+
 private struct ImportConfigBundleSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var model: AppModel
@@ -2063,15 +2167,34 @@ private struct ImportConfigBundleSheet: View {
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
 
+        // Retain the accessory handler for the lifetime of the panel.
+        let accessory = OpenPanelNewFolderAccessory(panel: panel)
+        panel.accessoryView = accessory.view
+        panel.isAccessoryViewDisclosed = true
+        objc_setAssociatedObject(
+            panel,
+            &OpenPanelAssociatedKeys.newFolderAccessory,
+            accessory,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+
         func applyUrl(_ url: URL) {
             let newPath = url.path
             if let inspection,
                let t = inspection.bundle.targets.first(where: { $0.id == targetId }),
                t.sourcePath == newPath
             {
-                // No-op: if the user picked the same path as the bundle's sourcePath, treat it as
-                // "no change" to avoid forcing unnecessary decisions / payload changes.
-                resolutions.removeValue(forKey: targetId)
+                // If the user explicitly opened the picker and re-selected the same path, treat
+                // it as "no change" unless remote latest exists. In that case, keep it as a
+                // rebind so the UI can force a restore data decision (empty folder vs keep local).
+                if remoteLatestExists(targetId: targetId) {
+                    setResolveState(
+                        targetId: targetId,
+                        ResolutionState(mode: .rebind, newSourcePath: newPath)
+                    )
+                } else {
+                    resolutions.removeValue(forKey: targetId)
+                }
                 return
             }
             setResolveState(
@@ -2841,7 +2964,10 @@ private struct ImportConfigBundleSheet: View {
 	        .onChange(of: inspection != nil) { _, ready in
 	            guard ready else { return }
 	            guard SettingsUIDemo.enabled else { return }
-	            guard SettingsUIDemo.scene == "backup-config-import-result" else { return }
+                let wantsResultSnapshot =
+                    SettingsUIDemo.scene == "backup-config-import-result"
+                        || SettingsUIDemo.scene == "backup-config-import-result-change-folder-picker"
+	            guard wantsResultSnapshot else { return }
 	            guard !didAutoSnapshot else { return }
 
             guard let dirPath = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_DIR"],
@@ -2857,6 +2983,18 @@ private struct ImportConfigBundleSheet: View {
 	            let prefix = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_PREFIX"] ?? "snapshot"
 	            let dir = URL(fileURLWithPath: dirPath, isDirectory: true)
 	            let delayMs = Int(ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_DELAY_MS"] ?? "") ?? 300
+
+                if SettingsUIDemo.scene == "backup-config-import-result-change-folder-picker",
+                   let inspection,
+                   let first = inspection.bundle.targets.first
+                {
+                    // Open the target folder picker so the snapshot captures the NSOpenPanel UI
+                    // (including the explicit "New Folder…" button).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        chooseFolder(targetId: first.id)
+                    }
+                }
+
 	            DispatchQueue.main.asyncAfter(deadline: .now() + Double(delayMs) / 1000.0) {
 	                UISnapshot.captureVisibleWindows(to: dir, prefix: prefix)
 	                Darwin.exit(0)
@@ -2871,6 +3009,10 @@ private struct ImportConfigBundleSheet: View {
             guard SettingsUIDemo.enabled else { return }
             guard SettingsUIDemo.scene.hasPrefix("backup-config-import") else { return }
 
+            let isImportResultScene =
+                SettingsUIDemo.scene == "backup-config-import-result"
+                    || SettingsUIDemo.scene == "backup-config-import-result-change-folder-picker"
+
             // Allow deterministic import UI screenshots without Accessibility scripting.
             if inspection == nil,
                fileUrl == nil,
@@ -2880,7 +3022,7 @@ private struct ImportConfigBundleSheet: View {
                 loadSelectedFile(url: URL(fileURLWithPath: p))
             }
 
-            if SettingsUIDemo.scene == "backup-config-import-result",
+            if isImportResultScene,
                inspection == nil,
                fileUrl != nil,
                let s = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_TARGETS_COUNT"],
@@ -2892,7 +3034,7 @@ private struct ImportConfigBundleSheet: View {
                 return
             }
 
-            if SettingsUIDemo.scene == "backup-config-import-result",
+            if isImportResultScene,
                inspection == nil,
                fileUrl != nil,
                fileEncrypted,
