@@ -1939,6 +1939,10 @@ private struct ImportConfigBundleSheet: View {
     private struct ResolutionState {
         var mode: ResolutionMode
         var newSourcePath: String
+        // When rebinding a target to a new folder while remote latest exists, the user must decide
+        // whether they intend to restore remote data into the new folder or keep the local folder
+        // contents and potentially overwrite remote on the next backup.
+        var rebindDataDecision: RebindDataDecision = .undecided
     }
 
     private enum ResolutionMode: String, CaseIterable, Identifiable {
@@ -1955,6 +1959,33 @@ private struct ImportConfigBundleSheet: View {
             case .overwrite_remote: return "Use local (update remote pin)"
             case .rebind: return "Choose a different folder"
             case .skip: return "Skip this target"
+            }
+        }
+    }
+
+    private enum RebindDataDecision: String, CaseIterable, Identifiable {
+        case undecided
+        case use_remote_latest
+        case keep_local
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .undecided: return "Choose…"
+            case .use_remote_latest: return "Use remote latest"
+            case .keep_local: return "Keep local folder"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .undecided:
+                return "Pick which side should be treated as the source of truth."
+            case .use_remote_latest:
+                return "Recommended for restore. The folder must be empty."
+            case .keep_local:
+                return "Local folder becomes the source of truth; next backup may overwrite remote latest."
             }
         }
     }
@@ -1976,6 +2007,40 @@ private struct ImportConfigBundleSheet: View {
 
     private func setResolveState(targetId: String, _ state: ResolutionState) {
         resolutions[targetId] = state
+    }
+
+    private func setRebindDataDecision(targetId: String, _ decision: RebindDataDecision) {
+        guard var s = resolutions[targetId] else { return }
+        guard s.mode == .rebind else { return }
+        s.rebindDataDecision = decision
+        resolutions[targetId] = s
+    }
+
+    private func isEmptyDirectory(path: String) -> Bool? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: trimmed, isDirectory: &isDir), isDir.boolValue else {
+            return nil
+        }
+
+        let url = URL(fileURLWithPath: trimmed, isDirectory: true)
+        let opts: FileManager.DirectoryEnumerationOptions = [.skipsSubdirectoryDescendants]
+        guard let en = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: nil,
+            options: opts,
+            errorHandler: { _, _ in false }
+        ) else {
+            return nil
+        }
+        return en.nextObject() == nil
+    }
+
+    private func remoteLatestExists(targetId: String) -> Bool {
+        guard let pf = preflightByTargetId[targetId] else { return false }
+        return pf.remoteLatest.state == "ok"
     }
 
     private func targetToggleBinding(id: String) -> Binding<Bool> {
@@ -2001,9 +2066,19 @@ private struct ImportConfigBundleSheet: View {
         panel.allowsMultipleSelection = false
 
         func applyUrl(_ url: URL) {
+            let newPath = url.path
+            if let inspection,
+               let t = inspection.bundle.targets.first(where: { $0.id == targetId }),
+               t.sourcePath == newPath
+            {
+                // No-op: if the user picked the same path as the bundle's sourcePath, treat it as
+                // "no change" to avoid forcing unnecessary decisions / payload changes.
+                resolutions.removeValue(forKey: targetId)
+                return
+            }
             setResolveState(
                 targetId: targetId,
-                ResolutionState(mode: .rebind, newSourcePath: url.path)
+                ResolutionState(mode: .rebind, newSourcePath: newPath)
             )
         }
 
@@ -2099,8 +2174,20 @@ private struct ImportConfigBundleSheet: View {
         for id in selectedTargetIds {
             let s = resolveState(targetId: id)
             if s.mode == .rebind {
-                if s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let trimmed = s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
                     return false
+                }
+
+                // If remote latest exists for this target, rebinding is a data-plane decision.
+                // Block Apply until the user explicitly chooses whether to use remote or keep local.
+                if remoteLatestExists(targetId: id) {
+                    let decision = s.rebindDataDecision
+                    if decision == .undecided { return false }
+                    if decision == .use_remote_latest {
+                        // Restore semantics require an empty directory.
+                        guard isEmptyDirectory(path: trimmed) == true else { return false }
+                    }
                 }
             }
 
@@ -2566,6 +2653,59 @@ private struct ImportConfigBundleSheet: View {
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
+                            }
+
+                            if state.mode == .rebind,
+                               !trimmedNewSourcePath.isEmpty,
+                               let pf,
+                               pf.remoteLatest.state == "ok"
+                            {
+                                let dirEmpty = isEmptyDirectory(path: trimmedNewSourcePath)
+                                let needsEmpty = state.rebindDataDecision == .use_remote_latest
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(spacing: 10) {
+                                        Text("Data")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .frame(width: 80, alignment: .leading)
+
+                                        Picker("", selection: Binding(
+                                            get: { resolveState(targetId: t.id).rebindDataDecision },
+                                            set: { newDecision in
+                                                setRebindDataDecision(targetId: t.id, newDecision)
+                                            }
+                                        )) {
+                                            ForEach(RebindDataDecision.allCases) { d in
+                                                Text(d.title).tag(d)
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        .controlSize(.regular)
+                                        .frame(width: 260, alignment: .leading)
+                                    }
+
+                                    Text(resolveState(targetId: t.id).rebindDataDecision.detail)
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+
+                                    if resolveState(targetId: t.id).rebindDataDecision == .undecided {
+                                        Label(
+                                            "Choose a data decision to enable Apply.",
+                                            systemImage: "exclamationmark.triangle.fill"
+                                        )
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.red)
+                                    }
+
+                                    if needsEmpty && dirEmpty != true {
+                                        Label(
+                                            "This folder must be empty to restore remote latest. Choose an empty folder or pick “Keep local folder”.",
+                                            systemImage: "exclamationmark.triangle.fill"
+                                        )
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.red)
+                                    }
+                                }
                             }
 
                             if let pf, pf.conflict.state == "needs_resolution", selectedTargetIds.contains(t.id) {
