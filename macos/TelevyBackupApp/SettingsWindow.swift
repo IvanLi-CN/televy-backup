@@ -2143,7 +2143,8 @@ private struct ImportConfigBundleSheet: View {
             let state = resolveState(targetId: id)
             var obj: [String: Any] = ["mode": state.mode.rawValue]
             if state.mode == .rebind {
-                obj["newSourcePath"] = state.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                // CLI expects snake_case for the rebind payload: { mode: "rebind", new_source_path: "..." }.
+                obj["new_source_path"] = state.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             resolutionsObj[id] = obj
         }
