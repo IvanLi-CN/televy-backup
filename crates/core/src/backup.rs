@@ -742,6 +742,7 @@ pub async fn run_backup_with<S: Storage>(
                         chunks_done: Some(0),
                         bytes_read: Some(0),
                         bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                        bytes_downloaded: None,
                         bytes_deduped: Some(0),
                     });
                 }
@@ -832,6 +833,7 @@ pub async fn run_backup_with<S: Storage>(
                             chunks_done: Some(result.chunks_total),
                             bytes_read: Some(result.bytes_read),
                             bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                            bytes_downloaded: None,
                             bytes_deduped: Some(result.bytes_deduped),
                         });
                     }
@@ -948,6 +950,7 @@ pub async fn run_backup_with<S: Storage>(
                                 chunks_done: Some(result.chunks_total),
                                 bytes_read: Some(result.bytes_read),
                                 bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                                bytes_downloaded: None,
                                 bytes_deduped: Some(result.bytes_deduped),
                             });
                         }
@@ -976,6 +979,7 @@ pub async fn run_backup_with<S: Storage>(
                         chunks_done: Some(scan_chunks_total.load(Ordering::Relaxed)),
                         bytes_read: Some(scan_bytes_read.load(Ordering::Relaxed)),
                         bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                        bytes_downloaded: None,
                         bytes_deduped: Some(scan_bytes_deduped.load(Ordering::Relaxed)),
                     });
                 }
@@ -1075,6 +1079,7 @@ pub async fn run_backup_with<S: Storage>(
                         chunks_done: Some(scan_chunks_total.load(Ordering::Relaxed)),
                         bytes_read: Some(scan_bytes_read.load(Ordering::Relaxed)),
                         bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                        bytes_downloaded: None,
                         bytes_deduped: Some(scan_bytes_deduped.load(Ordering::Relaxed)),
                     });
                 }
@@ -1120,6 +1125,7 @@ pub async fn run_backup_with<S: Storage>(
                         chunks_done: Some(scan_chunks_total.load(Ordering::Relaxed)),
                         bytes_read: Some(scan_bytes_read.load(Ordering::Relaxed)),
                         bytes_uploaded: Some(uploaded),
+                        bytes_downloaded: None,
                         bytes_deduped: Some(scan_bytes_deduped.load(Ordering::Relaxed)),
                     });
                 }
@@ -1166,6 +1172,7 @@ pub async fn run_backup_with<S: Storage>(
             chunks_done: Some(result.chunks_total),
             bytes_read: Some(result.bytes_read),
             bytes_uploaded: Some(result.bytes_uploaded),
+            bytes_downloaded: None,
             bytes_deduped: Some(result.bytes_deduped),
         });
     }
@@ -1519,6 +1526,7 @@ async fn upload_index<S: Storage>(
                                 chunks_done: Some(chunks_total),
                                 bytes_read: Some(bytes_read),
                                 bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                                bytes_downloaded: None,
                                 bytes_deduped: Some(bytes_deduped),
                             });
                         }
@@ -1552,6 +1560,7 @@ async fn upload_index<S: Storage>(
                 chunks_done: Some(chunks_total),
                 bytes_read: Some(bytes_read),
                 bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                bytes_downloaded: None,
                 bytes_deduped: Some(bytes_deduped),
             });
         }
@@ -1613,6 +1622,7 @@ async fn upload_index<S: Storage>(
                             chunks_done: Some(chunks_total),
                             bytes_read: Some(bytes_read),
                             bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                            bytes_downloaded: None,
                             bytes_deduped: Some(bytes_deduped),
                         });
                     }
@@ -1645,6 +1655,7 @@ async fn upload_index<S: Storage>(
             chunks_done: Some(chunks_total),
             bytes_read: Some(bytes_read),
             bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+            bytes_downloaded: None,
             bytes_deduped: Some(bytes_deduped),
         });
     }

@@ -257,9 +257,16 @@ impl CliError {
 struct NdjsonProgressSink {
     task_id: String,
     throttle: Mutex<ProgressThrottle>,
+    daemon_status_report: Option<DaemonStatusReport>,
 }
 
 static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
+
+struct DaemonStatusReport {
+    data_dir: PathBuf,
+    kind: String,
+    target_id: String,
+}
 
 #[derive(Debug)]
 struct ProgressThrottle {
@@ -315,6 +322,16 @@ impl ProgressSink for NdjsonProgressSink {
             return;
         }
 
+        if let Some(report) = &self.daemon_status_report {
+            daemon_control_status_task_progress(
+                &report.data_dir,
+                &self.task_id,
+                &report.kind,
+                &report.target_id,
+                &p,
+            );
+        }
+
         // Many phases don't have a stable "total" upfront. In those cases, the core currently
         // reports `*_total == *_done` as a "so far" counter which makes UI progress bars look
         // stuck at 100%. Only surface totals when they look meaningful.
@@ -337,6 +354,7 @@ impl ProgressSink for NdjsonProgressSink {
             "chunksDone": p.chunks_done,
             "bytesRead": p.bytes_read,
             "bytesUploaded": p.bytes_uploaded,
+            "bytesDownloaded": p.bytes_downloaded,
             "bytesDeduped": p.bytes_deduped,
         });
         emit_event_stdout(line);
@@ -406,6 +424,7 @@ fn emit_task_progress_preflight(events: bool, task_id: &str) {
         "chunksDone": serde_json::Value::Null,
         "bytesRead": 0,
         "bytesUploaded": 0,
+        "bytesDownloaded": 0,
         "bytesDeduped": 0,
     }));
 }
@@ -769,9 +788,12 @@ async fn status_stream(config_dir: &Path, data_dir: &Path, json: bool) -> Result
 struct StatusStreamEnricher {
     started: Option<Instant>,
     totals_by_target: HashMap<String, u64>,
+    totals_down_by_target: HashMap<String, u64>,
     smoothed_rate_by_target: HashMap<String, f64>,
+    smoothed_down_rate_by_target: HashMap<String, f64>,
     prev_sample_at: Option<Instant>,
     prev_uploaded_by_target: HashMap<String, u64>,
+    prev_downloaded_by_target: HashMap<String, u64>,
 }
 
 impl StatusStreamEnricher {
@@ -790,11 +812,21 @@ impl StatusStreamEnricher {
         let mut any_target_rate = false;
         let mut global_up_total: u64 = 0;
 
+        let mut global_down_bps: u64 = 0;
+        let mut any_target_down_rate = false;
+        let mut global_down_total: u64 = 0;
+
         for t in &mut snap.targets {
             let bytes_uploaded_now = t
                 .progress
                 .as_ref()
                 .and_then(|p| p.bytes_uploaded)
+                .unwrap_or(0);
+
+            let bytes_downloaded_now = t
+                .progress
+                .as_ref()
+                .and_then(|p| p.bytes_downloaded)
                 .unwrap_or(0);
 
             let prev_bytes = self
@@ -803,10 +835,21 @@ impl StatusStreamEnricher {
                 .copied()
                 .unwrap_or(bytes_uploaded_now);
 
+            let prev_down_bytes = self
+                .prev_downloaded_by_target
+                .get(&t.target_id)
+                .copied()
+                .unwrap_or(bytes_downloaded_now);
+
             // A new run may reset counters to 0; avoid carrying stale EWMA rates across runs.
             let reset = bytes_uploaded_now < prev_bytes;
             if reset || t.state != "running" {
                 self.smoothed_rate_by_target.remove(&t.target_id);
+            }
+
+            let reset_down = bytes_downloaded_now < prev_down_bytes;
+            if reset_down || t.state != "running" {
+                self.smoothed_down_rate_by_target.remove(&t.target_id);
             }
 
             let base = if reset {
@@ -820,6 +863,18 @@ impl StatusStreamEnricher {
                 .entry(t.target_id.clone())
                 .and_modify(|v| *v = v.saturating_add(delta))
                 .or_insert(delta);
+
+            let base_down = if reset_down {
+                bytes_downloaded_now
+            } else {
+                prev_down_bytes
+            };
+            let delta_down = bytes_downloaded_now.saturating_sub(base_down);
+            let total_down = self
+                .totals_down_by_target
+                .entry(t.target_id.clone())
+                .and_modify(|v| *v = v.saturating_add(delta_down))
+                .or_insert(delta_down);
 
             // Realtime rates only make sense when updates are timely.
             let mut bps: Option<u64> = None;
@@ -838,6 +893,22 @@ impl StatusStreamEnricher {
                 bps = Some(smoothed.max(0.0).round() as u64);
             }
 
+            let mut down_bps: Option<u64> = None;
+            if t.state == "running" && stale_age_ms <= 2_000 && dt > 0.0 {
+                let raw = (delta_down as f64) / dt;
+                let prev = self
+                    .smoothed_down_rate_by_target
+                    .get(&t.target_id)
+                    .copied()
+                    .unwrap_or(raw);
+                // 1.0s window EWMA.
+                let alpha = 1.0 - (-dt).exp();
+                let smoothed = prev * (1.0 - alpha) + raw * alpha;
+                self.smoothed_down_rate_by_target
+                    .insert(t.target_id.clone(), smoothed);
+                down_bps = Some(smoothed.max(0.0).round() as u64);
+            }
+
             t.up.bytes_per_second = bps;
             t.up_total.bytes = Some(*total);
             if let Some(bps) = bps {
@@ -846,8 +917,16 @@ impl StatusStreamEnricher {
             }
             global_up_total = global_up_total.saturating_add(*total);
 
+            if let Some(bps) = down_bps {
+                any_target_down_rate = true;
+                global_down_bps = global_down_bps.saturating_add(bps);
+            }
+            global_down_total = global_down_total.saturating_add(*total_down);
+
             self.prev_uploaded_by_target
                 .insert(t.target_id.clone(), bytes_uploaded_now);
+            self.prev_downloaded_by_target
+                .insert(t.target_id.clone(), bytes_downloaded_now);
         }
 
         snap.global.up.bytes_per_second = if any_target_rate {
@@ -855,9 +934,13 @@ impl StatusStreamEnricher {
         } else {
             None
         };
-        snap.global.down.bytes_per_second = None;
+        snap.global.down.bytes_per_second = if any_target_down_rate {
+            Some(global_down_bps)
+        } else {
+            None
+        };
         snap.global.up_total.bytes = Some(global_up_total);
-        snap.global.down_total.bytes = None;
+        snap.global.down_total.bytes = Some(global_down_total);
         snap.global.ui_uptime_seconds = Some(started.elapsed().as_secs_f64());
 
         self.prev_sample_at = Some(now);
@@ -2317,6 +2400,7 @@ async fn settings_import_bundle_apply(
                 &tmp_path,
                 None,
                 Some(&provider),
+                None,
             )
             .await
             .map_err(map_core_err)?;
@@ -3813,6 +3897,9 @@ async fn backup_run(
         None,
     );
     emit_task_progress_preflight(events, &task_id);
+    if events {
+        daemon_control_status_task_start(data_dir, &task_id, "backup", ctx_target_id.as_str());
+    }
 
     let result: Result<televy_backup_core::BackupResult, CliError> = async {
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
@@ -3828,6 +3915,11 @@ async fn backup_run(
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
             throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
+            daemon_status_report: events.then_some(DaemonStatusReport {
+                data_dir: data_dir.to_path_buf(),
+                kind: "backup".to_string(),
+                target_id: ctx_target_id.clone(),
+            }),
         };
         let opts = BackupOptions {
             cancel: None,
@@ -3983,7 +4075,7 @@ async fn backup_run(
                     "kind": "backup",
                     "state": "succeeded",
                     "snapshotId": res.snapshot_id,
-                    "targetId": ctx_target_id,
+                    "targetId": ctx_target_id.clone(),
                     "result": {
                         "filesIndexed": res.files_indexed,
                         "chunksUploaded": res.chunks_uploaded,
@@ -3995,6 +4087,13 @@ async fn backup_run(
                         "durationSeconds": duration_seconds,
                     }
                 }));
+                daemon_control_status_task_finish(
+                    data_dir,
+                    &task_id,
+                    "backup",
+                    ctx_target_id.as_str(),
+                    "succeeded",
+                );
                 return Ok(());
             }
 
@@ -4040,9 +4139,16 @@ async fn backup_run(
                     "taskId": task_id,
                     "kind": "backup",
                     "state": "failed",
-                    "targetId": ctx_target_id,
+                    "targetId": ctx_target_id.clone(),
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
+                daemon_control_status_task_finish(
+                    data_dir,
+                    &task_id,
+                    "backup",
+                    ctx_target_id.as_str(),
+                    "failed",
+                );
             }
             Err(e)
         }
@@ -4170,6 +4276,7 @@ async fn preflight_remote_first_index_sync(
         local_index_db,
         None,
         Some(provider),
+        sink,
     )
     .await
     .map_err(map_core_err)?;
@@ -4285,6 +4392,7 @@ async fn restore_run(
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
             throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
+            daemon_status_report: None,
         };
         let opts = RestoreOptions {
             cancel: None,
@@ -4717,6 +4825,9 @@ async fn restore_latest(
         Some("latest"),
     );
     emit_task_progress_preflight(events, &task_id);
+    if events {
+        daemon_control_status_task_start(data_dir, &task_id, "restore", t.id.as_str());
+    }
 
     let result: Result<(String, televy_backup_core::RestoreResult), CliError> = async {
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
@@ -4788,6 +4899,11 @@ async fn restore_latest(
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
             throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
+            daemon_status_report: events.then_some(DaemonStatusReport {
+                data_dir: data_dir.to_path_buf(),
+                kind: "restore".to_string(),
+                target_id: t.id.clone(),
+            }),
         };
         let opts = RestoreOptions {
             cancel: None,
@@ -4849,7 +4965,7 @@ async fn restore_latest(
                     "kind": "restore",
                     "state": "succeeded",
                     "snapshotId": snapshot_id,
-                    "targetId": t.id,
+                    "targetId": t.id.clone(),
                     "result": {
                         "filesRestored": res.files_restored,
                         "chunksDownloaded": res.chunks_downloaded,
@@ -4857,6 +4973,13 @@ async fn restore_latest(
                         "durationSeconds": duration_seconds,
                     }
                 }));
+                daemon_control_status_task_finish(
+                    data_dir,
+                    &task_id,
+                    "restore",
+                    t.id.as_str(),
+                    "succeeded",
+                );
                 return Ok(());
             }
 
@@ -4894,9 +5017,16 @@ async fn restore_latest(
                     "taskId": task_id,
                     "kind": "restore",
                     "state": "failed",
-                    "targetId": t.id,
+                    "targetId": t.id.clone(),
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
+                daemon_control_status_task_finish(
+                    data_dir,
+                    &task_id,
+                    "restore",
+                    t.id.as_str(),
+                    "failed",
+                );
             }
             Err(e)
         }
@@ -5086,6 +5216,9 @@ async fn verify_latest(
         Some("latest"),
     );
     emit_task_progress_preflight(events, &task_id);
+    if events {
+        daemon_control_status_task_start(data_dir, &task_id, "verify", t.id.as_str());
+    }
 
     let result: Result<(String, televy_backup_core::VerifyResult), CliError> = async {
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
@@ -5157,6 +5290,11 @@ async fn verify_latest(
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
             throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
+            daemon_status_report: events.then_some(DaemonStatusReport {
+                data_dir: data_dir.to_path_buf(),
+                kind: "verify".to_string(),
+                target_id: t.id.clone(),
+            }),
         };
         let opts = VerifyOptions {
             cancel: None,
@@ -5216,13 +5354,20 @@ async fn verify_latest(
                     "kind": "verify",
                     "state": "succeeded",
                     "snapshotId": snapshot_id,
-                    "targetId": t.id,
+                    "targetId": t.id.clone(),
                     "result": {
                         "chunksChecked": res.chunks_checked,
                         "bytesChecked": res.bytes_checked,
                         "durationSeconds": duration_seconds,
                     }
                 }));
+                daemon_control_status_task_finish(
+                    data_dir,
+                    &task_id,
+                    "verify",
+                    t.id.as_str(),
+                    "succeeded",
+                );
                 return Ok(());
             }
 
@@ -5260,9 +5405,16 @@ async fn verify_latest(
                     "taskId": task_id,
                     "kind": "verify",
                     "state": "failed",
-                    "targetId": t.id,
+                    "targetId": t.id.clone(),
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
+                daemon_control_status_task_finish(
+                    data_dir,
+                    &task_id,
+                    "verify",
+                    t.id.as_str(),
+                    "failed",
+                );
             }
             Err(e)
         }
@@ -5357,6 +5509,7 @@ async fn verify_run(
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
             throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
+            daemon_status_report: None,
         };
         let opts = VerifyOptions {
             cancel: None,
@@ -6055,6 +6208,111 @@ fn daemon_control_secrets_clear_telegram_mtproto_session(
     let params = serde_json::json!({ "endpointId": endpoint_id });
     let _ = control_ipc_call(data_dir, "secrets.clearTelegramMtprotoSession", params)?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn daemon_control_status_task_start(data_dir: &Path, task_id: &str, kind: &str, target_id: &str) {
+    let params = televy_backup_core::control::StatusTaskStartParams {
+        task_id: task_id.to_string(),
+        kind: kind.to_string(),
+        target_id: target_id.to_string(),
+    };
+    let params = serde_json::to_value(params).unwrap_or_else(|_| serde_json::json!({}));
+    let _ = control_ipc_call_with_timeouts(
+        data_dir,
+        "status.taskStart",
+        params,
+        Duration::from_millis(150),
+        Duration::from_millis(150),
+    );
+}
+
+#[cfg(not(unix))]
+fn daemon_control_status_task_start(
+    _data_dir: &Path,
+    _task_id: &str,
+    _kind: &str,
+    _target_id: &str,
+) {
+}
+
+#[cfg(unix)]
+fn daemon_control_status_task_progress(
+    data_dir: &Path,
+    task_id: &str,
+    kind: &str,
+    target_id: &str,
+    p: &televy_backup_core::TaskProgress,
+) {
+    let progress = televy_backup_core::control::StatusTaskProgress {
+        phase: p.phase.clone(),
+        files_total: p.files_total,
+        files_done: p.files_done,
+        chunks_total: p.chunks_total,
+        chunks_done: p.chunks_done,
+        bytes_read: p.bytes_read,
+        bytes_uploaded: p.bytes_uploaded,
+        bytes_downloaded: p.bytes_downloaded,
+        bytes_deduped: p.bytes_deduped,
+    };
+    let params = televy_backup_core::control::StatusTaskProgressParams {
+        task_id: task_id.to_string(),
+        kind: kind.to_string(),
+        target_id: target_id.to_string(),
+        progress,
+    };
+    let params = serde_json::to_value(params).unwrap_or_else(|_| serde_json::json!({}));
+    let _ = control_ipc_call_with_timeouts(
+        data_dir,
+        "status.taskProgress",
+        params,
+        Duration::from_millis(150),
+        Duration::from_millis(150),
+    );
+}
+
+#[cfg(not(unix))]
+fn daemon_control_status_task_progress(
+    _data_dir: &Path,
+    _task_id: &str,
+    _kind: &str,
+    _target_id: &str,
+    _p: &televy_backup_core::TaskProgress,
+) {
+}
+
+#[cfg(unix)]
+fn daemon_control_status_task_finish(
+    data_dir: &Path,
+    task_id: &str,
+    kind: &str,
+    target_id: &str,
+    state: &str,
+) {
+    let params = televy_backup_core::control::StatusTaskFinishParams {
+        task_id: task_id.to_string(),
+        kind: kind.to_string(),
+        target_id: target_id.to_string(),
+        state: state.to_string(),
+    };
+    let params = serde_json::to_value(params).unwrap_or_else(|_| serde_json::json!({}));
+    let _ = control_ipc_call_with_timeouts(
+        data_dir,
+        "status.taskFinish",
+        params,
+        Duration::from_millis(150),
+        Duration::from_millis(150),
+    );
+}
+
+#[cfg(not(unix))]
+fn daemon_control_status_task_finish(
+    _data_dir: &Path,
+    _task_id: &str,
+    _kind: &str,
+    _target_id: &str,
+    _state: &str,
+) {
 }
 
 fn daemon_keychain_get_secret(data_dir: &Path, key: &str) -> Result<Option<String>, CliError> {

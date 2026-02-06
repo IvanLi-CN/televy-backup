@@ -53,6 +53,10 @@ struct TargetRuntime {
     progress: Option<Progress>,
     last_run: Option<TargetRunSummary>,
 
+    // When a CLI-run task reports progress to the daemon for UI status purposes, we keep the
+    // current task id here so stale updates don't clobber newer runs.
+    external_task_id: Option<String>,
+
     up_bps: Option<u64>,
     up_total_bytes: Option<u64>,
     last_up_sample_bytes: Option<u64>,
@@ -87,6 +91,7 @@ impl StatusRuntimeState {
                     running_since: None,
                     progress: None,
                     last_run: None,
+                    external_task_id: None,
                     up_bps: None,
                     up_total_bytes: None,
                     last_up_sample_bytes: None,
@@ -117,6 +122,7 @@ impl StatusRuntimeState {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                external_task_id: None,
                 up_bps: None,
                 up_total_bytes: None,
                 last_up_sample_bytes: None,
@@ -143,6 +149,7 @@ impl StatusRuntimeState {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
+        t.external_task_id = None;
         t.state = "running".to_string();
         let now = now_unix_ms();
         t.running_since = Some(now);
@@ -154,12 +161,112 @@ impl StatusRuntimeState {
             chunks_done: None,
             bytes_read: None,
             bytes_uploaded: Some(0),
+            bytes_downloaded: Some(0),
             bytes_deduped: Some(0),
         });
         t.up_total_bytes = Some(0);
         t.up_bps = Some(0);
         t.last_up_sample_bytes = Some(0);
         t.last_up_sample_at_ms = Some(now);
+    }
+
+    fn mark_external_run_start(&mut self, target_id: &str, task_id: &str) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+
+        let now = now_unix_ms();
+        t.external_task_id = Some(task_id.to_string());
+        t.state = "running".to_string();
+        t.running_since = Some(now);
+        t.progress = Some(Progress {
+            phase: "running".to_string(),
+            files_total: None,
+            files_done: None,
+            chunks_total: None,
+            chunks_done: None,
+            bytes_read: Some(0),
+            bytes_uploaded: Some(0),
+            bytes_downloaded: Some(0),
+            bytes_deduped: Some(0),
+        });
+
+        // Reset upload EWMA baselines so status stream can compute rates cleanly for CLI runs.
+        t.up_total_bytes = Some(0);
+        t.up_bps = Some(0);
+        t.last_up_sample_bytes = Some(0);
+        t.last_up_sample_at_ms = Some(now);
+    }
+
+    fn on_external_progress(&mut self, target_id: &str, task_id: &str, p: TaskProgress) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+
+        // Ignore stale updates from an earlier task.
+        match t.external_task_id.as_deref() {
+            Some(active) if active != task_id => return,
+            None => t.external_task_id = Some(task_id.to_string()),
+            _ => {}
+        }
+
+        if t.state != "running" {
+            t.state = "running".to_string();
+        }
+        if t.running_since.is_none() {
+            t.running_since = Some(now_unix_ms());
+        }
+
+        t.progress = Some(Progress {
+            phase: p.phase,
+            files_total: p.files_total,
+            files_done: p.files_done,
+            chunks_total: p.chunks_total,
+            chunks_done: p.chunks_done,
+            bytes_read: p.bytes_read,
+            bytes_uploaded: p.bytes_uploaded,
+            bytes_downloaded: p.bytes_downloaded,
+            bytes_deduped: p.bytes_deduped,
+        });
+
+        // Preserve existing upload EWMA behavior for upload-heavy CLI tasks (e.g. manual backup).
+        if let Some(bytes) = p.bytes_uploaded {
+            let now = now_unix_ms();
+            t.up_total_bytes = Some(bytes);
+            match (t.last_up_sample_bytes, t.last_up_sample_at_ms) {
+                (Some(prev_bytes), Some(prev_at)) => {
+                    let dt_ms = now.saturating_sub(prev_at).max(1);
+                    let db = bytes.saturating_sub(prev_bytes);
+                    if dt_ms >= 50 {
+                        t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
+                        t.last_up_sample_bytes = Some(bytes);
+                        t.last_up_sample_at_ms = Some(now);
+                    }
+                }
+                _ => {
+                    t.last_up_sample_bytes = Some(bytes);
+                    t.last_up_sample_at_ms = Some(now);
+                }
+            }
+        }
+    }
+
+    fn mark_external_run_finish(&mut self, target_id: &str, task_id: &str) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+        if t.external_task_id.as_deref() != Some(task_id) {
+            return;
+        }
+
+        t.external_task_id = None;
+        t.state = "idle".to_string();
+        t.running_since = None;
+        t.progress = None;
+        t.up_bps = None;
+        t.up_total_bytes = None;
+        t.last_up_sample_bytes = None;
+        t.last_up_sample_at_ms = None;
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -180,6 +287,7 @@ impl StatusRuntimeState {
             chunks_done: p.chunks_done,
             bytes_read: p.bytes_read,
             bytes_uploaded: p.bytes_uploaded,
+            bytes_downloaded: p.bytes_downloaded,
             bytes_deduped: p.bytes_deduped,
         });
 
@@ -370,6 +478,7 @@ mod tests {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                external_task_id: None,
                 up_bps: None,
                 up_total_bytes: None,
                 last_up_sample_bytes: None,
@@ -388,6 +497,7 @@ mod tests {
             chunks_done: None,
             bytes_read: None,
             bytes_uploaded: Some(bytes_uploaded),
+            bytes_downloaded: None,
             bytes_deduped: None,
         }
     }
@@ -610,6 +720,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         control_socket_path.clone(),
         config_root.clone(),
         control_ipc_settings.clone(),
+        status_state.clone(),
     ) {
         Ok(h) => Some(h),
         Err(e) => {

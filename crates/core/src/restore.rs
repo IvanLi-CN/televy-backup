@@ -67,7 +67,7 @@ pub async fn restore_snapshot_with<S: Storage>(
     let restore_started = Instant::now();
     debug!(event = "phase.start", phase = "restore", "phase.start");
 
-    let _stats = download_and_write_index_db_atomic(
+    let stats = download_and_write_index_db_atomic(
         storage,
         &config.snapshot_id,
         &config.manifest_object_id,
@@ -75,8 +75,11 @@ pub async fn restore_snapshot_with<S: Storage>(
         &config.index_db_path,
         options.cancel,
         Some(storage.provider()),
+        options.progress,
     )
     .await?;
+
+    let mut bytes_downloaded = stats.bytes_downloaded;
 
     ensure_empty_dir(&config.target_path)?;
 
@@ -91,6 +94,7 @@ pub async fn restore_snapshot_with<S: Storage>(
         &config.target_path,
         &config.master_key,
         options.cancel,
+        &mut bytes_downloaded,
         options.progress,
     )
     .await?;
@@ -129,7 +133,7 @@ pub async fn verify_snapshot_with<S: Storage>(
     let verify_started = Instant::now();
     debug!(event = "phase.start", phase = "verify", "phase.start");
 
-    let _stats = download_and_write_index_db_atomic(
+    let stats = download_and_write_index_db_atomic(
         storage,
         &config.snapshot_id,
         &config.manifest_object_id,
@@ -137,8 +141,11 @@ pub async fn verify_snapshot_with<S: Storage>(
         &config.index_db_path,
         options.cancel,
         Some(storage.provider()),
+        options.progress,
     )
     .await?;
+
+    let mut bytes_downloaded = stats.bytes_downloaded;
 
     let pool = open_existing_index_db(&config.index_db_path).await?;
     ensure_snapshot_present(&pool, &config.snapshot_id).await?;
@@ -149,6 +156,7 @@ pub async fn verify_snapshot_with<S: Storage>(
         &config.snapshot_id,
         &config.master_key,
         options.cancel,
+        &mut bytes_downloaded,
         options.progress,
     )
     .await?;
@@ -194,6 +202,7 @@ async fn restore_dirs(pool: &SqlitePool, snapshot_id: &str, target: &Path) -> Re
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn restore_files<S: Storage>(
     storage: &S,
     pool: &SqlitePool,
@@ -201,6 +210,7 @@ async fn restore_files<S: Storage>(
     target: &Path,
     master_key: &[u8; 32],
     cancel: Option<&CancellationToken>,
+    bytes_downloaded: &mut u64,
     progress: Option<&dyn ProgressSink>,
 ) -> Result<RestoreResult> {
     let mut result = RestoreResult::default();
@@ -297,6 +307,8 @@ async fn restore_files<S: Storage>(
                             },
                         }
                     })?;
+                    *bytes_downloaded =
+                        (*bytes_downloaded).saturating_add(framed.len().try_into().unwrap_or(0));
                     decrypt_framed(master_key, chunk_hash.as_bytes(), &framed).map_err(|e| {
                         Error::Crypto {
                             message: format!(
@@ -345,6 +357,8 @@ async fn restore_files<S: Storage>(
                                             },
                                         }
                                     })?;
+                            *bytes_downloaded = (*bytes_downloaded)
+                                .saturating_add(bytes.len().try_into().unwrap_or(0));
                             pack_cache = Some((pack_object_id.clone(), bytes));
                             pack_cache.as_ref().expect("just set").1.as_slice()
                         }
@@ -396,6 +410,7 @@ async fn restore_files<S: Storage>(
                     chunks_done: Some(result.chunks_downloaded),
                     bytes_read: Some(result.bytes_written),
                     bytes_uploaded: None,
+                    bytes_downloaded: Some(*bytes_downloaded),
                     bytes_deduped: None,
                 });
             }
@@ -423,6 +438,7 @@ async fn restore_files<S: Storage>(
                 chunks_done: Some(result.chunks_downloaded),
                 bytes_read: Some(result.bytes_written),
                 bytes_uploaded: None,
+                bytes_downloaded: Some(*bytes_downloaded),
                 bytes_deduped: None,
             });
         }
@@ -431,12 +447,14 @@ async fn restore_files<S: Storage>(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn verify_chunks<S: Storage>(
     storage: &S,
     pool: &SqlitePool,
     snapshot_id: &str,
     master_key: &[u8; 32],
     cancel: Option<&CancellationToken>,
+    bytes_downloaded: &mut u64,
     progress: Option<&dyn ProgressSink>,
 ) -> Result<VerifyResult> {
     let mut result = VerifyResult::default();
@@ -500,6 +518,8 @@ async fn verify_chunks<S: Storage>(
                         },
                     }
                 })?;
+                *bytes_downloaded =
+                    (*bytes_downloaded).saturating_add(framed.len().try_into().unwrap_or(0));
                 decrypt_framed(master_key, chunk_hash.as_bytes(), &framed).map_err(|e| {
                     Error::Crypto {
                         message: format!(
@@ -548,6 +568,8 @@ async fn verify_chunks<S: Storage>(
                                         },
                                     }
                                 })?;
+                        *bytes_downloaded =
+                            (*bytes_downloaded).saturating_add(bytes.len().try_into().unwrap_or(0));
                         pack_cache = Some((pack_object_id.clone(), bytes));
                         pack_cache.as_ref().expect("just set").1.as_slice()
                     }
@@ -588,6 +610,7 @@ async fn verify_chunks<S: Storage>(
                 chunks_done: Some(result.chunks_checked),
                 bytes_read: Some(result.bytes_checked),
                 bytes_uploaded: None,
+                bytes_downloaded: Some(*bytes_downloaded),
                 bytes_deduped: None,
             });
         }
