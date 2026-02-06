@@ -124,6 +124,27 @@ TELEVYBACKUP_DATA_DIR="$data_dir" \
 TELEVYBACKUP_CONFIG_DIR="$config_dir" \
 "$app_bin"
 
+# Import result page with a simulated rebind compare mismatch (no network).
+quit_app
+TELEVYBACKUP_UI_DEMO=1 \
+TELEVYBACKUP_UI_DEMO_SCENE="backup-config-import-result" \
+TELEVYBACKUP_UI_DEMO_IMPORT_FILE="$demo_file" \
+TELEVYBACKUP_UI_DEMO_IMPORT_PASSPHRASE="1234" \
+TELEVYBACKUP_UI_DEMO_IMPORT_TARGETS_COUNT="8" \
+TELEVYBACKUP_UI_DEMO_IMPORT_CONFLICTS="1" \
+TELEVYBACKUP_UI_DEMO_REBIND_COMPARE_STATE="mismatch" \
+TELEVYBACKUP_UI_DEMO_REBIND_PATH="/Users/ivan/Demo/RebindFolder" \
+TELEVYBACKUP_UI_SNAPSHOT_DIR="$out_dir" \
+TELEVYBACKUP_UI_SNAPSHOT_PREFIX="settings-demo-backup-config-import-result-rebind-compare" \
+TELEVYBACKUP_UI_SNAPSHOT_DELAY_MS="600" \
+TELEVYBACKUP_UI_SNAPSHOT_MODE=manual \
+TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH=0 \
+TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH=1 \
+TELEVYBACKUP_DISABLE_KEYCHAIN=1 \
+TELEVYBACKUP_DATA_DIR="$data_dir" \
+TELEVYBACKUP_CONFIG_DIR="$config_dir" \
+"$app_bin"
+
 # Import result page with the Change folder picker open (to validate NSOpenPanel UI).
 quit_app
 TELEVYBACKUP_UI_DEMO=1 \

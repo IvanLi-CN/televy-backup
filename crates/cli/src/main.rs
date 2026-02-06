@@ -98,6 +98,8 @@ enum SettingsCmd {
         dry_run: bool,
         #[arg(long)]
         apply: bool,
+        #[arg(long)]
+        compare_folder: bool,
     },
 }
 
@@ -559,17 +561,27 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             SettingsCmd::ExportBundle { hint } => {
                 settings_export_bundle(&config_dir, &data_dir, cli.json, hint).await
             }
-            SettingsCmd::ImportBundle { dry_run, apply } => {
-                if dry_run == apply {
+            SettingsCmd::ImportBundle {
+                dry_run,
+                apply,
+                compare_folder,
+            } => {
+                let chosen = [dry_run, apply, compare_folder]
+                    .into_iter()
+                    .filter(|x| *x)
+                    .count();
+                if chosen != 1 {
                     return Err(CliError::new(
                         "config.invalid",
-                        "must pass exactly one of: --dry-run, --apply",
+                        "must pass exactly one of: --dry-run, --apply, --compare-folder",
                     ));
                 }
                 if dry_run {
                     settings_import_bundle_dry_run(&config_dir, &data_dir, cli.json).await
-                } else {
+                } else if apply {
                     settings_import_bundle_apply(&config_dir, &data_dir, cli.json).await
+                } else {
+                    settings_import_bundle_compare_folder(&config_dir, &data_dir, cli.json).await
                 }
             }
         },
@@ -1369,6 +1381,50 @@ struct SettingsImportBundleApplyLocalIndexSyncedJson {
     to: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ConfigBundleFolderCompareState {
+    Match,
+    Mismatch,
+    RemoteMissing,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleCompareFolderRequest {
+    bundle_key: String,
+    target_id: String,
+    // Local directory path to compare (folder).
+    source_path: String,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleCompareFolderDiffJson {
+    missing_local_files: u64,
+    extra_local_files: u64,
+    size_mismatch_files: u64,
+    hash_mismatch_files: u64,
+    io_error_files: u64,
+    missing_local_examples: Vec<String>,
+    extra_local_examples: Vec<String>,
+    mismatch_examples: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsImportBundleCompareFolderResponse {
+    ok: bool,
+    state: ConfigBundleFolderCompareState,
+    target_id: String,
+    source_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_manifest_object_id: Option<String>,
+    diff: SettingsImportBundleCompareFolderDiffJson,
+}
+
 async fn settings_export_bundle(
     config_dir: &Path,
     data_dir: &Path,
@@ -1797,6 +1853,239 @@ async fn settings_import_bundle_dry_run(
     println!(
         "{}",
         serde_json::to_string(&out).map_err(|e| CliError::new("config.invalid", e.to_string()))?
+    );
+    Ok(())
+}
+
+async fn settings_import_bundle_compare_folder(
+    _config_dir: &Path,
+    data_dir: &Path,
+    json: bool,
+) -> Result<(), CliError> {
+    if !json {
+        return Err(CliError::new(
+            "config.invalid",
+            "import-bundle --compare-folder requires --json",
+        ));
+    }
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .map_err(|e| CliError::new("config.read_failed", e.to_string()))?;
+    let req: SettingsImportBundleCompareFolderRequest =
+        serde_json::from_str(&input).map_err(|e| CliError::new("config.invalid", e.to_string()))?;
+
+    if req.bundle_key.trim().is_empty() {
+        return Err(CliError::new("config.invalid", "bundleKey is required"));
+    }
+    if req.target_id.trim().is_empty() {
+        return Err(CliError::new("config.invalid", "targetId is required"));
+    }
+    if req.source_path.trim().is_empty() {
+        return Err(CliError::new("config.invalid", "sourcePath is required"));
+    }
+
+    let passphrase = load_config_bundle_passphrase()?;
+    let decoded = config_bundle::decode_config_bundle_key_v2(&req.bundle_key, &passphrase)
+        .map_err(map_core_err)?;
+    let bundle_settings = decoded.payload.settings;
+    let bundle_secrets = decoded.payload.secrets;
+    let bundle_master_key = decoded.master_key;
+
+    let Some(target) = bundle_settings.targets.iter().find(|t| t.id == req.target_id) else {
+        return Err(CliError::new(
+            "config.invalid",
+            format!("unknown targetId: {}", req.target_id),
+        ));
+    };
+
+    let Some(endpoint) = bundle_settings
+        .telegram_endpoints
+        .iter()
+        .find(|e| e.id == target.endpoint_id)
+    else {
+        return Err(CliError::new(
+            "config.invalid",
+            format!("missing endpoint in bundle settings: {}", target.endpoint_id),
+        ));
+    };
+
+    let api_id = bundle_settings.telegram.mtproto.api_id;
+    let Some(api_hash) = bundle_secrets
+        .entries
+        .get(&bundle_settings.telegram.mtproto.api_hash_key)
+        .cloned()
+    else {
+        return Err(CliError::new(
+            "config_bundle.conflict",
+            "missing telegram.mtproto api_hash; cannot compare remote latest",
+        ));
+    };
+    let Some(bot_token) = bundle_secrets.entries.get(&endpoint.bot_token_key).cloned() else {
+        return Err(CliError::new(
+            "config_bundle.conflict",
+            "missing endpoint bot token; cannot compare remote latest",
+        ));
+    };
+    if api_id <= 0 {
+        return Err(CliError::new(
+            "config_bundle.conflict",
+            "invalid telegram.mtproto api_id; cannot compare remote latest",
+        ));
+    }
+
+    let cache_dir = data_dir.join("cache").join("mtproto");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+    let provider = settings_config::endpoint_provider(&endpoint.id);
+    let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+        provider: provider.clone(),
+        api_id,
+        api_hash: api_hash.clone(),
+        bot_token: bot_token.clone(),
+        chat_id: endpoint.chat_id.clone(),
+        session: None,
+        cache_dir,
+        helper_path: None,
+    })
+    .await
+    .map_err(|e| map_mtproto_validate_err(e, &bot_token, &api_hash))?;
+
+    let cat = match bootstrap::load_remote_catalog(&storage, &bundle_master_key).await {
+        Ok(Some(cat)) => cat,
+        Ok(None) => {
+            let resp = SettingsImportBundleCompareFolderResponse {
+                ok: true,
+                state: ConfigBundleFolderCompareState::RemoteMissing,
+                target_id: req.target_id,
+                source_path: req.source_path,
+                remote_snapshot_id: None,
+                remote_manifest_object_id: None,
+                diff: SettingsImportBundleCompareFolderDiffJson::default(),
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&resp)
+                    .map_err(|e| CliError::new("config.invalid", e.to_string()))?
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(map_core_err(e)),
+    };
+
+    let mut latest = cat
+        .targets
+        .iter()
+        .find(|x| x.target_id == target.id)
+        .and_then(|x| x.latest.clone());
+    if latest.is_none() {
+        let matches = cat
+            .targets
+            .iter()
+            .filter(|x| x.source_path == target.source_path)
+            .collect::<Vec<_>>();
+        if matches.len() == 1 {
+            latest = matches[0].latest.clone();
+        }
+    }
+
+    let Some(latest) = latest else {
+        let resp = SettingsImportBundleCompareFolderResponse {
+            ok: true,
+            state: ConfigBundleFolderCompareState::RemoteMissing,
+            target_id: req.target_id,
+            source_path: req.source_path,
+            remote_snapshot_id: None,
+            remote_manifest_object_id: None,
+            diff: SettingsImportBundleCompareFolderDiffJson::default(),
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&resp)
+                .map_err(|e| CliError::new("config.invalid", e.to_string()))?
+        );
+        return Ok(());
+    };
+
+    // Download remote index DB and compare the local folder contents against the snapshot index.
+    let compare_dir = data_dir.join("tmp").join("import_bundle_compare");
+    std::fs::create_dir_all(&compare_dir)
+        .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+    fn sanitize_for_filename(s: &str) -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    let safe_snapshot = sanitize_for_filename(&latest.snapshot_id);
+    // manifest object ids can be long; keep the filename shortish.
+    let safe_manifest = sanitize_for_filename(&latest.manifest_object_id);
+    let safe_manifest = safe_manifest.chars().take(24).collect::<String>();
+    let db_path = compare_dir.join(format!(
+        "remote-index-{safe_snapshot}-{safe_manifest}.sqlite"
+    ));
+
+    televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
+        &storage,
+        &latest.snapshot_id,
+        &latest.manifest_object_id,
+        &bundle_master_key,
+        &db_path,
+        None,
+        Some(&provider),
+    )
+    .await
+    .map_err(map_core_err)?;
+
+    let report = televy_backup_core::folder_compare::compare_local_folder_against_index_db(
+        &db_path,
+        &latest.snapshot_id,
+        Path::new(&req.source_path),
+        8,
+    )
+    .await
+    .map_err(map_core_err)?;
+
+    let is_match = report.is_match();
+
+    let mut diff = SettingsImportBundleCompareFolderDiffJson::default();
+    diff.missing_local_files = report.missing_local_files;
+    diff.extra_local_files = report.extra_local_files;
+    diff.size_mismatch_files = report.size_mismatch_files;
+    diff.hash_mismatch_files = report.hash_mismatch_files;
+    diff.io_error_files = report.io_error_files;
+    diff.missing_local_examples = report.missing_local_examples;
+    diff.extra_local_examples = report.extra_local_examples;
+    diff.mismatch_examples = report.mismatch_examples;
+
+    let state = if is_match {
+        ConfigBundleFolderCompareState::Match
+    } else {
+        ConfigBundleFolderCompareState::Mismatch
+    };
+
+    let resp = SettingsImportBundleCompareFolderResponse {
+        ok: true,
+        state,
+        target_id: req.target_id,
+        source_path: req.source_path,
+        remote_snapshot_id: Some(latest.snapshot_id),
+        remote_manifest_object_id: Some(latest.manifest_object_id),
+        diff,
+    };
+
+    println!(
+        "{}",
+        serde_json::to_string(&resp).map_err(|e| CliError::new("config.invalid", e.to_string()))?
     );
     Ok(())
 }

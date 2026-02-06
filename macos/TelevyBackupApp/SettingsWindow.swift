@@ -110,6 +110,27 @@ struct CliSettingsImportBundleDryRunResponse: Decodable {
     let preflight: Preflight
 }
 
+struct CliSettingsImportBundleCompareFolderResponse: Decodable {
+    struct Diff: Decodable {
+        let missingLocalFiles: Int
+        let extraLocalFiles: Int
+        let sizeMismatchFiles: Int
+        let hashMismatchFiles: Int
+        let ioErrorFiles: Int
+        let missingLocalExamples: [String]
+        let extraLocalExamples: [String]
+        let mismatchExamples: [String]
+    }
+
+    let ok: Bool
+    let state: String
+    let targetId: String
+    let sourcePath: String
+    let remoteSnapshotId: String?
+    let remoteManifestObjectId: String?
+    let diff: Diff
+}
+
 struct CliSettingsImportBundleApplyResponse: Decodable {
     let ok: Bool
 }
@@ -1886,6 +1907,7 @@ private struct ImportConfigBundleSheet: View {
 
     @State private var applying: Bool = false
     @State private var applyError: String?
+    @State private var postApplyStatus: String?
 
     private struct ConfigBundleOuterPreview: Decodable {
         let hint: String?
@@ -2040,6 +2062,15 @@ private struct ImportConfigBundleSheet: View {
         inspectError = "Invalid backup config file"
     }
 
+    private enum RebindCompareState: String {
+        case unknown
+        case checking
+        case match
+        case mismatch
+        case remote_missing
+        case error
+    }
+
     private struct ResolutionState {
         var mode: ResolutionMode
         var newSourcePath: String
@@ -2047,6 +2078,11 @@ private struct ImportConfigBundleSheet: View {
         // whether they intend to restore remote data into the new folder or keep the local folder
         // contents and potentially overwrite remote on the next backup.
         var rebindDataDecision: RebindDataDecision = .undecided
+        // Content-level compare between local folder and remote latest snapshot (remote index DB),
+        // used to avoid prompting when data is already identical.
+        var rebindCompareState: RebindCompareState = .unknown
+        var rebindCompareDiff: CliSettingsImportBundleCompareFolderResponse.Diff? = nil
+        var rebindCompareError: String? = nil
     }
 
     private enum ResolutionMode: String, CaseIterable, Identifiable {
@@ -2069,6 +2105,7 @@ private struct ImportConfigBundleSheet: View {
         case undecided
         case use_remote_latest
         case keep_local
+        case merge_local_to_remote
 
         var id: String { rawValue }
 
@@ -2077,6 +2114,7 @@ private struct ImportConfigBundleSheet: View {
             case .undecided: return "Choose…"
             case .use_remote_latest: return "Use remote latest"
             case .keep_local: return "Keep local folder"
+            case .merge_local_to_remote: return "Merge (backup local to remote)"
             }
         }
 
@@ -2088,6 +2126,8 @@ private struct ImportConfigBundleSheet: View {
                 return "Recommended for restore. The folder must be empty."
             case .keep_local:
                 return "Local folder becomes the source of truth; next backup may overwrite remote latest."
+            case .merge_local_to_remote:
+                return "Runs a backup after import to update remote latest from the local folder."
             }
         }
     }
@@ -2116,6 +2156,155 @@ private struct ImportConfigBundleSheet: View {
         guard s.mode == .rebind else { return }
         s.rebindDataDecision = decision
         resolutions[targetId] = s
+    }
+
+    private func startRebindCompare(targetId: String, sourcePath: String) {
+        // Avoid network calls when capturing deterministic UI screenshots, but allow forcing a
+        // demo compare state via env for snapshots.
+        if SettingsUIDemo.enabled {
+            let demo = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_REBIND_COMPARE_STATE"] ?? ""
+            guard !demo.isEmpty else { return }
+            guard var s = resolutions[targetId], s.mode == .rebind else { return }
+
+            s.rebindDataDecision = .undecided
+            s.rebindCompareError = nil
+
+            switch demo {
+            case "match":
+                s.rebindCompareState = .match
+                s.rebindCompareDiff = CliSettingsImportBundleCompareFolderResponse.Diff(
+                    missingLocalFiles: 0,
+                    extraLocalFiles: 0,
+                    sizeMismatchFiles: 0,
+                    hashMismatchFiles: 0,
+                    ioErrorFiles: 0,
+                    missingLocalExamples: [],
+                    extraLocalExamples: [],
+                    mismatchExamples: []
+                )
+            case "mismatch":
+                s.rebindCompareState = .mismatch
+                s.rebindCompareDiff = CliSettingsImportBundleCompareFolderResponse.Diff(
+                    missingLocalFiles: 1,
+                    extraLocalFiles: 1,
+                    sizeMismatchFiles: 0,
+                    hashMismatchFiles: 2,
+                    ioErrorFiles: 0,
+                    missingLocalExamples: ["Photos/2025/IMG_0001.jpg"],
+                    extraLocalExamples: ["Scratch/tmp.txt"],
+                    mismatchExamples: ["Videos/clip.mp4 (chunk hash mismatch at offset=0 len=1048576)"]
+                )
+            case "error":
+                s.rebindCompareState = .error
+                s.rebindCompareDiff = nil
+                s.rebindCompareError = "Demo compare error"
+            default:
+                s.rebindCompareState = .unknown
+                s.rebindCompareDiff = nil
+            }
+
+            resolutions[targetId] = s
+            return
+        }
+
+        guard remoteLatestExists(targetId: targetId) else { return }
+
+        let key = bundleKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pp = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !key.isEmpty else { return }
+        guard !pp.isEmpty else { return }
+
+        guard let cli = model.cliPath() else { return }
+
+        // Mark as checking and reset any previous diff/error.
+        if var s = resolutions[targetId] {
+            guard s.mode == .rebind else { return }
+            s.rebindCompareState = .checking
+            s.rebindCompareDiff = nil
+            s.rebindCompareError = nil
+            // Any folder change invalidates the previous choice.
+            s.rebindDataDecision = .undecided
+            resolutions[targetId] = s
+        }
+
+        let sourcePathTrimmed = sourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let payload: [String: Any] = [
+                "bundleKey": key,
+                "targetId": targetId,
+                "sourcePath": sourcePathTrimmed,
+            ]
+
+            guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+                  let stdin = String(data: data, encoding: .utf8)
+            else {
+                DispatchQueue.main.async {
+                    guard var s = resolutions[targetId], s.mode == .rebind else { return }
+                    s.rebindCompareState = .error
+                    s.rebindCompareError = "Failed to encode compare JSON"
+                    resolutions[targetId] = s
+                }
+                return
+            }
+
+            let res = model.runCommandCapture(
+                exe: cli,
+                args: ["--json", "settings", "import-bundle", "--compare-folder"],
+                stdin: stdin + "\n",
+                timeoutSeconds: 600,
+                env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": pp]
+            )
+
+            DispatchQueue.main.async {
+                guard var s = resolutions[targetId], s.mode == .rebind else { return }
+
+                // Ignore stale results if the user already picked a different folder.
+                let currentPath = s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard currentPath == sourcePathTrimmed else { return }
+
+                if res.status != 0 {
+                    let err = humanizeCliFailure(res.stderr, fallback: "Compare failed")
+                    s.rebindCompareState = .error
+                    s.rebindCompareError = err.message
+                    s.rebindCompareDiff = nil
+                    resolutions[targetId] = s
+                    return
+                }
+
+                guard let outData = res.stdout.data(using: .utf8) else {
+                    s.rebindCompareState = .error
+                    s.rebindCompareError = "Compare returned empty output"
+                    s.rebindCompareDiff = nil
+                    resolutions[targetId] = s
+                    return
+                }
+
+                do {
+                    let decoded = try JSONDecoder().decode(CliSettingsImportBundleCompareFolderResponse.self, from: outData)
+                    s.rebindCompareDiff = decoded.diff
+                    s.rebindCompareError = nil
+                    switch decoded.state {
+                    case "match":
+                        s.rebindCompareState = .match
+                    case "mismatch":
+                        s.rebindCompareState = .mismatch
+                    case "remote_missing":
+                        s.rebindCompareState = .remote_missing
+                    default:
+                        s.rebindCompareState = .error
+                        s.rebindCompareError = "Unknown compare state: \(decoded.state)"
+                    }
+                    resolutions[targetId] = s
+                } catch {
+                    s.rebindCompareState = .error
+                    s.rebindCompareError = "Compare JSON decode failed"
+                    s.rebindCompareDiff = nil
+                    resolutions[targetId] = s
+                }
+            }
+        }
     }
 
     private func isEmptyDirectory(path: String) -> Bool? {
@@ -2185,13 +2374,15 @@ private struct ImportConfigBundleSheet: View {
                t.sourcePath == newPath
             {
                 // If the user explicitly opened the picker and re-selected the same path, treat
-                // it as "no change" unless remote latest exists. In that case, keep it as a
-                // rebind so the UI can force a restore data decision (empty folder vs keep local).
+                // it as "no change" unless remote latest exists. In that case, treat it as a
+                // rebind so we can run a content-level compare against remote latest and only
+                // prompt for a data decision if it actually differs.
                 if remoteLatestExists(targetId: targetId) {
                     setResolveState(
                         targetId: targetId,
                         ResolutionState(mode: .rebind, newSourcePath: newPath)
                     )
+                    startRebindCompare(targetId: targetId, sourcePath: newPath)
                 } else {
                     resolutions.removeValue(forKey: targetId)
                 }
@@ -2201,6 +2392,7 @@ private struct ImportConfigBundleSheet: View {
                 targetId: targetId,
                 ResolutionState(mode: .rebind, newSourcePath: newPath)
             )
+            startRebindCompare(targetId: targetId, sourcePath: newPath)
         }
 
         if let hostWindow = NSApp.keyWindow ?? NSApp.mainWindow {
@@ -2299,13 +2491,23 @@ private struct ImportConfigBundleSheet: View {
                 }
 
                 // If remote latest exists for this target, rebinding is a data-plane decision.
-                // Block Apply until the user explicitly chooses whether to use remote or keep local.
+                // First do a content-level compare (remote index DB vs local bytes). Only prompt
+                // the user when there are actual differences.
                 if remoteLatestExists(targetId: id) {
-                    let decision = s.rebindDataDecision
-                    if decision == .undecided { return false }
-                    if decision == .use_remote_latest {
-                        // Restore semantics require an empty directory.
-                        guard isEmptyDirectory(path: trimmed) == true else { return false }
+                    switch s.rebindCompareState {
+                    case .unknown, .checking:
+                        return false
+                    case .error:
+                        return false
+                    case .match, .remote_missing:
+                        break
+                    case .mismatch:
+                        let decision = s.rebindDataDecision
+                        if decision == .undecided { return false }
+                        if decision == .use_remote_latest {
+                            // Restore semantics require an empty directory.
+                            guard isEmptyDirectory(path: trimmed) == true else { return false }
+                        }
                     }
                 }
             }
@@ -2339,6 +2541,7 @@ private struct ImportConfigBundleSheet: View {
 
         applying = true
         applyError = nil
+        postApplyStatus = nil
 
         let key = bundleKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let selected = Array(selectedTargetIds).sorted()
@@ -2395,6 +2598,63 @@ private struct ImportConfigBundleSheet: View {
         do {
             let decoded = try JSONDecoder().decode(CliSettingsImportBundleApplyResponse.self, from: outData)
             if decoded.ok {
+                // Post-import actions for rebinding when local != remote latest.
+                // - Use remote latest: run restore into the new folder.
+                // - Merge (Option B): run a backup to generate a new snapshot from local bytes.
+                struct PostAction {
+                    let status: String
+                    let args: [String]
+                    let timeoutSeconds: Double
+                }
+
+                var post: [PostAction] = []
+                for id in selected {
+                    let s = resolveState(targetId: id)
+                    guard s.mode == .rebind else { continue }
+                    guard remoteLatestExists(targetId: id) else { continue }
+                    guard s.rebindCompareState == .mismatch else { continue }
+
+                    let newPath = s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !newPath.isEmpty else { continue }
+
+                    switch s.rebindDataDecision {
+                    case .use_remote_latest:
+                        post.append(PostAction(
+                            status: "Restoring remote latest (\(id))…",
+                            args: ["restore", "latest", "--target-id", id, "--target", newPath],
+                            timeoutSeconds: 3600
+                        ))
+                    case .merge_local_to_remote:
+                        post.append(PostAction(
+                            status: "Backing up local folder (\(id))…",
+                            args: ["backup", "run", "--target-id", id, "--label", "import-merge"],
+                            timeoutSeconds: 3600
+                        ))
+                    case .keep_local, .undecided:
+                        break
+                    }
+                }
+
+                for a in post {
+                    postApplyStatus = a.status
+                    model.ensureDaemonRunning()
+                    let res = model.runCommandCapture(
+                        exe: cli,
+                        args: a.args,
+                        stdin: nil,
+                        timeoutSeconds: a.timeoutSeconds,
+                        env: [:]
+                    )
+                    if res.status != 0 {
+                        let err = humanizeCliFailure(res.stderr, fallback: "Post-import action failed")
+                        applyError = err.message
+                        postApplyStatus = nil
+                        applying = false
+                        return
+                    }
+                }
+
+                postApplyStatus = nil
                 onApplied()
                 dismiss()
             } else {
@@ -2775,49 +3035,135 @@ private struct ImportConfigBundleSheet: View {
                                pf.remoteLatest.state == "ok"
                             {
                                 let dirEmpty = isEmptyDirectory(path: trimmedNewSourcePath)
-                                let needsEmpty = state.rebindDataDecision == .use_remote_latest
+                                let compareState = state.rebindCompareState
+                                let retryTitle = compareState == .unknown ? "Check" : "Retry"
 
-                                VStack(alignment: .leading, spacing: 4) {
+                                VStack(alignment: .leading, spacing: 6) {
                                     HStack(spacing: 10) {
-                                        Text("Data")
+                                        Text("Compare")
                                             .font(.system(size: 12, weight: .semibold))
                                             .frame(width: 80, alignment: .leading)
 
-                                        Picker("", selection: Binding(
-                                            get: { resolveState(targetId: t.id).rebindDataDecision },
-                                            set: { newDecision in
-                                                setRebindDataDecision(targetId: t.id, newDecision)
-                                            }
-                                        )) {
-                                            ForEach(RebindDataDecision.allCases) { d in
-                                                Text(d.title).tag(d)
+                                        Group {
+                                            switch compareState {
+                                            case .unknown:
+                                                Label("Not checked", systemImage: "questionmark.circle")
+                                                    .foregroundStyle(.secondary)
+                                            case .checking:
+                                                HStack(spacing: 8) {
+                                                    ProgressView()
+                                                        .controlSize(.small)
+                                                    Text("Comparing with remote latest…")
+                                                }
+                                                .foregroundStyle(.secondary)
+                                            case .match:
+                                                Label("Matches remote latest", systemImage: "checkmark.seal.fill")
+                                                    .foregroundStyle(.green)
+                                            case .mismatch:
+                                                Label("Differs from remote latest", systemImage: "exclamationmark.triangle.fill")
+                                                    .foregroundStyle(.red)
+                                            case .remote_missing:
+                                                Label("Remote latest missing", systemImage: "questionmark.circle")
+                                                    .foregroundStyle(.secondary)
+                                            case .error:
+                                                Label("Compare failed", systemImage: "exclamationmark.triangle.fill")
+                                                    .foregroundStyle(.red)
                                             }
                                         }
-                                        .pickerStyle(.menu)
-                                        .controlSize(.regular)
-                                        .frame(width: 260, alignment: .leading)
+                                        .font(.system(size: 11, weight: .semibold))
+
+                                        Spacer()
+
+                                        if compareState != .checking {
+                                            Button(retryTitle) {
+                                                startRebindCompare(targetId: t.id, sourcePath: trimmedNewSourcePath)
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .controlSize(.small)
+                                        }
                                     }
 
-                                    Text(resolveState(targetId: t.id).rebindDataDecision.detail)
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(.secondary)
-
-                                    if resolveState(targetId: t.id).rebindDataDecision == .undecided {
-                                        Label(
-                                            "Choose a data decision to enable Apply.",
-                                            systemImage: "exclamationmark.triangle.fill"
-                                        )
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(.red)
+                                    if compareState == .error, let msg = state.rebindCompareError {
+                                        Text(msg)
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.red)
                                     }
 
-                                    if needsEmpty && dirEmpty != true {
-                                        Label(
-                                            "This folder must be empty to restore remote latest. Choose an empty folder or pick “Keep local folder”.",
-                                            systemImage: "exclamationmark.triangle.fill"
-                                        )
-                                        .font(.system(size: 11, weight: .semibold))
-                                        .foregroundStyle(.red)
+                                    if compareState == .mismatch, let diff = state.rebindCompareDiff {
+                                        let summaryParts: [String] = [
+                                            diff.missingLocalFiles > 0 ? "missing \(diff.missingLocalFiles)" : nil,
+                                            diff.extraLocalFiles > 0 ? "extra \(diff.extraLocalFiles)" : nil,
+                                            diff.sizeMismatchFiles > 0 ? "size \(diff.sizeMismatchFiles)" : nil,
+                                            diff.hashMismatchFiles > 0 ? "hash \(diff.hashMismatchFiles)" : nil,
+                                            diff.ioErrorFiles > 0 ? "io \(diff.ioErrorFiles)" : nil,
+                                        ].compactMap { $0 }
+
+                                        Text("Diff: \(summaryParts.isEmpty ? "(unknown)" : summaryParts.joined(separator: ", "))")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+
+                                        let exampleLines: [String] = {
+                                            var out: [String] = []
+                                            for p in diff.missingLocalExamples.prefix(3) { out.append("Missing local: \(p)") }
+                                            for p in diff.extraLocalExamples.prefix(3) { out.append("Extra local: \(p)") }
+                                            for p in diff.mismatchExamples.prefix(3) { out.append("Mismatch: \(p)") }
+                                            return out
+                                        }()
+
+                                        if !exampleLines.isEmpty {
+                                            ForEach(exampleLines, id: \.self) { line in
+                                                Text("• \(line)")
+                                                    .font(.system(size: 11, weight: .semibold))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+
+                                    if compareState == .mismatch {
+                                        let decision = resolveState(targetId: t.id).rebindDataDecision
+                                        let needsEmpty = decision == .use_remote_latest
+
+                                        HStack(spacing: 10) {
+                                            Text("Resolution")
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .frame(width: 80, alignment: .leading)
+
+                                            Picker("", selection: Binding(
+                                                get: { resolveState(targetId: t.id).rebindDataDecision },
+                                                set: { newDecision in
+                                                    setRebindDataDecision(targetId: t.id, newDecision)
+                                                }
+                                            )) {
+                                                ForEach(RebindDataDecision.allCases) { d in
+                                                    Text(d.title).tag(d)
+                                                }
+                                            }
+                                            .pickerStyle(.menu)
+                                            .controlSize(.regular)
+                                            .frame(width: 260, alignment: .leading)
+                                        }
+
+                                        Text(resolveState(targetId: t.id).rebindDataDecision.detail)
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+
+                                        if decision == .undecided {
+                                            Label(
+                                                "Choose a resolution to enable Apply.",
+                                                systemImage: "exclamationmark.triangle.fill"
+                                            )
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.red)
+                                        }
+
+                                        if needsEmpty && dirEmpty != true {
+                                            Label(
+                                                "This folder must be empty to restore remote latest.",
+                                                systemImage: "exclamationmark.triangle.fill"
+                                            )
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.red)
+                                        }
                                     }
                                 }
                             }
@@ -2833,7 +3179,15 @@ private struct ImportConfigBundleSheet: View {
                                     Picker("", selection: Binding(
                                         get: { state.mode },
                                         set: { newMode in
-                                            setResolveState(targetId: t.id, ResolutionState(mode: newMode, newSourcePath: state.newSourcePath))
+                                            var next = state
+                                            next.mode = newMode
+                                            if newMode != .rebind {
+                                                next.rebindDataDecision = .undecided
+                                                next.rebindCompareState = .unknown
+                                                next.rebindCompareDiff = nil
+                                                next.rebindCompareError = nil
+                                            }
+                                            setResolveState(targetId: t.id, next)
                                         }
                                     )) {
                                         ForEach(ResolutionMode.allCases) { m in
@@ -2905,6 +3259,12 @@ private struct ImportConfigBundleSheet: View {
             }
 
             Divider()
+
+            if let postApplyStatus {
+                Text(postApplyStatus)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
 
             if let applyError {
                 Text(applyError)
@@ -3031,6 +3391,22 @@ private struct ImportConfigBundleSheet: View {
                 let decoded = demoInspection(targetsCount: count)
                 inspection = decoded
                 applyDefaults(from: decoded)
+
+                // Optional demo: show compare + conflict UI without network.
+                if SettingsUIDemo.scene == "backup-config-import-result",
+                   let demoCompare = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_REBIND_COMPARE_STATE"],
+                   !demoCompare.isEmpty,
+                   let first = decoded.bundle.targets.first
+                {
+                    let demoPath =
+                        ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_REBIND_PATH"]
+                            ?? "/Users/ivan/Demo/RebindFolder"
+                    setResolveState(
+                        targetId: first.id,
+                        ResolutionState(mode: .rebind, newSourcePath: demoPath)
+                    )
+                    startRebindCompare(targetId: first.id, sourcePath: demoPath)
+                }
                 return
             }
 

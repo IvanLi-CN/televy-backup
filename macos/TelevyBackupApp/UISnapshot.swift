@@ -22,7 +22,10 @@ enum UISnapshot {
 
         // Prefer PDF-rendering for panels like NSSavePanel/NSTexturedFullScreenWindow.
         // Some system windows do not render correctly with `cacheDisplay`.
-        if window is NSPanel {
+        //
+        // Note: NSOpenPanel sometimes renders blank via PDF in sandboxed/deterministic snapshot
+        // mode; fall back to `cacheDisplay` for it.
+        if window is NSPanel, !(window is NSOpenPanel) {
             let pdf = view.dataWithPDF(inside: bounds)
             if let img = NSImage(data: pdf) {
                 let rep = NSBitmapImageRep(
