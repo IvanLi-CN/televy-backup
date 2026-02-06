@@ -1,14 +1,15 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{RwLock, broadcast, oneshot};
 
+use televy_backup_core::TaskProgress;
 use televy_backup_core::control::{
     ControlError, ControlRequest, ControlResponse, SecretsClearTelegramMtprotoSessionParams,
     SecretsPresenceParams, SecretsSetTelegramApiHashParams, SecretsSetTelegramBotTokenParams,
-    VaultStatusResult,
+    StatusTaskFinishParams, StatusTaskProgressParams, StatusTaskStartParams, VaultStatusResult,
 };
 
 type Settings = televy_backup_core::config::SettingsV2;
@@ -49,6 +50,7 @@ pub fn spawn_control_ipc_server(
     socket_path: PathBuf,
     config_root: PathBuf,
     settings: Arc<RwLock<Settings>>,
+    status_state: Arc<Mutex<crate::StatusRuntimeState>>,
 ) -> std::io::Result<ControlIpcServerHandle> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -121,8 +123,9 @@ pub fn spawn_control_ipc_server(
                     let mut shutdown = shutdown_broadcast.subscribe();
                     let config_root = config_root.clone();
                     let settings = settings.clone();
+                    let status_state = status_state.clone();
                     tokio::spawn(async move {
-                        let _ = handle_control_ipc_client(stream, &config_root, settings, &mut shutdown).await;
+                        let _ = handle_control_ipc_client(stream, &config_root, settings, status_state, &mut shutdown).await;
                     });
                 }
             }
@@ -140,6 +143,7 @@ async fn handle_control_ipc_client(
     stream: UnixStream,
     config_root: &std::path::Path,
     settings: Arc<RwLock<Settings>>,
+    status_state: Arc<Mutex<crate::StatusRuntimeState>>,
     shutdown: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let (r, w) = stream.into_split();
@@ -223,7 +227,7 @@ async fn handle_control_ipc_client(
 
     let resp = {
         let settings = settings.read().await;
-        handle_request(&req, config_root, &settings)
+        handle_request(&req, config_root, &settings, &status_state)
     };
     write_json_line(&mut w, &resp).await?;
     Ok(())
@@ -233,6 +237,7 @@ fn handle_request(
     req: &ControlRequest,
     config_root: &std::path::Path,
     settings: &Settings,
+    status_state: &Arc<Mutex<crate::StatusRuntimeState>>,
 ) -> ControlResponse {
     if req.type_ != "control.request" || req.id.trim().is_empty() || req.method.trim().is_empty() {
         return ControlResponse::err(
@@ -343,6 +348,75 @@ fn handle_request(
                 Ok(()) => ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true })),
                 Err(e) => ControlResponse::err(req.id.clone(), e),
             }
+        }
+        "status.taskStart" => {
+            let params: StatusTaskStartParams = match serde_json::from_value(req.params.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return ControlResponse::err(
+                        req.id.clone(),
+                        ControlError::invalid_request(
+                            "invalid params",
+                            serde_json::json!({ "error": e.to_string() }),
+                        ),
+                    );
+                }
+            };
+
+            if let Ok(mut st) = status_state.lock() {
+                st.mark_external_run_start(&params.target_id, &params.task_id);
+            }
+            ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
+        }
+        "status.taskProgress" => {
+            let params: StatusTaskProgressParams = match serde_json::from_value(req.params.clone())
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    return ControlResponse::err(
+                        req.id.clone(),
+                        ControlError::invalid_request(
+                            "invalid params",
+                            serde_json::json!({ "error": e.to_string() }),
+                        ),
+                    );
+                }
+            };
+
+            if let Ok(mut st) = status_state.lock() {
+                let p = TaskProgress {
+                    phase: params.progress.phase,
+                    files_total: params.progress.files_total,
+                    files_done: params.progress.files_done,
+                    chunks_total: params.progress.chunks_total,
+                    chunks_done: params.progress.chunks_done,
+                    bytes_read: params.progress.bytes_read,
+                    bytes_uploaded: params.progress.bytes_uploaded,
+                    bytes_downloaded: params.progress.bytes_downloaded,
+                    bytes_deduped: params.progress.bytes_deduped,
+                };
+                st.on_external_progress(&params.target_id, &params.task_id, p);
+            }
+            ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
+        }
+        "status.taskFinish" => {
+            let params: StatusTaskFinishParams = match serde_json::from_value(req.params.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return ControlResponse::err(
+                        req.id.clone(),
+                        ControlError::invalid_request(
+                            "invalid params",
+                            serde_json::json!({ "error": e.to_string() }),
+                        ),
+                    );
+                }
+            };
+
+            if let Ok(mut st) = status_state.lock() {
+                st.mark_external_run_finish(&params.target_id, &params.task_id);
+            }
+            ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
         }
         _ => ControlResponse::err(
             req.id.clone(),
@@ -660,10 +734,14 @@ mod tests {
         let cfg_root = dir.path().join("cfg");
         std::fs::create_dir_all(&cfg_root).unwrap();
 
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
         let _server = spawn_control_ipc_server(
             socket_path.clone(),
             cfg_root.clone(),
             Arc::new(RwLock::new(settings())),
+            status_state,
         )
         .unwrap();
 
