@@ -7,6 +7,7 @@ use tracing::error;
 
 use crate::crypto::decrypt_framed;
 use crate::index_manifest::{IndexManifest, index_part_aad};
+use crate::progress::{ProgressSink, TaskProgress};
 use crate::storage::Storage;
 use crate::{Error, Result};
 
@@ -24,6 +25,7 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
     index_db_path: &Path,
     cancel: Option<&CancellationToken>,
     normalize_provider: Option<&str>,
+    progress: Option<&dyn ProgressSink>,
 ) -> Result<DownloadedIndexDbStats> {
     if let Some(cancel) = cancel
         && cancel.is_cancelled()
@@ -45,6 +47,13 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
             e
         })?;
     let mut bytes_downloaded = manifest_enc.len() as u64;
+    if let Some(sink) = progress {
+        sink.on_progress(TaskProgress {
+            phase: "index".to_string(),
+            bytes_downloaded: Some(bytes_downloaded),
+            ..TaskProgress::default()
+        });
+    }
 
     let manifest_json = decrypt_framed(master_key, snapshot_id.as_bytes(), &manifest_enc).map_err(
         |e| Error::Crypto {
@@ -110,6 +119,13 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
             })?;
 
         bytes_downloaded = bytes_downloaded.saturating_add(part_enc.len() as u64);
+        if let Some(sink) = progress {
+            sink.on_progress(TaskProgress {
+                phase: "index".to_string(),
+                bytes_downloaded: Some(bytes_downloaded),
+                ..TaskProgress::default()
+            });
+        }
 
         if part_enc.len() != part.size {
             return Err(Error::Integrity {
@@ -148,6 +164,13 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
     let bytes_written = sqlite_bytes.len() as u64;
 
     write_index_db_atomic(index_db_path, &sqlite_bytes, normalize_provider).await?;
+    if let Some(sink) = progress {
+        sink.on_progress(TaskProgress {
+            phase: "index".to_string(),
+            bytes_downloaded: Some(bytes_downloaded),
+            ..TaskProgress::default()
+        });
+    }
 
     Ok(DownloadedIndexDbStats {
         bytes_downloaded,
@@ -328,6 +351,7 @@ mod tests {
             &out_db,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -429,6 +453,7 @@ mod tests {
             &out_db,
             None,
             Some("telegram.mtproto/new"),
+            None,
         )
         .await
         .unwrap();
