@@ -2430,7 +2430,8 @@ private struct ImportConfigBundleSheet: View {
             let action = RebindApplyGate.selectionAction(
                 originalSourcePath: originalPath,
                 selectedSourcePath: newPath,
-                remoteLatestExists: remoteLatestExists(targetId: targetId)
+                remoteLatestExists: remoteLatestExists(targetId: targetId),
+                canClearResolution: !needsResolution(targetId: targetId)
             )
 
             switch action {
@@ -2630,6 +2631,7 @@ private struct ImportConfigBundleSheet: View {
 
         let key = bundleKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let selected = Array(selectedTargetIds).sorted()
+        let passphraseValue = passphrase
 
         var resolutionsObj: [String: Any] = [:]
         for id in selected {
@@ -2662,97 +2664,120 @@ private struct ImportConfigBundleSheet: View {
             return
         }
 
-        model.ensureDaemonRunning()
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "settings", "import-bundle", "--apply"],
-            stdin: stdin + "\n",
-            timeoutSeconds: 180,
-            env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": passphrase]
-        )
-
-        guard res.status == 0, let outData = res.stdout.data(using: .utf8) else {
-            let err = humanizeCliFailure(res.stderr, fallback: "Import failed")
-            applyError = err.message
-            if err.hint == .incorrectPassphrase {
-                DispatchQueue.main.async { passphraseFocused = true }
-            }
-            applying = false
-            return
+        // Post-import actions for rebinding when local != remote latest.
+        // - Use remote latest: run restore into the new folder.
+        // - Merge (Option B): run a backup to generate a new snapshot from local bytes.
+        struct PostAction {
+            let status: String
+            let args: [String]
+            let timeoutSeconds: Double
         }
 
-        do {
-            let decoded = try JSONDecoder().decode(CliSettingsImportBundleApplyResponse.self, from: outData)
-            if decoded.ok {
-                // Post-import actions for rebinding when local != remote latest.
-                // - Use remote latest: run restore into the new folder.
-                // - Merge (Option B): run a backup to generate a new snapshot from local bytes.
-                struct PostAction {
-                    let status: String
-                    let args: [String]
-                    let timeoutSeconds: Double
-                }
+        // Pre-compute actions on the main thread so the background worker doesn't access SwiftUI
+        // state (which can race / trigger main-thread warnings).
+        var post: [PostAction] = []
+        for id in selected {
+            let s = resolveState(targetId: id)
+            guard remoteLatestExists(targetId: id) else { continue }
+            if needsResolution(targetId: id), s.mode == .skip { continue }
+            guard s.rebindCompareState == .mismatch else { continue }
 
-                var post: [PostAction] = []
-                for id in selected {
-                    let s = resolveState(targetId: id)
-                    guard remoteLatestExists(targetId: id) else { continue }
-                    if needsResolution(targetId: id), s.mode == .skip { continue }
-                    guard s.rebindCompareState == .mismatch else { continue }
+            guard let path = effectiveSourcePath(targetId: id)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !path.isEmpty
+            else { continue }
 
-                    guard let path = effectiveSourcePath(targetId: id)?
-                        .trimmingCharacters(in: .whitespacesAndNewlines),
-                        !path.isEmpty
-                    else { continue }
+            switch s.rebindDataDecision {
+            case .use_remote_latest:
+                post.append(PostAction(
+                    status: "Restoring remote latest (\(id))…",
+                    args: ["restore", "latest", "--target-id", id, "--target", path],
+                    timeoutSeconds: 3600
+                ))
+            case .merge_local_to_remote:
+                post.append(PostAction(
+                    status: "Backing up local folder (\(id))…",
+                    args: ["backup", "run", "--target-id", id, "--label", "import-merge"],
+                    timeoutSeconds: 3600
+                ))
+            case .keep_local, .undecided:
+                break
+            }
+        }
 
-                    switch s.rebindDataDecision {
-                    case .use_remote_latest:
-                        post.append(PostAction(
-                            status: "Restoring remote latest (\(id))…",
-                            args: ["restore", "latest", "--target-id", id, "--target", path],
-                            timeoutSeconds: 3600
-                        ))
-                    case .merge_local_to_remote:
-                        post.append(PostAction(
-                            status: "Backing up local folder (\(id))…",
-                            args: ["backup", "run", "--target-id", id, "--label", "import-merge"],
-                            timeoutSeconds: 3600
-                        ))
-                    case .keep_local, .undecided:
-                        break
-                    }
-                }
-
-                for a in post {
-                    postApplyStatus = a.status
+        DispatchQueue.global(qos: .userInitiated).async {
+            func ensureDaemonRunningOnMain() {
+                DispatchQueue.main.sync {
                     model.ensureDaemonRunning()
-                    let res = model.runCommandCapture(
-                        exe: cli,
-                        args: a.args,
-                        stdin: nil,
-                        timeoutSeconds: a.timeoutSeconds,
-                        env: [:]
-                    )
-                    if res.status != 0 {
-                        let err = humanizeCliFailure(res.stderr, fallback: "Post-import action failed")
+                }
+            }
+
+            ensureDaemonRunningOnMain()
+            let res = model.runCommandCapture(
+                exe: cli,
+                args: ["--json", "settings", "import-bundle", "--apply"],
+                stdin: stdin + "\n",
+                timeoutSeconds: 180,
+                env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": passphraseValue]
+            )
+
+            guard res.status == 0, let outData = res.stdout.data(using: .utf8) else {
+                let err = humanizeCliFailure(res.stderr, fallback: "Import failed")
+                DispatchQueue.main.async {
+                    applyError = err.message
+                    if err.hint == .incorrectPassphrase {
+                        passphraseFocused = true
+                    }
+                    applying = false
+                }
+                return
+            }
+
+            do {
+                let decoded = try JSONDecoder().decode(CliSettingsImportBundleApplyResponse.self, from: outData)
+                guard decoded.ok else {
+                    DispatchQueue.main.async {
+                        applyError = "Apply failed"
+                        applying = false
+                    }
+                    return
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    applyError = "Apply JSON decode failed"
+                    applying = false
+                }
+                return
+            }
+
+            for a in post {
+                DispatchQueue.main.async { postApplyStatus = a.status }
+                ensureDaemonRunningOnMain()
+                let res = model.runCommandCapture(
+                    exe: cli,
+                    args: a.args,
+                    stdin: nil,
+                    timeoutSeconds: a.timeoutSeconds,
+                    env: [:]
+                )
+                if res.status != 0 {
+                    let err = humanizeCliFailure(res.stderr, fallback: "Post-import action failed")
+                    DispatchQueue.main.async {
                         applyError = err.message
                         postApplyStatus = nil
                         applying = false
-                        return
                     }
+                    return
                 }
+            }
 
+            DispatchQueue.main.async {
                 postApplyStatus = nil
                 onApplied()
                 dismiss()
-            } else {
-                applyError = "Apply failed"
+                applying = false
             }
-        } catch {
-            applyError = "Apply JSON decode failed"
         }
-
-        applying = false
     }
 
     private func missingSecretLabels(keys: [String]) -> [String] {

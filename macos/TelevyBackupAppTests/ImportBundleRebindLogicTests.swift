@@ -17,16 +17,32 @@ private func test_selectionAction_samePath_remoteLatestMissing_clearsResolution(
     let action = RebindApplyGate.selectionAction(
         originalSourcePath: "/Users/ivan/Photos",
         selectedSourcePath: "/Users/ivan/Photos",
-        remoteLatestExists: false
+        remoteLatestExists: false,
+        canClearResolution: true
     )
     expectEqual(action, .clearResolution, "same path without remote latest should clear resolution")
+}
+
+private func test_selectionAction_samePath_remoteLatestMissing_needsResolution_rebinds() {
+    let action = RebindApplyGate.selectionAction(
+        originalSourcePath: "/Users/ivan/Photos",
+        selectedSourcePath: "/Users/ivan/Photos",
+        remoteLatestExists: false,
+        canClearResolution: false
+    )
+    expectEqual(
+        action,
+        .rebindAndCompare(newSourcePath: "/Users/ivan/Photos"),
+        "same path without remote latest should keep rebind when resolution cannot be cleared"
+    )
 }
 
 private func test_selectionAction_samePath_remoteLatestExists_rebinds() {
     let action = RebindApplyGate.selectionAction(
         originalSourcePath: "/Users/ivan/Photos",
         selectedSourcePath: "/Users/ivan/Photos",
-        remoteLatestExists: true
+        remoteLatestExists: true,
+        canClearResolution: true
     )
     expectEqual(
         action,
@@ -39,7 +55,8 @@ private func test_selectionAction_differentPath_always_rebinds() {
     let actionA = RebindApplyGate.selectionAction(
         originalSourcePath: "/Users/ivan/Photos",
         selectedSourcePath: "/Users/ivan/NewPhotos",
-        remoteLatestExists: false
+        remoteLatestExists: false,
+        canClearResolution: true
     )
     expectEqual(
         actionA,
@@ -50,7 +67,8 @@ private func test_selectionAction_differentPath_always_rebinds() {
     let actionB = RebindApplyGate.selectionAction(
         originalSourcePath: "/Users/ivan/Photos",
         selectedSourcePath: "/Users/ivan/NewPhotos",
-        remoteLatestExists: true
+        remoteLatestExists: true,
+        canClearResolution: true
     )
     expectEqual(
         actionB,
@@ -129,6 +147,7 @@ private func test_gate_unknown_checking_error_block() {
 
 private func runAllTests() {
     test_selectionAction_samePath_remoteLatestMissing_clearsResolution()
+    test_selectionAction_samePath_remoteLatestMissing_needsResolution_rebinds()
     test_selectionAction_samePath_remoteLatestExists_rebinds()
     test_selectionAction_differentPath_always_rebinds()
 

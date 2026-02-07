@@ -62,12 +62,17 @@ enum RebindApplyGate {
     static func selectionAction(
         originalSourcePath: String?,
         selectedSourcePath: String,
-        remoteLatestExists: Bool
+        remoteLatestExists: Bool,
+        canClearResolution: Bool
     ) -> RebindFolderSelectionAction {
         // If the user re-selects the original path:
         // - remote latest exists: treat it as a rebind so we can compare and potentially prompt.
         // - remote latest missing: it is a no-op, so clear the rebind resolution (back to defaults).
-        if let orig = originalSourcePath, orig == selectedSourcePath, !remoteLatestExists {
+        if canClearResolution,
+           let orig = originalSourcePath,
+           orig == selectedSourcePath,
+           !remoteLatestExists
+        {
             return .clearResolution
         }
         return .rebindAndCompare(newSourcePath: selectedSourcePath)
@@ -96,4 +101,3 @@ enum RebindApplyGate {
         }
     }
 }
-
