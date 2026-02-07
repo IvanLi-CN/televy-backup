@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-02-06
-- Last: 2026-02-06
+- Last: 2026-02-07
 
 ## 背景 / 问题
 
@@ -34,7 +34,7 @@
 
 - Given 在 import bundle inspect 结果页，When 查看任意 target 条目，Then 可见“Change…/Choose…”按钮。
 - Given 点击按钮并选择一个文件夹，Then 条目显示的新路径会更新，并在 Apply 后写入本机 settings。
-- Given 用户未选择新目录，Then 行为与现在一致（不发送多余 resolution，不改变导入路径）。
+- Given 用户未选择新目录，Then 不发送 rebind resolution，不改变导入路径；但若存在 remote latest，则仍会执行 compare 校验（可能阻塞 Apply 直到完成/决策）。
 - Given 用户将某个 target 设为 rebind 但未选目录（例如取消选择面板），Then Apply 按钮不可用。
 
 ## 测试 / 验证
