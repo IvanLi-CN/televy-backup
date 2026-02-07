@@ -2346,12 +2346,51 @@ private struct ImportConfigBundleSheet: View {
         return pf.remoteLatest.state == "ok"
     }
 
+    private func kickOffAutoCompareForTargetIfNeeded(targetId: String) {
+        // Users can opt out of importing a target by toggling it off. If they later toggle it
+        // back on (without clicking Change/Choose), we still must run the blocking compare
+        // against remote latest before allowing Apply.
+        guard selectedTargetIds.contains(targetId) else { return }
+        guard remoteLatestExists(targetId: targetId) else { return }
+
+        let s = resolveState(targetId: targetId)
+        if s.mode == .skip { return }
+
+        let trimmedNew = s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.mode == .rebind && trimmedNew.isEmpty {
+            // Needs an explicit folder selection first.
+            return
+        }
+
+        let path: String? = {
+            if s.mode == .rebind {
+                return trimmedNew
+            }
+            return bundleSourcePath(targetId: targetId)
+        }()
+        let trimmedPath = path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedPath.isEmpty else { return }
+
+        // Avoid re-running if we already have a definitive result for this path.
+        if s.compareSourcePath == trimmedPath {
+            switch s.rebindCompareState {
+            case .checking, .match, .mismatch, .remote_missing:
+                return
+            case .unknown, .error:
+                break
+            }
+        }
+
+        startFolderCompare(targetId: targetId, sourcePath: trimmedPath)
+    }
+
     private func targetToggleBinding(id: String) -> Binding<Bool> {
         Binding(
             get: { selectedTargetIds.contains(id) },
             set: { on in
                 if on {
                     selectedTargetIds.insert(id)
+                    kickOffAutoCompareForTargetIfNeeded(targetId: id)
                 } else {
                     selectedTargetIds.remove(id)
                 }
@@ -3253,6 +3292,7 @@ private struct ImportConfigBundleSheet: View {
                                                 next.rebindCompareError = nil
                                             }
                                             setResolveState(targetId: t.id, next)
+                                            kickOffAutoCompareForTargetIfNeeded(targetId: t.id)
                                         }
                                     )) {
                                         ForEach(ResolutionMode.allCases) { m in
