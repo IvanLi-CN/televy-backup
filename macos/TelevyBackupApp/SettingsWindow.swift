@@ -2313,15 +2313,25 @@ private struct ImportConfigBundleSheet: View {
 
         let url = URL(fileURLWithPath: trimmed, isDirectory: true)
         let opts: FileManager.DirectoryEnumerationOptions = [.skipsSubdirectoryDescendants]
+        var didError = false
         guard let en = FileManager.default.enumerator(
             at: url,
             includingPropertiesForKeys: nil,
             options: opts,
-            errorHandler: { _, _ in false }
+            errorHandler: { _, _ in
+                // Fail closed: treat enumeration errors as "unknown" rather than empty.
+                didError = true
+                return false
+            }
         ) else {
             return nil
         }
-        return en.nextObject() == nil
+
+        let first = en.nextObject()
+        if didError {
+            return nil
+        }
+        return first == nil
     }
 
     private func bundleSourcePath(targetId: String) -> String? {

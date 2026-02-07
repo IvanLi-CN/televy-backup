@@ -1,12 +1,39 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Component, Path};
 
 use sqlx::Row;
 use walkdir::WalkDir;
 
 use crate::{Error, Result};
+
+fn validate_remote_rel_path(rel: &str) -> Result<()> {
+    if rel.is_empty() {
+        return Err(Error::InvalidConfig {
+            message: "remote path is empty".to_string(),
+        });
+    }
+
+    let p = Path::new(rel);
+    for c in p.components() {
+        match c {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(Error::InvalidConfig {
+                    message: format!("remote path contains '..': {rel}"),
+                });
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(Error::InvalidConfig {
+                    message: format!("remote path must be relative: {rel}"),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// A content-level comparison between a local folder and a remote snapshot index DB.
 ///
@@ -81,6 +108,7 @@ pub async fn compare_local_folder_against_index_db(
     let mut remote_files = HashSet::<String>::new();
     for row in &remote_rows {
         let path: String = row.get("path");
+        validate_remote_rel_path(&path)?;
         remote_files.insert(path);
     }
 
@@ -411,5 +439,27 @@ mod tests {
             .unwrap();
         assert!(!report.is_match());
         assert_eq!(report.hash_mismatch_files, 1);
+    }
+
+    #[tokio::test]
+    async fn compare_rejects_parent_dir_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("local");
+        std::fs::create_dir_all(&local).unwrap();
+
+        let db_path = dir.path().join("index.sqlite");
+        let pool = init_test_db(&db_path, "s1").await;
+        let hash = blake3::hash(b"x").to_hex().to_string();
+        insert_file_one_chunk(&pool, "s1", "f1", "../escape.txt", b"x", &hash).await;
+
+        let err = compare_local_folder_against_index_db(&db_path, "s1", &local, 10)
+            .await
+            .unwrap_err();
+        match err {
+            Error::InvalidConfig { message } => {
+                assert!(message.contains(".."));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
