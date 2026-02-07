@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import Darwin
+import ObjectiveC
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -107,6 +108,27 @@ struct CliSettingsImportBundleDryRunResponse: Decodable {
     let nextAction: String
     let bundle: Bundle
     let preflight: Preflight
+}
+
+struct CliSettingsImportBundleCompareFolderResponse: Decodable {
+    struct Diff: Decodable {
+        let missingLocalFiles: Int
+        let extraLocalFiles: Int
+        let sizeMismatchFiles: Int
+        let hashMismatchFiles: Int
+        let ioErrorFiles: Int
+        let missingLocalExamples: [String]
+        let extraLocalExamples: [String]
+        let mismatchExamples: [String]
+    }
+
+    let ok: Bool
+    let state: String
+    let targetId: String
+    let sourcePath: String
+    let remoteSnapshotId: String?
+    let remoteManifestObjectId: String?
+    let diff: Diff
 }
 
 struct CliSettingsImportBundleApplyResponse: Decodable {
@@ -1754,6 +1776,109 @@ private struct SecurePassphraseField: NSViewRepresentable {
     }
 }
 
+private enum OpenPanelAssociatedKeys {
+    static var newFolderAccessory: UInt8 = 0
+}
+
+// Some macOS configurations hide the built-in "New Folder" affordance in NSOpenPanel.
+// Provide an explicit accessory button so users can always create a fresh directory when rebinding.
+private final class OpenPanelNewFolderAccessory: NSObject {
+    private weak var panel: NSOpenPanel?
+    let view: NSView
+
+    init(panel: NSOpenPanel) {
+        self.panel = panel
+
+        let button = NSButton(title: "New Folder…", target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 140, height: 26))
+        v.addSubview(button)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: v.leadingAnchor),
+            button.topAnchor.constraint(equalTo: v.topAnchor),
+            button.bottomAnchor.constraint(equalTo: v.bottomAnchor),
+        ])
+
+        self.view = v
+
+        super.init()
+
+        button.target = self
+        button.action = #selector(onNewFolder(_:))
+    }
+
+    private func currentDirectoryURL() -> URL {
+        guard let panel else { return FileManager.default.homeDirectoryForCurrentUser }
+
+        if let selected = panel.url {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: selected.path, isDirectory: &isDir), isDir.boolValue {
+                return selected
+            }
+            return selected.deletingLastPathComponent()
+        }
+
+        if let dir = panel.directoryURL {
+            return dir
+        }
+
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    private func showError(message: String, info: String? = nil) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = message
+        if let info { alert.informativeText = info }
+        alert.addButton(withTitle: "OK")
+        _ = alert.runModal()
+    }
+
+    @objc private func onNewFolder(_ sender: Any?) {
+        guard let panel else { return }
+
+        let parent = currentDirectoryURL()
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "New folder"
+        alert.informativeText = "Create a folder inside:\n\(parent.path)"
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "Folder name"
+        alert.accessoryView = field
+
+        let res = alert.runModal()
+        guard res == .alertFirstButtonReturn else { return }
+
+        let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty {
+            showError(message: "Folder name is required.")
+            return
+        }
+        if name.contains("/") {
+            showError(message: "Invalid folder name.", info: "Folder names must not contain “/”.")
+            return
+        }
+
+        let newURL = parent.appendingPathComponent(name, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: newURL, withIntermediateDirectories: false)
+        } catch {
+            showError(message: "Failed to create folder.", info: error.localizedDescription)
+            return
+        }
+
+        // Navigate the open panel into the newly created folder so it's easy to select.
+        panel.directoryURL = newURL
+    }
+}
+
 private struct ImportConfigBundleSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var model: AppModel
@@ -1782,6 +1907,7 @@ private struct ImportConfigBundleSheet: View {
 
     @State private var applying: Bool = false
     @State private var applyError: String?
+    @State private var postApplyStatus: String?
 
     private struct ConfigBundleOuterPreview: Decodable {
         let hint: String?
@@ -1936,33 +2062,54 @@ private struct ImportConfigBundleSheet: View {
         inspectError = "Invalid backup config file"
     }
 
-    private struct ResolutionState {
-        var mode: ResolutionMode
-        var newSourcePath: String
+	    private struct ResolutionState {
+	        var mode: ResolutionMode
+	        var newSourcePath: String
+
+        // Whether this state should be sent as an explicit `resolutions[targetId]` entry in the
+        // `import-bundle --apply` JSON payload.
+        //
+        // We also store compare/decision UI state in this struct even when the user hasn't chosen
+        // any import-time resolution. In that case, we must NOT send anything to the CLI.
+        var includeInApply: Bool = false
+
+        // Track which folder path the current compare state corresponds to so we can ignore stale
+        // async results when the user rebinds to a different folder.
+        var compareSourcePath: String = ""
+
+        // When remote latest exists, we must decide what to do if local bytes differ:
+        // - restore remote latest (requires empty folder)
+        // - keep local
+        // - merge (Option B): run a backup after import
+        var rebindDataDecision: RebindDataDecision = .undecided
+
+        // Content-level compare between local folder and remote latest snapshot (remote index DB),
+        // used to avoid prompting when data is already identical.
+        var rebindCompareState: RebindCompareState = .unknown
+        var rebindCompareDiff: CliSettingsImportBundleCompareFolderResponse.Diff? = nil
+        var rebindCompareError: String? = nil
     }
 
     private enum ResolutionMode: String, CaseIterable, Identifiable {
         case overwrite_local
-        case overwrite_remote
         case rebind
         case skip
 
-        var id: String { rawValue }
+	        var id: String { rawValue }
 
-        var title: String {
+	        var title: String {
             switch self {
             case .overwrite_local: return "Use remote latest (replace local)"
-            case .overwrite_remote: return "Use local (update remote pin)"
             case .rebind: return "Choose a different folder"
             case .skip: return "Skip this target"
             }
-        }
-    }
+	        }
+	    }
 
-    private var preflightByTargetId: [String: CliSettingsImportBundleDryRunResponse.PreflightTarget] {
-        guard let inspection else { return [:] }
-        return Dictionary(uniqueKeysWithValues: inspection.preflight.targets.map { ($0.targetId, $0) })
-    }
+	    private var preflightByTargetId: [String: CliSettingsImportBundleDryRunResponse.PreflightTarget] {
+	        guard let inspection else { return [:] }
+	        return Dictionary(uniqueKeysWithValues: inspection.preflight.targets.map { ($0.targetId, $0) })
+	    }
 
     private func needsResolution(targetId: String) -> Bool {
         guard let pf = preflightByTargetId[targetId] else { return false }
@@ -1978,12 +2125,282 @@ private struct ImportConfigBundleSheet: View {
         resolutions[targetId] = state
     }
 
+    private func setRebindDataDecision(targetId: String, _ decision: RebindDataDecision) {
+        // This decision is required whenever we detect local != remote latest, even if the user
+        // did not explicitly "rebind" the folder.
+        var s = resolutions[targetId] ?? ResolutionState(mode: .overwrite_local, newSourcePath: "")
+        s.rebindDataDecision = decision
+        resolutions[targetId] = s
+    }
+
+    private static let compareConcurrencyLimit = DispatchSemaphore(value: 2)
+
+    private func startFolderCompare(targetId: String, sourcePath: String) {
+        // Avoid network calls when capturing deterministic UI screenshots, but allow forcing a
+        // demo compare state via env for snapshots.
+        if SettingsUIDemo.enabled {
+            let env = ProcessInfo.processInfo.environment
+            let demoAll = env["TELEVYBACKUP_UI_DEMO_COMPARE_STATE"] ?? ""
+            let demoRebind = env["TELEVYBACKUP_UI_DEMO_REBIND_COMPARE_STATE"] ?? ""
+
+            var s = resolutions[targetId] ?? ResolutionState(mode: .overwrite_local, newSourcePath: "")
+            let demo: String = {
+                if !demoAll.isEmpty { return demoAll }
+                if s.mode == .rebind && !demoRebind.isEmpty { return demoRebind }
+                return "match"
+            }()
+
+            let sourcePathTrimmed = sourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            let pathChanged = s.compareSourcePath != sourcePathTrimmed
+            s.compareSourcePath = sourcePathTrimmed
+            if pathChanged {
+                s.rebindDataDecision = .undecided
+            }
+            s.rebindCompareError = nil
+
+            switch demo {
+            case "match":
+                s.rebindCompareState = .match
+                s.rebindCompareDiff = CliSettingsImportBundleCompareFolderResponse.Diff(
+                    missingLocalFiles: 0,
+                    extraLocalFiles: 0,
+                    sizeMismatchFiles: 0,
+                    hashMismatchFiles: 0,
+                    ioErrorFiles: 0,
+                    missingLocalExamples: [],
+                    extraLocalExamples: [],
+                    mismatchExamples: []
+                )
+            case "mismatch":
+                s.rebindCompareState = .mismatch
+                s.rebindCompareDiff = CliSettingsImportBundleCompareFolderResponse.Diff(
+                    missingLocalFiles: 1,
+                    extraLocalFiles: 1,
+                    sizeMismatchFiles: 0,
+                    hashMismatchFiles: 2,
+                    ioErrorFiles: 0,
+                    missingLocalExamples: ["Photos/2025/IMG_0001.jpg"],
+                    extraLocalExamples: ["Scratch/tmp.txt"],
+                    mismatchExamples: ["Videos/clip.mp4 (chunk hash mismatch at offset=0 len=1048576)"]
+                )
+            case "error":
+                s.rebindCompareState = .error
+                s.rebindCompareDiff = nil
+                s.rebindCompareError = "Demo compare error"
+            default:
+                s.rebindCompareState = .unknown
+                s.rebindCompareDiff = nil
+            }
+
+            resolutions[targetId] = s
+            return
+        }
+
+        guard remoteLatestExists(targetId: targetId) else { return }
+
+        let key = bundleKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pp = passphrase.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !key.isEmpty else { return }
+        if fileEncrypted && pp.isEmpty { return }
+
+        guard let cli = model.cliPath() else { return }
+
+        let sourcePathTrimmed = sourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Mark as checking and reset any previous diff/error.
+        var s = resolutions[targetId] ?? ResolutionState(mode: .overwrite_local, newSourcePath: "")
+        let pathChanged = s.compareSourcePath != sourcePathTrimmed
+        s.compareSourcePath = sourcePathTrimmed
+        s.rebindCompareState = .checking
+        s.rebindCompareDiff = nil
+        s.rebindCompareError = nil
+        if pathChanged {
+            // Any folder change invalidates the previous choice.
+            s.rebindDataDecision = .undecided
+        }
+        resolutions[targetId] = s
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            Self.compareConcurrencyLimit.wait()
+            defer { Self.compareConcurrencyLimit.signal() }
+
+            let payload: [String: Any] = [
+                "bundleKey": key,
+                "targetId": targetId,
+                "sourcePath": sourcePathTrimmed,
+            ]
+
+            guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+                  let stdin = String(data: data, encoding: .utf8)
+            else {
+                DispatchQueue.main.async {
+                    guard var s = resolutions[targetId] else { return }
+                    guard s.compareSourcePath == sourcePathTrimmed else { return }
+                    s.rebindCompareState = .error
+                    s.rebindCompareError = "Failed to encode compare JSON"
+                    resolutions[targetId] = s
+                }
+                return
+            }
+
+            let res = model.runCommandCapture(
+                exe: cli,
+                args: ["--json", "settings", "import-bundle", "--compare-folder"],
+                stdin: stdin + "\n",
+                timeoutSeconds: 600,
+                env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": pp]
+            )
+
+            DispatchQueue.main.async {
+                guard var s = resolutions[targetId] else { return }
+
+                // Ignore stale results if the user already picked a different folder (or if the
+                // auto-compare moved on to a different path).
+                guard s.compareSourcePath == sourcePathTrimmed else { return }
+
+                if res.status != 0 {
+                    let err = humanizeCliFailure(res.stderr, fallback: "Compare failed")
+                    s.rebindCompareState = .error
+                    s.rebindCompareError = err.message
+                    s.rebindCompareDiff = nil
+                    resolutions[targetId] = s
+                    return
+                }
+
+                guard let outData = res.stdout.data(using: .utf8) else {
+                    s.rebindCompareState = .error
+                    s.rebindCompareError = "Compare returned empty output"
+                    s.rebindCompareDiff = nil
+                    resolutions[targetId] = s
+                    return
+                }
+
+                do {
+                    let decoded = try JSONDecoder().decode(CliSettingsImportBundleCompareFolderResponse.self, from: outData)
+                    s.rebindCompareDiff = decoded.diff
+                    s.rebindCompareError = nil
+                    switch decoded.state {
+                    case "match":
+                        s.rebindCompareState = .match
+                    case "mismatch":
+                        s.rebindCompareState = .mismatch
+                    case "remote_missing":
+                        s.rebindCompareState = .remote_missing
+                    default:
+                        s.rebindCompareState = .error
+                        s.rebindCompareError = "Unknown compare state: \(decoded.state)"
+                    }
+                    resolutions[targetId] = s
+                } catch {
+                    s.rebindCompareState = .error
+                    s.rebindCompareError = "Compare JSON decode failed"
+                    s.rebindCompareDiff = nil
+                    resolutions[targetId] = s
+                }
+            }
+        }
+    }
+
+    private func isEmptyDirectory(path: String) -> Bool? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: trimmed, isDirectory: &isDir), isDir.boolValue else {
+            return nil
+        }
+
+        let url = URL(fileURLWithPath: trimmed, isDirectory: true)
+        let opts: FileManager.DirectoryEnumerationOptions = [.skipsSubdirectoryDescendants]
+        var didError = false
+        guard let en = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: nil,
+            options: opts,
+            errorHandler: { _, _ in
+                // Fail closed: treat enumeration errors as "unknown" rather than empty.
+                didError = true
+                return false
+            }
+        ) else {
+            return nil
+        }
+
+        let first = en.nextObject()
+        if didError {
+            return nil
+        }
+        return first == nil
+    }
+
+    private func bundleSourcePath(targetId: String) -> String? {
+        inspection?
+            .bundle
+            .targets
+            .first(where: { $0.id == targetId })?
+            .sourcePath
+    }
+
+    private func effectiveSourcePath(targetId: String) -> String? {
+        let s = resolveState(targetId: targetId)
+        let trimmedNew = s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.mode == .rebind, !trimmedNew.isEmpty {
+            return trimmedNew
+        }
+        return bundleSourcePath(targetId: targetId)
+    }
+
+    private func remoteLatestExists(targetId: String) -> Bool {
+        guard let pf = preflightByTargetId[targetId] else { return false }
+        return pf.remoteLatest.state == "ok"
+    }
+
+    private func kickOffAutoCompareForTargetIfNeeded(targetId: String) {
+        // Users can opt out of importing a target by toggling it off. If they later toggle it
+        // back on (without clicking Change/Choose), we still must run the blocking compare
+        // against remote latest before allowing Apply.
+        guard selectedTargetIds.contains(targetId) else { return }
+        guard remoteLatestExists(targetId: targetId) else { return }
+
+        let s = resolveState(targetId: targetId)
+        if s.mode == .skip { return }
+
+        let trimmedNew = s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.mode == .rebind && trimmedNew.isEmpty {
+            // Needs an explicit folder selection first.
+            return
+        }
+
+        let path: String? = {
+            if s.mode == .rebind {
+                return trimmedNew
+            }
+            return bundleSourcePath(targetId: targetId)
+        }()
+        let trimmedPath = path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedPath.isEmpty else { return }
+
+        // Avoid re-running if we already have a definitive result for this path.
+        if s.compareSourcePath == trimmedPath {
+            switch s.rebindCompareState {
+            case .checking, .match, .mismatch, .remote_missing:
+                return
+            case .unknown, .error:
+                break
+            }
+        }
+
+        startFolderCompare(targetId: targetId, sourcePath: trimmedPath)
+    }
+
     private func targetToggleBinding(id: String) -> Binding<Bool> {
         Binding(
             get: { selectedTargetIds.contains(id) },
             set: { on in
                 if on {
                     selectedTargetIds.insert(id)
+                    kickOffAutoCompareForTargetIfNeeded(targetId: id)
                 } else {
                     selectedTargetIds.remove(id)
                 }
@@ -1995,16 +2412,48 @@ private struct ImportConfigBundleSheet: View {
         let panel = NSOpenPanel()
         panel.title = "Choose folder"
         panel.prompt = "Choose"
+        panel.canCreateDirectories = true
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
 
+        // Retain the accessory handler for the lifetime of the panel.
+        let accessory = OpenPanelNewFolderAccessory(panel: panel)
+        panel.accessoryView = accessory.view
+        panel.isAccessoryViewDisclosed = true
+        objc_setAssociatedObject(
+            panel,
+            &OpenPanelAssociatedKeys.newFolderAccessory,
+            accessory,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+
         func applyUrl(_ url: URL) {
-            let current = resolveState(targetId: targetId)
-            setResolveState(
-                targetId: targetId,
-                ResolutionState(mode: current.mode, newSourcePath: url.path)
+            let newPath = url.path
+
+            let originalPath = inspection?
+                .bundle
+                .targets
+                .first(where: { $0.id == targetId })?
+                .sourcePath
+
+            let action = RebindApplyGate.selectionAction(
+                originalSourcePath: originalPath,
+                selectedSourcePath: newPath,
+                remoteLatestExists: remoteLatestExists(targetId: targetId),
+                canClearResolution: !needsResolution(targetId: targetId)
             )
+
+            switch action {
+            case .clearResolution:
+                resolutions.removeValue(forKey: targetId)
+            case let .rebindAndCompare(newSourcePath):
+                setResolveState(
+                    targetId: targetId,
+                    ResolutionState(mode: .rebind, newSourcePath: newSourcePath, includeInApply: true)
+                )
+                startFolderCompare(targetId: targetId, sourcePath: newSourcePath)
+            }
         }
 
         if let hostWindow = NSApp.keyWindow ?? NSApp.mainWindow {
@@ -2013,9 +2462,12 @@ private struct ImportConfigBundleSheet: View {
                 applyUrl(url)
             }
         } else {
-            let res = panel.runModal()
-            guard res == .OK, let url = panel.url else { return }
-            applyUrl(url)
+            // Avoid blocking the main thread in edge cases where we don't have a host window
+            // (e.g. UI snapshot/demo mode). `begin` is non-blocking and still shows the panel.
+            panel.begin { res in
+                guard res == .OK, let url = panel.url else { return }
+                applyUrl(url)
+            }
         }
     }
 
@@ -2026,16 +2478,41 @@ private struct ImportConfigBundleSheet: View {
         for pf in inspection.preflight.targets {
             guard pf.conflict.state == "needs_resolution" else { continue }
             if pf.conflict.reasons.contains("bootstrap_invalid") {
-                next[pf.targetId] = ResolutionState(mode: .skip, newSourcePath: "")
+                next[pf.targetId] = ResolutionState(mode: .skip, newSourcePath: "", includeInApply: true)
             } else if pf.conflict.reasons.contains("missing_path") {
-                next[pf.targetId] = ResolutionState(mode: .rebind, newSourcePath: "")
-            } else if pf.conflict.reasons.contains("local_vs_remote_mismatch") {
-                next[pf.targetId] = ResolutionState(mode: .overwrite_local, newSourcePath: "")
+                next[pf.targetId] = ResolutionState(mode: .rebind, newSourcePath: "", includeInApply: true)
             } else {
-                next[pf.targetId] = ResolutionState(mode: .overwrite_local, newSourcePath: "")
+                next[pf.targetId] = ResolutionState(mode: .overwrite_local, newSourcePath: "", includeInApply: true)
             }
         }
         resolutions = next
+    }
+
+    private func kickOffAutoCompare() {
+        guard let inspection else { return }
+
+        // Compare is expensive (remote index download + local bytes hashing) but must happen before
+        // Apply so we can avoid a blind restore/merge choice.
+        for t in inspection.bundle.targets {
+            let id = t.id
+            guard selectedTargetIds.contains(id) else { continue }
+            guard remoteLatestExists(targetId: id) else { continue }
+
+            let s = resolveState(targetId: id)
+            if s.mode == .skip { continue }
+
+            let trimmedNew = s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            if s.mode == .rebind && trimmedNew.isEmpty {
+                // Needs an explicit folder first.
+                continue
+            }
+
+            let effective = (s.mode == .rebind && !trimmedNew.isEmpty) ? trimmedNew : t.sourcePath
+            let effectiveTrimmed = effective.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !effectiveTrimmed.isEmpty else { continue }
+
+            startFolderCompare(targetId: id, sourcePath: effectiveTrimmed)
+        }
     }
 
     private func inspectBundle() {
@@ -2083,6 +2560,7 @@ private struct ImportConfigBundleSheet: View {
             let decoded = try JSONDecoder().decode(CliSettingsImportBundleDryRunResponse.self, from: data)
             inspection = decoded
             applyDefaults(from: decoded)
+            kickOffAutoCompare()
         } catch {
             inspectError = "Inspect JSON decode failed"
         }
@@ -2097,9 +2575,41 @@ private struct ImportConfigBundleSheet: View {
         if fileEncrypted && passphrase.isEmpty { return false }
 
         for id in selectedTargetIds {
+            let s = resolveState(targetId: id)
+            if s.mode == .rebind {
+                let trimmed = s.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    return false
+                }
+            }
+
+            if remoteLatestExists(targetId: id) {
+                // If we're skipping this target during import, we don't need to compare or decide.
+                if needsResolution(targetId: id), s.mode == .skip {
+                    // ok
+                } else {
+                    guard let path = effectiveSourcePath(targetId: id)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                        !path.isEmpty
+                    else { return false }
+
+                    var empty: Bool? = nil
+                    if s.rebindCompareState == .mismatch, s.rebindDataDecision == .use_remote_latest {
+                        // Restore semantics require an empty directory.
+                        empty = isEmptyDirectory(path: path)
+                    }
+
+                    let gate = RebindApplyGate.evaluate(
+                        compareState: s.rebindCompareState,
+                        decision: s.rebindDataDecision,
+                        isEmptyDirectory: empty
+                    )
+                    if gate != .allowed { return false }
+                }
+            }
+
             if needsResolution(targetId: id) {
                 guard let pf = preflightByTargetId[id] else { return false }
-                let s = resolveState(targetId: id)
 
                 if pf.conflict.reasons.contains("bootstrap_invalid") && s.mode != .skip {
                     return false
@@ -2127,17 +2637,21 @@ private struct ImportConfigBundleSheet: View {
 
         applying = true
         applyError = nil
+        postApplyStatus = nil
 
         let key = bundleKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let selected = Array(selectedTargetIds).sorted()
+        let passphraseValue = passphrase
 
         var resolutionsObj: [String: Any] = [:]
         for id in selected {
-            guard needsResolution(targetId: id) else { continue }
+            let include = resolutions[id]?.includeInApply ?? false
+            guard needsResolution(targetId: id) || include else { continue }
             let state = resolveState(targetId: id)
             var obj: [String: Any] = ["mode": state.mode.rawValue]
             if state.mode == .rebind {
-                obj["newSourcePath"] = state.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                // CLI expects snake_case for the rebind payload: { mode: "rebind", new_source_path: "..." }.
+                obj["new_source_path"] = state.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             resolutionsObj[id] = obj
         }
@@ -2160,38 +2674,120 @@ private struct ImportConfigBundleSheet: View {
             return
         }
 
-        model.ensureDaemonRunning()
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "settings", "import-bundle", "--apply"],
-            stdin: stdin + "\n",
-            timeoutSeconds: 180,
-            env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": passphrase]
-        )
-
-        guard res.status == 0, let outData = res.stdout.data(using: .utf8) else {
-            let err = humanizeCliFailure(res.stderr, fallback: "Import failed")
-            applyError = err.message
-            if err.hint == .incorrectPassphrase {
-                DispatchQueue.main.async { passphraseFocused = true }
-            }
-            applying = false
-            return
+        // Post-import actions for rebinding when local != remote latest.
+        // - Use remote latest: run restore into the new folder.
+        // - Merge (Option B): run a backup to generate a new snapshot from local bytes.
+        struct PostAction {
+            let status: String
+            let args: [String]
+            let timeoutSeconds: Double
         }
 
-        do {
-            let decoded = try JSONDecoder().decode(CliSettingsImportBundleApplyResponse.self, from: outData)
-            if decoded.ok {
+        // Pre-compute actions on the main thread so the background worker doesn't access SwiftUI
+        // state (which can race / trigger main-thread warnings).
+        var post: [PostAction] = []
+        for id in selected {
+            let s = resolveState(targetId: id)
+            guard remoteLatestExists(targetId: id) else { continue }
+            if needsResolution(targetId: id), s.mode == .skip { continue }
+            guard s.rebindCompareState == .mismatch else { continue }
+
+            guard let path = effectiveSourcePath(targetId: id)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !path.isEmpty
+            else { continue }
+
+            switch s.rebindDataDecision {
+            case .use_remote_latest:
+                post.append(PostAction(
+                    status: "Restoring remote latest (\(id))…",
+                    args: ["restore", "latest", "--target-id", id, "--target", path],
+                    timeoutSeconds: 3600
+                ))
+            case .merge_local_to_remote:
+                post.append(PostAction(
+                    status: "Backing up local folder (\(id))…",
+                    args: ["backup", "run", "--target-id", id, "--label", "import-merge"],
+                    timeoutSeconds: 3600
+                ))
+            case .keep_local, .undecided:
+                break
+            }
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            func ensureDaemonRunningOnMain() {
+                DispatchQueue.main.sync {
+                    model.ensureDaemonRunning()
+                }
+            }
+
+            ensureDaemonRunningOnMain()
+            let res = model.runCommandCapture(
+                exe: cli,
+                args: ["--json", "settings", "import-bundle", "--apply"],
+                stdin: stdin + "\n",
+                timeoutSeconds: 180,
+                env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": passphraseValue]
+            )
+
+            guard res.status == 0, let outData = res.stdout.data(using: .utf8) else {
+                let err = humanizeCliFailure(res.stderr, fallback: "Import failed")
+                DispatchQueue.main.async {
+                    applyError = err.message
+                    if err.hint == .incorrectPassphrase {
+                        passphraseFocused = true
+                    }
+                    applying = false
+                }
+                return
+            }
+
+            do {
+                let decoded = try JSONDecoder().decode(CliSettingsImportBundleApplyResponse.self, from: outData)
+                guard decoded.ok else {
+                    DispatchQueue.main.async {
+                        applyError = "Apply failed"
+                        applying = false
+                    }
+                    return
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    applyError = "Apply JSON decode failed"
+                    applying = false
+                }
+                return
+            }
+
+            for a in post {
+                DispatchQueue.main.async { postApplyStatus = a.status }
+                ensureDaemonRunningOnMain()
+                let res = model.runCommandCapture(
+                    exe: cli,
+                    args: a.args,
+                    stdin: nil,
+                    timeoutSeconds: a.timeoutSeconds,
+                    env: [:]
+                )
+                if res.status != 0 {
+                    let err = humanizeCliFailure(res.stderr, fallback: "Post-import action failed")
+                    DispatchQueue.main.async {
+                        applyError = err.message
+                        postApplyStatus = nil
+                        applying = false
+                    }
+                    return
+                }
+            }
+
+            DispatchQueue.main.async {
+                postApplyStatus = nil
                 onApplied()
                 dismiss()
-            } else {
-                applyError = "Apply failed"
+                applying = false
             }
-        } catch {
-            applyError = "Apply JSON decode failed"
         }
-
-        applying = false
     }
 
     private func missingSecretLabels(keys: [String]) -> [String] {
@@ -2216,8 +2812,6 @@ private struct ImportConfigBundleSheet: View {
                 out.append("Folder not found on this Mac.")
             case "bootstrap_invalid":
                 out.append("Remote bootstrap cannot be decrypted (wrong key or corrupted).")
-            case "local_vs_remote_mismatch":
-                out.append("Local index does not match the remote latest.")
             default:
                 out.append("Needs review (\(r)).")
             }
@@ -2252,7 +2846,7 @@ private struct ImportConfigBundleSheet: View {
                 snapshotId: "s_demo_latest",
                 manifestObjectId: "m_demo_latest"
             )
-            var localIndex = CliSettingsImportBundleDryRunResponse.LocalIndex(state: "match", details: nil)
+            let localIndex = CliSettingsImportBundleDryRunResponse.LocalIndex(state: "match", details: nil)
             var reasons: [String] = []
 
             if includeConflicts {
@@ -2266,9 +2860,6 @@ private struct ImportConfigBundleSheet: View {
                         details: ["error": "decrypt failed"]
                     )
                     reasons = ["bootstrap_invalid"]
-                } else if i == 2 {
-                    localIndex = CliSettingsImportBundleDryRunResponse.LocalIndex(state: "stale", details: nil)
-                    reasons = ["local_vs_remote_mismatch"]
                 }
             }
 
@@ -2522,6 +3113,10 @@ private struct ImportConfigBundleSheet: View {
                         a.id.localizedStandardCompare(b.id) == .orderedAscending
                     }) { t in
                         let pf = preflightByTargetId[t.id]
+                        let state = resolveState(targetId: t.id)
+                        let trimmedNewSourcePath = state.newSourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let effectiveSourcePath =
+                            (state.mode == .rebind && !trimmedNewSourcePath.isEmpty) ? trimmedNewSourcePath : t.sourcePath
 
                         VStack(alignment: .leading, spacing: 6) {
                             Toggle(isOn: targetToggleBinding(id: t.id)) {
@@ -2540,11 +3135,177 @@ private struct ImportConfigBundleSheet: View {
                                 }
                             }
 
-                            Text(t.sourcePath)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                            HStack(spacing: 8) {
+                                Text(effectiveSourcePath)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Button("Change…") {
+                                    // Clicking "Change…" implies the user intends to import this target.
+                                    selectedTargetIds.insert(t.id)
+                                    chooseFolder(targetId: t.id)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+
+                            if selectedTargetIds.contains(t.id),
+                               let pf,
+                               pf.remoteLatest.state == "ok",
+                               state.mode != .skip
+                            {
+                                let comparePath: String? = {
+                                    if state.mode == .rebind {
+                                        return trimmedNewSourcePath.isEmpty ? nil : trimmedNewSourcePath
+                                    }
+                                    return t.sourcePath
+                                }()
+
+                                let dirEmpty = comparePath != nil ? isEmptyDirectory(path: comparePath!) : nil
+                                let compareState = state.rebindCompareState
+                                let retryTitle = compareState == .unknown ? "Check" : "Retry"
+
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(spacing: 10) {
+                                        Text("Compare")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .frame(width: 80, alignment: .leading)
+
+                                        Group {
+                                            switch compareState {
+                                            case .unknown:
+                                                Label("Not checked", systemImage: "questionmark.circle")
+                                                    .foregroundStyle(.secondary)
+                                            case .checking:
+                                                HStack(spacing: 8) {
+                                                    ProgressView()
+                                                        .controlSize(.small)
+                                                    Text("Comparing with remote latest…")
+                                                }
+                                                .foregroundStyle(.secondary)
+                                            case .match:
+                                                Label("Matches remote latest", systemImage: "checkmark.seal.fill")
+                                                    .foregroundStyle(.green)
+                                            case .mismatch:
+                                                Label("Differs from remote latest", systemImage: "exclamationmark.triangle.fill")
+                                                    .foregroundStyle(.red)
+                                            case .remote_missing:
+                                                Label("Remote latest missing", systemImage: "questionmark.circle")
+                                                    .foregroundStyle(.secondary)
+                                            case .error:
+                                                Label("Compare failed", systemImage: "exclamationmark.triangle.fill")
+                                                    .foregroundStyle(.red)
+                                            }
+                                        }
+                                        .font(.system(size: 11, weight: .semibold))
+
+                                        Spacer()
+
+                                        if compareState != .checking {
+                                            Button(retryTitle) {
+                                                if let comparePath {
+                                                    startFolderCompare(targetId: t.id, sourcePath: comparePath)
+                                                }
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .controlSize(.small)
+                                            .disabled(comparePath == nil)
+                                        }
+                                    }
+
+                                    if comparePath == nil {
+                                        Text("Choose a folder to compare.")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    if compareState == .error, let msg = state.rebindCompareError {
+                                        Text(msg)
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.red)
+                                    }
+
+                                    if compareState == .mismatch, let diff = state.rebindCompareDiff {
+                                        let summaryParts: [String] = [
+                                            diff.missingLocalFiles > 0 ? "missing \(diff.missingLocalFiles)" : nil,
+                                            diff.extraLocalFiles > 0 ? "extra \(diff.extraLocalFiles)" : nil,
+                                            diff.sizeMismatchFiles > 0 ? "size \(diff.sizeMismatchFiles)" : nil,
+                                            diff.hashMismatchFiles > 0 ? "hash \(diff.hashMismatchFiles)" : nil,
+                                            diff.ioErrorFiles > 0 ? "io \(diff.ioErrorFiles)" : nil,
+                                        ].compactMap { $0 }
+
+                                        Text("Diff: \(summaryParts.isEmpty ? "(unknown)" : summaryParts.joined(separator: ", "))")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+
+                                        let exampleLines: [String] = {
+                                            var out: [String] = []
+                                            for p in diff.missingLocalExamples.prefix(3) { out.append("Missing local: \(p)") }
+                                            for p in diff.extraLocalExamples.prefix(3) { out.append("Extra local: \(p)") }
+                                            for p in diff.mismatchExamples.prefix(3) { out.append("Mismatch: \(p)") }
+                                            return out
+                                        }()
+
+                                        if !exampleLines.isEmpty {
+                                            ForEach(exampleLines, id: \.self) { line in
+                                                Text("• \(line)")
+                                                    .font(.system(size: 11, weight: .semibold))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+
+                                    if compareState == .mismatch {
+                                        let decision = resolveState(targetId: t.id).rebindDataDecision
+                                        let needsEmpty = decision == .use_remote_latest
+
+                                        HStack(spacing: 10) {
+                                            Text("Resolution")
+                                                .font(.system(size: 12, weight: .semibold))
+                                                .frame(width: 80, alignment: .leading)
+
+                                            Picker("", selection: Binding(
+                                                get: { resolveState(targetId: t.id).rebindDataDecision },
+                                                set: { newDecision in
+                                                    setRebindDataDecision(targetId: t.id, newDecision)
+                                                }
+                                            )) {
+                                                ForEach(RebindDataDecision.allCases) { d in
+                                                    Text(d.title).tag(d)
+                                                }
+                                            }
+                                            .pickerStyle(.menu)
+                                            .controlSize(.regular)
+                                            .frame(width: 260, alignment: .leading)
+                                        }
+
+                                        Text(resolveState(targetId: t.id).rebindDataDecision.detail)
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+
+                                        if decision == .undecided {
+                                            Label(
+                                                "Choose a resolution to enable Apply.",
+                                                systemImage: "exclamationmark.triangle.fill"
+                                            )
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.red)
+                                        }
+
+                                        if needsEmpty && dirEmpty != true {
+                                            Label(
+                                                "This folder must be empty to restore remote latest.",
+                                                systemImage: "exclamationmark.triangle.fill"
+                                            )
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundStyle(.red)
+                                        }
+                                    }
+                                }
+                            }
 
                             if let pf, pf.conflict.state == "needs_resolution", selectedTargetIds.contains(t.id) {
                                 let state = resolveState(targetId: t.id)
@@ -2557,7 +3318,16 @@ private struct ImportConfigBundleSheet: View {
                                     Picker("", selection: Binding(
                                         get: { state.mode },
                                         set: { newMode in
-                                            setResolveState(targetId: t.id, ResolutionState(mode: newMode, newSourcePath: state.newSourcePath))
+                                            var next = state
+                                            next.mode = newMode
+                                            if newMode != .rebind {
+                                                next.rebindDataDecision = .undecided
+                                                next.rebindCompareState = .unknown
+                                                next.rebindCompareDiff = nil
+                                                next.rebindCompareError = nil
+                                            }
+                                            setResolveState(targetId: t.id, next)
+                                            kickOffAutoCompareForTargetIfNeeded(targetId: t.id)
                                         }
                                     )) {
                                         ForEach(ResolutionMode.allCases) { m in
@@ -2630,6 +3400,12 @@ private struct ImportConfigBundleSheet: View {
 
             Divider()
 
+            if let postApplyStatus {
+                Text(postApplyStatus)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+
             if let applyError {
                 Text(applyError)
                     .font(.system(size: 12, weight: .semibold))
@@ -2688,7 +3464,10 @@ private struct ImportConfigBundleSheet: View {
 	        .onChange(of: inspection != nil) { _, ready in
 	            guard ready else { return }
 	            guard SettingsUIDemo.enabled else { return }
-	            guard SettingsUIDemo.scene == "backup-config-import-result" else { return }
+                let wantsResultSnapshot =
+                    SettingsUIDemo.scene == "backup-config-import-result"
+                        || SettingsUIDemo.scene == "backup-config-import-result-change-folder-picker"
+	            guard wantsResultSnapshot else { return }
 	            guard !didAutoSnapshot else { return }
 
             guard let dirPath = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_DIR"],
@@ -2704,6 +3483,18 @@ private struct ImportConfigBundleSheet: View {
 	            let prefix = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_PREFIX"] ?? "snapshot"
 	            let dir = URL(fileURLWithPath: dirPath, isDirectory: true)
 	            let delayMs = Int(ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_DELAY_MS"] ?? "") ?? 300
+
+                if SettingsUIDemo.scene == "backup-config-import-result-change-folder-picker",
+                   let inspection,
+                   let first = inspection.bundle.targets.first
+                {
+                    // Open the target folder picker so the snapshot captures the NSOpenPanel UI
+                    // (including the explicit "New Folder…" button).
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        chooseFolder(targetId: first.id)
+                    }
+                }
+
 	            DispatchQueue.main.asyncAfter(deadline: .now() + Double(delayMs) / 1000.0) {
 	                UISnapshot.captureVisibleWindows(to: dir, prefix: prefix)
 	                Darwin.exit(0)
@@ -2718,6 +3509,10 @@ private struct ImportConfigBundleSheet: View {
             guard SettingsUIDemo.enabled else { return }
             guard SettingsUIDemo.scene.hasPrefix("backup-config-import") else { return }
 
+            let isImportResultScene =
+                SettingsUIDemo.scene == "backup-config-import-result"
+                    || SettingsUIDemo.scene == "backup-config-import-result-change-folder-picker"
+
             // Allow deterministic import UI screenshots without Accessibility scripting.
             if inspection == nil,
                fileUrl == nil,
@@ -2727,7 +3522,7 @@ private struct ImportConfigBundleSheet: View {
                 loadSelectedFile(url: URL(fileURLWithPath: p))
             }
 
-            if SettingsUIDemo.scene == "backup-config-import-result",
+            if isImportResultScene,
                inspection == nil,
                fileUrl != nil,
                let s = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_TARGETS_COUNT"],
@@ -2736,10 +3531,27 @@ private struct ImportConfigBundleSheet: View {
                 let decoded = demoInspection(targetsCount: count)
                 inspection = decoded
                 applyDefaults(from: decoded)
+                kickOffAutoCompare()
+
+                // Optional demo: show compare + conflict UI without network.
+                if SettingsUIDemo.scene == "backup-config-import-result",
+                   let demoCompare = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_REBIND_COMPARE_STATE"],
+                   !demoCompare.isEmpty,
+                   let first = decoded.bundle.targets.first
+                {
+                    let demoPath =
+                        ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_REBIND_PATH"]
+                            ?? "/Users/ivan/Demo/RebindFolder"
+                    setResolveState(
+                        targetId: first.id,
+                        ResolutionState(mode: .rebind, newSourcePath: demoPath, includeInApply: true)
+                    )
+                    startFolderCompare(targetId: first.id, sourcePath: demoPath)
+                }
                 return
             }
 
-            if SettingsUIDemo.scene == "backup-config-import-result",
+            if isImportResultScene,
                inspection == nil,
                fileUrl != nil,
                fileEncrypted,

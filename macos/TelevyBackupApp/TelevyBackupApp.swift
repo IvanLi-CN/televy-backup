@@ -326,6 +326,7 @@ final class AppModel: ObservableObject {
         var disableKeychain: Bool = false
         var dataDir: String? = nil
         var configDir: String? = nil
+        var openSettingsOnLaunch: Bool = false
 
         static func parse(_ args: [String]) -> LaunchOverrides {
             var out = LaunchOverrides()
@@ -334,6 +335,8 @@ final class AppModel: ObservableObject {
                 switch args[i] {
                 case "--disable-keychain":
                     out.disableKeychain = true
+                case "--open-settings":
+                    out.openSettingsOnLaunch = true
                 case "--data-dir":
                     if i + 1 < args.count { out.dataDir = args[i + 1]; i += 1 }
                 case "--config-dir":
@@ -345,6 +348,10 @@ final class AppModel: ObservableObject {
             }
             return out
         }
+    }
+
+    func openSettingsOnLaunchOverrideEnabled() -> Bool {
+        launchOverrides.openSettingsOnLaunch
     }
 
     func defaultConfigDir() -> URL {
@@ -3868,6 +3875,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let env = ProcessInfo.processInfo.environment
         let shouldOpenSettings = env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1"
+            || ModelStore.shared.openSettingsOnLaunchOverrideEnabled()
         let shouldOpenMainWindow = env["TELEVYBACKUP_OPEN_MAIN_WINDOW_ON_LAUNCH"] == "1"
 
         if shouldOpenMainWindow {

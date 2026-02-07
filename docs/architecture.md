@@ -134,8 +134,19 @@ The config bundle is a single copy/paste key used to restore a working setup on 
   - Bundle payload plaintext is JSON and is framed-encrypted with the master key using AAD `televy.config.bundle.v2.payload`.
 - **Secrets coverage**: exports only the secrets referenced by Settings (e.g. bot tokens, MTProto api_hash); MTProto session secrets are intentionally excluded.
 - **Import flow**:
-  - Dry-run: decode + inspect + preflight (source path existence, pinned bootstrap/catalog, remote latest pointers, local index match).
-  - Apply: requires explicit confirmation and can rebuild per-endpoint index DB from remote latest (or initialize an empty DB when bootstrap is missing).
+  - Dry-run: decode + inspect + preflight (source path existence, pinned bootstrap/catalog, remote latest pointers).
+  - Apply: requires explicit confirmation and rebuilds per-endpoint index DB from the pinned remote latest (or initializes an empty DB when bootstrap is missing).
+  - Directory selection (rebind):
+    - Rebinding a target while remote latest exists is a **data-plane decision**.
+    - The UI first runs a **content-level compare** between local folder bytes and the remote latest snapshot:
+      - Downloads the remote index DB (manifest + parts) from Telegram.
+      - Uses the snapshot’s `file_chunks(offset,len)` + BLAKE3 to validate local files **without using any local index DB** as proof.
+    - If the folder is fully identical to remote latest, no prompt is shown.
+    - If differences exist, the user must choose a resolution:
+      - **Use remote latest**: restore remote latest into the chosen folder (folder must be empty).
+      - **Keep local folder**: keep local bytes; a future backup may overwrite remote latest.
+      - **Merge (Option B)**: run a backup immediately after import to update remote latest from local bytes (local -> remote new snapshot).
+  - Note: local index DBs are not authoritative during import. Import/compare never “proves equality” using a local index, and import never updates the remote pin based on any local index; remote changes must flow through a backup that computes a new snapshot from the actual filesystem.
 
 ## Crypto and framing
 

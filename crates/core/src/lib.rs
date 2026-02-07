@@ -5,6 +5,7 @@ pub mod config_bundle;
 pub mod control;
 mod crypto;
 mod error;
+pub mod folder_compare;
 pub mod gold_key;
 pub mod index_db;
 mod index_manifest;
