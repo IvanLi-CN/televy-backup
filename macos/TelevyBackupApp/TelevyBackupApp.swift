@@ -408,8 +408,11 @@ final class AppModel: ObservableObject {
         var env = ProcessInfo.processInfo.environment
         env["TELEVYBACKUP_CONFIG_DIR"] = effectiveConfigDirURL().path
         env["TELEVYBACKUP_DATA_DIR"] = effectiveDataDirURL().path
-        if effectiveDisableKeychain() {
+        let disableKeychain = effectiveDisableKeychain()
+        if disableKeychain {
             env["TELEVYBACKUP_DISABLE_KEYCHAIN"] = "1"
+        } else {
+            env.removeValue(forKey: "TELEVYBACKUP_DISABLE_KEYCHAIN")
         }
         return env
     }
