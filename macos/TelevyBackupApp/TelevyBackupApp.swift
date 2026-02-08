@@ -10,6 +10,10 @@ fileprivate enum StatusFreshness {
     static let toastMaxAgeSeconds: Int = 15
 }
 
+fileprivate func isDevAppVariant() -> Bool {
+    (Bundle.main.bundleIdentifier ?? "").hasSuffix(".dev")
+}
+
 struct VisualEffectView: NSViewRepresentable {
     let material: NSVisualEffectView.Material
     let blendingMode: NSVisualEffectView.BlendingMode
@@ -324,6 +328,7 @@ final class AppModel: ObservableObject {
 
     private struct LaunchOverrides {
         var disableKeychain: Bool = false
+        var enableKeychain: Bool = false
         var dataDir: String? = nil
         var configDir: String? = nil
         var openSettingsOnLaunch: Bool = false
@@ -335,6 +340,8 @@ final class AppModel: ObservableObject {
                 switch args[i] {
                 case "--disable-keychain":
                     out.disableKeychain = true
+                case "--enable-keychain":
+                    out.enableKeychain = true
                 case "--open-settings":
                     out.openSettingsOnLaunch = true
                 case "--data-dir":
@@ -359,7 +366,7 @@ final class AppModel: ObservableObject {
         return home
             .appendingPathComponent("Library")
             .appendingPathComponent("Application Support")
-            .appendingPathComponent("TelevyBackup")
+            .appendingPathComponent(isDevAppVariant() ? "TelevyBackup Dev" : "TelevyBackup")
     }
 
     func defaultDataDir() -> URL {
@@ -373,7 +380,12 @@ final class AppModel: ObservableObject {
 
     private func effectiveDisableKeychain() -> Bool {
         if launchOverrides.disableKeychain { return true }
-        return ProcessInfo.processInfo.environment["TELEVYBACKUP_DISABLE_KEYCHAIN"] == "1"
+        if launchOverrides.enableKeychain { return false }
+        if let v = ProcessInfo.processInfo.environment["TELEVYBACKUP_DISABLE_KEYCHAIN"], !v.isEmpty {
+            if v == "1" { return true }
+            if v == "0" { return false }
+        }
+        return isDevAppVariant()
     }
 
     private func effectiveConfigDirURL() -> URL {
@@ -3825,13 +3837,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var cancellables: Set<AnyCancellable> = []
 
+    private func makeDevStatusItemImage() -> NSImage? {
+        let base = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "TelevyBackup Dev")
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size, flipped: false) { rect in
+            base?.draw(
+                in: rect,
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1.0,
+                respectFlipped: false,
+                hints: nil
+            )
+
+            let badgeWidth: CGFloat = 14
+            let badgeHeight: CGFloat = 7
+            let inset: CGFloat = 1
+            let badgeRect = NSRect(
+                x: rect.maxX - badgeWidth - inset,
+                y: inset,
+                width: badgeWidth,
+                height: badgeHeight
+            )
+
+            let badgePath = NSBezierPath(roundedRect: badgeRect, xRadius: 2, yRadius: 2)
+            NSColor.black.setFill()
+            badgePath.fill()
+
+            guard let ctx = NSGraphicsContext.current else { return true }
+            NSGraphicsContext.saveGraphicsState()
+            ctx.compositingOperation = .destinationOut
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: 6, weight: .bold),
+                .foregroundColor: NSColor.black,
+            ]
+            let text = NSAttributedString(string: "DEV", attributes: attrs)
+            let textSize = text.size()
+            let textPoint = NSPoint(
+                x: badgeRect.midX - textSize.width / 2.0,
+                y: badgeRect.midY - textSize.height / 2.0 - 0.5
+            )
+            text.draw(at: textPoint)
+            NSGraphicsContext.restoreGraphicsState()
+
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = status.button {
-            button.image = NSImage(
-                systemSymbolName: "externaldrive",
-                accessibilityDescription: "TelevyBackup"
-            )
+            button.image = isDevAppVariant()
+                ? makeDevStatusItemImage()
+                : NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "TelevyBackup")
             button.action = #selector(togglePopover(_:))
             button.target = self
         }

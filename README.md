@@ -10,8 +10,25 @@ macOS desktop backup app + Rust backend (work in progress).
 ## Development
 
 - Build CLI/daemon: `cargo build`
-- Build macOS app: `./scripts/macos/build-app.sh`
+- Build macOS app (prod): `./scripts/macos/build-app.sh`
+- Build macOS app (dev variant): `TELEVYBACKUP_APP_VARIANT=dev ./scripts/macos/build-app.sh`
 - Run macOS app (dev default: Keychain disabled): `./scripts/macos/run-app.sh`
+- Run macOS app (prod-like: Keychain enabled): `TELEVYBACKUP_APP_VARIANT=prod ./scripts/macos/run-app.sh`
+
+### macOS app variants (prod vs dev)
+
+To avoid conflicts with an installed/release build on the same machine, local development uses a separate app variant:
+
+- **Prod app**
+  - Name: `TelevyBackup`
+  - Bundle ID: `com.ivan.televybackup`
+  - Default vault key backend: **Keychain enabled**
+- **Dev app**
+  - Name: `TelevyBackup Dev`
+  - Bundle ID: `com.ivan.televybackup.dev`
+  - Default vault key backend: **Keychain disabled** (override with `TELEVYBACKUP_DISABLE_KEYCHAIN=0`)
+
+Note: `scripts/macos/run-app.sh` will warn if you start the prod variant with `TELEVYBACKUP_DISABLE_KEYCHAIN=1`.
 
 ## Development: bypass Keychain (codesign + vault key)
 
@@ -36,10 +53,10 @@ TELEVYBACKUP_CODESIGN_IDENTITY=- ./scripts/macos/run-app.sh
 
 ### Runtime: disable Keychain for the daemon (security downgrade)
 
-`./scripts/macos/run-app.sh` defaults to `TELEVYBACKUP_DISABLE_KEYCHAIN=1`. In this mode, the daemon will **not**
-access Keychain and will use a local vault key file instead:
+The **dev app variant** defaults to `TELEVYBACKUP_DISABLE_KEYCHAIN=1`. In this mode, the daemon will **not** access
+Keychain and will use a local vault key file instead:
 
-- Default: `TELEVYBACKUP_CONFIG_DIR/vault.key` (default config dir: `~/Library/Application Support/TelevyBackup/`)
+- Default: `TELEVYBACKUP_CONFIG_DIR/vault.key`
 - Override: `TELEVYBACKUP_VAULT_KEY_FILE=<path>`
 
 Example:
@@ -54,6 +71,12 @@ To enable Keychain (production-like), run:
 
 ```bash
 TELEVYBACKUP_DISABLE_KEYCHAIN=0 ./scripts/macos/run-app.sh
+```
+
+To run the **prod app variant** (Keychain enabled by default), run:
+
+```bash
+TELEVYBACKUP_APP_VARIANT=prod ./scripts/macos/run-app.sh
 ```
 
 ### Daemon-only boundary (secrets)
