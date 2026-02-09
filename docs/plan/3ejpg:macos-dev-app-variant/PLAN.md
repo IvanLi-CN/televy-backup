@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 部分完成（2/3）
+- Status: 已完成
 - Created: 2026-02-08
 - Last: 2026-02-09
 
@@ -91,4 +91,4 @@
 
 - [x] M1: `build-app.sh` / `run-app.sh` 支持 dev/prod 变体（bundle id/name 分离）
 - [x] M2: dev menubar 图标叠加 `DEV` 徽标
-- [ ] M3: 主人验收：dev+prod 可并存运行，且 `DEV` 徽标清晰可辨
+- [x] M3: 主人验收：dev+prod 可并存运行，且 `DEV` 徽标清晰可辨
