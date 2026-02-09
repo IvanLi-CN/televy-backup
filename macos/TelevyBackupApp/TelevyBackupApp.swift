@@ -722,6 +722,7 @@ final class AppModel: ObservableObject {
     }
 
     private func preferBundledDaemonForCurrentEnvironment() -> Bool {
+        if isDevAppVariant() { return true }
         if effectiveDisableKeychain() { return true }
         if launchOverrides.dataDir != nil { return true }
         if launchOverrides.configDir != nil { return true }
@@ -2063,11 +2064,33 @@ final class AppModel: ObservableObject {
             try? input.fileHandleForWriting.close()
         }
 
+        // Drain stdout/stderr concurrently while the subprocess runs.
+        // Otherwise, a chatty subprocess can block on a full pipe buffer, and `waitUntilExit()`
+        // will hang until our timeout kills the process (leading to truncated output).
+        var stdoutData = Data()
+        var stderrData = Data()
+        let drainGroup = DispatchGroup()
+
         var status: Int32 = 1
         var reason: Process.TerminationReason = .exit
 
         do {
             try task.run()
+
+            // Close our copies of the write ends so the drainers can observe EOF when the child exits.
+            out.fileHandleForWriting.closeFile()
+            err.fileHandleForWriting.closeFile()
+
+            drainGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                stdoutData = out.fileHandleForReading.readDataToEndOfFile()
+                drainGroup.leave()
+            }
+            drainGroup.enter()
+            DispatchQueue.global(qos: .utility).async {
+                stderrData = err.fileHandleForReading.readDataToEndOfFile()
+                drainGroup.leave()
+            }
 
             if let timeoutSeconds {
                 let pid = task.processIdentifier
@@ -2080,20 +2103,19 @@ final class AppModel: ObservableObject {
                             guard task.isRunning, task.processIdentifier == pid else { return }
                             _ = kill(pid_t(pid), SIGKILL)
                         }
-                    }
+                }
             }
 
             task.waitUntilExit()
             status = task.terminationStatus
             reason = task.terminationReason
+            drainGroup.wait()
         } catch {
             return ("", "\(error)", 1, .exit)
         }
 
-        let outData = out.fileHandleForReading.readDataToEndOfFile()
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
-        let stdout = String(decoding: outData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        let stderr = String(decoding: errData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let stdout = String(decoding: stdoutData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let stderr = String(decoding: stderrData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         return (stdout, stderr, status, reason)
     }
 

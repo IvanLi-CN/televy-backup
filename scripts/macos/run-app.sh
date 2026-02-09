@@ -49,7 +49,9 @@ app_bin="$app/Contents/MacOS/TelevyBackup"
 app_daemon="$app/Contents/MacOS/televybackupd"
 app_cli="$app/Contents/MacOS/televybackup-cli"
 
-osascript -e "tell application id \"$bundle_id\" to quit" >/dev/null 2>&1 || true
+# Best-effort: stop the previous instance. Avoid AppleScript here because it can hang behind
+# an automation permission prompt (and we only want to terminate this exact variant anyway).
+pkill -f "$app_bin" >/dev/null 2>&1 || true
 for _ in {1..40}; do
   if ! pgrep -f "$app_bin" >/dev/null 2>&1; then
     break
