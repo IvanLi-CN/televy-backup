@@ -989,12 +989,19 @@ struct SettingsWindowRootView: View {
             let res = model.runCommandCapture(
                 exe: cli,
                 args: ["--json", "settings", "get", "--with-secrets"],
-                timeoutSeconds: 30
+                // NOTE: `settings get --with-secrets` calls daemon control IPC which itself can take ~30s
+                // to time out. Keep the outer timeout higher so we don't SIGTERM the CLI before it can
+                // return a useful JSON payload (including secretsError).
+                timeoutSeconds: 90
             )
             if res.status != 0 {
                 DispatchQueue.main.async {
                     guard seq == self.reloadSeq else { return }
-                    self.loadError = "settings get failed: exit=\(res.status)"
+                    if res.reason == .uncaughtSignal {
+                        self.loadError = "settings get failed: signal=\(res.status)"
+                    } else {
+                        self.loadError = "settings get failed: exit=\(res.status)"
+                    }
                 }
                 return
             }
