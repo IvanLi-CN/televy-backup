@@ -3,10 +3,30 @@ set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
 
-app_name="TelevyBackup"
+variant="${TELEVYBACKUP_APP_VARIANT:-prod}"
+case "$variant" in
+  prod)
+    bundle_display_name="TelevyBackup"
+    bundle_id="com.ivan.televybackup"
+    ;;
+  dev)
+    bundle_display_name="TelevyBackup Dev"
+    bundle_id="com.ivan.televybackup.dev"
+    # Dev default: avoid prompting for signing identities (ad-hoc signing).
+    if [ -z "${TELEVYBACKUP_CODESIGN_IDENTITY:-}" ]; then
+      export TELEVYBACKUP_CODESIGN_IDENTITY="-"
+    fi
+    ;;
+  *)
+    echo "ERROR: invalid TELEVYBACKUP_APP_VARIANT=$variant (expected: dev|prod)" >&2
+    exit 2
+    ;;
+esac
+
+executable_name="TelevyBackup"
 src_dir="$root_dir/macos/TelevyBackupApp"
 out_root="$root_dir/target/macos-app"
-app_dir="$out_root/${app_name}.app"
+app_dir="$out_root/${bundle_display_name}.app"
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
@@ -36,20 +56,20 @@ xcrun swiftc \
   -O \
   -framework SwiftUI \
   -framework AppKit \
-  -o "$macos_dir/$app_name" \
+  -o "$macos_dir/$executable_name" \
   "$src_dir"/*.swift
 
-cat > "$contents_dir/Info.plist" <<'PLIST'
+cat > "$contents_dir/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key>
-  <string>TelevyBackup</string>
+  <string>$bundle_display_name</string>
   <key>CFBundleDisplayName</key>
-  <string>TelevyBackup</string>
+  <string>$bundle_display_name</string>
   <key>CFBundleIdentifier</key>
-  <string>com.ivan.televybackup</string>
+  <string>$bundle_id</string>
   <key>CFBundleVersion</key>
   <string>0.1.0</string>
   <key>CFBundleShortVersionString</key>
@@ -57,7 +77,7 @@ cat > "$contents_dir/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
-  <string>TelevyBackup</string>
+  <string>$executable_name</string>
   <key>LSMinimumSystemVersion</key>
   <string>15.0</string>
   <key>LSUIElement</key>
@@ -76,9 +96,9 @@ fi
 
 if [[ -n "$codesign_identity" ]]; then
   echo "Codesigning with: $codesign_identity"
-  codesign --force --sign "$codesign_identity" -i com.ivan.televybackup.cli "$macos_dir/televybackup-cli" \
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.cli" "$macos_dir/televybackup-cli" \
     || echo "WARN: codesign CLI failed (Keychain prompts may repeat)"
-  codesign --force --sign "$codesign_identity" -i com.ivan.televybackup.mtproto-helper "$macos_dir/televybackup-mtproto-helper" \
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.mtproto-helper" "$macos_dir/televybackup-mtproto-helper" \
     || echo "WARN: codesign helper failed (Keychain prompts may repeat)"
   codesign --force --deep --sign "$codesign_identity" "$app_dir" \
     || echo "WARN: codesign app failed"
@@ -91,4 +111,4 @@ fi
 codesign -vvv --deep --strict "$app_dir" >/dev/null 2>&1 \
   || echo "WARN: codesign verification failed (embedded CLI may be killed by macOS)"
 
-echo "Built: $app_dir"
+echo "Built ($variant): $app_dir"
