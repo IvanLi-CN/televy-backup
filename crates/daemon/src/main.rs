@@ -189,12 +189,22 @@ impl StatusRuntimeState {
             match (t.last_up_sample_bytes, t.last_up_sample_at_ms) {
                 (Some(prev_bytes), Some(prev_at)) => {
                     let dt_ms = now.saturating_sub(prev_at).max(1);
-                    let db = bytes.saturating_sub(prev_bytes);
-                    // Avoid oscillating noise when updates are too frequent.
-                    if dt_ms >= 50 {
-                        t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
-                        t.last_up_sample_bytes = Some(bytes);
-                        t.last_up_sample_at_ms = Some(now);
+                    // Only advance the rate sample when bytes increase; scan progress updates can
+                    // be much more frequent than upload acknowledgements and would otherwise
+                    // collapse dt, producing spiky "unrelated" rates.
+                    if bytes > prev_bytes {
+                        let db = bytes.saturating_sub(prev_bytes);
+                        // Avoid oscillating noise when updates are too frequent.
+                        if dt_ms >= 50 {
+                            t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
+                            t.last_up_sample_bytes = Some(bytes);
+                            t.last_up_sample_at_ms = Some(now);
+                        }
+                    } else if dt_ms >= 1_000 {
+                        // If the counter hasn't advanced for a while, surface it as 0 B/s, but do
+                        // not move the sample window (next progress delta should span the full
+                        // stalled interval).
+                        t.up_bps = Some(0);
                     }
                 }
                 _ => {
@@ -414,6 +424,29 @@ mod tests {
 
         let t = st.targets.get("t1").unwrap();
         assert_eq!(t.up_total_bytes, Some(2000));
+        assert!(t.up_bps.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn up_bps_sample_window_does_not_advance_when_bytes_stall() {
+        let mut st = state_one_target();
+        st.mark_run_start("t1");
+
+        let sample_at_before = st.targets.get("t1").unwrap().last_up_sample_at_ms.unwrap();
+
+        // Simulate high-frequency scan/progress updates where bytesUploaded does not advance.
+        std::thread::sleep(Duration::from_millis(60));
+        st.on_progress("t1", progress(0));
+
+        let sample_at_after = st.targets.get("t1").unwrap().last_up_sample_at_ms.unwrap();
+        assert_eq!(sample_at_after, sample_at_before);
+
+        // When bytes finally advance, the dt should reflect the full window and produce a sane rate.
+        std::thread::sleep(Duration::from_millis(60));
+        st.on_progress("t1", progress(1024));
+
+        let t = st.targets.get("t1").unwrap();
+        assert_eq!(t.up_total_bytes, Some(1024));
         assert!(t.up_bps.unwrap_or(0) > 0);
     }
 }
