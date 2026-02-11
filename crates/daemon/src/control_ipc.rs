@@ -456,11 +456,9 @@ fn secrets_presence(
             details: serde_json::json!({ "path": secrets_path.display().to_string() }),
         })?;
 
-    let master_present = store.contains_key(crate::MASTER_KEY_KEY)
-        || crate::maybe_keychain_get_secret(crate::MASTER_KEY_KEY).is_some();
+    let master_present = store.contains_key(crate::MASTER_KEY_KEY);
 
-    let api_hash_present = store.contains_key(&settings.telegram.mtproto.api_hash_key)
-        || crate::maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key).is_some();
+    let api_hash_present = store.contains_key(&settings.telegram.mtproto.api_hash_key);
 
     let mut bot_present_by_endpoint = serde_json::Map::<String, serde_json::Value>::new();
     let mut mtproto_session_present_by_endpoint =
@@ -471,8 +469,7 @@ fn secrets_presence(
             continue;
         }
 
-        let bot_present = store.contains_key(&ep.bot_token_key)
-            || crate::maybe_keychain_get_secret(&ep.bot_token_key).is_some();
+        let bot_present = store.contains_key(&ep.bot_token_key);
         bot_present_by_endpoint.insert(ep.id.clone(), serde_json::Value::Bool(bot_present));
 
         let sess_present = store.contains_key(&ep.mtproto.session_key);

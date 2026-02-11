@@ -566,6 +566,35 @@ fn file_mtime(path: &PathBuf) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
+#[derive(Debug, Clone)]
+struct VaultKeyLoadError {
+    code: Option<i32>,
+    message: String,
+}
+
+impl VaultKeyLoadError {
+    fn is_keychain_error(&self) -> bool {
+        self.code.is_some()
+    }
+}
+
+fn vault_key_error_code(err: &(dyn std::error::Error + 'static)) -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(e) = err.downcast_ref::<security_framework::base::Error>() {
+            return Some(e.code());
+        }
+    }
+    None
+}
+
+fn vault_key_load_error(err: &(dyn std::error::Error + 'static)) -> VaultKeyLoadError {
+    VaultKeyLoadError {
+        code: vault_key_error_code(err),
+        message: err.to_string(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = std::env::var("TELEVYBACKUP_CONFIG_DIR")
@@ -703,22 +732,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
     let mut secrets_file_exists = secrets_path.exists();
     let mut last_secrets_mtime = file_mtime(&secrets_path);
+    let manual_trigger_path = data_root.join("control").join("backup-now");
+    let mut manual_trigger_last_attempted_mtime: Option<SystemTime> = None;
+    let initial_manual_trigger_mtime = file_mtime(&manual_trigger_path);
 
     // Vault key (Keychain on macOS) can block on user auth/permission. Load it in the background
     // so the daemon can still run its main loop (consume manual triggers, serve status IPC, etc).
     let mut vault_key: Option<[u8; 32]> = VAULT_KEY_CACHE.get().copied();
-    let mut vault_key_loader: Option<tokio::task::JoinHandle<Result<[u8; 32], String>>> = None;
+    let mut vault_key_loader: Option<tokio::task::JoinHandle<Result<[u8; 32], VaultKeyLoadError>>> =
+        None;
     let mut vault_key_last_attempt: Option<Instant> = None;
-    let mut vault_key_last_error: Option<String> = None;
+    let mut vault_key_last_error: Option<VaultKeyLoadError> = None;
 
     let mut secrets_store: Option<televy_backup_core::secrets::SecretsStore> = None;
     let mut master_key: Option<[u8; 32]> = None;
     let mut api_hash: Option<String> = None;
 
+    if initial_manual_trigger_mtime.is_some() {
+        manual_trigger_last_attempted_mtime = initial_manual_trigger_mtime;
+    }
+
+    // Do not eagerly retry Keychain access. We'll do a single best-effort warm-up attempt so
+    // scheduled runs can work when Keychain is already unlocked, but avoid pestering the user
+    // with repeated authorization prompts when they cancel.
     if vault_key.is_none() {
         vault_key_last_attempt = Some(Instant::now());
         vault_key_loader = Some(tokio::task::spawn_blocking(|| {
-            load_or_create_vault_key_uncached().map_err(|e| e.to_string())
+            load_or_create_vault_key_uncached().map_err(|e| vault_key_load_error(e.as_ref()))
         }));
     }
 
@@ -798,17 +838,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Manual backups are triggered by the UI via a control file under the configured data dir.
+        //
+        // We'll also use the trigger file's mtime as a coarse "user intent" signal: if Keychain
+        // access was cancelled, do not keep retrying (and re-prompting) unless the user clicks Start
+        // again (which rewrites the file, changing its mtime).
+        let manual_trigger_mtime = file_mtime(&manual_trigger_path);
+
         // Poll vault key loader (Keychain can block; never block the main loop).
+        //
+        // IMPORTANT: the vault IPC server may populate `VAULT_KEY_CACHE` independently; refresh
+        // our local view so a successful `televybackup vault ensure` immediately unblocks runs.
+        if vault_key.is_none()
+            && let Some(k) = VAULT_KEY_CACHE.get()
+        {
+            vault_key = Some(*k);
+            vault_key_last_error = None;
+            if let Some(h) = vault_key_loader.take() {
+                h.abort();
+            }
+        }
+
         if vault_key.is_none() {
+            let manual_trigger_is_new = manual_trigger_mtime.is_some()
+                && manual_trigger_mtime != manual_trigger_last_attempted_mtime;
+            let last_keychain_error = vault_key_last_error
+                .as_ref()
+                .is_some_and(|e| e.is_keychain_error());
+
             let should_retry = vault_key_loader.is_none()
                 && vault_key_last_attempt
                     .map(|t| t.elapsed() >= Duration::from_secs(5))
-                    .unwrap_or(true);
+                    .unwrap_or(true)
+                && (!last_keychain_error || manual_trigger_is_new);
             if should_retry {
                 vault_key_last_attempt = Some(Instant::now());
                 vault_key_last_error = None;
+                if manual_trigger_mtime.is_some() {
+                    manual_trigger_last_attempted_mtime = manual_trigger_mtime;
+                }
                 vault_key_loader = Some(tokio::task::spawn_blocking(|| {
-                    load_or_create_vault_key_uncached().map_err(|e| e.to_string())
+                    load_or_create_vault_key_uncached()
+                        .map_err(|e| vault_key_load_error(e.as_ref()))
                 }));
             }
 
@@ -823,7 +894,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         vault_key_last_error = Some(e);
                     }
                     Err(e) => {
-                        vault_key_last_error = Some(e.to_string());
+                        vault_key_last_error = Some(VaultKeyLoadError {
+                            code: None,
+                            message: e.to_string(),
+                        });
                     }
                 }
             }
@@ -852,8 +926,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Master key is required for all backup/restore operations. In dev mode (keychain disabled),
             // auto-generate a master key on first run if no secrets file exists yet.
             if master_key.is_none() {
-                let v = get_secret_from_store(store, MASTER_KEY_KEY)
-                    .or_else(|| maybe_keychain_get_secret(MASTER_KEY_KEY));
+                let v = get_secret_from_store(store, MASTER_KEY_KEY);
                 match v {
                     Some(b64) => {
                         if let Ok(k) = decode_base64_32(&b64) {
@@ -882,16 +955,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if api_hash.is_none() && has_enabled_targets {
-                api_hash = get_secret_from_store(store, &settings.telegram.mtproto.api_hash_key)
-                    .or_else(|| maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key));
+                api_hash = get_secret_from_store(store, &settings.telegram.mtproto.api_hash_key);
             }
         }
 
-        // Manual backups are triggered by the UI via a control file under the configured data dir.
-        // Only consume the trigger when we are able to attempt a run; otherwise keep it on disk
-        // so the user's click is not "lost" while waiting for Keychain/secrets to become available.
-        let manual_trigger_path = data_root.join("control").join("backup-now");
-        let manual_trigger_present = manual_trigger_path.exists();
+        // Only consume the trigger when we are able to attempt a run; otherwise keep it on disk so
+        // the user's click is not "lost" while waiting for Keychain/secrets to become available.
+        let manual_trigger_present = manual_trigger_mtime.is_some();
         let can_attempt_run = has_enabled_targets
             && vault_key.is_some()
             && secrets_store.is_some()
@@ -936,7 +1006,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if has_enabled_targets && !can_attempt_run {
             if manual_trigger_present {
                 let code = vault_key_last_error
-                    .clone()
+                    .as_ref()
+                    .map(|e| {
+                        e.code
+                            .map(|c| format!("{c}"))
+                            .unwrap_or_else(|| e.message.clone())
+                    })
                     .unwrap_or_else(|| "pending".to_string());
                 tracing::warn!(
                     event = "run.skip",
@@ -1048,8 +1123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let bot_token = secrets_store
                 .as_ref()
-                .and_then(|s| get_secret_from_store(s, &ep.bot_token_key))
-                .or_else(|| maybe_keychain_get_secret(&ep.bot_token_key));
+                .and_then(|s| get_secret_from_store(s, &ep.bot_token_key));
             let Some(bot_token) = bot_token else {
                 tracing::error!(
                     event = "run.finish",
@@ -1345,6 +1419,7 @@ fn default_data_dir() -> PathBuf {
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
 static CONFIG_ROOT_CACHE: OnceLock<PathBuf> = OnceLock::new();
 static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
+static VAULT_KEY_LOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn get_secret_from_store(
     store: &televy_backup_core::secrets::SecretsStore,
@@ -1364,13 +1439,6 @@ fn keychain_disabled() -> bool {
         std::env::var("TELEVYBACKUP_DISABLE_KEYCHAIN").as_deref(),
         Ok("1")
     )
-}
-
-fn maybe_keychain_get_secret(key: &str) -> Option<String> {
-    if keychain_disabled() {
-        return None;
-    }
-    keychain_get_secret(key).ok().flatten()
 }
 
 #[cfg(target_os = "macos")]
@@ -1462,6 +1530,13 @@ pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error:
 }
 
 pub(crate) fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    // Serialize Keychain (and vault key file) access to avoid spawning multiple concurrent
+    // authorization prompts when multiple clients call into the vault IPC at the same time.
+    let lock = VAULT_KEY_LOAD_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| std::io::Error::other("vault key load lock poisoned"))?;
+
     let config_root = CONFIG_ROOT_CACHE
         .get()
         .cloned()
@@ -1513,7 +1588,15 @@ pub(crate) fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn st
         let existing = keychain_get_secret(televy_backup_core::secrets::VAULT_KEY_KEY)?
             .map(|s| s.trim().to_string());
         if let Some(b64) = existing {
-            return Ok(televy_backup_core::secrets::vault_key_from_base64(&b64)?);
+            let key = televy_backup_core::secrets::vault_key_from_base64(&b64)?;
+            if secrets_path.exists()
+                && televy_backup_core::secrets::load_secrets_store(&secrets_path, &key).is_err()
+            {
+                return Err(Box::new(std::io::Error::other(
+                    "vault key mismatch for existing secrets store (Keychain item may be wrong); restore/migrate the correct vault key",
+                )));
+            }
+            return Ok(key);
         }
 
         // If a secrets store already exists, creating a brand-new vault key would only make it
