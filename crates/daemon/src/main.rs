@@ -375,6 +375,22 @@ mod tests {
         assert!(!try_consume_manual_trigger_file(&path).unwrap());
     }
 
+    #[test]
+    fn manual_trigger_file_is_not_consumed_until_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup-now");
+
+        std::fs::write(&path, b"manual").unwrap();
+
+        // Not ready: do not consume (file must stay).
+        assert!(!maybe_consume_manual_trigger_file(&path, false).unwrap());
+        assert!(path.exists());
+
+        // Ready: consume by remove.
+        assert!(maybe_consume_manual_trigger_file(&path, true).unwrap());
+        assert!(!path.exists());
+    }
+
     fn state_one_target() -> StatusRuntimeState {
         let mut st = StatusRuntimeState {
             target_order: vec!["t1".to_string()],
@@ -673,7 +689,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let has_enabled_targets = settings.targets.iter().any(|t| t.enabled);
+    let mut has_enabled_targets = settings.targets.iter().any(|t| t.enabled);
     if has_enabled_targets {
         if settings.telegram.mtproto.api_id <= 0 {
             return Err("telegram.mtproto.api_id must be > 0".into());
@@ -682,76 +698,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("telegram.mtproto.api_hash_key must not be empty".into());
         }
     }
-    let vault_key = load_or_create_vault_key()?;
     let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
-    let secrets_file_exists = secrets_path.exists();
-    let mut secrets_store =
-        televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
+    let mut secrets_file_exists = secrets_path.exists();
     let mut last_secrets_mtime = file_mtime(&secrets_path);
 
-    let mut master_key_b64 = match get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
-        .or_else(|| maybe_keychain_get_secret(MASTER_KEY_KEY))
-    {
-        Some(v) => v,
-        None if keychain_disabled() && !secrets_file_exists => {
-            let mut bytes = [0u8; 32];
-            getrandom::getrandom(&mut bytes)
-                .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
-            let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
-            secrets_store.set(MASTER_KEY_KEY, b64.clone());
-            televy_backup_core::secrets::save_secrets_store(
-                &secrets_path,
-                &vault_key,
-                &secrets_store,
-            )?;
-            b64
-        }
-        None => return Err("master key missing".into()),
-    };
-    let mut master_key = decode_base64_32(&master_key_b64)?;
+    // Vault key (Keychain on macOS) can block on user auth/permission. Load it in the background
+    // so the daemon can still run its main loop (consume manual triggers, serve status IPC, etc).
+    let mut vault_key: Option<[u8; 32]> = VAULT_KEY_CACHE.get().copied();
+    let mut vault_key_loader: Option<tokio::task::JoinHandle<Result<[u8; 32], String>>> = None;
+    let mut vault_key_last_attempt: Option<Instant> = None;
+    let mut vault_key_last_error: Option<String> = None;
 
-    let mut api_hash = if has_enabled_targets {
-        Some(
-            get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
-                .or_else(|| maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key))
-                .ok_or("telegram api_hash missing")?,
-        )
-    } else {
-        None
-    };
+    let mut secrets_store: Option<televy_backup_core::secrets::SecretsStore> = None;
+    let mut master_key: Option<[u8; 32]> = None;
+    let mut api_hash: Option<String> = None;
+
+    if vault_key.is_none() {
+        vault_key_last_attempt = Some(Instant::now());
+        vault_key_loader = Some(tokio::task::spawn_blocking(|| {
+            load_or_create_vault_key_uncached().map_err(|e| e.to_string())
+        }));
+    }
 
     let mut schedule_state_by_target = HashMap::<String, TargetScheduleState>::new();
     let mut storage_by_endpoint = HashMap::<String, TelegramMtProtoStorage>::new();
 
     loop {
         let now = chrono::Local::now();
-
-        // Manual backups are triggered by the UI via a control file under the configured data dir.
-        // Consume the trigger in the main loop to keep the behavior robust even if background
-        // tasks fail (and to avoid relying on logs that may be dropped when no run log is active).
-        let manual_trigger_path = data_root.join("control").join("backup-now");
-        let manual_triggered = match try_consume_manual_trigger_file(&manual_trigger_path) {
-            Ok(true) => {
-                tracing::info!(
-                    event = "manual.trigger",
-                    kind = "backup",
-                    path = %manual_trigger_path.display(),
-                    "manual backup trigger consumed"
-                );
-                true
-            }
-            Ok(false) => false,
-            Err(e) => {
-                tracing::warn!(
-                    event = "manual.trigger_remove_failed",
-                    kind = "backup",
-                    path = %manual_trigger_path.display(),
-                    error = %e,
-                    "failed to consume manual trigger"
-                );
-                false
-            }
-        };
 
         // Hot-reload settings + secrets when files change. This avoids confusing situations where the
         // UI saved new endpoint chat_id but the long-running daemon kept using the old one.
@@ -777,6 +750,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             } else {
                                 settings = new_settings;
+                                has_enabled_targets = settings.targets.iter().any(|t| t.enabled);
                                 *control_ipc_settings.write().await = settings.clone();
                                 last_config_mtime = config_mtime;
                                 storage_by_endpoint.clear();
@@ -804,49 +778,148 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if secrets_changed {
-                    match televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)
-                    {
-                        Ok(new_store) => {
-                            secrets_store = new_store;
-                            last_secrets_mtime = secrets_mtime;
-                            storage_by_endpoint.clear();
+                    // Reload once the vault key is available. Until then, remember the mtime so we
+                    // don't miss the change.
+                    last_secrets_mtime = secrets_mtime;
+                    secrets_file_exists = secrets_path.exists();
+                    secrets_store = None;
+                    master_key = None;
+                    api_hash = None;
+                    storage_by_endpoint.clear();
 
-                            if let Some(v) = get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
-                                .or_else(|| maybe_keychain_get_secret(MASTER_KEY_KEY))
-                            {
-                                master_key_b64 = v;
-                                if let Ok(k) = decode_base64_32(&master_key_b64) {
-                                    master_key = k;
-                                }
-                            }
-                            if let Some(h) = get_secret_from_store(
-                                &secrets_store,
-                                &settings.telegram.mtproto.api_hash_key,
-                            )
-                            .or_else(|| {
-                                maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key)
-                            }) {
-                                api_hash = Some(h);
-                            }
+                    tracing::info!(
+                        event = "secrets.changed",
+                        path = %secrets_path.display(),
+                        "secrets.changed"
+                    );
+                }
+            }
+        }
 
-                            tracing::info!(
-                                event = "secrets.reloaded",
-                                path = %secrets_path.display(),
-                                "secrets.reloaded"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                event = "secrets.reload_failed",
-                                error = %e,
-                                path = %secrets_path.display(),
-                                "secrets.reload_failed"
-                            );
-                        }
+        // Poll vault key loader (Keychain can block; never block the main loop).
+        if vault_key.is_none() {
+            let should_retry = vault_key_loader.is_none()
+                && vault_key_last_attempt
+                    .map(|t| t.elapsed() >= Duration::from_secs(5))
+                    .unwrap_or(true);
+            if should_retry {
+                vault_key_last_attempt = Some(Instant::now());
+                vault_key_last_error = None;
+                vault_key_loader = Some(tokio::task::spawn_blocking(|| {
+                    load_or_create_vault_key_uncached().map_err(|e| e.to_string())
+                }));
+            }
+
+            if vault_key_loader.as_ref().is_some_and(|t| t.is_finished()) {
+                match vault_key_loader.take().unwrap().await {
+                    Ok(Ok(key)) => {
+                        vault_key = Some(key);
+                        let _ = VAULT_KEY_CACHE.set(key);
+                        vault_key_last_error = None;
+                    }
+                    Ok(Err(e)) => {
+                        vault_key_last_error = Some(e);
+                    }
+                    Err(e) => {
+                        vault_key_last_error = Some(e.to_string());
                     }
                 }
             }
         }
+
+        // (Re)load secrets store and derived secrets once the vault key is ready.
+        if let Some(vault_key) = vault_key
+            && secrets_store.is_none()
+        {
+            match televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key) {
+                Ok(store) => {
+                    secrets_store = Some(store);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        event = "secrets.reload_failed",
+                        error = %e,
+                        path = %secrets_path.display(),
+                        "secrets.reload_failed"
+                    );
+                }
+            }
+        }
+
+        if let Some(store) = secrets_store.as_mut() {
+            // Master key is required for all backup/restore operations. In dev mode (keychain disabled),
+            // auto-generate a master key on first run if no secrets file exists yet.
+            if master_key.is_none() {
+                let v = get_secret_from_store(store, MASTER_KEY_KEY)
+                    .or_else(|| maybe_keychain_get_secret(MASTER_KEY_KEY));
+                match v {
+                    Some(b64) => {
+                        if let Ok(k) = decode_base64_32(&b64) {
+                            master_key = Some(k);
+                        }
+                    }
+                    None if keychain_disabled() && !secrets_file_exists => {
+                        if let Some(vault_key) = vault_key {
+                            let mut bytes = [0u8; 32];
+                            getrandom::getrandom(&mut bytes)
+                                .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
+                            let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
+                            store.set(MASTER_KEY_KEY, b64.clone());
+                            televy_backup_core::secrets::save_secrets_store(
+                                &secrets_path,
+                                &vault_key,
+                                store,
+                            )?;
+                            secrets_file_exists = true;
+                            master_key = Some(bytes);
+                        }
+                    }
+                    None => {}
+                }
+            }
+
+            if api_hash.is_none() && has_enabled_targets {
+                api_hash = get_secret_from_store(store, &settings.telegram.mtproto.api_hash_key)
+                    .or_else(|| maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key));
+            }
+        }
+
+        // Manual backups are triggered by the UI via a control file under the configured data dir.
+        // Only consume the trigger when we are able to attempt a run; otherwise keep it on disk
+        // so the user's click is not "lost" while waiting for Keychain/secrets to become available.
+        let manual_trigger_path = data_root.join("control").join("backup-now");
+        let manual_trigger_present = manual_trigger_path.exists();
+        let can_attempt_run = has_enabled_targets
+            && vault_key.is_some()
+            && secrets_store.is_some()
+            && master_key.is_some()
+            && api_hash.is_some();
+
+        let manual_triggered = match maybe_consume_manual_trigger_file(
+            &manual_trigger_path,
+            manual_trigger_present && can_attempt_run,
+        ) {
+            Ok(true) => {
+                tracing::info!(
+                    event = "manual.trigger",
+                    kind = "backup",
+                    path = %manual_trigger_path.display(),
+                    "manual backup trigger consumed"
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(e) => {
+                tracing::warn!(
+                    event = "manual.trigger_remove_failed",
+                    kind = "backup",
+                    path = %manual_trigger_path.display(),
+                    error = %e,
+                    "failed to consume manual trigger"
+                );
+                false
+            }
+        };
 
         if settings.telegram.mtproto.api_id <= 0
             || settings.telegram.mtproto.api_hash_key.trim().is_empty()
@@ -856,7 +929,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
+        // Skip starting runs until secrets are ready. (Do not consume manual trigger; it stays pending.)
+        if has_enabled_targets && !can_attempt_run {
+            if manual_trigger_present {
+                let code = vault_key_last_error.clone().unwrap_or_else(|| "pending".to_string());
+                tracing::warn!(
+                    event = "run.skip",
+                    kind = "backup",
+                    reason = "secrets_unavailable",
+                    detail = %code,
+                    "run.skip"
+                );
+            }
+            sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
         std::fs::create_dir_all(&index_dir)?;
+
+        let vault_key = vault_key.expect("vault key must be available when starting runs");
+        let master_key = master_key.expect("master key must be available when starting runs");
+        let api_hash = api_hash.clone().expect("api_hash must be available when starting runs");
 
         for target in &settings.targets {
             if !target.enabled {
@@ -946,7 +1039,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            let bot_token = get_secret_from_store(&secrets_store, &ep.bot_token_key)
+            let bot_token = secrets_store
+                .as_ref()
+                .and_then(|s| get_secret_from_store(s, &ep.bot_token_key))
                 .or_else(|| maybe_keychain_get_secret(&ep.bot_token_key));
             let Some(bot_token) = bot_token else {
                 tracing::error!(
@@ -963,7 +1058,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if !storage_by_endpoint.contains_key(&ep.id) {
-                let session = match get_secret_from_store(&secrets_store, &ep.mtproto.session_key) {
+                let session = match secrets_store
+                    .as_ref()
+                    .and_then(|s| get_secret_from_store(s, &ep.mtproto.session_key))
+                {
                     Some(b64) if !b64.trim().is_empty() => {
                         Some(base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())?)
                     }
@@ -977,7 +1075,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
                     provider,
                     api_id: settings.telegram.mtproto.api_id,
-                    api_hash: api_hash.clone().ok_or("telegram api_hash missing")?,
+                    api_hash: api_hash.clone(),
                     bot_token: bot_token.clone(),
                     chat_id: ep.chat_id.clone(),
                     session,
@@ -1177,21 +1275,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if let Some(bytes) = storage.session_bytes() {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-                let should_write = secrets_store
-                    .get(&ep.mtproto.session_key)
-                    .is_none_or(|v| v != b64.as_str());
-                if should_write {
-                    secrets_store.set(&ep.mtproto.session_key, b64);
-                    if let Err(e) = televy_backup_core::secrets::save_secrets_store(
-                        &secrets_path,
-                        &vault_key,
-                        &secrets_store,
-                    ) {
-                        tracing::warn!(
-                            event = "secrets.session_persist_failed",
-                            error = %e,
-                            "failed to persist mtproto session"
-                        );
+                if let Some(store) = secrets_store.as_mut() {
+                    let should_write = store
+                        .get(&ep.mtproto.session_key)
+                        .is_none_or(|v| v != b64.as_str());
+                    if should_write {
+                        store.set(&ep.mtproto.session_key, b64);
+                        if let Err(e) = televy_backup_core::secrets::save_secrets_store(
+                            &secrets_path,
+                            &vault_key,
+                            store,
+                        ) {
+                            tracing::warn!(
+                                event = "secrets.session_persist_failed",
+                                error = %e,
+                                "failed to persist mtproto session"
+                            );
+                        }
                     }
                 }
             }
@@ -1207,6 +1307,13 @@ fn try_consume_manual_trigger_file(path: &Path) -> std::io::Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+fn maybe_consume_manual_trigger_file(path: &Path, can_attempt_run: bool) -> std::io::Result<bool> {
+    if !can_attempt_run {
+        return Ok(false);
+    }
+    try_consume_manual_trigger_file(path)
 }
 
 fn parse_hhmm(s: &str) -> Result<(u8, u8), Box<dyn std::error::Error>> {
@@ -1231,7 +1338,6 @@ fn default_data_dir() -> PathBuf {
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
 static CONFIG_ROOT_CACHE: OnceLock<PathBuf> = OnceLock::new();
 static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
-static VAULT_KEY_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn get_secret_from_store(
     store: &televy_backup_core::secrets::SecretsStore,
@@ -1329,21 +1435,23 @@ fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
 }
 
 pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    // IMPORTANT: Keychain access can block (e.g. waiting for user authentication / permission).
+    // Never do that on the main async flow, otherwise the daemon can't consume manual triggers.
+    //
+    // We only return a cached key here. A background loader (spawned from `main`) is responsible
+    // for eventually populating `VAULT_KEY_CACHE` when Keychain is available.
     if let Some(key) = VAULT_KEY_CACHE.get() {
         return Ok(*key);
     }
 
-    // With concurrent IPC requests, ensure only one initializer runs.
-    let lock = VAULT_KEY_INIT_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().map_err(|_| "vault key init lock poisoned")?;
-
-    if let Some(key) = VAULT_KEY_CACHE.get() {
-        return Ok(*key);
+    // File-based backend (dev / keychain-disabled) is safe to load synchronously.
+    if keychain_disabled() {
+        let key = load_or_create_vault_key_uncached()?;
+        let _ = VAULT_KEY_CACHE.set(key);
+        return Ok(key);
     }
 
-    let key = load_or_create_vault_key_uncached()?;
-    let _ = VAULT_KEY_CACHE.set(key);
-    Ok(*VAULT_KEY_CACHE.get().unwrap_or(&key))
+    Err("vault key unavailable (waiting for Keychain)".into())
 }
 
 fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::Error>> {
