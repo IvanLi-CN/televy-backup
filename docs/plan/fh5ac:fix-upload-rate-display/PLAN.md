@@ -5,7 +5,7 @@
 - Status: 已完成
 - Created: 2026-02-11
 - Last: 2026-02-11
-- Notes: 待主人验收（建议对齐 Activity Monitor 中 `televybackup-mtproto-helper` 的发送速率）
+- Notes: PR #38；待主人验收（建议对齐 Activity Monitor 中 `televybackup-mtproto-helper` 的发送速率）
 
 ## 背景 / 问题陈述
 
