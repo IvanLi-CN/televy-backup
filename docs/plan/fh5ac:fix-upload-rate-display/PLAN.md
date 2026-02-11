@@ -2,9 +2,10 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-02-11
 - Last: 2026-02-11
+- Notes: 待主人验收（建议对齐 Activity Monitor 中 `televybackup-mtproto-helper` 的发送速率）
 
 ## 背景 / 问题陈述
 
@@ -66,12 +67,15 @@
 
 ## 里程碑（Milestones）
 
-- [ ] M1: 修复 MTProto helper progress 上报语义（仅成功后累计）
-- [ ] M2: CLI status stream 不覆盖 daemon 速率（保留 session totals）
-- [ ] M3: 补齐最小单测 + 本地验证通过
+- [x] M1: 修复 MTProto helper progress 上报语义（仅成功后累计）
+- [x] M2: CLI status stream 不覆盖 daemon 速率（保留 session totals）
+- [x] M3: 补齐最小单测 + 本地验证通过
 
 ## 风险与开放问题（Risks / Open Questions）
 
 - 速率口径为 payload bytes/s，可能与网卡统计存在固定比例偏差（协议/系统开销）；但应保持正相关且同量级。
 - big file 并发上传时，成功累计的粒度依赖 part 完成节奏；短时间内可能更“阶梯”，但应总体更可信。
 
+## 变更记录 / Change log
+
+- 2026-02-11：修复 MTProto helper progress 语义（仅成功后累计）+ status stream 不覆盖 daemon 速率；补齐单元测试与本地验证。
