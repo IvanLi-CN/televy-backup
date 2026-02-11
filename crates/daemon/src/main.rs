@@ -368,11 +368,11 @@ mod tests {
         let path = dir.path().join("backup-now");
 
         std::fs::write(&path, b"manual").unwrap();
-        assert_eq!(try_consume_manual_trigger_file(&path).unwrap(), true);
+        assert!(try_consume_manual_trigger_file(&path).unwrap());
         assert!(!path.exists());
 
         // Second consumption should be a no-op.
-        assert_eq!(try_consume_manual_trigger_file(&path).unwrap(), false);
+        assert!(!try_consume_manual_trigger_file(&path).unwrap());
     }
 
     fn state_one_target() -> StatusRuntimeState {
