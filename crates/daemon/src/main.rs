@@ -578,10 +578,10 @@ impl VaultKeyLoadError {
     }
 }
 
-fn vault_key_error_code(err: &(dyn std::error::Error + 'static)) -> Option<i32> {
+fn vault_key_error_code(_err: &(dyn std::error::Error + 'static)) -> Option<i32> {
     #[cfg(target_os = "macos")]
     {
-        if let Some(e) = err.downcast_ref::<security_framework::base::Error>() {
+        if let Some(e) = _err.downcast_ref::<security_framework::base::Error>() {
             return Some(e.code());
         }
     }
