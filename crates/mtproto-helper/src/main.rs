@@ -1023,7 +1023,6 @@ async fn upload_bytes_with_progress(
                     }
                     let chunk = bytes[start..end].to_vec();
                     let len_u64 = len as u64;
-                    uploaded.fetch_add(len_u64, Ordering::Relaxed);
                     let ok = match timeout(
                         Duration::from_secs(UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS),
                         client.invoke(&tl::functions::upload::SaveBigFilePart {
@@ -1037,20 +1036,20 @@ async fn upload_bytes_with_progress(
                     {
                         Ok(Ok(ok)) => ok,
                         Ok(Err(e)) => {
-                            uploaded.fetch_sub(len_u64, Ordering::Relaxed);
                             return Err(format!("save_big_file_part failed: {e}"));
                         }
                         Err(_) => {
-                            uploaded.fetch_sub(len_u64, Ordering::Relaxed);
                             return Err(format!(
                                 "save_big_file_part timed out after {UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS}s"
                             ));
                         }
                     };
                     if !ok {
-                        uploaded.fetch_sub(len_u64, Ordering::Relaxed);
                         return Err("server failed to store uploaded data".to_string());
                     }
+
+                    // Only count bytes after the server acknowledged storing the part.
+                    uploaded.fetch_add(len_u64, Ordering::Relaxed);
                 }
                 Ok::<(), String>(())
             });
@@ -1106,9 +1105,6 @@ async fn upload_bytes_with_progress(
     let mut bytes_uploaded = 0u64;
     for (part, chunk) in bytes.chunks(chunk_size).enumerate() {
         md5.consume(chunk);
-        bytes_uploaded = bytes_uploaded.saturating_add(chunk.len() as u64).min(bytes_total);
-        let session = Some(session_b64(&state.session));
-        write_upload_progress(out, session, bytes_uploaded, bytes_total)?;
         let ok = timeout(
             Duration::from_secs(UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS),
             state
@@ -1125,6 +1121,11 @@ async fn upload_bytes_with_progress(
         if !ok {
             return Err("server failed to store uploaded data".to_string());
         }
+
+        // Report only bytes that the server acknowledged storing (avoid "pre-counting" scheduled bytes).
+        bytes_uploaded = bytes_uploaded.saturating_add(chunk.len() as u64).min(bytes_total);
+        let session = Some(session_b64(&state.session));
+        write_upload_progress(out, session, bytes_uploaded, bytes_total)?;
     }
 
     Ok(Uploaded::from_raw(

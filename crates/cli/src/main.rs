@@ -833,8 +833,12 @@ impl StatusStreamEnricher {
                 .or_insert(delta);
 
             // Realtime rates only make sense when updates are timely.
-            let mut bps: Option<u64> = None;
-            if t.state == "running" && stale_age_ms <= 2_000 && dt > 0.0 {
+            //
+            // Prefer daemon-provided rates (already computed from progress cadence). Only fall
+            // back to a local EWMA when the snapshot doesn't provide a rate (compat / best-effort).
+            if t.state != "running" || stale_age_ms > 2_000 {
+                t.up.bytes_per_second = None;
+            } else if t.up.bytes_per_second.is_none() && dt > 0.0 {
                 let raw = (delta as f64) / dt;
                 let prev = self
                     .smoothed_rate_by_target
@@ -846,12 +850,11 @@ impl StatusStreamEnricher {
                 let smoothed = prev * (1.0 - alpha) + raw * alpha;
                 self.smoothed_rate_by_target
                     .insert(t.target_id.clone(), smoothed);
-                bps = Some(smoothed.max(0.0).round() as u64);
+                t.up.bytes_per_second = Some(smoothed.max(0.0).round() as u64);
             }
 
-            t.up.bytes_per_second = bps;
             t.up_total.bytes = Some(*total);
-            if let Some(bps) = bps {
+            if let Some(bps) = t.up.bytes_per_second {
                 any_target_rate = true;
                 global_up_bps = global_up_bps.saturating_add(bps);
             }
@@ -6326,6 +6329,167 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(60));
         assert!(t.should_emit("upload"), "should emit again after interval");
+    }
+
+    fn status_snapshot_one_target(
+        generated_at: u64,
+        state: &str,
+        up_bps: Option<u64>,
+    ) -> televy_backup_core::status::StatusSnapshot {
+        televy_backup_core::status::StatusSnapshot {
+            type_: "status.snapshot".to_string(),
+            schema_version: 1,
+            generated_at,
+            source: televy_backup_core::status::StatusSource {
+                kind: "daemon".to_string(),
+                detail: Some("test".to_string()),
+            },
+            global: televy_backup_core::status::GlobalStatus {
+                up: televy_backup_core::status::Rate {
+                    bytes_per_second: Some(999),
+                },
+                down: televy_backup_core::status::Rate {
+                    bytes_per_second: None,
+                },
+                up_total: televy_backup_core::status::Counter { bytes: None },
+                down_total: televy_backup_core::status::Counter { bytes: None },
+                ui_uptime_seconds: None,
+            },
+            targets: vec![televy_backup_core::status::TargetState {
+                target_id: "t1".to_string(),
+                label: None,
+                source_path: "/tmp".to_string(),
+                endpoint_id: "ep1".to_string(),
+                enabled: true,
+                state: state.to_string(),
+                running_since: Some(generated_at),
+                up: televy_backup_core::status::Rate {
+                    bytes_per_second: up_bps,
+                },
+                up_total: televy_backup_core::status::Counter { bytes: None },
+                progress: Some(televy_backup_core::status::Progress {
+                    phase: "upload".to_string(),
+                    files_total: None,
+                    files_done: None,
+                    chunks_total: None,
+                    chunks_done: None,
+                    bytes_read: None,
+                    bytes_uploaded: Some(123),
+                    bytes_deduped: None,
+                }),
+                last_run: None,
+                extra: Default::default(),
+            }],
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn status_stream_enricher_preserves_daemon_rate_when_fresh_and_running() {
+        let now = televy_backup_core::status::now_unix_ms();
+        let mut snap = status_snapshot_one_target(now, "running", Some(123));
+        let mut enricher = StatusStreamEnricher::default();
+
+        enricher.enrich(&mut snap);
+
+        assert_eq!(snap.targets[0].up.bytes_per_second, Some(123));
+        // Global rate is recomputed from targets, not taken from the snapshot.
+        assert_eq!(snap.global.up.bytes_per_second, Some(123));
+    }
+
+    #[test]
+    fn status_stream_enricher_hides_rate_when_stale() {
+        let now = televy_backup_core::status::now_unix_ms();
+        let mut snap = status_snapshot_one_target(now.saturating_sub(3_000), "running", Some(123));
+        let mut enricher = StatusStreamEnricher::default();
+
+        enricher.enrich(&mut snap);
+
+        assert_eq!(snap.targets[0].up.bytes_per_second, None);
+        assert_eq!(snap.global.up.bytes_per_second, None);
+    }
+
+    #[test]
+    fn status_stream_enricher_global_rate_sums_targets() {
+        let now = televy_backup_core::status::now_unix_ms();
+        let mut snap = televy_backup_core::status::StatusSnapshot {
+            type_: "status.snapshot".to_string(),
+            schema_version: 1,
+            generated_at: now,
+            source: televy_backup_core::status::StatusSource {
+                kind: "daemon".to_string(),
+                detail: Some("test".to_string()),
+            },
+            global: televy_backup_core::status::GlobalStatus {
+                up: televy_backup_core::status::Rate {
+                    bytes_per_second: Some(999),
+                },
+                down: televy_backup_core::status::Rate {
+                    bytes_per_second: None,
+                },
+                up_total: televy_backup_core::status::Counter { bytes: None },
+                down_total: televy_backup_core::status::Counter { bytes: None },
+                ui_uptime_seconds: None,
+            },
+            targets: vec![
+                televy_backup_core::status::TargetState {
+                    target_id: "t1".to_string(),
+                    label: None,
+                    source_path: "/tmp".to_string(),
+                    endpoint_id: "ep1".to_string(),
+                    enabled: true,
+                    state: "running".to_string(),
+                    running_since: Some(now),
+                    up: televy_backup_core::status::Rate {
+                        bytes_per_second: Some(10),
+                    },
+                    up_total: televy_backup_core::status::Counter { bytes: None },
+                    progress: Some(televy_backup_core::status::Progress {
+                        phase: "upload".to_string(),
+                        files_total: None,
+                        files_done: None,
+                        chunks_total: None,
+                        chunks_done: None,
+                        bytes_read: None,
+                        bytes_uploaded: Some(10),
+                        bytes_deduped: None,
+                    }),
+                    last_run: None,
+                    extra: Default::default(),
+                },
+                televy_backup_core::status::TargetState {
+                    target_id: "t2".to_string(),
+                    label: None,
+                    source_path: "/tmp".to_string(),
+                    endpoint_id: "ep1".to_string(),
+                    enabled: true,
+                    state: "running".to_string(),
+                    running_since: Some(now),
+                    up: televy_backup_core::status::Rate {
+                        bytes_per_second: Some(20),
+                    },
+                    up_total: televy_backup_core::status::Counter { bytes: None },
+                    progress: Some(televy_backup_core::status::Progress {
+                        phase: "upload".to_string(),
+                        files_total: None,
+                        files_done: None,
+                        chunks_total: None,
+                        chunks_done: None,
+                        bytes_read: None,
+                        bytes_uploaded: Some(20),
+                        bytes_deduped: None,
+                    }),
+                    last_run: None,
+                    extra: Default::default(),
+                },
+            ],
+            extra: Default::default(),
+        };
+
+        let mut enricher = StatusStreamEnricher::default();
+        enricher.enrich(&mut snap);
+
+        assert_eq!(snap.global.up.bytes_per_second, Some(30));
     }
 
     fn endpoint(id: &str) -> settings_config::TelegramEndpoint {
