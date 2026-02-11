@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -363,6 +362,19 @@ impl ProgressSink for StatusProgressSink {
 mod tests {
     use super::*;
 
+    #[test]
+    fn manual_trigger_file_is_consumed_by_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup-now");
+
+        std::fs::write(&path, b"manual").unwrap();
+        assert_eq!(try_consume_manual_trigger_file(&path).unwrap(), true);
+        assert!(!path.exists());
+
+        // Second consumption should be a no-op.
+        assert_eq!(try_consume_manual_trigger_file(&path).unwrap(), false);
+    }
+
     fn state_one_target() -> StatusRuntimeState {
         let mut st = StatusRuntimeState {
             target_order: vec!["t1".to_string()],
@@ -711,15 +723,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut schedule_state_by_target = HashMap::<String, TargetScheduleState>::new();
     let mut storage_by_endpoint = HashMap::<String, TelegramMtProtoStorage>::new();
 
-    let manual_trigger_pending = Arc::new(AtomicBool::new(false));
-    tokio::spawn(manual_trigger_watcher_loop(
-        data_root.clone(),
-        manual_trigger_pending.clone(),
-    ));
-
     loop {
         let now = chrono::Local::now();
-        let manual_triggered = manual_trigger_pending.swap(false, Ordering::SeqCst);
+
+        // Manual backups are triggered by the UI via a control file under the configured data dir.
+        // Consume the trigger in the main loop to keep the behavior robust even if background
+        // tasks fail (and to avoid relying on logs that may be dropped when no run log is active).
+        let manual_trigger_path = data_root.join("control").join("backup-now");
+        let manual_triggered = match try_consume_manual_trigger_file(&manual_trigger_path) {
+            Ok(true) => {
+                tracing::info!(
+                    event = "manual.trigger",
+                    kind = "backup",
+                    path = %manual_trigger_path.display(),
+                    "manual backup trigger consumed"
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(e) => {
+                tracing::warn!(
+                    event = "manual.trigger_remove_failed",
+                    kind = "backup",
+                    path = %manual_trigger_path.display(),
+                    error = %e,
+                    "failed to consume manual trigger"
+                );
+                false
+            }
+        };
 
         // Hot-reload settings + secrets when files change. This avoids confusing situations where the
         // UI saved new endpoint chat_id but the long-running daemon kept using the old one.
@@ -1169,56 +1201,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn manual_trigger_watcher_loop(data_root: PathBuf, pending: Arc<AtomicBool>) {
-    let control_dir = data_root.join("control");
-    let path = control_dir.join("backup-now");
-    loop {
-        let removed = tokio::task::spawn_blocking({
-            let path = path.clone();
-            move || {
-                if !path.exists() {
-                    return Ok(false);
-                }
-                match std::fs::remove_file(&path) {
-                    Ok(()) => Ok(true),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                    Err(e) => Err(e),
-                }
-            }
-        })
-        .await;
-
-        match removed {
-            Ok(Ok(true)) => {
-                pending.store(true, Ordering::SeqCst);
-                tracing::info!(
-                    event = "manual.trigger",
-                    kind = "backup",
-                    path = %path.display(),
-                    "manual backup trigger consumed"
-                );
-            }
-            Ok(Ok(false)) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    event = "manual.trigger_remove_failed",
-                    kind = "backup",
-                    path = %path.display(),
-                    error = %e,
-                    "failed to consume manual trigger"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    event = "manual.trigger_task_failed",
-                    kind = "backup",
-                    path = %path.display(),
-                    error = %e,
-                    "failed to spawn blocking task to consume manual trigger"
-                );
-            }
-        }
-        sleep(Duration::from_millis(200)).await;
+fn try_consume_manual_trigger_file(path: &Path) -> std::io::Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
