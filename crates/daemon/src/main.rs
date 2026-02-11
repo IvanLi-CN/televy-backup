@@ -55,7 +55,7 @@ struct TargetRuntime {
     up_bps: Option<u64>,
     up_total_bytes: Option<u64>,
     last_up_sample_bytes: Option<u64>,
-    last_up_sample_at_ms: Option<u64>,
+    last_up_sample_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -89,7 +89,7 @@ impl StatusRuntimeState {
                     up_bps: None,
                     up_total_bytes: None,
                     last_up_sample_bytes: None,
-                    last_up_sample_at_ms: None,
+                    last_up_sample_at: None,
                 },
             );
         }
@@ -119,7 +119,7 @@ impl StatusRuntimeState {
                 up_bps: None,
                 up_total_bytes: None,
                 last_up_sample_bytes: None,
-                last_up_sample_at_ms: None,
+                last_up_sample_at: None,
             });
 
             rt.label = if t.label.trim().is_empty() {
@@ -158,7 +158,7 @@ impl StatusRuntimeState {
         t.up_total_bytes = Some(0);
         t.up_bps = Some(0);
         t.last_up_sample_bytes = Some(0);
-        t.last_up_sample_at_ms = Some(now);
+        t.last_up_sample_at = Some(Instant::now());
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -183,11 +183,13 @@ impl StatusRuntimeState {
         });
 
         if let Some(bytes) = p.bytes_uploaded {
-            let now = now_unix_ms();
+            let now = Instant::now();
             t.up_total_bytes = Some(bytes);
-            match (t.last_up_sample_bytes, t.last_up_sample_at_ms) {
+            match (t.last_up_sample_bytes, t.last_up_sample_at) {
                 (Some(prev_bytes), Some(prev_at)) => {
-                    let dt_ms = now.saturating_sub(prev_at).max(1);
+                    let dt_ms = u64::try_from(now.duration_since(prev_at).as_millis())
+                        .unwrap_or(u64::MAX)
+                        .max(1);
                     // Only advance the rate sample when bytes increase; scan progress updates can
                     // be much more frequent than upload acknowledgements and would otherwise
                     // collapse dt, producing spiky "unrelated" rates.
@@ -197,7 +199,7 @@ impl StatusRuntimeState {
                         if dt_ms >= 50 {
                             t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
                             t.last_up_sample_bytes = Some(bytes);
-                            t.last_up_sample_at_ms = Some(now);
+                            t.last_up_sample_at = Some(now);
                         }
                     } else if dt_ms >= 1_000 {
                         // If the counter hasn't advanced for a while, surface it as 0 B/s, but do
@@ -208,7 +210,7 @@ impl StatusRuntimeState {
                 }
                 _ => {
                     t.last_up_sample_bytes = Some(bytes);
-                    t.last_up_sample_at_ms = Some(now);
+                    t.last_up_sample_at = Some(now);
                 }
             }
         }
@@ -231,7 +233,7 @@ impl StatusRuntimeState {
         t.up_bps = None;
         t.up_total_bytes = None;
         t.last_up_sample_bytes = None;
-        t.last_up_sample_at_ms = None;
+        t.last_up_sample_at = None;
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -260,7 +262,7 @@ impl StatusRuntimeState {
         t.up_bps = None;
         t.up_total_bytes = None;
         t.last_up_sample_bytes = None;
-        t.last_up_sample_at_ms = None;
+        t.last_up_sample_at = None;
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -411,7 +413,7 @@ mod tests {
                 up_bps: None,
                 up_total_bytes: None,
                 last_up_sample_bytes: None,
-                last_up_sample_at_ms: None,
+                last_up_sample_at: None,
             },
         );
         st
@@ -460,13 +462,13 @@ mod tests {
         let mut st = state_one_target();
         st.mark_run_start("t1");
 
-        let sample_at_before = st.targets.get("t1").unwrap().last_up_sample_at_ms.unwrap();
+        let sample_at_before = st.targets.get("t1").unwrap().last_up_sample_at.unwrap();
 
         // Simulate high-frequency scan/progress updates where bytesUploaded does not advance.
         std::thread::sleep(Duration::from_millis(60));
         st.on_progress("t1", progress(0));
 
-        let sample_at_after = st.targets.get("t1").unwrap().last_up_sample_at_ms.unwrap();
+        let sample_at_after = st.targets.get("t1").unwrap().last_up_sample_at.unwrap();
         assert_eq!(sample_at_after, sample_at_before);
 
         // When bytes finally advance, the dt should reflect the full window and produce a sane rate.
@@ -861,8 +863,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None if keychain_disabled() && !secrets_file_exists => {
                         if let Some(vault_key) = vault_key {
                             let mut bytes = [0u8; 32];
-                            getrandom::getrandom(&mut bytes)
-                                .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
+                            getrandom::getrandom(&mut bytes).map_err(|e| {
+                                std::io::Error::other(format!("getrandom failed: {e}"))
+                            })?;
                             let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
                             store.set(MASTER_KEY_KEY, b64.clone());
                             televy_backup_core::secrets::save_secrets_store(
@@ -932,7 +935,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Skip starting runs until secrets are ready. (Do not consume manual trigger; it stays pending.)
         if has_enabled_targets && !can_attempt_run {
             if manual_trigger_present {
-                let code = vault_key_last_error.clone().unwrap_or_else(|| "pending".to_string());
+                let code = vault_key_last_error
+                    .clone()
+                    .unwrap_or_else(|| "pending".to_string());
                 tracing::warn!(
                     event = "run.skip",
                     kind = "backup",
@@ -949,7 +954,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let vault_key = vault_key.expect("vault key must be available when starting runs");
         let master_key = master_key.expect("master key must be available when starting runs");
-        let api_hash = api_hash.clone().expect("api_hash must be available when starting runs");
+        let api_hash = api_hash
+            .clone()
+            .expect("api_hash must be available when starting runs");
 
         for target in &settings.targets {
             if !target.enabled {
@@ -1454,7 +1461,7 @@ pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error:
     Err("vault key unavailable (waiting for Keychain)".into())
 }
 
-fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+pub(crate) fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::Error>> {
     let config_root = CONFIG_ROOT_CACHE
         .get()
         .cloned()
@@ -1488,10 +1495,31 @@ fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::E
 
     #[cfg(target_os = "macos")]
     {
+        let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
+
+        // Migration/fallback: if a secrets store already exists and a legacy vault.key file is
+        // present, prefer using it to unlock secrets. This avoids getting "stuck" when the user
+        // previously ran with file backend (`TELEVYBACKUP_DISABLE_KEYCHAIN=1`) and later enables
+        // Keychain with an empty vault key item.
+        if secrets_path.exists()
+            && key_file_path.exists()
+            && let Ok(key) = televy_backup_core::secrets::read_vault_key_file(&key_file_path)
+            // Validate that this key can decrypt the existing secrets store.
+            && televy_backup_core::secrets::load_secrets_store(&secrets_path, &key).is_ok()
+        {
+            return Ok(key);
+        }
+
         let existing = keychain_get_secret(televy_backup_core::secrets::VAULT_KEY_KEY)?
             .map(|s| s.trim().to_string());
         if let Some(b64) = existing {
             return Ok(televy_backup_core::secrets::vault_key_from_base64(&b64)?);
+        }
+
+        // If a secrets store already exists, creating a brand-new vault key would only make it
+        // unreadable. Require the user to restore/migrate the vault key first.
+        if secrets_path.exists() {
+            return Err("vault key missing for existing secrets store (Keychain empty)".into());
         }
 
         let mut bytes = [0u8; 32];

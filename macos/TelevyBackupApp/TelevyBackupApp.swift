@@ -2491,6 +2491,21 @@ final class AppModel: ObservableObject {
         ensureDaemonRunning()
         let anyRunning = statusSnapshot?.targets.contains(where: { $0.state == "running" }) ?? false
 
+        // Proactively unlock the vault so the daemon can consume the manual trigger immediately.
+        // This may trigger a Keychain prompt on first access.
+        if let cli = cliPath() {
+            runProcess(
+                exe: cli,
+                args: ["--json", "vault", "ensure"],
+                updateTaskState: false,
+                onExit: { status in
+                    if status == 0 { return }
+                    self.appendStatusActivity("Vault unavailable (Keychain locked?)")
+                    self.showToast("Vault unavailable (unlock Keychain, see ui.log)", isError: true)
+                }
+            )
+        }
+
         DispatchQueue.global(qos: .utility).async {
             let dir = self.controlDirURL()
             let path = dir.appendingPathComponent("backup-now")

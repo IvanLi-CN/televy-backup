@@ -48,6 +48,10 @@ enum Command {
         #[command(subcommand)]
         cmd: SettingsCmd,
     },
+    Vault {
+        #[command(subcommand)]
+        cmd: VaultCmd,
+    },
     Status {
         #[command(subcommand)]
         cmd: StatusCmd,
@@ -101,6 +105,11 @@ enum SettingsCmd {
         #[arg(long)]
         compare_folder: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum VaultCmd {
+    Ensure,
 }
 
 #[derive(Subcommand)]
@@ -585,6 +594,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 }
             }
         },
+        Command::Vault { cmd } => match cmd {
+            VaultCmd::Ensure => vault_ensure(&config_dir, &data_dir, cli.json).await,
+        },
         Command::Secrets { cmd } => match cmd {
             SecretsCmd::SetTelegramBotToken { endpoint_id } => {
                 secrets_set_telegram_bot_token(&config_dir, &data_dir, endpoint_id, cli.json).await
@@ -729,6 +741,22 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
         },
     }
+}
+
+async fn vault_ensure(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
+    let vault_key = load_or_create_vault_key(data_dir)?;
+    let secrets_path = televy_backup_core::secrets::secrets_path(config_dir);
+
+    // Verify the vault key can decrypt the secrets store (if present).
+    let _ = televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)
+        .map_err(map_secrets_store_err)?;
+
+    if json {
+        println!("{}", serde_json::json!({ "ok": true }));
+    } else {
+        println!("ok");
+    }
+    Ok(())
 }
 
 async fn status_get(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
