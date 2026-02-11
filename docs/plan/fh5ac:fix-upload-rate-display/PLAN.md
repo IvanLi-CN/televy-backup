@@ -84,3 +84,4 @@
 
 - 2026-02-11：修复 MTProto helper progress 语义（仅成功后累计）+ status stream 不覆盖 daemon 速率；补齐单元测试与本地验证。
 - 2026-02-11：daemon 侧修复速率采样窗口推进逻辑（仅在 `bytesUploaded` 前进时更新时间基准），避免 scan/progress 造成的速率脉冲。
+- 2026-02-11：daemon 侧在主循环消费手动备份触发文件（`control/backup-now`），修复点击 Start 后不启动（trigger 未被消费）。
