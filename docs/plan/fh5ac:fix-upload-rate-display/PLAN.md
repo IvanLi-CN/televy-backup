@@ -13,6 +13,7 @@
 - 初步定位：
   - `televybackup-mtproto-helper` 的 `bytesUploaded` 上报在部分路径上可能“提前累计”（并非代表已实际完成上传）。
   - `televybackup --json status stream` 会对 daemon snapshot 的 `bytesPerSecond` 做二次计算并覆盖，导致速率呈现脉冲式跳变。
+  - daemon 侧速率采样窗口会被“bytesUploaded 未变化的 scan/progress 更新”推进，导致 dt 被压缩，从而出现速率乱跳（看起来与真实网络脱钩）。
 
 ## 目标 / 非目标
 
@@ -38,6 +39,8 @@
 - CLI status stream（`crates/cli/`）：
   - 保留 “session totals” (`upTotal`) 的 enrich 行为；
   - `bytesPerSecond`：优先保留 daemon 计算值（并在 stale 时隐藏），不再无条件覆盖。
+- daemon status（`crates/daemon/`）：
+  - `bytesPerSecond` 的采样窗口仅在 `bytesUploaded` 前进时推进（避免 scan/progress 更新把 dt 压缩成脉冲）。
 - 回归测试：为 enricher 行为补齐最小单元测试覆盖。
 
 ### Out of scope
@@ -70,6 +73,7 @@
 - [x] M1: 修复 MTProto helper progress 上报语义（仅成功后累计）
 - [x] M2: CLI status stream 不覆盖 daemon 速率（保留 session totals）
 - [x] M3: 补齐最小单测 + 本地验证通过
+- [x] M4: daemon 侧速率采样仅随 `bytesUploaded` 前进（避免 scan/progress 干扰）
 
 ## 风险与开放问题（Risks / Open Questions）
 
@@ -79,3 +83,4 @@
 ## 变更记录 / Change log
 
 - 2026-02-11：修复 MTProto helper progress 语义（仅成功后累计）+ status stream 不覆盖 daemon 速率；补齐单元测试与本地验证。
+- 2026-02-11：daemon 侧修复速率采样窗口推进逻辑（仅在 `bytesUploaded` 前进时更新时间基准），避免 scan/progress 造成的速率脉冲。
