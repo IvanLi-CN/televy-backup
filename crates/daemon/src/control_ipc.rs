@@ -419,7 +419,7 @@ fn vault_ensure(config_root: &std::path::Path) -> Result<VaultStatusResult, Cont
         // Keychain access may block waiting for user auth/permission. Avoid blocking Tokio worker
         // threads when possible.
         let res = if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| crate::load_or_create_vault_key_uncached())
+            tokio::task::block_in_place(crate::load_or_create_vault_key_uncached)
         } else {
             crate::load_or_create_vault_key_uncached()
         };
