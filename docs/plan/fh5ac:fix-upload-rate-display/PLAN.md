@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-02-11
-- Last: 2026-02-11
+- Last: 2026-02-12
 - Notes: PR #38；待主人验收（建议对齐 Activity Monitor 中 `televybackup-mtproto-helper` 的发送速率）
 
 ## 背景 / 问题陈述
@@ -85,3 +85,4 @@
 - 2026-02-11：修复 MTProto helper progress 语义（仅成功后累计）+ status stream 不覆盖 daemon 速率；补齐单元测试与本地验证。
 - 2026-02-11：daemon 侧修复速率采样窗口推进逻辑（仅在 `bytesUploaded` 前进时更新时间基准），避免 scan/progress 造成的速率脉冲。
 - 2026-02-11：daemon 侧在主循环消费手动备份触发文件（`control/backup-now`），修复点击 Start 后不启动（trigger 未被消费）。
+- 2026-02-12：daemon 侧在 status writer loop 中周期性 tick 速率采样，避免在缺少 progress callback 时速率“卡死”；补齐对应单测。
