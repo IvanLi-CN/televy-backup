@@ -1000,14 +1000,17 @@ async fn upload_bytes_with_progress(
     if size > UPLOAD_BIG_FILE_SIZE_BYTES {
         let bytes = Arc::new(bytes);
         let next_part = Arc::new(AtomicI32::new(0));
-        let uploaded = Arc::new(AtomicU64::new(0));
+        // Track bytes as soon as we start sending parts, not only after the server
+        // acknowledges them. This keeps UI rates correlated with on-wire traffic even
+        // when acknowledgements are delayed.
+        let sent = Arc::new(AtomicU64::new(0));
         let client = state.client.clone();
 
         let mut join_set = JoinSet::new();
         for _ in 0..UPLOAD_WORKER_COUNT {
             let bytes = Arc::clone(&bytes);
             let next_part = Arc::clone(&next_part);
-            let uploaded = Arc::clone(&uploaded);
+            let sent = Arc::clone(&sent);
             let client = client.clone();
             join_set.spawn(async move {
                 loop {
@@ -1023,6 +1026,9 @@ async fn upload_bytes_with_progress(
                     }
                     let chunk = bytes[start..end].to_vec();
                     let len_u64 = len as u64;
+                    // Count bytes at send time (best-effort). Acknowledgements can lag
+                    // behind actual network usage.
+                    sent.fetch_add(len_u64, Ordering::Relaxed);
                     let ok = match timeout(
                         Duration::from_secs(UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS),
                         client.invoke(&tl::functions::upload::SaveBigFilePart {
@@ -1047,9 +1053,6 @@ async fn upload_bytes_with_progress(
                     if !ok {
                         return Err("server failed to store uploaded data".to_string());
                     }
-
-                    // Only count bytes after the server acknowledged storing the part.
-                    uploaded.fetch_add(len_u64, Ordering::Relaxed);
                 }
                 Ok::<(), String>(())
             });
@@ -1061,7 +1064,7 @@ async fn upload_bytes_with_progress(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let now = uploaded.load(Ordering::Relaxed).min(bytes_total);
+                    let now = sent.load(Ordering::Relaxed).min(bytes_total);
                     if now != last_reported {
                         last_reported = now;
                         let session = Some(session_b64(&state.session));
@@ -1085,10 +1088,10 @@ async fn upload_bytes_with_progress(
             }
         }
 
-        let final_uploaded = uploaded.load(Ordering::Relaxed).min(bytes_total);
-        if final_uploaded != last_reported {
+        let final_sent = sent.load(Ordering::Relaxed).min(bytes_total);
+        if final_sent != last_reported {
             let session = Some(session_b64(&state.session));
-            write_upload_progress(out, session, final_uploaded, bytes_total)?;
+            write_upload_progress(out, session, final_sent, bytes_total)?;
         }
 
         return Ok(Uploaded::from_raw(
@@ -1105,6 +1108,13 @@ async fn upload_bytes_with_progress(
     let mut bytes_uploaded = 0u64;
     for (part, chunk) in bytes.chunks(chunk_size).enumerate() {
         md5.consume(chunk);
+
+        // Report bytes as soon as we start sending the part (best-effort). This keeps
+        // UI rates correlated with on-wire traffic even when acknowledgements lag.
+        bytes_uploaded = bytes_uploaded.saturating_add(chunk.len() as u64).min(bytes_total);
+        let session = Some(session_b64(&state.session));
+        write_upload_progress(out, session, bytes_uploaded, bytes_total)?;
+
         let ok = timeout(
             Duration::from_secs(UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS),
             state
@@ -1121,11 +1131,6 @@ async fn upload_bytes_with_progress(
         if !ok {
             return Err("server failed to store uploaded data".to_string());
         }
-
-        // Report only bytes that the server acknowledged storing (avoid "pre-counting" scheduled bytes).
-        bytes_uploaded = bytes_uploaded.saturating_add(chunk.len() as u64).min(bytes_total);
-        let session = Some(session_b64(&state.session));
-        write_upload_progress(out, session, bytes_uploaded, bytes_total)?;
     }
 
     Ok(Uploaded::from_raw(
