@@ -415,13 +415,28 @@ fn vault_status(config_root: &std::path::Path) -> Result<VaultStatusResult, Cont
 }
 
 fn vault_ensure(config_root: &std::path::Path) -> Result<VaultStatusResult, ControlError> {
-    if let Err(e) = crate::load_or_create_vault_key() {
-        return Err(ControlError {
-            code: "secrets.vault_unavailable".to_string(),
-            message: e.to_string(),
-            retryable: false,
-            details: serde_json::json!({}),
-        });
+    if crate::VAULT_KEY_CACHE.get().is_none() {
+        // Keychain access may block waiting for user auth/permission. Avoid blocking Tokio worker
+        // threads when possible.
+        let res = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| crate::load_or_create_vault_key_uncached())
+        } else {
+            crate::load_or_create_vault_key_uncached()
+        };
+
+        match res {
+            Ok(key) => {
+                let _ = crate::VAULT_KEY_CACHE.set(key);
+            }
+            Err(e) => {
+                return Err(ControlError {
+                    code: "secrets.vault_unavailable".to_string(),
+                    message: e.to_string(),
+                    retryable: false,
+                    details: serde_json::json!({}),
+                });
+            }
+        }
     }
     vault_status(config_root)
 }
