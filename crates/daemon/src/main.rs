@@ -280,6 +280,43 @@ impl StatusRuntimeState {
         self.targets.values().any(|t| t.state == "running")
     }
 
+    fn tick_rates_at(&mut self, now: Instant) {
+        for t in self.targets.values_mut() {
+            if t.state != "running" {
+                continue;
+            }
+            let Some(bytes) = t.up_total_bytes else {
+                continue;
+            };
+
+            match (t.last_up_sample_bytes, t.last_up_sample_at) {
+                (Some(prev_bytes), Some(prev_at)) => {
+                    let dt_ms = u64::try_from(now.duration_since(prev_at).as_millis())
+                        .unwrap_or(u64::MAX)
+                        .max(1);
+
+                    // Mirror `on_progress` sampling, but keep rates from getting "stuck" when we
+                    // stop receiving progress events (e.g., when the uploader is blocked waiting
+                    // for a remote ACK and scan progress has already finished).
+                    if bytes > prev_bytes {
+                        let db = bytes.saturating_sub(prev_bytes);
+                        if dt_ms >= 50 {
+                            t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
+                            t.last_up_sample_bytes = Some(bytes);
+                            t.last_up_sample_at = Some(now);
+                        }
+                    } else if dt_ms >= 1_000 {
+                        t.up_bps = Some(0);
+                    }
+                }
+                _ => {
+                    t.last_up_sample_bytes = Some(bytes);
+                    t.last_up_sample_at = Some(now);
+                }
+            }
+        }
+    }
+
     fn build_snapshot(&self, now_ms: u64) -> StatusSnapshot {
         let mut global_up_bps: u64 = 0;
         let mut global_up_total: u64 = 0;
@@ -479,6 +516,31 @@ mod tests {
         assert_eq!(t.up_total_bytes, Some(1024));
         assert!(t.up_bps.unwrap_or(0) > 0);
     }
+
+    #[test]
+    fn up_bps_does_not_get_stuck_without_progress_callbacks() {
+        let mut st = state_one_target();
+        st.mark_run_start("t1");
+
+        // Pretend we last computed a non-zero rate, but then progress callbacks stop arriving
+        // (e.g. uploader blocked waiting for remote ACK).
+        let now = Instant::now();
+        {
+            let t = st.targets.get_mut("t1").unwrap();
+            t.up_total_bytes = Some(1024);
+            t.last_up_sample_bytes = Some(1024);
+            t.last_up_sample_at = Some(now);
+            t.up_bps = Some(123);
+        }
+
+        st.tick_rates_at(now + Duration::from_millis(1100));
+
+        let t = st.targets.get("t1").unwrap();
+        assert_eq!(t.up_bps, Some(0));
+        // Sample window must not advance when bytes have not advanced.
+        assert_eq!(t.last_up_sample_bytes, Some(1024));
+        assert_eq!(t.last_up_sample_at, Some(now));
+    }
 }
 
 async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: PathBuf) {
@@ -503,7 +565,10 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
         if should_write {
             let snapshot_opt = {
                 match state.lock() {
-                    Ok(st) => Some(st.build_snapshot(now_unix_ms())),
+                    Ok(mut st) => {
+                        st.tick_rates_at(now);
+                        Some(st.build_snapshot(now_unix_ms()))
+                    }
                     Err(_) => None,
                 }
             };
