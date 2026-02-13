@@ -690,8 +690,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(move || {
             let now_ms = now_unix_ms();
             match ipc_state.lock() {
-                Ok(st) => {
+                Ok(mut st) => {
                     let has_running = st.has_running();
+                    // The GUI primarily reads status via IPC; keep rate sampling ticking even if
+                    // progress callbacks pause so the UI doesn't get stuck on stale rates.
+                    st.tick_rates_at(Instant::now());
                     let mut snap = st.build_snapshot(now_ms);
                     snap.source.detail = Some("televybackupd (ipc)".to_string());
                     (snap, has_running)
