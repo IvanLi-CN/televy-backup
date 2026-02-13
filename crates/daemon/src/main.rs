@@ -355,11 +355,13 @@ impl ByteRateWindow {
     }
 
     fn sample(&mut self, now: Instant, bytes: u64) -> u64 {
-        if let Some((_, last_bytes)) = self.samples.back() {
-            if bytes < *last_bytes {
-                self.reset(now, bytes);
-                return 0;
-            }
+        if self
+            .samples
+            .back()
+            .is_some_and(|(_, last_bytes)| bytes < *last_bytes)
+        {
+            self.reset(now, bytes);
+            return 0;
         }
 
         self.samples.push_back((now, bytes));
