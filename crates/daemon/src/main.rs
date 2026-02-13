@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
@@ -54,8 +54,7 @@ struct TargetRuntime {
 
     up_bps: Option<u64>,
     up_total_bytes: Option<u64>,
-    last_up_sample_bytes: Option<u64>,
-    last_up_sample_at: Option<Instant>,
+    up_rate: ByteRateWindow,
 }
 
 #[derive(Debug)]
@@ -88,8 +87,7 @@ impl StatusRuntimeState {
                     last_run: None,
                     up_bps: None,
                     up_total_bytes: None,
-                    last_up_sample_bytes: None,
-                    last_up_sample_at: None,
+                    up_rate: ByteRateWindow::default(),
                 },
             );
         }
@@ -118,8 +116,7 @@ impl StatusRuntimeState {
                 last_run: None,
                 up_bps: None,
                 up_total_bytes: None,
-                last_up_sample_bytes: None,
-                last_up_sample_at: None,
+                up_rate: ByteRateWindow::default(),
             });
 
             rt.label = if t.label.trim().is_empty() {
@@ -157,8 +154,7 @@ impl StatusRuntimeState {
         });
         t.up_total_bytes = Some(0);
         t.up_bps = Some(0);
-        t.last_up_sample_bytes = Some(0);
-        t.last_up_sample_at = Some(Instant::now());
+        t.up_rate.reset(Instant::now(), 0);
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -183,36 +179,7 @@ impl StatusRuntimeState {
         });
 
         if let Some(bytes) = p.bytes_uploaded {
-            let now = Instant::now();
             t.up_total_bytes = Some(bytes);
-            match (t.last_up_sample_bytes, t.last_up_sample_at) {
-                (Some(prev_bytes), Some(prev_at)) => {
-                    let dt_ms = u64::try_from(now.duration_since(prev_at).as_millis())
-                        .unwrap_or(u64::MAX)
-                        .max(1);
-                    // Only advance the rate sample when bytes increase; scan progress updates can
-                    // be much more frequent than upload acknowledgements and would otherwise
-                    // collapse dt, producing spiky "unrelated" rates.
-                    if bytes > prev_bytes {
-                        let db = bytes.saturating_sub(prev_bytes);
-                        // Avoid oscillating noise when updates are too frequent.
-                        if dt_ms >= 50 {
-                            t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
-                            t.last_up_sample_bytes = Some(bytes);
-                            t.last_up_sample_at = Some(now);
-                        }
-                    } else if dt_ms >= 1_000 {
-                        // If the counter hasn't advanced for a while, surface it as 0 B/s, but do
-                        // not move the sample window (next progress delta should span the full
-                        // stalled interval).
-                        t.up_bps = Some(0);
-                    }
-                }
-                _ => {
-                    t.last_up_sample_bytes = Some(bytes);
-                    t.last_up_sample_at = Some(now);
-                }
-            }
         }
     }
 
@@ -232,8 +199,7 @@ impl StatusRuntimeState {
         t.progress = None;
         t.up_bps = None;
         t.up_total_bytes = None;
-        t.last_up_sample_bytes = None;
-        t.last_up_sample_at = None;
+        t.up_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -261,8 +227,7 @@ impl StatusRuntimeState {
         t.progress = None;
         t.up_bps = None;
         t.up_total_bytes = None;
-        t.last_up_sample_bytes = None;
-        t.last_up_sample_at = None;
+        t.up_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -289,31 +254,13 @@ impl StatusRuntimeState {
                 continue;
             };
 
-            match (t.last_up_sample_bytes, t.last_up_sample_at) {
-                (Some(prev_bytes), Some(prev_at)) => {
-                    let dt_ms = u64::try_from(now.duration_since(prev_at).as_millis())
-                        .unwrap_or(u64::MAX)
-                        .max(1);
-
-                    // Mirror `on_progress` sampling, but keep rates from getting "stuck" when we
-                    // stop receiving progress events (e.g., when the uploader is blocked waiting
-                    // for a remote ACK and scan progress has already finished).
-                    if bytes > prev_bytes {
-                        let db = bytes.saturating_sub(prev_bytes);
-                        if dt_ms >= 50 {
-                            t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
-                            t.last_up_sample_bytes = Some(bytes);
-                            t.last_up_sample_at = Some(now);
-                        }
-                    } else if dt_ms >= 1_000 {
-                        t.up_bps = Some(0);
-                    }
-                }
-                _ => {
-                    t.last_up_sample_bytes = Some(bytes);
-                    t.last_up_sample_at = Some(now);
-                }
+            if t.up_rate.is_empty() {
+                t.up_rate.reset(now, bytes);
+                t.up_bps = Some(0);
+                continue;
             }
+
+            t.up_bps = Some(t.up_rate.sample(now, bytes));
         }
     }
 
@@ -379,6 +326,62 @@ impl StatusRuntimeState {
             targets: out_targets,
             extra: Default::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ByteRateWindow {
+    window: Duration,
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl Default for ByteRateWindow {
+    fn default() -> Self {
+        Self {
+            window: Duration::from_secs(1),
+            samples: VecDeque::new(),
+        }
+    }
+}
+
+impl ByteRateWindow {
+    fn reset(&mut self, now: Instant, bytes: u64) {
+        self.samples.clear();
+        self.samples.push_back((now, bytes));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    fn sample(&mut self, now: Instant, bytes: u64) -> u64 {
+        if let Some((_, last_bytes)) = self.samples.back() {
+            if bytes < *last_bytes {
+                self.reset(now, bytes);
+                return 0;
+            }
+        }
+
+        self.samples.push_back((now, bytes));
+
+        let cutoff = now.checked_sub(self.window).unwrap_or(now);
+        while self.samples.len() > 2 {
+            // Keep one sample older than the cutoff to compute a stable windowed rate.
+            let second_at = self.samples.get(1).map(|(t, _)| *t).unwrap_or(cutoff);
+            if second_at <= cutoff {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let (old_at, old_bytes) = self.samples.front().copied().unwrap_or((now, bytes));
+        let dt = now.duration_since(old_at).as_secs_f64();
+        if dt <= 0.0 {
+            return 0;
+        }
+        let delta = bytes.saturating_sub(old_bytes);
+        ((delta as f64) / dt).round() as u64
     }
 }
 
@@ -449,8 +452,7 @@ mod tests {
                 last_run: None,
                 up_bps: None,
                 up_total_bytes: None,
-                last_up_sample_bytes: None,
-                last_up_sample_at: None,
+                up_rate: ByteRateWindow::default(),
             },
         );
         st
@@ -478,68 +480,40 @@ mod tests {
     }
 
     #[test]
-    fn up_bps_updates_even_with_frequent_progress_calls() {
-        let mut st = state_one_target();
-        st.mark_run_start("t1");
+    fn byte_rate_window_uses_rolling_1s_window() {
+        let t0 = Instant::now();
+        let mut w = ByteRateWindow::default();
 
-        for n in 0..200u64 {
-            st.on_progress("t1", progress(n));
-        }
+        w.reset(t0, 0);
+        assert_eq!(w.sample(t0, 0), 0);
 
-        std::thread::sleep(Duration::from_millis(80));
-        st.on_progress("t1", progress(2000));
+        // 1000 bytes in 0.5s => 2000 B/s (startup transient, dt < window).
+        assert_eq!(w.sample(t0 + Duration::from_millis(500), 1000), 2000);
 
-        let t = st.targets.get("t1").unwrap();
-        assert_eq!(t.up_total_bytes, Some(2000));
-        assert!(t.up_bps.unwrap_or(0) > 0);
+        // Another 1000 bytes over the next 1.0s => 1000 B/s steady state.
+        assert_eq!(w.sample(t0 + Duration::from_millis(1500), 2000), 1000);
     }
 
     #[test]
-    fn up_bps_sample_window_does_not_advance_when_bytes_stall() {
+    fn up_bps_drops_to_zero_after_bytes_stall() {
         let mut st = state_one_target();
         st.mark_run_start("t1");
 
-        let sample_at_before = st.targets.get("t1").unwrap().last_up_sample_at.unwrap();
-
-        // Simulate high-frequency scan/progress updates where bytesUploaded does not advance.
-        std::thread::sleep(Duration::from_millis(60));
-        st.on_progress("t1", progress(0));
-
-        let sample_at_after = st.targets.get("t1").unwrap().last_up_sample_at.unwrap();
-        assert_eq!(sample_at_after, sample_at_before);
-
-        // When bytes finally advance, the dt should reflect the full window and produce a sane rate.
-        std::thread::sleep(Duration::from_millis(60));
-        st.on_progress("t1", progress(1024));
-
-        let t = st.targets.get("t1").unwrap();
-        assert_eq!(t.up_total_bytes, Some(1024));
-        assert!(t.up_bps.unwrap_or(0) > 0);
-    }
-
-    #[test]
-    fn up_bps_does_not_get_stuck_without_progress_callbacks() {
-        let mut st = state_one_target();
-        st.mark_run_start("t1");
-
-        // Pretend we last computed a non-zero rate, but then progress callbacks stop arriving
-        // (e.g. uploader blocked waiting for remote ACK).
-        let now = Instant::now();
+        let t0 = Instant::now();
         {
             let t = st.targets.get_mut("t1").unwrap();
-            t.up_total_bytes = Some(1024);
-            t.last_up_sample_bytes = Some(1024);
-            t.last_up_sample_at = Some(now);
-            t.up_bps = Some(123);
+            t.up_total_bytes = Some(0);
+            t.up_rate.reset(t0, 0);
         }
 
-        st.tick_rates_at(now + Duration::from_millis(1100));
+        // First: bytes increase and we observe a non-zero rate.
+        st.on_progress("t1", progress(1024));
+        st.tick_rates_at(t0 + Duration::from_millis(200));
+        assert!(st.targets.get("t1").unwrap().up_bps.unwrap_or(0) > 0);
 
-        let t = st.targets.get("t1").unwrap();
-        assert_eq!(t.up_bps, Some(0));
-        // Sample window must not advance when bytes have not advanced.
-        assert_eq!(t.last_up_sample_bytes, Some(1024));
-        assert_eq!(t.last_up_sample_at, Some(now));
+        // Then: bytes do not change for > 1s; rate should fall to 0 even without progress events.
+        st.tick_rates_at(t0 + Duration::from_millis(1500));
+        assert_eq!(st.targets.get("t1").unwrap().up_bps, Some(0));
     }
 }
 
