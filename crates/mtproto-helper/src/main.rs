@@ -32,6 +32,10 @@ const UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS: u64 = 60;
 const UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS: u64 = 60;
 const UPLOAD_BIG_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
 const UPLOAD_WORKER_COUNT: usize = 4;
+// Telegram's upload.*Part methods allow up to 512KiB per part. Using a smaller part size makes
+// progress/rate updates smoother and reduces the chance of long "stalls" where the network is
+// sending but we cannot observe partial progress inside one request.
+const UPLOAD_PART_SIZE_BYTES: usize = 128 * 1024;
 
 fn upload_stream_timeout_secs(size: usize) -> u64 {
     // Scale with size to avoid hanging forever, while allowing large objects to complete on slow links.
@@ -994,7 +998,7 @@ async fn upload_bytes_with_progress(
         filename
     };
 
-    let chunk_size = MAX_CHUNK_SIZE as usize;
+    let chunk_size = (MAX_CHUNK_SIZE as usize).min(UPLOAD_PART_SIZE_BYTES);
     let total_parts = ((size + chunk_size - 1) / chunk_size) as i32;
 
     if size > UPLOAD_BIG_FILE_SIZE_BYTES {
@@ -1023,7 +1027,6 @@ async fn upload_bytes_with_progress(
                     }
                     let chunk = bytes[start..end].to_vec();
                     let len_u64 = len as u64;
-                    uploaded.fetch_add(len_u64, Ordering::Relaxed);
                     let ok = match timeout(
                         Duration::from_secs(UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS),
                         client.invoke(&tl::functions::upload::SaveBigFilePart {
@@ -1037,20 +1040,22 @@ async fn upload_bytes_with_progress(
                     {
                         Ok(Ok(ok)) => ok,
                         Ok(Err(e)) => {
-                            uploaded.fetch_sub(len_u64, Ordering::Relaxed);
                             return Err(format!("save_big_file_part failed: {e}"));
                         }
                         Err(_) => {
-                            uploaded.fetch_sub(len_u64, Ordering::Relaxed);
                             return Err(format!(
                                 "save_big_file_part timed out after {UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS}s"
                             ));
                         }
                     };
                     if !ok {
-                        uploaded.fetch_sub(len_u64, Ordering::Relaxed);
                         return Err("server failed to store uploaded data".to_string());
                     }
+
+                    // Only count bytes once the server acknowledged storing the part.
+                    // Using a smaller part size makes this "close enough" to realtime without
+                    // needing socket-level accounting.
+                    uploaded.fetch_add(len_u64, Ordering::Relaxed);
                 }
                 Ok::<(), String>(())
             });
@@ -1106,9 +1111,7 @@ async fn upload_bytes_with_progress(
     let mut bytes_uploaded = 0u64;
     for (part, chunk) in bytes.chunks(chunk_size).enumerate() {
         md5.consume(chunk);
-        bytes_uploaded = bytes_uploaded.saturating_add(chunk.len() as u64).min(bytes_total);
-        let session = Some(session_b64(&state.session));
-        write_upload_progress(out, session, bytes_uploaded, bytes_total)?;
+
         let ok = timeout(
             Duration::from_secs(UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS),
             state
@@ -1125,6 +1128,10 @@ async fn upload_bytes_with_progress(
         if !ok {
             return Err("server failed to store uploaded data".to_string());
         }
+
+        bytes_uploaded = bytes_uploaded.saturating_add(chunk.len() as u64).min(bytes_total);
+        let session = Some(session_b64(&state.session));
+        write_upload_progress(out, session, bytes_uploaded, bytes_total)?;
     }
 
     Ok(Uploaded::from_raw(

@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -55,8 +54,7 @@ struct TargetRuntime {
 
     up_bps: Option<u64>,
     up_total_bytes: Option<u64>,
-    last_up_sample_bytes: Option<u64>,
-    last_up_sample_at_ms: Option<u64>,
+    up_rate: ByteRateWindow,
 }
 
 #[derive(Debug)]
@@ -89,8 +87,7 @@ impl StatusRuntimeState {
                     last_run: None,
                     up_bps: None,
                     up_total_bytes: None,
-                    last_up_sample_bytes: None,
-                    last_up_sample_at_ms: None,
+                    up_rate: ByteRateWindow::default(),
                 },
             );
         }
@@ -119,8 +116,7 @@ impl StatusRuntimeState {
                 last_run: None,
                 up_bps: None,
                 up_total_bytes: None,
-                last_up_sample_bytes: None,
-                last_up_sample_at_ms: None,
+                up_rate: ByteRateWindow::default(),
             });
 
             rt.label = if t.label.trim().is_empty() {
@@ -158,8 +154,7 @@ impl StatusRuntimeState {
         });
         t.up_total_bytes = Some(0);
         t.up_bps = Some(0);
-        t.last_up_sample_bytes = Some(0);
-        t.last_up_sample_at_ms = Some(now);
+        t.up_rate.reset(Instant::now(), 0);
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -184,24 +179,7 @@ impl StatusRuntimeState {
         });
 
         if let Some(bytes) = p.bytes_uploaded {
-            let now = now_unix_ms();
             t.up_total_bytes = Some(bytes);
-            match (t.last_up_sample_bytes, t.last_up_sample_at_ms) {
-                (Some(prev_bytes), Some(prev_at)) => {
-                    let dt_ms = now.saturating_sub(prev_at).max(1);
-                    let db = bytes.saturating_sub(prev_bytes);
-                    // Avoid oscillating noise when updates are too frequent.
-                    if dt_ms >= 50 {
-                        t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
-                        t.last_up_sample_bytes = Some(bytes);
-                        t.last_up_sample_at_ms = Some(now);
-                    }
-                }
-                _ => {
-                    t.last_up_sample_bytes = Some(bytes);
-                    t.last_up_sample_at_ms = Some(now);
-                }
-            }
         }
     }
 
@@ -221,8 +199,7 @@ impl StatusRuntimeState {
         t.progress = None;
         t.up_bps = None;
         t.up_total_bytes = None;
-        t.last_up_sample_bytes = None;
-        t.last_up_sample_at_ms = None;
+        t.up_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -250,8 +227,7 @@ impl StatusRuntimeState {
         t.progress = None;
         t.up_bps = None;
         t.up_total_bytes = None;
-        t.last_up_sample_bytes = None;
-        t.last_up_sample_at_ms = None;
+        t.up_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -267,6 +243,25 @@ impl StatusRuntimeState {
 
     fn has_running(&self) -> bool {
         self.targets.values().any(|t| t.state == "running")
+    }
+
+    fn tick_rates_at(&mut self, now: Instant) {
+        for t in self.targets.values_mut() {
+            if t.state != "running" {
+                continue;
+            }
+            let Some(bytes) = t.up_total_bytes else {
+                continue;
+            };
+
+            if t.up_rate.is_empty() {
+                t.up_rate.reset(now, bytes);
+                t.up_bps = Some(0);
+                continue;
+            }
+
+            t.up_bps = Some(t.up_rate.sample(now, bytes));
+        }
     }
 
     fn build_snapshot(&self, now_ms: u64) -> StatusSnapshot {
@@ -334,6 +329,64 @@ impl StatusRuntimeState {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ByteRateWindow {
+    window: Duration,
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl Default for ByteRateWindow {
+    fn default() -> Self {
+        Self {
+            window: Duration::from_secs(1),
+            samples: VecDeque::new(),
+        }
+    }
+}
+
+impl ByteRateWindow {
+    fn reset(&mut self, now: Instant, bytes: u64) {
+        self.samples.clear();
+        self.samples.push_back((now, bytes));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    fn sample(&mut self, now: Instant, bytes: u64) -> u64 {
+        if self
+            .samples
+            .back()
+            .is_some_and(|(_, last_bytes)| bytes < *last_bytes)
+        {
+            self.reset(now, bytes);
+            return 0;
+        }
+
+        self.samples.push_back((now, bytes));
+
+        let cutoff = now.checked_sub(self.window).unwrap_or(now);
+        while self.samples.len() > 2 {
+            // Keep one sample older than the cutoff to compute a stable windowed rate.
+            let second_at = self.samples.get(1).map(|(t, _)| *t).unwrap_or(cutoff);
+            if second_at <= cutoff {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        let (old_at, old_bytes) = self.samples.front().copied().unwrap_or((now, bytes));
+        let dt = now.duration_since(old_at).as_secs_f64();
+        if dt <= 0.0 {
+            return 0;
+        }
+        let delta = bytes.saturating_sub(old_bytes);
+        ((delta as f64) / dt).round() as u64
+    }
+}
+
 #[derive(Clone)]
 struct StatusProgressSink {
     target_id: String,
@@ -352,6 +405,35 @@ impl ProgressSink for StatusProgressSink {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_trigger_file_is_consumed_by_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup-now");
+
+        std::fs::write(&path, b"manual").unwrap();
+        assert!(try_consume_manual_trigger_file(&path).unwrap());
+        assert!(!path.exists());
+
+        // Second consumption should be a no-op.
+        assert!(!try_consume_manual_trigger_file(&path).unwrap());
+    }
+
+    #[test]
+    fn manual_trigger_file_is_not_consumed_until_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup-now");
+
+        std::fs::write(&path, b"manual").unwrap();
+
+        // Not ready: do not consume (file must stay).
+        assert!(!maybe_consume_manual_trigger_file(&path, false).unwrap());
+        assert!(path.exists());
+
+        // Ready: consume by remove.
+        assert!(maybe_consume_manual_trigger_file(&path, true).unwrap());
+        assert!(!path.exists());
+    }
 
     fn state_one_target() -> StatusRuntimeState {
         let mut st = StatusRuntimeState {
@@ -372,8 +454,7 @@ mod tests {
                 last_run: None,
                 up_bps: None,
                 up_total_bytes: None,
-                last_up_sample_bytes: None,
-                last_up_sample_at_ms: None,
+                up_rate: ByteRateWindow::default(),
             },
         );
         st
@@ -401,20 +482,40 @@ mod tests {
     }
 
     #[test]
-    fn up_bps_updates_even_with_frequent_progress_calls() {
+    fn byte_rate_window_uses_rolling_1s_window() {
+        let t0 = Instant::now();
+        let mut w = ByteRateWindow::default();
+
+        w.reset(t0, 0);
+        assert_eq!(w.sample(t0, 0), 0);
+
+        // 1000 bytes in 0.5s => 2000 B/s (startup transient, dt < window).
+        assert_eq!(w.sample(t0 + Duration::from_millis(500), 1000), 2000);
+
+        // Another 1000 bytes over the next 1.0s => 1000 B/s steady state.
+        assert_eq!(w.sample(t0 + Duration::from_millis(1500), 2000), 1000);
+    }
+
+    #[test]
+    fn up_bps_drops_to_zero_after_bytes_stall() {
         let mut st = state_one_target();
         st.mark_run_start("t1");
 
-        for n in 0..200u64 {
-            st.on_progress("t1", progress(n));
+        let t0 = Instant::now();
+        {
+            let t = st.targets.get_mut("t1").unwrap();
+            t.up_total_bytes = Some(0);
+            t.up_rate.reset(t0, 0);
         }
 
-        std::thread::sleep(Duration::from_millis(80));
-        st.on_progress("t1", progress(2000));
+        // First: bytes increase and we observe a non-zero rate.
+        st.on_progress("t1", progress(1024));
+        st.tick_rates_at(t0 + Duration::from_millis(200));
+        assert!(st.targets.get("t1").unwrap().up_bps.unwrap_or(0) > 0);
 
-        let t = st.targets.get("t1").unwrap();
-        assert_eq!(t.up_total_bytes, Some(2000));
-        assert!(t.up_bps.unwrap_or(0) > 0);
+        // Then: bytes do not change for > 1s; rate should fall to 0 even without progress events.
+        st.tick_rates_at(t0 + Duration::from_millis(1500));
+        assert_eq!(st.targets.get("t1").unwrap().up_bps, Some(0));
     }
 }
 
@@ -440,7 +541,10 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
         if should_write {
             let snapshot_opt = {
                 match state.lock() {
-                    Ok(st) => Some(st.build_snapshot(now_unix_ms())),
+                    Ok(mut st) => {
+                        st.tick_rates_at(now);
+                        Some(st.build_snapshot(now_unix_ms()))
+                    }
                     Err(_) => None,
                 }
             };
@@ -503,6 +607,35 @@ fn file_mtime(path: &PathBuf) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
+#[derive(Debug, Clone)]
+struct VaultKeyLoadError {
+    code: Option<i32>,
+    message: String,
+}
+
+impl VaultKeyLoadError {
+    fn is_keychain_error(&self) -> bool {
+        self.code.is_some()
+    }
+}
+
+fn vault_key_error_code(_err: &(dyn std::error::Error + 'static)) -> Option<i32> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(e) = _err.downcast_ref::<security_framework::base::Error>() {
+            return Some(e.code());
+        }
+    }
+    None
+}
+
+fn vault_key_load_error(err: &(dyn std::error::Error + 'static)) -> VaultKeyLoadError {
+    VaultKeyLoadError {
+        code: vault_key_error_code(err),
+        message: err.to_string(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = std::env::var("TELEVYBACKUP_CONFIG_DIR")
@@ -533,8 +666,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(move || {
             let now_ms = now_unix_ms();
             match ipc_state.lock() {
-                Ok(st) => {
+                Ok(mut st) => {
                     let has_running = st.has_running();
+                    // The GUI primarily reads status via IPC; keep rate sampling ticking even if
+                    // progress callbacks pause so the UI doesn't get stuck on stale rates.
+                    st.tick_rates_at(Instant::now());
                     let mut snap = st.build_snapshot(now_ms);
                     snap.source.detail = Some("televybackupd (ipc)".to_string());
                     (snap, has_running)
@@ -628,7 +764,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let has_enabled_targets = settings.targets.iter().any(|t| t.enabled);
+    let mut has_enabled_targets = settings.targets.iter().any(|t| t.enabled);
     if has_enabled_targets {
         if settings.telegram.mtproto.api_id <= 0 {
             return Err("telegram.mtproto.api_id must be > 0".into());
@@ -637,56 +773,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("telegram.mtproto.api_hash_key must not be empty".into());
         }
     }
-    let vault_key = load_or_create_vault_key()?;
     let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
-    let secrets_file_exists = secrets_path.exists();
-    let mut secrets_store =
-        televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
+    let mut secrets_file_exists = secrets_path.exists();
     let mut last_secrets_mtime = file_mtime(&secrets_path);
+    let manual_trigger_path = data_root.join("control").join("backup-now");
+    let mut manual_trigger_last_attempted_mtime: Option<SystemTime> = None;
+    let initial_manual_trigger_mtime = file_mtime(&manual_trigger_path);
 
-    let mut master_key_b64 = match get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
-        .or_else(|| maybe_keychain_get_secret(MASTER_KEY_KEY))
-    {
-        Some(v) => v,
-        None if keychain_disabled() && !secrets_file_exists => {
-            let mut bytes = [0u8; 32];
-            getrandom::getrandom(&mut bytes)
-                .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
-            let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
-            secrets_store.set(MASTER_KEY_KEY, b64.clone());
-            televy_backup_core::secrets::save_secrets_store(
-                &secrets_path,
-                &vault_key,
-                &secrets_store,
-            )?;
-            b64
-        }
-        None => return Err("master key missing".into()),
-    };
-    let mut master_key = decode_base64_32(&master_key_b64)?;
+    // Vault key (Keychain on macOS) can block on user auth/permission. Load it in the background
+    // so the daemon can still run its main loop (consume manual triggers, serve status IPC, etc).
+    let mut vault_key: Option<[u8; 32]> = VAULT_KEY_CACHE.get().copied();
+    let mut vault_key_loader: Option<tokio::task::JoinHandle<Result<[u8; 32], VaultKeyLoadError>>> =
+        None;
+    let mut vault_key_last_attempt: Option<Instant> = None;
+    let mut vault_key_last_error: Option<VaultKeyLoadError> = None;
 
-    let mut api_hash = if has_enabled_targets {
-        Some(
-            get_secret_from_store(&secrets_store, &settings.telegram.mtproto.api_hash_key)
-                .or_else(|| maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key))
-                .ok_or("telegram api_hash missing")?,
-        )
-    } else {
-        None
-    };
+    let mut secrets_store: Option<televy_backup_core::secrets::SecretsStore> = None;
+    let mut master_key: Option<[u8; 32]> = None;
+    let mut api_hash: Option<String> = None;
+
+    if initial_manual_trigger_mtime.is_some() {
+        manual_trigger_last_attempted_mtime = initial_manual_trigger_mtime;
+    }
+
+    // Do not eagerly retry Keychain access. We'll do a single best-effort warm-up attempt so
+    // scheduled runs can work when Keychain is already unlocked, but avoid pestering the user
+    // with repeated authorization prompts when they cancel.
+    if vault_key.is_none() {
+        vault_key_last_attempt = Some(Instant::now());
+        vault_key_loader = Some(tokio::task::spawn_blocking(|| {
+            load_or_create_vault_key_uncached().map_err(|e| vault_key_load_error(e.as_ref()))
+        }));
+    }
 
     let mut schedule_state_by_target = HashMap::<String, TargetScheduleState>::new();
     let mut storage_by_endpoint = HashMap::<String, TelegramMtProtoStorage>::new();
 
-    let manual_trigger_pending = Arc::new(AtomicBool::new(false));
-    tokio::spawn(manual_trigger_watcher_loop(
-        data_root.clone(),
-        manual_trigger_pending.clone(),
-    ));
-
     loop {
         let now = chrono::Local::now();
-        let manual_triggered = manual_trigger_pending.swap(false, Ordering::SeqCst);
 
         // Hot-reload settings + secrets when files change. This avoids confusing situations where the
         // UI saved new endpoint chat_id but the long-running daemon kept using the old one.
@@ -712,6 +836,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             } else {
                                 settings = new_settings;
+                                has_enabled_targets = settings.targets.iter().any(|t| t.enabled);
                                 *control_ipc_settings.write().await = settings.clone();
                                 last_config_mtime = config_mtime;
                                 storage_by_endpoint.clear();
@@ -739,49 +864,179 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if secrets_changed {
-                    match televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)
-                    {
-                        Ok(new_store) => {
-                            secrets_store = new_store;
-                            last_secrets_mtime = secrets_mtime;
-                            storage_by_endpoint.clear();
+                    // Reload once the vault key is available. Until then, remember the mtime so we
+                    // don't miss the change.
+                    last_secrets_mtime = secrets_mtime;
+                    secrets_file_exists = secrets_path.exists();
+                    secrets_store = None;
+                    master_key = None;
+                    api_hash = None;
+                    storage_by_endpoint.clear();
 
-                            if let Some(v) = get_secret_from_store(&secrets_store, MASTER_KEY_KEY)
-                                .or_else(|| maybe_keychain_get_secret(MASTER_KEY_KEY))
-                            {
-                                master_key_b64 = v;
-                                if let Ok(k) = decode_base64_32(&master_key_b64) {
-                                    master_key = k;
-                                }
-                            }
-                            if let Some(h) = get_secret_from_store(
-                                &secrets_store,
-                                &settings.telegram.mtproto.api_hash_key,
-                            )
-                            .or_else(|| {
-                                maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key)
-                            }) {
-                                api_hash = Some(h);
-                            }
+                    tracing::info!(
+                        event = "secrets.changed",
+                        path = %secrets_path.display(),
+                        "secrets.changed"
+                    );
+                }
+            }
+        }
 
-                            tracing::info!(
-                                event = "secrets.reloaded",
-                                path = %secrets_path.display(),
-                                "secrets.reloaded"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                event = "secrets.reload_failed",
-                                error = %e,
-                                path = %secrets_path.display(),
-                                "secrets.reload_failed"
-                            );
-                        }
+        // Manual backups are triggered by the UI via a control file under the configured data dir.
+        //
+        // We'll also use the trigger file's mtime as a coarse "user intent" signal: if Keychain
+        // access was cancelled, do not keep retrying (and re-prompting) unless the user clicks Start
+        // again (which rewrites the file, changing its mtime).
+        let manual_trigger_mtime = file_mtime(&manual_trigger_path);
+
+        // Poll vault key loader (Keychain can block; never block the main loop).
+        //
+        // IMPORTANT: the vault IPC server may populate `VAULT_KEY_CACHE` independently; refresh
+        // our local view so a successful `televybackup vault ensure` immediately unblocks runs.
+        if vault_key.is_none()
+            && let Some(k) = VAULT_KEY_CACHE.get()
+        {
+            vault_key = Some(*k);
+            vault_key_last_error = None;
+            if let Some(h) = vault_key_loader.take() {
+                h.abort();
+            }
+        }
+
+        if vault_key.is_none() {
+            let manual_trigger_is_new = manual_trigger_mtime.is_some()
+                && manual_trigger_mtime != manual_trigger_last_attempted_mtime;
+            let last_keychain_error = vault_key_last_error
+                .as_ref()
+                .is_some_and(|e| e.is_keychain_error());
+
+            let should_retry = vault_key_loader.is_none()
+                && vault_key_last_attempt
+                    .map(|t| t.elapsed() >= Duration::from_secs(5))
+                    .unwrap_or(true)
+                && (!last_keychain_error || manual_trigger_is_new);
+            if should_retry {
+                vault_key_last_attempt = Some(Instant::now());
+                vault_key_last_error = None;
+                if manual_trigger_mtime.is_some() {
+                    manual_trigger_last_attempted_mtime = manual_trigger_mtime;
+                }
+                vault_key_loader = Some(tokio::task::spawn_blocking(|| {
+                    load_or_create_vault_key_uncached()
+                        .map_err(|e| vault_key_load_error(e.as_ref()))
+                }));
+            }
+
+            if vault_key_loader.as_ref().is_some_and(|t| t.is_finished()) {
+                match vault_key_loader.take().unwrap().await {
+                    Ok(Ok(key)) => {
+                        vault_key = Some(key);
+                        let _ = VAULT_KEY_CACHE.set(key);
+                        vault_key_last_error = None;
+                    }
+                    Ok(Err(e)) => {
+                        vault_key_last_error = Some(e);
+                    }
+                    Err(e) => {
+                        vault_key_last_error = Some(VaultKeyLoadError {
+                            code: None,
+                            message: e.to_string(),
+                        });
                     }
                 }
             }
         }
+
+        // (Re)load secrets store and derived secrets once the vault key is ready.
+        if let Some(vault_key) = vault_key
+            && secrets_store.is_none()
+        {
+            match televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key) {
+                Ok(store) => {
+                    secrets_store = Some(store);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        event = "secrets.reload_failed",
+                        error = %e,
+                        path = %secrets_path.display(),
+                        "secrets.reload_failed"
+                    );
+                }
+            }
+        }
+
+        if let Some(store) = secrets_store.as_mut() {
+            // Master key is required for all backup/restore operations. In dev mode (keychain disabled),
+            // auto-generate a master key on first run if no secrets file exists yet.
+            if master_key.is_none() {
+                let v = get_secret_from_store(store, MASTER_KEY_KEY);
+                match v {
+                    Some(b64) => {
+                        if let Ok(k) = decode_base64_32(&b64) {
+                            master_key = Some(k);
+                        }
+                    }
+                    None if keychain_disabled() && !secrets_file_exists => {
+                        if let Some(vault_key) = vault_key {
+                            let mut bytes = [0u8; 32];
+                            getrandom::getrandom(&mut bytes).map_err(|e| {
+                                std::io::Error::other(format!("getrandom failed: {e}"))
+                            })?;
+                            let b64 = televy_backup_core::secrets::vault_key_to_base64(&bytes);
+                            store.set(MASTER_KEY_KEY, b64.clone());
+                            televy_backup_core::secrets::save_secrets_store(
+                                &secrets_path,
+                                &vault_key,
+                                store,
+                            )?;
+                            secrets_file_exists = true;
+                            master_key = Some(bytes);
+                        }
+                    }
+                    None => {}
+                }
+            }
+
+            if api_hash.is_none() && has_enabled_targets {
+                api_hash = get_secret_from_store(store, &settings.telegram.mtproto.api_hash_key);
+            }
+        }
+
+        // Only consume the trigger when we are able to attempt a run; otherwise keep it on disk so
+        // the user's click is not "lost" while waiting for Keychain/secrets to become available.
+        let manual_trigger_present = manual_trigger_mtime.is_some();
+        let can_attempt_run = has_enabled_targets
+            && vault_key.is_some()
+            && secrets_store.is_some()
+            && master_key.is_some()
+            && api_hash.is_some();
+
+        let manual_triggered = match maybe_consume_manual_trigger_file(
+            &manual_trigger_path,
+            manual_trigger_present && can_attempt_run,
+        ) {
+            Ok(true) => {
+                tracing::info!(
+                    event = "manual.trigger",
+                    kind = "backup",
+                    path = %manual_trigger_path.display(),
+                    "manual backup trigger consumed"
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(e) => {
+                tracing::warn!(
+                    event = "manual.trigger_remove_failed",
+                    kind = "backup",
+                    path = %manual_trigger_path.display(),
+                    error = %e,
+                    "failed to consume manual trigger"
+                );
+                false
+            }
+        };
 
         if settings.telegram.mtproto.api_id <= 0
             || settings.telegram.mtproto.api_hash_key.trim().is_empty()
@@ -791,7 +1046,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
+        // Skip starting runs until secrets are ready. (Do not consume manual trigger; it stays pending.)
+        if has_enabled_targets && !can_attempt_run {
+            if manual_trigger_present {
+                let code = vault_key_last_error
+                    .as_ref()
+                    .map(|e| {
+                        e.code
+                            .map(|c| format!("{c}"))
+                            .unwrap_or_else(|| e.message.clone())
+                    })
+                    .unwrap_or_else(|| "pending".to_string());
+                tracing::warn!(
+                    event = "run.skip",
+                    kind = "backup",
+                    reason = "secrets_unavailable",
+                    detail = %code,
+                    "run.skip"
+                );
+            }
+            sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
         std::fs::create_dir_all(&index_dir)?;
+
+        let vault_key = vault_key.expect("vault key must be available when starting runs");
+        let master_key = master_key.expect("master key must be available when starting runs");
+        let api_hash = api_hash
+            .clone()
+            .expect("api_hash must be available when starting runs");
 
         for target in &settings.targets {
             if !target.enabled {
@@ -881,8 +1165,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            let bot_token = get_secret_from_store(&secrets_store, &ep.bot_token_key)
-                .or_else(|| maybe_keychain_get_secret(&ep.bot_token_key));
+            let bot_token = secrets_store
+                .as_ref()
+                .and_then(|s| get_secret_from_store(s, &ep.bot_token_key));
             let Some(bot_token) = bot_token else {
                 tracing::error!(
                     event = "run.finish",
@@ -898,7 +1183,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             if !storage_by_endpoint.contains_key(&ep.id) {
-                let session = match get_secret_from_store(&secrets_store, &ep.mtproto.session_key) {
+                let session = match secrets_store
+                    .as_ref()
+                    .and_then(|s| get_secret_from_store(s, &ep.mtproto.session_key))
+                {
                     Some(b64) if !b64.trim().is_empty() => {
                         Some(base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())?)
                     }
@@ -912,7 +1200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
                     provider,
                     api_id: settings.telegram.mtproto.api_id,
-                    api_hash: api_hash.clone().ok_or("telegram api_hash missing")?,
+                    api_hash: api_hash.clone(),
                     bot_token: bot_token.clone(),
                     chat_id: ep.chat_id.clone(),
                     session,
@@ -1112,21 +1400,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if let Some(bytes) = storage.session_bytes() {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-                let should_write = secrets_store
-                    .get(&ep.mtproto.session_key)
-                    .is_none_or(|v| v != b64.as_str());
-                if should_write {
-                    secrets_store.set(&ep.mtproto.session_key, b64);
-                    if let Err(e) = televy_backup_core::secrets::save_secrets_store(
-                        &secrets_path,
-                        &vault_key,
-                        &secrets_store,
-                    ) {
-                        tracing::warn!(
-                            event = "secrets.session_persist_failed",
-                            error = %e,
-                            "failed to persist mtproto session"
-                        );
+                if let Some(store) = secrets_store.as_mut() {
+                    let should_write = store
+                        .get(&ep.mtproto.session_key)
+                        .is_none_or(|v| v != b64.as_str());
+                    if should_write {
+                        store.set(&ep.mtproto.session_key, b64);
+                        if let Err(e) = televy_backup_core::secrets::save_secrets_store(
+                            &secrets_path,
+                            &vault_key,
+                            store,
+                        ) {
+                            tracing::warn!(
+                                event = "secrets.session_persist_failed",
+                                error = %e,
+                                "failed to persist mtproto session"
+                            );
+                        }
                     }
                 }
             }
@@ -1136,57 +1426,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn manual_trigger_watcher_loop(data_root: PathBuf, pending: Arc<AtomicBool>) {
-    let control_dir = data_root.join("control");
-    let path = control_dir.join("backup-now");
-    loop {
-        let removed = tokio::task::spawn_blocking({
-            let path = path.clone();
-            move || {
-                if !path.exists() {
-                    return Ok(false);
-                }
-                match std::fs::remove_file(&path) {
-                    Ok(()) => Ok(true),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                    Err(e) => Err(e),
-                }
-            }
-        })
-        .await;
-
-        match removed {
-            Ok(Ok(true)) => {
-                pending.store(true, Ordering::SeqCst);
-                tracing::info!(
-                    event = "manual.trigger",
-                    kind = "backup",
-                    path = %path.display(),
-                    "manual backup trigger consumed"
-                );
-            }
-            Ok(Ok(false)) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    event = "manual.trigger_remove_failed",
-                    kind = "backup",
-                    path = %path.display(),
-                    error = %e,
-                    "failed to consume manual trigger"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    event = "manual.trigger_task_failed",
-                    kind = "backup",
-                    path = %path.display(),
-                    error = %e,
-                    "failed to spawn blocking task to consume manual trigger"
-                );
-            }
-        }
-        sleep(Duration::from_millis(200)).await;
+fn try_consume_manual_trigger_file(path: &Path) -> std::io::Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
+}
+
+fn maybe_consume_manual_trigger_file(path: &Path, can_attempt_run: bool) -> std::io::Result<bool> {
+    if !can_attempt_run {
+        return Ok(false);
+    }
+    try_consume_manual_trigger_file(path)
 }
 
 fn parse_hhmm(s: &str) -> Result<(u8, u8), Box<dyn std::error::Error>> {
@@ -1211,7 +1463,7 @@ fn default_data_dir() -> PathBuf {
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
 static CONFIG_ROOT_CACHE: OnceLock<PathBuf> = OnceLock::new();
 static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
-static VAULT_KEY_INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static VAULT_KEY_LOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn get_secret_from_store(
     store: &televy_backup_core::secrets::SecretsStore,
@@ -1231,13 +1483,6 @@ fn keychain_disabled() -> bool {
         std::env::var("TELEVYBACKUP_DISABLE_KEYCHAIN").as_deref(),
         Ok("1")
     )
-}
-
-fn maybe_keychain_get_secret(key: &str) -> Option<String> {
-    if keychain_disabled() {
-        return None;
-    }
-    keychain_get_secret(key).ok().flatten()
 }
 
 #[cfg(target_os = "macos")]
@@ -1309,24 +1554,33 @@ fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
 }
 
 pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    // IMPORTANT: Keychain access can block (e.g. waiting for user authentication / permission).
+    // Never do that on the main async flow, otherwise the daemon can't consume manual triggers.
+    //
+    // We only return a cached key here. A background loader (spawned from `main`) is responsible
+    // for eventually populating `VAULT_KEY_CACHE` when Keychain is available.
     if let Some(key) = VAULT_KEY_CACHE.get() {
         return Ok(*key);
     }
 
-    // With concurrent IPC requests, ensure only one initializer runs.
-    let lock = VAULT_KEY_INIT_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().map_err(|_| "vault key init lock poisoned")?;
-
-    if let Some(key) = VAULT_KEY_CACHE.get() {
-        return Ok(*key);
+    // File-based backend (dev / keychain-disabled) is safe to load synchronously.
+    if keychain_disabled() {
+        let key = load_or_create_vault_key_uncached()?;
+        let _ = VAULT_KEY_CACHE.set(key);
+        return Ok(key);
     }
 
-    let key = load_or_create_vault_key_uncached()?;
-    let _ = VAULT_KEY_CACHE.set(key);
-    Ok(*VAULT_KEY_CACHE.get().unwrap_or(&key))
+    Err("vault key unavailable (waiting for Keychain)".into())
 }
 
-fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+pub(crate) fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    // Serialize Keychain (and vault key file) access to avoid spawning multiple concurrent
+    // authorization prompts when multiple clients call into the vault IPC at the same time.
+    let lock = VAULT_KEY_LOAD_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| std::io::Error::other("vault key load lock poisoned"))?;
+
     let config_root = CONFIG_ROOT_CACHE
         .get()
         .cloned()
@@ -1360,10 +1614,39 @@ fn load_or_create_vault_key_uncached() -> Result<[u8; 32], Box<dyn std::error::E
 
     #[cfg(target_os = "macos")]
     {
+        let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
+
+        // Migration/fallback: if a secrets store already exists and a legacy vault.key file is
+        // present, prefer using it to unlock secrets. This avoids getting "stuck" when the user
+        // previously ran with file backend (`TELEVYBACKUP_DISABLE_KEYCHAIN=1`) and later enables
+        // Keychain with an empty vault key item.
+        if secrets_path.exists()
+            && key_file_path.exists()
+            && let Ok(key) = televy_backup_core::secrets::read_vault_key_file(&key_file_path)
+            // Validate that this key can decrypt the existing secrets store.
+            && televy_backup_core::secrets::load_secrets_store(&secrets_path, &key).is_ok()
+        {
+            return Ok(key);
+        }
+
         let existing = keychain_get_secret(televy_backup_core::secrets::VAULT_KEY_KEY)?
             .map(|s| s.trim().to_string());
         if let Some(b64) = existing {
-            return Ok(televy_backup_core::secrets::vault_key_from_base64(&b64)?);
+            let key = televy_backup_core::secrets::vault_key_from_base64(&b64)?;
+            if secrets_path.exists()
+                && televy_backup_core::secrets::load_secrets_store(&secrets_path, &key).is_err()
+            {
+                return Err(Box::new(std::io::Error::other(
+                    "vault key mismatch for existing secrets store (Keychain item may be wrong); restore/migrate the correct vault key",
+                )));
+            }
+            return Ok(key);
+        }
+
+        // If a secrets store already exists, creating a brand-new vault key would only make it
+        // unreadable. Require the user to restore/migrate the vault key first.
+        if secrets_path.exists() {
+            return Err("vault key missing for existing secrets store (Keychain empty)".into());
         }
 
         let mut bytes = [0u8; 32];

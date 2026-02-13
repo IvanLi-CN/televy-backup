@@ -240,22 +240,53 @@ async fn handle_vault_ipc_client(
     };
 
     let resp = match req {
-        VaultIpcRequest::VaultGetOrCreate => match crate::load_or_create_vault_key() {
-            Ok(key) => VaultIpcResponse {
-                ok: true,
-                vault_key_b64: Some(televy_backup_core::secrets::vault_key_to_base64(&key)),
-                value: None,
-                deleted: None,
-                error: None,
-            },
-            Err(e) => VaultIpcResponse {
-                ok: false,
-                vault_key_b64: None,
-                value: None,
-                deleted: None,
-                error: Some(e.to_string()),
-            },
-        },
+        VaultIpcRequest::VaultGetOrCreate => {
+            if let Some(key) = crate::VAULT_KEY_CACHE.get() {
+                VaultIpcResponse {
+                    ok: true,
+                    vault_key_b64: Some(televy_backup_core::secrets::vault_key_to_base64(key)),
+                    value: None,
+                    deleted: None,
+                    error: None,
+                }
+            } else {
+                // Keychain access may block waiting for user auth/permission. Do it on a blocking
+                // thread to avoid stalling the async runtime (and the daemon main loop).
+                match tokio::task::spawn_blocking(|| {
+                    crate::load_or_create_vault_key_uncached().map_err(|e| e.to_string())
+                })
+                .await
+                {
+                    Ok(Ok(key)) => {
+                        // Populate cache so non-blocking callers can proceed.
+                        let _ = crate::VAULT_KEY_CACHE.set(key);
+                        VaultIpcResponse {
+                            ok: true,
+                            vault_key_b64: Some(televy_backup_core::secrets::vault_key_to_base64(
+                                &key,
+                            )),
+                            value: None,
+                            deleted: None,
+                            error: None,
+                        }
+                    }
+                    Ok(Err(e)) => VaultIpcResponse {
+                        ok: false,
+                        vault_key_b64: None,
+                        value: None,
+                        deleted: None,
+                        error: Some(e),
+                    },
+                    Err(e) => VaultIpcResponse {
+                        ok: false,
+                        vault_key_b64: None,
+                        value: None,
+                        deleted: None,
+                        error: Some(e.to_string()),
+                    },
+                }
+            }
+        }
         VaultIpcRequest::KeychainGet { key } => match crate::keychain_get_secret(&key) {
             Ok(v) => VaultIpcResponse {
                 ok: true,

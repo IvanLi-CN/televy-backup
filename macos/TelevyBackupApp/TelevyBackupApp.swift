@@ -1689,25 +1689,34 @@ final class AppModel: ObservableObject {
             self.chatId = chatId
             self.mtprotoApiId = apiIdNum > 0 ? String(apiIdNum) : ""
             if withSecrets {
-                let secrets = obj["secrets"] as? [String: Any]
-                let masterPresent = (secrets?["masterKeyPresent"] as? Bool) ?? false
-                let apiHashPresent = (secrets?["telegramMtprotoApiHashPresent"] as? Bool) ?? false
+                if let secrets = obj["secrets"] as? [String: Any] {
+                    let masterPresent = (secrets["masterKeyPresent"] as? Bool) ?? false
+                    let apiHashPresent = (secrets["telegramMtprotoApiHashPresent"] as? Bool) ?? false
 
-                let botByEndpoint = secrets?["telegramBotTokenPresentByEndpoint"] as? [String: Any]
-                let sessionByEndpoint =
-                    secrets?["telegramMtprotoSessionPresentByEndpoint"] as? [String: Any]
-                let botAny = botByEndpoint?[selectedEndpointId]
-                let sessionAny = sessionByEndpoint?[selectedEndpointId]
-                let botPresent =
-                    (botAny as? Bool) ?? ((botAny as? NSNumber)?.boolValue ?? false)
-                let sessionPresent =
-                    (sessionAny as? Bool) ?? ((sessionAny as? NSNumber)?.boolValue ?? false)
+                    let botByEndpoint = secrets["telegramBotTokenPresentByEndpoint"] as? [String: Any]
+                    let sessionByEndpoint =
+                        secrets["telegramMtprotoSessionPresentByEndpoint"] as? [String: Any]
+                    let botAny = botByEndpoint?[selectedEndpointId]
+                    let sessionAny = sessionByEndpoint?[selectedEndpointId]
+                    let botPresent =
+                        (botAny as? Bool) ?? ((botAny as? NSNumber)?.boolValue ?? false)
+                    let sessionPresent =
+                        (sessionAny as? Bool) ?? ((sessionAny as? NSNumber)?.boolValue ?? false)
 
-                self.botTokenPresent = botPresent
-                self.masterKeyPresent = masterPresent
-                self.mtprotoApiHashPresent = apiHashPresent
-                self.mtprotoSessionPresent = sessionPresent
-                self.secretPresenceKnown = true
+                    self.botTokenPresent = botPresent
+                    self.masterKeyPresent = masterPresent
+                    self.mtprotoApiHashPresent = apiHashPresent
+                    self.mtprotoSessionPresent = sessionPresent
+                    self.secretPresenceKnown = true
+                } else {
+                    // If secrets presence couldn't be fetched (e.g. Keychain locked / vault not available),
+                    // keep it as "unknown" instead of falsely marking secrets as missing.
+                    self.botTokenPresent = false
+                    self.masterKeyPresent = false
+                    self.mtprotoApiHashPresent = false
+                    self.mtprotoSessionPresent = false
+                    self.secretPresenceKnown = false
+                }
             }
             if withSecrets {
                 if !self.botTokenPresent || self.chatId.isEmpty {
@@ -2492,6 +2501,27 @@ final class AppModel: ObservableObject {
         let anyRunning = statusSnapshot?.targets.contains(where: { $0.state == "running" }) ?? false
 
         DispatchQueue.global(qos: .utility).async {
+            // Proactively unlock the vault so the daemon can consume the manual trigger immediately.
+            // This may trigger a Keychain prompt on first access; only proceed if it succeeds.
+            if let cli = self.cliPath() {
+                let res = self.runCommandCapture(
+                    exe: cli,
+                    args: ["--json", "vault", "ensure"],
+                    timeoutSeconds: 180.0
+                )
+                if res.status != 0 {
+                    DispatchQueue.main.async {
+                        self.appendLog("ERROR: vault ensure failed: exit=\(res.status) reason=\(res.reason.rawValue)")
+                        if !res.stderr.isEmpty {
+                            self.appendLog("stderr: \(res.stderr.prefix(2000))")
+                        }
+                        self.appendStatusActivity("Vault unavailable (Keychain locked?)")
+                        self.showToast("Vault unavailable (unlock Keychain, see ui.log)", isError: true)
+                    }
+                    return
+                }
+            }
+
             let dir = self.controlDirURL()
             let path = dir.appendingPathComponent("backup-now")
             do {

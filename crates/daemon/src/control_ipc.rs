@@ -415,13 +415,28 @@ fn vault_status(config_root: &std::path::Path) -> Result<VaultStatusResult, Cont
 }
 
 fn vault_ensure(config_root: &std::path::Path) -> Result<VaultStatusResult, ControlError> {
-    if let Err(e) = crate::load_or_create_vault_key() {
-        return Err(ControlError {
-            code: "secrets.vault_unavailable".to_string(),
-            message: e.to_string(),
-            retryable: false,
-            details: serde_json::json!({}),
-        });
+    if crate::VAULT_KEY_CACHE.get().is_none() {
+        // Keychain access may block waiting for user auth/permission. Avoid blocking Tokio worker
+        // threads when possible.
+        let res = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(crate::load_or_create_vault_key_uncached)
+        } else {
+            crate::load_or_create_vault_key_uncached()
+        };
+
+        match res {
+            Ok(key) => {
+                let _ = crate::VAULT_KEY_CACHE.set(key);
+            }
+            Err(e) => {
+                return Err(ControlError {
+                    code: "secrets.vault_unavailable".to_string(),
+                    message: e.to_string(),
+                    retryable: false,
+                    details: serde_json::json!({}),
+                });
+            }
+        }
     }
     vault_status(config_root)
 }
@@ -456,11 +471,9 @@ fn secrets_presence(
             details: serde_json::json!({ "path": secrets_path.display().to_string() }),
         })?;
 
-    let master_present = store.contains_key(crate::MASTER_KEY_KEY)
-        || crate::maybe_keychain_get_secret(crate::MASTER_KEY_KEY).is_some();
+    let master_present = store.contains_key(crate::MASTER_KEY_KEY);
 
-    let api_hash_present = store.contains_key(&settings.telegram.mtproto.api_hash_key)
-        || crate::maybe_keychain_get_secret(&settings.telegram.mtproto.api_hash_key).is_some();
+    let api_hash_present = store.contains_key(&settings.telegram.mtproto.api_hash_key);
 
     let mut bot_present_by_endpoint = serde_json::Map::<String, serde_json::Value>::new();
     let mut mtproto_session_present_by_endpoint =
@@ -471,8 +484,7 @@ fn secrets_presence(
             continue;
         }
 
-        let bot_present = store.contains_key(&ep.bot_token_key)
-            || crate::maybe_keychain_get_secret(&ep.bot_token_key).is_some();
+        let bot_present = store.contains_key(&ep.bot_token_key);
         bot_present_by_endpoint.insert(ep.id.clone(), serde_json::Value::Bool(bot_present));
 
         let sess_present = store.contains_key(&ep.mtproto.session_key);
