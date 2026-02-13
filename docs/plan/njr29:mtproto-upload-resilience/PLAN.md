@@ -2,9 +2,10 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 部分完成（3/3）
 - Created: 2026-02-13
 - Last: 2026-02-13
+- Notes: PR #39
 
 ## 背景 / 问题陈述
 
@@ -61,12 +62,15 @@
 
 ## Milestones
 
-1) 为 `save_file_part` / `save_big_file_part` 实装 retry + backoff（含 flood wait 支持）。
-2) upload 阶段增加 `upload_progress` heartbeat（无进度也输出）。
-3) 补齐与 retry/heartbeat 相关的单元测试。
+- [x] 为 `save_file_part` / `save_big_file_part` 实装 retry + backoff（含 flood wait 支持）。
+- [x] upload 阶段增加 `upload_progress` heartbeat（无进度也输出）。
+- [x] 补齐与 retry/heartbeat 相关的单元测试。
 
 ## 风险与开放问题
 
 - 重试会拉长失败路径耗时；需要通过“最大尝试次数 + 最大 backoff”限制上界。
 - heartbeat 会增加 stdout 行数与日志量，但可显著提升可观测性并避免误杀。
 
+## 变更记录 / Change log
+
+- 2026-02-13: 实装 MTProto upload 分片重试（bounded retry + backoff）与 upload_progress heartbeat；补齐单元测试（PR #39）。
