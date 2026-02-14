@@ -23,12 +23,43 @@ To avoid conflicts with an installed/release build on the same machine, local de
   - Name: `TelevyBackup`
   - Bundle ID: `com.ivan.televybackup`
   - Default vault key backend: **Keychain enabled**
+  - Local build output path: `target/macos-app/TelevyBackup.app`
 - **Dev app**
   - Name: `TelevyBackup Dev`
   - Bundle ID: `com.ivan.televybackup.dev`
   - Default vault key backend: **Keychain disabled** (override with `TELEVYBACKUP_DISABLE_KEYCHAIN=0`)
+  - Local build output path: `target/macos-app/TelevyBackup Dev.app`
 
 Note: `scripts/macos/run-app.sh` will warn if you start the prod variant with `TELEVYBACKUP_DISABLE_KEYCHAIN=1`.
+
+### Terminology used in troubleshooting ("stable"/"dev")
+
+When an agent is asked to "restart stable version" on a dev machine, this repo uses:
+
+- **Stable** = the **prod variant** (bundle id `com.ivan.televybackup`) started by:
+  - `TELEVYBACKUP_APP_VARIANT=prod ./scripts/macos/run-app.sh`
+- **Dev** = the **dev variant** (bundle id `com.ivan.televybackup.dev`) started by:
+  - `./scripts/macos/run-app.sh` (default)
+
+Important:
+- An installed Release app under `/Applications` may have the same prod bundle id, so **do not** guess by app name.
+- Always restart via `./scripts/macos/run-app.sh` unless you explicitly want to target an installed app bundle by path.
+
+### How to confirm which app bundle is running
+
+Confirm by **process path** (prod vs dev local builds):
+
+```bash
+pgrep -fl 'target/macos-app/TelevyBackup\\.app/Contents/MacOS/TelevyBackup' || true
+pgrep -fl 'target/macos-app/TelevyBackup Dev\\.app/Contents/MacOS/TelevyBackup' || true
+```
+
+Confirm by **bundle id** (installed or local):
+
+```bash
+APP=/Applications/TelevyBackup.app
+/usr/bin/mdls -name kMDItemCFBundleIdentifier -name kMDItemVersion "$APP"
+```
 
 ## Development: bypass Keychain (codesign + vault key)
 
