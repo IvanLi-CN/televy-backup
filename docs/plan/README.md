@@ -78,3 +78,4 @@
 | r6ceq | 索引按 Endpoint 隔离 + 禁止 chat 复用 | 待实现 | `r6ceq:endpoint-scoped-index-chat-uniqueness/PLAN.md` | 2026-02-01 |  |
 | 4fexy | Master key 轮换（可暂停/继续/取消） | 待实现 | `4fexy:master-key-rotation/PLAN.md` | 2026-02-01 | 依赖：`r6ceq` |
 | 3ejpg | macOS：dev app variant（bundle id/name + menubar DEV 徽标） | 已完成 | `3ejpg:macos-dev-app-variant/PLAN.md` | 2026-02-09 | PR #37；实现分支：`feat/3ejpg-macos-dev-app-variant` |
+| njr29 | MTProto upload resilience（retry + heartbeat） | 已完成 | `njr29:mtproto-upload-resilience/PLAN.md` | 2026-02-14 | PR #39 |

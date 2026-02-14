@@ -16,7 +16,7 @@ use grammers_client::{Client, InputMessage, Update, UpdatesConfiguration};
 use grammers_mtsender::SenderPool;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout};
 
 const TG_MTPROTO_OBJECT_ID_PREFIX_V1: &str = "tgmtproto:v1:";
 const INIT_IS_AUTHORIZED_TIMEOUT_SECS: u64 = 120;
@@ -32,6 +32,12 @@ const UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS: u64 = 60;
 const UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS: u64 = 60;
 const UPLOAD_BIG_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
 const UPLOAD_WORKER_COUNT: usize = 4;
+const UPLOAD_PART_MAX_ATTEMPTS: usize = 4; // includes the initial attempt
+const UPLOAD_PART_BACKOFF_BASE_MS: u64 = 250;
+const UPLOAD_PART_BACKOFF_MAX_MS: u64 = 10_000;
+// Ensure we keep emitting JSON lines so the core side won't treat the helper as dead while the
+// network is stalled inside one long MTProto call.
+const UPLOAD_PROGRESS_HEARTBEAT_SECS: u64 = 10;
 // Telegram's upload.*Part methods allow up to 512KiB per part. Using a smaller part size makes
 // progress/rate updates smoother and reduces the chance of long "stalls" where the network is
 // sending but we cannot observe partial progress inside one request.
@@ -46,6 +52,191 @@ fn upload_stream_timeout_secs(size: usize) -> u64 {
     // ~32KiB/s baseline + fixed overhead.
     let scaled = min.saturating_add(size / (32 * 1024));
     scaled.clamp(min, max)
+}
+
+fn parse_flood_wait_secs(s: &str) -> Option<u64> {
+    // Common Telegram RPC error format: "FLOOD_WAIT_123"
+    let idx = s.find("FLOOD_WAIT_")?;
+    let rest = &s[idx + "FLOOD_WAIT_".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn upload_part_backoff(attempt: usize, flood_wait_secs: Option<u64>) -> Duration {
+    if let Some(secs) = flood_wait_secs {
+        // Respect server-provided flood wait, with +1s cushion.
+        return Duration::from_secs(secs.saturating_add(1));
+    }
+
+    // Exponential backoff with clamp.
+    let shift = attempt.saturating_sub(1).min(16) as u32;
+    let mul = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
+    let ms = UPLOAD_PART_BACKOFF_BASE_MS.saturating_mul(mul);
+    Duration::from_millis(ms.min(UPLOAD_PART_BACKOFF_MAX_MS))
+}
+
+async fn save_big_file_part_with_retry(
+    client: &Client,
+    file_id: i64,
+    part: i32,
+    total_parts: i32,
+    chunk: &[u8],
+) -> Result<(), String> {
+    for attempt in 1..=UPLOAD_PART_MAX_ATTEMPTS {
+        let res = timeout(
+            Duration::from_secs(UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS),
+            client.invoke(&tl::functions::upload::SaveBigFilePart {
+                file_id,
+                file_part: part,
+                file_total_parts: total_parts,
+                bytes: chunk.to_vec(),
+            }),
+        )
+        .await;
+
+        match res {
+            Ok(Ok(true)) => return Ok(()),
+            Ok(Ok(false)) => {
+                let msg = "server failed to store uploaded data".to_string();
+                if attempt >= UPLOAD_PART_MAX_ATTEMPTS {
+                    return Err(format!(
+                        "save_big_file_part failed (attempt {attempt}/{UPLOAD_PART_MAX_ATTEMPTS}): {msg}"
+                    ));
+                }
+            }
+            Ok(Err(e)) => {
+                let msg = format!("{e}");
+                if attempt >= UPLOAD_PART_MAX_ATTEMPTS {
+                    return Err(format!(
+                        "save_big_file_part failed (attempt {attempt}/{UPLOAD_PART_MAX_ATTEMPTS}): {msg}"
+                    ));
+                }
+                let wait = parse_flood_wait_secs(&msg);
+                tokio::time::sleep(upload_part_backoff(attempt, wait)).await;
+                continue;
+            }
+            Err(_) => {
+                let msg = format!(
+                    "save_big_file_part timed out after {UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS}s"
+                );
+                if attempt >= UPLOAD_PART_MAX_ATTEMPTS {
+                    return Err(format!(
+                        "{msg} (attempt {attempt}/{UPLOAD_PART_MAX_ATTEMPTS})"
+                    ));
+                }
+            }
+        }
+
+        tokio::time::sleep(upload_part_backoff(attempt, None)).await;
+    }
+
+    Err("save_big_file_part retry loop exhausted".to_string())
+}
+
+async fn save_file_part_with_retry_and_heartbeat(
+    client: &Client,
+    file_id: i64,
+    part: i32,
+    chunk: &[u8],
+    out: &mut impl Write,
+    session_b64: Option<String>,
+    bytes_uploaded: u64,
+    bytes_total: u64,
+) -> Result<(), String> {
+    for attempt in 1..=UPLOAD_PART_MAX_ATTEMPTS {
+        let mut hb = tokio::time::interval(Duration::from_secs(UPLOAD_PROGRESS_HEARTBEAT_SECS));
+        hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Emit a heartbeat immediately so the core side won't wait too long on a stalled part.
+        let _ = hb.tick().await;
+        write_upload_progress(out, session_b64.clone(), bytes_uploaded, bytes_total)?;
+
+        let req = tl::functions::upload::SaveFilePart {
+            file_id,
+            file_part: part,
+            bytes: chunk.to_vec(),
+        };
+        let fut = client.invoke(&req);
+        tokio::pin!(fut);
+
+        let deadline = tokio::time::sleep(Duration::from_secs(UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS));
+        tokio::pin!(deadline);
+
+        let final_res: Result<bool, String> = loop {
+            tokio::select! {
+                _ = hb.tick() => {
+                    // Keep stdout alive even if the MTProto call is stuck inside the client.
+                    write_upload_progress(out, session_b64.clone(), bytes_uploaded, bytes_total)?;
+                }
+                res = &mut fut => {
+                    break res.map_err(|e| format!("{e}"));
+                }
+                _ = &mut deadline => {
+                    break Err(format!(
+                        "save_file_part timed out after {UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS}s"
+                    ));
+                }
+            }
+        };
+
+        match final_res {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                let msg = "server failed to store uploaded data".to_string();
+                if attempt >= UPLOAD_PART_MAX_ATTEMPTS {
+                    return Err(format!(
+                        "save_file_part failed (attempt {attempt}/{UPLOAD_PART_MAX_ATTEMPTS}): {msg}"
+                    ));
+                }
+            }
+            Err(msg) => {
+                if attempt >= UPLOAD_PART_MAX_ATTEMPTS {
+                    return Err(format!(
+                        "save_file_part failed (attempt {attempt}/{UPLOAD_PART_MAX_ATTEMPTS}): {msg}"
+                    ));
+                }
+                let wait = parse_flood_wait_secs(&msg);
+                tokio::time::sleep(upload_part_backoff(attempt, wait)).await;
+                continue;
+            }
+        }
+
+        tokio::time::sleep(upload_part_backoff(attempt, None)).await;
+    }
+
+    Err("save_file_part retry loop exhausted".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_flood_wait_secs_extracts_digits() {
+        assert_eq!(parse_flood_wait_secs("FLOOD_WAIT_5"), Some(5));
+        assert_eq!(parse_flood_wait_secs("rpc error: FLOOD_WAIT_123 (test)"), Some(123));
+        assert_eq!(parse_flood_wait_secs("FLOOD_WAIT_"), None);
+        assert_eq!(parse_flood_wait_secs("no flood wait here"), None);
+    }
+
+    #[test]
+    fn upload_part_backoff_clamps_and_respects_flood_wait() {
+        assert_eq!(upload_part_backoff(1, None), Duration::from_millis(250));
+        assert_eq!(upload_part_backoff(2, None), Duration::from_millis(500));
+        assert_eq!(upload_part_backoff(3, None), Duration::from_millis(1000));
+        assert_eq!(
+            upload_part_backoff(999, None),
+            Duration::from_millis(UPLOAD_PART_BACKOFF_MAX_MS)
+        );
+
+        // Flood wait wins (with +1s cushion).
+        assert_eq!(
+            upload_part_backoff(1, Some(7)),
+            Duration::from_secs(8)
+        );
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1027,30 +1218,14 @@ async fn upload_bytes_with_progress(
                     }
                     let chunk = bytes[start..end].to_vec();
                     let len_u64 = len as u64;
-                    let ok = match timeout(
-                        Duration::from_secs(UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS),
-                        client.invoke(&tl::functions::upload::SaveBigFilePart {
-                            file_id,
-                            file_part: part,
-                            file_total_parts: total_parts,
-                            bytes: chunk,
-                        }),
+                    save_big_file_part_with_retry(
+                        &client,
+                        file_id,
+                        part,
+                        total_parts,
+                        &chunk,
                     )
-                    .await
-                    {
-                        Ok(Ok(ok)) => ok,
-                        Ok(Err(e)) => {
-                            return Err(format!("save_big_file_part failed: {e}"));
-                        }
-                        Err(_) => {
-                            return Err(format!(
-                                "save_big_file_part timed out after {UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS}s"
-                            ));
-                        }
-                    };
-                    if !ok {
-                        return Err("server failed to store uploaded data".to_string());
-                    }
+                    .await?;
 
                     // Only count bytes once the server acknowledged storing the part.
                     // Using a smaller part size makes this "close enough" to realtime without
@@ -1062,14 +1237,18 @@ async fn upload_bytes_with_progress(
         }
 
         let mut last_reported = 0u64;
+        let mut last_emit = Instant::now();
         let mut interval = tokio::time::interval(Duration::from_millis(250));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
                     let now = uploaded.load(Ordering::Relaxed).min(bytes_total);
-                    if now != last_reported {
+                    let stale = last_emit.elapsed() >= Duration::from_secs(UPLOAD_PROGRESS_HEARTBEAT_SECS);
+                    if now != last_reported || stale {
                         last_reported = now;
+                        last_emit = Instant::now();
                         let session = Some(session_b64(&state.session));
                         write_upload_progress(out, session, last_reported, bytes_total)?;
                     }
@@ -1112,22 +1291,17 @@ async fn upload_bytes_with_progress(
     for (part, chunk) in bytes.chunks(chunk_size).enumerate() {
         md5.consume(chunk);
 
-        let ok = timeout(
-            Duration::from_secs(UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS),
-            state
-                .client
-                .invoke(&tl::functions::upload::SaveFilePart {
-                    file_id,
-                    file_part: part as i32,
-                    bytes: chunk.to_vec(),
-                }),
+        save_file_part_with_retry_and_heartbeat(
+            &state.client,
+            file_id,
+            part as i32,
+            chunk,
+            out,
+            Some(session_b64(&state.session)),
+            bytes_uploaded,
+            bytes_total,
         )
-        .await
-        .map_err(|_| format!("save_file_part timed out after {UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS}s"))?
-        .map_err(|e| format!("save_file_part failed: {e}"))?;
-        if !ok {
-            return Err("server failed to store uploaded data".to_string());
-        }
+        .await?;
 
         bytes_uploaded = bytes_uploaded.saturating_add(chunk.len() as u64).min(bytes_total);
         let session = Some(session_b64(&state.session));
