@@ -19,40 +19,16 @@ macOS desktop backup app + Rust backend (work in progress).
 
 To avoid conflicts with an installed/release build on the same machine, local development uses a separate app variant:
 
-- **Release (stable) build**
-  - Meaning: the build you install from a GitHub Release (DMG/ZIP) and place in `/Applications`.
-  - Expected path: `/Applications/TelevyBackup.app`
-  - Notes:
-    - This is what "stable version" refers to in troubleshooting instructions and when an agent is asked to "restart stable".
-    - If `/Applications/TelevyBackup.app` is not present, an agent must say so and ask you to install it (do not silently run a local build).
-
 - **Prod app**
   - Name: `TelevyBackup`
   - Bundle ID: `com.ivan.televybackup`
   - Default vault key backend: **Keychain enabled**
-  - Default local build output path: `target/macos-app/TelevyBackup.app` (this is NOT the release/stable build)
 - **Dev app**
   - Name: `TelevyBackup Dev`
   - Bundle ID: `com.ivan.televybackup.dev`
   - Default vault key backend: **Keychain disabled** (override with `TELEVYBACKUP_DISABLE_KEYCHAIN=0`)
-  - Default local build output path: `target/macos-app/TelevyBackup Dev.app`
 
 Note: `scripts/macos/run-app.sh` will warn if you start the prod variant with `TELEVYBACKUP_DISABLE_KEYCHAIN=1`.
-
-### How to confirm which app is running
-
-The app name ("TelevyBackup") is not enough to disambiguate. Always confirm by **path**:
-
-```bash
-pgrep -fl 'TelevyBackup\\.app/Contents/MacOS/TelevyBackup' || true
-```
-
-You can also inspect an app bundle's bundle id / version:
-
-```bash
-APP=/Applications/TelevyBackup.app
-/usr/bin/mdls -name kMDItemCFBundleIdentifier -name kMDItemVersion "$APP"
-```
 
 ## Development: bypass Keychain (codesign + vault key)
 
