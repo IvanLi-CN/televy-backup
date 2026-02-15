@@ -180,6 +180,9 @@ impl StatusRuntimeState {
 
         if let Some(bytes) = p.bytes_uploaded {
             t.up_total_bytes = Some(bytes);
+            // Observe byte advances at the progress callback time to avoid attributing large
+            // bursts to the much smaller status-tick cadence (which can cause brief spikes).
+            t.up_rate.observe(Instant::now(), bytes);
         }
     }
 
@@ -260,7 +263,7 @@ impl StatusRuntimeState {
                 continue;
             }
 
-            t.up_bps = Some(t.up_rate.sample(now, bytes));
+            t.up_bps = Some(t.up_rate.rate_at(now, bytes));
         }
     }
 
@@ -354,21 +357,58 @@ impl ByteRateWindow {
         self.samples.is_empty()
     }
 
-    fn sample(&mut self, now: Instant, bytes: u64) -> u64 {
+    fn observe(&mut self, at: Instant, bytes: u64) {
         if self
             .samples
             .back()
             .is_some_and(|(_, last_bytes)| bytes < *last_bytes)
         {
-            self.reset(now, bytes);
+            self.reset(at, bytes);
+            return;
+        }
+
+        // Only keep change points; this keeps the window small and prevents tick cadence from
+        // introducing artificial dt shrinkage when bytes advance in large bursts.
+        if self
+            .samples
+            .back()
+            .is_some_and(|(_, last_bytes)| *last_bytes == bytes)
+        {
+            return;
+        }
+
+        self.samples.push_back((at, bytes));
+    }
+
+    fn rate_at(&mut self, now: Instant, bytes_now: u64) -> u64 {
+        if self.is_empty() {
+            self.reset(now, bytes_now);
             return 0;
         }
 
-        self.samples.push_back((now, bytes));
+        if self
+            .samples
+            .back()
+            .is_some_and(|(_, last_bytes)| bytes_now < *last_bytes)
+        {
+            self.reset(now, bytes_now);
+            return 0;
+        }
+
+        // If the caller didn't observe the latest byte advance (e.g. missing progress callbacks),
+        // record it at "now" as a best-effort fallback.
+        self.observe(now, bytes_now);
 
         let cutoff = now.checked_sub(self.window).unwrap_or(now);
+
+        // If the newest sample is older than the window, then no bytes advanced in the last window.
+        if self.samples.back().is_some_and(|(t, _)| *t <= cutoff) {
+            self.reset(now, bytes_now);
+            return 0;
+        }
+
+        // Prune samples, but keep one sample older than the cutoff for interpolation.
         while self.samples.len() > 2 {
-            // Keep one sample older than the cutoff to compute a stable windowed rate.
             let second_at = self.samples.get(1).map(|(t, _)| *t).unwrap_or(cutoff);
             if second_at <= cutoff {
                 self.samples.pop_front();
@@ -377,13 +417,36 @@ impl ByteRateWindow {
             }
         }
 
-        let (old_at, old_bytes) = self.samples.front().copied().unwrap_or((now, bytes));
-        let dt = now.duration_since(old_at).as_secs_f64();
-        if dt <= 0.0 {
+        let win_secs = self.window.as_secs_f64();
+        if win_secs <= 0.0 {
             return 0;
         }
-        let delta = bytes.saturating_sub(old_bytes);
-        ((delta as f64) / dt).round() as u64
+
+        // Estimate bytes at the cutoff time. We linearly interpolate between the last sample
+        // before the cutoff and the first sample after it (when available).
+        let bytes_at_cutoff = match (self.samples.front(), self.samples.get(1)) {
+            (Some((t0, b0)), Some((t1, b1))) => {
+                if *t0 >= cutoff {
+                    *b0 as f64
+                } else if *t1 <= cutoff {
+                    // Shouldn't happen after pruning, but keep it safe.
+                    *b1 as f64
+                } else {
+                    let total = t1.duration_since(*t0).as_secs_f64();
+                    if total <= 0.0 {
+                        *b1 as f64
+                    } else {
+                        let frac = cutoff.duration_since(*t0).as_secs_f64() / total;
+                        (*b0 as f64) + ((*b1 as f64) - (*b0 as f64)) * frac
+                    }
+                }
+            }
+            (Some((_t0, b0)), None) => *b0 as f64,
+            _ => bytes_now as f64,
+        };
+
+        let delta = (bytes_now as f64 - bytes_at_cutoff).max(0.0);
+        (delta / win_secs).round() as u64
     }
 }
 
@@ -487,13 +550,29 @@ mod tests {
         let mut w = ByteRateWindow::default();
 
         w.reset(t0, 0);
-        assert_eq!(w.sample(t0, 0), 0);
+        assert_eq!(w.rate_at(t0, 0), 0);
 
-        // 1000 bytes in 0.5s => 2000 B/s (startup transient, dt < window).
-        assert_eq!(w.sample(t0 + Duration::from_millis(500), 1000), 2000);
+        // With a fixed 1s window, the early rate is averaged over 1 second to avoid spikes.
+        w.observe(t0 + Duration::from_millis(500), 1000);
+        assert_eq!(w.rate_at(t0 + Duration::from_millis(500), 1000), 1000);
 
         // Another 1000 bytes over the next 1.0s => 1000 B/s steady state.
-        assert_eq!(w.sample(t0 + Duration::from_millis(1500), 2000), 1000);
+        w.observe(t0 + Duration::from_millis(1500), 2000);
+        assert_eq!(w.rate_at(t0 + Duration::from_millis(1500), 2000), 1000);
+    }
+
+    #[test]
+    fn byte_rate_window_interpolates_to_avoid_burst_spikes() {
+        let t0 = Instant::now();
+        let mut w = ByteRateWindow::default();
+
+        w.reset(t0, 0);
+
+        // A large byte jump after 5s should not turn into an absurd one-tick spike.
+        w.observe(t0 + Duration::from_secs(5), 10_000);
+
+        // Over a 1s window at t=5s, interpolation estimates ~2000 B/s (10_000 / 5s).
+        assert_eq!(w.rate_at(t0 + Duration::from_secs(5), 10_000), 2000);
     }
 
     #[test]
