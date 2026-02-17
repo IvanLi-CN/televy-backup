@@ -112,6 +112,15 @@ pub trait Storage {
         &'a self,
         object_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
+
+    fn download_document_with_progress<'a>(
+        &'a self,
+        object_id: &'a str,
+        progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        let _ = progress;
+        self.download_document(object_id)
+    }
 }
 
 #[derive(Debug, Default)]

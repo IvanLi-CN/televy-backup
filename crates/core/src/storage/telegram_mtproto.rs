@@ -357,6 +357,35 @@ impl Storage for TelegramMtProtoStorage {
             Ok(resp)
         })
     }
+
+    fn download_document_with_progress<'a>(
+        &'a self,
+        object_id: &'a str,
+        mut progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        Box::pin(async move {
+            let parsed = parse_tgmtproto_object_id_v1(object_id)?;
+            if parsed.peer != self.chat_id {
+                return Err(Error::InvalidConfig {
+                    message: format!(
+                        "tgmtproto peer mismatch: expected={} got={}",
+                        self.chat_id, parsed.peer
+                    ),
+                });
+            }
+
+            let resp = self.with_helper(|helper| {
+                let progress = progress.as_deref_mut().map(|cb| cb as &mut dyn FnMut(u64));
+                helper.download_with_progress(
+                    DownloadRequest {
+                        object_id: object_id.to_string(),
+                    },
+                    progress,
+                )
+            })?;
+            Ok(resp)
+        })
+    }
 }
 
 fn default_helper_path() -> Option<PathBuf> {
@@ -656,6 +685,14 @@ impl MtProtoHelper {
     }
 
     fn download(&mut self, req: DownloadRequest) -> Result<Vec<u8>> {
+        self.download_with_progress(req, None)
+    }
+
+    fn download_with_progress(
+        &mut self,
+        req: DownloadRequest,
+        mut on_progress: Option<&mut dyn FnMut(u64)>,
+    ) -> Result<Vec<u8>> {
         self.send_json(&Request::Download(req))?;
 
         let env = self.read_json_line()?;
@@ -681,12 +718,27 @@ impl MtProtoHelper {
             });
         }
 
-        let mut bytes = vec![0u8; size as usize];
-        self.stdout
-            .read_exact(&mut bytes)
-            .map_err(|e| Error::Telegram {
-                message: format!("mtproto download read failed: {e}"),
-            })?;
+        let size_usize = size as usize;
+        let mut bytes = vec![0u8; size_usize];
+
+        // Best-effort progress reporting: we only know the size after reading the JSON header.
+        // Read the payload incrementally so callers can keep UI bandwidth indicators responsive.
+        //
+        // (This does NOT make the download streamable; the full payload is still buffered.)
+        const READ_CHUNK: usize = 256 * 1024;
+        let mut read = 0usize;
+        while read < size_usize {
+            let end = (read + READ_CHUNK).min(size_usize);
+            self.stdout
+                .read_exact(&mut bytes[read..end])
+                .map_err(|e| Error::Telegram {
+                    message: format!("mtproto download read failed: {e}"),
+                })?;
+            read = end;
+            if let Some(cb) = on_progress.as_mut() {
+                (**cb)(read as u64);
+            }
+        }
 
         Ok(bytes)
     }

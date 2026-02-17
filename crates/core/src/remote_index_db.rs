@@ -1,6 +1,8 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio_util::sync::CancellationToken;
 use tracing::error;
@@ -34,8 +36,27 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
         return Err(Error::Cancelled);
     }
 
+    let mut bytes_downloaded = 0u64;
+
+    // Use streaming progress when the storage supports it so UI bandwidth indicators don't
+    // "fall to zero" during long downloads (e.g. large remote index parts).
+    let base_total = bytes_downloaded;
+    let latest = Arc::new(AtomicU64::new(0));
+    let latest_for_cb = Arc::clone(&latest);
     let manifest_enc = storage
-        .download_document(manifest_object_id)
+        .download_document_with_progress(
+            manifest_object_id,
+            Some(Box::new(move |n| {
+                latest_for_cb.store(n, Ordering::Relaxed);
+                if let Some(sink) = progress {
+                    sink.on_progress(TaskProgress {
+                        phase: "index".to_string(),
+                        bytes_downloaded: Some(base_total.saturating_add(n)),
+                        ..TaskProgress::default()
+                    });
+                }
+            })),
+        )
         .await
         .map_err(|e| {
             error!(
@@ -47,7 +68,13 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
             );
             e
         })?;
-    let mut bytes_downloaded = manifest_enc.len() as u64;
+    let streamed = latest.load(Ordering::Relaxed);
+    let actual = if streamed > 0 {
+        streamed
+    } else {
+        manifest_enc.len() as u64
+    };
+    bytes_downloaded = base_total.saturating_add(actual);
     if let Some(sink) = progress {
         sink.on_progress(TaskProgress {
             phase: "index".to_string(),
@@ -101,8 +128,23 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
             return Err(Error::Cancelled);
         }
 
+        let base_total = bytes_downloaded;
+        let latest = Arc::new(AtomicU64::new(0));
+        let latest_for_cb = Arc::clone(&latest);
         let part_enc = storage
-            .download_document(&part.object_id)
+            .download_document_with_progress(
+                &part.object_id,
+                Some(Box::new(move |n| {
+                    latest_for_cb.store(n, Ordering::Relaxed);
+                    if let Some(sink) = progress {
+                        sink.on_progress(TaskProgress {
+                            phase: "index".to_string(),
+                            bytes_downloaded: Some(base_total.saturating_add(n)),
+                            ..TaskProgress::default()
+                        });
+                    }
+                })),
+            )
             .await
             .map_err(|e| {
                 error!(
@@ -118,8 +160,13 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
                     part_no: part.no,
                 }
             })?;
-
-        bytes_downloaded = bytes_downloaded.saturating_add(part_enc.len() as u64);
+        let streamed = latest.load(Ordering::Relaxed);
+        let actual = if streamed > 0 {
+            streamed
+        } else {
+            part_enc.len() as u64
+        };
+        bytes_downloaded = base_total.saturating_add(actual);
         if let Some(sink) = progress {
             sink.on_progress(TaskProgress {
                 phase: "index".to_string(),

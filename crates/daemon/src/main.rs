@@ -59,6 +59,10 @@ struct TargetRuntime {
     up_bps: Option<u64>,
     up_total_bytes: Option<u64>,
     up_rate: ByteRateWindow,
+
+    down_bps: Option<u64>,
+    down_total_bytes: Option<u64>,
+    down_rate: ByteRateWindow,
 }
 
 #[derive(Debug)]
@@ -93,6 +97,9 @@ impl StatusRuntimeState {
                     up_bps: None,
                     up_total_bytes: None,
                     up_rate: ByteRateWindow::default(),
+                    down_bps: None,
+                    down_total_bytes: None,
+                    down_rate: ByteRateWindow::default(),
                 },
             );
         }
@@ -123,6 +130,9 @@ impl StatusRuntimeState {
                 up_bps: None,
                 up_total_bytes: None,
                 up_rate: ByteRateWindow::default(),
+                down_bps: None,
+                down_total_bytes: None,
+                down_rate: ByteRateWindow::default(),
             });
 
             rt.label = if t.label.trim().is_empty() {
@@ -163,6 +173,10 @@ impl StatusRuntimeState {
         t.up_total_bytes = Some(0);
         t.up_bps = Some(0);
         t.up_rate.reset(Instant::now(), 0);
+
+        t.down_total_bytes = Some(0);
+        t.down_bps = Some(0);
+        t.down_rate.reset(Instant::now(), 0);
     }
 
     fn mark_external_run_start(&mut self, target_id: &str, task_id: &str) {
@@ -186,11 +200,14 @@ impl StatusRuntimeState {
             bytes_deduped: Some(0),
         });
 
-        // Reset upload EWMA baselines so status stream can compute rates cleanly for CLI runs.
+        // Reset upload baselines so status sampling can compute rates cleanly for CLI runs.
         t.up_total_bytes = Some(0);
         t.up_bps = Some(0);
-        t.last_up_sample_bytes = Some(0);
-        t.last_up_sample_at_ms = Some(now);
+        t.up_rate.reset(Instant::now(), 0);
+
+        t.down_total_bytes = Some(0);
+        t.down_bps = Some(0);
+        t.down_rate.reset(Instant::now(), 0);
     }
 
     fn on_external_progress(&mut self, target_id: &str, task_id: &str, p: TaskProgress) {
@@ -224,25 +241,19 @@ impl StatusRuntimeState {
             bytes_deduped: p.bytes_deduped,
         });
 
-        // Preserve existing upload EWMA behavior for upload-heavy CLI tasks (e.g. manual backup).
+        // Keep upload rates consistent with the normal path by sampling bytes at progress time.
         if let Some(bytes) = p.bytes_uploaded {
-            let now = now_unix_ms();
+            let at = Instant::now();
             t.up_total_bytes = Some(bytes);
-            match (t.last_up_sample_bytes, t.last_up_sample_at_ms) {
-                (Some(prev_bytes), Some(prev_at)) => {
-                    let dt_ms = now.saturating_sub(prev_at).max(1);
-                    let db = bytes.saturating_sub(prev_bytes);
-                    if dt_ms >= 50 {
-                        t.up_bps = Some(db.saturating_mul(1000) / dt_ms);
-                        t.last_up_sample_bytes = Some(bytes);
-                        t.last_up_sample_at_ms = Some(now);
-                    }
-                }
-                _ => {
-                    t.last_up_sample_bytes = Some(bytes);
-                    t.last_up_sample_at_ms = Some(now);
-                }
-            }
+            t.up_rate.observe(at, bytes);
+            t.up_bps = Some(t.up_rate.rate_at(at, bytes));
+        }
+
+        if let Some(bytes) = p.bytes_downloaded {
+            let at = Instant::now();
+            t.down_total_bytes = Some(bytes);
+            t.down_rate.observe(at, bytes);
+            t.down_bps = Some(t.down_rate.rate_at(at, bytes));
         }
     }
 
@@ -260,8 +271,11 @@ impl StatusRuntimeState {
         t.progress = None;
         t.up_bps = None;
         t.up_total_bytes = None;
-        t.last_up_sample_bytes = None;
-        t.last_up_sample_at_ms = None;
+        t.up_rate.reset(Instant::now(), 0);
+
+        t.down_bps = None;
+        t.down_total_bytes = None;
+        t.down_rate.reset(Instant::now(), 0);
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -292,6 +306,11 @@ impl StatusRuntimeState {
             // bursts to the much smaller status-tick cadence (which can cause brief spikes).
             t.up_rate.observe(Instant::now(), bytes);
         }
+
+        if let Some(bytes) = p.bytes_downloaded {
+            t.down_total_bytes = Some(bytes);
+            t.down_rate.observe(Instant::now(), bytes);
+        }
     }
 
     fn mark_run_finish_success(
@@ -311,6 +330,9 @@ impl StatusRuntimeState {
         t.up_bps = None;
         t.up_total_bytes = None;
         t.up_rate = ByteRateWindow::default();
+        t.down_bps = None;
+        t.down_total_bytes = None;
+        t.down_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -339,6 +361,9 @@ impl StatusRuntimeState {
         t.up_bps = None;
         t.up_total_bytes = None;
         t.up_rate = ByteRateWindow::default();
+        t.down_bps = None;
+        t.down_total_bytes = None;
+        t.down_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -361,17 +386,23 @@ impl StatusRuntimeState {
             if t.state != "running" {
                 continue;
             }
-            let Some(bytes) = t.up_total_bytes else {
-                continue;
-            };
-
-            if t.up_rate.is_empty() {
-                t.up_rate.reset(now, bytes);
-                t.up_bps = Some(0);
-                continue;
+            if let Some(bytes) = t.up_total_bytes {
+                if t.up_rate.is_empty() {
+                    t.up_rate.reset(now, bytes);
+                    t.up_bps = Some(0);
+                } else {
+                    t.up_bps = Some(t.up_rate.rate_at(now, bytes));
+                }
             }
 
-            t.up_bps = Some(t.up_rate.rate_at(now, bytes));
+            if let Some(bytes) = t.down_total_bytes {
+                if t.down_rate.is_empty() {
+                    t.down_rate.reset(now, bytes);
+                    t.down_bps = Some(0);
+                } else {
+                    t.down_bps = Some(t.down_rate.rate_at(now, bytes));
+                }
+            }
         }
     }
 
@@ -379,6 +410,10 @@ impl StatusRuntimeState {
         let mut global_up_bps: u64 = 0;
         let mut global_up_total: u64 = 0;
         let mut have_global_up = false;
+
+        let mut global_down_bps: u64 = 0;
+        let mut global_down_total: u64 = 0;
+        let mut have_global_down = false;
 
         let mut out_targets = Vec::new();
         for id in &self.target_order {
@@ -392,6 +427,15 @@ impl StatusRuntimeState {
             if let Some(bytes) = t.up_total_bytes {
                 global_up_total = global_up_total.saturating_add(bytes);
                 have_global_up = true;
+            }
+
+            if let Some(bps) = t.down_bps {
+                global_down_bps = global_down_bps.saturating_add(bps);
+                have_global_down = true;
+            }
+            if let Some(bytes) = t.down_total_bytes {
+                global_down_total = global_down_total.saturating_add(bytes);
+                have_global_down = true;
             }
             out_targets.push(TargetState {
                 target_id: t.target_id.clone(),
@@ -426,12 +470,14 @@ impl StatusRuntimeState {
                     bytes_per_second: have_global_up.then_some(global_up_bps),
                 },
                 down: Rate {
-                    bytes_per_second: None,
+                    bytes_per_second: have_global_down.then_some(global_down_bps),
                 },
                 up_total: Counter {
                     bytes: have_global_up.then_some(global_up_total),
                 },
-                down_total: Counter { bytes: None },
+                down_total: Counter {
+                    bytes: have_global_down.then_some(global_down_total),
+                },
                 ui_uptime_seconds: None,
             },
             targets: out_targets,
@@ -627,6 +673,9 @@ mod tests {
                 up_bps: None,
                 up_total_bytes: None,
                 up_rate: ByteRateWindow::default(),
+                down_bps: None,
+                down_total_bytes: None,
+                down_rate: ByteRateWindow::default(),
             },
         );
         st

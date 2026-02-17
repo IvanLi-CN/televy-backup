@@ -1,6 +1,8 @@
 use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -279,36 +281,59 @@ async fn restore_files<S: Storage>(
 
             let plain = match object_ref {
                 ChunkObjectRef::Direct { object_id } => {
-                    let framed = storage.download_document(&object_id).await.map_err(|e| {
-                        error!(
-                            event = "io.telegram.download_failed",
-                            snapshot_id,
-                            object_id = %object_id,
-                            chunk_hash,
-                            error = %e,
-                            "io.telegram.download_failed"
-                        );
-                        match e {
-                            Error::Telegram { message } => {
-                                // Treat "not found" style errors as permanent missing data, but keep
-                                // timeouts/transient failures as retryable telegram errors.
-                                if message.contains("message not found")
-                                    || message.contains("document mismatch")
-                                {
-                                    Error::MissingChunkObject {
-                                        chunk_hash: chunk_hash.clone(),
-                                    }
-                                } else {
-                                    Error::Telegram { message }
+                    let base_total = *bytes_downloaded;
+                    let latest = Arc::new(AtomicU64::new(0));
+                    let latest_for_cb = latest.clone();
+                    let framed = storage
+                        .download_document_with_progress(
+                            &object_id,
+                            Some(Box::new(move |n| {
+                                latest_for_cb.store(n, Ordering::Relaxed);
+                                if let Some(sink) = progress {
+                                    sink.on_progress(TaskProgress {
+                                        phase: "download".to_string(),
+                                        bytes_downloaded: Some(base_total.saturating_add(n)),
+                                        ..TaskProgress::default()
+                                    });
                                 }
+                            })),
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(
+                                    event = "io.telegram.download_failed",
+                                    snapshot_id,
+                                    object_id = %object_id,
+                                    chunk_hash,
+                                error = %e,
+                                "io.telegram.download_failed"
+                            );
+                            match e {
+                                Error::Telegram { message } => {
+                                    // Treat "not found" style errors as permanent missing data, but keep
+                                    // timeouts/transient failures as retryable telegram errors.
+                                    if message.contains("message not found")
+                                        || message.contains("document mismatch")
+                                    {
+                                        Error::MissingChunkObject {
+                                            chunk_hash: chunk_hash.clone(),
+                                        }
+                                    } else {
+                                        Error::Telegram { message }
+                                    }
+                                }
+                                _other => Error::MissingChunkObject {
+                                    chunk_hash: chunk_hash.clone(),
+                                },
                             }
-                            _other => Error::MissingChunkObject {
-                                chunk_hash: chunk_hash.clone(),
-                            },
-                        }
-                    })?;
-                    *bytes_downloaded =
-                        (*bytes_downloaded).saturating_add(framed.len().try_into().unwrap_or(0));
+                        })?;
+                    let streamed = latest.load(Ordering::Relaxed);
+                    let actual = if streamed > 0 {
+                        streamed
+                    } else {
+                        framed.len() as u64
+                    };
+                    *bytes_downloaded = base_total.saturating_add(actual);
                     decrypt_framed(master_key, chunk_hash.as_bytes(), &framed).map_err(|e| {
                         Error::Crypto {
                             message: format!(
@@ -327,38 +352,59 @@ async fn restore_files<S: Storage>(
                             cached_bytes.as_slice()
                         }
                         _ => {
-                            let bytes =
-                                storage
-                                    .download_document(&pack_object_id)
-                                    .await
-                                    .map_err(|e| {
-                                        error!(
-                                            event = "io.telegram.download_failed",
-                                            snapshot_id,
-                                            object_id = %pack_object_id,
-                                            chunk_hash,
-                                            error = %e,
-                                            "io.telegram.download_failed"
-                                        );
-                                        match e {
-                                            Error::Telegram { message } => {
-                                                if message.contains("message not found")
-                                                    || message.contains("document mismatch")
-                                                {
-                                                    Error::MissingChunkObject {
-                                                        chunk_hash: chunk_hash.clone(),
-                                                    }
-                                                } else {
-                                                    Error::Telegram { message }
-                                                }
-                                            }
-                                            _other => Error::MissingChunkObject {
-                                                chunk_hash: chunk_hash.clone(),
-                                            },
+                            let base_total = *bytes_downloaded;
+                            let latest = Arc::new(AtomicU64::new(0));
+                            let latest_for_cb = latest.clone();
+                            let bytes = storage
+                                .download_document_with_progress(
+                                    &pack_object_id,
+                                    Some(Box::new(move |n| {
+                                        latest_for_cb.store(n, Ordering::Relaxed);
+                                        if let Some(sink) = progress {
+                                            sink.on_progress(TaskProgress {
+                                                phase: "download".to_string(),
+                                                bytes_downloaded: Some(
+                                                    base_total.saturating_add(n),
+                                                ),
+                                                ..TaskProgress::default()
+                                            });
                                         }
-                                    })?;
-                            *bytes_downloaded = (*bytes_downloaded)
-                                .saturating_add(bytes.len().try_into().unwrap_or(0));
+                                    })),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    error!(
+                                        event = "io.telegram.download_failed",
+                                        snapshot_id,
+                                        object_id = %pack_object_id,
+                                        chunk_hash,
+                                        error = %e,
+                                        "io.telegram.download_failed"
+                                    );
+                                    match e {
+                                        Error::Telegram { message } => {
+                                            if message.contains("message not found")
+                                                || message.contains("document mismatch")
+                                            {
+                                                Error::MissingChunkObject {
+                                                    chunk_hash: chunk_hash.clone(),
+                                                }
+                                            } else {
+                                                Error::Telegram { message }
+                                            }
+                                        }
+                                        _other => Error::MissingChunkObject {
+                                            chunk_hash: chunk_hash.clone(),
+                                        },
+                                    }
+                                })?;
+                            let streamed = latest.load(Ordering::Relaxed);
+                            let actual = if streamed > 0 {
+                                streamed
+                            } else {
+                                bytes.len() as u64
+                            };
+                            *bytes_downloaded = base_total.saturating_add(actual);
                             pack_cache = Some((pack_object_id.clone(), bytes));
                             pack_cache.as_ref().expect("just set").1.as_slice()
                         }
@@ -492,34 +538,57 @@ async fn verify_chunks<S: Storage>(
 
         let plain = match object_ref {
             ChunkObjectRef::Direct { object_id } => {
-                let framed = storage.download_document(&object_id).await.map_err(|e| {
-                    error!(
-                        event = "io.telegram.download_failed",
-                        snapshot_id,
-                        object_id = %object_id,
-                        chunk_hash,
-                        error = %e,
-                        "io.telegram.download_failed"
-                    );
-                    match e {
-                        Error::Telegram { message } => {
-                            if message.contains("message not found")
-                                || message.contains("document mismatch")
-                            {
-                                Error::MissingChunkObject {
-                                    chunk_hash: chunk_hash.clone(),
-                                }
-                            } else {
-                                Error::Telegram { message }
+                let base_total = *bytes_downloaded;
+                let latest = Arc::new(AtomicU64::new(0));
+                let latest_for_cb = latest.clone();
+                let framed = storage
+                    .download_document_with_progress(
+                        &object_id,
+                        Some(Box::new(move |n| {
+                            latest_for_cb.store(n, Ordering::Relaxed);
+                            if let Some(sink) = progress {
+                                sink.on_progress(TaskProgress {
+                                    phase: "chunks".to_string(),
+                                    bytes_downloaded: Some(base_total.saturating_add(n)),
+                                    ..TaskProgress::default()
+                                });
                             }
+                        })),
+                    )
+                    .await
+                    .map_err(|e| {
+                        error!(
+                            event = "io.telegram.download_failed",
+                            snapshot_id,
+                            object_id = %object_id,
+                            chunk_hash,
+                            error = %e,
+                            "io.telegram.download_failed"
+                        );
+                        match e {
+                            Error::Telegram { message } => {
+                                if message.contains("message not found")
+                                    || message.contains("document mismatch")
+                                {
+                                    Error::MissingChunkObject {
+                                        chunk_hash: chunk_hash.clone(),
+                                    }
+                                } else {
+                                    Error::Telegram { message }
+                                }
+                            }
+                            _other => Error::MissingChunkObject {
+                                chunk_hash: chunk_hash.clone(),
+                            },
                         }
-                        _other => Error::MissingChunkObject {
-                            chunk_hash: chunk_hash.clone(),
-                        },
-                    }
-                })?;
-                *bytes_downloaded =
-                    (*bytes_downloaded).saturating_add(framed.len().try_into().unwrap_or(0));
+                    })?;
+                let streamed = latest.load(Ordering::Relaxed);
+                let actual = if streamed > 0 {
+                    streamed
+                } else {
+                    framed.len() as u64
+                };
+                *bytes_downloaded = base_total.saturating_add(actual);
                 decrypt_framed(master_key, chunk_hash.as_bytes(), &framed).map_err(|e| {
                     Error::Crypto {
                         message: format!(
@@ -538,38 +607,57 @@ async fn verify_chunks<S: Storage>(
                         cached_bytes.as_slice()
                     }
                     _ => {
-                        let bytes =
-                            storage
-                                .download_document(&pack_object_id)
-                                .await
-                                .map_err(|e| {
-                                    error!(
-                                        event = "io.telegram.download_failed",
-                                        snapshot_id,
-                                        object_id = %pack_object_id,
-                                        chunk_hash,
-                                        error = %e,
-                                        "io.telegram.download_failed"
-                                    );
-                                    match e {
-                                        Error::Telegram { message } => {
-                                            if message.contains("message not found")
-                                                || message.contains("document mismatch")
-                                            {
-                                                Error::MissingChunkObject {
-                                                    chunk_hash: chunk_hash.clone(),
-                                                }
-                                            } else {
-                                                Error::Telegram { message }
-                                            }
-                                        }
-                                        _other => Error::MissingChunkObject {
-                                            chunk_hash: chunk_hash.clone(),
-                                        },
+                        let base_total = *bytes_downloaded;
+                        let latest = Arc::new(AtomicU64::new(0));
+                        let latest_for_cb = latest.clone();
+                        let bytes = storage
+                            .download_document_with_progress(
+                                &pack_object_id,
+                                Some(Box::new(move |n| {
+                                    latest_for_cb.store(n, Ordering::Relaxed);
+                                    if let Some(sink) = progress {
+                                        sink.on_progress(TaskProgress {
+                                            phase: "chunks".to_string(),
+                                            bytes_downloaded: Some(base_total.saturating_add(n)),
+                                            ..TaskProgress::default()
+                                        });
                                     }
-                                })?;
-                        *bytes_downloaded =
-                            (*bytes_downloaded).saturating_add(bytes.len().try_into().unwrap_or(0));
+                                })),
+                            )
+                            .await
+                            .map_err(|e| {
+                                error!(
+                                event = "io.telegram.download_failed",
+                                snapshot_id,
+                                object_id = %pack_object_id,
+                                chunk_hash,
+                                    error = %e,
+                                    "io.telegram.download_failed"
+                                );
+                                match e {
+                                    Error::Telegram { message } => {
+                                        if message.contains("message not found")
+                                            || message.contains("document mismatch")
+                                        {
+                                            Error::MissingChunkObject {
+                                                chunk_hash: chunk_hash.clone(),
+                                            }
+                                        } else {
+                                            Error::Telegram { message }
+                                        }
+                                    }
+                                    _other => Error::MissingChunkObject {
+                                        chunk_hash: chunk_hash.clone(),
+                                    },
+                                }
+                            })?;
+                        let streamed = latest.load(Ordering::Relaxed);
+                        let actual = if streamed > 0 {
+                            streamed
+                        } else {
+                            bytes.len() as u64
+                        };
+                        *bytes_downloaded = base_total.saturating_add(actual);
                         pack_cache = Some((pack_object_id.clone(), bytes));
                         pack_cache.as_ref().expect("just set").1.as_slice()
                     }

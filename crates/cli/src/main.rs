@@ -851,6 +851,11 @@ impl StatusStreamEnricher {
         let mut any_target_rate = false;
         let mut global_up_total: u64 = 0;
 
+        // Prefer daemon-provided global down metrics when present; only compute locally as a
+        // compat/best-effort fallback.
+        let need_down_rate = snap.global.down.bytes_per_second.is_none();
+        let need_down_total = snap.global.down_total.bytes.is_none();
+
         let mut global_down_bps: u64 = 0;
         let mut any_target_down_rate = false;
         let mut global_down_total: u64 = 0;
@@ -862,33 +867,16 @@ impl StatusStreamEnricher {
                 .and_then(|p| p.bytes_uploaded)
                 .unwrap_or(0);
 
-            let bytes_downloaded_now = t
-                .progress
-                .as_ref()
-                .and_then(|p| p.bytes_downloaded)
-                .unwrap_or(0);
-
             let prev_bytes = self
                 .prev_uploaded_by_target
                 .get(&t.target_id)
                 .copied()
                 .unwrap_or(bytes_uploaded_now);
 
-            let prev_down_bytes = self
-                .prev_downloaded_by_target
-                .get(&t.target_id)
-                .copied()
-                .unwrap_or(bytes_downloaded_now);
-
             // A new run may reset counters to 0; avoid carrying stale EWMA rates across runs.
             let reset = bytes_uploaded_now < prev_bytes;
             if reset || t.state != "running" {
                 self.smoothed_rate_by_target.remove(&t.target_id);
-            }
-
-            let reset_down = bytes_downloaded_now < prev_down_bytes;
-            if reset_down || t.state != "running" {
-                self.smoothed_down_rate_by_target.remove(&t.target_id);
             }
 
             let base = if reset {
@@ -903,17 +891,59 @@ impl StatusStreamEnricher {
                 .and_modify(|v| *v = v.saturating_add(delta))
                 .or_insert(delta);
 
-            let base_down = if reset_down {
-                bytes_downloaded_now
+            let (total_down, down_bps) = if need_down_rate || need_down_total {
+                let bytes_downloaded_now = t
+                    .progress
+                    .as_ref()
+                    .and_then(|p| p.bytes_downloaded)
+                    .unwrap_or(0);
+
+                let prev_down_bytes = self
+                    .prev_downloaded_by_target
+                    .get(&t.target_id)
+                    .copied()
+                    .unwrap_or(bytes_downloaded_now);
+
+                let reset_down = bytes_downloaded_now < prev_down_bytes;
+                if reset_down || t.state != "running" {
+                    self.smoothed_down_rate_by_target.remove(&t.target_id);
+                }
+
+                let base_down = if reset_down {
+                    bytes_downloaded_now
+                } else {
+                    prev_down_bytes
+                };
+                let delta_down = bytes_downloaded_now.saturating_sub(base_down);
+                let total_down = self
+                    .totals_down_by_target
+                    .entry(t.target_id.clone())
+                    .and_modify(|v| *v = v.saturating_add(delta_down))
+                    .or_insert(delta_down);
+
+                let mut down_bps: Option<u64> = None;
+                if need_down_rate && t.state == "running" && stale_age_ms <= 2_000 && dt > 0.0 {
+                    let raw = (delta_down as f64) / dt;
+                    let prev = self
+                        .smoothed_down_rate_by_target
+                        .get(&t.target_id)
+                        .copied()
+                        .unwrap_or(raw);
+                    // 1.0s window EWMA.
+                    let alpha = 1.0 - (-dt).exp();
+                    let smoothed = prev * (1.0 - alpha) + raw * alpha;
+                    self.smoothed_down_rate_by_target
+                        .insert(t.target_id.clone(), smoothed);
+                    down_bps = Some(smoothed.max(0.0).round() as u64);
+                }
+
+                self.prev_downloaded_by_target
+                    .insert(t.target_id.clone(), bytes_downloaded_now);
+
+                (Some(*total_down), down_bps)
             } else {
-                prev_down_bytes
+                (None, None)
             };
-            let delta_down = bytes_downloaded_now.saturating_sub(base_down);
-            let total_down = self
-                .totals_down_by_target
-                .entry(t.target_id.clone())
-                .and_modify(|v| *v = v.saturating_add(delta_down))
-                .or_insert(delta_down);
 
             // Realtime rates only make sense when updates are timely.
             //
@@ -935,22 +965,6 @@ impl StatusStreamEnricher {
                     .insert(t.target_id.clone(), smoothed);
                 t.up.bytes_per_second = Some(smoothed.max(0.0).round() as u64);
             }
-
-            let mut down_bps: Option<u64> = None;
-            if t.state == "running" && stale_age_ms <= 2_000 && dt > 0.0 {
-                let raw = (delta_down as f64) / dt;
-                let prev = self
-                    .smoothed_down_rate_by_target
-                    .get(&t.target_id)
-                    .copied()
-                    .unwrap_or(raw);
-                // 1.0s window EWMA.
-                let alpha = 1.0 - (-dt).exp();
-                let smoothed = prev * (1.0 - alpha) + raw * alpha;
-                self.smoothed_down_rate_by_target
-                    .insert(t.target_id.clone(), smoothed);
-                down_bps = Some(smoothed.max(0.0).round() as u64);
-            }
             t.up_total.bytes = Some(*total);
             if let Some(bps) = t.up.bytes_per_second {
                 any_target_rate = true;
@@ -962,12 +976,12 @@ impl StatusStreamEnricher {
                 any_target_down_rate = true;
                 global_down_bps = global_down_bps.saturating_add(bps);
             }
-            global_down_total = global_down_total.saturating_add(*total_down);
+            if let Some(total_down) = total_down {
+                global_down_total = global_down_total.saturating_add(total_down);
+            }
 
             self.prev_uploaded_by_target
                 .insert(t.target_id.clone(), bytes_uploaded_now);
-            self.prev_downloaded_by_target
-                .insert(t.target_id.clone(), bytes_downloaded_now);
         }
 
         snap.global.up.bytes_per_second = if any_target_rate {
@@ -975,13 +989,21 @@ impl StatusStreamEnricher {
         } else {
             None
         };
-        snap.global.down.bytes_per_second = if any_target_down_rate {
-            Some(global_down_bps)
-        } else {
-            None
-        };
+        if need_down_rate {
+            snap.global.down.bytes_per_second = if stale_age_ms > 2_000 {
+                None
+            } else if any_target_down_rate {
+                Some(global_down_bps)
+            } else {
+                None
+            };
+        } else if stale_age_ms > 2_000 {
+            snap.global.down.bytes_per_second = None;
+        }
         snap.global.up_total.bytes = Some(global_up_total);
-        snap.global.down_total.bytes = Some(global_down_total);
+        if need_down_total {
+            snap.global.down_total.bytes = Some(global_down_total);
+        }
         snap.global.ui_uptime_seconds = Some(started.elapsed().as_secs_f64());
 
         self.prev_sample_at = Some(now);
@@ -2162,6 +2184,7 @@ async fn settings_import_bundle_compare_folder(
         &db_path,
         None,
         Some(&provider),
+        None,
     )
     .await
     .map_err(map_core_err)?;
@@ -6660,6 +6683,7 @@ mod tests {
                     chunks_done: None,
                     bytes_read: None,
                     bytes_uploaded: Some(123),
+                    bytes_downloaded: None,
                     bytes_deduped: None,
                 }),
                 last_run: None,
@@ -6737,6 +6761,7 @@ mod tests {
                         chunks_done: None,
                         bytes_read: None,
                         bytes_uploaded: Some(10),
+                        bytes_downloaded: None,
                         bytes_deduped: None,
                     }),
                     last_run: None,
@@ -6762,6 +6787,7 @@ mod tests {
                         chunks_done: None,
                         bytes_read: None,
                         bytes_uploaded: Some(20),
+                        bytes_downloaded: None,
                         bytes_deduped: None,
                     }),
                     last_run: None,
