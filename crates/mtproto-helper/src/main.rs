@@ -42,6 +42,12 @@ const UPLOAD_PROGRESS_HEARTBEAT_SECS: u64 = 10;
 // progress/rate updates smoother and reduces the chance of long "stalls" where the network is
 // sending but we cannot observe partial progress inside one request.
 const UPLOAD_PART_SIZE_BYTES: usize = 128 * 1024;
+// Throttle download progress events so we don't overwhelm the core with JSON lines at high speeds
+// while still updating rate indicators frequently enough to feel "realtime".
+const DOWNLOAD_PROGRESS_MIN_INTERVAL_MS: u64 = 250;
+// Use a smaller part size than the maximum to make progress updates smoother and avoid long stalls
+// where the helper is downloading but can't report partial progress.
+const DOWNLOAD_PART_SIZE_BYTES: i32 = 128 * 1024;
 
 fn upload_stream_timeout_secs(size: usize) -> u64 {
     // Scale with size to avoid hanging forever, while allowing large objects to complete on slow links.
@@ -495,7 +501,7 @@ async fn main() {
                     continue;
                 };
 
-                let res = download_to_cache(s, &req.object_id).await;
+                let res = download_to_cache(s, &req.object_id, &mut output).await;
                 match res {
                     Ok(bytes_path) => {
                         let mut f = match std::fs::File::open(&bytes_path) {
@@ -1170,6 +1176,35 @@ fn write_upload_progress(
     Ok(())
 }
 
+fn write_download_progress(
+    out: &mut impl Write,
+    session_b64: Option<String>,
+    bytes_downloaded: u64,
+    bytes_total: u64,
+) -> Result<(), String> {
+    let mut data = BTreeMap::new();
+    data.insert(
+        "event".to_string(),
+        serde_json::Value::String("download_progress".to_string()),
+    );
+    data.insert(
+        "bytesDownloaded".to_string(),
+        serde_json::json!(bytes_downloaded),
+    );
+    data.insert("bytesTotal".to_string(), serde_json::json!(bytes_total));
+    write_response(
+        out,
+        Response {
+            ok: true,
+            error: None,
+            session_b64,
+            data,
+        },
+    )
+    .map_err(|e| format!("stdout write failed: {e}"))?;
+    Ok(())
+}
+
 async fn upload_bytes_with_progress(
     state: &mut State,
     filename: String,
@@ -1355,7 +1390,11 @@ async fn upload_with_progress(
     Ok(object_id)
 }
 
-async fn download_to_cache(state: &mut State, object_id: &str) -> Result<PathBuf, String> {
+async fn download_to_cache(
+    state: &mut State,
+    object_id: &str,
+    out: &mut impl Write,
+) -> Result<PathBuf, String> {
     let chat = require_chat(state)?;
     let parsed = parse_tgmtproto_object_id_v1(object_id)?;
     if parsed.peer != state.chat_id {
@@ -1384,7 +1423,7 @@ async fn download_to_cache(state: &mut State, object_id: &str) -> Result<PathBuf
     let media = msg
         .media()
         .ok_or_else(|| format!("message has no media: msg_id={}", parsed.msg_id))?;
-    let (doc_id, access_hash) = extract_document_id(&media)?;
+    let (doc_id, access_hash, bytes_total) = extract_document_id_and_size(&media)?;
     if doc_id != parsed.doc_id || access_hash != parsed.access_hash {
         return Err(format!(
             "document mismatch: expected docId={} accessHash={} got docId={} accessHash={}",
@@ -1395,7 +1434,9 @@ async fn download_to_cache(state: &mut State, object_id: &str) -> Result<PathBuf
     let cache_key = blake3::hash(object_id.as_bytes()).to_hex().to_string();
     let cache_path = state.cache_dir.join(format!("{cache_key}.part"));
 
-    let chunk_size = MAX_CHUNK_SIZE as u64;
+    let chunk_size_i32 = DOWNLOAD_PART_SIZE_BYTES.min(MAX_CHUNK_SIZE);
+    let chunk_size = u64::try_from(chunk_size_i32)
+        .map_err(|_| format!("invalid download chunk size: {chunk_size_i32}"))?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -1428,8 +1469,21 @@ async fn download_to_cache(state: &mut State, object_id: &str) -> Result<PathBuf
     let mut download = state
         .client
         .iter_download(&media)
-        .chunk_size(MAX_CHUNK_SIZE)
+        .chunk_size(chunk_size_i32)
         .skip_chunks((len / chunk_size) as i32);
+
+    let clamp_total = |n: u64| -> u64 {
+        if bytes_total > 0 {
+            n.min(bytes_total)
+        } else {
+            n
+        }
+    };
+
+    let mut last_reported = clamp_total(len);
+    let mut last_emit = Instant::now();
+    let session = Some(session_b64(&state.session));
+    write_download_progress(out, session, last_reported, bytes_total)?;
 
     while let Some(chunk) = timeout(
         Duration::from_secs(DOWNLOAD_CHUNK_TIMEOUT_SECS),
@@ -1441,6 +1495,24 @@ async fn download_to_cache(state: &mut State, object_id: &str) -> Result<PathBuf
     {
         file.write_all(&chunk)
             .map_err(|e| format!("cache file write failed: {e}"))?;
+
+        len = len.saturating_add(chunk.len() as u64);
+        let now = Instant::now();
+        let stale = now.duration_since(last_emit)
+            >= Duration::from_millis(DOWNLOAD_PROGRESS_MIN_INTERVAL_MS);
+        let report_now = clamp_total(len);
+        if stale && report_now != last_reported {
+            last_reported = report_now;
+            last_emit = now;
+            let session = Some(session_b64(&state.session));
+            write_download_progress(out, session, last_reported, bytes_total)?;
+        }
+    }
+
+    let final_len = clamp_total(len);
+    if final_len != last_reported {
+        let session = Some(session_b64(&state.session));
+        write_download_progress(out, session, final_len, bytes_total)?;
     }
     file.sync_all()
         .map_err(|e| format!("cache file sync failed: {e}"))?;
@@ -1511,6 +1583,11 @@ fn parse_tgmtproto_object_id_v1(encoded: &str) -> Result<TgMtProtoObjectIdV1, St
 }
 
 fn extract_document_id(media: &Media) -> Result<(i64, i64), String> {
+    let (doc_id, access_hash, _size) = extract_document_id_and_size(media)?;
+    Ok((doc_id, access_hash))
+}
+
+fn extract_document_id_and_size(media: &Media) -> Result<(i64, i64, u64), String> {
     let doc_media = match media {
         Media::Document(d) => d,
         other => return Err(format!("expected document media, got {other:?}")),
@@ -1523,7 +1600,11 @@ fn extract_document_id(media: &Media) -> Result<(i64, i64), String> {
         .ok_or_else(|| "missing document in media".to_string())?;
 
     match doc {
-        tl::enums::Document::Document(d) => Ok((d.id, d.access_hash)),
+        tl::enums::Document::Document(d) => Ok((
+            d.id,
+            d.access_hash,
+            u64::try_from(d.size).unwrap_or(0),
+        )),
         tl::enums::Document::Empty(_) => Err("unexpected empty document".to_string()),
     }
 }

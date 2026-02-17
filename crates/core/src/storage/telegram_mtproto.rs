@@ -694,16 +694,36 @@ impl MtProtoHelper {
         mut on_progress: Option<&mut dyn FnMut(u64)>,
     ) -> Result<Vec<u8>> {
         self.send_json(&Request::Download(req))?;
+        let mut saw_progress_event = false;
+        let env = loop {
+            let env = self.read_json_line()?;
+            self.apply_session(&env)?;
+            if !env.ok {
+                return Err(Error::Telegram {
+                    message: env
+                        .error
+                        .unwrap_or_else(|| "mtproto download failed".to_string()),
+                });
+            }
 
-        let env = self.read_json_line()?;
-        self.apply_session(&env)?;
-        if !env.ok {
-            return Err(Error::Telegram {
-                message: env
-                    .error
-                    .unwrap_or_else(|| "mtproto download failed".to_string()),
-            });
-        }
+            let event = env
+                .data
+                .get("event")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if event == "download_progress" {
+                saw_progress_event = true;
+                if let (Some(bytes), Some(cb)) = (
+                    env.data.get("bytesDownloaded").and_then(|v| v.as_u64()),
+                    on_progress.as_mut(),
+                ) {
+                    (**cb)(bytes);
+                }
+                continue;
+            }
+
+            break env;
+        };
 
         let size = env
             .data
@@ -721,10 +741,9 @@ impl MtProtoHelper {
         let size_usize = size as usize;
         let mut bytes = vec![0u8; size_usize];
 
-        // Best-effort progress reporting: we only know the size after reading the JSON header.
-        // Read the payload incrementally so callers can keep UI bandwidth indicators responsive.
-        //
-        // (This does NOT make the download streamable; the full payload is still buffered.)
+        // For older helpers, we only learn about download progress by reading the payload bytes.
+        // Newer helpers emit `download_progress` events while they download into a local cache, so
+        // reporting progress here would create unrealistic spikes and even "rewind" the counter.
         const READ_CHUNK: usize = 256 * 1024;
         let mut read = 0usize;
         while read < size_usize {
@@ -735,7 +754,7 @@ impl MtProtoHelper {
                     message: format!("mtproto download read failed: {e}"),
                 })?;
             read = end;
-            if let Some(cb) = on_progress.as_mut() {
+            if !saw_progress_event && let Some(cb) = on_progress.as_mut() {
                 (**cb)(read as u64);
             }
         }
