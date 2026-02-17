@@ -61,3 +61,12 @@ Out:
 
 - 若系统 keychain/签名导致“无法启动/频繁授权弹窗”，需要明确推荐的本地测试启动方式（例如禁用 keychain + workspace dirs）。
 
+## 里程碑（Milestones）
+
+- [x] 进度上报支持 streaming：remote index 下载过程中持续更新 `bytes_downloaded`
+- [x] status 速率来源稳定：daemon 提供 1s window down rate；CLI `status stream` 不再覆盖 daemon 的 down rate
+- [ ] 手工验收：在 macOS UI 中观察 NETWORK Down（>=1Hz 刷新、无明显不可能尖峰）
+
+## 变更记录 / Change log
+
+- 2026-02-17：实现并创建 PR #43（替代/关闭了旧 PR #36）
