@@ -1614,24 +1614,22 @@ async fn upload_index<S: Storage>(
                         }
                     }
 
-                    if progressed {
-                        if let Some(sink) = progress {
-                            sink.on_progress(TaskProgress {
-                                phase: "index".to_string(),
-                                files_total: None,
-                                files_done: Some(files_indexed),
-                                chunks_total: Some(chunks_total),
-                                chunks_done: Some(chunks_total),
-                                bytes_read: Some(bytes_read),
-                                bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-                                net_bytes_uploaded: have_uploaded_net_bytes
-                                    .load(Ordering::Relaxed)
-                                    .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
-                                bytes_downloaded: None,
-                                net_bytes_downloaded: None,
-                                bytes_deduped: Some(bytes_deduped),
-                            });
-                        }
+                    if progressed && let Some(sink) = progress {
+                        sink.on_progress(TaskProgress {
+                            phase: "index".to_string(),
+                            files_total: None,
+                            files_done: Some(files_indexed),
+                            chunks_total: Some(chunks_total),
+                            chunks_done: Some(chunks_total),
+                            bytes_read: Some(bytes_read),
+                            bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                            net_bytes_uploaded: have_uploaded_net_bytes
+                                .load(Ordering::Relaxed)
+                                .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+                            bytes_downloaded: None,
+                            net_bytes_downloaded: None,
+                            bytes_deduped: Some(bytes_deduped),
+                        });
                     }
                 })),
             )
@@ -1735,24 +1733,22 @@ async fn upload_index<S: Storage>(
                     }
                 }
 
-                if progressed {
-                    if let Some(sink) = progress {
-                        sink.on_progress(TaskProgress {
-                            phase: "index".to_string(),
-                            files_total: None,
-                            files_done: Some(files_indexed),
-                            chunks_total: Some(chunks_total),
-                            chunks_done: Some(chunks_total),
-                            bytes_read: Some(bytes_read),
-                            bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-                            net_bytes_uploaded: have_uploaded_net_bytes
-                                .load(Ordering::Relaxed)
-                                .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
-                            bytes_downloaded: None,
-                            net_bytes_downloaded: None,
-                            bytes_deduped: Some(bytes_deduped),
-                        });
-                    }
+                if progressed && let Some(sink) = progress {
+                    sink.on_progress(TaskProgress {
+                        phase: "index".to_string(),
+                        files_total: None,
+                        files_done: Some(files_indexed),
+                        chunks_total: Some(chunks_total),
+                        chunks_done: Some(chunks_total),
+                        bytes_read: Some(bytes_read),
+                        bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                        net_bytes_uploaded: have_uploaded_net_bytes
+                            .load(Ordering::Relaxed)
+                            .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+                        bytes_downloaded: None,
+                        net_bytes_downloaded: None,
+                        bytes_deduped: Some(bytes_deduped),
+                    });
                 }
             })),
         )
