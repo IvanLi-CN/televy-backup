@@ -1033,9 +1033,11 @@ async fn status_stream_ipc(stream: impl tokio::io::AsyncRead + Unpin) -> Result<
     {
         let mut snap = latest.clone();
         enricher.enrich(&mut snap);
-        println!("{}", serde_json::to_string(&snap).map_err(|e| {
-            CliError::new("status.invalid", e.to_string())
-        })?);
+        println!(
+            "{}",
+            serde_json::to_string(&snap)
+                .map_err(|e| { CliError::new("status.invalid", e.to_string()) })?
+        );
         let _ = std::io::stdout().flush();
     }
 
