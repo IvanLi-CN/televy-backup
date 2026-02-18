@@ -556,8 +556,12 @@ impl ByteRateWindow {
         let cutoff = now.checked_sub(self.window).unwrap_or(now);
 
         // If the newest sample is older than the window, then no bytes advanced in the last window.
+        //
+        // Important: do NOT `reset(now, bytes_now)` here. When progress callbacks are coarse
+        // (e.g. whole-part/object boundaries), the status writer keeps ticking even while bytes
+        // are in-flight. If we reset the time base on every "no progress" window, the next byte
+        // jump gets attributed to a tiny dt and shows up as an impossible spike.
         if self.samples.back().is_some_and(|(t, _)| *t <= cutoff) {
-            self.reset(now, bytes_now);
             return 0;
         }
 
@@ -732,6 +736,26 @@ mod tests {
 
         // Over a 1s window at t=5s, interpolation estimates ~2000 B/s (10_000 / 5s).
         assert_eq!(w.rate_at(t0 + Duration::from_secs(5), 10_000), 2000);
+    }
+
+    #[test]
+    fn byte_rate_window_does_not_spike_after_idle_ticks() {
+        let t0 = Instant::now();
+        let mut w = ByteRateWindow::default();
+
+        w.reset(t0, 0);
+
+        // Simulate the status writer ticking frequently while bytes don't change.
+        // Historically, resetting the window on every "idle" tick caused the next byte jump to
+        // be attributed to a tiny dt and show up as an impossible one-tick spike.
+        for i in 1..=50 {
+            let now = t0 + Duration::from_millis(200 * i);
+            assert_eq!(w.rate_at(now, 0), 0);
+        }
+
+        // A big jump after 10s should be interpreted as a ~1 KB/s steady transfer, not 10 KB/s.
+        w.observe(t0 + Duration::from_secs(10), 10_000);
+        assert_eq!(w.rate_at(t0 + Duration::from_secs(10), 10_000), 1000);
     }
 
     #[test]
