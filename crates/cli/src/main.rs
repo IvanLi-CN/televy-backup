@@ -1020,38 +1020,61 @@ async fn status_stream_ipc(stream: impl tokio::io::AsyncRead + Unpin) -> Result<
         .map_err(|e| CliError::retryable("status.unavailable", e.to_string()))?
         .ok_or_else(|| CliError::retryable("status.unavailable", "ipc status stream ended"))?;
 
-    let mut snap: televy_backup_core::status::StatusSnapshot =
+    // Throttle the emitted snapshot cadence to 2Hz. The daemon may generate status snapshots at a
+    // much higher cadence (e.g. 10Hz when running), which makes the UI appear to "flicker" and
+    // violates the desired refresh semantics for "last 1s" transfer rates.
+    const OUTPUT_INTERVAL: Duration = Duration::from_millis(500);
+
+    let mut latest: televy_backup_core::status::StatusSnapshot =
         serde_json::from_str(&first).map_err(|e| CliError::new("status.invalid", e.to_string()))?;
-    enricher.enrich(&mut snap);
-    println!(
-        "{}",
-        serde_json::to_string(&snap).map_err(|e| CliError::new("status.invalid", e.to_string()))?
-    );
-    let _ = std::io::stdout().flush();
+    let mut last_emitted_generated_at = latest.generated_at;
 
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|e| CliError::retryable("status.unavailable", e.to_string()))?
+    // Emit the first snapshot immediately, then align periodic output to 2Hz.
     {
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let mut snap: televy_backup_core::status::StatusSnapshot = serde_json::from_str(&line)
-            .map_err(|e| CliError::new("status.invalid", e.to_string()))?;
+        let mut snap = latest.clone();
         enricher.enrich(&mut snap);
-
-        let out = serde_json::to_string(&snap)
-            .map_err(|e| CliError::new("status.invalid", e.to_string()))?;
-        println!("{out}");
+        println!("{}", serde_json::to_string(&snap).map_err(|e| {
+            CliError::new("status.invalid", e.to_string())
+        })?);
         let _ = std::io::stdout().flush();
     }
 
-    Err(CliError::retryable(
-        "status.unavailable",
-        "ipc status stream ended",
-    ))
+    let mut interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + OUTPUT_INTERVAL,
+        OUTPUT_INTERVAL,
+    );
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            maybe_line = lines.next_line() => {
+                let line = maybe_line
+                    .map_err(|e| CliError::retryable("status.unavailable", e.to_string()))?
+                    .ok_or_else(|| CliError::retryable("status.unavailable", "ipc status stream ended"))?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                latest = serde_json::from_str(&line)
+                    .map_err(|e| CliError::new("status.invalid", e.to_string()))?;
+            }
+            _ = interval.tick() => {
+                // Avoid spamming identical snapshots (idle cadence is 1Hz on the daemon side).
+                if latest.generated_at == last_emitted_generated_at {
+                    continue;
+                }
+
+                let mut snap = latest.clone();
+                enricher.enrich(&mut snap);
+
+                let out = serde_json::to_string(&snap)
+                    .map_err(|e| CliError::new("status.invalid", e.to_string()))?;
+                println!("{out}");
+                let _ = std::io::stdout().flush();
+                last_emitted_generated_at = snap.generated_at;
+            }
+        }
+    }
 }
 
 async fn status_stream_file(_config_dir: &Path, data_dir: &Path) -> Result<(), CliError> {
@@ -1081,8 +1104,9 @@ async fn status_stream_file(_config_dir: &Path, data_dir: &Path) -> Result<(), C
         println!("{line}");
         let _ = std::io::stdout().flush();
 
+        // Throttle file-based streaming to 2Hz when running so the UI cadence matches the IPC path.
         let sleep = if is_daemon && any_running && stale_age_ms <= 2_000 {
-            std::time::Duration::from_millis(100)
+            std::time::Duration::from_millis(500)
         } else {
             std::time::Duration::from_secs(1)
         };

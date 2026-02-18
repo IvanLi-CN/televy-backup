@@ -34,6 +34,7 @@ The macOS popover “dashboard” UI is driven by a single snapshot schema (`Sta
   - Path: `$TELEVYBACKUP_DATA_DIR/status/status.json`.
 - **Transport** (CLI): `televybackup --json status stream` emits NDJSON, one `status.snapshot` per line.
   - The UI runs this as a long-lived process and decodes each line.
+  - The CLI throttles the emitted cadence to **2Hz** (500ms) while running so the UI refresh rate is stable and predictable.
   - The UI should pass `TELEVYBACKUP_CONFIG_DIR` / `TELEVYBACKUP_DATA_DIR` to the spawned CLI so it connects to the same IPC socket as the daemon.
   - If IPC is unavailable, the CLI falls back to reading `status.json`; if both are unavailable, it returns `status.unavailable`.
   - If the CLI binary itself is unavailable (dev/local), the UI may fall back to polling `status.json` directly at low frequency (e.g. 1Hz) to avoid a blank dashboard.
