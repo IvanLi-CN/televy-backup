@@ -81,6 +81,18 @@ pub fn parse_chunk_object_ref(encoded: &str) -> Result<ChunkObjectRef> {
     })
 }
 
+/// Best-effort progress update emitted by storage providers.
+///
+/// - `bytes`: cumulative *payload* bytes transferred for this invocation (monotonic; starts at 0).
+/// - `net_bytes`: cumulative *wire* bytes observed by the provider for this invocation (monotonic;
+///   starts at 0 when available). This may exceed `bytes` due to protocol overhead, retries, and
+///   in-flight buffering.
+#[derive(Debug, Clone, Copy)]
+pub struct StorageProgress {
+    pub bytes: u64,
+    pub net_bytes: Option<u64>,
+}
+
 pub trait Storage {
     fn provider(&self) -> &str;
 
@@ -100,13 +112,16 @@ pub trait Storage {
 
     /// Upload a document with best-effort progress reporting.
     ///
-    /// Progress callback semantics: the argument is the cumulative number of bytes uploaded so far
-    /// for this invocation (monotonic; starts at 0).
+    /// Progress callback semantics:
+    /// - `progress.bytes` is the cumulative number of payload bytes uploaded so far for this
+    ///   invocation (monotonic; starts at 0).
+    /// - `progress.net_bytes` is an optional cumulative number of wire bytes observed so far
+    ///   for this invocation (monotonic; starts at 0).
     fn upload_document_with_progress<'a>(
         &'a self,
         filename: &'a str,
         bytes: Vec<u8>,
-        progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+        progress: Option<Box<dyn FnMut(StorageProgress) + Send + 'a>>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         let _ = progress;
         self.upload_document(filename, bytes)
@@ -119,12 +134,15 @@ pub trait Storage {
 
     /// Download a document with best-effort progress reporting.
     ///
-    /// Progress callback semantics: the argument is the cumulative number of bytes downloaded so
-    /// far for this invocation (monotonic; starts at 0).
+    /// Progress callback semantics:
+    /// - `progress.bytes` is the cumulative number of payload bytes downloaded so far for this
+    ///   invocation (monotonic; starts at 0).
+    /// - `progress.net_bytes` is an optional cumulative number of wire bytes observed so far for
+    ///   this invocation (monotonic; starts at 0).
     fn download_document_with_progress<'a>(
         &'a self,
         object_id: &'a str,
-        progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+        progress: Option<Box<dyn FnMut(StorageProgress) + Send + 'a>>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
         let _ = progress;
         self.download_document(object_id)

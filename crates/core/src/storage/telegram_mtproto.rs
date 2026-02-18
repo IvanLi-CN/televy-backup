@@ -9,7 +9,7 @@ use std::time::Duration;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use super::Storage;
+use super::{Storage, StorageProgress};
 use crate::{Error, Result};
 
 const TG_MTPROTO_OBJECT_ID_PREFIX_V1: &str = "tgmtproto:v1:";
@@ -317,11 +317,13 @@ impl Storage for TelegramMtProtoStorage {
         &'a self,
         filename: &'a str,
         bytes: Vec<u8>,
-        mut progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+        mut progress: Option<Box<dyn FnMut(StorageProgress) + Send + 'a>>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
             let resp = self.with_helper(|helper| {
-                let progress = progress.as_deref_mut().map(|cb| cb as &mut dyn FnMut(u64));
+                let progress = progress
+                    .as_deref_mut()
+                    .map(|cb| cb as &mut dyn FnMut(StorageProgress));
                 helper.upload_with_progress(
                     UploadRequest {
                         filename: filename.to_string(),
@@ -361,7 +363,7 @@ impl Storage for TelegramMtProtoStorage {
     fn download_document_with_progress<'a>(
         &'a self,
         object_id: &'a str,
-        mut progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+        mut progress: Option<Box<dyn FnMut(StorageProgress) + Send + 'a>>,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
         Box::pin(async move {
             let parsed = parse_tgmtproto_object_id_v1(object_id)?;
@@ -375,7 +377,9 @@ impl Storage for TelegramMtProtoStorage {
             }
 
             let resp = self.with_helper(|helper| {
-                let progress = progress.as_deref_mut().map(|cb| cb as &mut dyn FnMut(u64));
+                let progress = progress
+                    .as_deref_mut()
+                    .map(|cb| cb as &mut dyn FnMut(StorageProgress));
                 helper.download_with_progress(
                     DownloadRequest {
                         object_id: object_id.to_string(),
@@ -631,7 +635,7 @@ impl MtProtoHelper {
     fn upload_with_progress(
         &mut self,
         req: UploadRequest,
-        mut on_progress: Option<&mut dyn FnMut(u64)>,
+        mut on_progress: Option<&mut dyn FnMut(StorageProgress)>,
     ) -> Result<String> {
         let meta = UploadRequestMeta {
             filename: req.filename,
@@ -666,7 +670,8 @@ impl MtProtoHelper {
                     env.data.get("bytesUploaded").and_then(|v| v.as_u64()),
                     on_progress.as_mut(),
                 ) {
-                    (**cb)(bytes);
+                    let net_bytes = env.data.get("netBytesOut").and_then(|v| v.as_u64());
+                    (**cb)(StorageProgress { bytes, net_bytes });
                 }
                 continue;
             }
@@ -691,7 +696,7 @@ impl MtProtoHelper {
     fn download_with_progress(
         &mut self,
         req: DownloadRequest,
-        mut on_progress: Option<&mut dyn FnMut(u64)>,
+        mut on_progress: Option<&mut dyn FnMut(StorageProgress)>,
     ) -> Result<Vec<u8>> {
         self.send_json(&Request::Download(req))?;
         let mut saw_progress_event = false;
@@ -722,7 +727,11 @@ impl MtProtoHelper {
                     on_progress.as_mut(),
                 ) {
                     let base = *progress_base.get_or_insert(bytes);
-                    (**cb)(bytes.saturating_sub(base));
+                    let net_bytes = env.data.get("netBytesIn").and_then(|v| v.as_u64());
+                    (**cb)(StorageProgress {
+                        bytes: bytes.saturating_sub(base),
+                        net_bytes,
+                    });
                 }
                 continue;
             }
@@ -760,7 +769,10 @@ impl MtProtoHelper {
                 })?;
             read = end;
             if !saw_progress_event && let Some(cb) = on_progress.as_mut() {
-                (**cb)(read as u64);
+                (**cb)(StorageProgress {
+                    bytes: read as u64,
+                    net_bytes: None,
+                });
             }
         }
 

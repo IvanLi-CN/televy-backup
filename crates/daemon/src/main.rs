@@ -241,15 +241,16 @@ impl StatusRuntimeState {
             bytes_deduped: p.bytes_deduped,
         });
 
-        // Keep upload rates consistent with the normal path by sampling bytes at progress time.
-        if let Some(bytes) = p.bytes_uploaded {
+        // Prefer wire bytes for realtime rates (stays responsive even when payload progress stalls).
+        // Fall back to payload bytes when the provider doesn't expose net stats.
+        if let Some(bytes) = p.net_bytes_uploaded.or(p.bytes_uploaded) {
             let at = Instant::now();
             t.up_total_bytes = Some(bytes);
             t.up_rate.observe(at, bytes);
             t.up_bps = Some(t.up_rate.rate_at(at, bytes));
         }
 
-        if let Some(bytes) = p.bytes_downloaded {
+        if let Some(bytes) = p.net_bytes_downloaded.or(p.bytes_downloaded) {
             let at = Instant::now();
             t.down_total_bytes = Some(bytes);
             t.down_rate.observe(at, bytes);
@@ -300,14 +301,14 @@ impl StatusRuntimeState {
             bytes_deduped: p.bytes_deduped,
         });
 
-        if let Some(bytes) = p.bytes_uploaded {
+        if let Some(bytes) = p.net_bytes_uploaded.or(p.bytes_uploaded) {
             t.up_total_bytes = Some(bytes);
             // Observe byte advances at the progress callback time to avoid attributing large
             // bursts to the much smaller status-tick cadence (which can cause brief spikes).
             t.up_rate.observe(Instant::now(), bytes);
         }
 
-        if let Some(bytes) = p.bytes_downloaded {
+        if let Some(bytes) = p.net_bytes_downloaded.or(p.bytes_downloaded) {
             t.down_total_bytes = Some(bytes);
             t.down_rate.observe(Instant::now(), bytes);
         }
@@ -694,7 +695,9 @@ mod tests {
             chunks_done: None,
             bytes_read: None,
             bytes_uploaded: Some(bytes_uploaded),
+            net_bytes_uploaded: None,
             bytes_downloaded: None,
+            net_bytes_downloaded: None,
             bytes_deduped: None,
         }
     }

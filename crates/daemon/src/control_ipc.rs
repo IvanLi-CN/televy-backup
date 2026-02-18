@@ -392,7 +392,9 @@ fn handle_request(
                     chunks_done: params.progress.chunks_done,
                     bytes_read: params.progress.bytes_read,
                     bytes_uploaded: params.progress.bytes_uploaded,
+                    net_bytes_uploaded: None,
                     bytes_downloaded: params.progress.bytes_downloaded,
+                    net_bytes_downloaded: None,
                     bytes_deduped: params.progress.bytes_deduped,
                 };
                 st.on_external_progress(&params.target_id, &params.task_id, p);

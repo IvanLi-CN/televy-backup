@@ -24,11 +24,13 @@ The macOS popover “dashboard” UI is driven by a single snapshot schema (`Sta
     - `generatedAt` is used for stale detection in the UI.
     - `global.*Total` and `targets[].upTotal` are **session totals** (UI/stream start → now) and are not persisted.
     - Rate semantics:
-      - `targets[].up.bytesPerSecond` is the daemon's estimate of the **payload** upload rate derived from `progress.bytesUploaded`.
+      - When available, `bytesPerSecond` rates prefer **wire bytes** observed by the storage provider (e.g. MTProto helper socket bytes) so the UI stays responsive even while a single long RPC is in flight.
+      - Fallback: rates are derived from **payload** progress counters (`progress.bytesUploaded` / `progress.bytesDownloaded`).
+      - `targets[].up.bytesPerSecond` is the daemon's estimate of the upload rate (wire bytes preferred; payload bytes as fallback).
       - `global.up.bytesPerSecond` is a best-effort sum across targets (typically only one target runs at a time).
-      - `global.down.bytesPerSecond` is the daemon's estimate of the **payload** download rate derived from `progress.bytesDownloaded` (meaningful for restore/verify; usually `0`/`null` during backup).
+      - `global.down.bytesPerSecond` is the daemon's estimate of the download rate (meaningful for restore/verify; usually `0`/`null` during backup).
       - Rates are computed from a rolling 1s window sampled at progress time, with interpolation to avoid "one-tick" spikes when progress updates are coarse.
-      - These are not NIC-level counters (protocol overhead/retries/in-flight bytes are not directly observed), so values may differ from Activity Monitor but should remain positively correlated and in the same order of magnitude.
+      - Wire-byte rates may exceed payload rates due to protocol overhead, retries, and buffering; this is expected.
 - **Fallback** (daemon → file): `status.json` written by `televybackupd` via atomic write + rename.
   - Path: `$TELEVYBACKUP_DATA_DIR/status/status.json`.
 - **Transport** (CLI): `televybackup --json status stream` emits NDJSON, one `status.snapshot` per line.

@@ -13,7 +13,7 @@ use grammers_client::session::storages::TlSession;
 use grammers_client::types::media::Uploaded;
 use grammers_client::types::{Media, Peer};
 use grammers_client::{Client, InputMessage, Update, UpdatesConfiguration};
-use grammers_mtsender::SenderPool;
+use grammers_mtsender::{NetStats, SenderPool};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant, timeout};
@@ -143,21 +143,44 @@ async fn save_big_file_part_with_retry(
 }
 
 async fn save_file_part_with_retry_and_heartbeat(
+    net_stats: &NetStats,
+    base_net_out: u64,
     client: &Client,
     file_id: i64,
     part: i32,
     chunk: &[u8],
-    out: &mut impl Write,
+    out: &mut dyn Write,
     session_b64: Option<String>,
-    bytes_uploaded: u64,
+    bytes_uploaded_payload: u64,
     bytes_total: u64,
 ) -> Result<(), String> {
     for attempt in 1..=UPLOAD_PART_MAX_ATTEMPTS {
-        let mut hb = tokio::time::interval(Duration::from_secs(UPLOAD_PROGRESS_HEARTBEAT_SECS));
+        let mut hb = tokio::time::interval(Duration::from_millis(250));
         hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_net_reported: Option<u64> = None;
+        let mut last_emit = Instant::now();
+
+        let mut maybe_emit = |out: &mut dyn Write| -> Result<(), String> {
+            let (_in_total, out_total) = net_stats.snapshot();
+            let net_bytes_out = out_total.saturating_sub(base_net_out);
+            let stale = last_emit.elapsed() >= Duration::from_secs(UPLOAD_PROGRESS_HEARTBEAT_SECS);
+            if last_net_reported != Some(net_bytes_out) || stale {
+                last_net_reported = Some(net_bytes_out);
+                last_emit = Instant::now();
+                write_upload_progress(
+                    out,
+                    session_b64.clone(),
+                    bytes_uploaded_payload,
+                    bytes_total,
+                    net_bytes_out,
+                )?;
+            }
+            Ok(())
+        };
+
         // Emit a heartbeat immediately so the core side won't wait too long on a stalled part.
         let _ = hb.tick().await;
-        write_upload_progress(out, session_b64.clone(), bytes_uploaded, bytes_total)?;
+        maybe_emit(out)?;
 
         let req = tl::functions::upload::SaveFilePart {
             file_id,
@@ -174,7 +197,7 @@ async fn save_file_part_with_retry_and_heartbeat(
             tokio::select! {
                 _ = hb.tick() => {
                     // Keep stdout alive even if the MTProto call is stuck inside the client.
-                    write_upload_progress(out, session_b64.clone(), bytes_uploaded, bytes_total)?;
+                    maybe_emit(out)?;
                 }
                 res = &mut fut => {
                     break res.map_err(|e| format!("{e}"));
@@ -188,7 +211,11 @@ async fn save_file_part_with_retry_and_heartbeat(
         };
 
         match final_res {
-            Ok(true) => return Ok(()),
+            Ok(true) => {
+                // Emit one last sample at completion to avoid leaving the caller with a stale rate.
+                maybe_emit(out)?;
+                return Ok(());
+            }
             Ok(false) => {
                 let msg = "server failed to store uploaded data".to_string();
                 if attempt >= UPLOAD_PART_MAX_ATTEMPTS {
@@ -222,7 +249,10 @@ mod tests {
     #[test]
     fn parse_flood_wait_secs_extracts_digits() {
         assert_eq!(parse_flood_wait_secs("FLOOD_WAIT_5"), Some(5));
-        assert_eq!(parse_flood_wait_secs("rpc error: FLOOD_WAIT_123 (test)"), Some(123));
+        assert_eq!(
+            parse_flood_wait_secs("rpc error: FLOOD_WAIT_123 (test)"),
+            Some(123)
+        );
         assert_eq!(parse_flood_wait_secs("FLOOD_WAIT_"), None);
         assert_eq!(parse_flood_wait_secs("no flood wait here"), None);
     }
@@ -238,10 +268,7 @@ mod tests {
         );
 
         // Flood wait wins (with +1s cushion).
-        assert_eq!(
-            upload_part_backoff(1, Some(7)),
-            Duration::from_secs(8)
-        );
+        assert_eq!(upload_part_backoff(1, Some(7)), Duration::from_secs(8));
     }
 }
 
@@ -337,6 +364,7 @@ struct State {
     cache_dir: PathBuf,
     session: Arc<TlSession>,
     client: Client,
+    net_stats: Arc<NetStats>,
     chat: Option<Peer>,
     updates: grammers_client::client::updates::UpdateStream,
 }
@@ -718,7 +746,9 @@ async fn main() {
                     continue;
                 };
 
-                let timeout_secs = req.timeout_secs.unwrap_or(WAIT_FOR_CHAT_TIMEOUT_SECS_DEFAULT);
+                let timeout_secs = req
+                    .timeout_secs
+                    .unwrap_or(WAIT_FOR_CHAT_TIMEOUT_SECS_DEFAULT);
                 let res = wait_for_chat(s, timeout_secs, req.include_users).await;
                 match res {
                     Ok(chat) => {
@@ -751,7 +781,7 @@ async fn main() {
     }
 }
 
-fn write_response(out: &mut impl Write, res: Response) -> std::io::Result<()> {
+fn write_response(out: &mut dyn Write, res: Response) -> std::io::Result<()> {
     let line = serde_json::to_string(&res)
         .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"failed to encode response\"}".to_string());
     out.write_all(line.as_bytes())?;
@@ -778,7 +808,12 @@ async fn init(req: InitRequest) -> Result<State, String> {
 
     let pool = SenderPool::new(Arc::clone(&session), req.api_id);
     let client = Client::new(&pool);
-    let SenderPool { runner, updates, .. } = pool;
+    let SenderPool {
+        runner,
+        updates,
+        net_stats,
+        ..
+    } = pool;
     tokio::spawn(runner.run());
 
     let authorized = timeout(
@@ -842,6 +877,7 @@ async fn init(req: InitRequest) -> Result<State, String> {
         cache_dir: req.cache_dir,
         session,
         client,
+        net_stats,
         chat,
         updates,
     })
@@ -851,10 +887,10 @@ fn require_chat(state: &State) -> Result<&Peer, String> {
     if state.chat_id.trim().is_empty() {
         return Err("telegram.chat_id is empty (required for upload/download/pin; dialogs list can run without chat_id)".to_string());
     }
-    state
-        .chat
-        .as_ref()
-        .ok_or_else(|| "chat is not resolved (required for upload/download/pin; re-run with a valid chat_id)".to_string())
+    state.chat.as_ref().ok_or_else(|| {
+        "chat is not resolved (required for upload/download/pin; re-run with a valid chat_id)"
+            .to_string()
+    })
 }
 
 async fn resolve_chat(client: &Client, chat_id: &str) -> Result<Peer, String> {
@@ -1151,18 +1187,23 @@ fn generate_upload_file_id() -> i64 {
 }
 
 fn write_upload_progress(
-    out: &mut impl Write,
+    out: &mut dyn Write,
     session_b64: Option<String>,
     bytes_uploaded: u64,
     bytes_total: u64,
+    net_bytes_out: u64,
 ) -> Result<(), String> {
     let mut data = BTreeMap::new();
     data.insert(
         "event".to_string(),
         serde_json::Value::String("upload_progress".to_string()),
     );
-    data.insert("bytesUploaded".to_string(), serde_json::json!(bytes_uploaded));
+    data.insert(
+        "bytesUploaded".to_string(),
+        serde_json::json!(bytes_uploaded),
+    );
     data.insert("bytesTotal".to_string(), serde_json::json!(bytes_total));
+    data.insert("netBytesOut".to_string(), serde_json::json!(net_bytes_out));
     write_response(
         out,
         Response {
@@ -1177,10 +1218,11 @@ fn write_upload_progress(
 }
 
 fn write_download_progress(
-    out: &mut impl Write,
+    out: &mut dyn Write,
     session_b64: Option<String>,
     bytes_downloaded: u64,
     bytes_total: u64,
+    net_bytes_in: u64,
 ) -> Result<(), String> {
     let mut data = BTreeMap::new();
     data.insert(
@@ -1192,6 +1234,7 @@ fn write_download_progress(
         serde_json::json!(bytes_downloaded),
     );
     data.insert("bytesTotal".to_string(), serde_json::json!(bytes_total));
+    data.insert("netBytesIn".to_string(), serde_json::json!(net_bytes_in));
     write_response(
         out,
         Response {
@@ -1227,17 +1270,23 @@ async fn upload_bytes_with_progress(
     let chunk_size = (MAX_CHUNK_SIZE as usize).min(UPLOAD_PART_SIZE_BYTES);
     let total_parts = ((size + chunk_size - 1) / chunk_size) as i32;
 
+    // Track MTProto socket bytes to provide a better "network speed" signal even when the
+    // protocol request is still in-flight and no part has completed yet.
+    let (_base_in, base_out) = state.net_stats.snapshot();
+    let session = Some(session_b64(&state.session));
+    write_upload_progress(out, session, 0, bytes_total, 0)?;
+
     if size > UPLOAD_BIG_FILE_SIZE_BYTES {
         let bytes = Arc::new(bytes);
         let next_part = Arc::new(AtomicI32::new(0));
-        let uploaded = Arc::new(AtomicU64::new(0));
+        let payload_done = Arc::new(AtomicU64::new(0));
         let client = state.client.clone();
 
         let mut join_set = JoinSet::new();
         for _ in 0..UPLOAD_WORKER_COUNT {
             let bytes = Arc::clone(&bytes);
             let next_part = Arc::clone(&next_part);
-            let uploaded = Arc::clone(&uploaded);
+            let payload_done = Arc::clone(&payload_done);
             let client = client.clone();
             join_set.spawn(async move {
                 loop {
@@ -1252,26 +1301,16 @@ async fn upload_bytes_with_progress(
                         continue;
                     }
                     let chunk = bytes[start..end].to_vec();
-                    let len_u64 = len as u64;
-                    save_big_file_part_with_retry(
-                        &client,
-                        file_id,
-                        part,
-                        total_parts,
-                        &chunk,
-                    )
-                    .await?;
-
-                    // Only count bytes once the server acknowledged storing the part.
-                    // Using a smaller part size makes this "close enough" to realtime without
-                    // needing socket-level accounting.
-                    uploaded.fetch_add(len_u64, Ordering::Relaxed);
+                    save_big_file_part_with_retry(&client, file_id, part, total_parts, &chunk)
+                        .await?;
+                    payload_done.fetch_add(len as u64, Ordering::Relaxed);
                 }
                 Ok::<(), String>(())
             });
         }
 
-        let mut last_reported = 0u64;
+        let mut last_payload = 0u64;
+        let mut last_net = 0u64;
         let mut last_emit = Instant::now();
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1279,13 +1318,16 @@ async fn upload_bytes_with_progress(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let now = uploaded.load(Ordering::Relaxed).min(bytes_total);
+                    let payload = payload_done.load(Ordering::Relaxed).min(bytes_total);
+                    let (_in_total, out_total) = state.net_stats.snapshot();
+                    let net = out_total.saturating_sub(base_out);
                     let stale = last_emit.elapsed() >= Duration::from_secs(UPLOAD_PROGRESS_HEARTBEAT_SECS);
-                    if now != last_reported || stale {
-                        last_reported = now;
+                    if payload != last_payload || net != last_net || stale {
+                        last_payload = payload;
+                        last_net = net;
                         last_emit = Instant::now();
                         let session = Some(session_b64(&state.session));
-                        write_upload_progress(out, session, last_reported, bytes_total)?;
+                        write_upload_progress(out, session, payload, bytes_total, net)?;
                     }
                 }
                 res = join_set.join_next() => {
@@ -1305,11 +1347,10 @@ async fn upload_bytes_with_progress(
             }
         }
 
-        let final_uploaded = uploaded.load(Ordering::Relaxed).min(bytes_total);
-        if final_uploaded != last_reported {
-            let session = Some(session_b64(&state.session));
-            write_upload_progress(out, session, final_uploaded, bytes_total)?;
-        }
+        let (_in_total, out_total) = state.net_stats.snapshot();
+        let net = out_total.saturating_sub(base_out);
+        let session = Some(session_b64(&state.session));
+        write_upload_progress(out, session, bytes_total, bytes_total, net)?;
 
         return Ok(Uploaded::from_raw(
             tl::types::InputFileBig {
@@ -1322,26 +1363,37 @@ async fn upload_bytes_with_progress(
     }
 
     let mut md5 = md5::Context::new();
-    let mut bytes_uploaded = 0u64;
+    let mut bytes_uploaded_payload = 0u64;
     for (part, chunk) in bytes.chunks(chunk_size).enumerate() {
         md5.consume(chunk);
 
         save_file_part_with_retry_and_heartbeat(
+            &state.net_stats,
+            base_out,
             &state.client,
             file_id,
             part as i32,
             chunk,
-            out,
+            out as &mut dyn Write,
             Some(session_b64(&state.session)),
-            bytes_uploaded,
+            bytes_uploaded_payload,
             bytes_total,
         )
         .await?;
 
-        bytes_uploaded = bytes_uploaded.saturating_add(chunk.len() as u64).min(bytes_total);
+        bytes_uploaded_payload = bytes_uploaded_payload
+            .saturating_add(chunk.len() as u64)
+            .min(bytes_total);
+        let (_in_total, out_total) = state.net_stats.snapshot();
+        let net = out_total.saturating_sub(base_out);
         let session = Some(session_b64(&state.session));
-        write_upload_progress(out, session, bytes_uploaded, bytes_total)?;
+        write_upload_progress(out, session, bytes_uploaded_payload, bytes_total, net)?;
     }
+
+    let (_in_total, out_total) = state.net_stats.snapshot();
+    let net = out_total.saturating_sub(base_out);
+    let session = Some(session_b64(&state.session));
+    write_upload_progress(out, session, bytes_total, bytes_total, net)?;
 
     Ok(Uploaded::from_raw(
         tl::types::InputFile {
@@ -1404,33 +1456,6 @@ async fn download_to_cache(
         ));
     }
 
-    let mut msgs = timeout(
-        Duration::from_secs(DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS),
-        state
-            .client
-            .get_messages_by_id(chat, &[parsed.msg_id]),
-    )
-    .await
-    .map_err(|_| {
-        format!("get_messages_by_id timed out after {DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS}s")
-    })?
-    .map_err(|e| format!("get_messages_by_id failed: {e}"))?;
-    let msg = msgs
-        .pop()
-        .flatten()
-        .ok_or_else(|| format!("message not found: msg_id={}", parsed.msg_id))?;
-
-    let media = msg
-        .media()
-        .ok_or_else(|| format!("message has no media: msg_id={}", parsed.msg_id))?;
-    let (doc_id, access_hash, bytes_total) = extract_document_id_and_size(&media)?;
-    if doc_id != parsed.doc_id || access_hash != parsed.access_hash {
-        return Err(format!(
-            "document mismatch: expected docId={} accessHash={} got docId={} accessHash={}",
-            parsed.doc_id, parsed.access_hash, doc_id, access_hash
-        ));
-    }
-
     let cache_key = blake3::hash(object_id.as_bytes()).to_hex().to_string();
     let cache_path = state.cache_dir.join(format!("{cache_key}.part"));
 
@@ -1466,54 +1491,108 @@ async fn download_to_cache(
         );
     }
 
+    // Baseline MTProto socket bytes so progress reflects "wire bytes" and updates even while
+    // awaiting the next iterator chunk.
+    let (base_in, _base_out) = state.net_stats.snapshot();
+    let mut last_payload_reported: Option<u64> = None;
+    let mut last_net_reported: Option<u64> = None;
+    let mut last_emit = Instant::now();
+
+    // First progress sample: emit the current cached payload length so the core side can
+    // normalize "downloaded in this invocation" to start at 0.
+    let session = Some(session_b64(&state.session));
+    write_download_progress(out, session, len, 0, 0)?;
+
+    let mut msgs = timeout(
+        Duration::from_secs(DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS),
+        state.client.get_messages_by_id(chat, &[parsed.msg_id]),
+    )
+    .await
+    .map_err(|_| {
+        format!("get_messages_by_id timed out after {DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS}s")
+    })?
+    .map_err(|e| format!("get_messages_by_id failed: {e}"))?;
+    let msg = msgs
+        .pop()
+        .flatten()
+        .ok_or_else(|| format!("message not found: msg_id={}", parsed.msg_id))?;
+
+    let media = msg
+        .media()
+        .ok_or_else(|| format!("message has no media: msg_id={}", parsed.msg_id))?;
+    let (doc_id, access_hash, bytes_total) = extract_document_id_and_size(&media)?;
+    if doc_id != parsed.doc_id || access_hash != parsed.access_hash {
+        return Err(format!(
+            "document mismatch: expected docId={} accessHash={} got docId={} accessHash={}",
+            parsed.doc_id, parsed.access_hash, doc_id, access_hash
+        ));
+    }
+
+    let mut maybe_emit =
+        |bytes_downloaded: u64, bytes_total: u64, out: &mut dyn Write| -> Result<(), String> {
+            let (in_total, _out_total) = state.net_stats.snapshot();
+            let net_bytes_in = in_total.saturating_sub(base_in);
+            let stale = last_emit.elapsed() >= Duration::from_secs(UPLOAD_PROGRESS_HEARTBEAT_SECS);
+            if last_payload_reported != Some(bytes_downloaded)
+                || last_net_reported != Some(net_bytes_in)
+                || stale
+            {
+                last_payload_reported = Some(bytes_downloaded);
+                last_net_reported = Some(net_bytes_in);
+                last_emit = Instant::now();
+                let session = Some(session_b64(&state.session));
+                write_download_progress(out, session, bytes_downloaded, bytes_total, net_bytes_in)?;
+            }
+            Ok(())
+        };
+
+    // Emit progress again now that we know the total file size; also captures bytes spent on the
+    // metadata fetch above.
+    maybe_emit(len, bytes_total, out)?;
+
     let mut download = state
         .client
         .iter_download(&media)
         .chunk_size(chunk_size_i32)
         .skip_chunks((len / chunk_size) as i32);
 
-    let clamp_total = |n: u64| -> u64 {
-        if bytes_total > 0 {
-            n.min(bytes_total)
-        } else {
-            n
-        }
-    };
+    let mut interval =
+        tokio::time::interval(Duration::from_millis(DOWNLOAD_PROGRESS_MIN_INTERVAL_MS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    let mut last_reported = clamp_total(len);
-    let mut last_emit = Instant::now();
-    let session = Some(session_b64(&state.session));
-    write_download_progress(out, session, last_reported, bytes_total)?;
+    loop {
+        // Apply a per-chunk timeout, but keep emitting progress while waiting.
+        let fut = download.next();
+        tokio::pin!(fut);
+        let deadline = tokio::time::sleep(Duration::from_secs(DOWNLOAD_CHUNK_TIMEOUT_SECS));
+        tokio::pin!(deadline);
 
-    while let Some(chunk) = timeout(
-        Duration::from_secs(DOWNLOAD_CHUNK_TIMEOUT_SECS),
-        download.next(),
-    )
-    .await
-    .map_err(|_| format!("download chunk timed out after {DOWNLOAD_CHUNK_TIMEOUT_SECS}s"))?
-    .map_err(|e| format!("download next failed: {e}"))?
-    {
+        let next: Option<Vec<u8>> = loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    maybe_emit(len, bytes_total, out)?;
+                }
+                _ = &mut deadline => {
+                    return Err(format!("download chunk timed out after {DOWNLOAD_CHUNK_TIMEOUT_SECS}s"));
+                }
+                res = &mut fut => {
+                    break res.map_err(|e| format!("download next failed: {e}"))?;
+                }
+            }
+        };
+
+        let Some(chunk) = next else {
+            break;
+        };
         file.write_all(&chunk)
             .map_err(|e| format!("cache file write failed: {e}"))?;
 
         len = len.saturating_add(chunk.len() as u64);
-        let now = Instant::now();
-        let stale = now.duration_since(last_emit)
-            >= Duration::from_millis(DOWNLOAD_PROGRESS_MIN_INTERVAL_MS);
-        let report_now = clamp_total(len);
-        if stale && report_now != last_reported {
-            last_reported = report_now;
-            last_emit = now;
-            let session = Some(session_b64(&state.session));
-            write_download_progress(out, session, last_reported, bytes_total)?;
-        }
+        maybe_emit(len, bytes_total, out)?;
     }
 
-    let final_len = clamp_total(len);
-    if final_len != last_reported {
-        let session = Some(session_b64(&state.session));
-        write_download_progress(out, session, final_len, bytes_total)?;
-    }
+    // Final progress sample (in case the loop ended without a tick).
+    maybe_emit(len, bytes_total, out)?;
     file.sync_all()
         .map_err(|e| format!("cache file sync failed: {e}"))?;
 
@@ -1600,11 +1679,9 @@ fn extract_document_id_and_size(media: &Media) -> Result<(i64, i64, u64), String
         .ok_or_else(|| "missing document in media".to_string())?;
 
     match doc {
-        tl::enums::Document::Document(d) => Ok((
-            d.id,
-            d.access_hash,
-            u64::try_from(d.size).unwrap_or(0),
-        )),
+        tl::enums::Document::Document(d) => {
+            Ok((d.id, d.access_hash, u64::try_from(d.size).unwrap_or(0)))
+        }
         tl::enums::Document::Empty(_) => Err("unexpected empty document".to_string()),
     }
 }

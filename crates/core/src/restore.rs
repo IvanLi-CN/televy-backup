@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,8 @@ pub async fn restore_snapshot_with<S: Storage>(
     .await?;
 
     let mut bytes_downloaded = stats.bytes_downloaded;
+    let mut net_bytes_downloaded = stats.net_bytes_downloaded.unwrap_or(0);
+    let have_net_bytes_downloaded = Arc::new(AtomicBool::new(stats.net_bytes_downloaded.is_some()));
 
     ensure_empty_dir(&config.target_path)?;
 
@@ -97,6 +99,8 @@ pub async fn restore_snapshot_with<S: Storage>(
         &config.master_key,
         options.cancel,
         &mut bytes_downloaded,
+        &mut net_bytes_downloaded,
+        Arc::clone(&have_net_bytes_downloaded),
         options.progress,
     )
     .await?;
@@ -148,6 +152,8 @@ pub async fn verify_snapshot_with<S: Storage>(
     .await?;
 
     let mut bytes_downloaded = stats.bytes_downloaded;
+    let mut net_bytes_downloaded = stats.net_bytes_downloaded.unwrap_or(0);
+    let have_net_bytes_downloaded = Arc::new(AtomicBool::new(stats.net_bytes_downloaded.is_some()));
 
     let pool = open_existing_index_db(&config.index_db_path).await?;
     ensure_snapshot_present(&pool, &config.snapshot_id).await?;
@@ -159,6 +165,8 @@ pub async fn verify_snapshot_with<S: Storage>(
         &config.master_key,
         options.cancel,
         &mut bytes_downloaded,
+        &mut net_bytes_downloaded,
+        Arc::clone(&have_net_bytes_downloaded),
         options.progress,
     )
     .await?;
@@ -213,6 +221,8 @@ async fn restore_files<S: Storage>(
     master_key: &[u8; 32],
     cancel: Option<&CancellationToken>,
     bytes_downloaded: &mut u64,
+    net_bytes_downloaded: &mut u64,
+    have_net_bytes_downloaded: Arc<AtomicBool>,
     progress: Option<&dyn ProgressSink>,
 ) -> Result<RestoreResult> {
     let mut result = RestoreResult::default();
@@ -282,19 +292,31 @@ async fn restore_files<S: Storage>(
             let plain = match object_ref {
                 ChunkObjectRef::Direct { object_id } => {
                     let base_total = *bytes_downloaded;
+                    let base_net_total = *net_bytes_downloaded;
                     // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache) is
                     // distinguishable from "no progress callbacks were ever emitted".
                     let latest = Arc::new(AtomicU64::new(u64::MAX));
                     let latest_for_cb = latest.clone();
+                    let latest_net = Arc::new(AtomicU64::new(u64::MAX));
+                    let latest_net_for_cb = latest_net.clone();
+                    let have_net_for_cb = Arc::clone(&have_net_bytes_downloaded);
                     let framed = storage
                         .download_document_with_progress(
                             &object_id,
-                            Some(Box::new(move |n| {
+                            Some(Box::new(move |p| {
+                                let n = p.bytes;
                                 latest_for_cb.store(n, Ordering::Relaxed);
+                                if let Some(net) = p.net_bytes {
+                                    latest_net_for_cb.store(net, Ordering::Relaxed);
+                                    have_net_for_cb.store(true, Ordering::Relaxed);
+                                }
                                 if let Some(sink) = progress {
                                     sink.on_progress(TaskProgress {
                                         phase: "download".to_string(),
                                         bytes_downloaded: Some(base_total.saturating_add(n)),
+                                        net_bytes_downloaded: p
+                                            .net_bytes
+                                            .map(|net| base_net_total.saturating_add(net)),
                                         ..TaskProgress::default()
                                     });
                                 }
@@ -336,6 +358,10 @@ async fn restore_files<S: Storage>(
                         framed.len() as u64
                     };
                     *bytes_downloaded = base_total.saturating_add(actual);
+                    let streamed_net = latest_net.load(Ordering::Relaxed);
+                    if streamed_net != u64::MAX {
+                        *net_bytes_downloaded = base_net_total.saturating_add(streamed_net);
+                    }
                     decrypt_framed(master_key, chunk_hash.as_bytes(), &framed).map_err(|e| {
                         Error::Crypto {
                             message: format!(
@@ -355,22 +381,34 @@ async fn restore_files<S: Storage>(
                         }
                         _ => {
                             let base_total = *bytes_downloaded;
+                            let base_net_total = *net_bytes_downloaded;
                             // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from
                             // cache) is distinguishable from "no progress callbacks were ever
                             // emitted".
                             let latest = Arc::new(AtomicU64::new(u64::MAX));
                             let latest_for_cb = latest.clone();
+                            let latest_net = Arc::new(AtomicU64::new(u64::MAX));
+                            let latest_net_for_cb = latest_net.clone();
+                            let have_net_for_cb = Arc::clone(&have_net_bytes_downloaded);
                             let bytes = storage
                                 .download_document_with_progress(
                                     &pack_object_id,
-                                    Some(Box::new(move |n| {
+                                    Some(Box::new(move |p| {
+                                        let n = p.bytes;
                                         latest_for_cb.store(n, Ordering::Relaxed);
+                                        if let Some(net) = p.net_bytes {
+                                            latest_net_for_cb.store(net, Ordering::Relaxed);
+                                            have_net_for_cb.store(true, Ordering::Relaxed);
+                                        }
                                         if let Some(sink) = progress {
                                             sink.on_progress(TaskProgress {
                                                 phase: "download".to_string(),
                                                 bytes_downloaded: Some(
                                                     base_total.saturating_add(n),
                                                 ),
+                                                net_bytes_downloaded: p
+                                                    .net_bytes
+                                                    .map(|net| base_net_total.saturating_add(net)),
                                                 ..TaskProgress::default()
                                             });
                                         }
@@ -410,6 +448,10 @@ async fn restore_files<S: Storage>(
                                 bytes.len() as u64
                             };
                             *bytes_downloaded = base_total.saturating_add(actual);
+                            let streamed_net = latest_net.load(Ordering::Relaxed);
+                            if streamed_net != u64::MAX {
+                                *net_bytes_downloaded = base_net_total.saturating_add(streamed_net);
+                            }
                             pack_cache = Some((pack_object_id.clone(), bytes));
                             pack_cache.as_ref().expect("just set").1.as_slice()
                         }
@@ -461,7 +503,11 @@ async fn restore_files<S: Storage>(
                     chunks_done: Some(result.chunks_downloaded),
                     bytes_read: Some(result.bytes_written),
                     bytes_uploaded: None,
+                    net_bytes_uploaded: None,
                     bytes_downloaded: Some(*bytes_downloaded),
+                    net_bytes_downloaded: have_net_bytes_downloaded
+                        .load(Ordering::Relaxed)
+                        .then_some(*net_bytes_downloaded),
                     bytes_deduped: None,
                 });
             }
@@ -482,14 +528,18 @@ async fn restore_files<S: Storage>(
 
         if let Some(sink) = progress {
             sink.on_progress(TaskProgress {
-                phase: "verify".to_string(),
+                phase: "restore".to_string(),
                 files_total: None,
                 files_done: Some(result.files_restored),
                 chunks_total: None,
                 chunks_done: Some(result.chunks_downloaded),
                 bytes_read: Some(result.bytes_written),
                 bytes_uploaded: None,
+                net_bytes_uploaded: None,
                 bytes_downloaded: Some(*bytes_downloaded),
+                net_bytes_downloaded: have_net_bytes_downloaded
+                    .load(Ordering::Relaxed)
+                    .then_some(*net_bytes_downloaded),
                 bytes_deduped: None,
             });
         }
@@ -506,6 +556,8 @@ async fn verify_chunks<S: Storage>(
     master_key: &[u8; 32],
     cancel: Option<&CancellationToken>,
     bytes_downloaded: &mut u64,
+    net_bytes_downloaded: &mut u64,
+    have_net_bytes_downloaded: Arc<AtomicBool>,
     progress: Option<&dyn ProgressSink>,
 ) -> Result<VerifyResult> {
     let mut result = VerifyResult::default();
@@ -544,19 +596,31 @@ async fn verify_chunks<S: Storage>(
         let plain = match object_ref {
             ChunkObjectRef::Direct { object_id } => {
                 let base_total = *bytes_downloaded;
+                let base_net_total = *net_bytes_downloaded;
                 // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache) is
                 // distinguishable from "no progress callbacks were ever emitted".
                 let latest = Arc::new(AtomicU64::new(u64::MAX));
                 let latest_for_cb = latest.clone();
+                let latest_net = Arc::new(AtomicU64::new(u64::MAX));
+                let latest_net_for_cb = latest_net.clone();
+                let have_net_for_cb = Arc::clone(&have_net_bytes_downloaded);
                 let framed = storage
                     .download_document_with_progress(
                         &object_id,
-                        Some(Box::new(move |n| {
+                        Some(Box::new(move |p| {
+                            let n = p.bytes;
                             latest_for_cb.store(n, Ordering::Relaxed);
+                            if let Some(net) = p.net_bytes {
+                                latest_net_for_cb.store(net, Ordering::Relaxed);
+                                have_net_for_cb.store(true, Ordering::Relaxed);
+                            }
                             if let Some(sink) = progress {
                                 sink.on_progress(TaskProgress {
                                     phase: "chunks".to_string(),
                                     bytes_downloaded: Some(base_total.saturating_add(n)),
+                                    net_bytes_downloaded: p
+                                        .net_bytes
+                                        .map(|net| base_net_total.saturating_add(net)),
                                     ..TaskProgress::default()
                                 });
                             }
@@ -596,6 +660,10 @@ async fn verify_chunks<S: Storage>(
                     framed.len() as u64
                 };
                 *bytes_downloaded = base_total.saturating_add(actual);
+                let streamed_net = latest_net.load(Ordering::Relaxed);
+                if streamed_net != u64::MAX {
+                    *net_bytes_downloaded = base_net_total.saturating_add(streamed_net);
+                }
                 decrypt_framed(master_key, chunk_hash.as_bytes(), &framed).map_err(|e| {
                     Error::Crypto {
                         message: format!(
@@ -615,19 +683,31 @@ async fn verify_chunks<S: Storage>(
                     }
                     _ => {
                         let base_total = *bytes_downloaded;
+                        let base_net_total = *net_bytes_downloaded;
                         // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache)
                         // is distinguishable from "no progress callbacks were ever emitted".
                         let latest = Arc::new(AtomicU64::new(u64::MAX));
                         let latest_for_cb = latest.clone();
+                        let latest_net = Arc::new(AtomicU64::new(u64::MAX));
+                        let latest_net_for_cb = latest_net.clone();
+                        let have_net_for_cb = Arc::clone(&have_net_bytes_downloaded);
                         let bytes = storage
                             .download_document_with_progress(
                                 &pack_object_id,
-                                Some(Box::new(move |n| {
+                                Some(Box::new(move |p| {
+                                    let n = p.bytes;
                                     latest_for_cb.store(n, Ordering::Relaxed);
+                                    if let Some(net) = p.net_bytes {
+                                        latest_net_for_cb.store(net, Ordering::Relaxed);
+                                        have_net_for_cb.store(true, Ordering::Relaxed);
+                                    }
                                     if let Some(sink) = progress {
                                         sink.on_progress(TaskProgress {
                                             phase: "chunks".to_string(),
                                             bytes_downloaded: Some(base_total.saturating_add(n)),
+                                            net_bytes_downloaded: p
+                                                .net_bytes
+                                                .map(|net| base_net_total.saturating_add(net)),
                                             ..TaskProgress::default()
                                         });
                                     }
@@ -667,6 +747,10 @@ async fn verify_chunks<S: Storage>(
                             bytes.len() as u64
                         };
                         *bytes_downloaded = base_total.saturating_add(actual);
+                        let streamed_net = latest_net.load(Ordering::Relaxed);
+                        if streamed_net != u64::MAX {
+                            *net_bytes_downloaded = base_net_total.saturating_add(streamed_net);
+                        }
                         pack_cache = Some((pack_object_id.clone(), bytes));
                         pack_cache.as_ref().expect("just set").1.as_slice()
                     }
@@ -707,7 +791,11 @@ async fn verify_chunks<S: Storage>(
                 chunks_done: Some(result.chunks_checked),
                 bytes_read: Some(result.bytes_checked),
                 bytes_uploaded: None,
+                net_bytes_uploaded: None,
                 bytes_downloaded: Some(*bytes_downloaded),
+                net_bytes_downloaded: have_net_bytes_downloaded
+                    .load(Ordering::Relaxed)
+                    .then_some(*net_bytes_downloaded),
                 bytes_deduped: None,
             });
         }
