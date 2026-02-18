@@ -41,7 +41,9 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
     // Use streaming progress when the storage supports it so UI bandwidth indicators don't
     // "fall to zero" during long downloads (e.g. large remote index parts).
     let base_total = bytes_downloaded;
-    let latest = Arc::new(AtomicU64::new(0));
+    // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache) is distinguishable
+    // from "no progress callbacks were ever emitted".
+    let latest = Arc::new(AtomicU64::new(u64::MAX));
     let latest_for_cb = Arc::clone(&latest);
     let manifest_enc = storage
         .download_document_with_progress(
@@ -69,7 +71,7 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
             e
         })?;
     let streamed = latest.load(Ordering::Relaxed);
-    let actual = if streamed > 0 {
+    let actual = if streamed != u64::MAX {
         streamed
     } else {
         manifest_enc.len() as u64
@@ -129,7 +131,9 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
         }
 
         let base_total = bytes_downloaded;
-        let latest = Arc::new(AtomicU64::new(0));
+        // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache) is
+        // distinguishable from "no progress callbacks were ever emitted".
+        let latest = Arc::new(AtomicU64::new(u64::MAX));
         let latest_for_cb = Arc::clone(&latest);
         let part_enc = storage
             .download_document_with_progress(
@@ -161,7 +165,7 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
                 }
             })?;
         let streamed = latest.load(Ordering::Relaxed);
-        let actual = if streamed > 0 {
+        let actual = if streamed != u64::MAX {
             streamed
         } else {
             part_enc.len() as u64

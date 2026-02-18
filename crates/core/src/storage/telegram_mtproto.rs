@@ -695,6 +695,10 @@ impl MtProtoHelper {
     ) -> Result<Vec<u8>> {
         self.send_json(&Request::Download(req))?;
         let mut saw_progress_event = false;
+        // The helper may resume from an on-disk cache and emit `bytesDownloaded` starting at the
+        // cached length (non-zero). For UI bandwidth indicators we want "bytes downloaded in this
+        // invocation" so we normalize the progress stream to start at 0.
+        let mut progress_base: Option<u64> = None;
         let env = loop {
             let env = self.read_json_line()?;
             self.apply_session(&env)?;
@@ -717,7 +721,8 @@ impl MtProtoHelper {
                     env.data.get("bytesDownloaded").and_then(|v| v.as_u64()),
                     on_progress.as_mut(),
                 ) {
-                    (**cb)(bytes);
+                    let base = *progress_base.get_or_insert(bytes);
+                    (**cb)(bytes.saturating_sub(base));
                 }
                 continue;
             }

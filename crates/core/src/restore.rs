@@ -282,7 +282,9 @@ async fn restore_files<S: Storage>(
             let plain = match object_ref {
                 ChunkObjectRef::Direct { object_id } => {
                     let base_total = *bytes_downloaded;
-                    let latest = Arc::new(AtomicU64::new(0));
+                    // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache) is
+                    // distinguishable from "no progress callbacks were ever emitted".
+                    let latest = Arc::new(AtomicU64::new(u64::MAX));
                     let latest_for_cb = latest.clone();
                     let framed = storage
                         .download_document_with_progress(
@@ -328,7 +330,7 @@ async fn restore_files<S: Storage>(
                             }
                         })?;
                     let streamed = latest.load(Ordering::Relaxed);
-                    let actual = if streamed > 0 {
+                    let actual = if streamed != u64::MAX {
                         streamed
                     } else {
                         framed.len() as u64
@@ -353,7 +355,10 @@ async fn restore_files<S: Storage>(
                         }
                         _ => {
                             let base_total = *bytes_downloaded;
-                            let latest = Arc::new(AtomicU64::new(0));
+                            // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from
+                            // cache) is distinguishable from "no progress callbacks were ever
+                            // emitted".
+                            let latest = Arc::new(AtomicU64::new(u64::MAX));
                             let latest_for_cb = latest.clone();
                             let bytes = storage
                                 .download_document_with_progress(
@@ -399,7 +404,7 @@ async fn restore_files<S: Storage>(
                                     }
                                 })?;
                             let streamed = latest.load(Ordering::Relaxed);
-                            let actual = if streamed > 0 {
+                            let actual = if streamed != u64::MAX {
                                 streamed
                             } else {
                                 bytes.len() as u64
@@ -539,7 +544,9 @@ async fn verify_chunks<S: Storage>(
         let plain = match object_ref {
             ChunkObjectRef::Direct { object_id } => {
                 let base_total = *bytes_downloaded;
-                let latest = Arc::new(AtomicU64::new(0));
+                // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache) is
+                // distinguishable from "no progress callbacks were ever emitted".
+                let latest = Arc::new(AtomicU64::new(u64::MAX));
                 let latest_for_cb = latest.clone();
                 let framed = storage
                     .download_document_with_progress(
@@ -583,7 +590,7 @@ async fn verify_chunks<S: Storage>(
                         }
                     })?;
                 let streamed = latest.load(Ordering::Relaxed);
-                let actual = if streamed > 0 {
+                let actual = if streamed != u64::MAX {
                     streamed
                 } else {
                     framed.len() as u64
@@ -608,7 +615,9 @@ async fn verify_chunks<S: Storage>(
                     }
                     _ => {
                         let base_total = *bytes_downloaded;
-                        let latest = Arc::new(AtomicU64::new(0));
+                        // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache)
+                        // is distinguishable from "no progress callbacks were ever emitted".
+                        let latest = Arc::new(AtomicU64::new(u64::MAX));
                         let latest_for_cb = latest.clone();
                         let bytes = storage
                             .download_document_with_progress(
@@ -652,7 +661,7 @@ async fn verify_chunks<S: Storage>(
                                 }
                             })?;
                         let streamed = latest.load(Ordering::Relaxed);
-                        let actual = if streamed > 0 {
+                        let actual = if streamed != u64::MAX {
                             streamed
                         } else {
                             bytes.len() as u64

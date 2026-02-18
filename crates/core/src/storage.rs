@@ -98,6 +98,10 @@ pub trait Storage {
         bytes: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 
+    /// Upload a document with best-effort progress reporting.
+    ///
+    /// Progress callback semantics: the argument is the cumulative number of bytes uploaded so far
+    /// for this invocation (monotonic; starts at 0).
     fn upload_document_with_progress<'a>(
         &'a self,
         filename: &'a str,
@@ -113,6 +117,10 @@ pub trait Storage {
         object_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>>;
 
+    /// Download a document with best-effort progress reporting.
+    ///
+    /// Progress callback semantics: the argument is the cumulative number of bytes downloaded so
+    /// far for this invocation (monotonic; starts at 0).
     fn download_document_with_progress<'a>(
         &'a self,
         object_id: &'a str,
