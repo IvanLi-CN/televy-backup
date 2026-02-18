@@ -24,13 +24,12 @@ The macOS popover “dashboard” UI is driven by a single snapshot schema (`Sta
     - `generatedAt` is used for stale detection in the UI.
     - `global.*Total` and `targets[].upTotal` are **session totals** (UI/stream start → now) and are not persisted.
     - Rate semantics:
-      - When available, `bytesPerSecond` rates prefer **wire bytes** observed by the storage provider (e.g. MTProto helper socket bytes) so the UI stays responsive even while a single long RPC is in flight.
-      - Fallback: rates are derived from **payload** progress counters (`progress.bytesUploaded` / `progress.bytesDownloaded`).
-      - `targets[].up.bytesPerSecond` is the daemon's estimate of the upload rate (wire bytes preferred; payload bytes as fallback).
+      - `bytesPerSecond` rates are derived from **payload** progress counters (`progress.bytesUploaded` / `progress.bytesDownloaded`).
+      - `targets[].up.bytesPerSecond` is the daemon's estimate of the upload rate.
       - `global.up.bytesPerSecond` is a best-effort sum across targets (typically only one target runs at a time).
       - `global.down.bytesPerSecond` is the daemon's estimate of the download rate (meaningful for restore/verify; usually `0`/`null` during backup).
       - Rates are computed from a rolling 1s window sampled at progress time, with interpolation to avoid "one-tick" spikes when progress updates are coarse.
-      - Wire-byte rates may exceed payload rates due to protocol overhead, retries, and buffering; this is expected.
+      - Note: some storage providers may also emit best-effort **wire byte** counters (e.g. MTProto socket bytes) in task progress, but these can get ahead due to kernel buffering and should not be used as the primary "last 1s" bandwidth indicator.
 - **Fallback** (daemon → file): `status.json` written by `televybackupd` via atomic write + rename.
   - Path: `$TELEVYBACKUP_DATA_DIR/status/status.json`.
 - **Transport** (CLI): `televybackup --json status stream` emits NDJSON, one `status.snapshot` per line.

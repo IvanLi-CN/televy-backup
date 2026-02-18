@@ -8,7 +8,7 @@
 
 ## 已确认决策（Decisions, frozen）
 
-- session totals（Up/Down）采用**业务层口径**（bytesUploaded/bytesDownloaded）；实时速率（bytesPerSecond）优先使用传输层 wire bytes（若 provider 可提供，如 MTProto helper socket bytes），否则回退为业务层 bytesUploaded/bytesDownloaded。
+- session totals（Up/Down）采用**业务层口径**（bytesUploaded/bytesDownloaded）；实时速率（bytesPerSecond）采用**业务层口径**（bytesUploaded/bytesDownloaded 的 1s 窗口变化率，且至少每秒刷新）。
 - Dev 视图对所有用户可见（不做隐藏开关/手势）。
 - Popover 尺寸：宽度固定 `360`；高度按内容自适应，最大高度为 `720`（高宽比 `2:1` 的上限）。当 targets 列表溢出时，列表区域滚动承载长列表，header/global 保持可见（或等价可用性设计）。
 - Targets 行仅展示**上行**（业务口径 bytesUploaded）与 last run 概要；不展示 per-target 下行字段（避免在 backup 场景下误导）。last run 次行默认展示 `bytesUploaded`；当 `bytesUploaded=0` 且 `bytesDeduped>0` 时，展示 `saved bytesDeduped`（可附带 `filesIndexed`）。
@@ -105,7 +105,7 @@
 - `≥ 100 MB/s`：0 位小数。
 - “抖动控制”：速率展示采用滑动窗口均值（默认 1.0s 窗口）+ 限制最小显示步进（例如 0.1 MB/s）。
 - 语义（速率口径）：
-  - Up/Down：优先 wire bytes（如 MTProto helper socket bytes），否则回退为业务 bytesUploaded/bytesDownloaded。
+  - Up/Down：基于业务 bytesUploaded/bytesDownloaded（payload bytes）。
   - Global `Up` / Target `Up`：Up 字节计数的变化率（upload to remote）。
   - Global `Down`：Down 字节计数的变化率（download from remote）。
 

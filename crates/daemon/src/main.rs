@@ -241,16 +241,19 @@ impl StatusRuntimeState {
             bytes_deduped: p.bytes_deduped,
         });
 
-        // Prefer wire bytes for realtime rates (stays responsive even when payload progress stalls).
-        // Fall back to payload bytes when the provider doesn't expose net stats.
-        if let Some(bytes) = p.net_bytes_uploaded.or(p.bytes_uploaded) {
+        // Prefer payload bytes for "last 1s" transfer rates.
+        //
+        // Wire-byte counters (socket writes/reads) can get ahead due to kernel buffering and cause
+        // brief spikes followed by misleading "0" periods while the OS drains buffers. Keep them
+        // as a fallback signal only when payload counters are unavailable.
+        if let Some(bytes) = p.bytes_uploaded.or(p.net_bytes_uploaded) {
             let at = Instant::now();
             t.up_total_bytes = Some(bytes);
             t.up_rate.observe(at, bytes);
             t.up_bps = Some(t.up_rate.rate_at(at, bytes));
         }
 
-        if let Some(bytes) = p.net_bytes_downloaded.or(p.bytes_downloaded) {
+        if let Some(bytes) = p.bytes_downloaded.or(p.net_bytes_downloaded) {
             let at = Instant::now();
             t.down_total_bytes = Some(bytes);
             t.down_rate.observe(at, bytes);
@@ -301,14 +304,14 @@ impl StatusRuntimeState {
             bytes_deduped: p.bytes_deduped,
         });
 
-        if let Some(bytes) = p.net_bytes_uploaded.or(p.bytes_uploaded) {
+        if let Some(bytes) = p.bytes_uploaded.or(p.net_bytes_uploaded) {
             t.up_total_bytes = Some(bytes);
             // Observe byte advances at the progress callback time to avoid attributing large
             // bursts to the much smaller status-tick cadence (which can cause brief spikes).
             t.up_rate.observe(Instant::now(), bytes);
         }
 
-        if let Some(bytes) = p.net_bytes_downloaded.or(p.bytes_downloaded) {
+        if let Some(bytes) = p.bytes_downloaded.or(p.net_bytes_downloaded) {
             t.down_total_bytes = Some(bytes);
             t.down_rate.observe(Instant::now(), bytes);
         }
