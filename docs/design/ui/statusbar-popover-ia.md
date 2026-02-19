@@ -2,14 +2,14 @@
 
 Design assets:
 
-- `docs/design/ui/statusbar-popover-dashboard/`（Overview / empty / Developer window）
+- `docs/design/ui/statusbar-popover-dashboard/`（Overview / empty / Diagnostics）
 - `docs/design/ui/settings-window/`（Settings window + popover minimal）
 
 ## Form factor
 
 - 形态：点击状态栏图标后出现的 popover（悬浮、不可太大）
 - 尺寸：宽度固定 `360`；高度按内容自适应，最大高度 `720`（高宽比 `2:1` 上限；targets 列表溢出时滚动承载）
-- 导航：popover 本身不提供 tabs；`Settings` 通过右上角齿轮按钮打开独立 Settings window（Dev 入口也在 Settings）
+- 导航：popover 本身不提供 tabs；`Settings` 通过右上角齿轮按钮打开独立 Settings window；排障入口在 Main window 的 `Diagnostics`（target detail）
 - 快捷键：支持 `⌘,` 打开 Settings window（符合 macOS 习惯）
 
 ## Overview（主视图）
@@ -36,11 +36,11 @@ Design assets:
   - 列表可滚动时：上下边缘渐隐提示仅在“未到顶/未到底”时显示（使用内容 alpha mask，避免遮罩染色）
 - Empty（targets=0）
   - 显示引导文案 + 主按钮 `Open Settings…`（跳转到 Settings 添加 targets）
-（注）Popover 不再承载 footer；连接/排障信息通过 header 状态与 Developer window 提供。
+（注）Popover 不再承载 footer；连接/排障信息通过 header 状态与 Main window Diagnostics 提供。
 
-## Dev（开发者视图）
+## Diagnostics（排障视图）
 
-- 入口：Settings window 提供 `Developer…` 入口（增加入口，不新增 Settings 页面），点击打开独立窗口；Popover 不承载 Dev 页面
+- 入口：Main window 的 target detail 提供 `History | Diagnostics` 分段；Popover 不承载 Diagnostics 页面（可通过 popover 的 main window 按钮打开主窗口）
 - Global：schemaVersion/source/generatedAt + 原始 up/down/totals + staleAge
 - Per-target：targetId/sourcePath/endpointId/enabled + state + progress 原始计数 + lastRun/errorCode
 - Activity：可见的工作活动时间线（快照更新、写入、进度推进、错误/告警等）

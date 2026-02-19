@@ -14,7 +14,7 @@
 - `popover-overview-empty.svg` / `popover-overview-empty.png`
   - Overview（empty）：当 `targets=0` 时的引导与跳转按钮（打开 Settings 添加 targets）。
 - `developer-window.svg` / `developer-window.png`
-  - Developer window：全局状态 + per-target 原始字段 + activity（用于排障）。
+  - Diagnostics（Main window target detail）：全局状态 + per-target 原始字段 + activity（用于排障；文件名保留为历史原因）。
 - `_preview-popover.html`
   - 本地预览页面（浏览器打开即可）。
 
@@ -26,7 +26,7 @@
 - 尺寸：宽度固定 `360`；高度按内容自适应，最大高度 `720`（高宽比 `2:1` 上限）；targets 溢出时区域滚动承载长列表（header/global 固定）。
 - Header actions：
   - `Backup now`（立即备份）：一键触发“立即备份”（详细行为见 Plan #0010；多 targets 时的默认策略需冻结）。
-  - `Settings…`（齿轮）：打开 Settings window（含 Developer… 入口）。
+  - `Settings…`（齿轮）：打开 Settings window。
 
 `Backup now` 默认策略（冻结）：
 
@@ -69,14 +69,12 @@
 - `Queued`：主行 = `Next <time>`；次行 = `—`
 - `Stale`：主行 = `Updated <age> ago`；次行 = `—`
 
-### 3) Dev：详细状态（尽量充分）
+### 3) Diagnostics：详细状态（尽量充分）
 
-- 入口：Settings window 提供“Developer…”入口（增加入口，不新增 Settings 页面），点击打开独立窗口
+- 入口：Main window 的 target detail 提供 `History | Diagnostics` 分段（Popover 不承载该页面）
 - Toolbar actions（右上角）：
   - `Copy JSON`：复制当前快照（含 global + 选中 target + activity）为 JSON 到剪贴板（用于快速贴到 issue/群里排障）。
   - `Reveal…`：在 Finder 中定位当前数据源文件（当 source 为 `status.json` 文件时可用；不可用则 disabled）。
-  - `Freeze` toggle：暂停/恢复实时刷新（暂停时不再应用新快照，便于人工检查字段；恢复后继续接收更新）。
-    - Icon（Iconify）：`tabler/player-pause`（可点击进入冻结） / `tabler/player-play`（可点击恢复实时）
 - Global:
   - `schemaVersion / generatedAt / source`（用于确认数据源）
   - `global.up/down` 与 totals（原始数值）

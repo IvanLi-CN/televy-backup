@@ -469,13 +469,6 @@ struct SettingsWindowRootView: View {
                     Label("Open logs", systemImage: "folder")
                 }
                 .help("Open logs folder in Finder")
-
-                Button {
-                    model.openDeveloperWindow()
-                } label: {
-                    Label("Developer…", systemImage: "wrench.and.screwdriver")
-                }
-        .help("Open Developer window")
             }
         }
         .onAppear {

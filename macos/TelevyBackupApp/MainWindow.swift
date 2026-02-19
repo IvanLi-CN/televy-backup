@@ -269,6 +269,15 @@ private struct TargetDetailView: View {
     @EnvironmentObject var model: AppModel
     let target: StatusTarget
 
+    private enum Tab: String, CaseIterable, Identifiable {
+        case history = "History"
+        case diagnostics = "Diagnostics"
+
+        var id: String { rawValue }
+    }
+
+    @State private var tab: Tab = .history
+
     private var runs: [RunLogSummary] {
         model.runHistory
             .filter { run in run.targetId == target.targetId }
@@ -296,8 +305,19 @@ private struct TargetDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            Picker("", selection: $tab) {
+                ForEach(Tab.allCases) { t in
+                    Text(t.rawValue).tag(t)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 320)
             Divider()
-            history
+            if tab == .history {
+                history
+            } else {
+                TargetDiagnosticsView(target: target)
+            }
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
