@@ -2,10 +2,10 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-02-19
 - Last: 2026-02-19
-- Notes:
+- Notes: PR #44
 
 ## 背景 / 问题陈述
 
@@ -63,7 +63,7 @@
 - Backup（Projects）：不再以 `sqlite error: pool timed out while waiting for an open connection` 作为最终失败原因；当 Telegram 真实失败时，最终错误码为 `telegram.unavailable`。
 - Backup（Sync）：遇到 `.syncthing*.tmp` 等瞬态 `NotFound` 不再失败。
 - Vault：当 `secrets.enc` 发生变化导致旧 vault key 失效时，daemon 能自动失效缓存并恢复；CLI verify 不再出现“立刻 crypto error”的死锁状态（除非用户确实无权限/无正确 key）。
-- 质量门槛：`cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-features` 全绿；并额外跑 `cargo test -p mtproto-helper`。
+- 质量门槛：`cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-features` 全绿；并额外跑 `cd crates/mtproto-helper && cargo test`（helper crate 不在 workspace 内）。
 
 ## Testing
 
@@ -72,16 +72,16 @@
   - FloodWait 解析新格式。
 - 集成/最小验证：
   - `cargo test --all-features`
-  - `cargo test -p mtproto-helper`
+  - `cd crates/mtproto-helper && cargo test`
 
 ## Milestones
 
-- [ ] core：远端索引下载错误分类修复 + 测试覆盖
-- [ ] core：扫描阶段容错（忽略瞬态 NotFound）+ 单测（非 flaky）
-- [ ] core：backup collect 批量写入 `chunk_objects`，避免 sqlite pool 超时 + 测试覆盖
-- [ ] helper：下载 retry+断点续传、FloodWait 解析增强、send_message 重试 + 单测
-- [ ] core+helper：helper init 协议与 config 扩展（`min_delay_ms`/`max_concurrent_uploads`）并打通 daemon/cli 创建点
-- [ ] daemon：Vault key 缓存可失效 + crypto 失败自愈（带护栏）+ 最小验证
+- [x] core：远端索引下载错误分类修复 + 测试覆盖
+- [x] core：扫描阶段容错（忽略瞬态 NotFound）+ 单测（非 flaky）
+- [x] core：backup collect 批量写入 `chunk_objects`，避免 sqlite pool 超时 + 测试覆盖
+- [x] helper：下载 retry+断点续传、FloodWait 解析增强、send_message 重试 + 单测
+- [x] core+helper：helper init 协议与 config 扩展（`min_delay_ms`/`max_concurrent_uploads`）并打通 daemon/cli 创建点
+- [x] daemon：Vault key 缓存可失效 + crypto 失败自愈（带护栏）+ 最小验证
 
 ## 风险与开放问题
 
@@ -92,4 +92,4 @@
 ## 变更记录 / Change log
 
 - 2026-02-19: 冻结范围与验收标准，准备进入实现。
-
+- 2026-02-19: 实装稳定性修复（index 错误分类、scan NotFound 容错、chunk_objects 批量落库、helper 下载/send_message 重试与节流、vault key cache 可失效），PR #44。
