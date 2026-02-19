@@ -10,7 +10,9 @@ use fastcdc::ronomon::FastCDC;
 use fastcdc::v2020::{ChunkData, Error as CdcError, MAXIMUM_MAX as V2020_MAXIMUM_MAX, StreamCDC};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
+use sqlx::pool::PoolConnection;
+use sqlx::sqlite::SqliteRow;
+use sqlx::{Connection, Row, Sqlite};
 use tracing::{debug, error};
 use walkdir::WalkDir;
 
@@ -37,6 +39,7 @@ const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
 const RONOMON_READ_CHUNK_BYTES: usize = 1024 * 1024;
 
 type CdcResult<T> = std::result::Result<T, CdcError>;
+type DbConn = PoolConnection<Sqlite>;
 
 #[derive(Debug, Clone)]
 pub struct ChunkingConfig {
@@ -729,10 +732,15 @@ pub async fn run_backup_with<S: Storage>(
     }
     drop(result_tx);
 
+    // Acquire a single dedicated SQLite connection for the entire backup pipeline. This avoids
+    // pool acquisition stalls/timeouts under heavy scan+upload workloads (especially for large
+    // `file_chunks` tables).
     let pool = open_index_db(&config.db_path).await?;
+    let mut conn: DbConn = pool.acquire().await?;
+    drop(pool);
 
     let scan_future = {
-        let pool = pool.clone();
+        let conn = &mut conn;
         let uploader = uploader.clone();
         let upload_tx = upload_tx.clone();
         let upload_tx_for_error = upload_tx.clone();
@@ -747,7 +755,8 @@ pub async fn run_backup_with<S: Storage>(
         let scan_done = Arc::clone(&scan_done);
         async move {
             let res = async {
-                let base_snapshot_id = latest_snapshot_for_source(&pool, &scan_source_path).await?;
+                let base_snapshot_id =
+                    latest_snapshot_for_source(conn, &scan_source_path).await?;
                 let snapshot_id = scan_snapshot_id
                     .clone()
                     .unwrap_or_else(|| format!("snp_{}", uuid::Uuid::new_v4()));
@@ -762,7 +771,7 @@ pub async fn run_backup_with<S: Storage>(
                 .bind(path_to_utf8(&scan_source_path)?)
                 .bind(&scan_label)
                 .bind(base_snapshot_id)
-                .execute(&pool)
+                .execute(&mut **conn)
                 .await?;
 
                 let mut result = BackupResult {
@@ -916,7 +925,7 @@ pub async fn run_backup_with<S: Storage>(
                     .bind(mtime_ms)
                     .bind(mode)
                     .bind(kind)
-                    .execute(&pool)
+                    .execute(&mut **conn)
                     .await?;
 
                     result.files_indexed += 1;
@@ -963,7 +972,7 @@ pub async fn run_backup_with<S: Storage>(
                         let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
 
                         let exists = chunk_object_exists_for_storage(
-                            &pool,
+                            conn,
                             storage,
                             provider,
                             &chunk_hash,
@@ -990,7 +999,7 @@ pub async fn run_backup_with<S: Storage>(
                             )
                             .bind(&chunk_hash)
                             .bind(chunk.data.len() as i64)
-                            .execute(&pool)
+                            .execute(&mut **conn)
                             .await?;
 
                             let blob = PackBlob {
@@ -1038,7 +1047,7 @@ pub async fn run_backup_with<S: Storage>(
                         .bind(&chunk_hash)
                         .bind(chunk.offset as i64)
                         .bind(chunk.length as i64)
-                        .execute(&pool)
+                        .execute(&mut **conn)
                         .await?;
 
                         if let Some(sink) = options.progress {
@@ -1268,7 +1277,7 @@ pub async fn run_backup_with<S: Storage>(
     let (snapshot_id, mut result, upload_started) = scan_res?;
 
     let upload_stats = upload_stats?;
-    record_chunk_objects_batch(&pool, &provider_owned, &upload_stats.chunk_objects).await?;
+    record_chunk_objects_batch(&mut conn, &provider_owned, &upload_stats.chunk_objects).await?;
     if let Some(err) = upload_stats.first_error {
         return Err(err);
     }
@@ -1310,7 +1319,7 @@ pub async fn run_backup_with<S: Storage>(
     let index_started = Instant::now();
     debug!(event = "phase.start", phase = "index", "phase.start");
     let manifest = upload_index(
-        &pool,
+        &mut conn,
         storage,
         &config,
         &snapshot_id,
@@ -1328,7 +1337,7 @@ pub async fn run_backup_with<S: Storage>(
     result.index_parts = manifest.parts.len() as u64;
     result.bytes_uploaded = uploaded_bytes.load(Ordering::Relaxed);
 
-    apply_retention(&pool, &config.source_path, config.keep_last_snapshots).await?;
+    apply_retention(&mut conn, &config.source_path, config.keep_last_snapshots).await?;
 
     debug!(
         event = "phase.finish",
@@ -1434,7 +1443,7 @@ impl PackState {
 }
 
 async fn record_chunk_objects_batch(
-    pool: &SqlitePool,
+    conn: &mut DbConn,
     provider: &str,
     chunk_objects: &[ChunkObjectMapping],
 ) -> Result<()> {
@@ -1442,7 +1451,7 @@ async fn record_chunk_objects_batch(
         return Ok(());
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = conn.begin().await?;
     for m in chunk_objects {
         sqlx::query(
             r#"
@@ -1464,7 +1473,7 @@ async fn record_chunk_objects_batch(
 }
 
 async fn apply_retention(
-    pool: &SqlitePool,
+    conn: &mut DbConn,
     source_path: &Path,
     keep_last_snapshots: u32,
 ) -> Result<()> {
@@ -1480,14 +1489,14 @@ async fn apply_retention(
     )
     .bind(source)
     .bind(keep_last_snapshots as i64)
-    .fetch_all(pool)
+    .fetch_all(&mut **conn)
     .await?;
 
     if rows.is_empty() {
         return Ok(());
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = conn.begin().await?;
     for row in rows {
         let snapshot_id: String = row.get("snapshot_id");
 
@@ -1537,7 +1546,7 @@ async fn apply_retention(
 }
 
 async fn latest_snapshot_for_source(
-    pool: &SqlitePool,
+    conn: &mut DbConn,
     source_path: &Path,
 ) -> Result<Option<String>> {
     let source = path_to_utf8(source_path)?;
@@ -1551,7 +1560,7 @@ async fn latest_snapshot_for_source(
         "#,
     )
     .bind(source)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **conn)
     .await?;
 
     Ok(row.map(|r| r.get::<String, _>("snapshot_id")))
@@ -1581,7 +1590,7 @@ fn tgmtproto_peer_from_object_id(object_id: &str) -> Option<String> {
 }
 
 async fn chunk_object_exists_for_storage<S: Storage>(
-    pool: &SqlitePool,
+    conn: &mut DbConn,
     storage: &S,
     provider: &str,
     chunk_hash: &str,
@@ -1596,7 +1605,7 @@ async fn chunk_object_exists_for_storage<S: Storage>(
     )
     .bind(provider)
     .bind(chunk_hash)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **conn)
     .await?;
 
     let Some(row) = row else {
@@ -1619,7 +1628,7 @@ async fn chunk_object_exists_for_storage<S: Storage>(
 
 #[allow(clippy::too_many_arguments)]
 async fn upload_index<S: Storage>(
-    pool: &SqlitePool,
+    conn: &mut DbConn,
     storage: &S,
     config: &BackupConfig,
     snapshot_id: &str,
@@ -1741,7 +1750,7 @@ async fn upload_index<S: Storage>(
         .bind(&object_id)
         .bind(part_len as i64)
         .bind(&part_hash)
-        .execute(pool)
+        .execute(&mut **conn)
         .await?;
 
         parts.push(IndexManifestPart {
@@ -1856,7 +1865,7 @@ async fn upload_index<S: Storage>(
     .bind(snapshot_id)
     .bind(provider)
     .bind(&manifest_object_id)
-    .execute(pool)
+    .execute(&mut **conn)
     .await?;
 
     Ok(manifest)
