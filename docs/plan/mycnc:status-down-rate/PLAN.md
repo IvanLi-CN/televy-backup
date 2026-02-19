@@ -65,8 +65,9 @@ Out:
 
 - [x] 进度上报支持 streaming：remote index 下载过程中持续更新 `bytes_downloaded`
 - [x] status 速率来源稳定：daemon 提供 1s window down rate；CLI `status stream` 不再覆盖 daemon 的 down rate
-- [ ] 手工验收：在 macOS UI 中观察 NETWORK Down（>=1Hz 刷新、无明显不可能尖峰）
+- [x] 手工验收：在 macOS UI 中观察 NETWORK Down（2Hz 刷新，±10%；无明显不可能尖峰；与 Activity Monitor 趋势正相关）
 
 ## 变更记录 / Change log
 
 - 2026-02-17：实现并创建 PR #43（替代/关闭了旧 PR #36）
+- 2026-02-19：完成手工验收（NETWORK Up/Down 2Hz 刷新，速率与系统监控趋势正相关）
