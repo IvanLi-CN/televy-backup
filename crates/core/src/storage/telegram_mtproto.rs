@@ -121,6 +121,8 @@ pub struct TelegramMtProtoStorageConfig {
     pub chat_id: String,
     pub session: Option<Vec<u8>>,
     pub cache_dir: PathBuf,
+    pub min_delay_ms: Option<u64>,
+    pub max_concurrent_uploads: Option<usize>,
     pub helper_path: Option<PathBuf>,
 }
 
@@ -131,6 +133,8 @@ pub struct TelegramMtProtoStorage {
     api_hash: String,
     bot_token: String,
     cache_dir: PathBuf,
+    min_delay_ms: Option<u64>,
+    max_concurrent_uploads: Option<usize>,
     helper_path: PathBuf,
     session: Mutex<Option<Vec<u8>>>,
     helper: Mutex<MtProtoHelper>,
@@ -151,6 +155,8 @@ impl TelegramMtProtoStorage {
         let bot_token = config.bot_token;
         let cache_dir = config.cache_dir;
         let chat_id = config.chat_id;
+        let min_delay_ms = config.min_delay_ms;
+        let max_concurrent_uploads = config.max_concurrent_uploads;
 
         let mut helper = MtProtoHelper::spawn(&helper_path)?;
         helper.init(InitRequest {
@@ -160,6 +166,8 @@ impl TelegramMtProtoStorage {
             chat_id: chat_id.clone(),
             session_b64,
             cache_dir: cache_dir.clone(),
+            min_delay_ms,
+            max_concurrent_uploads,
         })?;
 
         Ok(Self {
@@ -169,6 +177,8 @@ impl TelegramMtProtoStorage {
             api_hash,
             bot_token,
             cache_dir,
+            min_delay_ms,
+            max_concurrent_uploads,
             helper_path,
             session: Mutex::new(helper.session_bytes()),
             helper: Mutex::new(helper),
@@ -201,6 +211,8 @@ impl TelegramMtProtoStorage {
             chat_id: self.chat_id.clone(),
             session_b64,
             cache_dir: self.cache_dir.clone(),
+            min_delay_ms: self.min_delay_ms,
+            max_concurrent_uploads: self.max_concurrent_uploads,
         })?;
 
         *helper = new_helper;
@@ -218,29 +230,31 @@ impl TelegramMtProtoStorage {
     }
 
     fn with_helper<T>(&self, f: impl FnOnce(&mut MtProtoHelper) -> Result<T>) -> Result<T> {
-        let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
-            message: "mtproto helper lock poisoned".to_string(),
-        })?;
+        maybe_block_in_place(|| {
+            let mut helper = self.helper.lock().map_err(|_| Error::Telegram {
+                message: "mtproto helper lock poisoned".to_string(),
+            })?;
 
-        // Make sure we don't keep using a dead helper between runs.
-        self.ensure_helper_running_locked(&mut helper)?;
+            // Make sure we don't keep using a dead helper between runs.
+            self.ensure_helper_running_locked(&mut helper)?;
 
-        let res = f(&mut helper);
+            let res = f(&mut helper);
 
-        // Persist the latest session regardless of success/failure.
-        *self.session.lock().map_err(|_| Error::Telegram {
-            message: "mtproto helper session lock poisoned".to_string(),
-        })? = helper.session_bytes();
+            // Persist the latest session regardless of success/failure.
+            *self.session.lock().map_err(|_| Error::Telegram {
+                message: "mtproto helper session lock poisoned".to_string(),
+            })? = helper.session_bytes();
 
-        // If the helper process itself is unhealthy, respawn it so the next run can proceed
-        // without needing a full app/daemon restart.
-        if let Err(ref e) = res
-            && Self::should_respawn_helper_after(e)
-        {
-            let _ = self.replace_helper_locked(&mut helper);
-        }
+            // If the helper process itself is unhealthy, respawn it so the next run can proceed
+            // without needing a full app/daemon restart.
+            if let Err(ref e) = res
+                && Self::should_respawn_helper_after(e)
+            {
+                let _ = self.replace_helper_locked(&mut helper);
+            }
 
-        res
+            res
+        })
     }
 
     pub fn pinned_object_id(&self) -> Result<Option<String>> {
@@ -392,6 +406,20 @@ impl Storage for TelegramMtProtoStorage {
     }
 }
 
+fn maybe_block_in_place<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle)
+            if matches!(
+                handle.runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::MultiThread
+            ) =>
+        {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
+}
+
 fn default_helper_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let sibling = exe.with_file_name("televybackup-mtproto-helper");
@@ -489,6 +517,13 @@ struct InitRequest {
     session_b64: Option<String>,
     #[serde(rename = "cacheDir")]
     cache_dir: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "minDelayMs")]
+    min_delay_ms: Option<u64>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "maxConcurrentUploads"
+    )]
+    max_concurrent_uploads: Option<usize>,
 }
 
 #[derive(Debug)]

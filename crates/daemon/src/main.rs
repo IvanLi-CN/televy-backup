@@ -1045,13 +1045,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let secrets_path = televy_backup_core::secrets::secrets_path(&config_root);
     let mut secrets_file_exists = secrets_path.exists();
     let mut last_secrets_mtime = file_mtime(&secrets_path);
+    let mut last_secrets_crypto_error_mtime: Option<SystemTime> = None;
     let manual_trigger_path = data_root.join("control").join("backup-now");
     let mut manual_trigger_last_attempted_mtime: Option<SystemTime> = None;
     let initial_manual_trigger_mtime = file_mtime(&manual_trigger_path);
 
     // Vault key (Keychain on macOS) can block on user auth/permission. Load it in the background
     // so the daemon can still run its main loop (consume manual triggers, serve status IPC, etc).
-    let mut vault_key: Option<[u8; 32]> = VAULT_KEY_CACHE.get().copied();
+    let mut vault_key: Option<[u8; 32]> = get_cached_vault_key();
     let mut vault_key_loader: Option<tokio::task::JoinHandle<Result<[u8; 32], VaultKeyLoadError>>> =
         None;
     let mut vault_key_last_attempt: Option<Instant> = None;
@@ -1140,6 +1141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     secrets_store = None;
                     master_key = None;
                     api_hash = None;
+                    last_secrets_crypto_error_mtime = None;
                     storage_by_endpoint.clear();
 
                     tracing::info!(
@@ -1163,9 +1165,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // IMPORTANT: the vault IPC server may populate `VAULT_KEY_CACHE` independently; refresh
         // our local view so a successful `televybackup vault ensure` immediately unblocks runs.
         if vault_key.is_none()
-            && let Some(k) = VAULT_KEY_CACHE.get()
+            && let Some(k) = get_cached_vault_key()
         {
-            vault_key = Some(*k);
+            vault_key = Some(k);
             vault_key_last_error = None;
             if let Some(h) = vault_key_loader.take() {
                 h.abort();
@@ -1200,7 +1202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match vault_key_loader.take().unwrap().await {
                     Ok(Ok(key)) => {
                         vault_key = Some(key);
-                        let _ = VAULT_KEY_CACHE.set(key);
+                        set_cached_vault_key(key);
                         vault_key_last_error = None;
                     }
                     Ok(Err(e)) => {
@@ -1217,12 +1219,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // (Re)load secrets store and derived secrets once the vault key is ready.
-        if let Some(vault_key) = vault_key
-            && secrets_store.is_none()
+        if secrets_store.is_none()
+            && let Some(vault_key_bytes) = vault_key
         {
-            match televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key) {
+            match televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key_bytes) {
                 Ok(store) => {
                     secrets_store = Some(store);
+                    last_secrets_crypto_error_mtime = None;
+                }
+                Err(televy_backup_core::secrets::SecretsStoreError::Crypto) => {
+                    // `secrets.enc` may have been replaced/rotated while the daemon was running.
+                    // If we keep serving a stale cached vault key, the CLI/UI will be stuck with
+                    // `crypto error` until restart. Invalidate cache once per secrets mtime and
+                    // allow the existing Keychain retry guardrails to apply.
+                    if last_secrets_mtime.is_some()
+                        && last_secrets_mtime != last_secrets_crypto_error_mtime
+                    {
+                        tracing::warn!(
+                            event = "secrets.crypto_failed",
+                            path = %secrets_path.display(),
+                            "secrets.crypto_failed (clearing cached vault key)"
+                        );
+                        last_secrets_crypto_error_mtime = last_secrets_mtime;
+                        clear_cached_vault_key();
+                        vault_key = None;
+                        vault_key_last_error = None;
+                        vault_key_last_attempt = None;
+                        if let Some(h) = vault_key_loader.take() {
+                            h.abort();
+                        }
+                    } else {
+                        tracing::warn!(
+                            event = "secrets.crypto_failed",
+                            path = %secrets_path.display(),
+                            "secrets.crypto_failed"
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1474,6 +1506,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     chat_id: ep.chat_id.clone(),
                     session,
                     cache_dir,
+                    min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+                    max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
                     helper_path: None,
                 })
                 .await?;
@@ -1731,8 +1765,27 @@ fn default_data_dir() -> PathBuf {
 
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
 static CONFIG_ROOT_CACHE: OnceLock<PathBuf> = OnceLock::new();
-static VAULT_KEY_CACHE: OnceLock<[u8; 32]> = OnceLock::new();
+static VAULT_KEY_CACHE: OnceLock<Mutex<Option<[u8; 32]>>> = OnceLock::new();
 static VAULT_KEY_LOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub(crate) fn get_cached_vault_key() -> Option<[u8; 32]> {
+    let lock = VAULT_KEY_CACHE.get_or_init(|| Mutex::new(None));
+    lock.lock().ok().and_then(|g| *g)
+}
+
+pub(crate) fn set_cached_vault_key(key: [u8; 32]) {
+    let lock = VAULT_KEY_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut g) = lock.lock() {
+        *g = Some(key);
+    }
+}
+
+pub(crate) fn clear_cached_vault_key() {
+    let lock = VAULT_KEY_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(mut g) = lock.lock() {
+        *g = None;
+    }
+}
 
 fn get_secret_from_store(
     store: &televy_backup_core::secrets::SecretsStore,
@@ -1828,14 +1881,14 @@ pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error:
     //
     // We only return a cached key here. A background loader (spawned from `main`) is responsible
     // for eventually populating `VAULT_KEY_CACHE` when Keychain is available.
-    if let Some(key) = VAULT_KEY_CACHE.get() {
-        return Ok(*key);
+    if let Some(key) = get_cached_vault_key() {
+        return Ok(key);
     }
 
     // File-based backend (dev / keychain-disabled) is safe to load synchronously.
     if keychain_disabled() {
         let key = load_or_create_vault_key_uncached()?;
-        let _ = VAULT_KEY_CACHE.set(key);
+        set_cached_vault_key(key);
         return Ok(key);
     }
 

@@ -1844,6 +1844,8 @@ async fn settings_import_bundle_dry_run(
             chat_id: ep.chat_id.clone(),
             session: None,
             cache_dir,
+            min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+            max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
             helper_path: None,
         })
         .await
@@ -2116,6 +2118,8 @@ async fn settings_import_bundle_compare_folder(
         chat_id: endpoint.chat_id.clone(),
         session: None,
         cache_dir,
+        min_delay_ms: Some(endpoint.rate_limit.min_delay_ms as u64),
+        max_concurrent_uploads: Some(endpoint.rate_limit.max_concurrent_uploads as usize),
         helper_path: None,
     })
     .await
@@ -2408,6 +2412,8 @@ async fn settings_import_bundle_apply(
             chat_id: ep.chat_id.clone(),
             session: None,
             cache_dir,
+            min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+            max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
             helper_path: None,
         })
         .await
@@ -3202,6 +3208,8 @@ async fn telegram_validate(
         chat_id: ep.chat_id.clone(),
         session,
         cache_dir,
+        min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+        max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
         helper_path: None,
     })
     .await
@@ -3318,6 +3326,8 @@ async fn telegram_dialogs(
         chat_id: String::new(),
         session,
         cache_dir,
+        min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+        max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
         helper_path: None,
     })
     .await
@@ -3441,6 +3451,8 @@ async fn telegram_wait_chat(
         chat_id: String::new(),
         session,
         cache_dir,
+        min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+        max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
         helper_path: None,
     })
     .await
@@ -4188,6 +4200,8 @@ async fn backup_run(
             chat_id: ep.chat_id.clone(),
             session,
             cache_dir,
+            min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+            max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
             helper_path: None,
         })
         .await
@@ -4653,6 +4667,8 @@ async fn restore_run(
             chat_id: ep.chat_id.clone(),
             session,
             cache_dir,
+            min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+            max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
             helper_path: None,
         })
         .await
@@ -4815,6 +4831,8 @@ async fn restore_list_latest(
         chat_id: ep.chat_id.clone(),
         session,
         cache_dir,
+        min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+        max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
         helper_path: None,
     })
     .await
@@ -5088,6 +5106,8 @@ async fn restore_latest(
             chat_id: ep.chat_id.clone(),
             session,
             cache_dir,
+            min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+            max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
             helper_path: None,
         })
         .await
@@ -5479,6 +5499,8 @@ async fn verify_latest(
             chat_id: ep.chat_id.clone(),
             session,
             cache_dir,
+            min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+            max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
             helper_path: None,
         })
         .await
@@ -5769,6 +5791,8 @@ async fn verify_run(
             chat_id: ep.chat_id.clone(),
             session,
             cache_dir,
+            min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+            max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
             helper_path: None,
         })
         .await
