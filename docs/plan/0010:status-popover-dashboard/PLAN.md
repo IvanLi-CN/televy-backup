@@ -8,7 +8,7 @@
 
 ## 已确认决策（Decisions, frozen）
 
-- “实时上下行/累计流量”采用**业务层口径**（bytesUploaded/bytesDownloaded），不使用传输层（MTProto session bytes sent/recv）。
+- session totals（Up/Down）采用**业务层口径**（bytesUploaded/bytesDownloaded）；实时速率（bytesPerSecond）采用**业务层口径**（bytesUploaded/bytesDownloaded 的 1s 窗口变化率，且至少每秒刷新）。
 - Dev 视图对所有用户可见（不做隐藏开关/手势）。
 - Popover 尺寸：宽度固定 `360`；高度按内容自适应，最大高度为 `720`（高宽比 `2:1` 的上限）。当 targets 列表溢出时，列表区域滚动承载长列表，header/global 保持可见（或等价可用性设计）。
 - Targets 行仅展示**上行**（业务口径 bytesUploaded）与 last run 概要；不展示 per-target 下行字段（避免在 backup 场景下误导）。last run 次行默认展示 `bytesUploaded`；当 `bytesUploaded=0` 且 `bytesDeduped>0` 时，展示 `saved bytesDeduped`（可附带 `filesIndexed`）。
@@ -87,7 +87,7 @@
 - Dev：必须包含 Activity（工作活动时间线）：
   - 至少包含：快照更新、落盘写入、phase/进度推进、错误出现、stale 触发
   - 每条必须有时间戳（精确到毫秒或等价精度）
-- UI 更新延迟：运行中状态更新频率目标 `≥ 5Hz`（200ms 内可感知更新），静止态可降频（见 NFR）。
+- UI 更新延迟：运行中状态更新频率目标 `2Hz`（500ms 刷新；允许 ±10% 更新时间误差），静止态可降频（见 NFR）。
 - 缺失字段必须有稳定的回退显示（`—`/`unknown`），不得出现闪烁式跳变。
 
 ## 显示逻辑（Display Logic, frozen）
@@ -102,12 +102,12 @@
 - `B/s`（速率）：
   - `< 10 KB/s`：保留 1 位小数（提高可读性）；
   - `≥ 10 KB/s`：1 位小数；
-  - `≥ 100 MB/s`：0 位小数。
+- `≥ 100 MB/s`：0 位小数。
 - “抖动控制”：速率展示采用滑动窗口均值（默认 1.0s 窗口）+ 限制最小显示步进（例如 0.1 MB/s）。
-- 语义（业务口径）：
-  - Global `Up` = `bytesUploaded` 的变化率（upload to remote）。
-  - Global `Down` = `bytesDownloaded` 的变化率（download from remote）。
-  - Target `Up` = `bytesUploaded` 的变化率（upload to remote）。
+- 语义（速率口径）：
+  - Up/Down：基于业务 bytesUploaded/bytesDownloaded（payload bytes）。
+  - Global `Up` / Target `Up`：Up 字节计数的变化率（upload to remote）。
+  - Global `Down`：Down 字节计数的变化率（download from remote）。
 
 ### 2) 时间（last run / elapsed）
 
@@ -166,7 +166,7 @@
   Then UI 能在 targets 列表中观察到对应 target 进入 `Running` 并开始更新进度（或给出明确失败提示与可排障入口）。
 - Given 任一 target 正在运行且底层有持续进度更新，
   When 用户观察 Overview，
-  Then 进度条与关键数字以 `≥ 5Hz` 频率更新且无明显卡顿/滞后（人眼可感知延迟 ≤ 200ms 目标）。
+  Then 进度条与关键数字以 `2Hz` 频率更新且无明显卡顿/滞后（500ms 刷新；允许 ±10% 更新时间误差）。
 - Given 用户在 Settings window 点击 `Developer…` 打开独立 Developer window，
   When 查看全局与 per-target 字段，
   Then 能定位快照生成时间/数据源、每个 target 的原始字段（含 progress 计数与错误码），用于排障不依赖外部日志。
@@ -192,7 +192,7 @@
 
 ### Performance
 
-- 运行中 UI 更新目标：`≥ 5Hz`；静止态可降至 `1Hz`（以不显著增加功耗为准）。
+- 运行中 UI 更新目标：`2Hz`（500ms；允许 ±10% 更新时间误差）；静止态可降至 `1Hz`（以不显著增加功耗为准）。
 - 不允许通过高频启动短命 CLI 进程实现实时（避免 CPU/电量与抖动）；实时路径应为“单一长连接/长进程 stream”或等价机制。
 - daemon 侧状态快照（`status.json`）写入需要限频（建议上限 10Hz）并保证单条快照体积可控（避免 IO/CPU 抖动）。
 - Scroll UX：targets 列表在可滚动时，顶部/底部应提供渐隐提示；实现应使用“内容 alpha mask”（而非覆盖一层带颜色的遮罩），以兼容 popover 半透明材质。

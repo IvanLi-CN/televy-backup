@@ -52,9 +52,17 @@ struct TargetRuntime {
     progress: Option<Progress>,
     last_run: Option<TargetRunSummary>,
 
+    // When a CLI-run task reports progress to the daemon for UI status purposes, we keep the
+    // current task id here so stale updates don't clobber newer runs.
+    external_task_id: Option<String>,
+
     up_bps: Option<u64>,
     up_total_bytes: Option<u64>,
     up_rate: ByteRateWindow,
+
+    down_bps: Option<u64>,
+    down_total_bytes: Option<u64>,
+    down_rate: ByteRateWindow,
 }
 
 #[derive(Debug)]
@@ -85,9 +93,13 @@ impl StatusRuntimeState {
                     running_since: None,
                     progress: None,
                     last_run: None,
+                    external_task_id: None,
                     up_bps: None,
                     up_total_bytes: None,
                     up_rate: ByteRateWindow::default(),
+                    down_bps: None,
+                    down_total_bytes: None,
+                    down_rate: ByteRateWindow::default(),
                 },
             );
         }
@@ -114,9 +126,13 @@ impl StatusRuntimeState {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                external_task_id: None,
                 up_bps: None,
                 up_total_bytes: None,
                 up_rate: ByteRateWindow::default(),
+                down_bps: None,
+                down_total_bytes: None,
+                down_rate: ByteRateWindow::default(),
             });
 
             rt.label = if t.label.trim().is_empty() {
@@ -139,6 +155,7 @@ impl StatusRuntimeState {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
+        t.external_task_id = None;
         t.state = "running".to_string();
         let now = now_unix_ms();
         t.running_since = Some(now);
@@ -150,11 +167,119 @@ impl StatusRuntimeState {
             chunks_done: None,
             bytes_read: None,
             bytes_uploaded: Some(0),
+            bytes_downloaded: Some(0),
             bytes_deduped: Some(0),
         });
         t.up_total_bytes = Some(0);
         t.up_bps = Some(0);
         t.up_rate.reset(Instant::now(), 0);
+
+        t.down_total_bytes = Some(0);
+        t.down_bps = Some(0);
+        t.down_rate.reset(Instant::now(), 0);
+    }
+
+    fn mark_external_run_start(&mut self, target_id: &str, task_id: &str) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+
+        let now = now_unix_ms();
+        t.external_task_id = Some(task_id.to_string());
+        t.state = "running".to_string();
+        t.running_since = Some(now);
+        t.progress = Some(Progress {
+            phase: "running".to_string(),
+            files_total: None,
+            files_done: None,
+            chunks_total: None,
+            chunks_done: None,
+            bytes_read: Some(0),
+            bytes_uploaded: Some(0),
+            bytes_downloaded: Some(0),
+            bytes_deduped: Some(0),
+        });
+
+        // Reset upload baselines so status sampling can compute rates cleanly for CLI runs.
+        t.up_total_bytes = Some(0);
+        t.up_bps = Some(0);
+        t.up_rate.reset(Instant::now(), 0);
+
+        t.down_total_bytes = Some(0);
+        t.down_bps = Some(0);
+        t.down_rate.reset(Instant::now(), 0);
+    }
+
+    fn on_external_progress(&mut self, target_id: &str, task_id: &str, p: TaskProgress) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+
+        // Ignore stale updates from an earlier task.
+        match t.external_task_id.as_deref() {
+            Some(active) if active != task_id => return,
+            None => t.external_task_id = Some(task_id.to_string()),
+            _ => {}
+        }
+
+        if t.state != "running" {
+            t.state = "running".to_string();
+        }
+        if t.running_since.is_none() {
+            t.running_since = Some(now_unix_ms());
+        }
+
+        t.progress = Some(Progress {
+            phase: p.phase,
+            files_total: p.files_total,
+            files_done: p.files_done,
+            chunks_total: p.chunks_total,
+            chunks_done: p.chunks_done,
+            bytes_read: p.bytes_read,
+            bytes_uploaded: p.bytes_uploaded,
+            bytes_downloaded: p.bytes_downloaded,
+            bytes_deduped: p.bytes_deduped,
+        });
+
+        // Prefer payload bytes for "last 1s" transfer rates.
+        //
+        // Wire-byte counters (socket writes/reads) can get ahead due to kernel buffering and cause
+        // brief spikes followed by misleading "0" periods while the OS drains buffers. Keep them
+        // as a fallback signal only when payload counters are unavailable.
+        if let Some(bytes) = p.bytes_uploaded.or(p.net_bytes_uploaded) {
+            let at = Instant::now();
+            t.up_total_bytes = Some(bytes);
+            t.up_rate.observe(at, bytes);
+            t.up_bps = Some(t.up_rate.rate_at(at, bytes));
+        }
+
+        if let Some(bytes) = p.bytes_downloaded.or(p.net_bytes_downloaded) {
+            let at = Instant::now();
+            t.down_total_bytes = Some(bytes);
+            t.down_rate.observe(at, bytes);
+            t.down_bps = Some(t.down_rate.rate_at(at, bytes));
+        }
+    }
+
+    fn mark_external_run_finish(&mut self, target_id: &str, task_id: &str) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+        if t.external_task_id.as_deref() != Some(task_id) {
+            return;
+        }
+
+        t.external_task_id = None;
+        t.state = "idle".to_string();
+        t.running_since = None;
+        t.progress = None;
+        t.up_bps = None;
+        t.up_total_bytes = None;
+        t.up_rate.reset(Instant::now(), 0);
+
+        t.down_bps = None;
+        t.down_total_bytes = None;
+        t.down_rate.reset(Instant::now(), 0);
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -175,14 +300,20 @@ impl StatusRuntimeState {
             chunks_done: p.chunks_done,
             bytes_read: p.bytes_read,
             bytes_uploaded: p.bytes_uploaded,
+            bytes_downloaded: p.bytes_downloaded,
             bytes_deduped: p.bytes_deduped,
         });
 
-        if let Some(bytes) = p.bytes_uploaded {
+        if let Some(bytes) = p.bytes_uploaded.or(p.net_bytes_uploaded) {
             t.up_total_bytes = Some(bytes);
             // Observe byte advances at the progress callback time to avoid attributing large
             // bursts to the much smaller status-tick cadence (which can cause brief spikes).
             t.up_rate.observe(Instant::now(), bytes);
+        }
+
+        if let Some(bytes) = p.bytes_downloaded.or(p.net_bytes_downloaded) {
+            t.down_total_bytes = Some(bytes);
+            t.down_rate.observe(Instant::now(), bytes);
         }
     }
 
@@ -203,6 +334,9 @@ impl StatusRuntimeState {
         t.up_bps = None;
         t.up_total_bytes = None;
         t.up_rate = ByteRateWindow::default();
+        t.down_bps = None;
+        t.down_total_bytes = None;
+        t.down_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -231,6 +365,9 @@ impl StatusRuntimeState {
         t.up_bps = None;
         t.up_total_bytes = None;
         t.up_rate = ByteRateWindow::default();
+        t.down_bps = None;
+        t.down_total_bytes = None;
+        t.down_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -253,17 +390,23 @@ impl StatusRuntimeState {
             if t.state != "running" {
                 continue;
             }
-            let Some(bytes) = t.up_total_bytes else {
-                continue;
-            };
-
-            if t.up_rate.is_empty() {
-                t.up_rate.reset(now, bytes);
-                t.up_bps = Some(0);
-                continue;
+            if let Some(bytes) = t.up_total_bytes {
+                if t.up_rate.is_empty() {
+                    t.up_rate.reset(now, bytes);
+                    t.up_bps = Some(0);
+                } else {
+                    t.up_bps = Some(t.up_rate.rate_at(now, bytes));
+                }
             }
 
-            t.up_bps = Some(t.up_rate.rate_at(now, bytes));
+            if let Some(bytes) = t.down_total_bytes {
+                if t.down_rate.is_empty() {
+                    t.down_rate.reset(now, bytes);
+                    t.down_bps = Some(0);
+                } else {
+                    t.down_bps = Some(t.down_rate.rate_at(now, bytes));
+                }
+            }
         }
     }
 
@@ -271,6 +414,10 @@ impl StatusRuntimeState {
         let mut global_up_bps: u64 = 0;
         let mut global_up_total: u64 = 0;
         let mut have_global_up = false;
+
+        let mut global_down_bps: u64 = 0;
+        let mut global_down_total: u64 = 0;
+        let mut have_global_down = false;
 
         let mut out_targets = Vec::new();
         for id in &self.target_order {
@@ -284,6 +431,15 @@ impl StatusRuntimeState {
             if let Some(bytes) = t.up_total_bytes {
                 global_up_total = global_up_total.saturating_add(bytes);
                 have_global_up = true;
+            }
+
+            if let Some(bps) = t.down_bps {
+                global_down_bps = global_down_bps.saturating_add(bps);
+                have_global_down = true;
+            }
+            if let Some(bytes) = t.down_total_bytes {
+                global_down_total = global_down_total.saturating_add(bytes);
+                have_global_down = true;
             }
             out_targets.push(TargetState {
                 target_id: t.target_id.clone(),
@@ -318,12 +474,14 @@ impl StatusRuntimeState {
                     bytes_per_second: have_global_up.then_some(global_up_bps),
                 },
                 down: Rate {
-                    bytes_per_second: None,
+                    bytes_per_second: have_global_down.then_some(global_down_bps),
                 },
                 up_total: Counter {
                     bytes: have_global_up.then_some(global_up_total),
                 },
-                down_total: Counter { bytes: None },
+                down_total: Counter {
+                    bytes: have_global_down.then_some(global_down_total),
+                },
                 ui_uptime_seconds: None,
             },
             targets: out_targets,
@@ -402,8 +560,12 @@ impl ByteRateWindow {
         let cutoff = now.checked_sub(self.window).unwrap_or(now);
 
         // If the newest sample is older than the window, then no bytes advanced in the last window.
+        //
+        // Important: do NOT `reset(now, bytes_now)` here. When progress callbacks are coarse
+        // (e.g. whole-part/object boundaries), the status writer keeps ticking even while bytes
+        // are in-flight. If we reset the time base on every "no progress" window, the next byte
+        // jump gets attributed to a tiny dt and shows up as an impossible spike.
         if self.samples.back().is_some_and(|(t, _)| *t <= cutoff) {
-            self.reset(now, bytes_now);
             return 0;
         }
 
@@ -515,9 +677,13 @@ mod tests {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                external_task_id: None,
                 up_bps: None,
                 up_total_bytes: None,
                 up_rate: ByteRateWindow::default(),
+                down_bps: None,
+                down_total_bytes: None,
+                down_rate: ByteRateWindow::default(),
             },
         );
         st
@@ -532,6 +698,9 @@ mod tests {
             chunks_done: None,
             bytes_read: None,
             bytes_uploaded: Some(bytes_uploaded),
+            net_bytes_uploaded: None,
+            bytes_downloaded: None,
+            net_bytes_downloaded: None,
             bytes_deduped: None,
         }
     }
@@ -573,6 +742,26 @@ mod tests {
 
         // Over a 1s window at t=5s, interpolation estimates ~2000 B/s (10_000 / 5s).
         assert_eq!(w.rate_at(t0 + Duration::from_secs(5), 10_000), 2000);
+    }
+
+    #[test]
+    fn byte_rate_window_does_not_spike_after_idle_ticks() {
+        let t0 = Instant::now();
+        let mut w = ByteRateWindow::default();
+
+        w.reset(t0, 0);
+
+        // Simulate the status writer ticking frequently while bytes don't change.
+        // Historically, resetting the window on every "idle" tick caused the next byte jump to
+        // be attributed to a tiny dt and show up as an impossible one-tick spike.
+        for i in 1..=50 {
+            let now = t0 + Duration::from_millis(200 * i);
+            assert_eq!(w.rate_at(now, 0), 0);
+        }
+
+        // A big jump after 10s should be interpreted as a ~1 KB/s steady transfer, not 10 KB/s.
+        w.observe(t0 + Duration::from_secs(10), 10_000);
+        assert_eq!(w.rate_at(t0 + Duration::from_secs(10), 10_000), 1000);
     }
 
     #[test]
@@ -825,6 +1014,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         control_socket_path.clone(),
         config_root.clone(),
         control_ipc_settings.clone(),
+        status_state.clone(),
     ) {
         Ok(h) => Some(h),
         Err(e) => {

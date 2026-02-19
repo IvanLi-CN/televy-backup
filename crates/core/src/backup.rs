@@ -482,6 +482,8 @@ async fn process_upload_job<S: Storage>(
     provider: &str,
     limiter: &UploadRateLimiter,
     uploaded_bytes: &AtomicU64,
+    uploaded_net_bytes: &AtomicU64,
+    have_uploaded_net_bytes: &AtomicBool,
     job: UploadJob,
 ) -> Result<UploadOutcome> {
     match job {
@@ -494,15 +496,26 @@ async fn process_upload_job<S: Storage>(
             limiter.wait_turn().await;
             let filename = telegram_camouflaged_filename();
             let last_reported = Arc::new(AtomicU64::new(0));
+            let last_reported_net = Arc::new(AtomicU64::new(0));
             let last_for_cb = Arc::clone(&last_reported);
+            let last_net_for_cb = Arc::clone(&last_reported_net);
             let object_id = storage
                 .upload_document_with_progress(
                     &filename,
                     blob,
-                    Some(Box::new(move |n| {
+                    Some(Box::new(move |p| {
+                        let n = p.bytes;
                         let prev = last_for_cb.swap(n, Ordering::Relaxed);
                         if n > prev {
                             uploaded_bytes.fetch_add(n - prev, Ordering::Relaxed);
+                        }
+
+                        if let Some(net) = p.net_bytes {
+                            have_uploaded_net_bytes.store(true, Ordering::Relaxed);
+                            let prev_net = last_net_for_cb.swap(net, Ordering::Relaxed);
+                            if net > prev_net {
+                                uploaded_net_bytes.fetch_add(net - prev_net, Ordering::Relaxed);
+                            }
                         }
                     })),
                 )
@@ -541,15 +554,26 @@ async fn process_upload_job<S: Storage>(
             limiter.wait_turn().await;
             let filename = telegram_camouflaged_filename();
             let last_reported = Arc::new(AtomicU64::new(0));
+            let last_reported_net = Arc::new(AtomicU64::new(0));
             let last_for_cb = Arc::clone(&last_reported);
+            let last_net_for_cb = Arc::clone(&last_reported_net);
             let pack_object_id = storage
                 .upload_document_with_progress(
                     &filename,
                     pack_bytes,
-                    Some(Box::new(move |n| {
+                    Some(Box::new(move |p| {
+                        let n = p.bytes;
                         let prev = last_for_cb.swap(n, Ordering::Relaxed);
                         if n > prev {
                             uploaded_bytes.fetch_add(n - prev, Ordering::Relaxed);
+                        }
+
+                        if let Some(net) = p.net_bytes {
+                            have_uploaded_net_bytes.store(true, Ordering::Relaxed);
+                            let prev_net = last_net_for_cb.swap(net, Ordering::Relaxed);
+                            if net > prev_net {
+                                uploaded_net_bytes.fetch_add(net - prev_net, Ordering::Relaxed);
+                            }
                         }
                     })),
                 )
@@ -619,6 +643,8 @@ pub async fn run_backup_with<S: Storage>(
     let scan_bytes_read = Arc::new(AtomicU64::new(0));
     let scan_bytes_deduped = Arc::new(AtomicU64::new(0));
     let uploaded_bytes = Arc::new(AtomicU64::new(0));
+    let uploaded_net_bytes = Arc::new(AtomicU64::new(0));
+    let have_uploaded_net_bytes = Arc::new(AtomicBool::new(false));
     let scan_done = Arc::new(AtomicBool::new(false));
     let active_uploads = Arc::new(AtomicUsize::new(0));
 
@@ -652,6 +678,8 @@ pub async fn run_backup_with<S: Storage>(
         let provider = provider_owned.clone();
         let cancel = upload_cancel.clone();
         let uploaded_bytes = Arc::clone(&uploaded_bytes);
+        let uploaded_net_bytes = Arc::clone(&uploaded_net_bytes);
+        let have_uploaded_net_bytes = Arc::clone(&have_uploaded_net_bytes);
         let active_uploads = Arc::clone(&active_uploads);
         workers.push(async move {
             struct ActiveUploadToken<'a>(&'a AtomicUsize);
@@ -677,9 +705,16 @@ pub async fn run_backup_with<S: Storage>(
                 }
                 active_uploads.fetch_add(1, Ordering::Relaxed);
                 let _token = ActiveUploadToken(active_uploads.as_ref());
-                let outcome =
-                    process_upload_job(storage, &provider, &limiter, uploaded_bytes.as_ref(), job)
-                        .await;
+                let outcome = process_upload_job(
+                    storage,
+                    &provider,
+                    &limiter,
+                    uploaded_bytes.as_ref(),
+                    uploaded_net_bytes.as_ref(),
+                    have_uploaded_net_bytes.as_ref(),
+                    job,
+                )
+                .await;
                 if tx.send(outcome).await.is_err() {
                     break;
                 }
@@ -701,6 +736,8 @@ pub async fn run_backup_with<S: Storage>(
         let scan_bytes_read = Arc::clone(&scan_bytes_read);
         let scan_bytes_deduped = Arc::clone(&scan_bytes_deduped);
         let uploaded_bytes = Arc::clone(&uploaded_bytes);
+        let uploaded_net_bytes = Arc::clone(&uploaded_net_bytes);
+        let have_uploaded_net_bytes = Arc::clone(&have_uploaded_net_bytes);
         let scan_done = Arc::clone(&scan_done);
         async move {
             let res = async {
@@ -742,6 +779,11 @@ pub async fn run_backup_with<S: Storage>(
                         chunks_done: Some(0),
                         bytes_read: Some(0),
                         bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                        net_bytes_uploaded: have_uploaded_net_bytes
+                            .load(Ordering::Relaxed)
+                            .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+                        bytes_downloaded: None,
+                        net_bytes_downloaded: None,
                         bytes_deduped: Some(0),
                     });
                 }
@@ -829,12 +871,17 @@ pub async fn run_backup_with<S: Storage>(
                             files_total: None,
                             files_done: Some(result.files_indexed),
                             chunks_total: Some(result.chunks_total),
-                            chunks_done: Some(result.chunks_total),
-                            bytes_read: Some(result.bytes_read),
-                            bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-                            bytes_deduped: Some(result.bytes_deduped),
-                        });
-                    }
+	                            chunks_done: Some(result.chunks_total),
+	                            bytes_read: Some(result.bytes_read),
+	                            bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+	                            net_bytes_uploaded: have_uploaded_net_bytes
+	                                .load(Ordering::Relaxed)
+	                                .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+	                            bytes_downloaded: None,
+	                            net_bytes_downloaded: None,
+	                            bytes_deduped: Some(result.bytes_deduped),
+	                        });
+	                    }
 
                     if kind != "file" {
                         continue;
@@ -944,13 +991,18 @@ pub async fn run_backup_with<S: Storage>(
                                 phase: "scan".to_string(),
                                 files_total: None,
                                 files_done: Some(result.files_indexed),
-                                chunks_total: Some(result.chunks_total),
-                                chunks_done: Some(result.chunks_total),
-                                bytes_read: Some(result.bytes_read),
-                                bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-                                bytes_deduped: Some(result.bytes_deduped),
-                            });
-                        }
+	                                chunks_total: Some(result.chunks_total),
+	                                chunks_done: Some(result.chunks_total),
+	                                bytes_read: Some(result.bytes_read),
+	                                bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+	                                net_bytes_uploaded: have_uploaded_net_bytes
+	                                    .load(Ordering::Relaxed)
+	                                    .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+	                                bytes_downloaded: None,
+	                                net_bytes_downloaded: None,
+	                                bytes_deduped: Some(result.bytes_deduped),
+	                            });
+	                        }
                     }
                 }
 
@@ -972,13 +1024,18 @@ pub async fn run_backup_with<S: Storage>(
                         phase: "upload".to_string(),
                         files_total: None,
                         files_done: Some(scan_files_indexed.load(Ordering::Relaxed)),
-                        chunks_total: Some(scan_chunks_total.load(Ordering::Relaxed)),
-                        chunks_done: Some(scan_chunks_total.load(Ordering::Relaxed)),
-                        bytes_read: Some(scan_bytes_read.load(Ordering::Relaxed)),
-                        bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-                        bytes_deduped: Some(scan_bytes_deduped.load(Ordering::Relaxed)),
-                    });
-                }
+	                        chunks_total: Some(scan_chunks_total.load(Ordering::Relaxed)),
+	                        chunks_done: Some(scan_chunks_total.load(Ordering::Relaxed)),
+	                        bytes_read: Some(scan_bytes_read.load(Ordering::Relaxed)),
+	                        bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+	                        bytes_downloaded: None,
+	                        net_bytes_uploaded: have_uploaded_net_bytes
+	                            .load(Ordering::Relaxed)
+	                            .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+	                        net_bytes_downloaded: None,
+	                        bytes_deduped: Some(scan_bytes_deduped.load(Ordering::Relaxed)),
+	                    });
+	                }
                 if pack_enabled {
                     flush_packer(&uploader, &scan_master_key, &mut pack_state).await?;
                 } else {
@@ -1020,6 +1077,8 @@ pub async fn run_backup_with<S: Storage>(
         let scan_bytes_read = Arc::clone(&scan_bytes_read);
         let scan_bytes_deduped = Arc::clone(&scan_bytes_deduped);
         let uploaded_bytes = Arc::clone(&uploaded_bytes);
+        let uploaded_net_bytes = Arc::clone(&uploaded_net_bytes);
+        let have_uploaded_net_bytes = Arc::clone(&have_uploaded_net_bytes);
         async move {
             let mut stats = UploadStats::default();
             let mut rx = result_rx;
@@ -1075,6 +1134,11 @@ pub async fn run_backup_with<S: Storage>(
                         chunks_done: Some(scan_chunks_total.load(Ordering::Relaxed)),
                         bytes_read: Some(scan_bytes_read.load(Ordering::Relaxed)),
                         bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                        net_bytes_uploaded: have_uploaded_net_bytes
+                            .load(Ordering::Relaxed)
+                            .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+                        bytes_downloaded: None,
+                        net_bytes_downloaded: None,
                         bytes_deduped: Some(scan_bytes_deduped.load(Ordering::Relaxed)),
                     });
                 }
@@ -1094,19 +1158,31 @@ pub async fn run_backup_with<S: Storage>(
         let scan_bytes_read = Arc::clone(&scan_bytes_read);
         let scan_bytes_deduped = Arc::clone(&scan_bytes_deduped);
         let uploaded_bytes = Arc::clone(&uploaded_bytes);
+        let uploaded_net_bytes = Arc::clone(&uploaded_net_bytes);
+        let have_uploaded_net_bytes = Arc::clone(&have_uploaded_net_bytes);
         async move {
             let Some(sink) = options.progress else {
                 return;
             };
 
             let mut last_uploaded = uploaded_bytes.load(Ordering::Relaxed);
+            let mut last_net = have_uploaded_net_bytes
+                .load(Ordering::Relaxed)
+                .then_some(uploaded_net_bytes.load(Ordering::Relaxed));
+            let mut last_emit = Instant::now();
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             loop {
                 interval.tick().await;
 
                 let uploaded = uploaded_bytes.load(Ordering::Relaxed);
-                if uploaded != last_uploaded {
+                let net = have_uploaded_net_bytes
+                    .load(Ordering::Relaxed)
+                    .then_some(uploaded_net_bytes.load(Ordering::Relaxed));
+                let stale = last_emit.elapsed() >= Duration::from_secs(1);
+                if uploaded != last_uploaded || net != last_net || stale {
                     last_uploaded = uploaded;
+                    last_net = net;
+                    last_emit = Instant::now();
                     let phase = if scan_done.load(Ordering::Relaxed) {
                         "upload"
                     } else {
@@ -1120,6 +1196,9 @@ pub async fn run_backup_with<S: Storage>(
                         chunks_done: Some(scan_chunks_total.load(Ordering::Relaxed)),
                         bytes_read: Some(scan_bytes_read.load(Ordering::Relaxed)),
                         bytes_uploaded: Some(uploaded),
+                        net_bytes_uploaded: net,
+                        bytes_downloaded: None,
+                        net_bytes_downloaded: None,
                         bytes_deduped: Some(scan_bytes_deduped.load(Ordering::Relaxed)),
                     });
                 }
@@ -1166,6 +1245,11 @@ pub async fn run_backup_with<S: Storage>(
             chunks_done: Some(result.chunks_total),
             bytes_read: Some(result.bytes_read),
             bytes_uploaded: Some(result.bytes_uploaded),
+            net_bytes_uploaded: have_uploaded_net_bytes
+                .load(Ordering::Relaxed)
+                .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+            bytes_downloaded: None,
+            net_bytes_downloaded: None,
             bytes_deduped: Some(result.bytes_deduped),
         });
     }
@@ -1179,6 +1263,8 @@ pub async fn run_backup_with<S: Storage>(
         &snapshot_id,
         &rate_limiter,
         uploaded_bytes.as_ref(),
+        uploaded_net_bytes.as_ref(),
+        have_uploaded_net_bytes.as_ref(),
         options.progress,
         scan_files_indexed.load(Ordering::Relaxed),
         scan_chunks_total.load(Ordering::Relaxed),
@@ -1479,6 +1565,8 @@ async fn upload_index<S: Storage>(
     snapshot_id: &str,
     rate_limiter: &UploadRateLimiter,
     uploaded_bytes: &AtomicU64,
+    uploaded_net_bytes: &AtomicU64,
+    have_uploaded_net_bytes: &AtomicBool,
     progress: Option<&dyn ProgressSink>,
     files_indexed: u64,
     chunks_total: u64,
@@ -1502,26 +1590,46 @@ async fn upload_index<S: Storage>(
         let filename = telegram_camouflaged_filename();
         rate_limiter.wait_turn().await;
         let last_reported = AtomicU64::new(0);
+        let last_reported_net = AtomicU64::new(0);
         let object_id = storage
             .upload_document_with_progress(
                 &filename,
                 part_enc,
-                Some(Box::new(|n| {
+                Some(Box::new(|p| {
+                    let mut progressed = false;
+
+                    let n = p.bytes;
                     let prev = last_reported.swap(n, Ordering::Relaxed);
                     if n > prev {
+                        progressed = true;
                         uploaded_bytes.fetch_add(n - prev, Ordering::Relaxed);
-                        if let Some(sink) = progress {
-                            sink.on_progress(TaskProgress {
-                                phase: "index".to_string(),
-                                files_total: None,
-                                files_done: Some(files_indexed),
-                                chunks_total: Some(chunks_total),
-                                chunks_done: Some(chunks_total),
-                                bytes_read: Some(bytes_read),
-                                bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-                                bytes_deduped: Some(bytes_deduped),
-                            });
+                    }
+
+                    if let Some(net) = p.net_bytes {
+                        have_uploaded_net_bytes.store(true, Ordering::Relaxed);
+                        let prev_net = last_reported_net.swap(net, Ordering::Relaxed);
+                        if net > prev_net {
+                            progressed = true;
+                            uploaded_net_bytes.fetch_add(net - prev_net, Ordering::Relaxed);
                         }
+                    }
+
+                    if progressed && let Some(sink) = progress {
+                        sink.on_progress(TaskProgress {
+                            phase: "index".to_string(),
+                            files_total: None,
+                            files_done: Some(files_indexed),
+                            chunks_total: Some(chunks_total),
+                            chunks_done: Some(chunks_total),
+                            bytes_read: Some(bytes_read),
+                            bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                            net_bytes_uploaded: have_uploaded_net_bytes
+                                .load(Ordering::Relaxed)
+                                .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+                            bytes_downloaded: None,
+                            net_bytes_downloaded: None,
+                            bytes_deduped: Some(bytes_deduped),
+                        });
                     }
                 })),
             )
@@ -1552,6 +1660,11 @@ async fn upload_index<S: Storage>(
                 chunks_done: Some(chunks_total),
                 bytes_read: Some(bytes_read),
                 bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                net_bytes_uploaded: have_uploaded_net_bytes
+                    .load(Ordering::Relaxed)
+                    .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+                bytes_downloaded: None,
+                net_bytes_downloaded: None,
                 bytes_deduped: Some(bytes_deduped),
             });
         }
@@ -1596,26 +1709,46 @@ async fn upload_index<S: Storage>(
     let manifest_filename = telegram_camouflaged_filename();
     rate_limiter.wait_turn().await;
     let last_reported = AtomicU64::new(0);
+    let last_reported_net = AtomicU64::new(0);
     let manifest_object_id = storage
         .upload_document_with_progress(
             &manifest_filename,
             manifest_enc,
-            Some(Box::new(|n| {
+            Some(Box::new(|p| {
+                let mut progressed = false;
+
+                let n = p.bytes;
                 let prev = last_reported.swap(n, Ordering::Relaxed);
                 if n > prev {
+                    progressed = true;
                     uploaded_bytes.fetch_add(n - prev, Ordering::Relaxed);
-                    if let Some(sink) = progress {
-                        sink.on_progress(TaskProgress {
-                            phase: "index".to_string(),
-                            files_total: None,
-                            files_done: Some(files_indexed),
-                            chunks_total: Some(chunks_total),
-                            chunks_done: Some(chunks_total),
-                            bytes_read: Some(bytes_read),
-                            bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-                            bytes_deduped: Some(bytes_deduped),
-                        });
+                }
+
+                if let Some(net) = p.net_bytes {
+                    have_uploaded_net_bytes.store(true, Ordering::Relaxed);
+                    let prev_net = last_reported_net.swap(net, Ordering::Relaxed);
+                    if net > prev_net {
+                        progressed = true;
+                        uploaded_net_bytes.fetch_add(net - prev_net, Ordering::Relaxed);
                     }
+                }
+
+                if progressed && let Some(sink) = progress {
+                    sink.on_progress(TaskProgress {
+                        phase: "index".to_string(),
+                        files_total: None,
+                        files_done: Some(files_indexed),
+                        chunks_total: Some(chunks_total),
+                        chunks_done: Some(chunks_total),
+                        bytes_read: Some(bytes_read),
+                        bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                        net_bytes_uploaded: have_uploaded_net_bytes
+                            .load(Ordering::Relaxed)
+                            .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+                        bytes_downloaded: None,
+                        net_bytes_downloaded: None,
+                        bytes_deduped: Some(bytes_deduped),
+                    });
                 }
             })),
         )
@@ -1645,6 +1778,11 @@ async fn upload_index<S: Storage>(
             chunks_done: Some(chunks_total),
             bytes_read: Some(bytes_read),
             bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+            net_bytes_uploaded: have_uploaded_net_bytes
+                .load(Ordering::Relaxed)
+                .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+            bytes_downloaded: None,
+            net_bytes_downloaded: None,
             bytes_deduped: Some(bytes_deduped),
         });
     }

@@ -155,3 +155,46 @@ pub struct SecretsSetTelegramApiHashParams {
 pub struct SecretsClearTelegramMtprotoSessionParams {
     pub endpoint_id: String,
 }
+
+// Best-effort status reporting from CLI -> daemon for UI status surfaces.
+// These calls must not be required for correctness; they only improve observability.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusTaskStartParams {
+    pub task_id: String,
+    pub kind: String, // "backup" | "restore" | "verify"
+    pub target_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusTaskProgress {
+    pub phase: String,
+    pub files_total: Option<u64>,
+    pub files_done: Option<u64>,
+    pub chunks_total: Option<u64>,
+    pub chunks_done: Option<u64>,
+    pub bytes_read: Option<u64>,
+    pub bytes_uploaded: Option<u64>,
+    pub bytes_downloaded: Option<u64>,
+    pub bytes_deduped: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusTaskProgressParams {
+    pub task_id: String,
+    pub kind: String, // "backup" | "restore" | "verify"
+    pub target_id: String,
+    pub progress: StatusTaskProgress,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusTaskFinishParams {
+    pub task_id: String,
+    pub kind: String, // "backup" | "restore" | "verify"
+    pub target_id: String,
+    pub state: String, // "succeeded" | "failed"
+}

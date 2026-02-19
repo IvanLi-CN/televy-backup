@@ -13,3 +13,6 @@ md5 = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[patch.crates-io]
+grammers-mtsender = { path = "vendor/grammers-mtsender-0.8.1" }

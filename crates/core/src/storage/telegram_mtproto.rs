@@ -9,7 +9,7 @@ use std::time::Duration;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use super::Storage;
+use super::{Storage, StorageProgress};
 use crate::{Error, Result};
 
 const TG_MTPROTO_OBJECT_ID_PREFIX_V1: &str = "tgmtproto:v1:";
@@ -317,11 +317,13 @@ impl Storage for TelegramMtProtoStorage {
         &'a self,
         filename: &'a str,
         bytes: Vec<u8>,
-        mut progress: Option<Box<dyn FnMut(u64) + Send + 'a>>,
+        mut progress: Option<Box<dyn FnMut(StorageProgress) + Send + 'a>>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
             let resp = self.with_helper(|helper| {
-                let progress = progress.as_deref_mut().map(|cb| cb as &mut dyn FnMut(u64));
+                let progress = progress
+                    .as_deref_mut()
+                    .map(|cb| cb as &mut dyn FnMut(StorageProgress));
                 helper.upload_with_progress(
                     UploadRequest {
                         filename: filename.to_string(),
@@ -353,6 +355,37 @@ impl Storage for TelegramMtProtoStorage {
                 helper.download(DownloadRequest {
                     object_id: object_id.to_string(),
                 })
+            })?;
+            Ok(resp)
+        })
+    }
+
+    fn download_document_with_progress<'a>(
+        &'a self,
+        object_id: &'a str,
+        mut progress: Option<Box<dyn FnMut(StorageProgress) + Send + 'a>>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        Box::pin(async move {
+            let parsed = parse_tgmtproto_object_id_v1(object_id)?;
+            if parsed.peer != self.chat_id {
+                return Err(Error::InvalidConfig {
+                    message: format!(
+                        "tgmtproto peer mismatch: expected={} got={}",
+                        self.chat_id, parsed.peer
+                    ),
+                });
+            }
+
+            let resp = self.with_helper(|helper| {
+                let progress = progress
+                    .as_deref_mut()
+                    .map(|cb| cb as &mut dyn FnMut(StorageProgress));
+                helper.download_with_progress(
+                    DownloadRequest {
+                        object_id: object_id.to_string(),
+                    },
+                    progress,
+                )
             })?;
             Ok(resp)
         })
@@ -602,7 +635,7 @@ impl MtProtoHelper {
     fn upload_with_progress(
         &mut self,
         req: UploadRequest,
-        mut on_progress: Option<&mut dyn FnMut(u64)>,
+        mut on_progress: Option<&mut dyn FnMut(StorageProgress)>,
     ) -> Result<String> {
         let meta = UploadRequestMeta {
             filename: req.filename,
@@ -637,7 +670,8 @@ impl MtProtoHelper {
                     env.data.get("bytesUploaded").and_then(|v| v.as_u64()),
                     on_progress.as_mut(),
                 ) {
-                    (**cb)(bytes);
+                    let net_bytes = env.data.get("netBytesOut").and_then(|v| v.as_u64());
+                    (**cb)(StorageProgress { bytes, net_bytes });
                 }
                 continue;
             }
@@ -656,17 +690,54 @@ impl MtProtoHelper {
     }
 
     fn download(&mut self, req: DownloadRequest) -> Result<Vec<u8>> {
-        self.send_json(&Request::Download(req))?;
+        self.download_with_progress(req, None)
+    }
 
-        let env = self.read_json_line()?;
-        self.apply_session(&env)?;
-        if !env.ok {
-            return Err(Error::Telegram {
-                message: env
-                    .error
-                    .unwrap_or_else(|| "mtproto download failed".to_string()),
-            });
-        }
+    fn download_with_progress(
+        &mut self,
+        req: DownloadRequest,
+        mut on_progress: Option<&mut dyn FnMut(StorageProgress)>,
+    ) -> Result<Vec<u8>> {
+        self.send_json(&Request::Download(req))?;
+        let mut saw_progress_event = false;
+        // The helper may resume from an on-disk cache and emit `bytesDownloaded` starting at the
+        // cached length (non-zero). For UI bandwidth indicators we want "bytes downloaded in this
+        // invocation" so we normalize the progress stream to start at 0.
+        let mut progress_base: Option<u64> = None;
+        let env = loop {
+            let env = self.read_json_line()?;
+            self.apply_session(&env)?;
+            if !env.ok {
+                return Err(Error::Telegram {
+                    message: env
+                        .error
+                        .unwrap_or_else(|| "mtproto download failed".to_string()),
+                });
+            }
+
+            let event = env
+                .data
+                .get("event")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if event == "download_progress" {
+                saw_progress_event = true;
+                if let (Some(bytes), Some(cb)) = (
+                    env.data.get("bytesDownloaded").and_then(|v| v.as_u64()),
+                    on_progress.as_mut(),
+                ) {
+                    let base = *progress_base.get_or_insert(bytes);
+                    let net_bytes = env.data.get("netBytesIn").and_then(|v| v.as_u64());
+                    (**cb)(StorageProgress {
+                        bytes: bytes.saturating_sub(base),
+                        net_bytes,
+                    });
+                }
+                continue;
+            }
+
+            break env;
+        };
 
         let size = env
             .data
@@ -681,12 +752,29 @@ impl MtProtoHelper {
             });
         }
 
-        let mut bytes = vec![0u8; size as usize];
-        self.stdout
-            .read_exact(&mut bytes)
-            .map_err(|e| Error::Telegram {
-                message: format!("mtproto download read failed: {e}"),
-            })?;
+        let size_usize = size as usize;
+        let mut bytes = vec![0u8; size_usize];
+
+        // For older helpers, we only learn about download progress by reading the payload bytes.
+        // Newer helpers emit `download_progress` events while they download into a local cache, so
+        // reporting progress here would create unrealistic spikes and even "rewind" the counter.
+        const READ_CHUNK: usize = 256 * 1024;
+        let mut read = 0usize;
+        while read < size_usize {
+            let end = (read + READ_CHUNK).min(size_usize);
+            self.stdout
+                .read_exact(&mut bytes[read..end])
+                .map_err(|e| Error::Telegram {
+                    message: format!("mtproto download read failed: {e}"),
+                })?;
+            read = end;
+            if !saw_progress_event && let Some(cb) = on_progress.as_mut() {
+                (**cb)(StorageProgress {
+                    bytes: read as u64,
+                    net_bytes: None,
+                });
+            }
+        }
 
         Ok(bytes)
     }

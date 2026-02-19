@@ -1,21 +1,26 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
 use crate::crypto::decrypt_framed;
 use crate::index_manifest::{IndexManifest, index_part_aad};
+use crate::progress::{ProgressSink, TaskProgress};
 use crate::storage::Storage;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy)]
 pub struct DownloadedIndexDbStats {
     pub bytes_downloaded: u64,
+    pub net_bytes_downloaded: Option<u64>,
     pub bytes_written: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn download_and_write_index_db_atomic<S: Storage>(
     storage: &S,
     snapshot_id: &str,
@@ -24,6 +29,7 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
     index_db_path: &Path,
     cancel: Option<&CancellationToken>,
     normalize_provider: Option<&str>,
+    progress: Option<&dyn ProgressSink>,
 ) -> Result<DownloadedIndexDbStats> {
     if let Some(cancel) = cancel
         && cancel.is_cancelled()
@@ -31,8 +37,41 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
         return Err(Error::Cancelled);
     }
 
+    let mut bytes_downloaded = 0u64;
+    let mut net_bytes_downloaded = 0u64;
+    let mut have_net_bytes = false;
+
+    // Use streaming progress when the storage supports it so UI bandwidth indicators don't
+    // "fall to zero" during long downloads (e.g. large remote index parts).
+    let base_total = bytes_downloaded;
+    let base_net_total = net_bytes_downloaded;
+    // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache) is distinguishable
+    // from "no progress callbacks were ever emitted".
+    let latest = Arc::new(AtomicU64::new(u64::MAX));
+    let latest_for_cb = Arc::clone(&latest);
+    let latest_net = Arc::new(AtomicU64::new(u64::MAX));
+    let latest_net_for_cb = Arc::clone(&latest_net);
     let manifest_enc = storage
-        .download_document(manifest_object_id)
+        .download_document_with_progress(
+            manifest_object_id,
+            Some(Box::new(move |p| {
+                let n = p.bytes;
+                latest_for_cb.store(n, Ordering::Relaxed);
+                if let Some(net) = p.net_bytes {
+                    latest_net_for_cb.store(net, Ordering::Relaxed);
+                }
+                if let Some(sink) = progress {
+                    sink.on_progress(TaskProgress {
+                        phase: "index".to_string(),
+                        bytes_downloaded: Some(base_total.saturating_add(n)),
+                        net_bytes_downloaded: p
+                            .net_bytes
+                            .map(|net| base_net_total.saturating_add(net)),
+                        ..TaskProgress::default()
+                    });
+                }
+            })),
+        )
         .await
         .map_err(|e| {
             error!(
@@ -44,7 +83,26 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
             );
             e
         })?;
-    let mut bytes_downloaded = manifest_enc.len() as u64;
+    let streamed = latest.load(Ordering::Relaxed);
+    let actual = if streamed != u64::MAX {
+        streamed
+    } else {
+        manifest_enc.len() as u64
+    };
+    bytes_downloaded = base_total.saturating_add(actual);
+    let streamed_net = latest_net.load(Ordering::Relaxed);
+    if streamed_net != u64::MAX {
+        net_bytes_downloaded = base_net_total.saturating_add(streamed_net);
+        have_net_bytes = true;
+    }
+    if let Some(sink) = progress {
+        sink.on_progress(TaskProgress {
+            phase: "index".to_string(),
+            bytes_downloaded: Some(bytes_downloaded),
+            net_bytes_downloaded: (streamed_net != u64::MAX).then_some(net_bytes_downloaded),
+            ..TaskProgress::default()
+        });
+    }
 
     let manifest_json = decrypt_framed(master_key, snapshot_id.as_bytes(), &manifest_enc).map_err(
         |e| Error::Crypto {
@@ -91,8 +149,35 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
             return Err(Error::Cancelled);
         }
 
+        let base_total = bytes_downloaded;
+        let base_net_total = net_bytes_downloaded;
+        // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache) is
+        // distinguishable from "no progress callbacks were ever emitted".
+        let latest = Arc::new(AtomicU64::new(u64::MAX));
+        let latest_for_cb = Arc::clone(&latest);
+        let latest_net = Arc::new(AtomicU64::new(u64::MAX));
+        let latest_net_for_cb = Arc::clone(&latest_net);
         let part_enc = storage
-            .download_document(&part.object_id)
+            .download_document_with_progress(
+                &part.object_id,
+                Some(Box::new(move |p| {
+                    let n = p.bytes;
+                    latest_for_cb.store(n, Ordering::Relaxed);
+                    if let Some(net) = p.net_bytes {
+                        latest_net_for_cb.store(net, Ordering::Relaxed);
+                    }
+                    if let Some(sink) = progress {
+                        sink.on_progress(TaskProgress {
+                            phase: "index".to_string(),
+                            bytes_downloaded: Some(base_total.saturating_add(n)),
+                            net_bytes_downloaded: p
+                                .net_bytes
+                                .map(|net| base_net_total.saturating_add(net)),
+                            ..TaskProgress::default()
+                        });
+                    }
+                })),
+            )
             .await
             .map_err(|e| {
                 error!(
@@ -108,8 +193,26 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
                     part_no: part.no,
                 }
             })?;
-
-        bytes_downloaded = bytes_downloaded.saturating_add(part_enc.len() as u64);
+        let streamed = latest.load(Ordering::Relaxed);
+        let actual = if streamed != u64::MAX {
+            streamed
+        } else {
+            part_enc.len() as u64
+        };
+        bytes_downloaded = base_total.saturating_add(actual);
+        let streamed_net = latest_net.load(Ordering::Relaxed);
+        if streamed_net != u64::MAX {
+            net_bytes_downloaded = base_net_total.saturating_add(streamed_net);
+            have_net_bytes = true;
+        }
+        if let Some(sink) = progress {
+            sink.on_progress(TaskProgress {
+                phase: "index".to_string(),
+                bytes_downloaded: Some(bytes_downloaded),
+                net_bytes_downloaded: (streamed_net != u64::MAX).then_some(net_bytes_downloaded),
+                ..TaskProgress::default()
+            });
+        }
 
         if part_enc.len() != part.size {
             return Err(Error::Integrity {
@@ -148,9 +251,18 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
     let bytes_written = sqlite_bytes.len() as u64;
 
     write_index_db_atomic(index_db_path, &sqlite_bytes, normalize_provider).await?;
+    if let Some(sink) = progress {
+        sink.on_progress(TaskProgress {
+            phase: "index".to_string(),
+            bytes_downloaded: Some(bytes_downloaded),
+            net_bytes_downloaded: have_net_bytes.then_some(net_bytes_downloaded),
+            ..TaskProgress::default()
+        });
+    }
 
     Ok(DownloadedIndexDbStats {
         bytes_downloaded,
+        net_bytes_downloaded: have_net_bytes.then_some(net_bytes_downloaded),
         bytes_written,
     })
 }
@@ -328,6 +440,7 @@ mod tests {
             &out_db,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -429,6 +542,7 @@ mod tests {
             &out_db,
             None,
             Some("telegram.mtproto/new"),
+            None,
         )
         .await
         .unwrap();
