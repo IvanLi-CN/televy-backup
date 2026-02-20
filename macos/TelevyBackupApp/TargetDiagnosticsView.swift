@@ -84,6 +84,7 @@ struct TargetDiagnosticsView: View {
                 )
                 keyValue("bytesRead", p.bytesRead.map(String.init) ?? "—")
                 keyValue("bytesUploaded", p.bytesUploaded.map(String.init) ?? "—")
+                keyValue("bytesDownloaded", p.bytesDownloaded.map(String.init) ?? "—")
                 keyValue("bytesDeduped", p.bytesDeduped.map(String.init) ?? "—")
             } else {
                 keyValue("progress", "—")

@@ -86,6 +86,7 @@ final class AppModel: ObservableObject {
     @Published var popoverDesiredHeight: CGFloat = 460
     @Published var runHistory: [RunLogSummary] = []
     @Published var runHistoryRefreshInFlight: Bool = false
+    @Published var targetRateEstimates: [String: TargetRateEstimate] = [:]
 
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
@@ -148,6 +149,13 @@ final class AppModel: ObservableObject {
     private var daemonTask: Process? = nil
     private var daemonIpcRetryWork: DispatchWorkItem? = nil
     private var lastDaemonStartAttemptAt: Date? = nil
+    private var lastRateSampleByTargetId: [String: RateSample] = [:]
+
+    private struct RateSample {
+        let at: Date
+        let uploaded: Int64?
+        let downloaded: Int64?
+    }
 
     private enum PopoverSizing {
         static let maxHeight: CGFloat = 720
@@ -885,11 +893,51 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func updateRateSample(targetId: String, uploaded: Int64?, downloaded: Int64?) {
+        let now = Date()
+        let cur = RateSample(at: now, uploaded: uploaded, downloaded: downloaded)
+
+        defer {
+            lastRateSampleByTargetId[targetId] = cur
+        }
+
+        guard let prev = lastRateSampleByTargetId[targetId] else { return }
+        let dt = now.timeIntervalSince(prev.at)
+        if dt < 0.3 || dt > 10.0 { return }
+
+        func deltaBytes(_ cur: Int64?, _ prev: Int64?) -> Int64? {
+            guard let cur, let prev else { return nil }
+            let d = cur - prev
+            if d <= 0 { return nil }
+            return d
+        }
+
+        let upDelta = deltaBytes(uploaded, prev.uploaded)
+        let downDelta = deltaBytes(downloaded, prev.downloaded)
+        if upDelta == nil && downDelta == nil { return }
+
+        let upBps = upDelta.map { Int64(Double($0) / dt) }.flatMap { $0 > 0 ? $0 : nil }
+        let downBps = downDelta.map { Int64(Double($0) / dt) }.flatMap { $0 > 0 ? $0 : nil }
+
+        var next = targetRateEstimates
+        next[targetId] = TargetRateEstimate(uploadBytesPerSecond: upBps, downloadBytesPerSecond: downBps, updatedAt: now)
+        targetRateEstimates = next
+    }
+
     private func applyStatusSnapshot(_ snap: StatusSnapshot) {
         statusSnapshot = snap
         statusSnapshotReceivedAt = Date()
         appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
         updatePopoverHeightForTargets(targetCount: snap.targets.count)
+
+        // UI-only rate estimates based on monotonic progress counters. These are used to derive
+        // per-target download speeds (core doesn't expose them directly).
+        for t in snap.targets {
+            let p = t.progress
+            if p?.bytesUploaded != nil || p?.bytesDownloaded != nil {
+                updateRateSample(targetId: t.targetId, uploaded: p?.bytesUploaded, downloaded: p?.bytesDownloaded)
+            }
+        }
 
         // Keep run history in sync with daemon-triggered runs:
         // - Refresh when a target transitions into running so the new NDJSON file (run.start) appears immediately.
@@ -2133,6 +2181,7 @@ final class AppModel: ObservableObject {
                 let chunksDone = (obj["chunksDone"] as? NSNumber)?.int64Value
                 let bytesRead = (obj["bytesRead"] as? NSNumber)?.int64Value
                 let bytesUploaded = (obj["bytesUploaded"] as? NSNumber)?.int64Value
+                let bytesDownloaded = (obj["bytesDownloaded"] as? NSNumber)?.int64Value
                 let bytesDeduped = (obj["bytesDeduped"] as? NSNumber)?.int64Value
 
                 self.phase = phase
@@ -2167,9 +2216,16 @@ final class AppModel: ObservableObject {
                     chunksDone: chunksDone,
                     bytesRead: bytesRead,
                     bytesUploaded: bytesUploaded,
+                    bytesDownloaded: bytesDownloaded,
                     bytesDeduped: bytesDeduped
                 )
                 self.activeTask = task
+
+                if let tid = task?.targetId, !tid.isEmpty {
+                    if bytesUploaded != nil || bytesDownloaded != nil {
+                        self.updateRateSample(targetId: tid, uploaded: bytesUploaded, downloaded: bytesDownloaded)
+                    }
+                }
             }
             return
         }
