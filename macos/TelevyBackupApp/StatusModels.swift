@@ -16,6 +16,7 @@ struct StatusProgress: Codable {
     var chunksDone: Int64?
     var bytesRead: Int64?
     var bytesUploaded: Int64?
+    var bytesDownloaded: Int64?
     var bytesDeduped: Int64?
 }
 

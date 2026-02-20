@@ -80,3 +80,4 @@
 | 4fexy | Master key 轮换（可暂停/继续/取消） | 待实现 | `4fexy:master-key-rotation/PLAN.md` | 2026-02-01 | 依赖：`r6ceq` |
 | 3ejpg | macOS：dev app variant（bundle id/name + menubar DEV 徽标） | 已完成 | `3ejpg:macos-dev-app-variant/PLAN.md` | 2026-02-09 | PR #37；实现分支：`feat/3ejpg-macos-dev-app-variant` |
 | njr29 | MTProto upload resilience（retry + heartbeat） | 已完成 | `njr29:mtproto-upload-resilience/PLAN.md` | 2026-02-14 | PR #39 |
+| 7f9wg | macOS: Integrate Developer diagnostics into Main window | 已完成 | `7f9wg:integrate-developer-diagnostics/PLAN.md` | 2026-02-19 | PR #45 |

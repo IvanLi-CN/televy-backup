@@ -40,7 +40,8 @@ struct MainWindowRootView: View {
 
             NavigationSplitView {
                 sidebar
-                    .frame(minWidth: 200, idealWidth: 300, maxWidth: 460)
+                    // Default sidebar width should be comfortable enough to read status/stage without truncation.
+                    .frame(minWidth: 240, idealWidth: 320, maxWidth: 480)
             } detail: {
                 detail
             }
@@ -63,6 +64,20 @@ struct MainWindowRootView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
 
+                if let selection,
+                   selection != Selection.unknownTarget,
+                   let target = (model.statusSnapshot?.targets ?? []).first(where: { $0.targetId == selection })
+                {
+                    Menu {
+                        Button("Restore…") { model.promptRestoreLatest(targetId: target.targetId) }
+                            .disabled(model.isRunning)
+                        Button("Verify") { model.verifyLatest(targetId: target.targetId) }
+                            .disabled(model.isRunning)
+                    } label: {
+                        Label("Actions", systemImage: "ellipsis.circle")
+                    }
+                }
+
                 Button {
                     model.openSettingsWindow()
                 } label: {
@@ -82,15 +97,60 @@ struct MainWindowRootView: View {
     private var sidebar: some View {
         let targets = model.statusSnapshot?.targets ?? []
         let unknownCount = model.runHistory.filter { $0.targetId == nil }.count
+        let now = Date()
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
+        let snap = model.statusSnapshot
+        let snapshotOffline = TargetPresentation.snapshotIsOffline(snap: snap, nowMs: nowMs)
+
+        let sidebarStatusLine1: String? = {
+            guard let snap else { return nil }
+            let ageSeconds = Int(max(0, nowMs - snap.generatedAt) / 1000)
+            let rel = TargetPresentation.formatRelativeSeconds(ageSeconds)
+            let ageText = rel == "just now" ? rel : (rel + " ago")
+            return "\(snapshotOffline ? "Offline" : "Online") · \(ageText)"
+        }()
+
+        let sidebarStatusLine2: String? = {
+            guard let snap else { return nil }
+            if snapshotOffline { return "No recent updates" }
+
+            var parts: [String] = []
+            if let up = snap.global.up.bytesPerSecond, up > 0 {
+                parts.append("Upload \(formatBytes(up))/s")
+            }
+            if let down = snap.global.down.bytesPerSecond, down > 0 {
+                parts.append("Download \(formatBytes(down))/s")
+            }
+            if parts.isEmpty { return nil }
+            return parts.joined(separator: " · ")
+        }()
+
         return VStack(spacing: 0) {
-            HStack {
-                Text("Targets")
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if model.runHistoryRefreshInFlight {
-                    ProgressView()
-                        .controlSize(.small)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Targets")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if model.runHistoryRefreshInFlight {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+
+                if let sidebarStatusLine1 {
+                    Text(sidebarStatusLine1)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                if let sidebarStatusLine2 {
+                    Text(sidebarStatusLine2)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
             .padding(.horizontal, 12)
@@ -170,7 +230,7 @@ private enum MainWindowUIDemo {
 
     static func initialSelection(targets: [StatusTarget]) -> String? {
         guard enabled else { return nil }
-        if scene == "main-window-target-detail" {
+        if scene.hasPrefix("main-window-target-") {
             return targets.first?.targetId
         }
         return nil
@@ -178,6 +238,7 @@ private enum MainWindowUIDemo {
 }
 
 private struct TargetListRow: View {
+    @EnvironmentObject var model: AppModel
     let target: StatusTarget
     let isSelected: Bool
     let isBusy: Bool
@@ -185,89 +246,207 @@ private struct TargetListRow: View {
     let onVerify: () -> Void
     let onSelect: () -> Void
 
+    private var runs: [RunLogSummary] {
+        model.runHistory.filter { run in run.targetId == target.targetId }
+    }
+
+    private var hasInProgressRunLog: Bool {
+        runs.contains(where: { $0.status == "running" })
+    }
+
+    private var activeForTarget: AppModel.ActiveTask? {
+        guard let t = model.activeTask else { return nil }
+        if t.state == "running" && t.targetId == target.targetId { return t }
+        return nil
+    }
+
+    private var effectiveProgress: StatusProgress? {
+        if let t = activeForTarget {
+            return t.progress ?? target.progress
+        }
+        return target.progress
+    }
+
+    private func filesProgressText(_ p: StatusProgress?) -> String? {
+        guard let p else { return nil }
+        if let done = p.filesDone, let total = p.filesTotal, total > 0 {
+            return "\(done)/\(total) files"
+        }
+        if let total = p.filesTotal, total > 0 {
+            return "\(total) files"
+        }
+        if let done = p.filesDone, done > 0 {
+            return "\(done) files"
+        }
+        return nil
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            VStack(alignment: .leading, spacing: 3) {
+        let now = Date()
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
+        let snap = model.statusSnapshot
+        let status = TargetPresentation.userStatus(
+            target: target,
+            activeTask: model.activeTask,
+            hasInProgressRunLog: hasInProgressRunLog,
+            snap: snap,
+            nowMs: nowMs
+        )
+
+        let runLogKind = runs.first(where: { $0.status == "running" })?.kind
+        let kind = TargetPresentation.workKind(
+            activeKind: activeForTarget?.kind,
+            runLogKind: runLogKind,
+            targetIsRunningInDaemon: target.state == "running"
+        )
+
+        let stage = TargetPresentation.stageText(effectiveProgress?.phase)
+
+        let uploadBps: Int64? = {
+            guard status == .running else { return nil }
+            let bps = (target.up.bytesPerSecond ?? 0) > 0
+                ? target.up.bytesPerSecond
+                : model.targetRateEstimates[target.targetId]?.uploadBytesPerSecond
+            if let bps, bps > 0 { return bps }
+            return nil
+        }()
+
+        let downloadBps: Int64? = {
+            guard status == .running else { return nil }
+            let bps = model.targetRateEstimates[target.targetId]?.downloadBytesPerSecond
+            if let bps, bps > 0 { return bps }
+            return nil
+        }()
+
+        let rowSecondaryLeft: String = {
+            switch status {
+            case .running:
+                var parts: [String] = []
+                if let stage { parts.append(stage) }
+                if let fp = filesProgressText(effectiveProgress) { parts.append(fp) }
+                return parts.isEmpty ? "Working…" : parts.joined(separator: " · ")
+            case .idle:
+                return TargetPresentation.lastRunCompact(target: target, now: now) ?? "No recent runs."
+            case .failed:
+                return TargetPresentation.lastRunCompact(target: target, now: now) ?? "Last run: Failed"
+            case .offline:
+                return "No recent updates."
+            }
+        }()
+
+        let rowSecondaryRight: (systemImage: String, text: String)? = {
+            guard status == .running else { return nil }
+            switch kind {
+            case .backup:
+                if let bps = uploadBps {
+                    return ("arrow.up", "\(formatBytes(bps))/s")
+                }
+                return nil
+            case .restore:
+                if let bps = downloadBps {
+                    return ("arrow.down", "\(formatBytes(bps))/s")
+                }
+                return nil
+            case .verify, .unknown:
+                return nil
+            }
+        }()
+
+        let progressFrac = TargetPresentation.progressFraction(effectiveProgress)
+
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(target.label ?? target.targetId)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(target.sourcePath)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    .truncationMode(.tail)
+
+                if !target.enabled {
+                    Text("Disabled")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
             }
 
             HStack(spacing: 8) {
-                TargetRowActionButton(
-                    title: "Restore…",
-                    systemImage: "arrow.down.doc",
-                    isSelected: isSelected,
-                    isBusy: isBusy,
-                    action: onRestore
-                )
-
-                TargetRowActionButton(
-                    title: "Verify",
-                    systemImage: "checkmark.seal",
-                    isSelected: isSelected,
-                    isBusy: isBusy,
-                    action: onVerify
-                )
+                StatusBadge(status: status, style: .inline, isSelected: isSelected)
+                Text(rowSecondaryLeft)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(isSelected ? Color.primary.opacity(0.92) : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
                 Spacer(minLength: 0)
+
+                if let rowSecondaryRight {
+                    HStack(spacing: 4) {
+                        Image(systemName: rowSecondaryRight.systemImage)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(isSelected ? Color.primary.opacity(0.85) : .secondary)
+                        Text(rowSecondaryRight.text)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(isSelected ? Color.primary.opacity(0.85) : .secondary)
+                    }
+                    .lineLimit(1)
+                }
+            }
+
+            if status == .running {
+                if let progressFrac {
+                    ProgressView(value: progressFrac)
+                        .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                        .tint(status.tint)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                        .tint(status.tint)
+                }
             }
         }
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
-        .padding(.vertical, 2)
-    }
-}
-
-private struct TargetRowActionButton: View {
-    let title: String
-    let systemImage: String
-    let isSelected: Bool
-    let isBusy: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .labelStyle(.titleOnly)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(isSelected ? Color.white.opacity(isBusy ? 0.5 : 0.95) : Color.primary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(
-                    Group {
-                        if isSelected {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(Color.white.opacity(0.20))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
-                                )
-                        } else {
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(Color.white.opacity(0.12))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                        .strokeBorder(Color.black.opacity(0.10), lineWidth: 1)
-                                )
-                        }
-                    }
-                )
+        .contextMenu {
+            Button("Restore…") { onRestore() }
+                .disabled(isBusy)
+            Button("Verify") { onVerify() }
+                .disabled(isBusy)
         }
-        .buttonStyle(.plain)
-        .disabled(isBusy)
+        .help(target.sourcePath)
+        .padding(.vertical, 4)
     }
 }
 
 private struct TargetDetailView: View {
     @EnvironmentObject var model: AppModel
     let target: StatusTarget
+
+    private struct OverviewMetricItem: Identifiable {
+        let id = UUID()
+        let title: String
+        let value: String
+        let systemImage: String
+    }
+
+    private enum Tab: String, CaseIterable, Identifiable {
+        case history = "History"
+        case diagnostics = "Diagnostics"
+
+        var id: String { rawValue }
+    }
+
+    @State private var tab: Tab = {
+        if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1" {
+            let scene = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
+            if scene == "main-window-target-diagnostics" {
+                return .diagnostics
+            }
+        }
+        return .history
+    }()
 
     private var runs: [RunLogSummary] {
         model.runHistory
@@ -279,122 +458,343 @@ private struct TargetDetailView: View {
             }
     }
 
-    private var effectiveTargetState: String {
-        if target.state == "running" { return "running" }
-        if let t = model.activeTask,
-           t.state == "running",
-           t.targetId == target.targetId
-        {
-            return "running"
+    private var hasInProgressRunLog: Bool {
+        runs.contains(where: { $0.status == "running" })
+    }
+
+    private var activeForTarget: AppModel.ActiveTask? {
+        guard let t = model.activeTask else { return nil }
+        if t.state == "running" && t.targetId == target.targetId { return t }
+        return nil
+    }
+
+    private var effectiveProgress: StatusProgress? {
+        if let t = activeForTarget {
+            return t.progress ?? target.progress
         }
-        // Verify/restore runs are executed by the CLI and may not reflect in the daemon status
-        // stream immediately; infer "running" from the presence of an in-progress run log.
-        if runs.contains(where: { $0.status == "running" }) { return "running" }
-        return target.state
+        return target.progress
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             header
+            controlsRow
             Divider()
-            history
+            if tab == .history {
+                history
+            } else {
+                TargetDiagnosticsView(target: target)
+            }
         }
-        .padding(16)
+        .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private var header: some View {
-        let active = model.activeTask
-        let showActive = active?.state == "running" && active?.targetId == target.targetId
-
-        return VStack(alignment: .leading, spacing: 6) {
-            Text(target.label ?? target.targetId)
-                .font(.system(size: 20, weight: .bold))
-            Text(target.targetId)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(.secondary)
-            Text(target.sourcePath)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
-
-            HStack(spacing: 10) {
-                StatusChip(text: target.enabled ? "Enabled" : "Disabled", tint: target.enabled ? .green : .gray)
-                StatusChip(text: effectiveTargetState, tint: effectiveTargetState == "running" ? .blue : .gray)
-                if let status = target.lastRun?.status {
-                    StatusChip(text: "Last: \(status)", tint: status == "succeeded" ? .green : .red)
+    private var controlsRow: some View {
+        HStack(spacing: 12) {
+            Picker("", selection: $tab) {
+                ForEach(Tab.allCases) { t in
+                    Text(t.rawValue).tag(t)
                 }
-                Spacer()
-                Button("Restore…") { model.promptRestoreLatest(targetId: target.targetId) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.isRunning)
-                Button("Verify") { model.verifyLatest(targetId: target.targetId) }
-                    .buttonStyle(.bordered)
-                    .disabled(model.isRunning)
             }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .fixedSize()
 
-            if showActive, let active {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(activeTaskSummary(active))
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                    if let frac = activeTaskFraction(active) {
-                        ProgressView(value: frac)
-                            .progressViewStyle(.linear)
-                    } else {
-                        ProgressView()
-                            .progressViewStyle(.linear)
-                    }
+            Spacer(minLength: 0)
+
+            if tab == .diagnostics {
+                Button {
+                    model.copyStatusSnapshotJsonToClipboard()
+                } label: {
+                    Label("Copy JSON", systemImage: "doc.on.doc")
                 }
-                .padding(.top, 2)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.statusSnapshot == nil)
+
+                Button {
+                    model.revealStatusSourceInFinder()
+                } label: {
+                    Label("Reveal…", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
         }
     }
 
+    private var header: some View {
+        let now = Date()
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
+        let snap = model.statusSnapshot
+        let status = TargetPresentation.userStatus(
+            target: target,
+            activeTask: model.activeTask,
+            hasInProgressRunLog: hasInProgressRunLog,
+            snap: snap,
+            nowMs: nowMs
+        )
+
+        let runLogKind = runs.first(where: { $0.status == "running" })?.kind
+        let kind = TargetPresentation.workKind(
+            activeKind: activeForTarget?.kind,
+            runLogKind: runLogKind,
+            targetIsRunningInDaemon: target.state == "running"
+        )
+
+        let p = effectiveProgress
+
+        let stageText = TargetPresentation.stageText(p?.phase)
+            ?? {
+                switch kind {
+                case .backup: return "Backing up"
+                case .restore: return "Restoring"
+                case .verify: return "Verifying"
+                case .unknown: return "Working"
+                }
+            }()
+
+        let elapsedText: String? = {
+            guard status == .running else { return nil }
+            let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
+            if let t = activeForTarget {
+                return formatDuration(Date().timeIntervalSince(t.startedAt))
+            }
+            if let since = target.runningSince {
+                let secs = max(0, (nowMs - since)) / 1000
+                return formatDuration(Double(secs))
+            }
+            return nil
+        }()
+
+        let stageAndElapsed: String? = {
+            guard status == .running else { return nil }
+            var parts: [String] = [stageText]
+            if let elapsedText, !elapsedText.isEmpty {
+                parts.append(elapsedText)
+            }
+            return parts.joined(separator: " · ")
+        }()
+
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .center, spacing: 10) {
+                Text(target.label ?? target.targetId)
+                    .font(.system(size: 18, weight: .bold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                StatusBadge(status: status, style: .pill)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                if let stageAndElapsed {
+                    Text(stageAndElapsed)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                }
+
+                if !target.enabled {
+                    Text("Disabled")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            Text(target.sourcePath)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            overviewStats(now: now, status: status, kind: kind)
+        }
+    }
+
+    private func overviewStats(now: Date, status: TargetUserStatus, kind: TargetWorkKind) -> some View {
+        let p = effectiveProgress
+
+        if status != .running {
+            return AnyView(
+                VStack(alignment: .leading, spacing: 8) {
+                    let last = TargetPresentation.lastRunSummary(target: target, now: now)
+                    if let last {
+                        Text(last)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                    } else if status != .offline {
+                        Text("No runs yet.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if status == .offline {
+                        Text("No recent updates.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            )
+        }
+
+        let speedText: String? = {
+            switch kind {
+            case .backup:
+                let bps = (target.up.bytesPerSecond ?? 0) > 0
+                    ? target.up.bytesPerSecond
+                    : model.targetRateEstimates[target.targetId]?.uploadBytesPerSecond
+                if let bps, bps > 0 { return "Upload \(formatBytes(bps))/s" }
+                return nil
+            case .restore:
+                if let bps = model.targetRateEstimates[target.targetId]?.downloadBytesPerSecond, bps > 0 {
+                    return "Download \(formatBytes(bps))/s"
+                }
+                return "Measuring…"
+            case .verify, .unknown:
+                return nil
+            }
+        }()
+
+        let filesText = doneTotalText(done: p?.filesDone, total: p?.filesTotal)
+
+        func bytesText(_ value: Int64?) -> String {
+            guard let value else { return "Waiting…" }
+            return formatBytes(value)
+        }
+
+        let bytesReadValue = p?.bytesRead ?? 0
+        let savedBytes = p?.bytesDeduped ?? 0
+
+        func rowView(_ items: [OverviewMetricItem]) -> some View {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 14) {
+                    ForEach(items) { item in
+                        OverviewMetric(title: item.title, value: item.value, systemImage: item.systemImage)
+                    }
+                    Spacer(minLength: 0)
+                }
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 160), spacing: 14, alignment: .leading)],
+                    alignment: .leading,
+                    spacing: 10
+                ) {
+                    ForEach(items) { item in
+                        OverviewMetric(title: item.title, value: item.value, systemImage: item.systemImage)
+                    }
+                }
+            }
+        }
+
+        var items: [OverviewMetricItem] = []
+        if let speedText {
+            items.append(.init(title: "Speed", value: speedText, systemImage: "arrow.up.arrow.down"))
+        }
+
+        switch kind {
+        case .backup:
+            items.append(.init(title: "Uploaded", value: bytesText(p?.bytesUploaded), systemImage: "arrow.up.circle"))
+            items.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+            if p?.bytesRead != nil || bytesReadValue > 0 {
+                items.append(.init(title: "Read", value: bytesText(p?.bytesRead), systemImage: "internaldrive"))
+            }
+            if savedBytes > 0 {
+                items.append(.init(title: "Saved", value: bytesText(p?.bytesDeduped), systemImage: "leaf"))
+            }
+        case .restore:
+            items.append(.init(title: "Downloaded", value: bytesText(p?.bytesDownloaded), systemImage: "arrow.down.circle"))
+            items.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+            if p?.bytesRead != nil || bytesReadValue > 0 {
+                items.append(.init(title: "Written", value: bytesText(p?.bytesRead), systemImage: "square.and.arrow.down.on.square"))
+            }
+        case .verify:
+            items.append(.init(title: "Checked", value: bytesText(p?.bytesRead), systemImage: "checkmark.seal"))
+            items.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+        case .unknown:
+            items.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+        }
+
+        return AnyView(
+            VStack(alignment: .leading, spacing: 6) {
+                rowView(items)
+
+                if let frac = TargetPresentation.progressFraction(p) {
+                    ProgressView(value: frac)
+                        .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                        .tint(status.tint)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                        .tint(status.tint)
+                }
+            }
+        )
+    }
+
+    private func doneTotalText(done: Int64?, total: Int64?) -> String {
+        if let done, let total, total > 0 {
+            return "\(done)/\(total)"
+        }
+        if let total, total > 0 {
+            return "\(total)"
+        }
+        if let done, done > 0 {
+            return "\(done)"
+        }
+        return "Waiting…"
+    }
+
     private func activeTaskSummary(_ t: AppModel.ActiveTask) -> String {
-        let phase = t.progress?.phase ?? "running"
+        let stage = TargetPresentation.stageText(t.progress?.phase) ?? "Working"
         let elapsed = Date().timeIntervalSince(t.startedAt)
         let elapsedText = formatDuration(elapsed)
 
         var parts: [String] = []
-        parts.append("\(t.kind.uppercased()) • phase=\(phase)")
+        parts.append("\(t.kind.uppercased()) · \(stage)")
 
         let bytesUploaded = t.progress?.bytesUploaded ?? 0
+        let bytesDownloaded = t.progress?.bytesDownloaded ?? 0
         let bytesRead = t.progress?.bytesRead ?? 0
         let bytesDeduped = t.progress?.bytesDeduped ?? 0
 
         switch t.kind {
         case "backup":
-            if bytesUploaded > 0 { parts.append("+\(formatBytes(bytesUploaded))") }
-            if bytesUploaded == 0 && bytesRead > 0 { parts.append("read \(formatBytes(bytesRead))") }
-            if bytesDeduped > 0 { parts.append("saved \(formatBytes(bytesDeduped))") }
+            if bytesUploaded > 0 { parts.append("Uploaded \(formatBytes(bytesUploaded))") }
+            if bytesUploaded == 0 && bytesRead > 0 { parts.append("Read \(formatBytes(bytesRead))") }
+            if bytesDeduped > 0 { parts.append("Saved \(formatBytes(bytesDeduped))") }
         case "restore":
-            if bytesRead > 0 { parts.append("written \(formatBytes(bytesRead))") }
+            if bytesDownloaded > 0 { parts.append("Downloaded \(formatBytes(bytesDownloaded))") }
+            if bytesRead > 0 { parts.append("Written \(formatBytes(bytesRead))") }
         case "verify":
-            if bytesRead > 0 { parts.append("checked \(formatBytes(bytesRead))") }
+            if bytesRead > 0 { parts.append("Checked \(formatBytes(bytesRead))") }
         default:
-            if bytesRead > 0 { parts.append("read \(formatBytes(bytesRead))") }
+            if bytesRead > 0 { parts.append("Read \(formatBytes(bytesRead))") }
         }
 
         if let done = t.progress?.chunksDone {
             if let total = t.progress?.chunksTotal, total > 0 {
-                parts.append("chunks \(done)/\(total)")
+                parts.append("Chunks \(done)/\(total)")
             } else {
-                parts.append("chunks \(done)")
+                parts.append("Chunks \(done)")
             }
         } else if let done = t.progress?.filesDone {
             if let total = t.progress?.filesTotal, total > 0 {
-                parts.append("files \(done)/\(total)")
+                parts.append("Files \(done)/\(total)")
             } else {
-                parts.append("files \(done)")
+                parts.append("Files \(done)")
             }
         }
 
-        parts.append("elapsed \(elapsedText)")
-        return parts.joined(separator: " • ")
+        parts.append("Elapsed \(elapsedText)")
+        return parts.joined(separator: " · ")
     }
 
     private func activeTaskFraction(_ t: AppModel.ActiveTask) -> Double? {
@@ -414,28 +814,146 @@ private struct TargetDetailView: View {
         return nil
     }
 
+    @ViewBuilder
     private var history: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("History")
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Refresh") { model.refreshRunHistory() }
-                    .buttonStyle(.borderless)
+        if runs.isEmpty {
+            historyEmptyState
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            List(runs) { run in
+                RunLogRow(run: run)
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .frame(maxHeight: .infinity)
+        }
+    }
 
-            if runs.isEmpty {
-                Text("No run logs for this target yet.")
+    private var historyEmptyState: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text("No history yet")
+                        .font(.system(size: 14, weight: .bold))
+                }
+
+                Text("Run logs will appear here after the first completed backup / restore / verify.")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .padding(.vertical, 6)
-            } else {
-                List(runs) { run in
-                    RunLogRow(run: run)
+
+                if let last = TargetPresentation.lastRunSummary(target: target, now: Date()) {
+                    Text(last)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
                 }
-                .listStyle(.inset)
+
+                Button {
+                    model.openLogs()
+                } label: {
+                    Label("Open logs", systemImage: "folder")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
             }
+            .padding(14)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+            .frame(maxWidth: 560)
+
+            let updates = recentTargetActivity(limit: 6)
+            if !updates.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Recent updates")
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundStyle(.secondary)
+
+                    ForEach(updates) { item in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(item.relativeWhen)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 72, alignment: .leading)
+
+                            Text(item.text)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .truncationMode(.tail)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+                .frame(maxWidth: 760, alignment: .leading)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 6)
+    }
+
+    private struct RecentUpdateItem: Identifiable {
+        let id = UUID()
+        let relativeWhen: String
+        let text: String
+    }
+
+    private func recentTargetActivity(limit: Int) -> [RecentUpdateItem] {
+        let all = Array(model.statusActivity.suffix(200).reversed())
+        let filtered = all.filter { $0.text.contains(target.targetId) }
+        let now = Date()
+        return filtered.prefix(limit).map { item in
+            let ageSeconds = Int(now.timeIntervalSince(item.at))
+            let rel = TargetPresentation.formatRelativeSeconds(max(0, ageSeconds))
+            return RecentUpdateItem(relativeWhen: rel, text: presentActivityText(item.text))
+        }
+    }
+
+    private func presentActivityText(_ raw: String) -> String {
+        let prefix = "Target \(target.targetId) "
+        var s = raw
+        if s.hasPrefix(prefix) {
+            s = String(s.dropFirst(prefix.count))
+        }
+
+        if s.hasPrefix("state ") {
+            s = "State " + String(s.dropFirst("state ".count))
+        }
+        if s.hasPrefix("lastRun ") {
+            s = "Last run " + String(s.dropFirst("lastRun ".count))
+        }
+        s = s.replacingOccurrences(of: " lastRun ", with: " Last run ")
+        return s
+    }
+}
+
+private struct OverviewMetric: View {
+    let title: String
+    let value: String
+    let systemImage: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(title)
+                    .font(.system(size: 10, weight: .heavy))
+                    .foregroundStyle(.secondary)
+            }
+            Text(value)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
     }
 }
@@ -449,10 +967,10 @@ private struct UnknownTargetListRow: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Unknown target")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                 Text("\(count) run(s)")
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -498,7 +1016,9 @@ private struct UnknownTargetDetailView: View {
                 List(runs) { run in
                     RunLogRow(run: run)
                 }
-                .listStyle(.inset)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .frame(maxHeight: .infinity)
             }
         }
         .padding(16)
@@ -506,17 +1026,53 @@ private struct UnknownTargetDetailView: View {
     }
 }
 
-private struct StatusChip: View {
-    let text: String
-    let tint: Color
+private struct StatusBadge: View {
+    enum Style {
+        case pill
+        case inline
+    }
+
+    let status: TargetUserStatus
+    let style: Style
+    var isSelected: Bool = false
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(Color.white)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(tint.opacity(0.92), in: Capsule())
+        let content = HStack(alignment: .center, spacing: 6) {
+            Circle()
+                .fill(status.tint)
+                .frame(width: 6, height: 6)
+                // Selected list rows may use accent-colored backgrounds; add a light outline so the
+                // status dot doesn't get swallowed by the selection highlight.
+                .overlay(
+                    Circle()
+                        .strokeBorder(Color.white.opacity(isSelected ? 0.85 : 0.0), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(isSelected ? 0.18 : 0.0), radius: 1, x: 0, y: 0)
+            Text(status.title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle({
+                    switch style {
+                    case .pill:
+                        return status.tint.opacity(0.92)
+                    case .inline:
+                        return isSelected ? Color.primary.opacity(0.92) : Color.secondary
+                    }
+                }())
+        }
+
+        switch style {
+        case .pill:
+            content
+                .padding(.vertical, 3)
+                .padding(.horizontal, 8)
+                .background(status.tint.opacity(0.12), in: Capsule())
+                .overlay(
+                    Capsule()
+                        .strokeBorder(status.tint.opacity(0.18), lineWidth: 1)
+                )
+        case .inline:
+            content
+        }
     }
 }
 
@@ -544,7 +1100,7 @@ private struct RunLogRow: View {
                 }
 
                 Text(summaryLine(run))
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -555,7 +1111,7 @@ private struct RunLogRow: View {
             HStack(alignment: .center, spacing: 8) {
                 if let at = run.finishedAt ?? run.startedAt {
                     Text(at.formatted(date: .abbreviated, time: .standard))
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .frame(minWidth: 160, alignment: .trailing)
@@ -574,24 +1130,36 @@ private struct RunLogRow: View {
 
     private func summaryLine(_ r: RunLogSummary) -> String {
         var parts: [String] = []
-        if let d = r.durationSeconds {
-            parts.append(String(format: "dur=%.1fs", d))
+        if let d = r.durationSeconds, d > 0 {
+            parts.append(formatDuration(d))
         }
         if let e = r.errorCode, !e.isEmpty {
-            parts.append("err=\(e)")
+            parts.append("Error \(e)")
         }
-        if let b = r.bytesUploaded {
-            parts.append("up=\(b)")
+        if let b = r.bytesUploaded, b > 0 {
+            parts.append("Uploaded \(formatBytes(b))")
         }
-        if let b = r.bytesWritten {
-            parts.append("written=\(b)")
+        if let b = r.bytesDeduped, b > 0 {
+            parts.append("Saved \(formatBytes(b))")
         }
-        if let b = r.bytesChecked {
-            parts.append("checked=\(b)")
+        if let b = r.bytesWritten, b > 0 {
+            parts.append("Written \(formatBytes(b))")
         }
-        if let s = r.snapshotId, !s.isEmpty {
-            parts.append("snap=\(s)")
+        if let b = r.bytesChecked, b > 0 {
+            parts.append("Checked \(formatBytes(b))")
         }
-        return parts.joined(separator: " ")
+        if let f = r.filesRestored, f > 0 {
+            parts.append("Restored \(f) files")
+        }
+        if let c = r.chunksDownloaded, c > 0 {
+            parts.append("Downloaded \(c) chunks")
+        }
+        if let c = r.chunksChecked, c > 0 {
+            parts.append("Checked \(c) chunks")
+        }
+        if parts.isEmpty {
+            return "—"
+        }
+        return parts.joined(separator: " · ")
     }
 }

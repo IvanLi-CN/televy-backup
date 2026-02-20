@@ -4,7 +4,7 @@ import Darwin
 import Foundation
 import SwiftUI
 
-fileprivate enum StatusFreshness {
+enum StatusFreshness {
     static let staleMs: Int64 = 5_000
     static let disconnectedMs: Int64 = 60_000
     static let toastMaxAgeSeconds: Int = 15
@@ -83,17 +83,16 @@ final class AppModel: ObservableObject {
 
     @Published var statusSnapshot: StatusSnapshot? = nil
     @Published var statusSnapshotReceivedAt: Date? = nil
-    @Published var statusStreamFrozen: Bool = false
     @Published var popoverDesiredHeight: CGFloat = 460
     @Published var runHistory: [RunLogSummary] = []
     @Published var runHistoryRefreshInFlight: Bool = false
+    @Published var targetRateEstimates: [String: TargetRateEstimate] = [:]
 
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
     private var didShowUiLogWriteErrorToast: Bool = false
     private var settingsWindow: NSWindow? = nil
     private var mainWindow: NSWindow? = nil
-    private var developerWindow: NSWindow? = nil
     private var lastTaskKind: String? = nil
     private var lastTaskState: String? = nil
     private let launchOverrides: LaunchOverrides = .parse(CommandLine.arguments)
@@ -150,6 +149,13 @@ final class AppModel: ObservableObject {
     private var daemonTask: Process? = nil
     private var daemonIpcRetryWork: DispatchWorkItem? = nil
     private var lastDaemonStartAttemptAt: Date? = nil
+    private var lastRateSampleByTargetId: [String: RateSample] = [:]
+
+    private struct RateSample {
+        let at: Date
+        let uploaded: Int64?
+        let downloaded: Int64?
+    }
 
     private enum PopoverSizing {
         static let maxHeight: CGFloat = 720
@@ -176,26 +182,38 @@ final class AppModel: ObservableObject {
                 type: "status.snapshot",
                 schemaVersion: 1,
                 generatedAt: nowMs,
-                source: StatusSource(kind: "demo", detail: UIDemo.scene),
+                // In UI demo mode we still pretend to be a live daemon snapshot, otherwise the
+                // main window will intentionally render as Offline (by design).
+                source: StatusSource(kind: "daemon", detail: UIDemo.scene),
                 global: StatusGlobal(
-                    up: StatusRate(bytesPerSecond: 0),
-                    down: StatusRate(bytesPerSecond: 0),
-                    upTotal: StatusCounter(bytes: 0),
-                    downTotal: StatusCounter(bytes: 0),
+                    up: StatusRate(bytesPerSecond: 3_200_000),
+                    down: StatusRate(bytesPerSecond: 8_100_000),
+                    upTotal: StatusCounter(bytes: 1_234_567_890),
+                    downTotal: StatusCounter(bytes: 987_654_321),
                     uiUptimeSeconds: 42.0
                 ),
                 targets: [
                     StatusTarget(
                         targetId: "t_demo_a",
                         label: "photos",
-                        sourcePath: "/Users/ivan/Demo/Photos",
+                        sourcePath: "/Volumes/Demo/Photos",
                         endpointId: "ep_demo_a",
                         enabled: true,
-                        state: "idle",
-                        runningSince: nil,
-                        up: StatusRate(bytesPerSecond: nil),
+                        state: "running",
+                        runningSince: nowMs - 92_000,
+                        up: StatusRate(bytesPerSecond: 3_200_000),
                         upTotal: StatusCounter(bytes: 1_234_567_890),
-                        progress: nil,
+                        progress: StatusProgress(
+                            phase: "upload",
+                            filesTotal: 10_000,
+                            filesDone: 3_210,
+                            chunksTotal: nil,
+                            chunksDone: nil,
+                            bytesRead: 2_432_000_000,
+                            bytesUploaded: 1_700_000_000,
+                            bytesDownloaded: nil,
+                            bytesDeduped: 11_800_000
+                        ),
                         lastRun: StatusTargetRunSummary(
                             finishedAt: "2026-02-01T06:12:00Z",
                             durationSeconds: 723.4,
@@ -209,7 +227,7 @@ final class AppModel: ObservableObject {
                     StatusTarget(
                         targetId: "t_demo_b",
                         label: "docs",
-                        sourcePath: "/Users/ivan/Demo/Documents",
+                        sourcePath: "/Volumes/Demo/Documents",
                         endpointId: "ep_demo_a",
                         enabled: true,
                         state: "idle",
@@ -230,7 +248,7 @@ final class AppModel: ObservableObject {
                     StatusTarget(
                         targetId: "t_demo_c",
                         label: "music",
-                        sourcePath: "/Users/ivan/Demo/Music",
+                        sourcePath: "/Volumes/Demo/Music",
                         endpointId: "ep_demo_b",
                         enabled: false,
                         state: "idle",
@@ -253,7 +271,7 @@ final class AppModel: ObservableObject {
                     kind: "backup",
                     targetId: "t_demo_a",
                     endpointId: "ep_demo_a",
-                    sourcePath: "/Users/ivan/Demo/Photos",
+                    sourcePath: "/Volumes/Demo/Photos",
                     snapshotId: "s_demo_001",
                     status: "succeeded",
                     errorCode: nil,
@@ -274,7 +292,7 @@ final class AppModel: ObservableObject {
                     kind: "verify",
                     targetId: "t_demo_b",
                     endpointId: "ep_demo_a",
-                    sourcePath: "/Users/ivan/Demo/Documents",
+                    sourcePath: "/Volumes/Demo/Documents",
                     snapshotId: "s_demo_001",
                     status: "failed",
                     errorCode: "config.invalid",
@@ -619,7 +637,6 @@ final class AppModel: ObservableObject {
             guard let data = try? Data(contentsOf: url) else { return }
             guard let snap = try? JSONDecoder().decode(StatusSnapshot.self, from: data) else { return }
             DispatchQueue.main.async {
-                if self.statusStreamFrozen { return }
                 if self.statusSnapshot?.generatedAt == snap.generatedAt { return }
                 self.applyStatusSnapshot(snap)
             }
@@ -838,63 +855,6 @@ final class AppModel: ObservableObject {
         EdgeInsets(top: PopoverSizing.listInsetTop, leading: 0, bottom: PopoverSizing.listInsetBottom, trailing: 0)
     }
 
-    func openDeveloperWindow() {
-        DispatchQueue.main.async {
-            let window: NSWindow
-            if let existing = self.developerWindow {
-                window = existing
-            } else {
-                let root = DeveloperWindowRootView()
-                    .environmentObject(self)
-                let controller = NSHostingController(rootView: root)
-                controller.view.wantsLayer = true
-                controller.view.layer?.backgroundColor = NSColor.clear.cgColor
-
-                let w = NSWindow(contentViewController: controller)
-                w.title = "Developer"
-                if #available(macOS 11.0, *) {
-                    w.toolbarStyle = .unified
-                }
-                w.setContentSize(NSSize(width: 860, height: 720))
-                w.minSize = NSSize(width: 720, height: 560)
-                w.maxSize = NSSize(width: 1600, height: 2000)
-                w.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
-                w.isReleasedWhenClosed = false
-                w.center()
-                self.configureDeveloperWindowIfNeeded(w)
-                self.developerWindow = w
-                window = w
-            }
-
-            self.configureDeveloperWindowIfNeeded(window)
-            self.ensureStatusStreamRunning()
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
-        }
-    }
-
-    private func configureDeveloperWindowIfNeeded(_ window: NSWindow) {
-        if window.isOpaque {
-            window.isOpaque = false
-        }
-        if window.backgroundColor != .clear {
-            window.backgroundColor = .clear
-        }
-        if !window.styleMask.contains(.fullSizeContentView) {
-            window.styleMask.insert(.fullSizeContentView)
-        }
-        if window.appearance?.name != .vibrantLight {
-            window.appearance = NSAppearance(named: .vibrantLight)
-        }
-        window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = true
-
-        if let contentView = window.contentView {
-            contentView.wantsLayer = true
-            contentView.layer?.backgroundColor = NSColor.clear.cgColor
-        }
-    }
-
     func copyStatusSnapshotJsonToClipboard() {
         guard let statusSnapshot else { return }
         let encoder = JSONEncoder()
@@ -945,12 +905,51 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func updateRateSample(targetId: String, uploaded: Int64?, downloaded: Int64?) {
+        let now = Date()
+        let cur = RateSample(at: now, uploaded: uploaded, downloaded: downloaded)
+
+        defer {
+            lastRateSampleByTargetId[targetId] = cur
+        }
+
+        guard let prev = lastRateSampleByTargetId[targetId] else { return }
+        let dt = now.timeIntervalSince(prev.at)
+        if dt < 0.3 || dt > 10.0 { return }
+
+        func deltaBytes(_ cur: Int64?, _ prev: Int64?) -> Int64? {
+            guard let cur, let prev else { return nil }
+            let d = cur - prev
+            if d <= 0 { return nil }
+            return d
+        }
+
+        let upDelta = deltaBytes(uploaded, prev.uploaded)
+        let downDelta = deltaBytes(downloaded, prev.downloaded)
+        if upDelta == nil && downDelta == nil { return }
+
+        let upBps = upDelta.map { Int64(Double($0) / dt) }.flatMap { $0 > 0 ? $0 : nil }
+        let downBps = downDelta.map { Int64(Double($0) / dt) }.flatMap { $0 > 0 ? $0 : nil }
+
+        var next = targetRateEstimates
+        next[targetId] = TargetRateEstimate(uploadBytesPerSecond: upBps, downloadBytesPerSecond: downBps, updatedAt: now)
+        targetRateEstimates = next
+    }
+
     private func applyStatusSnapshot(_ snap: StatusSnapshot) {
-        if statusStreamFrozen { return }
         statusSnapshot = snap
         statusSnapshotReceivedAt = Date()
         appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
         updatePopoverHeightForTargets(targetCount: snap.targets.count)
+
+        // UI-only rate estimates based on monotonic progress counters. These are used to derive
+        // per-target download speeds (core doesn't expose them directly).
+        for t in snap.targets {
+            let p = t.progress
+            if p?.bytesUploaded != nil || p?.bytesDownloaded != nil {
+                updateRateSample(targetId: t.targetId, uploaded: p?.bytesUploaded, downloaded: p?.bytesDownloaded)
+            }
+        }
 
         // Keep run history in sync with daemon-triggered runs:
         // - Refresh when a target transitions into running so the new NDJSON file (run.start) appears immediately.
@@ -958,6 +957,11 @@ final class AppModel: ObservableObject {
         for t in snap.targets {
             let prev = lastObservedTargetStateByTargetId[t.targetId]
             if prev != t.state {
+                if let prev {
+                    appendStatusActivity("Target \(t.targetId) state \(prev) -> \(t.state)")
+                } else {
+                    appendStatusActivity("Target \(t.targetId) state \(t.state)")
+                }
                 lastObservedTargetStateByTargetId[t.targetId] = t.state
                 if t.state == "running" {
                     observedRunStart = true
@@ -980,11 +984,13 @@ final class AppModel: ObservableObject {
                 // History so the UI can pick up the corresponding NDJSON log file.
                 lastNotifiedRunFinishedAtByTargetId[t.targetId] = finishedAt
                 observedNewLastRun = true
+                appendStatusActivity(lastRunActivityText(target: t))
                 continue
             }
             guard prevFinishedAt != finishedAt else { continue }
             lastNotifiedRunFinishedAtByTargetId[t.targetId] = finishedAt
             observedNewLastRun = true
+            appendStatusActivity(lastRunActivityText(target: t))
 
             guard let d = parseIsoDate(finishedAt) else { continue }
             let ageSeconds = Int(Date().timeIntervalSince(d))
@@ -1023,6 +1029,29 @@ final class AppModel: ObservableObject {
             }
         }
 
+    }
+
+    private func lastRunActivityText(target t: StatusTarget) -> String {
+        let status = t.lastRun?.status ?? "unknown"
+        if status == "failed" {
+            let code = (t.lastRun?.errorCode?.isEmpty == false) ? (t.lastRun?.errorCode ?? "failed") : "failed"
+            return "Target \(t.targetId) lastRun failed (\(code))"
+        }
+
+        var parts: [String] = []
+        parts.append("Target \(t.targetId) lastRun \(status)")
+        if let files = t.lastRun?.filesIndexed, files > 0 {
+            parts.append("\(files) files")
+        }
+        if let uploaded = t.lastRun?.bytesUploaded, uploaded > 0 {
+            parts.append("+\(formatBytes(uploaded))")
+        } else if let saved = t.lastRun?.bytesDeduped, saved > 0 {
+            parts.append("saved \(formatBytes(saved))")
+        }
+        if let dur = t.lastRun?.durationSeconds, dur > 0 {
+            parts.append(formatDuration(dur))
+        }
+        return parts.joined(separator: " • ")
     }
 
     private func parseIsoDate(_ s: String) -> Date? {
@@ -2164,6 +2193,7 @@ final class AppModel: ObservableObject {
                 let chunksDone = (obj["chunksDone"] as? NSNumber)?.int64Value
                 let bytesRead = (obj["bytesRead"] as? NSNumber)?.int64Value
                 let bytesUploaded = (obj["bytesUploaded"] as? NSNumber)?.int64Value
+                let bytesDownloaded = (obj["bytesDownloaded"] as? NSNumber)?.int64Value
                 let bytesDeduped = (obj["bytesDeduped"] as? NSNumber)?.int64Value
 
                 self.phase = phase
@@ -2198,9 +2228,16 @@ final class AppModel: ObservableObject {
                     chunksDone: chunksDone,
                     bytesRead: bytesRead,
                     bytesUploaded: bytesUploaded,
+                    bytesDownloaded: bytesDownloaded,
                     bytesDeduped: bytesDeduped
                 )
                 self.activeTask = task
+
+                if let tid = task?.targetId, !tid.isEmpty {
+                    if bytesUploaded != nil || bytesDownloaded != nil {
+                        self.updateRateSample(targetId: tid, uploaded: bytesUploaded, downloaded: bytesDownloaded)
+                    }
+                }
             }
             return
         }
@@ -3453,273 +3490,6 @@ private struct TargetRowView: View {
 
 }
 
-struct DeveloperWindowRootView: View {
-    @EnvironmentObject var model: AppModel
-    @State private var selectedTargetId: String? = nil
-    @State private var activityFilter: String = ""
-
-    var body: some View {
-        ZStack {
-            VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow, state: .active)
-                .ignoresSafeArea()
-
-            if let snap = model.statusSnapshot {
-                HStack(spacing: 0) {
-                    sidebar(snapshot: snap)
-                        .frame(width: 280)
-                    Divider().opacity(0.2)
-                    mainPanel(snapshot: snap)
-                }
-            } else {
-                GlassCard(title: "STATUS") {
-                    Text("Waiting for status snapshots…")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(18)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .automatic) {
-                Button {
-                    model.copyStatusSnapshotJsonToClipboard()
-                } label: {
-                    Label("Copy JSON", systemImage: "doc.on.doc")
-                }
-                Button {
-                    model.revealStatusSourceInFinder()
-                } label: {
-                    Label("Reveal…", systemImage: "folder")
-                }
-                Button {
-                    model.statusStreamFrozen.toggle()
-                } label: {
-                    Label("Freeze", systemImage: model.statusStreamFrozen ? "pause.fill" : "play.fill")
-                }
-            }
-        }
-    }
-
-    private func sidebar(snapshot snap: StatusSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("TARGETS")
-                .font(.system(size: 11, weight: .heavy))
-                .foregroundStyle(.secondary)
-                .tracking(0.8)
-                .padding(.top, 14)
-                .padding(.horizontal, 14)
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(snap.targets) { t in
-                        Button {
-                            selectedTargetId = t.targetId
-                        } label: {
-                            sidebarRow(target: t, selected: effectiveSelectedTargetId(snapshot: snap) == t.targetId)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 12)
-            }
-
-            Divider().opacity(0.2)
-                .padding(.horizontal, 14)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Last snapshot: \(updatedAgeText(snapshot: snap))")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Text("Source: \(snap.source.kind)\(snap.source.detail.map { " (\($0))" } ?? "")")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 14)
-            .padding(.bottom, 14)
-        }
-        .frame(maxHeight: .infinity, alignment: .top)
-    }
-
-    private func sidebarRow(target t: StatusTarget, selected: Bool) -> some View {
-        HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(displayLabel(t))
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundStyle(.primary)
-                Text(t.targetId)
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                Text(t.state)
-                    .font(.system(size: 11, weight: .heavy, design: .monospaced))
-                    .foregroundStyle(stateColor(t))
-                Text("↑ \(t.up.bytesPerSecond.map { "\(formatBytes($0))/s" } ?? "—")")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(selected ? Color.blue.opacity(0.10) : Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
-        )
-    }
-
-    private func mainPanel(snapshot snap: StatusSnapshot) -> some View {
-        let selectedId = effectiveSelectedTargetId(snapshot: snap)
-        let target = snap.targets.first(where: { $0.targetId == selectedId }) ?? snap.targets.first
-
-        return ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                if let target {
-                    HStack(alignment: .firstTextBaseline, spacing: 0) {
-                        Text(displayLabel(target))
-                            .font(.system(size: 18, weight: .heavy))
-                        Text(target.sourcePath)
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .padding(.leading, 8)
-                        Spacer()
-                    }
-                    .padding(.top, 14)
-                    .padding(.horizontal, 16)
-                }
-
-                GlassCard(title: "GLOBAL") {
-                    let up = snap.global.up.bytesPerSecond.map { "\(formatBytes($0))/s" } ?? "—"
-                    let down = snap.global.down.bytesPerSecond.map { "\(formatBytes($0))/s" } ?? "—"
-                    let upTot = snap.global.upTotal.bytes.map { formatBytes($0) } ?? "—"
-                    let downTot = snap.global.downTotal.bytes.map { formatBytes($0) } ?? "—"
-
-                    keyValue("schemaVersion", "\(snap.schemaVersion)")
-                    keyValue("generatedAt", isoFromMs(snap.generatedAt))
-                    keyValue("rates", "up=\(up) down=\(down)")
-                    keyValue("session totals", "up=\(upTot) down=\(downTot)")
-                }
-                .padding(.horizontal, 16)
-
-                if let target {
-                    GlassCard(title: "TARGET DETAILS") {
-                        keyValue("state", target.state)
-                        keyValue("phase", target.progress?.phase ?? "—")
-                        if let p = target.progress {
-                            keyValue("progress", "chunks \(p.chunksDone ?? -1)/\(p.chunksTotal ?? -1)  files \(p.filesDone ?? -1)/\(p.filesTotal ?? -1)")
-                            keyValue("bytesRead", p.bytesRead.map(String.init) ?? "—")
-                            keyValue("bytesUploaded", p.bytesUploaded.map(String.init) ?? "—")
-                            keyValue("bytesDeduped", p.bytesDeduped.map(String.init) ?? "—")
-                        } else {
-                            keyValue("progress", "—")
-                        }
-                        if let r = target.lastRun {
-                            keyValue(
-                                "lastRun",
-                                "\(r.status ?? "—")  code=\(r.errorCode ?? "—")  dur=\(r.durationSeconds.map { String(format: "%.2fs", $0) } ?? "—")  files=\(r.filesIndexed.map(String.init) ?? "—")  uploaded=\(r.bytesUploaded.map(String.init) ?? "—")  deduped=\(r.bytesDeduped.map(String.init) ?? "—")"
-                            )
-                        } else {
-                            keyValue("lastRun", "—")
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                }
-
-                GlassCard(title: "ACTIVITY") {
-                    HStack {
-                        Spacer()
-                        TextField("filter: target", text: $activityFilter)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .frame(width: 220)
-                    }
-                    Divider().opacity(0.25)
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(filteredActivityItems(selectedTargetId: selectedId)) { item in
-                            Text("\(isoFromDate(item.at))  \(item.text)")
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(.primary.opacity(0.9))
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 16)
-            }
-        }
-    }
-
-    private func filteredActivityItems(selectedTargetId: String?) -> [AppModel.StatusActivityItem] {
-        let all = Array(model.statusActivity.suffix(200).reversed())
-        let needle = activityFilter.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !needle.isEmpty {
-            return all.filter { $0.text.localizedCaseInsensitiveContains(needle) }
-        }
-        if let selectedTargetId {
-            return all.filter { $0.text.contains(selectedTargetId) }
-        }
-        return all
-    }
-
-    private func effectiveSelectedTargetId(snapshot snap: StatusSnapshot) -> String? {
-        if let selectedTargetId, snap.targets.contains(where: { $0.targetId == selectedTargetId }) {
-            return selectedTargetId
-        }
-        return snap.targets.first?.targetId
-    }
-
-    private func updatedAgeText(snapshot snap: StatusSnapshot) -> String {
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
-        let ageMs = max(0, nowMs - snap.generatedAt)
-        if ageMs < 1_000 { return "\(ageMs)ms ago" }
-        if ageMs < 60_000 { return "\(ageMs / 1000)s ago" }
-        if ageMs < 3_600_000 { return "\(ageMs / 60_000)m ago" }
-        return "\(ageMs / 3_600_000)h ago"
-    }
-
-    private func stateColor(_ t: StatusTarget) -> Color {
-        if t.state == "running" { return .green }
-        if t.state == "failed" { return .red }
-        if t.state == "stale" { return .orange }
-        return .secondary
-    }
-
-    private func displayLabel(_ t: StatusTarget) -> String {
-        if let label = t.label, !label.isEmpty { return label }
-        return t.targetId
-    }
-
-    private func keyValue(_ key: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(key)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.primary)
-                .multilineTextAlignment(.trailing)
-        }
-    }
-
-    private func isoFromMs(_ ms: Int64) -> String {
-        let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000.0)
-        return isoFromDate(date)
-    }
-
-    private func isoFromDate(_ date: Date) -> String {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f.string(from: date)
-    }
-}
-
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @FocusState private var tokenFocused: Bool
@@ -3892,6 +3662,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var cancellables: Set<AnyCancellable> = []
 
+    // Prevent accidental multi-launch (e.g. `open -n`) from creating duplicate status bar items and
+    // competing daemons. We keep the earliest-launched instance alive and exit the rest.
+    private func exitIfSecondaryInstance() {
+        // Allow multiple instances for automated UI snapshots/debug workflows if needed.
+        if ProcessInfo.processInfo.environment["TELEVYBACKUP_ALLOW_MULTI_INSTANCE"] == "1" {
+            return
+        }
+        if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_DIR"] != nil {
+            return
+        }
+
+        guard let bundleId = Bundle.main.bundleIdentifier else { return }
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+        guard apps.count > 1 else { return }
+
+        let mePid = getpid()
+        let sorted = apps.sorted { a, b in
+            if let ad = a.launchDate, let bd = b.launchDate, ad != bd {
+                return ad < bd
+            }
+            return a.processIdentifier < b.processIdentifier
+        }
+        guard let primary = sorted.first else { return }
+        if primary.processIdentifier == mePid { return }
+
+        // Best-effort: focus the primary instance, then exit quickly.
+        primary.activate(options: [.activateAllWindows])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            Darwin.exit(0)
+        }
+    }
+
     private func makeDevStatusItemImage() -> NSImage? {
         let base = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "TelevyBackup Dev")
         let size = NSSize(width: 18, height: 18)
@@ -3942,6 +3744,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        exitIfSecondaryInstance()
+
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = status.button {
             button.image = isDevAppVariant()
