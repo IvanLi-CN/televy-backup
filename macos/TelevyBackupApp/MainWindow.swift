@@ -40,7 +40,8 @@ struct MainWindowRootView: View {
 
             NavigationSplitView {
                 sidebar
-                    .frame(minWidth: 200, idealWidth: 260, maxWidth: 380)
+                    // Default sidebar width should be comfortable enough to read status/stage without truncation.
+                    .frame(minWidth: 240, idealWidth: 320, maxWidth: 480)
             } detail: {
                 detail
             }
@@ -63,6 +64,20 @@ struct MainWindowRootView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
 
+                if let selection,
+                   selection != Selection.unknownTarget,
+                   let target = (model.statusSnapshot?.targets ?? []).first(where: { $0.targetId == selection })
+                {
+                    Menu {
+                        Button("Restore…") { model.promptRestoreLatest(targetId: target.targetId) }
+                            .disabled(model.isRunning)
+                        Button("Verify") { model.verifyLatest(targetId: target.targetId) }
+                            .disabled(model.isRunning)
+                    } label: {
+                        Label("Actions", systemImage: "ellipsis.circle")
+                    }
+                }
+
                 Button {
                     model.openSettingsWindow()
                 } label: {
@@ -82,15 +97,60 @@ struct MainWindowRootView: View {
     private var sidebar: some View {
         let targets = model.statusSnapshot?.targets ?? []
         let unknownCount = model.runHistory.filter { $0.targetId == nil }.count
+        let now = Date()
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
+        let snap = model.statusSnapshot
+        let snapshotOffline = TargetPresentation.snapshotIsOffline(snap: snap, nowMs: nowMs)
+
+        let sidebarStatusLine1: String? = {
+            guard let snap else { return nil }
+            let ageSeconds = Int(max(0, nowMs - snap.generatedAt) / 1000)
+            let rel = TargetPresentation.formatRelativeSeconds(ageSeconds)
+            let ageText = rel == "just now" ? rel : (rel + " ago")
+            return "\(snapshotOffline ? "Offline" : "Online") · \(ageText)"
+        }()
+
+        let sidebarStatusLine2: String? = {
+            guard let snap else { return nil }
+            if snapshotOffline { return "No recent updates" }
+
+            var parts: [String] = []
+            if let up = snap.global.up.bytesPerSecond, up > 0 {
+                parts.append("Upload \(formatBytes(up))/s")
+            }
+            if let down = snap.global.down.bytesPerSecond, down > 0 {
+                parts.append("Download \(formatBytes(down))/s")
+            }
+            if parts.isEmpty { return nil }
+            return parts.joined(separator: " · ")
+        }()
+
         return VStack(spacing: 0) {
-            HStack {
-                Text("Targets")
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if model.runHistoryRefreshInFlight {
-                    ProgressView()
-                        .controlSize(.small)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Targets")
+                        .font(.system(size: 12, weight: .heavy))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if model.runHistoryRefreshInFlight {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+
+                if let sidebarStatusLine1 {
+                    Text(sidebarStatusLine1)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                if let sidebarStatusLine2 {
+                    Text(sidebarStatusLine2)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
             .padding(.horizontal, 12)
@@ -170,7 +230,7 @@ private enum MainWindowUIDemo {
 
     static func initialSelection(targets: [StatusTarget]) -> String? {
         guard enabled else { return nil }
-        if scene == "main-window-target-detail" {
+        if scene.hasPrefix("main-window-target-") {
             return targets.first?.targetId
         }
         return nil
@@ -185,8 +245,6 @@ private struct TargetListRow: View {
     let onRestore: () -> Void
     let onVerify: () -> Void
     let onSelect: () -> Void
-
-    @State private var isHovering: Bool = false
 
     private var runs: [RunLogSummary] {
         model.runHistory.filter { run in run.targetId == target.targetId }
@@ -244,45 +302,53 @@ private struct TargetListRow: View {
 
         let stage = TargetPresentation.stageText(effectiveProgress?.phase)
 
-        let speedText: String? = {
+        let uploadBps: Int64? = {
             guard status == .running else { return nil }
-            switch kind {
-            case .backup:
-                let bps = (target.up.bytesPerSecond ?? 0) > 0
-                    ? target.up.bytesPerSecond
-                    : model.targetRateEstimates[target.targetId]?.uploadBytesPerSecond
-                if let bps, bps > 0 { return "Upload \(formatBytes(bps))/s" }
-                return nil
-            case .restore:
-                if let bps = model.targetRateEstimates[target.targetId]?.downloadBytesPerSecond, bps > 0 {
-                    return "Download \(formatBytes(bps))/s"
-                }
-                return "Download Waiting…"
-            case .verify, .unknown:
-                return nil
-            }
+            let bps = (target.up.bytesPerSecond ?? 0) > 0
+                ? target.up.bytesPerSecond
+                : model.targetRateEstimates[target.targetId]?.uploadBytesPerSecond
+            if let bps, bps > 0 { return bps }
+            return nil
         }()
 
-        let secondaryText: String = {
+        let downloadBps: Int64? = {
+            guard status == .running else { return nil }
+            let bps = model.targetRateEstimates[target.targetId]?.downloadBytesPerSecond
+            if let bps, bps > 0 { return bps }
+            return nil
+        }()
+
+        let rowSecondaryLeft: String = {
             switch status {
             case .running:
                 var parts: [String] = []
                 if let stage { parts.append(stage) }
-                if let speedText { parts.append(speedText) }
                 if let fp = filesProgressText(effectiveProgress) { parts.append(fp) }
                 return parts.isEmpty ? "Working…" : parts.joined(separator: " · ")
             case .idle:
-                if let last = TargetPresentation.lastRunCompact(target: target, now: now) {
-                    return last
-                }
-                return "No recent runs."
+                return TargetPresentation.lastRunCompact(target: target, now: now) ?? "No recent runs."
             case .failed:
-                if let last = TargetPresentation.lastRunCompact(target: target, now: now) {
-                    return last
-                }
-                return "Last run: Failed"
+                return TargetPresentation.lastRunCompact(target: target, now: now) ?? "Last run: Failed"
             case .offline:
                 return "No recent updates."
+            }
+        }()
+
+        let rowSecondaryRight: (systemImage: String, text: String)? = {
+            guard status == .running else { return nil }
+            switch kind {
+            case .backup:
+                if let bps = uploadBps {
+                    return ("arrow.up", "\(formatBytes(bps))/s")
+                }
+                return nil
+            case .restore:
+                if let bps = downloadBps {
+                    return ("arrow.down", "\(formatBytes(bps))/s")
+                }
+                return nil
+            case .verify, .unknown:
+                return nil
             }
         }()
 
@@ -290,45 +356,41 @@ private struct TargetListRow: View {
 
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                StatusMark(color: status.tint)
                 Text(target.label ?? target.targetId)
                     .font(.system(size: 12, weight: .semibold))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Spacer(minLength: 0)
 
-                HStack(spacing: 10) {
-                    Button(action: onRestore) {
-                        Image(systemName: "arrow.down.doc")
-                            .symbolRenderingMode(.hierarchical)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Restore…")
-                    .disabled(isBusy)
-
-                    Button(action: onVerify) {
-                        Image(systemName: "checkmark.seal")
-                            .symbolRenderingMode(.hierarchical)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Verify")
-                    .disabled(isBusy)
+                if !target.enabled {
+                    Text("Disabled")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
                 }
-                .opacity((isSelected || isHovering) ? 1.0 : 0.6)
+
+                Spacer(minLength: 0)
             }
 
             HStack(spacing: 8) {
-                Text(status.title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(status == .idle ? Color.secondary : Color.primary.opacity(0.9))
-
-                Text(secondaryText)
+                StatusBadge(status: status, style: .inline, isSelected: isSelected)
+                Text(rowSecondaryLeft)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isSelected ? Color.primary.opacity(0.92) : .secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
 
                 Spacer(minLength: 0)
+
+                if let rowSecondaryRight {
+                    HStack(spacing: 4) {
+                        Image(systemName: rowSecondaryRight.systemImage)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(isSelected ? Color.primary.opacity(0.85) : .secondary)
+                        Text(rowSecondaryRight.text)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(isSelected ? Color.primary.opacity(0.85) : .secondary)
+                    }
+                    .lineLimit(1)
+                }
             }
 
             if status == .running {
@@ -347,7 +409,12 @@ private struct TargetListRow: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
-        .onHover { isHovering = $0 }
+        .contextMenu {
+            Button("Restore…") { onRestore() }
+                .disabled(isBusy)
+            Button("Verify") { onVerify() }
+                .disabled(isBusy)
+        }
         .help(target.sourcePath)
         .padding(.vertical, 4)
     }
@@ -371,7 +438,15 @@ private struct TargetDetailView: View {
         var id: String { rawValue }
     }
 
-    @State private var tab: Tab = .history
+    @State private var tab: Tab = {
+        if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1" {
+            let scene = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
+            if scene == "main-window-target-diagnostics" {
+                return .diagnostics
+            }
+        }
+        return .history
+    }()
 
     private var runs: [RunLogSummary] {
         model.runHistory
@@ -403,17 +478,7 @@ private struct TargetDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            HStack {
-                Picker("", selection: $tab) {
-                    ForEach(Tab.allCases) { t in
-                        Text(t.rawValue).tag(t)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .controlSize(.small)
-
-                Spacer(minLength: 0)
-            }
+            controlsRow
             Divider()
             if tab == .history {
                 history
@@ -421,8 +486,42 @@ private struct TargetDetailView: View {
                 TargetDiagnosticsView(target: target)
             }
         }
-        .padding(12)
+        .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var controlsRow: some View {
+        HStack(spacing: 12) {
+            Picker("", selection: $tab) {
+                ForEach(Tab.allCases) { t in
+                    Text(t.rawValue).tag(t)
+                }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .fixedSize()
+
+            Spacer(minLength: 0)
+
+            if tab == .diagnostics {
+                Button {
+                    model.copyStatusSnapshotJsonToClipboard()
+                } label: {
+                    Label("Copy JSON", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(model.statusSnapshot == nil)
+
+                Button {
+                    model.revealStatusSourceInFinder()
+                } label: {
+                    Label("Reveal…", systemImage: "folder")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
     }
 
     private var header: some View {
@@ -444,78 +543,7 @@ private struct TargetDetailView: View {
             targetIsRunningInDaemon: target.state == "running"
         )
 
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(target.label ?? target.targetId)
-                        .font(.system(size: 20, weight: .bold))
-
-                    Text(target.sourcePath)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-
-                    HStack(spacing: 10) {
-                        StatusMark(color: status.tint)
-                        Text(status.title)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.primary.opacity(0.92))
-
-                        if !target.enabled {
-                            Text("Disabled")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Spacer(minLength: 0)
-                    }
-                }
-
-                Spacer(minLength: 0)
-
-                HStack(spacing: 10) {
-                    Button("Restore…") { model.promptRestoreLatest(targetId: target.targetId) }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .disabled(model.isRunning)
-                    Button("Verify") { model.verifyLatest(targetId: target.targetId) }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .disabled(model.isRunning)
-                }
-                .padding(.top, 2)
-            }
-
-            overviewStats(now: now, status: status, kind: kind)
-        }
-    }
-
-    private func overviewStats(now: Date, status: TargetUserStatus, kind: TargetWorkKind) -> some View {
         let p = effectiveProgress
-
-        if status != .running {
-            return AnyView(
-                VStack(alignment: .leading, spacing: 8) {
-                    if status == .offline {
-                        Text("No recent updates.")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    } else if let last = TargetPresentation.lastRunSummary(target: target, now: now) {
-                        Text(last)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .truncationMode(.tail)
-                    } else {
-                        Text("No runs yet.")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            )
-        }
 
         let stageText = TargetPresentation.stageText(p?.phase)
             ?? {
@@ -527,8 +555,9 @@ private struct TargetDetailView: View {
                 }
             }()
 
-        let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
-        let elapsedText: String = {
+        let elapsedText: String? = {
+            guard status == .running else { return nil }
+            let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
             if let t = activeForTarget {
                 return formatDuration(Date().timeIntervalSince(t.startedAt))
             }
@@ -536,8 +565,84 @@ private struct TargetDetailView: View {
                 let secs = max(0, (nowMs - since)) / 1000
                 return formatDuration(Double(secs))
             }
-            return "—"
+            return nil
         }()
+
+        let stageAndElapsed: String? = {
+            guard status == .running else { return nil }
+            var parts: [String] = [stageText]
+            if let elapsedText, !elapsedText.isEmpty {
+                parts.append(elapsedText)
+            }
+            return parts.joined(separator: " · ")
+        }()
+
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .center, spacing: 10) {
+                Text(target.label ?? target.targetId)
+                    .font(.system(size: 18, weight: .bold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                StatusBadge(status: status, style: .pill)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                if let stageAndElapsed {
+                    Text(stageAndElapsed)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                }
+
+                if !target.enabled {
+                    Text("Disabled")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            Text(target.sourcePath)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            overviewStats(now: now, status: status, kind: kind)
+        }
+    }
+
+    private func overviewStats(now: Date, status: TargetUserStatus, kind: TargetWorkKind) -> some View {
+        let p = effectiveProgress
+
+        if status != .running {
+            return AnyView(
+                VStack(alignment: .leading, spacing: 8) {
+                    let last = TargetPresentation.lastRunSummary(target: target, now: now)
+                    if let last {
+                        Text(last)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                    } else if status != .offline {
+                        Text("No runs yet.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if status == .offline {
+                        Text("No recent updates.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            )
+        }
 
         let speedText: String? = {
             switch kind {
@@ -551,7 +656,7 @@ private struct TargetDetailView: View {
                 if let bps = model.targetRateEstimates[target.targetId]?.downloadBytesPerSecond, bps > 0 {
                     return "Download \(formatBytes(bps))/s"
                 }
-                return "Download Waiting…"
+                return "Measuring…"
             case .verify, .unknown:
                 return nil
             }
@@ -569,7 +674,7 @@ private struct TargetDetailView: View {
 
         func rowView(_ items: [OverviewMetricItem]) -> some View {
             ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 18) {
+                HStack(alignment: .top, spacing: 14) {
                     ForEach(items) { item in
                         OverviewMetric(title: item.title, value: item.value, systemImage: item.systemImage)
                     }
@@ -587,50 +692,48 @@ private struct TargetDetailView: View {
             }
         }
 
-        var row1: [OverviewMetricItem] = []
-        row1.append(.init(title: "Stage", value: stageText, systemImage: "bolt.fill"))
+        var items: [OverviewMetricItem] = []
         if let speedText {
-            row1.append(.init(title: "Speed", value: speedText, systemImage: "arrow.up.arrow.down"))
-        }
-        if elapsedText != "—" {
-            row1.append(.init(title: "Elapsed", value: elapsedText, systemImage: "clock"))
+            items.append(.init(title: "Speed", value: speedText, systemImage: "arrow.up.arrow.down"))
         }
 
-        var row2: [OverviewMetricItem] = []
         switch kind {
         case .backup:
-            row2.append(.init(title: "Uploaded", value: bytesText(p?.bytesUploaded), systemImage: "arrow.up.circle"))
-            row2.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+            items.append(.init(title: "Uploaded", value: bytesText(p?.bytesUploaded), systemImage: "arrow.up.circle"))
+            items.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
             if p?.bytesRead != nil || bytesReadValue > 0 {
-                row2.append(.init(title: "Read", value: bytesText(p?.bytesRead), systemImage: "internaldrive"))
+                items.append(.init(title: "Read", value: bytesText(p?.bytesRead), systemImage: "internaldrive"))
             }
             if savedBytes > 0 {
-                row2.append(.init(title: "Saved", value: bytesText(p?.bytesDeduped), systemImage: "leaf"))
+                items.append(.init(title: "Saved", value: bytesText(p?.bytesDeduped), systemImage: "leaf"))
             }
         case .restore:
-            row2.append(.init(title: "Downloaded", value: bytesText(p?.bytesDownloaded), systemImage: "arrow.down.circle"))
-            row2.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+            items.append(.init(title: "Downloaded", value: bytesText(p?.bytesDownloaded), systemImage: "arrow.down.circle"))
+            items.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
             if p?.bytesRead != nil || bytesReadValue > 0 {
-                row2.append(.init(title: "Written", value: bytesText(p?.bytesRead), systemImage: "square.and.arrow.down.on.square"))
+                items.append(.init(title: "Written", value: bytesText(p?.bytesRead), systemImage: "square.and.arrow.down.on.square"))
             }
         case .verify:
-            row2.append(.init(title: "Checked", value: bytesText(p?.bytesRead), systemImage: "checkmark.seal"))
-            row2.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+            items.append(.init(title: "Checked", value: bytesText(p?.bytesRead), systemImage: "checkmark.seal"))
+            items.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
         case .unknown:
-            row2.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+            items.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
         }
 
         return AnyView(
             VStack(alignment: .leading, spacing: 6) {
-                rowView(row1)
-                rowView(row2)
+                rowView(items)
 
                 if let frac = TargetPresentation.progressFraction(p) {
                     ProgressView(value: frac)
                         .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                        .tint(status.tint)
                 } else {
                     ProgressView()
                         .progressViewStyle(.linear)
+                        .controlSize(.mini)
+                        .tint(status.tint)
                 }
             }
         )
@@ -711,29 +814,123 @@ private struct TargetDetailView: View {
         return nil
     }
 
+    @ViewBuilder
     private var history: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("History")
-                    .font(.system(size: 12, weight: .heavy))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Refresh") { model.refreshRunHistory() }
-                    .buttonStyle(.borderless)
+        if runs.isEmpty {
+            historyEmptyState
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            List(runs) { run in
+                RunLogRow(run: run)
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .frame(maxHeight: .infinity)
+        }
+    }
 
-            if runs.isEmpty {
-                Text("No run logs for this target yet.")
+    private var historyEmptyState: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text("No history yet")
+                        .font(.system(size: 14, weight: .bold))
+                }
+
+                Text("Run logs will appear here after the first completed backup / restore / verify.")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .padding(.vertical, 6)
-            } else {
-                List(runs) { run in
-                    RunLogRow(run: run)
+
+                if let last = TargetPresentation.lastRunSummary(target: target, now: Date()) {
+                    Text(last)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
                 }
-                .listStyle(.inset)
+
+                Button {
+                    model.openLogs()
+                } label: {
+                    Label("Open logs", systemImage: "folder")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
             }
+            .padding(14)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+            .frame(maxWidth: 560)
+
+            let updates = recentTargetActivity(limit: 6)
+            if !updates.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Recent updates")
+                        .font(.system(size: 11, weight: .heavy))
+                        .foregroundStyle(.secondary)
+
+                    ForEach(updates) { item in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(item.relativeWhen)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 72, alignment: .leading)
+
+                            Text(item.text)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .truncationMode(.tail)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+                .frame(maxWidth: 760, alignment: .leading)
+            }
+
+            Spacer(minLength: 0)
         }
+        .padding(.top, 6)
+    }
+
+    private struct RecentUpdateItem: Identifiable {
+        let id = UUID()
+        let relativeWhen: String
+        let text: String
+    }
+
+    private func recentTargetActivity(limit: Int) -> [RecentUpdateItem] {
+        let all = Array(model.statusActivity.suffix(200).reversed())
+        let filtered = all.filter { $0.text.contains(target.targetId) }
+        let now = Date()
+        return filtered.prefix(limit).map { item in
+            let ageSeconds = Int(now.timeIntervalSince(item.at))
+            let rel = TargetPresentation.formatRelativeSeconds(max(0, ageSeconds))
+            return RecentUpdateItem(relativeWhen: rel, text: presentActivityText(item.text))
+        }
+    }
+
+    private func presentActivityText(_ raw: String) -> String {
+        let prefix = "Target \(target.targetId) "
+        var s = raw
+        if s.hasPrefix(prefix) {
+            s = String(s.dropFirst(prefix.count))
+        }
+
+        if s.hasPrefix("state ") {
+            s = "State " + String(s.dropFirst("state ".count))
+        }
+        if s.hasPrefix("lastRun ") {
+            s = "Last run " + String(s.dropFirst("lastRun ".count))
+        }
+        s = s.replacingOccurrences(of: " lastRun ", with: " Last run ")
+        return s
     }
 }
 
@@ -819,7 +1016,9 @@ private struct UnknownTargetDetailView: View {
                 List(runs) { run in
                     RunLogRow(run: run)
                 }
-                .listStyle(.inset)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .frame(maxHeight: .infinity)
             }
         }
         .padding(16)
@@ -827,21 +1026,53 @@ private struct UnknownTargetDetailView: View {
     }
 }
 
-private struct StatusMark: View {
-    let color: Color
+private struct StatusBadge: View {
+    enum Style {
+        case pill
+        case inline
+    }
+
+    let status: TargetUserStatus
+    let style: Style
+    var isSelected: Bool = false
 
     var body: some View {
-        ZStack {
+        let content = HStack(alignment: .center, spacing: 6) {
             Circle()
-                .fill(color)
-                .opacity(0.20)
-                .frame(width: 16, height: 16)
-            Circle()
-                .fill(color)
-                .opacity(0.92)
-                .frame(width: 8, height: 8)
+                .fill(status.tint)
+                .frame(width: 6, height: 6)
+                // Selected list rows may use accent-colored backgrounds; add a light outline so the
+                // status dot doesn't get swallowed by the selection highlight.
+                .overlay(
+                    Circle()
+                        .strokeBorder(Color.white.opacity(isSelected ? 0.85 : 0.0), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(isSelected ? 0.18 : 0.0), radius: 1, x: 0, y: 0)
+            Text(status.title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle({
+                    switch style {
+                    case .pill:
+                        return status.tint.opacity(0.92)
+                    case .inline:
+                        return isSelected ? Color.primary.opacity(0.92) : Color.secondary
+                    }
+                }())
         }
-        .accessibilityHidden(true)
+
+        switch style {
+        case .pill:
+            content
+                .padding(.vertical, 3)
+                .padding(.horizontal, 8)
+                .background(status.tint.opacity(0.12), in: Capsule())
+                .overlay(
+                    Capsule()
+                        .strokeBorder(status.tint.opacity(0.18), lineWidth: 1)
+                )
+        case .inline:
+            content
+        }
     }
 }
 

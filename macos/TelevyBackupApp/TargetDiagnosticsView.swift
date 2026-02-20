@@ -16,33 +16,11 @@ struct TargetDiagnosticsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                actions
                 globalCard
                 targetDetailsCard
                 activityCard
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var actions: some View {
-        HStack(spacing: 10) {
-            Button {
-                model.copyStatusSnapshotJsonToClipboard()
-            } label: {
-                Label("Copy JSON", systemImage: "doc.on.doc")
-            }
-            .buttonStyle(.bordered)
-            .disabled(model.statusSnapshot == nil)
-
-            Button {
-                model.revealStatusSourceInFinder()
-            } label: {
-                Label("Reveal…", systemImage: "folder")
-            }
-            .buttonStyle(.bordered)
-
-            Spacer()
         }
     }
 
