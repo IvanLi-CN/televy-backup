@@ -357,6 +357,13 @@ private struct TargetDetailView: View {
     @EnvironmentObject var model: AppModel
     let target: StatusTarget
 
+    private struct OverviewMetricItem: Identifiable {
+        let id = UUID()
+        let title: String
+        let value: String
+        let systemImage: String
+    }
+
     private enum Tab: String, CaseIterable, Identifiable {
         case history = "History"
         case diagnostics = "Diagnostics"
@@ -414,7 +421,7 @@ private struct TargetDetailView: View {
                 TargetDiagnosticsView(target: target)
             }
         }
-        .padding(16)
+        .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
@@ -510,7 +517,15 @@ private struct TargetDetailView: View {
             )
         }
 
-        let stageText = TargetPresentation.stageText(p?.phase) ?? "Working"
+        let stageText = TargetPresentation.stageText(p?.phase)
+            ?? {
+                switch kind {
+                case .backup: return "Backing up"
+                case .restore: return "Restoring"
+                case .verify: return "Verifying"
+                case .unknown: return "Working"
+                }
+            }()
 
         let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
         let elapsedText: String = {
@@ -544,55 +559,71 @@ private struct TargetDetailView: View {
 
         let filesText = doneTotalText(done: p?.filesDone, total: p?.filesTotal)
 
-        func metric(_ title: String, _ value: String, _ systemImage: String) -> OverviewMetric {
-            OverviewMetric(title: title, value: value, systemImage: systemImage)
+        func bytesText(_ value: Int64?) -> String {
+            guard let value else { return "Waiting…" }
+            return formatBytes(value)
         }
 
-        let uploadedText = formatBytes(p?.bytesUploaded ?? 0)
-        let downloadedText = formatBytes(p?.bytesDownloaded ?? 0)
         let bytesReadValue = p?.bytesRead ?? 0
-        let bytesReadText = formatBytes(bytesReadValue)
         let savedBytes = p?.bytesDeduped ?? 0
-        let savedText = formatBytes(savedBytes)
 
-        let columns: [GridItem] = [
-            GridItem(.adaptive(minimum: 140, maximum: 220), spacing: 12, alignment: .leading)
-        ]
-
-        return AnyView(
-            VStack(alignment: .leading, spacing: 8) {
-                LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
-                    metric("Stage", stageText, "bolt.fill")
-                    if elapsedText != "—" {
-                        metric("Elapsed", elapsedText, "clock")
+        func rowView(_ items: [OverviewMetricItem]) -> some View {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 18) {
+                    ForEach(items) { item in
+                        OverviewMetric(title: item.title, value: item.value, systemImage: item.systemImage)
                     }
-                    if let speedText {
-                        metric("Speed", speedText, "arrow.up.arrow.down")
-                    }
-
-                    switch kind {
-                    case .backup:
-                        metric("Uploaded", uploadedText, "arrow.up.circle")
-                        metric("Files", filesText, "doc.on.doc")
-                        if bytesReadValue > 0 {
-                            metric("Read", bytesReadText, "internaldrive")
-                        }
-                        if savedBytes > 0 {
-                            metric("Saved", savedText, "leaf")
-                        }
-                    case .restore:
-                        metric("Downloaded", downloadedText, "arrow.down.circle")
-                        metric("Files", filesText, "doc.on.doc")
-                        if bytesReadValue > 0 {
-                            metric("Written", bytesReadText, "square.and.arrow.down.on.square")
-                        }
-                    case .verify:
-                        metric("Checked", bytesReadText, "checkmark.seal")
-                        metric("Files", filesText, "doc.on.doc")
-                    case .unknown:
-                        metric("Files", filesText, "doc.on.doc")
+                    Spacer(minLength: 0)
+                }
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 160), spacing: 14, alignment: .leading)],
+                    alignment: .leading,
+                    spacing: 10
+                ) {
+                    ForEach(items) { item in
+                        OverviewMetric(title: item.title, value: item.value, systemImage: item.systemImage)
                     }
                 }
+            }
+        }
+
+        var row1: [OverviewMetricItem] = []
+        row1.append(.init(title: "Stage", value: stageText, systemImage: "bolt.fill"))
+        if let speedText {
+            row1.append(.init(title: "Speed", value: speedText, systemImage: "arrow.up.arrow.down"))
+        }
+        if elapsedText != "—" {
+            row1.append(.init(title: "Elapsed", value: elapsedText, systemImage: "clock"))
+        }
+
+        var row2: [OverviewMetricItem] = []
+        switch kind {
+        case .backup:
+            row2.append(.init(title: "Uploaded", value: bytesText(p?.bytesUploaded), systemImage: "arrow.up.circle"))
+            row2.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+            if p?.bytesRead != nil || bytesReadValue > 0 {
+                row2.append(.init(title: "Read", value: bytesText(p?.bytesRead), systemImage: "internaldrive"))
+            }
+            if savedBytes > 0 {
+                row2.append(.init(title: "Saved", value: bytesText(p?.bytesDeduped), systemImage: "leaf"))
+            }
+        case .restore:
+            row2.append(.init(title: "Downloaded", value: bytesText(p?.bytesDownloaded), systemImage: "arrow.down.circle"))
+            row2.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+            if p?.bytesRead != nil || bytesReadValue > 0 {
+                row2.append(.init(title: "Written", value: bytesText(p?.bytesRead), systemImage: "square.and.arrow.down.on.square"))
+            }
+        case .verify:
+            row2.append(.init(title: "Checked", value: bytesText(p?.bytesRead), systemImage: "checkmark.seal"))
+            row2.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+        case .unknown:
+            row2.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
+        }
+
+        return AnyView(
+            VStack(alignment: .leading, spacing: 6) {
+                rowView(row1)
+                rowView(row2)
 
                 if let frac = TargetPresentation.progressFraction(p) {
                     ProgressView(value: frac)
