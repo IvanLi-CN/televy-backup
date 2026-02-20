@@ -3650,6 +3650,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var cancellables: Set<AnyCancellable> = []
 
+    // Prevent accidental multi-launch (e.g. `open -n`) from creating duplicate status bar items and
+    // competing daemons. We keep the earliest-launched instance alive and exit the rest.
+    private func exitIfSecondaryInstance() {
+        // Allow multiple instances for automated UI snapshots/debug workflows if needed.
+        if ProcessInfo.processInfo.environment["TELEVYBACKUP_ALLOW_MULTI_INSTANCE"] == "1" {
+            return
+        }
+        if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_SNAPSHOT_DIR"] != nil {
+            return
+        }
+
+        guard let bundleId = Bundle.main.bundleIdentifier else { return }
+        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+        guard apps.count > 1 else { return }
+
+        let mePid = getpid()
+        let sorted = apps.sorted { a, b in
+            if let ad = a.launchDate, let bd = b.launchDate, ad != bd {
+                return ad < bd
+            }
+            return a.processIdentifier < b.processIdentifier
+        }
+        guard let primary = sorted.first else { return }
+        if primary.processIdentifier == mePid { return }
+
+        // Best-effort: focus the primary instance, then exit quickly.
+        primary.activate(options: [.activateAllWindows])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            Darwin.exit(0)
+        }
+    }
+
     private func makeDevStatusItemImage() -> NSImage? {
         let base = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "TelevyBackup Dev")
         let size = NSSize(width: 18, height: 18)
@@ -3700,6 +3732,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        exitIfSecondaryInstance()
+
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = status.button {
             button.image = isDevAppVariant()
