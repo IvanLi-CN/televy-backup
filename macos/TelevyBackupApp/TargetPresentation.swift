@@ -1,0 +1,215 @@
+import Foundation
+import SwiftUI
+
+enum TargetWorkKind: String {
+    case backup
+    case restore
+    case verify
+    case unknown
+}
+
+struct TargetRateEstimate: Equatable {
+    var uploadBytesPerSecond: Int64?
+    var downloadBytesPerSecond: Int64?
+    var updatedAt: Date
+}
+
+enum TargetUserStatus: String {
+    case running
+    case idle
+    case failed
+    case offline
+
+    var title: String {
+        switch self {
+        case .running: return "Running"
+        case .idle: return "Idle"
+        case .failed: return "Failed"
+        case .offline: return "Offline"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .running: return .blue
+        case .idle: return .gray
+        case .failed: return .red
+        case .offline: return .orange
+        }
+    }
+}
+
+enum TargetPresentation {
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    static func stageText(_ phase: String?) -> String? {
+        guard let phase else { return nil }
+        let p = phase.trimmingCharacters(in: .whitespacesAndNewlines)
+        if p.isEmpty { return nil }
+        switch p {
+        case "scan": return "Scanning"
+        case "upload": return "Uploading"
+        case "index": return "Indexing"
+        case "index_sync": return "Indexing"
+        case "verify": return "Verifying"
+        case "restore": return "Restoring"
+        default: return p.prefix(1).uppercased() + p.dropFirst()
+        }
+    }
+
+    static func workKind(activeKind: String?, runLogKind: String?, targetIsRunningInDaemon: Bool) -> TargetWorkKind {
+        let candidates = [activeKind, runLogKind]
+        for raw in candidates {
+            guard let raw else { continue }
+            let k = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if k.isEmpty { continue }
+            if k == "backup" { return .backup }
+            if k == "restore" { return .restore }
+            if k == "verify" { return .verify }
+        }
+        if targetIsRunningInDaemon { return .backup }
+        return .unknown
+    }
+
+    static func snapshotIsOffline(snap: StatusSnapshot?, nowMs: Int64) -> Bool {
+        guard let snap else { return true }
+        if snap.source.kind != "daemon" { return true }
+        let ageMs = max(0, nowMs - snap.generatedAt)
+        return ageMs > StatusFreshness.staleMs
+    }
+
+    static func userStatus(
+        target: StatusTarget,
+        activeTask: AppModel.ActiveTask?,
+        hasInProgressRunLog: Bool,
+        snap: StatusSnapshot?,
+        nowMs: Int64
+    ) -> TargetUserStatus {
+        let activeRunning = (activeTask?.state == "running") && (activeTask?.targetId == target.targetId)
+        if activeRunning { return .running }
+
+        if hasInProgressRunLog { return .running }
+
+        let snapshotOffline = snapshotIsOffline(snap: snap, nowMs: nowMs)
+        if snapshotOffline { return .offline }
+
+        if target.state == "running" { return .running }
+
+        if target.state == "failed" || target.lastRun?.status == "failed" { return .failed }
+        if target.state == "stale" { return .offline }
+
+        return .idle
+    }
+
+    static func progressFraction(_ p: StatusProgress?) -> Double? {
+        guard let p else { return nil }
+
+        if let done = p.chunksDone, let total = p.chunksTotal, total > 0 {
+            if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
+                return nil
+            }
+            return min(1.0, Double(done) / Double(total))
+        }
+
+        if let done = p.filesDone, let total = p.filesTotal, total > 0 {
+            if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
+                return nil
+            }
+            return min(1.0, Double(done) / Double(total))
+        }
+
+        return nil
+    }
+
+    static func lastRunSummary(target: StatusTarget, now: Date) -> String? {
+        guard let r = target.lastRun else { return nil }
+
+        let status = (r.status?.isEmpty == false) ? (r.status ?? "unknown") : "unknown"
+        let statusTitle = status.prefix(1).uppercased() + status.dropFirst()
+
+        var parts: [String] = []
+        if status == "failed" {
+            if let code = r.errorCode, !code.isEmpty {
+                parts.append("Last run: Failed (\(code))")
+            } else {
+                parts.append("Last run: Failed")
+            }
+        } else {
+            parts.append("Last run: \(statusTitle)")
+        }
+
+        if let finishedAt = r.finishedAt, let d = parseIsoDate(finishedAt) {
+            let ageSeconds = Int(now.timeIntervalSince(d))
+            if ageSeconds >= 0 {
+                let rel = formatRelativeSeconds(ageSeconds)
+                parts.append(rel == "just now" ? rel : (rel + " ago"))
+            }
+        }
+
+        if status != "failed" {
+            if let uploaded = r.bytesUploaded, uploaded > 0 {
+                parts.append("Uploaded \(formatBytes(uploaded))")
+            }
+            if let saved = r.bytesDeduped, saved > 0 {
+                parts.append("Saved \(formatBytes(saved))")
+            }
+        }
+
+        if let dur = r.durationSeconds, dur > 0 {
+            parts.append(formatDuration(dur))
+        }
+
+        return parts.joined(separator: " · ")
+    }
+
+    static func lastRunCompact(target: StatusTarget, now: Date) -> String? {
+        guard let r = target.lastRun else { return nil }
+
+        let status = (r.status?.isEmpty == false) ? (r.status ?? "unknown") : "unknown"
+        if status == "failed" {
+            if let code = r.errorCode, !code.isEmpty {
+                return "Last run: Failed (\(code))"
+            }
+            return "Last run: Failed"
+        }
+
+        var parts: [String] = ["Last run: \(status.prefix(1).uppercased() + status.dropFirst())"]
+
+        if let finishedAt = r.finishedAt, let d = parseIsoDate(finishedAt) {
+            let ageSeconds = Int(now.timeIntervalSince(d))
+            if ageSeconds >= 0 {
+                let rel = formatRelativeSeconds(ageSeconds)
+                parts.append(rel == "just now" ? rel : (rel + " ago"))
+            }
+        }
+
+        if let uploaded = r.bytesUploaded, uploaded > 0 {
+            parts.append("+\(formatBytes(uploaded))")
+        }
+
+        if let dur = r.durationSeconds, dur > 0 {
+            parts.append(formatDuration(dur))
+        }
+
+        return parts.joined(separator: " · ")
+    }
+
+    static func parseIsoDate(_ s: String) -> Date? {
+        if let d = isoFormatter.date(from: s) { return d }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: s)
+    }
+
+    static func formatRelativeSeconds(_ s: Int) -> String {
+        if s < 5 { return "just now" }
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return "\(s / 60)m" }
+        if s < 86400 { return "\(s / 3600)h" }
+        return "\(s / 86400)d"
+    }
+}

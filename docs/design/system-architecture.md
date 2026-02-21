@@ -12,7 +12,7 @@
 - 技术：SwiftUI + AppKit（`NSStatusItem` + `NSPopover`）
 - 责任：
   - Settings window：编辑 v2 Settings（targets/endpoints/schedule/recovery key 等）。
-  - Popover Dashboard：展示全局 network + 多 target 状态；提供 Developer window 做排障。
+  - Popover Dashboard：展示全局 network + 多 target 状态；排障信息通过 Main window 的 Diagnostics（target detail）提供。
   - 通过启动/管理本地 CLI/daemon（best-effort）来获取任务进度与状态快照。
 
 ### 1.2 CLI（televybackup）
@@ -53,7 +53,7 @@ macOS 默认（未设置 env 时，GUI 侧）：
   - `status/status.json`
   - `logs/ui.log` 与每轮任务的 `sync-*.ndjson`
 
-## 3. 状态快照（Popover/Developer Dashboard）
+## 3. 状态快照（Popover / Main window Diagnostics）
 
 ### 3.1 真源：daemon 本地 IPC（Unix domain socket）
 
@@ -105,4 +105,4 @@ Popover 右上角状态灯与 header 文案反映“快照新鲜度”：
 
 - 任务日志（CLI/daemon）：以 NDJSON 落盘（每轮任务一份文件），避免混入 stdout（保证事件流可解析）。
 - UI 日志：`ui.log`（best-effort 追加写），用于记录进程拉起、status stream 解析错误、stale 转换等。
-- Developer window：用于把“快照来源/更新时间/原始字段”展示出来，尽量减少排障时对外部日志的依赖。
+- Main window Diagnostics（target detail）：用于把“快照来源/更新时间/原始字段”展示出来，尽量减少排障时对外部日志的依赖。

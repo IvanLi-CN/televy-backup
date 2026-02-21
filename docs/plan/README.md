@@ -81,3 +81,4 @@
 | 3ejpg | macOS：dev app variant（bundle id/name + menubar DEV 徽标） | 已完成 | `3ejpg:macos-dev-app-variant/PLAN.md` | 2026-02-09 | PR #37；实现分支：`feat/3ejpg-macos-dev-app-variant` |
 | njr29 | MTProto upload resilience（retry + heartbeat） | 已完成 | `njr29:mtproto-upload-resilience/PLAN.md` | 2026-02-14 | PR #39 |
 | 7bq4a | 正式版备份/验证稳定性修复（Telegram 超时、索引误判、瞬态文件、Vault Key 缓存） | 已完成 | `7bq4a:prod-backup-verify-stability/PLAN.md` | 2026-02-19 | PR #44 |
+| 7f9wg | macOS: Integrate Developer diagnostics into Main window | 已完成 | `7f9wg:integrate-developer-diagnostics/PLAN.md` | 2026-02-19 | PR #45 |
