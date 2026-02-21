@@ -10,7 +10,9 @@ use fastcdc::ronomon::FastCDC;
 use fastcdc::v2020::{ChunkData, Error as CdcError, MAXIMUM_MAX as V2020_MAXIMUM_MAX, StreamCDC};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool, sqlite::SqliteRow};
+use sqlx::pool::PoolConnection;
+use sqlx::sqlite::SqliteRow;
+use sqlx::{Connection, Row, Sqlite};
 use tracing::{debug, error};
 use walkdir::WalkDir;
 
@@ -37,6 +39,7 @@ const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
 const RONOMON_READ_CHUNK_BYTES: usize = 1024 * 1024;
 
 type CdcResult<T> = std::result::Result<T, CdcError>;
+type DbConn = PoolConnection<Sqlite>;
 
 #[derive(Debug, Clone)]
 pub struct ChunkingConfig {
@@ -410,6 +413,12 @@ enum UploadOutcome {
     },
 }
 
+#[derive(Debug, Clone)]
+struct ChunkObjectMapping {
+    chunk_hash: String,
+    object_id: String,
+}
+
 #[derive(Clone)]
 struct UploadQueue {
     sender: mpsc::Sender<UploadJob>,
@@ -723,10 +732,15 @@ pub async fn run_backup_with<S: Storage>(
     }
     drop(result_tx);
 
+    // Acquire a single dedicated SQLite connection for the entire backup pipeline. This avoids
+    // pool acquisition stalls/timeouts under heavy scan+upload workloads (especially for large
+    // `file_chunks` tables).
     let pool = open_index_db(&config.db_path).await?;
+    let mut conn: DbConn = pool.acquire().await?;
+    drop(pool);
 
     let scan_future = {
-        let pool = pool.clone();
+        let conn = &mut conn;
         let uploader = uploader.clone();
         let upload_tx = upload_tx.clone();
         let upload_tx_for_error = upload_tx.clone();
@@ -741,7 +755,8 @@ pub async fn run_backup_with<S: Storage>(
         let scan_done = Arc::clone(&scan_done);
         async move {
             let res = async {
-                let base_snapshot_id = latest_snapshot_for_source(&pool, &scan_source_path).await?;
+                let base_snapshot_id =
+                    latest_snapshot_for_source(conn, &scan_source_path).await?;
                 let snapshot_id = scan_snapshot_id
                     .clone()
                     .unwrap_or_else(|| format!("snp_{}", uuid::Uuid::new_v4()));
@@ -756,7 +771,7 @@ pub async fn run_backup_with<S: Storage>(
                 .bind(path_to_utf8(&scan_source_path)?)
                 .bind(&scan_label)
                 .bind(base_snapshot_id)
-                .execute(&pool)
+                .execute(&mut **conn)
                 .await?;
 
                 let mut result = BackupResult {
@@ -795,9 +810,25 @@ pub async fn run_backup_with<S: Storage>(
                         return Err(Error::Cancelled);
                     }
 
-                    let entry = entry.map_err(|e| Error::InvalidConfig {
-                        message: format!("walkdir error: {e}"),
-                    })?;
+                    let entry = match entry {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let is_not_found = e
+                                .io_error()
+                                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+                            let is_root = e.path().is_some_and(|p| p == scan_source_path);
+                            if is_not_found && !is_root {
+                                debug!(
+                                    event = "scan.walkdir.not_found",
+                                    path = %e.path().unwrap_or(Path::new("")).display(),
+                                    error = %e,
+                                    "scan.walkdir.not_found"
+                                );
+                                continue;
+                            }
+                            return Err(Error::Walkdir(e));
+                        }
+                    };
 
                     let path = entry.path();
                     if path == scan_source_path {
@@ -811,7 +842,24 @@ pub async fn run_backup_with<S: Storage>(
                             })?;
                     let rel_path_str = path_to_utf8(rel_path)?;
 
-                    let metadata = entry.metadata()?;
+                    let metadata = match entry.metadata() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let is_not_found = e
+                                .io_error()
+                                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+                            if is_not_found {
+                                debug!(
+                                    event = "scan.entry_not_found",
+                                    path = %path.display(),
+                                    error = %e,
+                                    "scan.entry_not_found"
+                                );
+                                continue;
+                            }
+                            return Err(Error::Walkdir(e));
+                        }
+                    };
 
                     let kind = if metadata.is_dir() {
                         "dir"
@@ -843,6 +891,24 @@ pub async fn run_backup_with<S: Storage>(
                         (0i64, 0i64, 0i64)
                     };
 
+                    let file = if kind == "file" {
+                        match File::open(path) {
+                            Ok(f) => Some(f),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                debug!(
+                                    event = "scan.file_not_found",
+                                    path = %path.display(),
+                                    error = %e,
+                                    "scan.file_not_found"
+                                );
+                                continue;
+                            }
+                            Err(e) => return Err(e.into()),
+                        }
+                    } else {
+                        None
+                    };
+
                     result.files_total += 1;
 
                     let file_id = format!("f_{}", uuid::Uuid::new_v4());
@@ -859,7 +925,7 @@ pub async fn run_backup_with<S: Storage>(
                     .bind(mtime_ms)
                     .bind(mode)
                     .bind(kind)
-                    .execute(&pool)
+                    .execute(&mut **conn)
                     .await?;
 
                     result.files_indexed += 1;
@@ -883,11 +949,9 @@ pub async fn run_backup_with<S: Storage>(
 	                        });
 	                    }
 
-                    if kind != "file" {
+                    let Some(file) = file else {
                         continue;
-                    }
-
-                    let file = File::open(path)?;
+                    };
                     let chunker = file_chunker(file, &scan_chunking);
 
                     for (seq, chunk) in chunker.enumerate() {
@@ -908,7 +972,7 @@ pub async fn run_backup_with<S: Storage>(
                         let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
 
                         let exists = chunk_object_exists_for_storage(
-                            &pool,
+                            conn,
                             storage,
                             provider,
                             &chunk_hash,
@@ -935,7 +999,7 @@ pub async fn run_backup_with<S: Storage>(
                             )
                             .bind(&chunk_hash)
                             .bind(chunk.data.len() as i64)
-                            .execute(&pool)
+                            .execute(&mut **conn)
                             .await?;
 
                             let blob = PackBlob {
@@ -983,7 +1047,7 @@ pub async fn run_backup_with<S: Storage>(
                         .bind(&chunk_hash)
                         .bind(chunk.offset as i64)
                         .bind(chunk.length as i64)
-                        .execute(&pool)
+                        .execute(&mut **conn)
                         .await?;
 
                         if let Some(sink) = options.progress {
@@ -1067,11 +1131,10 @@ pub async fn run_backup_with<S: Storage>(
         data_objects_uploaded: u64,
         bytes_uploaded: u64,
         first_error: Option<Error>,
+        chunk_objects: Vec<ChunkObjectMapping>,
     }
 
     let collect_future = {
-        let pool = pool.clone();
-        let provider = provider_owned.clone();
         let scan_files_indexed = Arc::clone(&scan_files_indexed);
         let scan_chunks_total = Arc::clone(&scan_chunks_total);
         let scan_bytes_read = Arc::clone(&scan_bytes_read);
@@ -1089,13 +1152,10 @@ pub async fn run_backup_with<S: Storage>(
                         object_id,
                         bytes,
                     }) => {
-                        record_chunk_object(
-                            &pool,
-                            &provider,
-                            &chunk_hash,
-                            &encode_tgfile_object_id(&object_id),
-                        )
-                        .await?;
+                        stats.chunk_objects.push(ChunkObjectMapping {
+                            chunk_hash,
+                            object_id: encode_tgfile_object_id(&object_id),
+                        });
                         stats.chunks_uploaded += 1;
                         stats.data_objects_uploaded += 1;
                         stats.bytes_uploaded += bytes;
@@ -1106,13 +1166,14 @@ pub async fn run_backup_with<S: Storage>(
                         bytes,
                     }) => {
                         for entry in entries {
-                            record_chunk_object(
-                                &pool,
-                                &provider,
-                                &entry.chunk_hash,
-                                &encode_tgpack_object_id(&pack_object_id, entry.offset, entry.len),
-                            )
-                            .await?;
+                            stats.chunk_objects.push(ChunkObjectMapping {
+                                chunk_hash: entry.chunk_hash,
+                                object_id: encode_tgpack_object_id(
+                                    &pack_object_id,
+                                    entry.offset,
+                                    entry.len,
+                                ),
+                            });
                             stats.chunks_uploaded += 1;
                         }
                         stats.data_objects_uploaded += 1;
@@ -1216,6 +1277,7 @@ pub async fn run_backup_with<S: Storage>(
     let (snapshot_id, mut result, upload_started) = scan_res?;
 
     let upload_stats = upload_stats?;
+    record_chunk_objects_batch(&mut conn, &provider_owned, &upload_stats.chunk_objects).await?;
     if let Some(err) = upload_stats.first_error {
         return Err(err);
     }
@@ -1257,7 +1319,7 @@ pub async fn run_backup_with<S: Storage>(
     let index_started = Instant::now();
     debug!(event = "phase.start", phase = "index", "phase.start");
     let manifest = upload_index(
-        &pool,
+        &mut conn,
         storage,
         &config,
         &snapshot_id,
@@ -1275,7 +1337,7 @@ pub async fn run_backup_with<S: Storage>(
     result.index_parts = manifest.parts.len() as u64;
     result.bytes_uploaded = uploaded_bytes.load(Ordering::Relaxed);
 
-    apply_retention(&pool, &config.source_path, config.keep_last_snapshots).await?;
+    apply_retention(&mut conn, &config.source_path, config.keep_last_snapshots).await?;
 
     debug!(
         event = "phase.finish",
@@ -1380,31 +1442,38 @@ impl PackState {
     }
 }
 
-async fn record_chunk_object(
-    pool: &SqlitePool,
+async fn record_chunk_objects_batch(
+    conn: &mut DbConn,
     provider: &str,
-    chunk_hash: &str,
-    object_id: &str,
+    chunk_objects: &[ChunkObjectMapping],
 ) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at)
-        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-        ON CONFLICT(provider, chunk_hash) DO UPDATE SET
-          object_id = excluded.object_id,
-          created_at = excluded.created_at
-        "#,
-    )
-    .bind(chunk_hash)
-    .bind(provider)
-    .bind(object_id)
-    .execute(pool)
-    .await?;
+    if chunk_objects.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = conn.begin().await?;
+    for m in chunk_objects {
+        sqlx::query(
+            r#"
+            INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at)
+            VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            ON CONFLICT(provider, chunk_hash) DO UPDATE SET
+              object_id = excluded.object_id,
+              created_at = excluded.created_at
+            "#,
+        )
+        .bind(&m.chunk_hash)
+        .bind(provider)
+        .bind(&m.object_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
 async fn apply_retention(
-    pool: &SqlitePool,
+    conn: &mut DbConn,
     source_path: &Path,
     keep_last_snapshots: u32,
 ) -> Result<()> {
@@ -1420,14 +1489,14 @@ async fn apply_retention(
     )
     .bind(source)
     .bind(keep_last_snapshots as i64)
-    .fetch_all(pool)
+    .fetch_all(&mut **conn)
     .await?;
 
     if rows.is_empty() {
         return Ok(());
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = conn.begin().await?;
     for row in rows {
         let snapshot_id: String = row.get("snapshot_id");
 
@@ -1477,7 +1546,7 @@ async fn apply_retention(
 }
 
 async fn latest_snapshot_for_source(
-    pool: &SqlitePool,
+    conn: &mut DbConn,
     source_path: &Path,
 ) -> Result<Option<String>> {
     let source = path_to_utf8(source_path)?;
@@ -1491,7 +1560,7 @@ async fn latest_snapshot_for_source(
         "#,
     )
     .bind(source)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **conn)
     .await?;
 
     Ok(row.map(|r| r.get::<String, _>("snapshot_id")))
@@ -1521,7 +1590,7 @@ fn tgmtproto_peer_from_object_id(object_id: &str) -> Option<String> {
 }
 
 async fn chunk_object_exists_for_storage<S: Storage>(
-    pool: &SqlitePool,
+    conn: &mut DbConn,
     storage: &S,
     provider: &str,
     chunk_hash: &str,
@@ -1536,7 +1605,7 @@ async fn chunk_object_exists_for_storage<S: Storage>(
     )
     .bind(provider)
     .bind(chunk_hash)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **conn)
     .await?;
 
     let Some(row) = row else {
@@ -1559,7 +1628,7 @@ async fn chunk_object_exists_for_storage<S: Storage>(
 
 #[allow(clippy::too_many_arguments)]
 async fn upload_index<S: Storage>(
-    pool: &SqlitePool,
+    conn: &mut DbConn,
     storage: &S,
     config: &BackupConfig,
     snapshot_id: &str,
@@ -1681,7 +1750,7 @@ async fn upload_index<S: Storage>(
         .bind(&object_id)
         .bind(part_len as i64)
         .bind(&part_hash)
-        .execute(pool)
+        .execute(&mut **conn)
         .await?;
 
         parts.push(IndexManifestPart {
@@ -1796,7 +1865,7 @@ async fn upload_index<S: Storage>(
     .bind(snapshot_id)
     .bind(provider)
     .bind(&manifest_object_id)
-    .execute(pool)
+    .execute(&mut **conn)
     .await?;
 
     Ok(manifest)

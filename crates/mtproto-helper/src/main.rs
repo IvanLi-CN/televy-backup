@@ -15,6 +15,7 @@ use grammers_client::types::{Media, Peer};
 use grammers_client::{Client, InputMessage, Update, UpdatesConfiguration};
 use grammers_mtsender::{NetStats, SenderPool};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant, timeout};
 
@@ -48,6 +49,9 @@ const DOWNLOAD_PROGRESS_MIN_INTERVAL_MS: u64 = 250;
 // Use a smaller part size than the maximum to make progress updates smoother and avoid long stalls
 // where the helper is downloading but can't report partial progress.
 const DOWNLOAD_PART_SIZE_BYTES: i32 = 128 * 1024;
+const DOWNLOAD_CHUNK_MAX_ATTEMPTS: usize = 4; // includes the initial attempt
+const SEND_MESSAGE_MAX_ATTEMPTS: usize = 3; // includes the initial attempt
+const MAX_CONCURRENT_UPLOADS_CAP: usize = 8;
 
 fn upload_stream_timeout_secs(size: usize) -> u64 {
     // Scale with size to avoid hanging forever, while allowing large objects to complete on slow links.
@@ -62,13 +66,28 @@ fn upload_stream_timeout_secs(size: usize) -> u64 {
 
 fn parse_flood_wait_secs(s: &str) -> Option<u64> {
     // Common Telegram RPC error format: "FLOOD_WAIT_123"
-    let idx = s.find("FLOOD_WAIT_")?;
-    let rest = &s[idx + "FLOOD_WAIT_".len()..];
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return None;
+    if let Some(idx) = s.find("FLOOD_WAIT_") {
+        let rest = &s[idx + "FLOOD_WAIT_".len()..];
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            return digits.parse().ok();
+        }
     }
-    digits.parse().ok()
+
+    // Alternative format observed in some RPC errors: "(value: 3)".
+    if let Some(idx) = s.find("value:") {
+        let rest = &s[idx + "value:".len()..];
+        let digits: String = rest
+            .chars()
+            .skip_while(|c| c.is_whitespace())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if !digits.is_empty() {
+            return digits.parse().ok();
+        }
+    }
+
+    None
 }
 
 fn upload_part_backoff(attempt: usize, flood_wait_secs: Option<u64>) -> Duration {
@@ -84,7 +103,39 @@ fn upload_part_backoff(attempt: usize, flood_wait_secs: Option<u64>) -> Duration
     Duration::from_millis(ms.min(UPLOAD_PART_BACKOFF_MAX_MS))
 }
 
+#[derive(Debug)]
+struct InvokeRateLimiter {
+    min_delay: Duration,
+    next_allowed: Mutex<Instant>,
+}
+
+impl InvokeRateLimiter {
+    fn new(min_delay: Duration) -> Self {
+        Self {
+            min_delay,
+            next_allowed: Mutex::new(Instant::now()),
+        }
+    }
+
+    async fn wait_turn(&self) {
+        if self.min_delay.is_zero() {
+            return;
+        }
+        let now = Instant::now();
+        let scheduled = {
+            let mut guard = self.next_allowed.lock().await;
+            let scheduled = if *guard > now { *guard } else { now };
+            *guard = scheduled + self.min_delay;
+            scheduled
+        };
+        if scheduled > now {
+            tokio::time::sleep(scheduled - now).await;
+        }
+    }
+}
+
 async fn save_big_file_part_with_retry(
+    limiter: &InvokeRateLimiter,
     client: &Client,
     file_id: i64,
     part: i32,
@@ -92,6 +143,7 @@ async fn save_big_file_part_with_retry(
     chunk: &[u8],
 ) -> Result<(), String> {
     for attempt in 1..=UPLOAD_PART_MAX_ATTEMPTS {
+        limiter.wait_turn().await;
         let res = timeout(
             Duration::from_secs(UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS),
             client.invoke(&tl::functions::upload::SaveBigFilePart {
@@ -143,6 +195,7 @@ async fn save_big_file_part_with_retry(
 }
 
 async fn save_file_part_with_retry_and_heartbeat(
+    limiter: &InvokeRateLimiter,
     net_stats: &NetStats,
     base_net_out: u64,
     client: &Client,
@@ -181,6 +234,8 @@ async fn save_file_part_with_retry_and_heartbeat(
         // Emit a heartbeat immediately so the core side won't wait too long on a stalled part.
         let _ = hb.tick().await;
         maybe_emit(out)?;
+
+        limiter.wait_turn().await;
 
         let req = tl::functions::upload::SaveFilePart {
             file_id,
@@ -253,6 +308,10 @@ mod tests {
             parse_flood_wait_secs("rpc error: FLOOD_WAIT_123 (test)"),
             Some(123)
         );
+        assert_eq!(
+            parse_flood_wait_secs("rpc error 420: FLOOD_WAIT (value: 3)"),
+            Some(3)
+        );
         assert_eq!(parse_flood_wait_secs("FLOOD_WAIT_"), None);
         assert_eq!(parse_flood_wait_secs("no flood wait here"), None);
     }
@@ -298,6 +357,10 @@ struct InitRequest {
     session_b64: Option<String>,
     #[serde(rename = "cacheDir")]
     cache_dir: PathBuf,
+    #[serde(default, rename = "minDelayMs")]
+    min_delay_ms: Option<u64>,
+    #[serde(default, rename = "maxConcurrentUploads")]
+    max_concurrent_uploads: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -365,6 +428,8 @@ struct State {
     session: Arc<TlSession>,
     client: Client,
     net_stats: Arc<NetStats>,
+    part_rate_limiter: Arc<InvokeRateLimiter>,
+    max_concurrent_uploads: usize,
     chat: Option<Peer>,
     updates: grammers_client::client::updates::UpdateStream,
 }
@@ -872,12 +937,22 @@ async fn init(req: InitRequest) -> Result<State, String> {
         },
     );
 
+    let max_concurrent_uploads = req
+        .max_concurrent_uploads
+        .unwrap_or(UPLOAD_WORKER_COUNT)
+        .clamp(1, MAX_CONCURRENT_UPLOADS_CAP);
+    let part_rate_limiter = Arc::new(InvokeRateLimiter::new(Duration::from_millis(
+        req.min_delay_ms.unwrap_or(0),
+    )));
+
     Ok(State {
         chat_id: req.chat_id,
         cache_dir: req.cache_dir,
         session,
         client,
         net_stats,
+        part_rate_limiter,
+        max_concurrent_uploads,
         chat,
         updates,
     })
@@ -1281,13 +1356,15 @@ async fn upload_bytes_with_progress(
         let next_part = Arc::new(AtomicI32::new(0));
         let payload_done = Arc::new(AtomicU64::new(0));
         let client = state.client.clone();
+        let limiter = Arc::clone(&state.part_rate_limiter);
 
         let mut join_set = JoinSet::new();
-        for _ in 0..UPLOAD_WORKER_COUNT {
+        for _ in 0..state.max_concurrent_uploads {
             let bytes = Arc::clone(&bytes);
             let next_part = Arc::clone(&next_part);
             let payload_done = Arc::clone(&payload_done);
             let client = client.clone();
+            let limiter = Arc::clone(&limiter);
             join_set.spawn(async move {
                 loop {
                     let part = next_part.fetch_add(1, Ordering::Relaxed);
@@ -1301,8 +1378,15 @@ async fn upload_bytes_with_progress(
                         continue;
                     }
                     let chunk = bytes[start..end].to_vec();
-                    save_big_file_part_with_retry(&client, file_id, part, total_parts, &chunk)
-                        .await?;
+                    save_big_file_part_with_retry(
+                        limiter.as_ref(),
+                        &client,
+                        file_id,
+                        part,
+                        total_parts,
+                        &chunk,
+                    )
+                    .await?;
                     payload_done.fetch_add(len as u64, Ordering::Relaxed);
                 }
                 Ok::<(), String>(())
@@ -1368,6 +1452,7 @@ async fn upload_bytes_with_progress(
         md5.consume(chunk);
 
         save_file_part_with_retry_and_heartbeat(
+            state.part_rate_limiter.as_ref(),
             &state.net_stats,
             base_out,
             &state.client,
@@ -1422,15 +1507,7 @@ async fn upload_with_progress(
     .await
     .map_err(|_| format!("upload_stream timed out after {timeout_secs}s"))??;
 
-    let msg = timeout(
-        Duration::from_secs(UPLOAD_SEND_MESSAGE_TIMEOUT_SECS),
-        state
-            .client
-            .send_message(&chat, InputMessage::new().text("").file(uploaded)),
-    )
-    .await
-    .map_err(|_| format!("send_message timed out after {UPLOAD_SEND_MESSAGE_TIMEOUT_SECS}s"))?
-    .map_err(|e| format!("send_message failed: {e}"))?;
+    let msg = send_media_message_with_retry(&state.client, &chat, &uploaded).await?;
 
     let msg_id = msg.id();
     let media = msg
@@ -1440,6 +1517,46 @@ async fn upload_with_progress(
 
     let object_id = encode_tgmtproto_object_id_v1(&state.chat_id, msg_id, doc_id, access_hash)?;
     Ok(object_id)
+}
+
+async fn send_media_message_with_retry(
+    client: &Client,
+    chat: &Peer,
+    uploaded: &Uploaded,
+) -> Result<grammers_client::types::Message, String> {
+    for attempt in 1..=SEND_MESSAGE_MAX_ATTEMPTS {
+        let res = timeout(
+            Duration::from_secs(UPLOAD_SEND_MESSAGE_TIMEOUT_SECS),
+            client.send_message(chat, InputMessage::new().text("").file(uploaded.clone())),
+        )
+        .await;
+
+        match res {
+            Ok(Ok(msg)) => return Ok(msg),
+            Ok(Err(e)) => {
+                let msg = format!("{e}");
+                if attempt >= SEND_MESSAGE_MAX_ATTEMPTS {
+                    return Err(format!(
+                        "send_message failed (attempt {attempt}/{SEND_MESSAGE_MAX_ATTEMPTS}): {msg}"
+                    ));
+                }
+                let wait = parse_flood_wait_secs(&msg);
+                tokio::time::sleep(upload_part_backoff(attempt, wait)).await;
+            }
+            Err(_) => {
+                let msg =
+                    format!("send_message timed out after {UPLOAD_SEND_MESSAGE_TIMEOUT_SECS}s");
+                if attempt >= SEND_MESSAGE_MAX_ATTEMPTS {
+                    return Err(format!(
+                        "{msg} (attempt {attempt}/{SEND_MESSAGE_MAX_ATTEMPTS})"
+                    ));
+                }
+                tokio::time::sleep(upload_part_backoff(attempt, None)).await;
+            }
+        }
+    }
+
+    Err("send_message retry loop exhausted".to_string())
 }
 
 async fn download_to_cache(
@@ -1561,22 +1678,47 @@ async fn download_to_cache(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        // Apply a per-chunk timeout, but keep emitting progress while waiting.
-        let fut = download.next();
-        tokio::pin!(fut);
-        let deadline = tokio::time::sleep(Duration::from_secs(DOWNLOAD_CHUNK_TIMEOUT_SECS));
-        tokio::pin!(deadline);
-
+        let mut attempt = 1usize;
         let next: Option<Vec<u8>> = loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    maybe_emit(len, bytes_total, out)?;
+            // Apply a per-chunk timeout, but keep emitting progress while waiting.
+            let res: Result<Option<Vec<u8>>, String> = {
+                let fut = download.next();
+                tokio::pin!(fut);
+                let deadline = tokio::time::sleep(Duration::from_secs(DOWNLOAD_CHUNK_TIMEOUT_SECS));
+                tokio::pin!(deadline);
+
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            maybe_emit(len, bytes_total, out)?;
+                        }
+                        _ = &mut deadline => {
+                            break Err(format!("download chunk timed out after {DOWNLOAD_CHUNK_TIMEOUT_SECS}s"));
+                        }
+                        res = &mut fut => {
+                            break res.map_err(|e| format!("download next failed: {e}"));
+                        }
+                    }
                 }
-                _ = &mut deadline => {
-                    return Err(format!("download chunk timed out after {DOWNLOAD_CHUNK_TIMEOUT_SECS}s"));
-                }
-                res = &mut fut => {
-                    break res.map_err(|e| format!("download next failed: {e}"))?;
+            };
+
+            match res {
+                Ok(v) => break v,
+                Err(e) => {
+                    if attempt >= DOWNLOAD_CHUNK_MAX_ATTEMPTS {
+                        return Err(format!(
+                            "{e} (attempt {attempt}/{DOWNLOAD_CHUNK_MAX_ATTEMPTS})"
+                        ));
+                    }
+                    let wait = parse_flood_wait_secs(&e);
+                    tokio::time::sleep(upload_part_backoff(attempt, wait)).await;
+                    attempt += 1;
+                    download = state
+                        .client
+                        .iter_download(&media)
+                        .chunk_size(chunk_size_i32)
+                        .skip_chunks((len / chunk_size) as i32);
+                    continue;
                 }
             }
         };

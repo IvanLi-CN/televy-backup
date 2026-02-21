@@ -491,7 +491,7 @@ fn vault_status(config_root: &std::path::Path) -> Result<VaultStatusResult, Cont
 }
 
 fn vault_ensure(config_root: &std::path::Path) -> Result<VaultStatusResult, ControlError> {
-    if crate::VAULT_KEY_CACHE.get().is_none() {
+    if crate::get_cached_vault_key().is_none() {
         // Keychain access may block waiting for user auth/permission. Avoid blocking Tokio worker
         // threads when possible.
         let res = if tokio::runtime::Handle::try_current().is_ok() {
@@ -502,7 +502,7 @@ fn vault_ensure(config_root: &std::path::Path) -> Result<VaultStatusResult, Cont
 
         match res {
             Ok(key) => {
-                let _ = crate::VAULT_KEY_CACHE.set(key);
+                crate::set_cached_vault_key(key);
             }
             Err(e) => {
                 return Err(ControlError {

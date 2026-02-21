@@ -188,9 +188,22 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
                     error = %e,
                     "io.telegram.download_failed"
                 );
-                Error::MissingIndexPart {
-                    snapshot_id: snapshot_id.to_string(),
-                    part_no: part.no,
+                match e {
+                    Error::Telegram { message } => {
+                        // Treat "not found" style errors as permanent missing data, but keep
+                        // timeouts/transient failures as retryable telegram errors.
+                        if message.contains("message not found")
+                            || message.contains("document mismatch")
+                        {
+                            Error::MissingIndexPart {
+                                snapshot_id: snapshot_id.to_string(),
+                                part_no: part.no,
+                            }
+                        } else {
+                            Error::Telegram { message }
+                        }
+                    }
+                    other => other,
                 }
             })?;
         let streamed = latest.load(Ordering::Relaxed);
@@ -372,7 +385,44 @@ fn replace_atomic(tmp: &Path, path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+
     use sqlx::Row;
+
+    struct FailOnDownload {
+        inner: crate::InMemoryStorage,
+        fail_object_id: String,
+        fail_message: String,
+    }
+
+    impl crate::storage::Storage for FailOnDownload {
+        fn provider(&self) -> &str {
+            self.inner.provider()
+        }
+
+        fn upload_document<'a>(
+            &'a self,
+            filename: &'a str,
+            bytes: Vec<u8>,
+        ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
+            self.inner.upload_document(filename, bytes)
+        }
+
+        fn download_document<'a>(
+            &'a self,
+            object_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+            Box::pin(async move {
+                if object_id == self.fail_object_id {
+                    return Err(Error::Telegram {
+                        message: self.fail_message.clone(),
+                    });
+                }
+                self.inner.download_document(object_id).await
+            })
+        }
+    }
 
     #[tokio::test]
     async fn download_and_write_roundtrip_writes_expected_sqlite_bytes() {
@@ -572,5 +622,141 @@ mod tests {
         .unwrap();
         let provider: String = row.try_get("provider").unwrap();
         assert_eq!(provider, "telegram.mtproto/new");
+    }
+
+    #[tokio::test]
+    async fn download_and_write_keeps_transient_telegram_errors_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_db = dir.path().join("out.sqlite");
+
+        let sqlite_bytes = b"not a real sqlite db";
+        let compressed = zstd::stream::encode_all(sqlite_bytes.as_slice(), 0).unwrap();
+
+        let snapshot_id = "snp_1";
+        let master_key = [9u8; 32];
+
+        let part_no = 0u32;
+        let aad = index_part_aad(snapshot_id, part_no);
+        let part_enc =
+            crate::crypto::encrypt_framed(&master_key, aad.as_bytes(), &compressed).unwrap();
+        let part_hash = blake3::hash(&part_enc).to_hex().to_string();
+
+        let inner = crate::InMemoryStorage::new();
+        let part_object_id = inner.upload_document("part.dat", part_enc).await.unwrap();
+
+        let manifest = IndexManifest {
+            version: 1,
+            snapshot_id: snapshot_id.to_string(),
+            hash_alg: "blake3".to_string(),
+            enc_alg: "xchacha20poly1305".to_string(),
+            compression: "zstd".to_string(),
+            parts: vec![crate::index_manifest::IndexManifestPart {
+                no: part_no,
+                size: inner
+                    .download_document(&part_object_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                hash: part_hash,
+                object_id: part_object_id.clone(),
+            }],
+        };
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let manifest_enc =
+            crate::crypto::encrypt_framed(&master_key, snapshot_id.as_bytes(), &manifest_json)
+                .unwrap();
+        let manifest_object_id = inner
+            .upload_document("manifest.dat", manifest_enc)
+            .await
+            .unwrap();
+
+        let storage = FailOnDownload {
+            inner,
+            fail_object_id: part_object_id,
+            fail_message: "mtproto helper timed out waiting for response after 180s".to_string(),
+        };
+
+        let err = download_and_write_index_db_atomic(
+            &storage,
+            snapshot_id,
+            &manifest_object_id,
+            &master_key,
+            &out_db,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), "telegram.unavailable");
+    }
+
+    #[tokio::test]
+    async fn download_and_write_maps_permanent_missing_to_missing_index_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_db = dir.path().join("out.sqlite");
+
+        let sqlite_bytes = b"not a real sqlite db";
+        let compressed = zstd::stream::encode_all(sqlite_bytes.as_slice(), 0).unwrap();
+
+        let snapshot_id = "snp_1";
+        let master_key = [9u8; 32];
+
+        let part_no = 0u32;
+        let aad = index_part_aad(snapshot_id, part_no);
+        let part_enc =
+            crate::crypto::encrypt_framed(&master_key, aad.as_bytes(), &compressed).unwrap();
+        let part_hash = blake3::hash(&part_enc).to_hex().to_string();
+
+        let inner = crate::InMemoryStorage::new();
+        let part_object_id = inner.upload_document("part.dat", part_enc).await.unwrap();
+
+        let manifest = IndexManifest {
+            version: 1,
+            snapshot_id: snapshot_id.to_string(),
+            hash_alg: "blake3".to_string(),
+            enc_alg: "xchacha20poly1305".to_string(),
+            compression: "zstd".to_string(),
+            parts: vec![crate::index_manifest::IndexManifestPart {
+                no: part_no,
+                size: inner
+                    .download_document(&part_object_id)
+                    .await
+                    .unwrap()
+                    .len(),
+                hash: part_hash,
+                object_id: part_object_id.clone(),
+            }],
+        };
+        let manifest_json = serde_json::to_vec(&manifest).unwrap();
+        let manifest_enc =
+            crate::crypto::encrypt_framed(&master_key, snapshot_id.as_bytes(), &manifest_json)
+                .unwrap();
+        let manifest_object_id = inner
+            .upload_document("manifest.dat", manifest_enc)
+            .await
+            .unwrap();
+
+        let storage = FailOnDownload {
+            inner,
+            fail_object_id: part_object_id,
+            fail_message: "message not found: msg_id=123".to_string(),
+        };
+
+        let err = download_and_write_index_db_atomic(
+            &storage,
+            snapshot_id,
+            &manifest_object_id,
+            &master_key,
+            &out_db,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), "index.part_missing");
     }
 }

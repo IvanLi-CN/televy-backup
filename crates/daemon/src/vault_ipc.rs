@@ -241,10 +241,10 @@ async fn handle_vault_ipc_client(
 
     let resp = match req {
         VaultIpcRequest::VaultGetOrCreate => {
-            if let Some(key) = crate::VAULT_KEY_CACHE.get() {
+            if let Some(key) = crate::get_cached_vault_key() {
                 VaultIpcResponse {
                     ok: true,
-                    vault_key_b64: Some(televy_backup_core::secrets::vault_key_to_base64(key)),
+                    vault_key_b64: Some(televy_backup_core::secrets::vault_key_to_base64(&key)),
                     value: None,
                     deleted: None,
                     error: None,
@@ -259,7 +259,7 @@ async fn handle_vault_ipc_client(
                 {
                     Ok(Ok(key)) => {
                         // Populate cache so non-blocking callers can proceed.
-                        let _ = crate::VAULT_KEY_CACHE.set(key);
+                        crate::set_cached_vault_key(key);
                         VaultIpcResponse {
                             ok: true,
                             vault_key_b64: Some(televy_backup_core::secrets::vault_key_to_base64(
