@@ -353,7 +353,8 @@ fn compute_upload_limits(rate_limit: &TelegramRateLimit) -> Result<UploadLimits>
             ),
         });
     }
-    let worker_pool_size = configured_concurrency;
+    // Keep enough workers ready for adaptive upshifts even if config starts low.
+    let worker_pool_size = ADAPTIVE_MAX_CONCURRENCY;
     let max_pending_jobs = worker_pool_size.saturating_mul(2).max(1);
     let max_pending_bytes = worker_pool_size
         .saturating_mul(PACK_MAX_BYTES)
@@ -966,7 +967,7 @@ pub async fn run_backup_with<S: Storage>(
     let provider_owned = provider.to_string();
     let limits = compute_upload_limits(&config.rate_limit)?;
     let configured_concurrency = config.rate_limit.max_concurrent_uploads as usize;
-    let adaptive_max_concurrency = configured_concurrency;
+    let adaptive_max_concurrency = ADAPTIVE_MAX_CONCURRENCY;
     let initial_concurrency = configured_concurrency;
     let configured_delay_ms = config.rate_limit.min_delay_ms as u64;
     if configured_delay_ms > ADAPTIVE_MAX_DELAY_MS {
@@ -976,7 +977,7 @@ pub async fn run_backup_with<S: Storage>(
             ),
         });
     }
-    let adaptive_min_delay_ms = configured_delay_ms;
+    let adaptive_min_delay_ms = 0;
     let initial_delay_ms = configured_delay_ms;
     let rate_limiter = Arc::new(UploadRateLimiter::new(
         initial_delay_ms,
