@@ -2,10 +2,10 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 部分完成（4/5）
 - Created: 2026-02-23
 - Last: 2026-02-23
-- Notes:
+- Notes: PR #46（CI 进行中；30 分钟现场验收未达标，需继续）
 
 ## 背景 / 问题陈述
 
@@ -83,10 +83,10 @@
 
 ## Milestones
 
-- [ ] M1: core 上传侧自适应并发/节流控制器落地并接入主备份流程
-- [ ] M2: helper watchdog + send_message heartbeat 改造完成
-- [ ] M3: sqlite 锁竞争恢复（busy_timeout + 限定重试）落地
-- [ ] M4: 错误优先级修正 + 测试覆盖
+- [x] M1: core 上传侧自适应并发/节流控制器落地并接入主备份流程
+- [x] M2: helper watchdog + send_message heartbeat 改造完成
+- [x] M3: sqlite 锁竞争恢复（busy_timeout + 限定重试）落地
+- [x] M4: 错误优先级修正 + 测试覆盖
 - [ ] M5: 本地自动化验证 + 30 分钟现场验收 + PR 结果收敛
 
 ## 风险与开放问题
@@ -98,3 +98,4 @@
 ## 变更记录 / Change log
 
 - 2026-02-23: 冻结目标、范围、验收与测试口径，进入实现阶段。
+- 2026-02-23: 完成实现与本地自动化验证，创建 PR #46；现场采样约 897s，当前未满足 30 分钟验收口径。
