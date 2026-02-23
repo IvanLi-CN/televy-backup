@@ -45,6 +45,19 @@ pub async fn open_index_db(path: &Path) -> Result<SqlitePool> {
             );
             e
         })?;
+    sqlx::query("PRAGMA busy_timeout = 60000;")
+        .execute(&pool)
+        .await
+        .map_err(|e| {
+            error!(
+                event = "io.sqlite.pragma_failed",
+                db_path = %path.display(),
+                pragma = "busy_timeout",
+                error = %e,
+                "io.sqlite.pragma_failed"
+            );
+            e
+        })?;
 
     sqlx::migrate!().run(&pool).await.map_err(|e| {
         error!(
@@ -92,6 +105,19 @@ pub async fn open_existing_index_db(path: &Path) -> Result<SqlitePool> {
             error!(
                 event = "io.sqlite.pragma_failed",
                 db_path = %path.display(),
+                error = %e,
+                "io.sqlite.pragma_failed"
+            );
+            e
+        })?;
+    sqlx::query("PRAGMA busy_timeout = 60000;")
+        .execute(&pool)
+        .await
+        .map_err(|e| {
+            error!(
+                event = "io.sqlite.pragma_failed",
+                db_path = %path.display(),
+                pragma = "busy_timeout",
                 error = %e,
                 "io.sqlite.pragma_failed"
             );

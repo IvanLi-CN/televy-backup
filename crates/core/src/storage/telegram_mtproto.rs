@@ -13,7 +13,7 @@ use super::{Storage, StorageProgress};
 use crate::{Error, Result};
 
 const TG_MTPROTO_OBJECT_ID_PREFIX_V1: &str = "tgmtproto:v1:";
-const MTPROTO_HELPER_READ_TIMEOUT_SECS: u64 = 180;
+const MTPROTO_HELPER_READ_TIMEOUT_SECS: u64 = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TgMtProtoObjectIdV1 {

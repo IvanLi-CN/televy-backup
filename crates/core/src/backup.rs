@@ -29,7 +29,7 @@ use crate::progress::{ProgressSink, TaskProgress};
 use crate::storage::MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES;
 use crate::storage::{Storage, encode_tgfile_object_id, encode_tgpack_object_id};
 use crate::{Error, Result};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -37,6 +37,17 @@ const INDEX_PART_BYTES: usize = 4 * 1024 * 1024;
 const PACK_ENABLE_MIN_OBJECTS: usize = 10;
 const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
 const RONOMON_READ_CHUNK_BYTES: usize = 1024 * 1024;
+const ADAPTIVE_MIN_CONCURRENCY: usize = 1;
+const ADAPTIVE_MAX_CONCURRENCY: usize = 8;
+const ADAPTIVE_MIN_DELAY_MS: u64 = 0;
+const ADAPTIVE_MAX_DELAY_MS: u64 = 500;
+const ADAPTIVE_TICK_INTERVAL_SECS: u64 = 15;
+const ADAPTIVE_WARMUP_SECS: u64 = 30;
+const ADAPTIVE_UPGRADE_THROUGHPUT_BPS: u64 = 1024 * 1024;
+const ADAPTIVE_UPGRADE_MAX_ERROR_RATE: f64 = 0.01;
+const ADAPTIVE_DOWNGRADE_MIN_ERROR_RATE: f64 = 0.05;
+const ADAPTIVE_CONSECUTIVE_FAILURES_DOWNGRADE: usize = 3;
+const SQLITE_BUSY_RETRY_DELAYS_MS: [u64; 5] = [100, 250, 500, 1000, 2000];
 
 type CdcResult<T> = std::result::Result<T, CdcError>;
 type DbConn = PoolConnection<Sqlite>;
@@ -323,7 +334,7 @@ pub struct BackupOptions<'a> {
 
 #[derive(Debug, Clone)]
 struct UploadLimits {
-    max_concurrent_uploads: usize,
+    worker_pool_size: usize,
     max_pending_jobs: usize,
     max_pending_bytes: usize,
 }
@@ -335,13 +346,13 @@ fn compute_upload_limits(rate_limit: &TelegramRateLimit) -> Result<UploadLimits>
                 .to_string(),
         });
     }
-    let max_concurrent_uploads = rate_limit.max_concurrent_uploads as usize;
-    let max_pending_jobs = max_concurrent_uploads.saturating_mul(2).max(1);
-    let max_pending_bytes = max_concurrent_uploads
+    let worker_pool_size = ADAPTIVE_MAX_CONCURRENCY;
+    let max_pending_jobs = worker_pool_size.saturating_mul(2).max(1);
+    let max_pending_bytes = worker_pool_size
         .saturating_mul(PACK_MAX_BYTES)
         .saturating_mul(2);
     Ok(UploadLimits {
-        max_concurrent_uploads,
+        worker_pool_size,
         max_pending_jobs,
         max_pending_bytes,
     })
@@ -349,33 +360,300 @@ fn compute_upload_limits(rate_limit: &TelegramRateLimit) -> Result<UploadLimits>
 
 #[derive(Debug)]
 struct UploadRateLimiter {
-    min_delay: Duration,
+    min_delay_ms: AtomicU64,
     next_allowed: Mutex<Instant>,
 }
 
 impl UploadRateLimiter {
-    fn new(min_delay: Duration) -> Self {
+    fn new(min_delay_ms: u64) -> Self {
         Self {
-            min_delay,
+            min_delay_ms: AtomicU64::new(
+                min_delay_ms.clamp(ADAPTIVE_MIN_DELAY_MS, ADAPTIVE_MAX_DELAY_MS),
+            ),
             next_allowed: Mutex::new(Instant::now()),
         }
     }
 
+    fn min_delay_ms(&self) -> u64 {
+        self.min_delay_ms.load(Ordering::Relaxed)
+    }
+
+    fn adjust_min_delay_ms(&self, delta_ms: i64) -> (u64, u64) {
+        loop {
+            let current = self.min_delay_ms.load(Ordering::Relaxed);
+            let adjusted = if delta_ms >= 0 {
+                current.saturating_add(delta_ms as u64)
+            } else {
+                current.saturating_sub(delta_ms.unsigned_abs())
+            }
+            .clamp(ADAPTIVE_MIN_DELAY_MS, ADAPTIVE_MAX_DELAY_MS);
+            if self
+                .min_delay_ms
+                .compare_exchange(current, adjusted, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return (current, adjusted);
+            }
+        }
+    }
+
     async fn wait_turn(&self) {
-        if self.min_delay.is_zero() {
+        let min_delay_ms = self.min_delay_ms();
+        if min_delay_ms == 0 {
             return;
         }
+        let min_delay = Duration::from_millis(min_delay_ms);
         let now = Instant::now();
         let scheduled = {
             let mut guard = self.next_allowed.lock().await;
             let scheduled = if *guard > now { *guard } else { now };
-            *guard = scheduled + self.min_delay;
+            *guard = scheduled + min_delay;
             scheduled
         };
         if scheduled > now {
             sleep(scheduled - now).await;
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdaptiveWindowMetrics {
+    attempts: u64,
+    failures: u64,
+    consecutive_failures: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdaptiveShiftResult {
+    changed: bool,
+    previous_concurrency: usize,
+    current_concurrency: usize,
+    previous_delay_ms: u64,
+    current_delay_ms: u64,
+}
+
+#[derive(Debug)]
+struct AdaptiveUploadController {
+    target_concurrency: AtomicUsize,
+    slots_in_use: AtomicUsize,
+    window_attempts: AtomicU64,
+    window_failures: AtomicU64,
+    consecutive_failures: AtomicUsize,
+    limiter: Arc<UploadRateLimiter>,
+    notify: Notify,
+}
+
+struct AdaptiveUploadSlot {
+    controller: Arc<AdaptiveUploadController>,
+}
+
+impl Drop for AdaptiveUploadSlot {
+    fn drop(&mut self) {
+        saturating_sub_usize(&self.controller.slots_in_use, 1);
+        self.controller.notify.notify_waiters();
+    }
+}
+
+impl AdaptiveUploadController {
+    fn new(initial_concurrency: usize, limiter: Arc<UploadRateLimiter>) -> Self {
+        Self {
+            target_concurrency: AtomicUsize::new(
+                initial_concurrency.clamp(ADAPTIVE_MIN_CONCURRENCY, ADAPTIVE_MAX_CONCURRENCY),
+            ),
+            slots_in_use: AtomicUsize::new(0),
+            window_attempts: AtomicU64::new(0),
+            window_failures: AtomicU64::new(0),
+            consecutive_failures: AtomicUsize::new(0),
+            limiter,
+            notify: Notify::new(),
+        }
+    }
+
+    fn target_concurrency(&self) -> usize {
+        self.target_concurrency.load(Ordering::Relaxed)
+    }
+
+    fn min_delay_ms(&self) -> u64 {
+        self.limiter.min_delay_ms()
+    }
+
+    async fn acquire_slot(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+    ) -> Result<AdaptiveUploadSlot> {
+        loop {
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+
+            let target = self.target_concurrency();
+            let in_use = self.slots_in_use.load(Ordering::Relaxed);
+            if in_use < target {
+                if self
+                    .slots_in_use
+                    .compare_exchange(in_use, in_use + 1, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    return Ok(AdaptiveUploadSlot {
+                        controller: Arc::clone(self),
+                    });
+                }
+                continue;
+            }
+
+            tokio::select! {
+                _ = self.notify.notified() => {},
+                _ = cancel.cancelled() => return Err(Error::Cancelled),
+            }
+        }
+    }
+
+    fn on_attempt(&self) {
+        self.window_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn on_success(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+    }
+
+    fn on_failure(&self, error: &Error) -> Option<AdaptiveShiftResult> {
+        self.window_failures.fetch_add(1, Ordering::Relaxed);
+        self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+        if !error_has_flood_wait(error) {
+            return None;
+        }
+        let shift = self.try_shift_down(50);
+        if shift.changed {
+            debug!(
+                event = "upload.adaptive.tick",
+                action = "downshift_flood_wait",
+                target_concurrency = shift.current_concurrency,
+                previous_concurrency = shift.previous_concurrency,
+                min_delay_ms = shift.current_delay_ms,
+                previous_delay_ms = shift.previous_delay_ms,
+                "upload.adaptive.tick"
+            );
+            return Some(shift);
+        }
+        None
+    }
+
+    fn take_window_metrics(&self) -> AdaptiveWindowMetrics {
+        AdaptiveWindowMetrics {
+            attempts: self.window_attempts.swap(0, Ordering::Relaxed),
+            failures: self.window_failures.swap(0, Ordering::Relaxed),
+            consecutive_failures: self.consecutive_failures.load(Ordering::Relaxed),
+        }
+    }
+
+    fn try_shift_up(&self) -> AdaptiveShiftResult {
+        self.try_shift(1, -25)
+    }
+
+    fn try_shift_down(&self, delay_step_ms: i64) -> AdaptiveShiftResult {
+        self.try_shift(-1, delay_step_ms)
+    }
+
+    fn try_shift(&self, concurrency_delta: i32, delay_delta_ms: i64) -> AdaptiveShiftResult {
+        let (previous_concurrency, current_concurrency) =
+            self.adjust_target_concurrency(concurrency_delta);
+        let (previous_delay_ms, current_delay_ms) =
+            self.limiter.adjust_min_delay_ms(delay_delta_ms);
+        let changed =
+            previous_concurrency != current_concurrency || previous_delay_ms != current_delay_ms;
+        if changed {
+            self.notify.notify_waiters();
+        }
+        AdaptiveShiftResult {
+            changed,
+            previous_concurrency,
+            current_concurrency,
+            previous_delay_ms,
+            current_delay_ms,
+        }
+    }
+
+    fn adjust_target_concurrency(&self, delta: i32) -> (usize, usize) {
+        loop {
+            let current = self.target_concurrency();
+            let next = (current as i32 + delta).clamp(
+                ADAPTIVE_MIN_CONCURRENCY as i32,
+                ADAPTIVE_MAX_CONCURRENCY as i32,
+            ) as usize;
+            if self
+                .target_concurrency
+                .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return (current, next);
+            }
+        }
+    }
+}
+
+fn error_has_flood_wait(error: &Error) -> bool {
+    match error {
+        Error::Telegram { message } => message.to_ascii_uppercase().contains("FLOOD_WAIT"),
+        _ => false,
+    }
+}
+
+fn saturating_sub_usize(atom: &AtomicUsize, delta: usize) {
+    let _ = atom.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(delta))
+    });
+}
+
+fn saturating_sub_u64(atom: &AtomicU64, delta: u64) {
+    let _ = atom.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(delta))
+    });
+}
+
+fn is_sqlite_busy_or_locked(error: &sqlx::Error) -> bool {
+    if let sqlx::Error::Database(db_error) = error {
+        if db_error
+            .code()
+            .as_deref()
+            .is_some_and(|code| matches!(code, "5" | "6" | "SQLITE_BUSY" | "SQLITE_LOCKED"))
+        {
+            return true;
+        }
+    }
+    let msg = error.to_string().to_ascii_lowercase();
+    msg.contains("database is locked")
+        || msg.contains("database table is locked")
+        || msg.contains("database is busy")
+        || msg.contains("sqlite_busy")
+        || msg.contains("sqlite_locked")
+}
+
+macro_rules! execute_sqlite_with_busy_retry {
+    ($op_name:expr, $query:expr) => {{
+        let mut retry_idx = 0usize;
+        loop {
+            match $query.await {
+                Ok(v) => break Ok(v),
+                Err(e)
+                    if is_sqlite_busy_or_locked(&e)
+                        && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() =>
+                {
+                    let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                    retry_idx += 1;
+                    debug!(
+                        event = "sqlite.busy_retry",
+                        operation = $op_name,
+                        retry = retry_idx,
+                        wait_ms,
+                        error = %e,
+                        "sqlite.busy_retry"
+                    );
+                    sleep(Duration::from_millis(wait_ms)).await;
+                }
+                Err(e) => break Err(Error::Sqlite(e)),
+            }
+        }
+    }};
 }
 
 #[derive(Debug, Clone)]
@@ -397,6 +675,15 @@ enum UploadJob {
         pack_bytes: Vec<u8>,
         _bytes_permit: OwnedSemaphorePermit,
     },
+}
+
+impl UploadJob {
+    fn payload_len(&self) -> usize {
+        match self {
+            UploadJob::Direct { blob, .. } => blob.len(),
+            UploadJob::Pack { pack_bytes, .. } => pack_bytes.len(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -424,6 +711,8 @@ struct UploadQueue {
     sender: mpsc::Sender<UploadJob>,
     bytes_sem: Arc<Semaphore>,
     bytes_budget: usize,
+    pending_jobs: Arc<AtomicUsize>,
+    pending_bytes: Arc<AtomicU64>,
     cancel: CancellationToken,
 }
 
@@ -431,28 +720,42 @@ impl UploadQueue {
     async fn enqueue_direct(&self, chunk_hash: String, blob: Vec<u8>) -> Result<()> {
         let bytes = blob.len();
         let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
+        self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+        self.pending_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
         let job = UploadJob::Direct {
             chunk_hash,
             blob,
             _bytes_permit: permit,
         };
-        self.sender.send(job).await.map_err(|_| Error::Telegram {
-            message: "upload queue closed".to_string(),
-        })?;
+        if self.sender.send(job).await.is_err() {
+            saturating_sub_usize(self.pending_jobs.as_ref(), 1);
+            saturating_sub_u64(self.pending_bytes.as_ref(), bytes as u64);
+            return Err(Error::Telegram {
+                message: "upload queue closed".to_string(),
+            });
+        }
         Ok(())
     }
 
     async fn enqueue_pack(&self, entries: Vec<PackEntryRef>, pack_bytes: Vec<u8>) -> Result<()> {
         let bytes = pack_bytes.len();
         let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
+        self.pending_jobs.fetch_add(1, Ordering::Relaxed);
+        self.pending_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
         let job = UploadJob::Pack {
             entries,
             pack_bytes,
             _bytes_permit: permit,
         };
-        self.sender.send(job).await.map_err(|_| Error::Telegram {
-            message: "upload queue closed".to_string(),
-        })?;
+        if self.sender.send(job).await.is_err() {
+            saturating_sub_usize(self.pending_jobs.as_ref(), 1);
+            saturating_sub_u64(self.pending_bytes.as_ref(), bytes as u64);
+            return Err(Error::Telegram {
+                message: "upload queue closed".to_string(),
+            });
+        }
         Ok(())
     }
 }
@@ -643,9 +946,26 @@ pub async fn run_backup_with<S: Storage>(
 
     let provider_owned = provider.to_string();
     let limits = compute_upload_limits(&config.rate_limit)?;
-    let rate_limiter = Arc::new(UploadRateLimiter::new(Duration::from_millis(
-        config.rate_limit.min_delay_ms as u64,
-    )));
+    let configured_concurrency = config.rate_limit.max_concurrent_uploads as usize;
+    let initial_concurrency =
+        configured_concurrency.clamp(ADAPTIVE_MIN_CONCURRENCY, ADAPTIVE_MAX_CONCURRENCY);
+    let configured_delay_ms = config.rate_limit.min_delay_ms as u64;
+    let initial_delay_ms = configured_delay_ms.clamp(ADAPTIVE_MIN_DELAY_MS, ADAPTIVE_MAX_DELAY_MS);
+    if initial_concurrency != configured_concurrency || initial_delay_ms != configured_delay_ms {
+        debug!(
+            event = "upload.adaptive.clamp",
+            configured_concurrency,
+            initial_concurrency,
+            configured_delay_ms,
+            initial_delay_ms,
+            "upload.adaptive.clamp"
+        );
+    }
+    let rate_limiter = Arc::new(UploadRateLimiter::new(initial_delay_ms));
+    let adaptive_controller = Arc::new(AdaptiveUploadController::new(
+        initial_concurrency,
+        Arc::clone(&rate_limiter),
+    ));
 
     let scan_files_indexed = Arc::new(AtomicU64::new(0));
     let scan_chunks_total = Arc::new(AtomicU64::new(0));
@@ -656,6 +976,8 @@ pub async fn run_backup_with<S: Storage>(
     let have_uploaded_net_bytes = Arc::new(AtomicBool::new(false));
     let scan_done = Arc::new(AtomicBool::new(false));
     let active_uploads = Arc::new(AtomicUsize::new(0));
+    let pending_jobs = Arc::new(AtomicUsize::new(0));
+    let pending_bytes = Arc::new(AtomicU64::new(0));
 
     let scan_source_path = config.source_path.clone();
     let scan_snapshot_id = config.snapshot_id.clone();
@@ -675,21 +997,26 @@ pub async fn run_backup_with<S: Storage>(
         sender: upload_tx.clone(),
         bytes_sem: bytes_sem.clone(),
         bytes_budget,
+        pending_jobs: Arc::clone(&pending_jobs),
+        pending_bytes: Arc::clone(&pending_bytes),
         cancel: upload_cancel.clone(),
     };
 
     let upload_rx = Arc::new(Mutex::new(upload_rx));
     let mut workers = FuturesUnordered::new();
-    for _ in 0..limits.max_concurrent_uploads {
+    for _ in 0..limits.worker_pool_size {
         let rx = Arc::clone(&upload_rx);
         let tx = result_tx.clone();
         let limiter = rate_limiter.clone();
+        let adaptive = Arc::clone(&adaptive_controller);
         let provider = provider_owned.clone();
         let cancel = upload_cancel.clone();
         let uploaded_bytes = Arc::clone(&uploaded_bytes);
         let uploaded_net_bytes = Arc::clone(&uploaded_net_bytes);
         let have_uploaded_net_bytes = Arc::clone(&have_uploaded_net_bytes);
         let active_uploads = Arc::clone(&active_uploads);
+        let pending_jobs = Arc::clone(&pending_jobs);
+        let pending_bytes = Arc::clone(&pending_bytes);
         workers.push(async move {
             struct ActiveUploadToken<'a>(&'a AtomicUsize);
             impl Drop for ActiveUploadToken<'_> {
@@ -699,6 +1026,19 @@ pub async fn run_backup_with<S: Storage>(
             }
 
             loop {
+                let slot = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    slot = adaptive.acquire_slot(&cancel) => slot,
+                };
+                let _slot = match slot {
+                    Ok(v) => v,
+                    Err(Error::Cancelled) => break,
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                };
+
                 let job = tokio::select! {
                     _ = cancel.cancelled() => break,
                     job = async {
@@ -709,11 +1049,14 @@ pub async fn run_backup_with<S: Storage>(
                 let Some(job) = job else {
                     break;
                 };
+                saturating_sub_usize(pending_jobs.as_ref(), 1);
+                saturating_sub_u64(pending_bytes.as_ref(), job.payload_len() as u64);
                 if cancel.is_cancelled() {
                     break;
                 }
                 active_uploads.fetch_add(1, Ordering::Relaxed);
                 let _token = ActiveUploadToken(active_uploads.as_ref());
+                adaptive.on_attempt();
                 let outcome = process_upload_job(
                     storage,
                     &provider,
@@ -724,6 +1067,12 @@ pub async fn run_backup_with<S: Storage>(
                     job,
                 )
                 .await;
+                match &outcome {
+                    Ok(_) => adaptive.on_success(),
+                    Err(e) => {
+                        let _ = adaptive.on_failure(e);
+                    }
+                }
                 if tx.send(outcome).await.is_err() {
                     break;
                 }
@@ -760,19 +1109,22 @@ pub async fn run_backup_with<S: Storage>(
                 let snapshot_id = scan_snapshot_id
                     .clone()
                     .unwrap_or_else(|| format!("snp_{}", uuid::Uuid::new_v4()));
+                let source_path_utf8 = path_to_utf8(&scan_source_path)?;
 
-                sqlx::query(
-                    r#"
-                    INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id)
-                    VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?, ?, ?)
-                    "#,
-                )
-                .bind(&snapshot_id)
-                .bind(path_to_utf8(&scan_source_path)?)
-                .bind(&scan_label)
-                .bind(base_snapshot_id)
-                .execute(&mut **conn)
-                .await?;
+                execute_sqlite_with_busy_retry!(
+                    "snapshots.insert",
+                    sqlx::query(
+                        r#"
+                        INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id)
+                        VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?, ?, ?)
+                        "#,
+                    )
+                    .bind(&snapshot_id)
+                    .bind(&source_path_utf8)
+                    .bind(&scan_label)
+                    .bind(&base_snapshot_id)
+                    .execute(&mut **conn)
+                )?;
 
                 let mut result = BackupResult {
                     snapshot_id: snapshot_id.clone(),
@@ -912,21 +1264,23 @@ pub async fn run_backup_with<S: Storage>(
                     result.files_total += 1;
 
                     let file_id = format!("f_{}", uuid::Uuid::new_v4());
-                    sqlx::query(
-                        r#"
-                        INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        "#,
-                    )
-                    .bind(&file_id)
-                    .bind(&snapshot_id)
-                    .bind(rel_path_str)
-                    .bind(size)
-                    .bind(mtime_ms)
-                    .bind(mode)
-                    .bind(kind)
-                    .execute(&mut **conn)
-                    .await?;
+                    execute_sqlite_with_busy_retry!(
+                        "files.insert",
+                        sqlx::query(
+                            r#"
+                            INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            "#,
+                        )
+                        .bind(&file_id)
+                        .bind(&snapshot_id)
+                        .bind(&rel_path_str)
+                        .bind(size)
+                        .bind(mtime_ms)
+                        .bind(mode)
+                        .bind(kind)
+                        .execute(&mut **conn)
+                    )?;
 
                     result.files_indexed += 1;
                     scan_files_indexed.store(result.files_indexed, Ordering::Relaxed);
@@ -991,16 +1345,18 @@ pub async fn run_backup_with<S: Storage>(
                                 &chunk.data,
                             )?;
 
-                            sqlx::query(
-                                r#"
-                                INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
-                                VALUES (?, ?, 'blake3', 'xchacha20poly1305', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-                                "#,
-                            )
-                            .bind(&chunk_hash)
-                            .bind(chunk.data.len() as i64)
-                            .execute(&mut **conn)
-                            .await?;
+                            execute_sqlite_with_busy_retry!(
+                                "chunks.insert",
+                                sqlx::query(
+                                    r#"
+                                    INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+                                    VALUES (?, ?, 'blake3', 'xchacha20poly1305', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                                    "#,
+                                )
+                                .bind(&chunk_hash)
+                                .bind(chunk.data.len() as i64)
+                                .execute(&mut **conn)
+                            )?;
 
                             let blob = PackBlob {
                                 chunk_hash: chunk_hash.clone(),
@@ -1036,19 +1392,21 @@ pub async fn run_backup_with<S: Storage>(
                             }
                         }
 
-                        sqlx::query(
-                            r#"
-                            INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
-                            VALUES (?, ?, ?, ?, ?)
-                            "#,
-                        )
-                        .bind(&file_id)
-                        .bind(seq as i64)
-                        .bind(&chunk_hash)
-                        .bind(chunk.offset as i64)
-                        .bind(chunk.length as i64)
-                        .execute(&mut **conn)
-                        .await?;
+                        execute_sqlite_with_busy_retry!(
+                            "file_chunks.insert",
+                            sqlx::query(
+                                r#"
+                                INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
+                                VALUES (?, ?, ?, ?, ?)
+                                "#,
+                            )
+                            .bind(&file_id)
+                            .bind(seq as i64)
+                            .bind(&chunk_hash)
+                            .bind(chunk.offset as i64)
+                            .bind(chunk.length as i64)
+                            .execute(&mut **conn)
+                        )?;
 
                         if let Some(sink) = options.progress {
                             sink.on_progress(TaskProgress {
@@ -1214,6 +1572,7 @@ pub async fn run_backup_with<S: Storage>(
     let progress_future = {
         let scan_done = Arc::clone(&scan_done);
         let active_uploads = Arc::clone(&active_uploads);
+        let pending_jobs = Arc::clone(&pending_jobs);
         let scan_files_indexed = Arc::clone(&scan_files_indexed);
         let scan_chunks_total = Arc::clone(&scan_chunks_total);
         let scan_bytes_read = Arc::clone(&scan_bytes_read);
@@ -1264,7 +1623,9 @@ pub async fn run_backup_with<S: Storage>(
                     });
                 }
 
-                if scan_done.load(Ordering::Relaxed) && active_uploads.load(Ordering::Relaxed) == 0
+                if scan_done.load(Ordering::Relaxed)
+                    && active_uploads.load(Ordering::Relaxed) == 0
+                    && pending_jobs.load(Ordering::Relaxed) == 0
                 {
                     break;
                 }
@@ -1272,15 +1633,110 @@ pub async fn run_backup_with<S: Storage>(
         }
     };
 
-    let (scan_res, _, upload_stats, _) =
-        tokio::join!(scan_future, workers_future, collect_future, progress_future);
+    let adaptive_future = {
+        let scan_done = Arc::clone(&scan_done);
+        let active_uploads = Arc::clone(&active_uploads);
+        let pending_jobs = Arc::clone(&pending_jobs);
+        let pending_bytes = Arc::clone(&pending_bytes);
+        let uploaded_bytes = Arc::clone(&uploaded_bytes);
+        let adaptive = Arc::clone(&adaptive_controller);
+        async move {
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(ADAPTIVE_TICK_INTERVAL_SECS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            let started = Instant::now();
+            let mut last_uploaded = uploaded_bytes.load(Ordering::Relaxed);
+            let mut last_tick = Instant::now();
+            let mut last_backlog = pending_jobs.load(Ordering::Relaxed) > 0;
+
+            loop {
+                interval.tick().await;
+
+                let now = Instant::now();
+                let elapsed = now.saturating_duration_since(last_tick);
+                last_tick = now;
+
+                let uploaded_now = uploaded_bytes.load(Ordering::Relaxed);
+                let uploaded_delta = uploaded_now.saturating_sub(last_uploaded);
+                last_uploaded = uploaded_now;
+                let throughput_bps = if elapsed.is_zero() {
+                    0
+                } else {
+                    (uploaded_delta as f64 / elapsed.as_secs_f64()) as u64
+                };
+
+                let metrics = adaptive.take_window_metrics();
+                let error_rate = if metrics.attempts == 0 {
+                    0.0
+                } else {
+                    metrics.failures as f64 / metrics.attempts as f64
+                };
+                let backlog_jobs = pending_jobs.load(Ordering::Relaxed);
+                let backlog_sustained = backlog_jobs > 0 && last_backlog;
+                last_backlog = backlog_jobs > 0;
+
+                let warmup_done = started.elapsed() >= Duration::from_secs(ADAPTIVE_WARMUP_SECS);
+                let mut action = if warmup_done { "steady" } else { "warmup" };
+                if warmup_done {
+                    if error_rate > ADAPTIVE_DOWNGRADE_MIN_ERROR_RATE
+                        || metrics.consecutive_failures >= ADAPTIVE_CONSECUTIVE_FAILURES_DOWNGRADE
+                    {
+                        if adaptive.try_shift_down(50).changed {
+                            action = "downshift";
+                        }
+                    } else if error_rate < ADAPTIVE_UPGRADE_MAX_ERROR_RATE
+                        && backlog_sustained
+                        && throughput_bps < ADAPTIVE_UPGRADE_THROUGHPUT_BPS
+                    {
+                        if adaptive.try_shift_up().changed {
+                            action = "upshift";
+                        }
+                    }
+                }
+
+                debug!(
+                    event = "upload.adaptive.tick",
+                    action,
+                    warmup_done,
+                    attempts = metrics.attempts,
+                    failures = metrics.failures,
+                    error_rate,
+                    consecutive_failures = metrics.consecutive_failures,
+                    backlog_jobs,
+                    backlog_bytes = pending_bytes.load(Ordering::Relaxed),
+                    backlog_sustained,
+                    throughput_bps,
+                    target_concurrency = adaptive.target_concurrency(),
+                    effective_concurrency = active_uploads.load(Ordering::Relaxed),
+                    min_delay_ms = adaptive.min_delay_ms(),
+                    "upload.adaptive.tick"
+                );
+
+                if scan_done.load(Ordering::Relaxed)
+                    && active_uploads.load(Ordering::Relaxed) == 0
+                    && backlog_jobs == 0
+                {
+                    break;
+                }
+            }
+        }
+    };
+
+    let (scan_res, _, upload_stats, _, _) = tokio::join!(
+        scan_future,
+        workers_future,
+        collect_future,
+        progress_future,
+        adaptive_future
+    );
     let (snapshot_id, mut result, upload_started) = scan_res?;
 
     let upload_stats = upload_stats?;
-    record_chunk_objects_batch(&mut conn, &provider_owned, &upload_stats.chunk_objects).await?;
     if let Some(err) = upload_stats.first_error {
         return Err(err);
     }
+    record_chunk_objects_batch(&mut conn, &provider_owned, &upload_stats.chunk_objects).await?;
 
     result.chunks_uploaded = upload_stats.chunks_uploaded;
     result.data_objects_uploaded = upload_stats.data_objects_uploaded;
@@ -1451,25 +1907,78 @@ async fn record_chunk_objects_batch(
         return Ok(());
     }
 
-    let mut tx = conn.begin().await?;
-    for m in chunk_objects {
-        sqlx::query(
-            r#"
-            INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at)
-            VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-            ON CONFLICT(provider, chunk_hash) DO UPDATE SET
-              object_id = excluded.object_id,
-              created_at = excluded.created_at
-            "#,
-        )
-        .bind(&m.chunk_hash)
-        .bind(provider)
-        .bind(&m.object_id)
-        .execute(&mut *tx)
-        .await?;
+    let mut retry_idx = 0usize;
+    loop {
+        let mut tx = match conn.begin().await {
+            Ok(tx) => tx,
+            Err(e)
+                if is_sqlite_busy_or_locked(&e)
+                    && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() =>
+            {
+                let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                retry_idx += 1;
+                debug!(
+                    event = "sqlite.busy_retry",
+                    operation = "chunk_objects.begin_tx",
+                    retry = retry_idx,
+                    wait_ms,
+                    error = %e,
+                    "sqlite.busy_retry"
+                );
+                sleep(Duration::from_millis(wait_ms)).await;
+                continue;
+            }
+            Err(e) => return Err(Error::Sqlite(e)),
+        };
+        let mut retry_err: Option<sqlx::Error> = None;
+
+        for m in chunk_objects {
+            if let Err(e) = sqlx::query(
+                r#"
+                INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at)
+                VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                ON CONFLICT(provider, chunk_hash) DO UPDATE SET
+                  object_id = excluded.object_id,
+                  created_at = excluded.created_at
+                "#,
+            )
+            .bind(&m.chunk_hash)
+            .bind(provider)
+            .bind(&m.object_id)
+            .execute(&mut *tx)
+            .await
+            {
+                retry_err = Some(e);
+                break;
+            }
+        }
+
+        if retry_err.is_none()
+            && let Err(e) = tx.commit().await
+        {
+            retry_err = Some(e);
+        }
+
+        if let Some(e) = retry_err {
+            if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
+                let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                retry_idx += 1;
+                debug!(
+                    event = "sqlite.busy_retry",
+                    operation = "chunk_objects.upsert_batch",
+                    retry = retry_idx,
+                    wait_ms,
+                    error = %e,
+                    "sqlite.busy_retry"
+                );
+                sleep(Duration::from_millis(wait_ms)).await;
+                continue;
+            }
+            return Err(Error::Sqlite(e));
+        }
+
+        return Ok(());
     }
-    tx.commit().await?;
-    Ok(())
 }
 
 async fn apply_retention(
@@ -1496,53 +2005,133 @@ async fn apply_retention(
         return Ok(());
     }
 
-    let mut tx = conn.begin().await?;
-    for row in rows {
-        let snapshot_id: String = row.get("snapshot_id");
+    let snapshot_ids = rows
+        .into_iter()
+        .map(|row| row.get::<String, _>("snapshot_id"))
+        .collect::<Vec<_>>();
 
-        sqlx::query(
-            r#"
-            DELETE FROM file_chunks
-            WHERE file_id IN (SELECT file_id FROM files WHERE snapshot_id = ?)
-            "#,
-        )
-        .bind(&snapshot_id)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query("DELETE FROM files WHERE snapshot_id = ?")
-            .bind(&snapshot_id)
+    let mut retry_idx = 0usize;
+    loop {
+        let mut tx = match conn.begin().await {
+            Ok(tx) => tx,
+            Err(e)
+                if is_sqlite_busy_or_locked(&e)
+                    && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() =>
+            {
+                let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                retry_idx += 1;
+                debug!(
+                    event = "sqlite.busy_retry",
+                    operation = "snapshots.retention_begin_tx",
+                    retry = retry_idx,
+                    wait_ms,
+                    error = %e,
+                    "sqlite.busy_retry"
+                );
+                sleep(Duration::from_millis(wait_ms)).await;
+                continue;
+            }
+            Err(e) => return Err(Error::Sqlite(e)),
+        };
+        let mut retry_err: Option<sqlx::Error> = None;
+        for snapshot_id in &snapshot_ids {
+            if let Err(e) = sqlx::query(
+                r#"
+                DELETE FROM file_chunks
+                WHERE file_id IN (SELECT file_id FROM files WHERE snapshot_id = ?)
+                "#,
+            )
+            .bind(snapshot_id)
             .execute(&mut *tx)
-            .await?;
+            .await
+            {
+                retry_err = Some(e);
+                break;
+            }
 
-        sqlx::query("DELETE FROM remote_index_parts WHERE snapshot_id = ?")
-            .bind(&snapshot_id)
-            .execute(&mut *tx)
-            .await?;
+            if let Err(e) = sqlx::query("DELETE FROM files WHERE snapshot_id = ?")
+                .bind(snapshot_id)
+                .execute(&mut *tx)
+                .await
+            {
+                retry_err = Some(e);
+                break;
+            }
 
-        sqlx::query("DELETE FROM remote_indexes WHERE snapshot_id = ?")
-            .bind(&snapshot_id)
-            .execute(&mut *tx)
-            .await?;
+            if let Err(e) = sqlx::query("DELETE FROM remote_index_parts WHERE snapshot_id = ?")
+                .bind(snapshot_id)
+                .execute(&mut *tx)
+                .await
+            {
+                retry_err = Some(e);
+                break;
+            }
 
-        sqlx::query("DELETE FROM tasks WHERE snapshot_id = ?")
-            .bind(&snapshot_id)
-            .execute(&mut *tx)
-            .await?;
+            if let Err(e) = sqlx::query("DELETE FROM remote_indexes WHERE snapshot_id = ?")
+                .bind(snapshot_id)
+                .execute(&mut *tx)
+                .await
+            {
+                retry_err = Some(e);
+                break;
+            }
 
-        sqlx::query("DELETE FROM snapshots WHERE snapshot_id = ?")
-            .bind(&snapshot_id)
-            .execute(&mut *tx)
-            .await?;
+            if let Err(e) = sqlx::query("DELETE FROM tasks WHERE snapshot_id = ?")
+                .bind(snapshot_id)
+                .execute(&mut *tx)
+                .await
+            {
+                retry_err = Some(e);
+                break;
+            }
 
-        sqlx::query("UPDATE snapshots SET base_snapshot_id = NULL WHERE base_snapshot_id = ?")
-            .bind(&snapshot_id)
+            if let Err(e) = sqlx::query("DELETE FROM snapshots WHERE snapshot_id = ?")
+                .bind(snapshot_id)
+                .execute(&mut *tx)
+                .await
+            {
+                retry_err = Some(e);
+                break;
+            }
+
+            if let Err(e) = sqlx::query(
+                "UPDATE snapshots SET base_snapshot_id = NULL WHERE base_snapshot_id = ?",
+            )
+            .bind(snapshot_id)
             .execute(&mut *tx)
-            .await?;
+            .await
+            {
+                retry_err = Some(e);
+                break;
+            }
+        }
+
+        if retry_err.is_none()
+            && let Err(e) = tx.commit().await
+        {
+            retry_err = Some(e);
+        }
+
+        if let Some(e) = retry_err {
+            if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
+                let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                retry_idx += 1;
+                debug!(
+                    event = "sqlite.busy_retry",
+                    operation = "snapshots.retention",
+                    retry = retry_idx,
+                    wait_ms,
+                    error = %e,
+                    "sqlite.busy_retry"
+                );
+                sleep(Duration::from_millis(wait_ms)).await;
+                continue;
+            }
+            return Err(Error::Sqlite(e));
+        }
+
+        return Ok(());
     }
-    tx.commit().await?;
-
-    Ok(())
 }
 
 async fn latest_snapshot_for_source(
@@ -1738,20 +2327,22 @@ async fn upload_index<S: Storage>(
             });
         }
 
-        sqlx::query(
-            r#"
-            INSERT OR REPLACE INTO remote_index_parts (snapshot_id, part_no, provider, object_id, size, hash)
-            VALUES (?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(snapshot_id)
-        .bind(part_no as i64)
-        .bind(provider)
-        .bind(&object_id)
-        .bind(part_len as i64)
-        .bind(&part_hash)
-        .execute(&mut **conn)
-        .await?;
+        execute_sqlite_with_busy_retry!(
+            "remote_index_parts.upsert",
+            sqlx::query(
+                r#"
+                INSERT OR REPLACE INTO remote_index_parts (snapshot_id, part_no, provider, object_id, size, hash)
+                VALUES (?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(snapshot_id)
+            .bind(part_no as i64)
+            .bind(provider)
+            .bind(&object_id)
+            .bind(part_len as i64)
+            .bind(&part_hash)
+            .execute(&mut **conn)
+        )?;
 
         parts.push(IndexManifestPart {
             no: part_no,
@@ -1856,17 +2447,19 @@ async fn upload_index<S: Storage>(
         });
     }
 
-    sqlx::query(
-        r#"
-        INSERT OR REPLACE INTO remote_indexes (snapshot_id, provider, manifest_object_id, created_at)
-        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-        "#,
-    )
-    .bind(snapshot_id)
-    .bind(provider)
-    .bind(&manifest_object_id)
-    .execute(&mut **conn)
-    .await?;
+    execute_sqlite_with_busy_retry!(
+        "remote_indexes.upsert",
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO remote_indexes (snapshot_id, provider, manifest_object_id, created_at)
+            VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            "#,
+        )
+        .bind(snapshot_id)
+        .bind(provider)
+        .bind(&manifest_object_id)
+        .execute(&mut **conn)
+    )?;
 
     Ok(manifest)
 }

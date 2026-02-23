@@ -1499,6 +1499,7 @@ async fn upload_with_progress(
 ) -> Result<String, String> {
     let chat = require_chat(state)?.clone();
     let size = bytes.len();
+    let bytes_total = size as u64;
     let timeout_secs = upload_stream_timeout_secs(size);
     let uploaded = timeout(
         Duration::from_secs(timeout_secs),
@@ -1507,7 +1508,25 @@ async fn upload_with_progress(
     .await
     .map_err(|_| format!("upload_stream timed out after {timeout_secs}s"))??;
 
-    let msg = send_media_message_with_retry(&state.client, &chat, &uploaded).await?;
+    let (_base_in, send_base_out) = state.net_stats.snapshot();
+    let mut emit_send_message_progress = || {
+        let (_in_total, out_total) = state.net_stats.snapshot();
+        let net = out_total.saturating_sub(send_base_out);
+        write_upload_progress(
+            out,
+            Some(session_b64(&state.session)),
+            bytes_total,
+            bytes_total,
+            net,
+        )
+    };
+    let msg = send_media_message_with_retry(
+        &state.client,
+        &chat,
+        &uploaded,
+        &mut emit_send_message_progress,
+    )
+    .await?;
 
     let msg_id = msg.id();
     let media = msg
@@ -1523,8 +1542,10 @@ async fn send_media_message_with_retry(
     client: &Client,
     chat: &Peer,
     uploaded: &Uploaded,
+    emit_progress: &mut dyn FnMut() -> Result<(), String>,
 ) -> Result<grammers_client::types::Message, String> {
     for attempt in 1..=SEND_MESSAGE_MAX_ATTEMPTS {
+        emit_progress()?;
         let res = timeout(
             Duration::from_secs(UPLOAD_SEND_MESSAGE_TIMEOUT_SECS),
             client.send_message(chat, InputMessage::new().text("").file(uploaded.clone())),
@@ -1541,7 +1562,8 @@ async fn send_media_message_with_retry(
                     ));
                 }
                 let wait = parse_flood_wait_secs(&msg);
-                tokio::time::sleep(upload_part_backoff(attempt, wait)).await;
+                wait_with_upload_heartbeat(upload_part_backoff(attempt, wait), emit_progress)
+                    .await?;
             }
             Err(_) => {
                 let msg =
@@ -1551,12 +1573,35 @@ async fn send_media_message_with_retry(
                         "{msg} (attempt {attempt}/{SEND_MESSAGE_MAX_ATTEMPTS})"
                     ));
                 }
-                tokio::time::sleep(upload_part_backoff(attempt, None)).await;
+                wait_with_upload_heartbeat(upload_part_backoff(attempt, None), emit_progress)
+                    .await?;
             }
         }
     }
 
     Err("send_message retry loop exhausted".to_string())
+}
+
+async fn wait_with_upload_heartbeat(
+    wait: Duration,
+    emit_progress: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<(), String> {
+    if wait.is_zero() {
+        return Ok(());
+    }
+
+    let deadline = Instant::now() + wait;
+    let mut hb = tokio::time::interval(Duration::from_millis(250));
+    hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = hb.tick() => emit_progress()?,
+            _ = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    emit_progress()?;
+    Ok(())
 }
 
 async fn download_to_cache(
