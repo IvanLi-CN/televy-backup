@@ -611,14 +611,13 @@ fn saturating_sub_u64(atom: &AtomicU64, delta: u64) {
 }
 
 fn is_sqlite_busy_or_locked(error: &sqlx::Error) -> bool {
-    if let sqlx::Error::Database(db_error) = error {
-        if db_error
+    if let sqlx::Error::Database(db_error) = error
+        && db_error
             .code()
             .as_deref()
             .is_some_and(|code| matches!(code, "5" | "6" | "SQLITE_BUSY" | "SQLITE_LOCKED"))
-        {
-            return true;
-        }
+    {
+        return true;
     }
     let msg = error.to_string().to_ascii_lowercase();
     msg.contains("database is locked")
@@ -1688,10 +1687,9 @@ pub async fn run_backup_with<S: Storage>(
                     } else if error_rate < ADAPTIVE_UPGRADE_MAX_ERROR_RATE
                         && backlog_sustained
                         && throughput_bps < ADAPTIVE_UPGRADE_THROUGHPUT_BPS
+                        && adaptive.try_shift_up().changed
                     {
-                        if adaptive.try_shift_up().changed {
-                            action = "upshift";
-                        }
+                        action = "upshift";
                     }
                 }
 
