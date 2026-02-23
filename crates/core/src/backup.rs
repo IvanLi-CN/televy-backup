@@ -39,7 +39,6 @@ const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
 const RONOMON_READ_CHUNK_BYTES: usize = 1024 * 1024;
 const ADAPTIVE_MIN_CONCURRENCY: usize = 1;
 const ADAPTIVE_MAX_CONCURRENCY: usize = 8;
-const ADAPTIVE_MIN_DELAY_MS: u64 = 0;
 const ADAPTIVE_MAX_DELAY_MS: u64 = 500;
 const ADAPTIVE_TICK_INTERVAL_SECS: u64 = 15;
 const ADAPTIVE_WARMUP_SECS: u64 = 30;
@@ -346,7 +345,15 @@ fn compute_upload_limits(rate_limit: &TelegramRateLimit) -> Result<UploadLimits>
                 .to_string(),
         });
     }
-    let worker_pool_size = ADAPTIVE_MAX_CONCURRENCY;
+    let configured_concurrency = rate_limit.max_concurrent_uploads as usize;
+    if configured_concurrency > ADAPTIVE_MAX_CONCURRENCY {
+        return Err(Error::InvalidConfig {
+            message: format!(
+                "telegram_endpoints[].rate_limit.max_concurrent_uploads must be <= {ADAPTIVE_MAX_CONCURRENCY} for adaptive mode"
+            ),
+        });
+    }
+    let worker_pool_size = configured_concurrency;
     let max_pending_jobs = worker_pool_size.saturating_mul(2).max(1);
     let max_pending_bytes = worker_pool_size
         .saturating_mul(PACK_MAX_BYTES)
@@ -360,16 +367,19 @@ fn compute_upload_limits(rate_limit: &TelegramRateLimit) -> Result<UploadLimits>
 
 #[derive(Debug)]
 struct UploadRateLimiter {
+    min_delay_floor_ms: u64,
+    max_delay_ms: u64,
     min_delay_ms: AtomicU64,
     next_allowed: Mutex<Instant>,
 }
 
 impl UploadRateLimiter {
-    fn new(min_delay_ms: u64) -> Self {
+    fn new(initial_delay_ms: u64, min_delay_floor_ms: u64, max_delay_ms: u64) -> Self {
+        let min_delay_floor_ms = min_delay_floor_ms.min(max_delay_ms);
         Self {
-            min_delay_ms: AtomicU64::new(
-                min_delay_ms.clamp(ADAPTIVE_MIN_DELAY_MS, ADAPTIVE_MAX_DELAY_MS),
-            ),
+            min_delay_floor_ms,
+            max_delay_ms,
+            min_delay_ms: AtomicU64::new(initial_delay_ms.clamp(min_delay_floor_ms, max_delay_ms)),
             next_allowed: Mutex::new(Instant::now()),
         }
     }
@@ -386,7 +396,7 @@ impl UploadRateLimiter {
             } else {
                 current.saturating_sub(delta_ms.unsigned_abs())
             }
-            .clamp(ADAPTIVE_MIN_DELAY_MS, ADAPTIVE_MAX_DELAY_MS);
+            .clamp(self.min_delay_floor_ms, self.max_delay_ms);
             if self
                 .min_delay_ms
                 .compare_exchange(current, adjusted, Ordering::Relaxed, Ordering::Relaxed)
@@ -434,6 +444,8 @@ struct AdaptiveShiftResult {
 
 #[derive(Debug)]
 struct AdaptiveUploadController {
+    min_concurrency: usize,
+    max_concurrency: usize,
     target_concurrency: AtomicUsize,
     slots_in_use: AtomicUsize,
     window_attempts: AtomicU64,
@@ -455,10 +467,19 @@ impl Drop for AdaptiveUploadSlot {
 }
 
 impl AdaptiveUploadController {
-    fn new(initial_concurrency: usize, limiter: Arc<UploadRateLimiter>) -> Self {
+    fn new(
+        initial_concurrency: usize,
+        min_concurrency: usize,
+        max_concurrency: usize,
+        limiter: Arc<UploadRateLimiter>,
+    ) -> Self {
+        let min_concurrency = min_concurrency.max(ADAPTIVE_MIN_CONCURRENCY);
+        let max_concurrency = max_concurrency.max(min_concurrency);
         Self {
+            min_concurrency,
+            max_concurrency,
             target_concurrency: AtomicUsize::new(
-                initial_concurrency.clamp(ADAPTIVE_MIN_CONCURRENCY, ADAPTIVE_MAX_CONCURRENCY),
+                initial_concurrency.clamp(min_concurrency, max_concurrency),
             ),
             slots_in_use: AtomicUsize::new(0),
             window_attempts: AtomicU64::new(0),
@@ -576,10 +597,9 @@ impl AdaptiveUploadController {
     fn adjust_target_concurrency(&self, delta: i32) -> (usize, usize) {
         loop {
             let current = self.target_concurrency();
-            let next = (current as i32 + delta).clamp(
-                ADAPTIVE_MIN_CONCURRENCY as i32,
-                ADAPTIVE_MAX_CONCURRENCY as i32,
-            ) as usize;
+            let next = (current as i32 + delta)
+                .clamp(self.min_concurrency as i32, self.max_concurrency as i32)
+                as usize;
             if self
                 .target_concurrency
                 .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
@@ -946,23 +966,27 @@ pub async fn run_backup_with<S: Storage>(
     let provider_owned = provider.to_string();
     let limits = compute_upload_limits(&config.rate_limit)?;
     let configured_concurrency = config.rate_limit.max_concurrent_uploads as usize;
-    let initial_concurrency =
-        configured_concurrency.clamp(ADAPTIVE_MIN_CONCURRENCY, ADAPTIVE_MAX_CONCURRENCY);
+    let adaptive_max_concurrency = configured_concurrency;
+    let initial_concurrency = configured_concurrency;
     let configured_delay_ms = config.rate_limit.min_delay_ms as u64;
-    let initial_delay_ms = configured_delay_ms.clamp(ADAPTIVE_MIN_DELAY_MS, ADAPTIVE_MAX_DELAY_MS);
-    if initial_concurrency != configured_concurrency || initial_delay_ms != configured_delay_ms {
-        debug!(
-            event = "upload.adaptive.clamp",
-            configured_concurrency,
-            initial_concurrency,
-            configured_delay_ms,
-            initial_delay_ms,
-            "upload.adaptive.clamp"
-        );
+    if configured_delay_ms > ADAPTIVE_MAX_DELAY_MS {
+        return Err(Error::InvalidConfig {
+            message: format!(
+                "telegram_endpoints[].rate_limit.min_delay_ms must be <= {ADAPTIVE_MAX_DELAY_MS} for adaptive mode"
+            ),
+        });
     }
-    let rate_limiter = Arc::new(UploadRateLimiter::new(initial_delay_ms));
+    let adaptive_min_delay_ms = configured_delay_ms;
+    let initial_delay_ms = configured_delay_ms;
+    let rate_limiter = Arc::new(UploadRateLimiter::new(
+        initial_delay_ms,
+        adaptive_min_delay_ms,
+        ADAPTIVE_MAX_DELAY_MS,
+    ));
     let adaptive_controller = Arc::new(AdaptiveUploadController::new(
         initial_concurrency,
+        ADAPTIVE_MIN_CONCURRENCY,
+        adaptive_max_concurrency,
         Arc::clone(&rate_limiter),
     ));
 
@@ -1569,6 +1593,7 @@ pub async fn run_backup_with<S: Storage>(
     let workers_future = async { while workers.next().await.is_some() {} };
 
     let progress_future = {
+        let cancel = upload_cancel.clone();
         let scan_done = Arc::clone(&scan_done);
         let active_uploads = Arc::clone(&active_uploads);
         let pending_jobs = Arc::clone(&pending_jobs);
@@ -1624,7 +1649,7 @@ pub async fn run_backup_with<S: Storage>(
 
                 if scan_done.load(Ordering::Relaxed)
                     && active_uploads.load(Ordering::Relaxed) == 0
-                    && pending_jobs.load(Ordering::Relaxed) == 0
+                    && (pending_jobs.load(Ordering::Relaxed) == 0 || cancel.is_cancelled())
                 {
                     break;
                 }
@@ -1633,6 +1658,7 @@ pub async fn run_backup_with<S: Storage>(
     };
 
     let adaptive_future = {
+        let cancel = upload_cancel.clone();
         let scan_done = Arc::clone(&scan_done);
         let active_uploads = Arc::clone(&active_uploads);
         let pending_jobs = Arc::clone(&pending_jobs);
@@ -1650,7 +1676,21 @@ pub async fn run_backup_with<S: Storage>(
             let mut last_backlog = pending_jobs.load(Ordering::Relaxed) > 0;
 
             loop {
-                interval.tick().await;
+                let backlog_jobs = pending_jobs.load(Ordering::Relaxed);
+                if scan_done.load(Ordering::Relaxed)
+                    && active_uploads.load(Ordering::Relaxed) == 0
+                    && (backlog_jobs == 0 || cancel.is_cancelled())
+                {
+                    break;
+                }
+
+                let ticked = tokio::select! {
+                    _ = interval.tick() => true,
+                    _ = sleep(Duration::from_millis(250)) => false,
+                };
+                if !ticked {
+                    continue;
+                }
 
                 let now = Instant::now();
                 let elapsed = now.saturating_duration_since(last_tick);
@@ -1713,7 +1753,7 @@ pub async fn run_backup_with<S: Storage>(
 
                 if scan_done.load(Ordering::Relaxed)
                     && active_uploads.load(Ordering::Relaxed) == 0
-                    && backlog_jobs == 0
+                    && (backlog_jobs == 0 || cancel.is_cancelled())
                 {
                     break;
                 }
@@ -1731,14 +1771,36 @@ pub async fn run_backup_with<S: Storage>(
     let (snapshot_id, mut result, upload_started) = scan_res?;
 
     let upload_stats = upload_stats?;
-    if let Some(err) = upload_stats.first_error {
+    let UploadStats {
+        chunks_uploaded,
+        data_objects_uploaded,
+        bytes_uploaded,
+        first_error,
+        chunk_objects,
+    } = upload_stats;
+
+    if let Err(tail_err) =
+        record_chunk_objects_batch(&mut conn, &provider_owned, &chunk_objects).await
+    {
+        if let Some(upload_err) = first_error {
+            error!(
+                event = "backup.upload_error_preserved",
+                upload_error = %upload_err,
+                tail_error = %tail_err,
+                "backup.upload_error_preserved"
+            );
+            return Err(upload_err);
+        }
+        return Err(tail_err);
+    }
+
+    if let Some(err) = first_error {
         return Err(err);
     }
-    record_chunk_objects_batch(&mut conn, &provider_owned, &upload_stats.chunk_objects).await?;
 
-    result.chunks_uploaded = upload_stats.chunks_uploaded;
-    result.data_objects_uploaded = upload_stats.data_objects_uploaded;
-    result.bytes_uploaded = upload_stats.bytes_uploaded;
+    result.chunks_uploaded = chunks_uploaded;
+    result.data_objects_uploaded = data_objects_uploaded;
+    result.bytes_uploaded = bytes_uploaded;
 
     result.data_objects_estimated_without_pack = result.chunks_uploaded;
     debug!(
