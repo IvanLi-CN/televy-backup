@@ -5,7 +5,7 @@
 - Status: 部分完成（4/5）
 - Created: 2026-02-23
 - Last: 2026-02-24
-- Notes: PR #46（CI 已通过；新增增量扫描复用优化，30 分钟验收仍未达标，需继续）
+- Notes: PR #46（CI run #242 已通过；完整 30 分钟窗口复测仍未达标，需继续）
 
 ## 背景 / 问题陈述
 
@@ -109,3 +109,5 @@
 - 2026-02-24: 继续完整 30 分钟窗口复测（不带 `--no-remote-index-sync`，`/tmp/7r6p4-perf-20260224-opt2-143423/summary.json`）：上传约 1.20 GiB，`>=1 MiB/s` 累计约 0.224 分钟，未在窗口内完成，验收仍未通过。
 - 2026-02-24: 追加两项吞吐优化：`PACK_MAX_ENTRIES_PER_PACK` 从 32 提升到 1024（让 pack 更按字节填满，降低消息开销）；扫描阶段新增“同路径且元数据未变时复用 base snapshot 的 `file_chunks`”逻辑（避免重复分块与重复读盘）。自动化测试通过。
 - 2026-02-24: 现场快检（`/tmp/7r6p4-perf-20260224-opt4-154855/summary.json`）观测 330s：扫描期 `bytesRead` 明显低于 `bytesDeduped`（已出现复用命中），但窗口内仍未出现有效上传速率，验收仍未通过；后续需继续优化大目录扫描/索引写入链路。
+- 2026-02-24: 修复 PR CI 阻塞（`clippy::collapsible_if`，`crates/core/src/backup.rs` let-chain 合并），补跑自动化测试与 `cargo clippy --all-targets --all-features -- -D warnings` 通过；GitHub Actions CI run #242 通过。
+- 2026-02-24: 补跑完整 30 分钟观察窗（`/tmp/7r6p4-perf-20260224-161434-opt6/summary.json`）：观测 `1806.24s`，上传 `1,337,256,265` bytes，`>=1 MiB/s` 累计 `13.18` 分钟，窗口结束时任务仍在进行，未满足“30 分钟内完成 / >=20 分钟达标速率”验收口径。
