@@ -105,3 +105,5 @@
 - 2026-02-24: 按维护口径尝试一次“本地索引对齐远端 latest”（去掉 `--no-remote-index-sync`）时，运行在 preflight/index_sync 即失败：`config.invalid: bootstrap missing source_path: /Users/ivan/Projects`（`/tmp/7r6p4-perf-20260224-remoteidx-133022`），说明当前 bootstrap catalog 尚无该 target 的 latest 映射。
 - 2026-02-24: 修复 index_sync 预检查在 bootstrap 缺失 target/latest 映射时的硬失败：降级为 `index_sync.skipped` 并继续使用本地索引执行备份，待本轮成功后再写回 remote latest。现场快检（`/tmp/7r6p4-perf-20260224-indexsync-skip2-135107/backup_run.jsonl`）已从 `index_sync` 顺利进入 `scan`，不再报 `bootstrap missing source_path`。
 - 2026-02-24: 修复后补跑完整 30 分钟窗口（不带 `--no-remote-index-sync`，`/tmp/7r6p4-perf-20260224-full-135840/summary.json`）：上传约 0.97 GiB，`>=1 MiB/s` 累计约 0.102 分钟，未在窗口内完成，验收仍未通过。
+- 2026-02-24: 增加 scan 热路径优化：预加载当前 provider 的 `chunk_objects` 到内存集合，替代逐 chunk SQLite 存在性查询，减少扫描期数据库往返；自动化测试通过。
+- 2026-02-24: 继续完整 30 分钟窗口复测（不带 `--no-remote-index-sync`，`/tmp/7r6p4-perf-20260224-opt2-143423/summary.json`）：上传约 1.20 GiB，`>=1 MiB/s` 累计约 0.224 分钟，未在窗口内完成，验收仍未通过。
