@@ -37,6 +37,7 @@ const PACK_ENABLE_MIN_OBJECTS: usize = 10;
 const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
 const RONOMON_READ_CHUNK_BYTES: usize = 1024 * 1024;
 const PACK_MAX_STAGING_AGE_SECS: u64 = 3;
+const BASE_FILE_CHUNK_COPY_BATCH_SIZE: usize = 128;
 const ADAPTIVE_MIN_CONCURRENCY: usize = 1;
 const ADAPTIVE_MAX_CONCURRENCY: usize = 8;
 const ADAPTIVE_MAX_DELAY_MS: u64 = 500;
@@ -742,6 +743,13 @@ struct BaseFileSnapshotRow {
     mode: i64,
 }
 
+#[derive(Debug, Clone)]
+struct BaseFileChunkCopyRow {
+    file_id: String,
+    base_file_id: String,
+    size: u64,
+}
+
 #[derive(Clone)]
 struct UploadQueue {
     sender: mpsc::Sender<UploadJob>,
@@ -1176,6 +1184,7 @@ pub async fn run_backup_with<S: Storage>(
                 let mut pack_enabled = false;
                 let mut pending_bytes: usize = 0;
                 let mut pending: Vec<PackBlob> = Vec::new();
+                let mut pending_base_chunk_copies: Vec<BaseFileChunkCopyRow> = Vec::new();
                 let mut pack_state = PackState::new(provider, &snapshot_id);
 
                 if let Some(sink) = options.progress {
@@ -1320,15 +1329,25 @@ pub async fn run_backup_with<S: Storage>(
                         && base_row.mtime_ms == mtime_ms
                         && base_row.mode == mode
                     {
-                        let copied_chunks =
-                            copy_file_chunks_from_base(conn, &base_row.file_id, &file_id).await?;
-                        if copied_chunks > 0 {
-                            result.chunks_total = result.chunks_total.saturating_add(copied_chunks);
-                            scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
-                        }
-                        if size > 0 {
-                            result.bytes_deduped = result.bytes_deduped.saturating_add(size as u64);
-                            scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
+                        pending_base_chunk_copies.push(BaseFileChunkCopyRow {
+                            file_id: file_id.clone(),
+                            base_file_id: base_row.file_id,
+                            size: size.max(0) as u64,
+                        });
+                        if pending_base_chunk_copies.len() >= BASE_FILE_CHUNK_COPY_BATCH_SIZE {
+                            let (copied_chunks, deduped_bytes) =
+                                flush_base_chunk_copy_batch(conn, &mut pending_base_chunk_copies)
+                                    .await?;
+                            if copied_chunks > 0 {
+                                result.chunks_total =
+                                    result.chunks_total.saturating_add(copied_chunks);
+                                scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
+                            }
+                            if deduped_bytes > 0 {
+                                result.bytes_deduped =
+                                    result.bytes_deduped.saturating_add(deduped_bytes);
+                                scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
+                            }
                         }
                         continue;
                     }
@@ -1440,6 +1459,19 @@ pub async fn run_backup_with<S: Storage>(
                     }
 
                     insert_file_chunks_batch(conn, &file_id, &file_chunk_rows).await?;
+                }
+
+                if !pending_base_chunk_copies.is_empty() {
+                    let (copied_chunks, deduped_bytes) =
+                        flush_base_chunk_copy_batch(conn, &mut pending_base_chunk_copies).await?;
+                    if copied_chunks > 0 {
+                        result.chunks_total = result.chunks_total.saturating_add(copied_chunks);
+                        scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
+                    }
+                    if deduped_bytes > 0 {
+                        result.bytes_deduped = result.bytes_deduped.saturating_add(deduped_bytes);
+                        scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
+                    }
                 }
 
                 debug!(
@@ -2318,27 +2350,80 @@ async fn lookup_base_file_snapshot_row(
     }))
 }
 
-async fn copy_file_chunks_from_base(
+async fn flush_base_chunk_copy_batch(
     conn: &mut DbConn,
-    base_file_id: &str,
-    file_id: &str,
-) -> Result<u64> {
-    let insert_res = execute_sqlite_with_busy_retry!(
-        "file_chunks.copy_from_base",
-        sqlx::query(
-            r#"
-            INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
-            SELECT ?, seq, chunk_hash, offset, len
-            FROM file_chunks
-            WHERE file_id = ?
-            ORDER BY seq
-            "#,
-        )
-        .bind(file_id)
-        .bind(base_file_id)
-        .execute(&mut **conn)
-    )?;
-    Ok(insert_res.rows_affected())
+    rows: &mut Vec<BaseFileChunkCopyRow>,
+) -> Result<(u64, u64)> {
+    if rows.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let mut retry_idx = 0usize;
+    'retry: loop {
+        let mut tx = conn.begin().await.map_err(Error::from)?;
+        let mut copied_chunks = 0u64;
+
+        for row in rows.iter() {
+            let copied = match sqlx::query(
+                r#"
+                INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
+                SELECT ?, seq, chunk_hash, offset, len
+                FROM file_chunks
+                WHERE file_id = ?
+                ORDER BY seq
+                "#,
+            )
+            .bind(&row.file_id)
+            .bind(&row.base_file_id)
+            .execute(&mut *tx)
+            .await
+            {
+                Ok(v) => v.rows_affected(),
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len()
+                    {
+                        let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                        retry_idx += 1;
+                        debug!(
+                            event = "sqlite.busy_retry",
+                            op = "file_chunks.copy_from_base.batch",
+                            retry = retry_idx,
+                            wait_ms,
+                            "sqlite.busy_retry"
+                        );
+                        sleep(Duration::from_millis(wait_ms)).await;
+                        continue 'retry;
+                    }
+                    return Err(Error::from(e));
+                }
+            };
+            copied_chunks = copied_chunks.saturating_add(copied);
+        }
+
+        if let Err(e) = tx.commit().await {
+            if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
+                let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                retry_idx += 1;
+                debug!(
+                    event = "sqlite.busy_retry",
+                    op = "file_chunks.copy_from_base.batch",
+                    retry = retry_idx,
+                    wait_ms,
+                    "sqlite.busy_retry"
+                );
+                sleep(Duration::from_millis(wait_ms)).await;
+                continue 'retry;
+            }
+            return Err(Error::from(e));
+        }
+
+        let deduped_bytes = rows
+            .iter()
+            .fold(0u64, |acc, row| acc.saturating_add(row.size));
+        rows.clear();
+        return Ok((copied_chunks, deduped_bytes));
+    }
 }
 
 fn telegram_camouflaged_filename() -> String {
