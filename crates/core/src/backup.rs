@@ -47,6 +47,8 @@ const ADAPTIVE_UPGRADE_THROUGHPUT_BPS: u64 = 1024 * 1024;
 const ADAPTIVE_UPGRADE_MAX_ERROR_RATE: f64 = 0.01;
 const ADAPTIVE_DOWNGRADE_MIN_ERROR_RATE: f64 = 0.05;
 const ADAPTIVE_CONSECUTIVE_FAILURES_DOWNGRADE: usize = 3;
+const ADAPTIVE_UPSHIFT_DELAY_STEP_MS: i64 = -50;
+const ADAPTIVE_DOWNSHIFT_DELAY_STEP_MS: i64 = 50;
 const SQLITE_BUSY_RETRY_DELAYS_MS: [u64; 5] = [100, 250, 500, 1000, 2000];
 
 type CdcResult<T> = std::result::Result<T, CdcError>;
@@ -545,7 +547,7 @@ impl AdaptiveUploadController {
         if !error_has_flood_wait(error) {
             return None;
         }
-        let shift = self.try_shift_down(50);
+        let shift = self.try_shift_down(ADAPTIVE_DOWNSHIFT_DELAY_STEP_MS);
         if shift.changed {
             debug!(
                 event = "upload.adaptive.tick",
@@ -570,7 +572,7 @@ impl AdaptiveUploadController {
     }
 
     fn try_shift_up(&self) -> AdaptiveShiftResult {
-        self.try_shift(1, -25)
+        self.try_shift(1, ADAPTIVE_UPSHIFT_DELAY_STEP_MS)
     }
 
     fn try_shift_down(&self, delay_step_ms: i64) -> AdaptiveShiftResult {
@@ -1744,11 +1746,14 @@ pub async fn run_backup_with<S: Storage>(
                     if error_rate > ADAPTIVE_DOWNGRADE_MIN_ERROR_RATE
                         || metrics.consecutive_failures >= ADAPTIVE_CONSECUTIVE_FAILURES_DOWNGRADE
                     {
-                        if adaptive.try_shift_down(50).changed {
+                        if adaptive
+                            .try_shift_down(ADAPTIVE_DOWNSHIFT_DELAY_STEP_MS)
+                            .changed
+                        {
                             action = "downshift";
                         }
                     } else if error_rate < ADAPTIVE_UPGRADE_MAX_ERROR_RATE
-                        && backlog_sustained
+                        && backlog_jobs > 0
                         && throughput_bps < ADAPTIVE_UPGRADE_THROUGHPUT_BPS
                         && adaptive.try_shift_up().changed
                     {
