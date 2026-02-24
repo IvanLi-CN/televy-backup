@@ -734,6 +734,14 @@ struct FileChunkRow {
     len: i64,
 }
 
+#[derive(Debug, Clone)]
+struct BaseFileSnapshotRow {
+    file_id: String,
+    size: i64,
+    mtime_ms: i64,
+    mode: i64,
+}
+
 #[derive(Clone)]
 struct UploadQueue {
     sender: mpsc::Sender<UploadJob>,
@@ -1276,24 +1284,6 @@ pub async fn run_backup_with<S: Storage>(
                         (0i64, 0i64, 0i64)
                     };
 
-                    let file = if kind == "file" {
-                        match File::open(path) {
-                            Ok(f) => Some(f),
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                debug!(
-                                    event = "scan.file_not_found",
-                                    path = %path.display(),
-                                    error = %e,
-                                    "scan.file_not_found"
-                                );
-                                continue;
-                            }
-                            Err(e) => return Err(e.into()),
-                        }
-                    } else {
-                        None
-                    };
-
                     result.files_total += 1;
 
                     let file_id = format!("f_{}", uuid::Uuid::new_v4());
@@ -1318,8 +1308,49 @@ pub async fn run_backup_with<S: Storage>(
                     result.files_indexed += 1;
                     scan_files_indexed.store(result.files_indexed, Ordering::Relaxed);
 
-                    let Some(file) = file else {
+                    if kind != "file" {
                         continue;
+                    }
+
+                    if let Some(base_snapshot_id) = base_snapshot_id.as_deref() {
+                        if let Some(base_row) =
+                            lookup_base_file_snapshot_row(conn, base_snapshot_id, &rel_path_str)
+                                .await?
+                        {
+                            if base_row.size == size
+                                && base_row.mtime_ms == mtime_ms
+                                && base_row.mode == mode
+                            {
+                                let copied_chunks =
+                                    copy_file_chunks_from_base(conn, &base_row.file_id, &file_id)
+                                        .await?;
+                                if copied_chunks > 0 {
+                                    result.chunks_total =
+                                        result.chunks_total.saturating_add(copied_chunks);
+                                    scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
+                                }
+                                if size > 0 {
+                                    result.bytes_deduped =
+                                        result.bytes_deduped.saturating_add(size as u64);
+                                    scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
+                    let file = match File::open(path) {
+                        Ok(f) => f,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            debug!(
+                                event = "scan.file_not_found",
+                                path = %path.display(),
+                                error = %e,
+                                "scan.file_not_found"
+                            );
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
                     };
                     let chunker = file_chunker(file, &scan_chunking);
                     let mut file_chunk_rows: Vec<FileChunkRow> = Vec::new();
@@ -2263,6 +2294,57 @@ async fn latest_snapshot_for_source(
     .await?;
 
     Ok(row.map(|r| r.get::<String, _>("snapshot_id")))
+}
+
+async fn lookup_base_file_snapshot_row(
+    conn: &mut DbConn,
+    base_snapshot_id: &str,
+    rel_path: &str,
+) -> Result<Option<BaseFileSnapshotRow>> {
+    let row = execute_sqlite_with_busy_retry!(
+        "files.lookup_base_snapshot_row",
+        sqlx::query(
+            r#"
+            SELECT file_id, size, mtime_ms, mode
+            FROM files
+            WHERE snapshot_id = ? AND path = ? AND kind = 'file'
+            LIMIT 1
+            "#,
+        )
+        .bind(base_snapshot_id)
+        .bind(rel_path)
+        .fetch_optional(&mut **conn)
+    )?;
+
+    Ok(row.map(|r| BaseFileSnapshotRow {
+        file_id: r.get::<String, _>("file_id"),
+        size: r.get::<i64, _>("size"),
+        mtime_ms: r.get::<i64, _>("mtime_ms"),
+        mode: r.get::<i64, _>("mode"),
+    }))
+}
+
+async fn copy_file_chunks_from_base(
+    conn: &mut DbConn,
+    base_file_id: &str,
+    file_id: &str,
+) -> Result<u64> {
+    let insert_res = execute_sqlite_with_busy_retry!(
+        "file_chunks.copy_from_base",
+        sqlx::query(
+            r#"
+            INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
+            SELECT ?, seq, chunk_hash, offset, len
+            FROM file_chunks
+            WHERE file_id = ?
+            ORDER BY seq
+            "#,
+        )
+        .bind(file_id)
+        .bind(base_file_id)
+        .execute(&mut **conn)
+    )?;
+    Ok(insert_res.rows_affected())
 }
 
 fn telegram_camouflaged_filename() -> String {
