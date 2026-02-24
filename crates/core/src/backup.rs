@@ -1312,31 +1312,25 @@ pub async fn run_backup_with<S: Storage>(
                         continue;
                     }
 
-                    if let Some(base_snapshot_id) = base_snapshot_id.as_deref() {
-                        if let Some(base_row) =
+                    if let Some(base_snapshot_id) = base_snapshot_id.as_deref()
+                        && let Some(base_row) =
                             lookup_base_file_snapshot_row(conn, base_snapshot_id, &rel_path_str)
                                 .await?
-                        {
-                            if base_row.size == size
-                                && base_row.mtime_ms == mtime_ms
-                                && base_row.mode == mode
-                            {
-                                let copied_chunks =
-                                    copy_file_chunks_from_base(conn, &base_row.file_id, &file_id)
-                                        .await?;
-                                if copied_chunks > 0 {
-                                    result.chunks_total =
-                                        result.chunks_total.saturating_add(copied_chunks);
-                                    scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
-                                }
-                                if size > 0 {
-                                    result.bytes_deduped =
-                                        result.bytes_deduped.saturating_add(size as u64);
-                                    scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
-                                }
-                                continue;
-                            }
+                        && base_row.size == size
+                        && base_row.mtime_ms == mtime_ms
+                        && base_row.mode == mode
+                    {
+                        let copied_chunks =
+                            copy_file_chunks_from_base(conn, &base_row.file_id, &file_id).await?;
+                        if copied_chunks > 0 {
+                            result.chunks_total = result.chunks_total.saturating_add(copied_chunks);
+                            scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
                         }
+                        if size > 0 {
+                            result.bytes_deduped = result.bytes_deduped.saturating_add(size as u64);
+                            scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
+                        }
+                        continue;
                     }
 
                     let file = match File::open(path) {
