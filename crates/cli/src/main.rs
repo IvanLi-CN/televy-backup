@@ -4450,12 +4450,17 @@ async fn preflight_remote_first_index_sync(
     };
 
     let latest = if let Some(t) = catalog.targets.iter().find(|t| t.target_id == target_id) {
-        t.latest.clone().ok_or_else(|| {
-            CliError::new(
-                "config.invalid",
-                format!("bootstrap missing latest for target_id: {target_id}"),
-            )
-        })?
+        if let Some(latest) = t.latest.clone() {
+            Some(latest)
+        } else {
+            tracing::warn!(
+                event = "index_sync.skipped",
+                reason = "bootstrap_target_latest_missing",
+                target_id,
+                "bootstrap target has no latest pointer; continue with local index and publish latest after backup"
+            );
+            None
+        }
     } else {
         let matches = catalog
             .targets
@@ -4464,23 +4469,41 @@ async fn preflight_remote_first_index_sync(
             .collect::<Vec<_>>();
 
         if matches.is_empty() {
-            return Err(CliError::new(
-                "config.invalid",
-                format!("bootstrap missing source_path: {source_path}"),
-            ));
-        }
-        if matches.len() > 1 {
+            tracing::warn!(
+                event = "index_sync.skipped",
+                reason = "bootstrap_target_mapping_missing",
+                target_id,
+                source_path,
+                "bootstrap has no mapping for this target/source path; continue with local index and publish latest after backup"
+            );
+            None
+        } else if matches.len() > 1 {
             return Err(CliError::new(
                 "config.invalid",
                 format!("bootstrap source_path is ambiguous: {source_path}"),
             ));
+        } else if let Some(latest) = matches[0].latest.clone() {
+            Some(latest)
+        } else {
+            tracing::warn!(
+                event = "index_sync.skipped",
+                reason = "bootstrap_source_latest_missing",
+                source_path,
+                "bootstrap source path has no latest pointer; continue with local index and publish latest after backup"
+            );
+            None
         }
-        matches[0].latest.clone().ok_or_else(|| {
-            CliError::new(
-                "config.invalid",
-                format!("bootstrap missing latest for source_path: {source_path}"),
-            )
-        })?
+    };
+    let Some(latest) = latest else {
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "bootstrap_mapping_missing",
+            "phase.finish"
+        );
+        return Ok(());
     };
 
     let provider = storage.provider();

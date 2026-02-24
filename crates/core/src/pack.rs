@@ -5,7 +5,9 @@ use crate::{Error, Result};
 
 pub const PACK_TARGET_JITTER_BYTES: usize = 8 * 1024 * 1024;
 pub const PACK_MAX_BYTES: usize = 128 * 1024 * 1024;
-pub const PACK_MAX_ENTRIES_PER_PACK: usize = 32;
+// Keep pack-level message overhead low when chunk sizes are small by allowing the
+// packer to fill by bytes instead of being capped too early by entry count.
+pub const PACK_MAX_ENTRIES_PER_PACK: usize = 1024;
 pub const PACK_TARGET_BYTES: usize = 64 * 1024 * 1024;
 
 const HEADER_TRAILER_BYTES: usize = 4;

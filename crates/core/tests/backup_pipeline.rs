@@ -64,6 +64,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
 
     let r2 = run_backup(&storage, cfg2).await.unwrap();
     assert_eq!(r2.chunks_uploaded, 0);
+    assert_eq!(r2.bytes_read, 0);
     assert!(r2.bytes_deduped > 0);
     assert!(r2.index_parts > 0);
 
