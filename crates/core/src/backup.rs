@@ -37,6 +37,7 @@ const INDEX_PART_BYTES: usize = 4 * 1024 * 1024;
 const PACK_ENABLE_MIN_OBJECTS: usize = 10;
 const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
 const RONOMON_READ_CHUNK_BYTES: usize = 1024 * 1024;
+const PACK_MAX_STAGING_AGE_SECS: u64 = 3;
 const ADAPTIVE_MIN_CONCURRENCY: usize = 1;
 const ADAPTIVE_MAX_CONCURRENCY: usize = 8;
 const ADAPTIVE_MAX_DELAY_MS: u64 = 500;
@@ -355,7 +356,7 @@ fn compute_upload_limits(rate_limit: &TelegramRateLimit) -> Result<UploadLimits>
     }
     // Keep enough workers ready for adaptive upshifts even if config starts low.
     let worker_pool_size = ADAPTIVE_MAX_CONCURRENCY;
-    let max_pending_jobs = worker_pool_size.saturating_mul(2).max(1);
+    let max_pending_jobs = worker_pool_size.saturating_mul(8).max(1);
     let max_pending_bytes = worker_pool_size
         .saturating_mul(PACK_MAX_BYTES)
         .saturating_mul(2);
@@ -724,6 +725,14 @@ enum UploadOutcome {
 struct ChunkObjectMapping {
     chunk_hash: String,
     object_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct FileChunkRow {
+    seq: i64,
+    chunk_hash: String,
+    offset: i64,
+    len: i64,
 }
 
 #[derive(Clone)]
@@ -1309,28 +1318,11 @@ pub async fn run_backup_with<S: Storage>(
                     result.files_indexed += 1;
                     scan_files_indexed.store(result.files_indexed, Ordering::Relaxed);
 
-                    if let Some(sink) = options.progress {
-                        sink.on_progress(TaskProgress {
-                            phase: "scan".to_string(),
-                            files_total: None,
-                            files_done: Some(result.files_indexed),
-                            chunks_total: Some(result.chunks_total),
-	                            chunks_done: Some(result.chunks_total),
-	                            bytes_read: Some(result.bytes_read),
-	                            bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-	                            net_bytes_uploaded: have_uploaded_net_bytes
-	                                .load(Ordering::Relaxed)
-	                                .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
-	                            bytes_downloaded: None,
-	                            net_bytes_downloaded: None,
-	                            bytes_deduped: Some(result.bytes_deduped),
-	                        });
-	                    }
-
                     let Some(file) = file else {
                         continue;
                     };
                     let chunker = file_chunker(file, &scan_chunking);
+                    let mut file_chunk_rows: Vec<FileChunkRow> = Vec::new();
 
                     for (seq, chunk) in chunker.enumerate() {
                         if let Some(cancel) = options.cancel
@@ -1416,40 +1408,20 @@ pub async fn run_backup_with<S: Storage>(
                             }
                         }
 
-                        execute_sqlite_with_busy_retry!(
-                            "file_chunks.insert",
-                            sqlx::query(
-                                r#"
-                                INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
-                                VALUES (?, ?, ?, ?, ?)
-                                "#,
-                            )
-                            .bind(&file_id)
-                            .bind(seq as i64)
-                            .bind(&chunk_hash)
-                            .bind(chunk.offset as i64)
-                            .bind(chunk.length as i64)
-                            .execute(&mut **conn)
-                        )?;
+                        if pack_enabled && pack_state.should_flush_due_to_age() {
+                            flush_packer(&uploader, &scan_master_key, &mut pack_state).await?;
+                        }
 
-                        if let Some(sink) = options.progress {
-                            sink.on_progress(TaskProgress {
-                                phase: "scan".to_string(),
-                                files_total: None,
-                                files_done: Some(result.files_indexed),
-	                                chunks_total: Some(result.chunks_total),
-	                                chunks_done: Some(result.chunks_total),
-	                                bytes_read: Some(result.bytes_read),
-	                                bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-	                                net_bytes_uploaded: have_uploaded_net_bytes
-	                                    .load(Ordering::Relaxed)
-	                                    .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
-	                                bytes_downloaded: None,
-	                                net_bytes_downloaded: None,
-	                                bytes_deduped: Some(result.bytes_deduped),
-	                            });
-	                        }
+                        file_chunk_rows.push(FileChunkRow {
+                            seq: seq as i64,
+                            chunk_hash,
+                            offset: chunk.offset as i64,
+                            len: chunk.length as i64,
+                        });
+
                     }
+
+                    insert_file_chunks_batch(conn, &file_id, &file_chunk_rows).await?;
                 }
 
                 debug!(
@@ -1886,6 +1858,7 @@ async fn schedule_pack_or_direct_upload(
     }
 
     pack_state.packer.push_blob(PackBlob { chunk_hash, blob })?;
+    pack_state.mark_staged();
     if pack_state.packer.entries_len() >= PACK_MAX_ENTRIES_PER_PACK
         || pack_state.packer.blob_len() >= pack_state.flush_target_bytes
     {
@@ -1916,9 +1889,11 @@ async fn flush_packer(
         pack_state.packs_uploaded = pack_state.packs_uploaded.saturating_add(1);
         pack_state.flush_target_bytes = pack_state.jittered_target_bytes();
         pack_state.packer.reset();
+        pack_state.staged_since = None;
         for b in carry {
             pack_state.packer.push_blob(b)?;
         }
+        pack_state.mark_staged();
     }
     Ok(())
 }
@@ -1928,6 +1903,7 @@ struct PackState {
     packs_uploaded: u64,
     flush_target_bytes: usize,
     seed_prefix: String,
+    staged_since: Option<Instant>,
 }
 
 impl PackState {
@@ -1938,6 +1914,7 @@ impl PackState {
             packs_uploaded: 0,
             flush_target_bytes: PACK_TARGET_BYTES,
             seed_prefix,
+            staged_since: None,
         };
         state.flush_target_bytes = state.jittered_target_bytes();
         state
@@ -1956,6 +1933,85 @@ impl PackState {
         let offset = (v % span) as i64 - jitter;
 
         (base + offset) as usize
+    }
+
+    fn mark_staged(&mut self) {
+        if self.staged_since.is_none() && !self.packer.is_empty() {
+            self.staged_since = Some(Instant::now());
+        }
+    }
+
+    fn should_flush_due_to_age(&self) -> bool {
+        let Some(since) = self.staged_since else {
+            return false;
+        };
+        !self.packer.is_empty() && since.elapsed() >= Duration::from_secs(PACK_MAX_STAGING_AGE_SECS)
+    }
+}
+
+async fn insert_file_chunks_batch(
+    conn: &mut DbConn,
+    file_id: &str,
+    rows: &[FileChunkRow],
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let mut retry_idx = 0usize;
+    'retry: loop {
+        let mut tx = conn.begin().await.map_err(Error::from)?;
+
+        for row in rows {
+            if let Err(e) = sqlx::query(
+                r#"
+                INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
+                VALUES (?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(file_id)
+            .bind(row.seq)
+            .bind(&row.chunk_hash)
+            .bind(row.offset)
+            .bind(row.len)
+            .execute(&mut *tx)
+            .await
+            {
+                let _ = tx.rollback().await;
+                if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
+                    let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                    retry_idx += 1;
+                    debug!(
+                        event = "sqlite.busy_retry",
+                        op = "file_chunks.insert.batch",
+                        retry = retry_idx,
+                        wait_ms,
+                        "sqlite.busy_retry"
+                    );
+                    sleep(Duration::from_millis(wait_ms)).await;
+                    continue 'retry;
+                }
+                return Err(Error::from(e));
+            }
+        }
+
+        if let Err(e) = tx.commit().await {
+            if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
+                let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                retry_idx += 1;
+                debug!(
+                    event = "sqlite.busy_retry",
+                    op = "file_chunks.insert.batch",
+                    retry = retry_idx,
+                    wait_ms,
+                    "sqlite.busy_retry"
+                );
+                sleep(Duration::from_millis(wait_ms)).await;
+                continue 'retry;
+            }
+            return Err(Error::from(e));
+        }
+        return Ok(());
     }
 }
 
