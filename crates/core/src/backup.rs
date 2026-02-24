@@ -11,7 +11,6 @@ use fastcdc::v2020::{ChunkData, Error as CdcError, MAXIMUM_MAX as V2020_MAXIMUM_
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use sqlx::pool::PoolConnection;
-use sqlx::sqlite::SqliteRow;
 use sqlx::{Connection, Row, Sqlite};
 use tracing::{debug, error};
 use walkdir::WalkDir;
@@ -1164,7 +1163,8 @@ pub async fn run_backup_with<S: Storage>(
                     ..BackupResult::default()
                 };
 
-                let mut scheduled_new_chunks = HashSet::<String>::new();
+                let mut known_chunk_hashes =
+                    load_chunk_hashes_for_storage(conn, storage, provider).await?;
                 let mut pack_enabled = false;
                 let mut pending_bytes: usize = 0;
                 let mut pending: Vec<PackBlob> = Vec::new();
@@ -1341,19 +1341,12 @@ pub async fn run_backup_with<S: Storage>(
 
                         let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
 
-                        let exists = chunk_object_exists_for_storage(
-                            conn,
-                            storage,
-                            provider,
-                            &chunk_hash,
-                        )
-                        .await?
-                            || scheduled_new_chunks.contains(&chunk_hash);
+                        let exists = known_chunk_hashes.contains(&chunk_hash);
                         if exists {
                             result.bytes_deduped += chunk.data.len() as u64;
                             scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
                         } else {
-                            scheduled_new_chunks.insert(chunk_hash.clone());
+                            known_chunk_hashes.insert(chunk_hash.clone());
 
                             let encrypted = encrypt_framed(
                                 &scan_master_key,
@@ -2295,41 +2288,41 @@ fn tgmtproto_peer_from_object_id(object_id: &str) -> Option<String> {
         .map(|v| v.peer)
 }
 
-async fn chunk_object_exists_for_storage<S: Storage>(
+async fn load_chunk_hashes_for_storage<S: Storage>(
     conn: &mut DbConn,
     storage: &S,
     provider: &str,
-    chunk_hash: &str,
-) -> Result<bool> {
-    let row: Option<SqliteRow> = sqlx::query(
+) -> Result<HashSet<String>> {
+    let rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
         r#"
-        SELECT object_id
+        SELECT chunk_hash, object_id
         FROM chunk_objects
-        WHERE provider = ? AND chunk_hash = ?
-        LIMIT 1
+        WHERE provider = ?
         "#,
     )
     .bind(provider)
-    .bind(chunk_hash)
-    .fetch_optional(&mut **conn)
+    .fetch_all(&mut **conn)
     .await?;
 
-    let Some(row) = row else {
-        return Ok(false);
-    };
-
-    let object_id: String = row.get("object_id");
-    let Some(expected_scope) = storage.object_id_scope() else {
-        return Ok(true);
-    };
-
-    // For Telegram MTProto, object IDs embed the peer. If the stored object_id points at a
-    // different peer (e.g. user changed endpoint chat_id), treat it as missing so we re-upload and
-    // rewrite the mapping.
-    let Some(peer) = tgmtproto_peer_from_object_id(&object_id) else {
-        return Ok(false);
-    };
-    Ok(peer == expected_scope)
+    let mut hashes = HashSet::with_capacity(rows.len());
+    let expected_scope = storage.object_id_scope();
+    for row in rows {
+        let chunk_hash: String = row.get("chunk_hash");
+        if let Some(expected_scope) = expected_scope {
+            let object_id: String = row.get("object_id");
+            // For Telegram MTProto, object IDs embed the peer. If the stored object_id points at
+            // a different peer (e.g. user changed endpoint chat_id), treat it as missing so we
+            // re-upload and rewrite the mapping.
+            let Some(peer) = tgmtproto_peer_from_object_id(&object_id) else {
+                continue;
+            };
+            if peer != expected_scope {
+                continue;
+            }
+        }
+        hashes.insert(chunk_hash);
+    }
+    Ok(hashes)
 }
 
 #[allow(clippy::too_many_arguments)]
