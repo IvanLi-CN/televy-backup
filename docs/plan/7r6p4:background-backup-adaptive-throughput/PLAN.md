@@ -111,3 +111,5 @@
 - 2026-02-24: 现场快检（`/tmp/7r6p4-perf-20260224-opt4-154855/summary.json`）观测 330s：扫描期 `bytesRead` 明显低于 `bytesDeduped`（已出现复用命中），但窗口内仍未出现有效上传速率，验收仍未通过；后续需继续优化大目录扫描/索引写入链路。
 - 2026-02-24: 修复 PR CI 阻塞（`clippy::collapsible_if`，`crates/core/src/backup.rs` let-chain 合并），补跑自动化测试与 `cargo clippy --all-targets --all-features -- -D warnings` 通过；GitHub Actions CI run #242 通过。
 - 2026-02-24: 补跑完整 30 分钟观察窗（`/tmp/7r6p4-perf-20260224-161434-opt6/summary.json`）：观测 `1806.24s`，上传 `1,337,256,265` bytes，`>=1 MiB/s` 累计 `13.18` 分钟，窗口结束时任务仍在进行，未满足“30 分钟内完成 / >=20 分钟达标速率”验收口径。
+- 2026-02-24: 追加扫描热路径优化：base snapshot 的 `file_chunks` 复制改为批量事务提交（每 128 文件一批）以降低 SQLite 往返与提交开销；补跑自动化测试与 clippy 通过。
+- 2026-02-24: 基于新优化补跑完整 30 分钟观察窗（`/tmp/7r6p4-perf-20260224-170237-opt7/summary.json`）：观测 `1803.90s`，上传 `1,782,790,489` bytes，`>=1 MiB/s` 累计 `18.37` 分钟（较上一轮 13.18 分钟提升），但仍未达到 `>=20` 分钟验收阈值。
