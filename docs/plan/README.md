@@ -82,4 +82,4 @@
 | njr29 | MTProto upload resilience（retry + heartbeat） | 已完成 | `njr29:mtproto-upload-resilience/PLAN.md` | 2026-02-14 | PR #39 |
 | 7bq4a | 正式版备份/验证稳定性修复（Telegram 超时、索引误判、瞬态文件、Vault Key 缓存） | 已完成 | `7bq4a:prod-backup-verify-stability/PLAN.md` | 2026-02-19 | PR #44 |
 | 7f9wg | macOS: Integrate Developer diagnostics into Main window | 已完成 | `7f9wg:integrate-developer-diagnostics/PLAN.md` | 2026-02-19 | PR #45 |
-| 7r6p4 | 后台备份吞吐自适应优化（稳定优先，尽量跑满带宽） | 部分完成（4/5） | `7r6p4:background-backup-adaptive-throughput/PLAN.md` | 2026-02-24 | PR #46；30 分钟现场验收未通过（remote latest 对齐受 bootstrap 映射缺失阻塞） |
+| 7r6p4 | 后台备份吞吐自适应优化（稳定优先，尽量跑满带宽） | 部分完成（4/5） | `7r6p4:background-backup-adaptive-throughput/PLAN.md` | 2026-02-24 | PR #46；已修复 remote latest 映射缺失时的 preflight 硬失败，30 分钟验收待通过 |

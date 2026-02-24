@@ -103,3 +103,4 @@
 - 2026-02-23: 修正自适应上限/下限落地偏差（并发上限放开到内部 8、延迟下限允许降到 0ms）；补跑完整 30 分钟窗口（上传约 1.98 GiB，`>=1 MiB/s` 累计约 0.336 分钟，未在 30 分钟内完成），验收仍未通过。
 - 2026-02-24: 追加 scan/上传流水线开销优化（扩大上传队列深度、pack 滞留超时刷新、scan 进度上报降频、`file_chunks` 按文件批量事务写入）；自动化测试通过。30 分钟窗口复测（`/tmp/7r6p4-perf-20260224-125752`）上传约 1.41 GiB，`>=1 MiB/s` 累计约 0.231 分钟，仍未满足验收。
 - 2026-02-24: 按维护口径尝试一次“本地索引对齐远端 latest”（去掉 `--no-remote-index-sync`）时，运行在 preflight/index_sync 即失败：`config.invalid: bootstrap missing source_path: /Users/ivan/Projects`（`/tmp/7r6p4-perf-20260224-remoteidx-133022`），说明当前 bootstrap catalog 尚无该 target 的 latest 映射。
+- 2026-02-24: 修复 index_sync 预检查在 bootstrap 缺失 target/latest 映射时的硬失败：降级为 `index_sync.skipped` 并继续使用本地索引执行备份，待本轮成功后再写回 remote latest。现场快检（`/tmp/7r6p4-perf-20260224-indexsync-skip2-135107/backup_run.jsonl`）已从 `index_sync` 顺利进入 `scan`，不再报 `bootstrap missing source_path`。
