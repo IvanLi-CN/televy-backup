@@ -2865,6 +2865,7 @@ struct OverviewView: View {
         .onAppear {
             model.ensureDaemonRunning()
             model.ensureStatusStreamRunning()
+            measuredTargetsContentHeight = 0
             syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
         }
         .onChange(of: targetIds) { _, _ in
