@@ -10,7 +10,7 @@ enum TargetWorkKind: String {
 
 enum BackupProgressVisual {
     case indeterminate
-    case determinate(scan: Double, success: Double)
+    case determinate(scan: Double, uploaded: Double, deduped: Double)
 }
 
 struct TargetRateEstimate: Equatable {
@@ -149,34 +149,38 @@ enum TargetPresentation {
 
     static func backupProgressVisual(_ p: StatusProgress?) -> BackupProgressVisual {
         // UX contract: only prepare renders as indeterminate.
-        guard let p else { return .determinate(scan: 0, success: 0) }
+        guard let p else { return .determinate(scan: 0, uploaded: 0, deduped: 0) }
         if isPreparePhase(p.phase) {
             return .indeterminate
         }
 
         if let fractions = backupFractions(p) {
-            // Keep the two metrics independent so the bar reflects actual scan/upload states.
-            return .determinate(scan: fractions.scan, success: fractions.success)
+            // Keep scan independent and split successful backup into deduped vs uploaded data.
+            return .determinate(scan: fractions.scan, uploaded: fractions.uploaded, deduped: fractions.deduped)
         }
 
         if let fallback = progressFraction(p) {
-            // Fallback is only used as scan activity. Success must stay on real backup accounting.
-            return .determinate(scan: fallback, success: 0)
+            // Fallback is only used as scan activity. Backup success stays on real accounting.
+            return .determinate(scan: fallback, uploaded: 0, deduped: 0)
         }
 
-        return .determinate(scan: 0, success: 0)
+        return .determinate(scan: 0, uploaded: 0, deduped: 0)
     }
 
-    static func backupFractions(_ p: StatusProgress?) -> (scan: Double, success: Double)? {
+    static func backupFractions(_ p: StatusProgress?) -> (scan: Double, uploaded: Double, deduped: Double, success: Double)? {
         guard let p, let sourceBytesTotal = p.sourceBytesTotal, sourceBytesTotal > 0 else { return nil }
         let total = Double(sourceBytesTotal)
         let uploaded = max(Int64(0), p.bytesUploaded ?? 0)
         let deduped = max(Int64(0), p.bytesDeduped ?? 0)
         let read = max(Int64(0), p.bytesRead ?? 0)
+        let uploadedRatio = min(1.0, max(0.0, Double(uploaded) / total))
+        let dedupedRatio = min(1.0, max(0.0, Double(deduped) / total))
         let successBytes = uploaded > (Int64.max - deduped) ? Int64.max : (uploaded + deduped)
         let success = min(1.0, max(0.0, Double(successBytes) / total))
         let scan = min(1.0, max(0.0, Double(read) / total))
-        return (scan: scan, success: success)
+        let dedupedClamped = min(dedupedRatio, success)
+        let uploadedClamped = max(0.0, min(uploadedRatio, 1.0 - dedupedClamped))
+        return (scan: scan, uploaded: uploadedClamped, deduped: dedupedClamped, success: success)
     }
 
     static func lastRunSummary(target: StatusTarget, now: Date) -> String? {
@@ -280,37 +284,50 @@ struct BackupUnifiedProgressBar: View {
                 .progressViewStyle(.linear)
                 .controlSize(.mini)
                 .tint(tint.opacity(0.92))
-        case let .determinate(scan, success):
+        case let .determinate(scan, uploaded, deduped):
             let scanFrac = min(1.0, max(0.0, scan))
-            let successFrac = min(1.0, max(0.0, success))
+            let uploadedFrac = min(1.0, max(0.0, uploaded))
+            let dedupedFrac = min(1.0, max(0.0, deduped))
+            let successFrac = min(1.0, uploadedFrac + dedupedFrac)
             let track = RoundedRectangle(cornerRadius: height / 2, style: .continuous)
             let successHeight = max(2, height * 0.56)
             let scanHeight = max(2, height * 0.36)
-            let scanColor = Color(red: 0.95, green: 0.67, blue: 0.20)
-            let successColor = tint.opacity(0.96)
+            let scanColor = Color.gray.opacity(0.34)
+            let dedupedColor = Color(red: 0.38, green: 0.62, blue: 0.95).opacity(0.76)
+            let uploadedColor = tint.opacity(0.97)
 
-            ZStack(alignment: .leading) {
-                track.fill(Color.primary.opacity(0.10))
+            GeometryReader { geo in
+                let width = geo.size.width
+                ZStack(alignment: .leading) {
+                    track.fill(Color.primary.opacity(0.10))
 
-                if successFrac > 0 {
-                    RoundedRectangle(cornerRadius: successHeight / 2, style: .continuous)
-                        .fill(successColor)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .scaleEffect(x: CGFloat(successFrac), y: 1, anchor: .leading)
-                        .padding(.top, height - successHeight)
+                    if dedupedFrac > 0 {
+                        RoundedRectangle(cornerRadius: successHeight / 2, style: .continuous)
+                            .fill(dedupedColor)
+                            .frame(width: width * CGFloat(dedupedFrac), height: successHeight)
+                            .offset(y: height - successHeight)
+                    }
+
+                    if uploadedFrac > 0 {
+                        RoundedRectangle(cornerRadius: successHeight / 2, style: .continuous)
+                            .fill(uploadedColor)
+                            .frame(width: width * CGFloat(uploadedFrac), height: successHeight)
+                            .offset(x: width * CGFloat(dedupedFrac), y: height - successHeight)
+                    }
+
+                    if scanFrac > 0 {
+                        RoundedRectangle(cornerRadius: scanHeight / 2, style: .continuous)
+                            .fill(scanColor)
+                            .frame(width: width * CGFloat(scanFrac), height: scanHeight)
+                            .offset(y: 0)
+                    }
                 }
-
-                if scanFrac > 0 {
-                    RoundedRectangle(cornerRadius: scanHeight / 2, style: .continuous)
-                        .fill(scanColor.opacity(0.98))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .scaleEffect(x: CGFloat(scanFrac), y: 1, anchor: .leading)
-                        .padding(.bottom, height - scanHeight)
-                }
+                .clipShape(track)
             }
             .frame(height: height)
             .animation(.easeOut(duration: 0.18), value: scanFrac)
             .animation(.easeOut(duration: 0.18), value: successFrac)
+            .animation(.easeOut(duration: 0.18), value: uploadedFrac)
         }
     }
 }
