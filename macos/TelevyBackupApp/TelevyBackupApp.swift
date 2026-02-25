@@ -165,6 +165,8 @@ final class AppModel: ObservableObject {
         static let rowHeight: CGFloat = 86
         static let listInsetTop: CGFloat = 10
         static let listInsetBottom: CGFloat = 16
+        static let listInsetCompactTop: CGFloat = 0
+        static let listInsetCompactBottom: CGFloat = 6
         static let emptyStateHeight: CGFloat = 276
         static let minHeight: CGFloat = 320
     }
@@ -839,7 +841,8 @@ final class AppModel: ObservableObject {
         if targetCount <= 0 {
             listContentHeight = targetsEmptyStateHeight()
         } else {
-            listContentHeight = estimatedTargetsListContentHeight(targetCount: targetCount)
+            let rowsHeight = estimatedTargetsRowsHeight(targetCount: targetCount)
+            listContentHeight = desiredTargetsListHeight(contentRowsHeight: rowsHeight)
         }
         let desired = min(PopoverSizing.maxHeight, PopoverSizing.chromeHeightEstimate + listContentHeight)
         let clamped = max(PopoverSizing.minHeight, desired)
@@ -857,11 +860,10 @@ final class AppModel: ObservableObject {
             return
         }
 
-        let fallbackContent = estimatedTargetsListContentHeight(targetCount: targetCount)
-        let measured = measuredContentHeight > 1
-            ? (measuredContentHeight + PopoverSizing.listInsetTop + PopoverSizing.listInsetBottom)
-            : fallbackContent
-        let desiredListHeight = min(targetsListMaxHeight(), max(1, ceil(measured)))
+        let rowsHeight = measuredContentHeight > 1
+            ? measuredContentHeight
+            : estimatedTargetsRowsHeight(targetCount: targetCount)
+        let desiredListHeight = desiredTargetsListHeight(contentRowsHeight: rowsHeight)
         let desired = PopoverSizing.chromeHeightEstimate + desiredListHeight
         let clamped = max(PopoverSizing.minHeight, min(PopoverSizing.maxHeight, desired))
         if abs(popoverDesiredHeight - clamped) >= 1 {
@@ -877,13 +879,43 @@ final class AppModel: ObservableObject {
         PopoverSizing.emptyStateHeight
     }
 
+    func estimatedTargetsRowsHeight(targetCount: Int) -> CGFloat {
+        CGFloat(max(0, targetCount)) * PopoverSizing.rowHeight
+    }
+
+    private func targetsCompactListInsets() -> EdgeInsets {
+        EdgeInsets(
+            top: PopoverSizing.listInsetCompactTop,
+            leading: 0,
+            bottom: PopoverSizing.listInsetCompactBottom,
+            trailing: 0
+        )
+    }
+
+    func shouldScrollTargetsList(contentRowsHeight: CGFloat) -> Bool {
+        let compact = targetsCompactListInsets()
+        let compactTotal = contentRowsHeight + compact.top + compact.bottom
+        return compactTotal > targetsListMaxHeight() + 0.5
+    }
+
+    func desiredTargetsListHeight(contentRowsHeight: CGFloat) -> CGFloat {
+        let insets = shouldScrollTargetsList(contentRowsHeight: contentRowsHeight)
+            ? targetsListInsets()
+            : targetsListInsets(scrollEnabled: false)
+        let total = contentRowsHeight + insets.top + insets.bottom
+        return min(targetsListMaxHeight(), max(1, ceil(total)))
+    }
+
     func estimatedTargetsListContentHeight(targetCount: Int) -> CGFloat {
-        (CGFloat(max(0, targetCount)) * PopoverSizing.rowHeight)
+        estimatedTargetsRowsHeight(targetCount: targetCount)
             + PopoverSizing.listInsetTop + PopoverSizing.listInsetBottom
     }
 
-    func targetsListInsets() -> EdgeInsets {
-        EdgeInsets(top: PopoverSizing.listInsetTop, leading: 0, bottom: PopoverSizing.listInsetBottom, trailing: 0)
+    func targetsListInsets(scrollEnabled: Bool = true) -> EdgeInsets {
+        if scrollEnabled {
+            return EdgeInsets(top: PopoverSizing.listInsetTop, leading: 0, bottom: PopoverSizing.listInsetBottom, trailing: 0)
+        }
+        return targetsCompactListInsets()
     }
 
     func copyStatusSnapshotJsonToClipboard() {
@@ -2978,26 +3010,18 @@ struct OverviewView: View {
 
     private func targetsContainer(snap: StatusSnapshot?, targets: [StatusTarget]) -> some View {
         let container = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        let listInsets = model.targetsListInsets()
-        let listInsetHeight = listInsets.top + listInsets.bottom
+        let rowsHeight = measuredTargetsContentHeight > 1
+            ? measuredTargetsContentHeight
+            : model.estimatedTargetsRowsHeight(targetCount: targets.count)
+        let shouldScroll = model.shouldScrollTargetsList(contentRowsHeight: rowsHeight)
+        let listInsets = model.targetsListInsets(scrollEnabled: shouldScroll)
+        let listHeight = model.desiredTargetsListHeight(contentRowsHeight: rowsHeight)
         let listMaxHeight = model.targetsListMaxHeight()
         let height: CGFloat = {
             if targets.isEmpty {
                 return model.targetsEmptyStateHeight()
             }
-            let fallback = model.estimatedTargetsListContentHeight(targetCount: targets.count)
-            let measured = measuredTargetsContentHeight > 1
-                ? measuredTargetsContentHeight + listInsetHeight
-                : fallback
-            return min(listMaxHeight, max(1, ceil(measured)))
-        }()
-        let shouldScroll: Bool = {
-            guard !targets.isEmpty else { return false }
-            let fallback = model.estimatedTargetsListContentHeight(targetCount: targets.count)
-            let measured = measuredTargetsContentHeight > 1
-                ? measuredTargetsContentHeight + listInsetHeight
-                : fallback
-            return measured > listMaxHeight + 0.5
+            return min(listMaxHeight, listHeight)
         }()
 
         return ZStack {
@@ -3028,7 +3052,7 @@ struct OverviewView: View {
                         measuredTargetsContentHeight = contentHeight
                     }
                 )
-                .padding(model.targetsListInsets())
+                .padding(listInsets)
             } else {
                 waitingForStatusEmptyState()
             }
