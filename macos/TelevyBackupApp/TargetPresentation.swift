@@ -106,8 +106,9 @@ enum TargetPresentation {
     ) -> TargetUserStatus {
         let activeRunning = (activeTask?.state == "running") && (activeTask?.targetId == target.targetId)
         if activeRunning { return .running }
-
-        if hasInProgressRunLog { return .running }
+        // Do not treat run-history "running" rows as authoritative runtime state.
+        // A crashed/aborted run can leave a stale running row and conflict with live daemon status.
+        _ = hasInProgressRunLog
 
         let snapshotOffline = snapshotIsOffline(snap: snap, nowMs: nowMs)
         if snapshotOffline { return .offline }
