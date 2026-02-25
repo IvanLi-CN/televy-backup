@@ -20,6 +20,7 @@ use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod control_ipc;
@@ -1620,7 +1621,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state: status_state.clone(),
             };
             let progress_sink = Some(&sink as &dyn ProgressSink);
-            let (index_sync_res, quick_stats_res) = tokio::join!(
+            let quick_stats_cancel = CancellationToken::new();
+            let quick_stats_cancel_for_task = quick_stats_cancel.clone();
+            let prepare_res = tokio::try_join!(
                 preflight_remote_first_index_sync_daemon(
                     storage,
                     &master_key,
@@ -1630,26 +1633,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     is_likely_private_chat_id(&ep.chat_id),
                     progress_sink,
                 ),
-                preflight_local_quick_stats_daemon(Path::new(&target.source_path), progress_sink)
+                async {
+                    match preflight_local_quick_stats_daemon(
+                        Path::new(&target.source_path),
+                        progress_sink,
+                        Some(quick_stats_cancel_for_task),
+                    )
+                    .await
+                    {
+                        Ok(stats) => Ok(Some(stats)),
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "prepare.local_quick_stats_failed",
+                                target_id = %target.id,
+                                source_path = %target.source_path,
+                                error_code = e.code(),
+                                error_message = %e,
+                                "prepare.local_quick_stats_failed"
+                            );
+                            Ok(None)
+                        }
+                    }
+                }
             );
 
-            let quick_stats = match quick_stats_res {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    tracing::warn!(
-                        event = "prepare.local_quick_stats_failed",
-                        target_id = %target.id,
-                        source_path = %target.source_path,
-                        error_code = e.code(),
-                        error_message = %e,
-                        "prepare.local_quick_stats_failed"
-                    );
-                    None
-                }
-            };
-
-            let result = match index_sync_res {
-                Ok(()) => {
+            let result = match prepare_res {
+                Ok(((), quick_stats)) => {
                     let opts = BackupOptions {
                         cancel: None,
                         progress: progress_sink,
@@ -1657,7 +1666,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     televy_backup_core::run_backup_with(storage, cfg, opts).await
                 }
-                Err(e) => Err(e),
+                Err(e) => {
+                    quick_stats_cancel.cancel();
+                    Err(e)
+                }
             };
             let duration_seconds = started.elapsed().as_secs_f64();
 
@@ -1942,6 +1954,7 @@ async fn preflight_remote_first_index_sync_daemon(
 async fn preflight_local_quick_stats_daemon(
     source_path: &Path,
     sink: Option<&dyn ProgressSink>,
+    cancel: Option<CancellationToken>,
 ) -> televy_backup_core::Result<SourceQuickStats> {
     if let Some(sink) = sink {
         sink.on_progress(TaskProgress {
@@ -1951,8 +1964,9 @@ async fn preflight_local_quick_stats_daemon(
     }
 
     let source_path = source_path.to_path_buf();
+    let cancel_for_task = cancel;
     let stats = tokio::task::spawn_blocking(move || {
-        televy_backup_core::compute_source_quick_stats(&source_path, None)
+        televy_backup_core::compute_source_quick_stats(&source_path, cancel_for_task.as_ref())
     })
     .await
     .map_err(|e| televy_backup_core::Error::InvalidConfig {

@@ -18,6 +18,7 @@ use televy_backup_core::{config as settings_config, gold_key};
 use tokio::io::AsyncBufReadExt;
 #[cfg(unix)]
 use tokio::net::UnixStream;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[command(name = "televybackup")]
@@ -4208,7 +4209,53 @@ async fn backup_run(
         .await
         .map_err(map_core_err)?;
 
-        let (index_sync_res, quick_stats_res) = tokio::join!(
+        let quick_stats = if progress_sink.is_some() {
+            let quick_stats_cancel = CancellationToken::new();
+            let quick_stats_cancel_for_task = quick_stats_cancel.clone();
+
+            let prepare_res = tokio::try_join!(
+                preflight_remote_first_index_sync(
+                    &storage,
+                    &master_key,
+                    &target.id,
+                    &target.source_path,
+                    &db_path,
+                    no_remote_index_sync,
+                    is_likely_private_chat_id(&ep.chat_id),
+                    progress_sink,
+                ),
+                async {
+                    match preflight_local_quick_stats(
+                        Path::new(&target.source_path),
+                        progress_sink,
+                        Some(quick_stats_cancel_for_task),
+                    )
+                    .await
+                    {
+                        Ok(stats) => Ok(Some(stats)),
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "prepare.local_quick_stats_failed",
+                                target_id = %target.id,
+                                source_path = %target.source_path,
+                                error_code = e.code,
+                                error_message = %e.message,
+                                "prepare.local_quick_stats_failed"
+                            );
+                            Ok(None)
+                        }
+                    }
+                }
+            );
+
+            match prepare_res {
+                Ok(((), stats)) => stats,
+                Err(e) => {
+                    quick_stats_cancel.cancel();
+                    return Err(e);
+                }
+            }
+        } else {
             preflight_remote_first_index_sync(
                 &storage,
                 &master_key,
@@ -4218,24 +4265,9 @@ async fn backup_run(
                 no_remote_index_sync,
                 is_likely_private_chat_id(&ep.chat_id),
                 progress_sink,
-            ),
-            preflight_local_quick_stats(Path::new(&target.source_path), progress_sink)
-        );
-        index_sync_res?;
-
-        let quick_stats = match quick_stats_res {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!(
-                    event = "prepare.local_quick_stats_failed",
-                    target_id = %target.id,
-                    source_path = %target.source_path,
-                    error_code = e.code,
-                    error_message = %e.message,
-                    "prepare.local_quick_stats_failed"
-                );
-                None
-            }
+            )
+            .await?;
+            None
         };
 
         let opts = BackupOptions {
@@ -4583,6 +4615,7 @@ async fn preflight_remote_first_index_sync(
 async fn preflight_local_quick_stats(
     source_path: &Path,
     sink: Option<&dyn ProgressSink>,
+    cancel: Option<CancellationToken>,
 ) -> Result<televy_backup_core::SourceQuickStats, CliError> {
     if let Some(sink) = sink {
         sink.on_progress(televy_backup_core::TaskProgress {
@@ -4592,8 +4625,9 @@ async fn preflight_local_quick_stats(
     }
 
     let source_path = source_path.to_path_buf();
+    let cancel_for_task = cancel;
     let stats = tokio::task::spawn_blocking(move || {
-        televy_backup_core::compute_source_quick_stats(&source_path, None)
+        televy_backup_core::compute_source_quick_stats(&source_path, cancel_for_task.as_ref())
     })
     .await
     .map_err(|e| CliError::new("task.cancelled", format!("prepare aborted: {e}")))?

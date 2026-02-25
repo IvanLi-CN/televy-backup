@@ -1858,6 +1858,7 @@ dependencies = [
  "televy_backup_core",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "uuid",
@@ -1877,6 +1878,7 @@ dependencies = [
  "televy_backup_core",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "uuid",
@@ -2026,6 +2028,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

@@ -11,6 +11,7 @@ getrandom = "0.2"
 serde = { version = "1", features = ["derive"] }
 televy_backup_core = { path = "../core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
