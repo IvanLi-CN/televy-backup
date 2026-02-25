@@ -161,8 +161,8 @@ final class AppModel: ObservableObject {
         static let maxHeight: CGFloat = 720
         static let chromeHeightEstimate: CGFloat = 240
         static let rowHeight: CGFloat = 62
-        static let listInsetTop: CGFloat = 0
-        static let listInsetBottom: CGFloat = 0
+        static let listInsetTop: CGFloat = 10
+        static let listInsetBottom: CGFloat = 16
         static let emptyStateHeight: CGFloat = 276
         static let minHeight: CGFloat = 320
     }
@@ -835,10 +835,9 @@ final class AppModel: ObservableObject {
     func updatePopoverHeightForTargets(targetCount: Int) {
         let listContentHeight: CGFloat
         if targetCount <= 0 {
-            listContentHeight = PopoverSizing.emptyStateHeight
+            listContentHeight = targetsEmptyStateHeight()
         } else {
-            listContentHeight = (CGFloat(targetCount) * PopoverSizing.rowHeight)
-                + PopoverSizing.listInsetTop + PopoverSizing.listInsetBottom
+            listContentHeight = estimatedTargetsListContentHeight(targetCount: targetCount)
         }
         let desired = min(PopoverSizing.maxHeight, PopoverSizing.chromeHeightEstimate + listContentHeight)
         let clamped = max(PopoverSizing.minHeight, desired)
@@ -847,8 +846,45 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func updatePopoverHeightForMeasuredTargets(
+        currentViewportHeight: CGFloat,
+        measuredContentHeight: CGFloat,
+        targetCount: Int
+    ) {
+        guard targetCount > 0 else {
+            updatePopoverHeightForTargets(targetCount: 0)
+            return
+        }
+
+        let fallbackContent = estimatedTargetsListContentHeight(targetCount: targetCount)
+        let measured = measuredContentHeight > 1
+            ? (measuredContentHeight + PopoverSizing.listInsetTop + PopoverSizing.listInsetBottom)
+            : fallbackContent
+        let desiredListHeight = min(targetsListMaxHeight(), max(1, ceil(measured)))
+
+        let viewport = currentViewportHeight > 1
+            ? currentViewportHeight
+            : min(targetsListMaxHeight(), max(1, ceil(fallbackContent)))
+        let chromeHeight = max(0, popoverDesiredHeight - viewport)
+
+        let desired = chromeHeight + desiredListHeight
+        let clamped = max(PopoverSizing.minHeight, min(PopoverSizing.maxHeight, desired))
+        if abs(popoverDesiredHeight - clamped) >= 1 {
+            popoverDesiredHeight = clamped
+        }
+    }
+
     func targetsListMaxHeight() -> CGFloat {
         max(160, PopoverSizing.maxHeight - PopoverSizing.chromeHeightEstimate)
+    }
+
+    func targetsEmptyStateHeight() -> CGFloat {
+        PopoverSizing.emptyStateHeight
+    }
+
+    func estimatedTargetsListContentHeight(targetCount: Int) -> CGFloat {
+        (CGFloat(max(0, targetCount)) * PopoverSizing.rowHeight)
+            + PopoverSizing.listInsetTop + PopoverSizing.listInsetBottom
     }
 
     func targetsListInsets() -> EdgeInsets {
@@ -2823,10 +2859,13 @@ struct PopoverRootView: View {
 
 struct OverviewView: View {
     @EnvironmentObject var model: AppModel
+    @State private var measuredTargetsContentHeight: CGFloat = 0
+    @State private var measuredTargetsViewportHeight: CGFloat = 0
 
     var body: some View {
         let snap = model.statusSnapshot
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
+        let targetIds = snap?.targets.map(\.id) ?? []
 
         VStack(alignment: .leading, spacing: 14) {
             networkSection(snap: snap, nowMs: nowMs)
@@ -2835,8 +2874,29 @@ struct OverviewView: View {
         .onAppear {
             model.ensureDaemonRunning()
             model.ensureStatusStreamRunning()
-            model.updatePopoverHeightForTargets(targetCount: snap?.targets.count ?? 0)
+            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
         }
+        .onChange(of: targetIds) { _, _ in
+            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
+        }
+        .onChange(of: measuredTargetsContentHeight) { _, _ in
+            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
+        }
+        .onChange(of: measuredTargetsViewportHeight) { _, _ in
+            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
+        }
+    }
+
+    private func syncPopoverHeight(targetCount: Int) {
+        if targetCount <= 0 {
+            model.updatePopoverHeightForTargets(targetCount: 0)
+            return
+        }
+        model.updatePopoverHeightForMeasuredTargets(
+            currentViewportHeight: measuredTargetsViewportHeight,
+            measuredContentHeight: measuredTargetsContentHeight,
+            targetCount: targetCount
+        )
     }
 
     private func networkSection(snap: StatusSnapshot?, nowMs: Int64) -> some View {
@@ -2911,7 +2971,7 @@ struct OverviewView: View {
                     .foregroundStyle(Color.secondary.opacity(0.92))
             }
 
-            targetsContainer(snap: snap, targets: targets, nowMs: nowMs)
+            targetsContainer(snap: snap, targets: targets)
         }
     }
 
@@ -2924,14 +2984,19 @@ struct OverviewView: View {
         return "updated \(ageMs / 3_600_000)h"
     }
 
-    private func targetsContainer(snap: StatusSnapshot?, targets: [StatusTarget], nowMs: Int64) -> some View {
+    private func targetsContainer(snap: StatusSnapshot?, targets: [StatusTarget]) -> some View {
         let container = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let listInsets = model.targetsListInsets()
+        let listInsetHeight = listInsets.top + listInsets.bottom
         let height: CGFloat = {
             if targets.isEmpty {
-                return 276
+                return model.targetsEmptyStateHeight()
             }
-            let desired = CGFloat(targets.count) * 62
-            return min(model.targetsListMaxHeight(), desired)
+            let fallback = model.estimatedTargetsListContentHeight(targetCount: targets.count)
+            let measured = measuredTargetsContentHeight > 1
+                ? measuredTargetsContentHeight + listInsetHeight
+                : fallback
+            return min(model.targetsListMaxHeight(), max(1, ceil(measured)))
         }()
 
         return ZStack {
@@ -2956,9 +3021,13 @@ struct OverviewView: View {
                 TargetsListView(
                     targets: targets,
                     snapshotGeneratedAtMs: snap.generatedAt,
-                    snapshotSourceKind: snap.source.kind
+                    snapshotSourceKind: snap.source.kind,
+                    onMetricsChange: { contentHeight, viewportHeight in
+                        measuredTargetsContentHeight = contentHeight
+                        measuredTargetsViewportHeight = viewportHeight
+                    }
                 )
-                .padding(.vertical, 0)
+                .padding(model.targetsListInsets())
             } else {
                 waitingForStatusEmptyState()
             }
@@ -3049,6 +3118,7 @@ private struct TargetsListView: View {
     let targets: [StatusTarget]
     let snapshotGeneratedAtMs: Int64
     let snapshotSourceKind: String
+    var onMetricsChange: ((CGFloat, CGFloat) -> Void)? = nil
 
     @State private var contentMinY: CGFloat = 0
     @State private var contentHeight: CGFloat = 0
@@ -3107,9 +3177,11 @@ private struct TargetsListView: View {
         .onPreferenceChange(ContentMetricsKey.self) { v in
             contentMinY = v.minY
             contentHeight = v.height
+            onMetricsChange?(v.height, containerHeight)
         }
         .onPreferenceChange(ContainerHeightKey.self) { h in
             containerHeight = h
+            onMetricsChange?(contentHeight, h)
         }
         .mask(fadeMask)
     }
@@ -3235,6 +3307,8 @@ private struct TargetRowView: View {
             Text(runningSummary(nowMs: nowMs))
                 .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Color.secondary.opacity(0.92))
+                .lineLimit(1)
+                .truncationMode(.tail)
 
             progressBar
         }
