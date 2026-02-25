@@ -704,9 +704,7 @@ private struct TargetDetailView: View {
             }
             if let fractions = TargetPresentation.backupFractions(p) {
                 items.append(.init(title: "Backed Up", value: percentText(fractions.success), systemImage: "checkmark.circle"))
-                items.append(.init(title: "Uploaded %", value: percentText(fractions.uploaded), systemImage: "arrow.up.circle"))
                 items.append(.init(title: "Deduped %", value: percentText(fractions.deduped), systemImage: "leaf"))
-                items.append(.init(title: "Pending %", value: percentText(fractions.pending), systemImage: "hourglass"))
                 items.append(.init(title: "Scanned", value: percentText(fractions.scan), systemImage: "magnifyingglass"))
             }
         case .restore:
