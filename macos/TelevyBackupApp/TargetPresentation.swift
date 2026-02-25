@@ -279,19 +279,21 @@ struct BackupUnifiedProgressBar: View {
             let track = RoundedRectangle(cornerRadius: height / 2, style: .continuous)
             let successHeight = max(2, height * 0.66)
             let successInset = (height - successHeight) / 2
+            let scanColor = Color(red: 0.33, green: 0.76, blue: 1.0)
+            let successColor = Color(red: 0.11, green: 0.47, blue: 0.98)
 
             ZStack(alignment: .leading) {
                 track.fill(Color.primary.opacity(0.10))
 
                 if scanFrac > 0 {
-                    track.fill(tint.opacity(0.36))
+                    track.fill(scanColor.opacity(0.78))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .scaleEffect(x: CGFloat(scanFrac), y: 1, anchor: .leading)
                 }
 
                 if successFrac > 0 {
                     RoundedRectangle(cornerRadius: successHeight / 2, style: .continuous)
-                        .fill(tint.opacity(0.96))
+                        .fill(successColor.opacity(0.97))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .scaleEffect(x: CGFloat(successFrac), y: 1, anchor: .leading)
                         .padding(.vertical, successInset)
