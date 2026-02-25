@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-02-25
 - Last: 2026-02-25
 
@@ -108,10 +108,10 @@ None（无外部接口变更）。
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
-- [ ] M1: 接入 Targets 真实内容高度测量并回传布局层。
-- [ ] M2: Popover 高度改为实测驱动并增加抖动抑制。
-- [ ] M3: Running 摘要单行截断并完成场景回归验证。
-- [ ] M4: 创建 PR 并完成 checks + review-loop 收敛。
+- [x] M1: 接入 Targets 真实内容高度测量并回传布局层。
+- [x] M2: Popover 高度改为实测驱动并增加抖动抑制。
+- [x] M3: Running 摘要单行截断并完成场景回归验证。
+- [x] M4: 创建 PR 并完成 checks + review-loop 收敛。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
@@ -122,3 +122,5 @@ None（无外部接口变更）。
 ## 变更记录（Change log）
 
 - 2026-02-25: 创建规格并冻结修复口径。
+- 2026-02-25: 完成实现并推送 `th/2e73n-popover-targets-live-height`，PR #48 更新到 `0d63324`。
+- 2026-02-25: CI run #251 (`.github/workflows/ci.yml`) 成功；review-loop 结论为无阻塞问题。
