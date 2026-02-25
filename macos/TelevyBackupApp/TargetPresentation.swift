@@ -170,22 +170,25 @@ enum TargetPresentation {
     static func backupFractions(_ p: StatusProgress?) -> (scan: Double, uploaded: Double, deduped: Double, pending: Double, success: Double)? {
         guard let p, let sourceBytesTotal = p.sourceBytesTotal, sourceBytesTotal > 0 else { return nil }
         let total = Double(sourceBytesTotal)
+        let phase = p.phase.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let inRunningPhase = phase == "scan" || phase == "upload" || phase == "index"
+        let runtimeCap = inRunningPhase ? 0.999 : 1.0
         let uploaded = max(Int64(0), p.bytesUploaded ?? 0)
         let deduped = max(Int64(0), p.bytesDeduped ?? 0)
         let read = max(Int64(0), p.bytesRead ?? 0)
-        let uploadedRatio = min(1.0, max(0.0, Double(uploaded) / total))
-        let dedupedRatio = min(1.0, max(0.0, Double(deduped) / total))
+        let uploadedRatio = min(runtimeCap, max(0.0, Double(uploaded) / total))
+        let dedupedRatio = min(runtimeCap, max(0.0, Double(deduped) / total))
         let successBytes = uploaded > (Int64.max - deduped) ? Int64.max : (uploaded + deduped)
-        let success = min(1.0, max(0.0, Double(successBytes) / total))
+        let success = min(runtimeCap, max(0.0, Double(successBytes) / total))
         // Scanned combines byte-level read progress and file-level traversal progress.
-        let scanRead = min(1.0, max(0.0, Double(read) / total))
+        let scanRead = min(runtimeCap, max(0.0, Double(read) / total))
         let scanFiles: Double = {
             let filesDone = max(Int64(0), p.filesDone ?? 0)
             if let sourceFilesTotal = p.sourceFilesTotal, sourceFilesTotal > 0 {
-                return min(1.0, max(0.0, Double(filesDone) / Double(sourceFilesTotal)))
+                return min(runtimeCap, max(0.0, Double(filesDone) / Double(sourceFilesTotal)))
             }
             if let filesTotal = p.filesTotal, filesTotal > 0 {
-                return min(1.0, max(0.0, Double(filesDone) / Double(filesTotal)))
+                return min(runtimeCap, max(0.0, Double(filesDone) / Double(filesTotal)))
             }
             return 0
         }()
@@ -309,12 +312,8 @@ struct BackupUnifiedProgressBar: View {
             let backedUpFrac = max(dedupedFrac, min(1.0, max(0.0, backedUp)))
             let scannedFrac = max(backedUpFrac, min(1.0, max(0.0, scanned)))
             let track = RoundedRectangle(cornerRadius: height / 2, style: .continuous)
-            // Layer rule: all bars start at the left edge, and stronger bars never exceed weaker bars.
-            // Use stacked thin lanes so three meanings are visible even when fractions are close.
-            let laneGap = max(1, floor(height * 0.10))
-            let laneHeight = max(1.5, floor((height - laneGap * 2) / 3))
-            let totalUsed = laneHeight * 3 + laneGap * 2
-            let topInset = max(0, (height - totalUsed) / 2)
+            let laneHeight = max(2.5, height * 0.78)
+            let laneY = (height - laneHeight) / 2
             let scanColor = Color.gray.opacity(0.42)
             let backedUpColor = Color(red: 0.57, green: 0.78, blue: 0.98).opacity(0.95)
             let dedupedColor = tint.opacity(0.98)
@@ -328,21 +327,21 @@ struct BackupUnifiedProgressBar: View {
                         RoundedRectangle(cornerRadius: laneHeight / 2, style: .continuous)
                             .fill(scanColor)
                             .frame(width: width * CGFloat(scannedFrac), height: laneHeight)
-                            .offset(y: topInset)
+                            .offset(y: laneY)
                     }
 
                     if backedUpFrac > 0 {
                         RoundedRectangle(cornerRadius: laneHeight / 2, style: .continuous)
                             .fill(backedUpColor)
                             .frame(width: width * CGFloat(backedUpFrac), height: laneHeight)
-                            .offset(y: topInset + laneHeight + laneGap)
+                            .offset(y: laneY)
                     }
 
                     if dedupedFrac > 0 {
                         RoundedRectangle(cornerRadius: laneHeight / 2, style: .continuous)
                             .fill(dedupedColor)
                             .frame(width: width * CGFloat(dedupedFrac), height: laneHeight)
-                            .offset(y: topInset + (laneHeight + laneGap) * 2)
+                            .offset(y: laneY)
                     }
                 }
                 .clipShape(track)

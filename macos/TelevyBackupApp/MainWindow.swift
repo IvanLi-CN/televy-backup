@@ -661,7 +661,7 @@ private struct TargetDetailView: View {
 
         func percentText(_ value: Double) -> String {
             let clamped = min(1.0, max(0.0, value))
-            return "\(Int((clamped * 100).rounded()))%"
+            return "\(Int(floor(clamped * 100.0)))%"
         }
 
         let bytesReadValue = p?.bytesRead ?? 0
