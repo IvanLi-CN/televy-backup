@@ -160,7 +160,9 @@ final class AppModel: ObservableObject {
     private enum PopoverSizing {
         static let maxHeight: CGFloat = 720
         static let chromeHeightEstimate: CGFloat = 240
-        static let rowHeight: CGFloat = 62
+        // Fallback-only estimate used before live layout metrics arrive.
+        // Keep this aligned with `TargetRowView` visual density to avoid early under-sizing.
+        static let rowHeight: CGFloat = 86
         static let listInsetTop: CGFloat = 10
         static let listInsetBottom: CGFloat = 16
         static let emptyStateHeight: CGFloat = 276
@@ -2978,6 +2980,7 @@ struct OverviewView: View {
         let container = RoundedRectangle(cornerRadius: 12, style: .continuous)
         let listInsets = model.targetsListInsets()
         let listInsetHeight = listInsets.top + listInsets.bottom
+        let listMaxHeight = model.targetsListMaxHeight()
         let height: CGFloat = {
             if targets.isEmpty {
                 return model.targetsEmptyStateHeight()
@@ -2986,7 +2989,15 @@ struct OverviewView: View {
             let measured = measuredTargetsContentHeight > 1
                 ? measuredTargetsContentHeight + listInsetHeight
                 : fallback
-            return min(model.targetsListMaxHeight(), max(1, ceil(measured)))
+            return min(listMaxHeight, max(1, ceil(measured)))
+        }()
+        let shouldScroll: Bool = {
+            guard !targets.isEmpty else { return false }
+            let fallback = model.estimatedTargetsListContentHeight(targetCount: targets.count)
+            let measured = measuredTargetsContentHeight > 1
+                ? measuredTargetsContentHeight + listInsetHeight
+                : fallback
+            return measured > listMaxHeight + 0.5
         }()
 
         return ZStack {
@@ -3012,6 +3023,7 @@ struct OverviewView: View {
                     targets: targets,
                     snapshotGeneratedAtMs: snap.generatedAt,
                     snapshotSourceKind: snap.source.kind,
+                    scrollEnabled: shouldScroll,
                     onMetricsChange: { contentHeight in
                         measuredTargetsContentHeight = contentHeight
                     }
@@ -3107,6 +3119,7 @@ private struct TargetsListView: View {
     let targets: [StatusTarget]
     let snapshotGeneratedAtMs: Int64
     let snapshotSourceKind: String
+    let scrollEnabled: Bool
     var onMetricsChange: ((CGFloat) -> Void)? = nil
 
     @State private var contentMinY: CGFloat = 0
@@ -3133,36 +3146,41 @@ private struct TargetsListView: View {
     }
 
     var body: some View {
-        ScrollView(.vertical) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(targets.enumerated()), id: \.element.id) { idx, t in
-                    TargetRowView(target: t, snapshotGeneratedAtMs: snapshotGeneratedAtMs, snapshotSourceKind: snapshotSourceKind)
-                    if idx != targets.count - 1 {
-                        Rectangle()
-                            .fill(Color.black.opacity(0.08))
-                            .frame(height: 1)
-                            .padding(.horizontal, 12)
-                    }
-                }
-            }
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: ContentMetricsKey.self,
-                        value: ContentMetrics(
-                            minY: proxy.frame(in: .named("targetsScroll")).minY,
-                            height: proxy.size.height
+        Group {
+            if scrollEnabled {
+                ScrollView(.vertical) {
+                    listRows
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear.preference(
+                                    key: ContentMetricsKey.self,
+                                    value: ContentMetrics(
+                                        minY: proxy.frame(in: .named("targetsScroll")).minY,
+                                        height: proxy.size.height
+                                    )
+                                )
+                            }
                         )
-                    )
                 }
-            )
-        }
-        .coordinateSpace(name: "targetsScroll")
-        .background(
-            GeometryReader { proxy in
-                Color.clear.preference(key: ContainerHeightKey.self, value: proxy.size.height)
+                .coordinateSpace(name: "targetsScroll")
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: ContainerHeightKey.self, value: proxy.size.height)
+                    }
+                )
+                .mask(fadeMask)
+            } else {
+                listRows
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: ContentMetricsKey.self,
+                                value: ContentMetrics(minY: 0, height: proxy.size.height)
+                            )
+                        }
+                    )
             }
-        )
+        }
         .onPreferenceChange(ContentMetricsKey.self) { v in
             contentMinY = v.minY
             contentHeight = v.height
@@ -3171,7 +3189,20 @@ private struct TargetsListView: View {
         .onPreferenceChange(ContainerHeightKey.self) { h in
             containerHeight = h
         }
-        .mask(fadeMask)
+    }
+
+    private var listRows: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(targets.enumerated()), id: \.element.id) { idx, t in
+                TargetRowView(target: t, snapshotGeneratedAtMs: snapshotGeneratedAtMs, snapshotSourceKind: snapshotSourceKind)
+                if idx != targets.count - 1 {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.08))
+                        .frame(height: 1)
+                        .padding(.horizontal, 12)
+                }
+            }
+        }
     }
 
     private var fadeMask: some View {
