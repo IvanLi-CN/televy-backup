@@ -177,9 +177,20 @@ enum TargetPresentation {
         let dedupedRatio = min(1.0, max(0.0, Double(deduped) / total))
         let successBytes = uploaded > (Int64.max - deduped) ? Int64.max : (uploaded + deduped)
         let success = min(1.0, max(0.0, Double(successBytes) / total))
-        // Scanned is the weakest (largest) semantic layer: it should never be below backed-up bytes.
+        // Scanned combines byte-level read progress and file-level traversal progress.
         let scanRead = min(1.0, max(0.0, Double(read) / total))
-        let scan = max(scanRead, success)
+        let scanFiles: Double = {
+            let filesDone = max(Int64(0), p.filesDone ?? 0)
+            if let sourceFilesTotal = p.sourceFilesTotal, sourceFilesTotal > 0 {
+                return min(1.0, max(0.0, Double(filesDone) / Double(sourceFilesTotal)))
+            }
+            if let filesTotal = p.filesTotal, filesTotal > 0 {
+                return min(1.0, max(0.0, Double(filesDone) / Double(filesTotal)))
+            }
+            return 0
+        }()
+        // Scanned is the weakest (largest) semantic layer: it should never be below backed-up bytes.
+        let scan = max(max(scanRead, scanFiles), success)
         let dedupedClamped = min(dedupedRatio, success)
         let uploadedClamped = max(0.0, min(uploadedRatio, 1.0 - dedupedClamped))
         let pendingClamped = max(0.0, min(scan - success, 1.0 - dedupedClamped - uploadedClamped))
@@ -298,11 +309,14 @@ struct BackupUnifiedProgressBar: View {
             let backedUpFrac = max(dedupedFrac, min(1.0, max(0.0, backedUp)))
             let scannedFrac = max(backedUpFrac, min(1.0, max(0.0, scanned)))
             let track = RoundedRectangle(cornerRadius: height / 2, style: .continuous)
-            let laneHeight = max(2, height * 0.78)
-            let laneY = (height - laneHeight) / 2
             // Layer rule: all bars start at the left edge, and stronger bars never exceed weaker bars.
-            let scanColor = Color.gray.opacity(0.26)
-            let backedUpColor = Color(red: 0.56, green: 0.76, blue: 0.96).opacity(0.82)
+            // Use stacked thin lanes so three meanings are visible even when fractions are close.
+            let laneGap = max(1, floor(height * 0.10))
+            let laneHeight = max(1.5, floor((height - laneGap * 2) / 3))
+            let totalUsed = laneHeight * 3 + laneGap * 2
+            let topInset = max(0, (height - totalUsed) / 2)
+            let scanColor = Color.gray.opacity(0.42)
+            let backedUpColor = Color(red: 0.57, green: 0.78, blue: 0.98).opacity(0.95)
             let dedupedColor = tint.opacity(0.98)
 
             GeometryReader { geo in
@@ -314,21 +328,21 @@ struct BackupUnifiedProgressBar: View {
                         RoundedRectangle(cornerRadius: laneHeight / 2, style: .continuous)
                             .fill(scanColor)
                             .frame(width: width * CGFloat(scannedFrac), height: laneHeight)
-                            .offset(y: laneY)
+                            .offset(y: topInset)
                     }
 
                     if backedUpFrac > 0 {
                         RoundedRectangle(cornerRadius: laneHeight / 2, style: .continuous)
                             .fill(backedUpColor)
                             .frame(width: width * CGFloat(backedUpFrac), height: laneHeight)
-                            .offset(y: laneY)
+                            .offset(y: topInset + laneHeight + laneGap)
                     }
 
                     if dedupedFrac > 0 {
                         RoundedRectangle(cornerRadius: laneHeight / 2, style: .continuous)
                             .fill(dedupedColor)
                             .frame(width: width * CGFloat(dedupedFrac), height: laneHeight)
-                            .offset(y: laneY)
+                            .offset(y: topInset + (laneHeight + laneGap) * 2)
                     }
                 }
                 .clipShape(track)
