@@ -160,8 +160,8 @@ enum TargetPresentation {
             let successBytes = uploaded > (Int64.max - deduped) ? Int64.max : (uploaded + deduped)
             let success = min(1.0, max(0.0, Double(successBytes) / total))
             let scan = min(1.0, max(0.0, Double(read) / total))
-            // Throttled events can briefly make scan lag behind success; keep success inside scan.
-            return .determinate(scan: max(scan, success), success: success)
+            // Keep the two metrics independent so the bar reflects actual scan/upload states.
+            return .determinate(scan: scan, success: success)
         }
 
         if let fallback = progressFraction(p) {
@@ -276,20 +276,24 @@ struct BackupUnifiedProgressBar: View {
             let scanFrac = min(1.0, max(0.0, scan))
             let successFrac = min(1.0, max(0.0, success))
             let track = RoundedRectangle(cornerRadius: height / 2, style: .continuous)
+            let successHeight = max(2, height * 0.66)
+            let successInset = (height - successHeight) / 2
 
             ZStack(alignment: .leading) {
                 track.fill(Color.primary.opacity(0.10))
 
                 if scanFrac > 0 {
-                    track.fill(tint.opacity(0.30))
+                    track.fill(tint.opacity(0.36))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .scaleEffect(x: CGFloat(scanFrac), y: 1, anchor: .leading)
                 }
 
                 if successFrac > 0 {
-                    track.fill(tint.opacity(0.92))
+                    RoundedRectangle(cornerRadius: successHeight / 2, style: .continuous)
+                        .fill(tint.opacity(0.96))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .scaleEffect(x: CGFloat(successFrac), y: 1, anchor: .leading)
+                        .padding(.vertical, successInset)
                 }
             }
             .frame(height: height)
