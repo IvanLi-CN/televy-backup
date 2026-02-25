@@ -177,7 +177,9 @@ enum TargetPresentation {
         let dedupedRatio = min(1.0, max(0.0, Double(deduped) / total))
         let successBytes = uploaded > (Int64.max - deduped) ? Int64.max : (uploaded + deduped)
         let success = min(1.0, max(0.0, Double(successBytes) / total))
-        let scan = min(1.0, max(0.0, Double(read) / total))
+        // Scanned is the weakest (largest) semantic layer: it should never be below backed-up bytes.
+        let scanRead = min(1.0, max(0.0, Double(read) / total))
+        let scan = max(scanRead, success)
         let dedupedClamped = min(dedupedRatio, success)
         let uploadedClamped = max(0.0, min(uploadedRatio, 1.0 - dedupedClamped))
         let pendingClamped = max(0.0, min(scan - success, 1.0 - dedupedClamped - uploadedClamped))
