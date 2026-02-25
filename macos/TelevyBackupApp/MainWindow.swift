@@ -659,6 +659,11 @@ private struct TargetDetailView: View {
             return formatBytes(value)
         }
 
+        func percentText(_ value: Double) -> String {
+            let clamped = min(1.0, max(0.0, value))
+            return "\(Int((clamped * 100).rounded()))%"
+        }
+
         let bytesReadValue = p?.bytesRead ?? 0
         let savedBytes = p?.bytesDeduped ?? 0
 
@@ -696,6 +701,10 @@ private struct TargetDetailView: View {
             }
             if savedBytes > 0 {
                 items.append(.init(title: "Saved", value: bytesText(p?.bytesDeduped), systemImage: "leaf"))
+            }
+            if let fractions = TargetPresentation.backupFractions(p) {
+                items.append(.init(title: "Backed Up", value: percentText(fractions.success), systemImage: "checkmark.circle"))
+                items.append(.init(title: "Scanned", value: percentText(fractions.scan), systemImage: "magnifyingglass"))
             }
         case .restore:
             items.append(.init(title: "Downloaded", value: bytesText(p?.bytesDownloaded), systemImage: "arrow.down.circle"))

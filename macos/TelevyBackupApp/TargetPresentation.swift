@@ -154,23 +154,29 @@ enum TargetPresentation {
             return .indeterminate
         }
 
-        if let sourceBytesTotal = p.sourceBytesTotal, sourceBytesTotal > 0 {
-            let total = Double(sourceBytesTotal)
-            let uploaded = max(Int64(0), p.bytesUploaded ?? 0)
-            let deduped = max(Int64(0), p.bytesDeduped ?? 0)
-            let read = max(Int64(0), p.bytesRead ?? 0)
-            let successBytes = uploaded > (Int64.max - deduped) ? Int64.max : (uploaded + deduped)
-            let success = min(1.0, max(0.0, Double(successBytes) / total))
-            let scan = min(1.0, max(0.0, Double(read) / total))
+        if let fractions = backupFractions(p) {
             // Keep the two metrics independent so the bar reflects actual scan/upload states.
-            return .determinate(scan: scan, success: success)
+            return .determinate(scan: fractions.scan, success: fractions.success)
         }
 
         if let fallback = progressFraction(p) {
-            return .determinate(scan: fallback, success: fallback)
+            // Fallback is only used as scan activity. Success must stay on real backup accounting.
+            return .determinate(scan: fallback, success: 0)
         }
 
         return .determinate(scan: 0, success: 0)
+    }
+
+    static func backupFractions(_ p: StatusProgress?) -> (scan: Double, success: Double)? {
+        guard let p, let sourceBytesTotal = p.sourceBytesTotal, sourceBytesTotal > 0 else { return nil }
+        let total = Double(sourceBytesTotal)
+        let uploaded = max(Int64(0), p.bytesUploaded ?? 0)
+        let deduped = max(Int64(0), p.bytesDeduped ?? 0)
+        let read = max(Int64(0), p.bytesRead ?? 0)
+        let successBytes = uploaded > (Int64.max - deduped) ? Int64.max : (uploaded + deduped)
+        let success = min(1.0, max(0.0, Double(successBytes) / total))
+        let scan = min(1.0, max(0.0, Double(read) / total))
+        return (scan: scan, success: success)
     }
 
     static func lastRunSummary(target: StatusTarget, now: Date) -> String? {
@@ -265,7 +271,7 @@ enum TargetPresentation {
 struct BackupUnifiedProgressBar: View {
     let visual: BackupProgressVisual
     var tint: Color = .blue
-    var height: CGFloat = 6
+    var height: CGFloat = 7
 
     var body: some View {
         switch visual {
@@ -278,26 +284,28 @@ struct BackupUnifiedProgressBar: View {
             let scanFrac = min(1.0, max(0.0, scan))
             let successFrac = min(1.0, max(0.0, success))
             let track = RoundedRectangle(cornerRadius: height / 2, style: .continuous)
-            let successHeight = max(2, height * 0.66)
-            let successInset = (height - successHeight) / 2
-            let scanColor = Color(red: 0.33, green: 0.76, blue: 1.0)
-            let successColor = Color(red: 0.11, green: 0.47, blue: 0.98)
+            let successHeight = max(2, height * 0.56)
+            let scanHeight = max(2, height * 0.36)
+            let scanColor = Color(red: 0.95, green: 0.67, blue: 0.20)
+            let successColor = tint.opacity(0.96)
 
             ZStack(alignment: .leading) {
                 track.fill(Color.primary.opacity(0.10))
 
-                if scanFrac > 0 {
-                    track.fill(scanColor.opacity(0.78))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .scaleEffect(x: CGFloat(scanFrac), y: 1, anchor: .leading)
-                }
-
                 if successFrac > 0 {
                     RoundedRectangle(cornerRadius: successHeight / 2, style: .continuous)
-                        .fill(successColor.opacity(0.97))
+                        .fill(successColor)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .scaleEffect(x: CGFloat(successFrac), y: 1, anchor: .leading)
-                        .padding(.vertical, successInset)
+                        .padding(.top, height - successHeight)
+                }
+
+                if scanFrac > 0 {
+                    RoundedRectangle(cornerRadius: scanHeight / 2, style: .continuous)
+                        .fill(scanColor.opacity(0.98))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .scaleEffect(x: CGFloat(scanFrac), y: 1, anchor: .leading)
+                        .padding(.bottom, height - scanHeight)
                 }
             }
             .frame(height: height)
