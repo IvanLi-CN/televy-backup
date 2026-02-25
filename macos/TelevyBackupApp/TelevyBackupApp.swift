@@ -847,7 +847,6 @@ final class AppModel: ObservableObject {
     }
 
     func updatePopoverHeightForMeasuredTargets(
-        currentViewportHeight: CGFloat,
         measuredContentHeight: CGFloat,
         targetCount: Int
     ) {
@@ -861,13 +860,7 @@ final class AppModel: ObservableObject {
             ? (measuredContentHeight + PopoverSizing.listInsetTop + PopoverSizing.listInsetBottom)
             : fallbackContent
         let desiredListHeight = min(targetsListMaxHeight(), max(1, ceil(measured)))
-
-        let viewport = currentViewportHeight > 1
-            ? currentViewportHeight
-            : min(targetsListMaxHeight(), max(1, ceil(fallbackContent)))
-        let chromeHeight = max(0, popoverDesiredHeight - viewport)
-
-        let desired = chromeHeight + desiredListHeight
+        let desired = PopoverSizing.chromeHeightEstimate + desiredListHeight
         let clamped = max(PopoverSizing.minHeight, min(PopoverSizing.maxHeight, desired))
         if abs(popoverDesiredHeight - clamped) >= 1 {
             popoverDesiredHeight = clamped
@@ -976,7 +969,6 @@ final class AppModel: ObservableObject {
         statusSnapshot = snap
         statusSnapshotReceivedAt = Date()
         appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
-        updatePopoverHeightForTargets(targetCount: snap.targets.count)
 
         // UI-only rate estimates based on monotonic progress counters. These are used to derive
         // per-target download speeds (core doesn't expose them directly).
@@ -2860,7 +2852,6 @@ struct PopoverRootView: View {
 struct OverviewView: View {
     @EnvironmentObject var model: AppModel
     @State private var measuredTargetsContentHeight: CGFloat = 0
-    @State private var measuredTargetsViewportHeight: CGFloat = 0
 
     var body: some View {
         let snap = model.statusSnapshot
@@ -2877,12 +2868,11 @@ struct OverviewView: View {
             syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
         }
         .onChange(of: targetIds) { _, _ in
+            // Prevent a one-frame stale height when the target set changes.
+            measuredTargetsContentHeight = 0
             syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
         }
         .onChange(of: measuredTargetsContentHeight) { _, _ in
-            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
-        }
-        .onChange(of: measuredTargetsViewportHeight) { _, _ in
             syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
         }
     }
@@ -2893,7 +2883,6 @@ struct OverviewView: View {
             return
         }
         model.updatePopoverHeightForMeasuredTargets(
-            currentViewportHeight: measuredTargetsViewportHeight,
             measuredContentHeight: measuredTargetsContentHeight,
             targetCount: targetCount
         )
@@ -3022,9 +3011,8 @@ struct OverviewView: View {
                     targets: targets,
                     snapshotGeneratedAtMs: snap.generatedAt,
                     snapshotSourceKind: snap.source.kind,
-                    onMetricsChange: { contentHeight, viewportHeight in
+                    onMetricsChange: { contentHeight in
                         measuredTargetsContentHeight = contentHeight
-                        measuredTargetsViewportHeight = viewportHeight
                     }
                 )
                 .padding(model.targetsListInsets())
@@ -3118,7 +3106,7 @@ private struct TargetsListView: View {
     let targets: [StatusTarget]
     let snapshotGeneratedAtMs: Int64
     let snapshotSourceKind: String
-    var onMetricsChange: ((CGFloat, CGFloat) -> Void)? = nil
+    var onMetricsChange: ((CGFloat) -> Void)? = nil
 
     @State private var contentMinY: CGFloat = 0
     @State private var contentHeight: CGFloat = 0
@@ -3177,11 +3165,10 @@ private struct TargetsListView: View {
         .onPreferenceChange(ContentMetricsKey.self) { v in
             contentMinY = v.minY
             contentHeight = v.height
-            onMetricsChange?(v.height, containerHeight)
+            onMetricsChange?(v.height)
         }
         .onPreferenceChange(ContainerHeightKey.self) { h in
             containerHeight = h
-            onMetricsChange?(contentHeight, h)
         }
         .mask(fadeMask)
     }
