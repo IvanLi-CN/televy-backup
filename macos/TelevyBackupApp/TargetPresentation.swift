@@ -147,7 +147,8 @@ enum TargetPresentation {
     }
 
     static func backupProgressVisual(_ p: StatusProgress?) -> BackupProgressVisual {
-        guard let p else { return .indeterminate }
+        // UX contract: only prepare renders as indeterminate.
+        guard let p else { return .determinate(scan: 0, success: 0) }
         if isPreparePhase(p.phase) {
             return .indeterminate
         }
@@ -168,7 +169,7 @@ enum TargetPresentation {
             return .determinate(scan: fallback, success: fallback)
         }
 
-        return .indeterminate
+        return .determinate(scan: 0, success: 0)
     }
 
     static func lastRunSummary(target: StatusTarget, now: Date) -> String? {
