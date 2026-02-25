@@ -352,7 +352,7 @@ private struct TargetListRow: View {
             }
         }()
 
-        let progressFrac = TargetPresentation.progressFraction(effectiveProgress)
+        let progressVisual = TargetPresentation.backupProgressVisual(effectiveProgress)
 
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -394,17 +394,7 @@ private struct TargetListRow: View {
             }
 
             if status == .running {
-                if let progressFrac {
-                    ProgressView(value: progressFrac)
-                        .progressViewStyle(.linear)
-                        .controlSize(.mini)
-                        .tint(status.tint)
-                } else {
-                    ProgressView()
-                        .progressViewStyle(.linear)
-                        .controlSize(.mini)
-                        .tint(status.tint)
-                }
+                BackupUnifiedProgressBar(visual: progressVisual, tint: status.tint)
             }
         }
         .contentShape(Rectangle())
@@ -724,17 +714,10 @@ private struct TargetDetailView: View {
             VStack(alignment: .leading, spacing: 6) {
                 rowView(items)
 
-                if let frac = TargetPresentation.progressFraction(p) {
-                    ProgressView(value: frac)
-                        .progressViewStyle(.linear)
-                        .controlSize(.mini)
-                        .tint(status.tint)
-                } else {
-                    ProgressView()
-                        .progressViewStyle(.linear)
-                        .controlSize(.mini)
-                        .tint(status.tint)
-                }
+                BackupUnifiedProgressBar(
+                    visual: TargetPresentation.backupProgressVisual(p),
+                    tint: status.tint
+                )
             }
         )
     }

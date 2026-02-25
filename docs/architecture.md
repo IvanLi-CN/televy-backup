@@ -23,6 +23,7 @@ The macOS popover “dashboard” UI is driven by a single snapshot schema (`Sta
   - Semantics:
     - `generatedAt` is used for stale detection in the UI.
     - `global.*Total` and `targets[].upTotal` are **session totals** (UI/stream start → now) and are not persisted.
+    - `targets[].progress.sourceFilesTotal` / `sourceBytesTotal` are best-effort local quick stats gathered during backup `prepare` (metadata-only scan). Fields are optional/additive for backward compatibility.
     - Rate semantics:
       - `bytesPerSecond` rates are derived from **payload** progress counters (`progress.bytesUploaded` / `progress.bytesDownloaded`).
       - `targets[].up.bytesPerSecond` is the daemon's estimate of the upload rate.
@@ -208,9 +209,12 @@ Cross-device restore (without the old local SQLite) uses a per-endpoint “boots
 Remote-first index sync (backup preflight):
 
 - `backup run` treats the pinned catalog’s `latest` remote index as the **source of truth**.
-- Before entering `scan`, it may download the remote latest index DB (manifest → parts → decrypt → zstd → SQLite) and atomically replace `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite`.
+- Before entering `scan`, backup runs a parallel `prepare` stage:
+  - `index_sync`: may download the remote latest index DB (manifest → parts → decrypt → zstd → SQLite) and atomically replace `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite`.
+  - `local_quick_stats`: metadata-only local walk to estimate source file count/bytes for UI progress denominator.
   - If the pinned catalog is missing: skip sync (first backup / no cross-device pointer).
   - If the pinned catalog exists but cannot be decrypted: fail with `bootstrap.decrypt_failed` (do not overwrite pinned).
+  - If local quick stats fails: continue backup with degraded (indeterminate) progress until totals are available.
   - Can be disabled for offline/debug via `backup run --no-remote-index-sync` (no pinned read; no remote index download).
 
 ## SQLite index

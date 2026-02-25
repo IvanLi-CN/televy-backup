@@ -209,6 +209,8 @@ final class AppModel: ObservableObject {
                         upTotal: StatusCounter(bytes: 1_234_567_890),
                         progress: StatusProgress(
                             phase: "upload",
+                            sourceFilesTotal: 10_000,
+                            sourceBytesTotal: 5_120_000_000,
                             filesTotal: 10_000,
                             filesDone: 3_210,
                             chunksTotal: nil,
@@ -2251,6 +2253,8 @@ final class AppModel: ObservableObject {
             DispatchQueue.main.async {
                 let filesTotal = (obj["filesTotal"] as? NSNumber)?.int64Value
                 let filesDone = (obj["filesDone"] as? NSNumber)?.int64Value
+                let sourceFilesTotal = (obj["sourceFilesTotal"] as? NSNumber)?.int64Value
+                let sourceBytesTotal = (obj["sourceBytesTotal"] as? NSNumber)?.int64Value
                 let chunksTotal = (obj["chunksTotal"] as? NSNumber)?.int64Value
                 let chunksDone = (obj["chunksDone"] as? NSNumber)?.int64Value
                 let bytesRead = (obj["bytesRead"] as? NSNumber)?.int64Value
@@ -2284,6 +2288,8 @@ final class AppModel: ObservableObject {
                 task?.updatedAt = now
                 task?.progress = StatusProgress(
                     phase: phase,
+                    sourceFilesTotal: sourceFilesTotal,
+                    sourceBytesTotal: sourceBytesTotal,
                     filesTotal: filesTotal,
                     filesDone: filesDone,
                     chunksTotal: chunksTotal,
@@ -3398,19 +3404,10 @@ private struct TargetRowView: View {
     }
 
     private var progressBar: some View {
-        let bg = RoundedRectangle(cornerRadius: 3, style: .continuous)
-        return ZStack(alignment: .leading) {
-            bg.fill(Color.black.opacity(0.10))
-            if let frac = progressFraction() {
-                bg.fill(Color.blue.opacity(0.92))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .scaleEffect(x: max(0.02, CGFloat(min(1.0, frac))), y: 1, anchor: .leading)
-            } else {
-                bg.fill(Color.blue.opacity(0.55))
-                    .frame(width: 56)
-            }
-        }
-        .frame(height: 6)
+        BackupUnifiedProgressBar(
+            visual: TargetPresentation.backupProgressVisual(effectiveProgress()),
+            tint: .blue
+        )
     }
 
     private func rightTopText(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, disconnected: Bool) -> String {
@@ -3468,7 +3465,7 @@ private struct TargetRowView: View {
            t.state == "running",
            t.targetId == target.targetId
         {
-            let phase = t.progress?.phase ?? "running"
+            let phase = TargetPresentation.stageText(t.progress?.phase) ?? "Working"
             let elapsed = elapsedText(nowMs: nowMs)
             let bytesUploaded = t.progress?.bytesUploaded ?? 0
             let bytesRead = t.progress?.bytesRead ?? 0
@@ -3497,7 +3494,7 @@ private struct TargetRowView: View {
         }
 
         let elapsed = elapsedText(nowMs: nowMs)
-        let phase = target.progress?.phase ?? "running"
+        let phase = TargetPresentation.stageText(target.progress?.phase) ?? "Working"
         let bytesUploaded = target.progress?.bytesUploaded ?? 0
         let bytesRead = target.progress?.bytesRead ?? 0
         let metric: String
@@ -3515,34 +3512,14 @@ private struct TargetRowView: View {
         return "Backup \(phase) • \(metric) • Elapsed \(elapsed)"
     }
 
-    private func progressFraction() -> Double? {
-        let p: StatusProgress? = {
-            if let t = model.activeTask,
-               t.state == "running",
-               t.targetId == target.targetId
-            {
-                return t.progress
-            }
-            return target.progress
-        }()
-
-        if let p {
-            if let done = p.chunksDone, let total = p.chunksTotal, total > 0 {
-                // For phases without a stable total, core may report `done == total` as a
-                // "so far" counter. Treat that as indeterminate to avoid a stuck 100% bar.
-                if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
-                    return nil
-                }
-                return min(1.0, Double(done) / Double(total))
-            }
-            if let done = p.filesDone, let total = p.filesTotal, total > 0 {
-                if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
-                    return nil
-                }
-                return min(1.0, Double(done) / Double(total))
-            }
+    private func effectiveProgress() -> StatusProgress? {
+        if let t = model.activeTask,
+           t.state == "running",
+           t.targetId == target.targetId
+        {
+            return t.progress
         }
-        return nil
+        return target.progress
     }
 
     private func elapsedText(nowMs: Int64) -> String {

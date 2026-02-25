@@ -8,6 +8,11 @@ enum TargetWorkKind: String {
     case unknown
 }
 
+enum BackupProgressVisual {
+    case indeterminate
+    case determinate(scan: Double, success: Double)
+}
+
 struct TargetRateEstimate: Equatable {
     var uploadBytesPerSecond: Int64?
     var downloadBytesPerSecond: Int64?
@@ -46,15 +51,25 @@ enum TargetPresentation {
         return f
     }()
 
+    private static let preparePhases: Set<String> = ["preflight", "prepare", "index_sync"]
+
+    static func isPreparePhase(_ phase: String?) -> Bool {
+        guard let phase else { return false }
+        let normalized = phase.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.isEmpty { return false }
+        return preparePhases.contains(normalized)
+    }
+
     static func stageText(_ phase: String?) -> String? {
         guard let phase else { return nil }
         let p = phase.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = p.lowercased()
         if p.isEmpty { return nil }
-        switch p {
+        switch normalized {
+        case "preflight", "prepare", "index_sync": return "Preparing"
         case "scan": return "Scanning"
         case "upload": return "Uploading"
         case "index": return "Indexing"
-        case "index_sync": return "Indexing"
         case "verify": return "Verifying"
         case "restore": return "Restoring"
         default: return p.prefix(1).uppercased() + p.dropFirst()
@@ -107,22 +122,53 @@ enum TargetPresentation {
 
     static func progressFraction(_ p: StatusProgress?) -> Double? {
         guard let p else { return nil }
+        if isPreparePhase(p.phase) {
+            return nil
+        }
+
+        let normalizedPhase = p.phase.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let unstableTotalPhases: Set<String> = ["scan", "upload", "index", "index_sync"]
 
         if let done = p.chunksDone, let total = p.chunksTotal, total > 0 {
-            if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
+            if done == total && unstableTotalPhases.contains(normalizedPhase) {
                 return nil
             }
             return min(1.0, Double(done) / Double(total))
         }
 
         if let done = p.filesDone, let total = p.filesTotal, total > 0 {
-            if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
+            if done == total && unstableTotalPhases.contains(normalizedPhase) {
                 return nil
             }
             return min(1.0, Double(done) / Double(total))
         }
 
         return nil
+    }
+
+    static func backupProgressVisual(_ p: StatusProgress?) -> BackupProgressVisual {
+        guard let p else { return .indeterminate }
+        if isPreparePhase(p.phase) {
+            return .indeterminate
+        }
+
+        if let sourceBytesTotal = p.sourceBytesTotal, sourceBytesTotal > 0 {
+            let total = Double(sourceBytesTotal)
+            let uploaded = max(Int64(0), p.bytesUploaded ?? 0)
+            let deduped = max(Int64(0), p.bytesDeduped ?? 0)
+            let read = max(Int64(0), p.bytesRead ?? 0)
+            let successBytes = uploaded > (Int64.max - deduped) ? Int64.max : (uploaded + deduped)
+            let success = min(1.0, max(0.0, Double(successBytes) / total))
+            let scan = min(1.0, max(0.0, Double(read) / total))
+            // Throttled events can briefly make scan lag behind success; keep success inside scan.
+            return .determinate(scan: max(scan, success), success: success)
+        }
+
+        if let fallback = progressFraction(p) {
+            return .determinate(scan: fallback, success: fallback)
+        }
+
+        return .indeterminate
     }
 
     static func lastRunSummary(target: StatusTarget, now: Date) -> String? {
@@ -211,5 +257,44 @@ enum TargetPresentation {
         if s < 3600 { return "\(s / 60)m" }
         if s < 86400 { return "\(s / 3600)h" }
         return "\(s / 86400)d"
+    }
+}
+
+struct BackupUnifiedProgressBar: View {
+    let visual: BackupProgressVisual
+    var tint: Color = .blue
+    var height: CGFloat = 6
+
+    var body: some View {
+        switch visual {
+        case .indeterminate:
+            ProgressView()
+                .progressViewStyle(.linear)
+                .controlSize(.mini)
+                .tint(tint.opacity(0.92))
+        case let .determinate(scan, success):
+            let scanFrac = min(1.0, max(0.0, scan))
+            let successFrac = min(1.0, max(0.0, success))
+            let track = RoundedRectangle(cornerRadius: height / 2, style: .continuous)
+
+            ZStack(alignment: .leading) {
+                track.fill(Color.primary.opacity(0.10))
+
+                if scanFrac > 0 {
+                    track.fill(tint.opacity(0.30))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .scaleEffect(x: CGFloat(scanFrac), y: 1, anchor: .leading)
+                }
+
+                if successFrac > 0 {
+                    track.fill(tint.opacity(0.92))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .scaleEffect(x: CGFloat(successFrac), y: 1, anchor: .leading)
+                }
+            }
+            .frame(height: height)
+            .animation(.easeOut(duration: 0.18), value: scanFrac)
+            .animation(.easeOut(duration: 0.18), value: successFrac)
+        }
     }
 }

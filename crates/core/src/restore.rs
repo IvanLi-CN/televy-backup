@@ -497,6 +497,8 @@ async fn restore_files<S: Storage>(
             if let Some(sink) = progress {
                 sink.on_progress(TaskProgress {
                     phase: "download".to_string(),
+                    source_files_total: None,
+                    source_bytes_total: None,
                     files_total: None,
                     files_done: Some(result.files_restored),
                     chunks_total: None,
@@ -529,6 +531,8 @@ async fn restore_files<S: Storage>(
         if let Some(sink) = progress {
             sink.on_progress(TaskProgress {
                 phase: "restore".to_string(),
+                source_files_total: None,
+                source_bytes_total: None,
                 files_total: None,
                 files_done: Some(result.files_restored),
                 chunks_total: None,
@@ -785,6 +789,8 @@ async fn verify_chunks<S: Storage>(
         if let Some(sink) = progress {
             sink.on_progress(TaskProgress {
                 phase: "chunks".to_string(),
+                source_files_total: None,
+                source_bytes_total: None,
                 files_total: None,
                 files_done: None,
                 chunks_total: None,

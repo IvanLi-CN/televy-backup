@@ -13,7 +13,7 @@ use televy_backup_core::status::{
     write_status_snapshot_json_atomic_with_options,
 };
 use televy_backup_core::{
-    BackupConfig, BackupOptions, ChunkingConfig, TelegramMtProtoStorage,
+    BackupConfig, BackupOptions, ChunkingConfig, SourceQuickStats, TelegramMtProtoStorage,
     TelegramMtProtoStorageConfig,
 };
 use televy_backup_core::{ProgressSink, Storage, TaskProgress};
@@ -163,6 +163,8 @@ impl StatusRuntimeState {
             phase: "running".to_string(),
             files_total: None,
             files_done: None,
+            source_files_total: None,
+            source_bytes_total: None,
             chunks_total: None,
             chunks_done: None,
             bytes_read: None,
@@ -192,6 +194,8 @@ impl StatusRuntimeState {
             phase: "running".to_string(),
             files_total: None,
             files_done: None,
+            source_files_total: None,
+            source_bytes_total: None,
             chunks_total: None,
             chunks_done: None,
             bytes_read: Some(0),
@@ -233,6 +237,8 @@ impl StatusRuntimeState {
             phase: p.phase,
             files_total: p.files_total,
             files_done: p.files_done,
+            source_files_total: p.source_files_total,
+            source_bytes_total: p.source_bytes_total,
             chunks_total: p.chunks_total,
             chunks_done: p.chunks_done,
             bytes_read: p.bytes_read,
@@ -296,6 +302,8 @@ impl StatusRuntimeState {
             phase: p.phase,
             files_total: p.files_total,
             files_done: p.files_done,
+            source_files_total: p.source_files_total,
+            source_bytes_total: p.source_bytes_total,
             chunks_total: p.chunks_total,
             chunks_done: p.chunks_done,
             bytes_read: p.bytes_read,
@@ -694,6 +702,8 @@ mod tests {
             phase: "upload".to_string(),
             files_total: None,
             files_done: None,
+            source_files_total: None,
+            source_bytes_total: None,
             chunks_total: None,
             chunks_done: None,
             bytes_read: None,
@@ -1609,12 +1619,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 target_id: target.id.clone(),
                 state: status_state.clone(),
             };
-            let opts = BackupOptions {
-                cancel: None,
-                progress: Some(&sink),
+            let progress_sink = Some(&sink as &dyn ProgressSink);
+            let (index_sync_res, quick_stats_res) = tokio::join!(
+                preflight_remote_first_index_sync_daemon(
+                    storage,
+                    &master_key,
+                    &target.id,
+                    &target.source_path,
+                    &db_path,
+                    is_likely_private_chat_id(&ep.chat_id),
+                    progress_sink,
+                ),
+                preflight_local_quick_stats_daemon(Path::new(&target.source_path), progress_sink)
+            );
+
+            let quick_stats = match quick_stats_res {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(
+                        event = "prepare.local_quick_stats_failed",
+                        target_id = %target.id,
+                        source_path = %target.source_path,
+                        error_code = e.code(),
+                        error_message = %e,
+                        "prepare.local_quick_stats_failed"
+                    );
+                    None
+                }
             };
 
-            let result = televy_backup_core::run_backup_with(storage, cfg, opts).await;
+            let result = match index_sync_res {
+                Ok(()) => {
+                    let opts = BackupOptions {
+                        cancel: None,
+                        progress: progress_sink,
+                        source_quick_stats: quick_stats,
+                    };
+                    televy_backup_core::run_backup_with(storage, cfg, opts).await
+                }
+                Err(e) => Err(e),
+            };
             let duration_seconds = started.elapsed().as_secs_f64();
 
             match result {
@@ -1742,6 +1786,197 @@ fn maybe_consume_manual_trigger_file(path: &Path, can_attempt_run: bool) -> std:
         return Ok(false);
     }
     try_consume_manual_trigger_file(path)
+}
+
+async fn preflight_remote_first_index_sync_daemon(
+    storage: &TelegramMtProtoStorage,
+    master_key: &[u8; 32],
+    target_id: &str,
+    source_path: &str,
+    local_index_db: &Path,
+    is_private_chat: bool,
+    sink: Option<&dyn ProgressSink>,
+) -> televy_backup_core::Result<()> {
+    let started = Instant::now();
+    tracing::debug!(event = "phase.start", phase = "index_sync", "phase.start");
+    if let Some(sink) = sink {
+        sink.on_progress(TaskProgress {
+            phase: "index_sync".to_string(),
+            ..Default::default()
+        });
+    }
+
+    if is_private_chat {
+        tracing::warn!(
+            event = "index_sync.skipped",
+            reason = "unsupported_private_chat",
+            "index_sync requires pinned bootstrap catalog; use a group/channel (e.g. -100...) or @username chat id"
+        );
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "unsupported_chat",
+            "phase.finish"
+        );
+        return Ok(());
+    }
+
+    let Some(catalog) = bootstrap::load_remote_catalog(storage, master_key).await? else {
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "bootstrap_missing",
+            "phase.finish"
+        );
+        return Ok(());
+    };
+
+    let latest = if let Some(t) = catalog.targets.iter().find(|t| t.target_id == target_id) {
+        if let Some(latest) = t.latest.clone() {
+            Some(latest)
+        } else {
+            tracing::warn!(
+                event = "index_sync.skipped",
+                reason = "bootstrap_target_latest_missing",
+                target_id,
+                "bootstrap target has no latest pointer; continue with local index and publish latest after backup"
+            );
+            None
+        }
+    } else {
+        let matches = catalog
+            .targets
+            .iter()
+            .filter(|t| t.source_path == source_path)
+            .collect::<Vec<_>>();
+
+        if matches.is_empty() {
+            tracing::warn!(
+                event = "index_sync.skipped",
+                reason = "bootstrap_target_mapping_missing",
+                target_id,
+                source_path,
+                "bootstrap has no mapping for this target/source path; continue with local index and publish latest after backup"
+            );
+            None
+        } else if matches.len() > 1 {
+            return Err(televy_backup_core::Error::InvalidConfig {
+                message: format!("bootstrap source_path is ambiguous: {source_path}"),
+            });
+        } else if let Some(latest) = matches[0].latest.clone() {
+            Some(latest)
+        } else {
+            tracing::warn!(
+                event = "index_sync.skipped",
+                reason = "bootstrap_source_latest_missing",
+                source_path,
+                "bootstrap source path has no latest pointer; continue with local index and publish latest after backup"
+            );
+            None
+        }
+    };
+
+    let Some(latest) = latest else {
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "bootstrap_mapping_missing",
+            "phase.finish"
+        );
+        return Ok(());
+    };
+
+    let provider = storage.provider();
+    let already_synced = televy_backup_core::index_sync::local_index_matches_remote_latest(
+        local_index_db,
+        provider,
+        &latest.snapshot_id,
+        &latest.manifest_object_id,
+    )
+    .await?;
+
+    if already_synced {
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "already_synced",
+            "phase.finish"
+        );
+        return Ok(());
+    }
+
+    let stats = televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
+        storage,
+        &latest.snapshot_id,
+        &latest.manifest_object_id,
+        master_key,
+        local_index_db,
+        None,
+        Some(provider),
+        sink,
+    )
+    .await?;
+
+    tracing::debug!(
+        event = "phase.finish",
+        phase = "index_sync",
+        duration_ms = started.elapsed().as_millis() as u64,
+        index_source = "downloaded",
+        bytes_downloaded = stats.bytes_downloaded,
+        bytes_written = stats.bytes_written,
+        snapshot_id = %latest.snapshot_id,
+        "phase.finish"
+    );
+
+    Ok(())
+}
+
+async fn preflight_local_quick_stats_daemon(
+    source_path: &Path,
+    sink: Option<&dyn ProgressSink>,
+) -> televy_backup_core::Result<SourceQuickStats> {
+    if let Some(sink) = sink {
+        sink.on_progress(TaskProgress {
+            phase: "prepare".to_string(),
+            ..Default::default()
+        });
+    }
+
+    let source_path = source_path.to_path_buf();
+    let stats = tokio::task::spawn_blocking(move || {
+        televy_backup_core::compute_source_quick_stats(&source_path, None)
+    })
+    .await
+    .map_err(|e| televy_backup_core::Error::InvalidConfig {
+        message: format!("prepare local stats aborted: {e}"),
+    })??;
+
+    if let Some(sink) = sink {
+        sink.on_progress(TaskProgress {
+            phase: "prepare".to_string(),
+            source_files_total: Some(stats.files_total),
+            source_bytes_total: Some(stats.bytes_total),
+            ..Default::default()
+        });
+    }
+
+    Ok(stats)
+}
+
+fn is_likely_private_chat_id(chat_id: &str) -> bool {
+    let s = chat_id.trim();
+    let Ok(id) = s.parse::<i64>() else {
+        return false;
+    };
+    !s.starts_with("-100") && id > 0
 }
 
 fn parse_hhmm(s: &str) -> Result<(u8, u8), Box<dyn std::error::Error>> {

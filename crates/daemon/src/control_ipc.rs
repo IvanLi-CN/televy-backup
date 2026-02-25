@@ -388,6 +388,8 @@ fn handle_request(
                     phase: params.progress.phase,
                     files_total: params.progress.files_total,
                     files_done: params.progress.files_done,
+                    source_files_total: params.progress.source_files_total,
+                    source_bytes_total: params.progress.source_bytes_total,
                     chunks_total: params.progress.chunks_total,
                     chunks_done: params.progress.chunks_done,
                     bytes_read: params.progress.bytes_read,

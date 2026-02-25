@@ -360,6 +360,8 @@ impl ProgressSink for NdjsonProgressSink {
             "phase": p.phase,
             "filesTotal": p.files_total,
             "filesDone": p.files_done,
+            "sourceFilesTotal": p.source_files_total,
+            "sourceBytesTotal": p.source_bytes_total,
             "chunksTotal": chunks_total,
             "chunksDone": p.chunks_done,
             "bytesRead": p.bytes_read,
@@ -430,6 +432,8 @@ fn emit_task_progress_preflight(events: bool, task_id: &str) {
         "phase": "preflight",
         "filesTotal": serde_json::Value::Null,
         "filesDone": serde_json::Value::Null,
+        "sourceFilesTotal": serde_json::Value::Null,
+        "sourceBytesTotal": serde_json::Value::Null,
         "chunksTotal": serde_json::Value::Null,
         "chunksDone": serde_json::Value::Null,
         "bytesRead": 0,
@@ -4156,10 +4160,7 @@ async fn backup_run(
                 target_id: ctx_target_id.clone(),
             }),
         };
-        let opts = BackupOptions {
-            cancel: None,
-            progress: if events { Some(&sink) } else { None },
-        };
+        let progress_sink = events.then_some(&sink as &dyn ProgressSink);
 
         let cfg = BackupConfig {
             db_path: db_path.clone(),
@@ -4207,17 +4208,41 @@ async fn backup_run(
         .await
         .map_err(map_core_err)?;
 
-        preflight_remote_first_index_sync(
-            &storage,
-            &master_key,
-            &target.id,
-            &target.source_path,
-            &db_path,
-            no_remote_index_sync,
-            is_likely_private_chat_id(&ep.chat_id),
-            events.then_some(&sink),
-        )
-        .await?;
+        let (index_sync_res, quick_stats_res) = tokio::join!(
+            preflight_remote_first_index_sync(
+                &storage,
+                &master_key,
+                &target.id,
+                &target.source_path,
+                &db_path,
+                no_remote_index_sync,
+                is_likely_private_chat_id(&ep.chat_id),
+                progress_sink,
+            ),
+            preflight_local_quick_stats(Path::new(&target.source_path), progress_sink)
+        );
+        index_sync_res?;
+
+        let quick_stats = match quick_stats_res {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(
+                    event = "prepare.local_quick_stats_failed",
+                    target_id = %target.id,
+                    source_path = %target.source_path,
+                    error_code = e.code,
+                    error_message = %e.message,
+                    "prepare.local_quick_stats_failed"
+                );
+                None
+            }
+        };
+
+        let opts = BackupOptions {
+            cancel: None,
+            progress: progress_sink,
+            source_quick_stats: quick_stats,
+        };
 
         let res = run_backup_with(&storage, cfg, opts)
             .await
@@ -4553,6 +4578,36 @@ async fn preflight_remote_first_index_sync(
     );
 
     Ok(())
+}
+
+async fn preflight_local_quick_stats(
+    source_path: &Path,
+    sink: Option<&dyn ProgressSink>,
+) -> Result<televy_backup_core::SourceQuickStats, CliError> {
+    if let Some(sink) = sink {
+        sink.on_progress(televy_backup_core::TaskProgress {
+            phase: "prepare".to_string(),
+            ..Default::default()
+        });
+    }
+
+    let source_path = source_path.to_path_buf();
+    let stats = tokio::task::spawn_blocking(move || {
+        televy_backup_core::compute_source_quick_stats(&source_path, None)
+    })
+    .await
+    .map_err(|e| CliError::new("task.cancelled", format!("prepare aborted: {e}")))?
+    .map_err(map_core_err)?;
+
+    if let Some(sink) = sink {
+        sink.on_progress(televy_backup_core::TaskProgress {
+            phase: "prepare".to_string(),
+            source_files_total: Some(stats.files_total),
+            source_bytes_total: Some(stats.bytes_total),
+            ..Default::default()
+        });
+    }
+    Ok(stats)
 }
 
 fn is_likely_private_chat_id(chat_id: &str) -> bool {
@@ -6518,6 +6573,8 @@ fn daemon_control_status_task_progress(
         phase: p.phase.clone(),
         files_total: p.files_total,
         files_done: p.files_done,
+        source_files_total: p.source_files_total,
+        source_bytes_total: p.source_bytes_total,
         chunks_total: p.chunks_total,
         chunks_done: p.chunks_done,
         bytes_read: p.bytes_read,
@@ -6750,6 +6807,8 @@ mod tests {
                 up_total: televy_backup_core::status::Counter { bytes: None },
                 progress: Some(televy_backup_core::status::Progress {
                     phase: "upload".to_string(),
+                    source_files_total: None,
+                    source_bytes_total: None,
                     files_total: None,
                     files_done: None,
                     chunks_total: None,
@@ -6828,6 +6887,8 @@ mod tests {
                     up_total: televy_backup_core::status::Counter { bytes: None },
                     progress: Some(televy_backup_core::status::Progress {
                         phase: "upload".to_string(),
+                        source_files_total: None,
+                        source_bytes_total: None,
                         files_total: None,
                         files_done: None,
                         chunks_total: None,
@@ -6854,6 +6915,8 @@ mod tests {
                     up_total: televy_backup_core::status::Counter { bytes: None },
                     progress: Some(televy_backup_core::status::Progress {
                         phase: "upload".to_string(),
+                        source_files_total: None,
+                        source_bytes_total: None,
                         files_total: None,
                         files_done: None,
                         chunks_total: None,

@@ -1,15 +1,36 @@
 # 规格（Spec）总览
 
-本目录用于管理工作项规格（scope/acceptance/milestones）。
+本目录用于管理工作项的**规格与追踪**：记录范围、验收标准、任务清单与状态，作为交付依据；实现与验证应以对应 `SPEC.md` 为准。
 
-> Legacy compatibility: 历史计划仍保留在 `docs/plan/**/PLAN.md`；新规格统一写入 `docs/specs/**/SPEC.md`。
+> Legacy compatibility: historical specs remain under `docs/plan/**/PLAN.md`. New or migrated entries should be created under `docs/specs/**/SPEC.md`.
 
-## 状态（Status）
+## 快速新增一个规格
 
-仅允许：`待设计`、`待实现`、`跳过`、`部分完成（x/y）`、`已完成`、`作废`、`重新设计（#<id>）`。
+1. 生成一个新的规格 `ID`（推荐 5 个字符的 nanoId 风格，降低并行建规格时的冲突概率）。
+2. 新建目录：`docs/specs/<id>-<title>/`（`<title>` 用简短 slug，建议 kebab-case）。
+3. 在该目录下创建 `SPEC.md`。
+4. 在下方 Index 表新增一行，并把 `Status` 设为 `待设计` 或 `待实现`，并填入 `Last`。
 
-## Index
+## 状态（Status）说明
+
+仅允许使用以下状态值：
+
+- `待设计`
+- `待实现`
+- `跳过`
+- `部分完成（x/y）`
+- `已完成`
+- `作废`
+- `重新设计（#<id>）`
+
+## Legacy plan index
+
+历史计划索引仍在：`docs/plan/README.md`。
+
+## Index（固定表格）
 
 | ID   | Title | Status | Spec | Last | Notes |
 |-----:|-------|--------|------|------|-------|
 | 2e73n | Popover Targets 高度实时自适应与误滚动修复 | 已完成 | `2e73n-popover-targets-live-height/SPEC.md` | 2026-02-25 | PR #48 已创建并更新；CI run #251 通过；review-loop 无阻塞问题 |
+| dmts3 | backup 主流水线并行化（scan+upload）与进度语义修复 | 部分完成（4/5） | `dmts3-streaming-backup-pipeline/SPEC.md` | 2026-02-28 | 主循环并行 + retention 优化已落地；新增 index 流式压缩上传以压低 daemon 内存 footprint，待完成 UI 真机截图验收 |
+| z324m | 统一进度条规范（含 Prepare 并行）与四处 UI 对齐 | 已完成 | `z324m-unified-backup-progress-prepare/SPEC.md` | 2026-02-28 | 已同步为单条多层进度规范（NeedUploadConfirmed/UploadingCurrent/BackedUp/Scanned）并保留 Need Upload(Disc./Final) 口径 |

@@ -173,6 +173,8 @@ pub struct StatusTaskProgress {
     pub phase: String,
     pub files_total: Option<u64>,
     pub files_done: Option<u64>,
+    pub source_files_total: Option<u64>,
+    pub source_bytes_total: Option<u64>,
     pub chunks_total: Option<u64>,
     pub chunks_done: Option<u64>,
     pub bytes_read: Option<u64>,

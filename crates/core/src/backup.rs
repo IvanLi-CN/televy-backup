@@ -324,6 +324,12 @@ pub struct BackupResult {
     pub index_parts: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct SourceQuickStats {
+    pub files_total: u64,
+    pub bytes_total: u64,
+}
+
 pub async fn run_backup<S: Storage>(storage: &S, config: BackupConfig) -> Result<BackupResult> {
     run_backup_with(storage, config, BackupOptions::default()).await
 }
@@ -332,6 +338,7 @@ pub async fn run_backup<S: Storage>(storage: &S, config: BackupConfig) -> Result
 pub struct BackupOptions<'a> {
     pub cancel: Option<&'a CancellationToken>,
     pub progress: Option<&'a dyn ProgressSink>,
+    pub source_quick_stats: Option<SourceQuickStats>,
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +373,66 @@ fn compute_upload_limits(rate_limit: &TelegramRateLimit) -> Result<UploadLimits>
         worker_pool_size,
         max_pending_jobs,
         max_pending_bytes,
+    })
+}
+
+pub fn compute_source_quick_stats(
+    source_path: &Path,
+    cancel: Option<&CancellationToken>,
+) -> Result<SourceQuickStats> {
+    let mut files_total = 0u64;
+    let mut bytes_total = 0u64;
+
+    for entry in WalkDir::new(source_path).follow_links(false) {
+        if let Some(cancel) = cancel
+            && cancel.is_cancelled()
+        {
+            return Err(Error::Cancelled);
+        }
+
+        let entry = match entry {
+            Ok(v) => v,
+            Err(e) => {
+                let is_not_found = e
+                    .io_error()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+                let is_root = e.path().is_some_and(|p| p == source_path);
+                if is_not_found && !is_root {
+                    continue;
+                }
+                return Err(Error::Walkdir(e));
+            }
+        };
+
+        let path = entry.path();
+        if path == source_path {
+            continue;
+        }
+
+        let metadata = match entry.metadata() {
+            Ok(v) => v,
+            Err(e) => {
+                let is_not_found = e
+                    .io_error()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+                if is_not_found {
+                    continue;
+                }
+                return Err(Error::Walkdir(e));
+            }
+        };
+
+        if !metadata.is_file() {
+            continue;
+        }
+
+        files_total = files_total.saturating_add(1);
+        bytes_total = bytes_total.saturating_add(metadata.len());
+    }
+
+    Ok(SourceQuickStats {
+        files_total,
+        bytes_total,
     })
 }
 
@@ -990,6 +1057,10 @@ pub async fn run_backup_with<S: Storage>(
         });
     }
 
+    let source_quick_stats = options.source_quick_stats;
+    let source_files_total = source_quick_stats.map(|s| s.files_total);
+    let source_bytes_total = source_quick_stats.map(|s| s.bytes_total);
+
     let provider_owned = provider.to_string();
     let limits = compute_upload_limits(&config.rate_limit)?;
     let configured_concurrency = config.rate_limit.max_concurrent_uploads as usize;
@@ -1194,6 +1265,8 @@ pub async fn run_backup_with<S: Storage>(
                         phase: "scan".to_string(),
                         files_total: None,
                         files_done: Some(0),
+                        source_files_total,
+                        source_bytes_total,
                         chunks_total: Some(0),
                         chunks_done: Some(0),
                         bytes_read: Some(0),
@@ -1494,6 +1567,8 @@ pub async fn run_backup_with<S: Storage>(
                         phase: "upload".to_string(),
                         files_total: None,
                         files_done: Some(scan_files_indexed.load(Ordering::Relaxed)),
+                        source_files_total,
+                        source_bytes_total,
 	                        chunks_total: Some(scan_chunks_total.load(Ordering::Relaxed)),
 	                        chunks_done: Some(scan_chunks_total.load(Ordering::Relaxed)),
 	                        bytes_read: Some(scan_bytes_read.load(Ordering::Relaxed)),
@@ -1597,6 +1672,8 @@ pub async fn run_backup_with<S: Storage>(
                         phase: "upload".to_string(),
                         files_total: None,
                         files_done: Some(scan_files_indexed.load(Ordering::Relaxed)),
+                        source_files_total,
+                        source_bytes_total,
                         chunks_total: Some(scan_chunks_total.load(Ordering::Relaxed)),
                         chunks_done: Some(scan_chunks_total.load(Ordering::Relaxed)),
                         bytes_read: Some(scan_bytes_read.load(Ordering::Relaxed)),
@@ -1661,6 +1738,8 @@ pub async fn run_backup_with<S: Storage>(
                         phase: phase.to_string(),
                         files_total: None,
                         files_done: Some(scan_files_indexed.load(Ordering::Relaxed)),
+                        source_files_total,
+                        source_bytes_total,
                         chunks_total: Some(scan_chunks_total.load(Ordering::Relaxed)),
                         chunks_done: Some(scan_chunks_total.load(Ordering::Relaxed)),
                         bytes_read: Some(scan_bytes_read.load(Ordering::Relaxed)),
@@ -1847,6 +1926,8 @@ pub async fn run_backup_with<S: Storage>(
             phase: "index".to_string(),
             files_total: None,
             files_done: Some(result.files_indexed),
+            source_files_total,
+            source_bytes_total,
             chunks_total: Some(result.chunks_total),
             chunks_done: Some(result.chunks_total),
             bytes_read: Some(result.bytes_read),
@@ -1872,6 +1953,8 @@ pub async fn run_backup_with<S: Storage>(
         uploaded_net_bytes.as_ref(),
         have_uploaded_net_bytes.as_ref(),
         options.progress,
+        source_files_total,
+        source_bytes_total,
         scan_files_indexed.load(Ordering::Relaxed),
         scan_chunks_total.load(Ordering::Relaxed),
         scan_bytes_read.load(Ordering::Relaxed),
@@ -2502,6 +2585,8 @@ async fn upload_index<S: Storage>(
     uploaded_net_bytes: &AtomicU64,
     have_uploaded_net_bytes: &AtomicBool,
     progress: Option<&dyn ProgressSink>,
+    source_files_total: Option<u64>,
+    source_bytes_total: Option<u64>,
     files_indexed: u64,
     chunks_total: u64,
     bytes_read: u64,
@@ -2553,6 +2638,8 @@ async fn upload_index<S: Storage>(
                             phase: "index".to_string(),
                             files_total: None,
                             files_done: Some(files_indexed),
+                            source_files_total,
+                            source_bytes_total,
                             chunks_total: Some(chunks_total),
                             chunks_done: Some(chunks_total),
                             bytes_read: Some(bytes_read),
@@ -2590,6 +2677,8 @@ async fn upload_index<S: Storage>(
                 phase: "index".to_string(),
                 files_total: None,
                 files_done: Some(files_indexed),
+                source_files_total,
+                source_bytes_total,
                 chunks_total: Some(chunks_total),
                 chunks_done: Some(chunks_total),
                 bytes_read: Some(bytes_read),
@@ -2674,6 +2763,8 @@ async fn upload_index<S: Storage>(
                         phase: "index".to_string(),
                         files_total: None,
                         files_done: Some(files_indexed),
+                        source_files_total,
+                        source_bytes_total,
                         chunks_total: Some(chunks_total),
                         chunks_done: Some(chunks_total),
                         bytes_read: Some(bytes_read),
@@ -2710,6 +2801,8 @@ async fn upload_index<S: Storage>(
             phase: "index".to_string(),
             files_total: None,
             files_done: Some(files_indexed),
+            source_files_total,
+            source_bytes_total,
             chunks_total: Some(chunks_total),
             chunks_done: Some(chunks_total),
             bytes_read: Some(bytes_read),
