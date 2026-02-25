@@ -160,9 +160,13 @@ final class AppModel: ObservableObject {
     private enum PopoverSizing {
         static let maxHeight: CGFloat = 720
         static let chromeHeightEstimate: CGFloat = 240
-        static let rowHeight: CGFloat = 62
-        static let listInsetTop: CGFloat = 0
-        static let listInsetBottom: CGFloat = 0
+        // Fallback-only estimate used before live layout metrics arrive.
+        // Keep this aligned with `TargetRowView` visual density to avoid early under-sizing.
+        static let rowHeight: CGFloat = 86
+        static let listInsetTop: CGFloat = 10
+        static let listInsetBottom: CGFloat = 16
+        static let listInsetCompactTop: CGFloat = 0
+        static let listInsetCompactBottom: CGFloat = 6
         static let emptyStateHeight: CGFloat = 276
         static let minHeight: CGFloat = 320
     }
@@ -835,13 +839,33 @@ final class AppModel: ObservableObject {
     func updatePopoverHeightForTargets(targetCount: Int) {
         let listContentHeight: CGFloat
         if targetCount <= 0 {
-            listContentHeight = PopoverSizing.emptyStateHeight
+            listContentHeight = targetsEmptyStateHeight()
         } else {
-            listContentHeight = (CGFloat(targetCount) * PopoverSizing.rowHeight)
-                + PopoverSizing.listInsetTop + PopoverSizing.listInsetBottom
+            let rowsHeight = estimatedTargetsRowsHeight(targetCount: targetCount)
+            listContentHeight = desiredTargetsListHeight(contentRowsHeight: rowsHeight)
         }
         let desired = min(PopoverSizing.maxHeight, PopoverSizing.chromeHeightEstimate + listContentHeight)
         let clamped = max(PopoverSizing.minHeight, desired)
+        if abs(popoverDesiredHeight - clamped) >= 1 {
+            popoverDesiredHeight = clamped
+        }
+    }
+
+    func updatePopoverHeightForMeasuredTargets(
+        measuredContentHeight: CGFloat,
+        targetCount: Int
+    ) {
+        guard targetCount > 0 else {
+            updatePopoverHeightForTargets(targetCount: 0)
+            return
+        }
+
+        let rowsHeight = measuredContentHeight > 1
+            ? measuredContentHeight
+            : estimatedTargetsRowsHeight(targetCount: targetCount)
+        let desiredListHeight = desiredTargetsListHeight(contentRowsHeight: rowsHeight)
+        let desired = PopoverSizing.chromeHeightEstimate + desiredListHeight
+        let clamped = max(PopoverSizing.minHeight, min(PopoverSizing.maxHeight, desired))
         if abs(popoverDesiredHeight - clamped) >= 1 {
             popoverDesiredHeight = clamped
         }
@@ -851,8 +875,47 @@ final class AppModel: ObservableObject {
         max(160, PopoverSizing.maxHeight - PopoverSizing.chromeHeightEstimate)
     }
 
-    func targetsListInsets() -> EdgeInsets {
-        EdgeInsets(top: PopoverSizing.listInsetTop, leading: 0, bottom: PopoverSizing.listInsetBottom, trailing: 0)
+    func targetsEmptyStateHeight() -> CGFloat {
+        PopoverSizing.emptyStateHeight
+    }
+
+    func estimatedTargetsRowsHeight(targetCount: Int) -> CGFloat {
+        CGFloat(max(0, targetCount)) * PopoverSizing.rowHeight
+    }
+
+    private func targetsCompactListInsets() -> EdgeInsets {
+        EdgeInsets(
+            top: PopoverSizing.listInsetCompactTop,
+            leading: 0,
+            bottom: PopoverSizing.listInsetCompactBottom,
+            trailing: 0
+        )
+    }
+
+    func shouldScrollTargetsList(contentRowsHeight: CGFloat) -> Bool {
+        let compact = targetsCompactListInsets()
+        let compactTotal = contentRowsHeight + compact.top + compact.bottom
+        return compactTotal > targetsListMaxHeight() + 0.5
+    }
+
+    func desiredTargetsListHeight(contentRowsHeight: CGFloat) -> CGFloat {
+        let insets = shouldScrollTargetsList(contentRowsHeight: contentRowsHeight)
+            ? targetsListInsets()
+            : targetsListInsets(scrollEnabled: false)
+        let total = contentRowsHeight + insets.top + insets.bottom
+        return min(targetsListMaxHeight(), max(1, ceil(total)))
+    }
+
+    func estimatedTargetsListContentHeight(targetCount: Int) -> CGFloat {
+        estimatedTargetsRowsHeight(targetCount: targetCount)
+            + PopoverSizing.listInsetTop + PopoverSizing.listInsetBottom
+    }
+
+    func targetsListInsets(scrollEnabled: Bool = true) -> EdgeInsets {
+        if scrollEnabled {
+            return EdgeInsets(top: PopoverSizing.listInsetTop, leading: 0, bottom: PopoverSizing.listInsetBottom, trailing: 0)
+        }
+        return targetsCompactListInsets()
     }
 
     func copyStatusSnapshotJsonToClipboard() {
@@ -940,7 +1003,6 @@ final class AppModel: ObservableObject {
         statusSnapshot = snap
         statusSnapshotReceivedAt = Date()
         appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
-        updatePopoverHeightForTargets(targetCount: snap.targets.count)
 
         // UI-only rate estimates based on monotonic progress counters. These are used to derive
         // per-target download speeds (core doesn't expose them directly).
@@ -2823,10 +2885,12 @@ struct PopoverRootView: View {
 
 struct OverviewView: View {
     @EnvironmentObject var model: AppModel
+    @State private var measuredTargetsContentHeight: CGFloat = 0
 
     var body: some View {
         let snap = model.statusSnapshot
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
+        let targetIds = snap?.targets.map(\.id) ?? []
 
         VStack(alignment: .leading, spacing: 14) {
             networkSection(snap: snap, nowMs: nowMs)
@@ -2835,8 +2899,28 @@ struct OverviewView: View {
         .onAppear {
             model.ensureDaemonRunning()
             model.ensureStatusStreamRunning()
-            model.updatePopoverHeightForTargets(targetCount: snap?.targets.count ?? 0)
+            measuredTargetsContentHeight = 0
+            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
         }
+        .onChange(of: targetIds) { _, _ in
+            // Prevent a one-frame stale height when the target set changes.
+            measuredTargetsContentHeight = 0
+            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
+        }
+        .onChange(of: measuredTargetsContentHeight) { _, _ in
+            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
+        }
+    }
+
+    private func syncPopoverHeight(targetCount: Int) {
+        if targetCount <= 0 {
+            model.updatePopoverHeightForTargets(targetCount: 0)
+            return
+        }
+        model.updatePopoverHeightForMeasuredTargets(
+            measuredContentHeight: measuredTargetsContentHeight,
+            targetCount: targetCount
+        )
     }
 
     private func networkSection(snap: StatusSnapshot?, nowMs: Int64) -> some View {
@@ -2911,7 +2995,7 @@ struct OverviewView: View {
                     .foregroundStyle(Color.secondary.opacity(0.92))
             }
 
-            targetsContainer(snap: snap, targets: targets, nowMs: nowMs)
+            targetsContainer(snap: snap, targets: targets)
         }
     }
 
@@ -2924,14 +3008,20 @@ struct OverviewView: View {
         return "updated \(ageMs / 3_600_000)h"
     }
 
-    private func targetsContainer(snap: StatusSnapshot?, targets: [StatusTarget], nowMs: Int64) -> some View {
+    private func targetsContainer(snap: StatusSnapshot?, targets: [StatusTarget]) -> some View {
         let container = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        let rowsHeight = measuredTargetsContentHeight > 1
+            ? measuredTargetsContentHeight
+            : model.estimatedTargetsRowsHeight(targetCount: targets.count)
+        let shouldScroll = model.shouldScrollTargetsList(contentRowsHeight: rowsHeight)
+        let listInsets = model.targetsListInsets(scrollEnabled: shouldScroll)
+        let listHeight = model.desiredTargetsListHeight(contentRowsHeight: rowsHeight)
+        let listMaxHeight = model.targetsListMaxHeight()
         let height: CGFloat = {
             if targets.isEmpty {
-                return 276
+                return model.targetsEmptyStateHeight()
             }
-            let desired = CGFloat(targets.count) * 62
-            return min(model.targetsListMaxHeight(), desired)
+            return min(listMaxHeight, listHeight)
         }()
 
         return ZStack {
@@ -2956,9 +3046,13 @@ struct OverviewView: View {
                 TargetsListView(
                     targets: targets,
                     snapshotGeneratedAtMs: snap.generatedAt,
-                    snapshotSourceKind: snap.source.kind
+                    snapshotSourceKind: snap.source.kind,
+                    scrollEnabled: shouldScroll,
+                    onMetricsChange: { contentHeight in
+                        measuredTargetsContentHeight = contentHeight
+                    }
                 )
-                .padding(.vertical, 0)
+                .padding(listInsets)
             } else {
                 waitingForStatusEmptyState()
             }
@@ -3049,6 +3143,8 @@ private struct TargetsListView: View {
     let targets: [StatusTarget]
     let snapshotGeneratedAtMs: Int64
     let snapshotSourceKind: String
+    let scrollEnabled: Bool
+    var onMetricsChange: ((CGFloat) -> Void)? = nil
 
     @State private var contentMinY: CGFloat = 0
     @State private var contentHeight: CGFloat = 0
@@ -3074,44 +3170,63 @@ private struct TargetsListView: View {
     }
 
     var body: some View {
-        ScrollView(.vertical) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(targets.enumerated()), id: \.element.id) { idx, t in
-                    TargetRowView(target: t, snapshotGeneratedAtMs: snapshotGeneratedAtMs, snapshotSourceKind: snapshotSourceKind)
-                    if idx != targets.count - 1 {
-                        Rectangle()
-                            .fill(Color.black.opacity(0.08))
-                            .frame(height: 1)
-                            .padding(.horizontal, 12)
-                    }
-                }
-            }
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: ContentMetricsKey.self,
-                        value: ContentMetrics(
-                            minY: proxy.frame(in: .named("targetsScroll")).minY,
-                            height: proxy.size.height
+        Group {
+            if scrollEnabled {
+                ScrollView(.vertical) {
+                    listRows
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear.preference(
+                                    key: ContentMetricsKey.self,
+                                    value: ContentMetrics(
+                                        minY: proxy.frame(in: .named("targetsScroll")).minY,
+                                        height: proxy.size.height
+                                    )
+                                )
+                            }
                         )
-                    )
                 }
-            )
-        }
-        .coordinateSpace(name: "targetsScroll")
-        .background(
-            GeometryReader { proxy in
-                Color.clear.preference(key: ContainerHeightKey.self, value: proxy.size.height)
+                .coordinateSpace(name: "targetsScroll")
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: ContainerHeightKey.self, value: proxy.size.height)
+                    }
+                )
+                .mask(fadeMask)
+            } else {
+                listRows
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: ContentMetricsKey.self,
+                                value: ContentMetrics(minY: 0, height: proxy.size.height)
+                            )
+                        }
+                    )
             }
-        )
+        }
         .onPreferenceChange(ContentMetricsKey.self) { v in
             contentMinY = v.minY
             contentHeight = v.height
+            onMetricsChange?(v.height)
         }
         .onPreferenceChange(ContainerHeightKey.self) { h in
             containerHeight = h
         }
-        .mask(fadeMask)
+    }
+
+    private var listRows: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(targets.enumerated()), id: \.element.id) { idx, t in
+                TargetRowView(target: t, snapshotGeneratedAtMs: snapshotGeneratedAtMs, snapshotSourceKind: snapshotSourceKind)
+                if idx != targets.count - 1 {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.08))
+                        .frame(height: 1)
+                        .padding(.horizontal, 12)
+                }
+            }
+        }
     }
 
     private var fadeMask: some View {
@@ -3235,6 +3350,8 @@ private struct TargetRowView: View {
             Text(runningSummary(nowMs: nowMs))
                 .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Color.secondary.opacity(0.92))
+                .lineLimit(1)
+                .truncationMode(.tail)
 
             progressBar
         }
