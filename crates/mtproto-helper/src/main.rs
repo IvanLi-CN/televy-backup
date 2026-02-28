@@ -210,20 +210,46 @@ async fn save_big_file_part_with_retry(
 ) -> Result<(), String> {
     for attempt in 1..=UPLOAD_PART_MAX_ATTEMPTS {
         limiter.wait_turn().await;
-        let res = timeout(
-            Duration::from_secs(UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS),
-            client.invoke(&tl::functions::upload::SaveBigFilePart {
-                file_id,
-                file_part: part,
-                file_total_parts: total_parts,
-                bytes: chunk.to_vec(),
-            }),
-        )
-        .await;
+        let req = tl::functions::upload::SaveBigFilePart {
+            file_id,
+            file_part: part,
+            file_total_parts: total_parts,
+            bytes: chunk.to_vec(),
+        };
+
+        // Some MTProto calls may block a runtime worker thread (e.g. during network stalls).
+        // Run the call in a separate task so our timeout can still fire.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let client = client.clone();
+        let invoke_task = tokio::spawn(async move {
+            let res = client.invoke(&req).await;
+            let _ = tx.send(res);
+        });
+        tokio::pin!(rx);
+
+        let deadline =
+            tokio::time::sleep(Duration::from_secs(UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS));
+        tokio::pin!(deadline);
+
+        let res: Result<bool, String> = tokio::select! {
+            res = &mut rx => {
+                match res {
+                    Ok(Ok(v)) => Ok(v),
+                    Ok(Err(e)) => Err(format!("{e}")),
+                    Err(_) => Err("save_big_file_part failed: invoke result channel closed".to_string()),
+                }
+            }
+            _ = &mut deadline => {
+                invoke_task.abort();
+                Err(format!(
+                    "save_big_file_part timed out after {UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS}s"
+                ))
+            }
+        };
 
         match res {
-            Ok(Ok(true)) => return Ok(()),
-            Ok(Ok(false)) => {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
                 let msg = "server failed to store uploaded data".to_string();
                 if attempt >= UPLOAD_PART_MAX_ATTEMPTS {
                     return Err(format!(
@@ -231,8 +257,7 @@ async fn save_big_file_part_with_retry(
                     ));
                 }
             }
-            Ok(Err(e)) => {
-                let msg = format!("{e}");
+            Err(msg) => {
                 if attempt >= UPLOAD_PART_MAX_ATTEMPTS {
                     return Err(format!(
                         "save_big_file_part failed (attempt {attempt}/{UPLOAD_PART_MAX_ATTEMPTS}): {msg}"
@@ -246,16 +271,6 @@ async fn save_big_file_part_with_retry(
                 tokio::time::sleep(backoff).await;
                 continue;
             }
-            Err(_) => {
-                let msg = format!(
-                    "save_big_file_part timed out after {UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS}s"
-                );
-                if attempt >= UPLOAD_PART_MAX_ATTEMPTS {
-                    return Err(format!(
-                        "{msg} (attempt {attempt}/{UPLOAD_PART_MAX_ATTEMPTS})"
-                    ));
-                }
-            }
         }
 
         tokio::time::sleep(upload_part_backoff(attempt, None)).await;
@@ -264,83 +279,52 @@ async fn save_big_file_part_with_retry(
     Err("save_big_file_part retry loop exhausted".to_string())
 }
 
-async fn save_file_part_with_retry_and_heartbeat(
+async fn save_file_part_with_retry(
     limiter: &InvokeRateLimiter,
-    net_stats: &NetStats,
-    base_net_out: u64,
     client: &Client,
     file_id: i64,
     part: i32,
     chunk: &[u8],
-    out: &mut dyn Write,
-    session_b64: Option<String>,
-    bytes_uploaded_payload: u64,
-    bytes_total: u64,
 ) -> Result<(), String> {
     for attempt in 1..=UPLOAD_PART_MAX_ATTEMPTS {
-        let mut hb = tokio::time::interval(Duration::from_millis(250));
-        hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut last_net_reported: Option<u64> = None;
-        let mut last_emit = Instant::now();
-
-        let mut emit_progress = || -> Result<(), String> {
-            let (_in_total, out_total) = net_stats.snapshot();
-            let net_bytes_out = out_total.saturating_sub(base_net_out);
-            let stale = last_emit.elapsed() >= Duration::from_secs(UPLOAD_PROGRESS_HEARTBEAT_SECS);
-            if last_net_reported != Some(net_bytes_out) || stale {
-                last_net_reported = Some(net_bytes_out);
-                last_emit = Instant::now();
-                write_upload_progress(
-                    out,
-                    session_b64.clone(),
-                    bytes_uploaded_payload,
-                    bytes_total,
-                    net_bytes_out,
-                )?;
-            }
-            Ok(())
-        };
-
-        // Emit a heartbeat immediately so the core side won't wait too long on a stalled part.
-        let _ = hb.tick().await;
-        emit_progress()?;
-
-        limiter
-            .wait_turn_with_upload_heartbeat(&mut emit_progress)
-            .await?;
-
+        limiter.wait_turn().await;
         let req = tl::functions::upload::SaveFilePart {
             file_id,
             file_part: part,
             bytes: chunk.to_vec(),
         };
-        let fut = client.invoke(&req);
-        tokio::pin!(fut);
+
+        // Some MTProto calls may block a runtime worker thread (e.g. during network stalls).
+        // Run the call in a separate task so our timeout can still fire.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let client = client.clone();
+        let invoke_task = tokio::spawn(async move {
+            let res = client.invoke(&req).await;
+            let _ = tx.send(res);
+        });
+        tokio::pin!(rx);
 
         let deadline = tokio::time::sleep(Duration::from_secs(UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS));
         tokio::pin!(deadline);
 
-        let final_res: Result<bool, String> = loop {
-            tokio::select! {
-                _ = hb.tick() => {
-                    // Keep stdout alive even if the MTProto call is stuck inside the client.
-                    emit_progress()?;
+        let final_res: Result<bool, String> = tokio::select! {
+            res = &mut rx => {
+                match res {
+                    Ok(Ok(v)) => Ok(v),
+                    Ok(Err(e)) => Err(format!("{e}")),
+                    Err(_) => Err("save_file_part failed: invoke result channel closed".to_string()),
                 }
-                res = &mut fut => {
-                    break res.map_err(|e| format!("{e}"));
-                }
-                _ = &mut deadline => {
-                    break Err(format!(
-                        "save_file_part timed out after {UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS}s"
-                    ));
-                }
+            }
+            _ = &mut deadline => {
+                invoke_task.abort();
+                Err(format!(
+                    "save_file_part timed out after {UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS}s"
+                ))
             }
         };
 
         match final_res {
             Ok(true) => {
-                // Emit one last sample at completion to avoid leaving the caller with a stale rate.
-                emit_progress()?;
                 return Ok(());
             }
             Ok(false) => {
@@ -362,12 +346,12 @@ async fn save_file_part_with_retry_and_heartbeat(
                 if wait.is_some() || has_flood_wait_token(&msg) {
                     limiter.cooldown(backoff).await;
                 }
-                wait_with_upload_heartbeat(backoff, &mut emit_progress).await?;
+                tokio::time::sleep(backoff).await;
                 continue;
             }
         }
 
-        wait_with_upload_heartbeat(upload_part_backoff(attempt, None), &mut emit_progress).await?;
+        tokio::time::sleep(upload_part_backoff(attempt, None)).await;
     }
 
     Err("save_file_part retry loop exhausted".to_string())
@@ -1027,9 +1011,13 @@ async fn init(req: InitRequest) -> Result<State, String> {
         .max_concurrent_uploads
         .unwrap_or(UPLOAD_WORKER_COUNT)
         .clamp(1, MAX_CONCURRENT_UPLOADS_CAP);
-    let part_rate_limiter = Arc::new(InvokeRateLimiter::new(Duration::from_millis(
-        req.min_delay_ms.unwrap_or(0),
-    )));
+    let min_delay_ms = req.min_delay_ms.unwrap_or(0);
+    let part_rate_limiter =
+        Arc::new(InvokeRateLimiter::new(Duration::from_millis(min_delay_ms)));
+
+    eprintln!(
+        "mtproto: init rate_limit(min_delay_ms={min_delay_ms} max_concurrent_uploads={max_concurrent_uploads}) parts(upload={UPLOAD_PART_SIZE_BYTES} download={DOWNLOAD_PART_SIZE_BYTES})"
+    );
 
     Ok(State {
         chat_id: req.chat_id,
@@ -1532,33 +1520,81 @@ async fn upload_bytes_with_progress(
         ));
     }
 
-    let mut md5 = md5::Context::new();
-    let mut bytes_uploaded_payload = 0u64;
-    for (part, chunk) in bytes.chunks(chunk_size).enumerate() {
-        md5.consume(chunk);
+    // For small (<=10MiB) files Telegram requires an MD5 checksum, but file parts can still be
+    // uploaded in parallel. This is important for TelevyBackup because most blobs are ~4MiB and
+    // would otherwise never use `max_concurrent_uploads`.
+    let md5_checksum = format!("{:x}", md5::compute(&bytes));
 
-        save_file_part_with_retry_and_heartbeat(
-            state.part_rate_limiter.as_ref(),
-            &state.net_stats,
-            base_out,
-            &state.client,
-            file_id,
-            part as i32,
-            chunk,
-            out as &mut dyn Write,
-            Some(session_b64(&state.session)),
-            bytes_uploaded_payload,
-            bytes_total,
-        )
-        .await?;
+    let bytes = Arc::new(bytes);
+    let next_part = Arc::new(AtomicI32::new(0));
+    let payload_done = Arc::new(AtomicU64::new(0));
+    let client = state.client.clone();
+    let limiter = Arc::clone(&state.part_rate_limiter);
 
-        bytes_uploaded_payload = bytes_uploaded_payload
-            .saturating_add(chunk.len() as u64)
-            .min(bytes_total);
-        let (_in_total, out_total) = state.net_stats.snapshot();
-        let net = out_total.saturating_sub(base_out);
-        let session = Some(session_b64(&state.session));
-        write_upload_progress(out, session, bytes_uploaded_payload, bytes_total, net)?;
+    let mut join_set = JoinSet::new();
+    for _ in 0..state.max_concurrent_uploads {
+        let bytes = Arc::clone(&bytes);
+        let next_part = Arc::clone(&next_part);
+        let payload_done = Arc::clone(&payload_done);
+        let client = client.clone();
+        let limiter = Arc::clone(&limiter);
+        join_set.spawn(async move {
+            loop {
+                let part = next_part.fetch_add(1, Ordering::Relaxed);
+                if part >= total_parts {
+                    break;
+                }
+                let start = (part as usize).saturating_mul(chunk_size);
+                let end = (start + chunk_size).min(bytes.len());
+                let len = end.saturating_sub(start);
+                if len == 0 {
+                    continue;
+                }
+                let chunk = bytes[start..end].to_vec();
+                save_file_part_with_retry(limiter.as_ref(), &client, file_id, part, &chunk)
+                    .await?;
+                payload_done.fetch_add(len as u64, Ordering::Relaxed);
+            }
+            Ok::<(), String>(())
+        });
+    }
+
+    let mut last_payload = 0u64;
+    let mut last_net = 0u64;
+    let mut last_emit = Instant::now();
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let payload = payload_done.load(Ordering::Relaxed).min(bytes_total);
+                let (_in_total, out_total) = state.net_stats.snapshot();
+                let net = out_total.saturating_sub(base_out);
+                let stale = last_emit.elapsed() >= Duration::from_secs(UPLOAD_PROGRESS_HEARTBEAT_SECS);
+                if payload != last_payload || net != last_net || stale {
+                    last_payload = payload;
+                    last_net = net;
+                    last_emit = Instant::now();
+                    let session = Some(session_b64(&state.session));
+                    write_upload_progress(out, session, payload, bytes_total, net)?;
+                }
+            }
+            res = join_set.join_next() => {
+                match res {
+                    Some(Ok(Ok(()))) => {}
+                    Some(Ok(Err(e))) => {
+                        join_set.abort_all();
+                        return Err(e);
+                    }
+                    Some(Err(e)) => {
+                        join_set.abort_all();
+                        return Err(format!("upload worker join failed: {e}"));
+                    }
+                    None => break,
+                }
+            }
+        }
     }
 
     let (_in_total, out_total) = state.net_stats.snapshot();
@@ -1571,7 +1607,7 @@ async fn upload_bytes_with_progress(
             id: file_id,
             parts: total_parts,
             name,
-            md5_checksum: format!("{:x}", md5.compute()),
+            md5_checksum,
         }
         .into(),
     ))
@@ -1640,9 +1676,6 @@ async fn send_media_message_with_retry(
 ) -> Result<grammers_client::types::Message, String> {
     for attempt in 1..=SEND_MESSAGE_MAX_ATTEMPTS {
         emit_progress()?;
-        let fut = client.send_message(chat, InputMessage::new().text("").file(uploaded.clone()));
-        tokio::pin!(fut);
-
         // Keep stdout alive while awaiting the send_message RPC; otherwise the core side can
         // assume the helper is dead (it expects an upload_progress JSON line at least every 45s).
         let mut hb = tokio::time::interval(Duration::from_millis(250));
@@ -1651,11 +1684,32 @@ async fn send_media_message_with_retry(
         let deadline = tokio::time::sleep(Duration::from_secs(UPLOAD_SEND_MESSAGE_TIMEOUT_SECS));
         tokio::pin!(deadline);
 
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let client = client.clone();
+        let chat = chat.clone();
+        let uploaded = uploaded.clone();
+        let send_task = tokio::spawn(async move {
+            let res = client
+                .send_message(&chat, InputMessage::new().text("").file(uploaded))
+                .await;
+            let _ = tx.send(res);
+        });
+        tokio::pin!(rx);
+
         let res: Result<Result<grammers_client::types::Message, String>, ()> = loop {
             tokio::select! {
                 _ = hb.tick() => emit_progress()?,
-                res = &mut fut => break Ok(res.map_err(|e| format!("{e}"))),
-                _ = &mut deadline => break Err(()),
+                res = &mut rx => {
+                    break Ok(match res {
+                        Ok(Ok(msg)) => Ok(msg),
+                        Ok(Err(e)) => Err(format!("{e}")),
+                        Err(_) => Err("send_message failed: result channel closed".to_string()),
+                    });
+                }
+                _ = &mut deadline => {
+                    send_task.abort();
+                    break Err(());
+                }
             }
         };
 
