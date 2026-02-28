@@ -83,9 +83,9 @@ fn parse_flood_wait_secs(s: &str) -> Option<u64> {
         }
     }
 
-    // Alternative format observed in some RPC errors: "(value: 3)".
-    if let Some(idx) = s.find("value:") {
-        let rest = &s[idx + "value:".len()..];
+    // Alternative format observed in some RPC errors: "(value: 3)" (case-insensitive).
+    if let Some(idx) = upper.find("VALUE:") {
+        let rest = &upper[idx + "VALUE:".len()..];
         let digits: String = rest
             .chars()
             .skip_while(|c| c.is_whitespace())
@@ -97,6 +97,14 @@ fn parse_flood_wait_secs(s: &str) -> Option<u64> {
     }
 
     None
+}
+
+fn has_flood_wait_token(s: &str) -> bool {
+    let upper = s.to_ascii_uppercase();
+    upper.contains("FLOOD_WAIT")
+        || upper.contains("FLOOD WAIT")
+        || upper.contains("FLOOD_PREMIUM_WAIT")
+        || upper.contains("FLOOD PREMIUM WAIT")
 }
 
 fn upload_part_backoff(attempt: usize, flood_wait_secs: Option<u64>) -> Duration {
@@ -232,7 +240,7 @@ async fn save_big_file_part_with_retry(
                 }
                 let wait = parse_flood_wait_secs(&msg);
                 let backoff = upload_part_backoff(attempt, wait);
-                if wait.is_some() {
+                if wait.is_some() || has_flood_wait_token(&msg) {
                     limiter.cooldown(backoff).await;
                 }
                 tokio::time::sleep(backoff).await;
@@ -351,7 +359,7 @@ async fn save_file_part_with_retry_and_heartbeat(
                 }
                 let wait = parse_flood_wait_secs(&msg);
                 let backoff = upload_part_backoff(attempt, wait);
-                if wait.is_some() {
+                if wait.is_some() || has_flood_wait_token(&msg) {
                     limiter.cooldown(backoff).await;
                 }
                 wait_with_upload_heartbeat(backoff, &mut emit_progress).await?;
@@ -384,6 +392,10 @@ mod tests {
         assert_eq!(
             parse_flood_wait_secs("rpc error 420: FLOOD_WAIT (value: 3)"),
             Some(3)
+        );
+        assert_eq!(
+            parse_flood_wait_secs("rpc error 420: FLOOD_WAIT (VALUE: 9)"),
+            Some(9)
         );
         assert_eq!(parse_flood_wait_secs("FLOOD_WAIT_"), None);
         assert_eq!(parse_flood_wait_secs("FLOOD_PREMIUM_WAIT_"), None);
@@ -1837,7 +1849,7 @@ async fn download_to_cache(
                     }
                     let wait = parse_flood_wait_secs(&e);
                     let backoff = upload_part_backoff(attempt, wait);
-                    if wait.is_some() {
+                    if wait.is_some() || has_flood_wait_token(&e) {
                         state.part_rate_limiter.cooldown(backoff).await;
                     }
                     let mut emit_progress = || maybe_emit(len, bytes_total, out as &mut dyn Write);
