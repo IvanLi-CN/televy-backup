@@ -25,12 +25,12 @@ const INIT_BOT_SIGN_IN_TIMEOUT_SECS: u64 = 120;
 const INIT_RESOLVE_CHAT_TIMEOUT_SECS: u64 = 60;
 const UPLOAD_SEND_MESSAGE_TIMEOUT_SECS: u64 = 60;
 const DOWNLOAD_GET_MESSAGE_TIMEOUT_SECS: u64 = 60;
-const DOWNLOAD_CHUNK_TIMEOUT_SECS: u64 = 60;
+const DOWNLOAD_CHUNK_TIMEOUT_SECS: u64 = 120;
 const LIST_DIALOGS_TIMEOUT_SECS: u64 = 30;
 const WAIT_FOR_CHAT_TIMEOUT_SECS_DEFAULT: u64 = 60;
 const WAIT_FOR_CHAT_TIMEOUT_SECS_MAX: u64 = 10 * 60;
-const UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS: u64 = 60;
-const UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS: u64 = 60;
+const UPLOAD_SAVE_FILE_PART_TIMEOUT_SECS: u64 = 120;
+const UPLOAD_SAVE_BIG_FILE_PART_TIMEOUT_SECS: u64 = 120;
 const UPLOAD_BIG_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
 const UPLOAD_WORKER_COUNT: usize = 4;
 const UPLOAD_PART_MAX_ATTEMPTS: usize = 4; // includes the initial attempt
@@ -39,16 +39,18 @@ const UPLOAD_PART_BACKOFF_MAX_MS: u64 = 10_000;
 // Ensure we keep emitting JSON lines so the core side won't treat the helper as dead while the
 // network is stalled inside one long MTProto call.
 const UPLOAD_PROGRESS_HEARTBEAT_SECS: u64 = 10;
-// Telegram's upload.*Part methods allow up to 512KiB per part. Using a smaller part size makes
-// progress/rate updates smoother and reduces the chance of long "stalls" where the network is
-// sending but we cannot observe partial progress inside one request.
-const UPLOAD_PART_SIZE_BYTES: usize = 128 * 1024;
+// Telegram's upload.*Part methods allow up to 512KiB per part, and Telegram recommends using the
+// largest possible part size (512KiB) to reduce protocol overhead and maximize throughput.
+// Constraints from the official docs:
+// - part_size % 1024 = 0
+// - 512KiB % part_size = 0
+const UPLOAD_PART_SIZE_BYTES: usize = 512 * 1024;
 // Throttle download progress events so we don't overwhelm the core with JSON lines at high speeds
 // while still updating rate indicators frequently enough to feel "realtime".
 const DOWNLOAD_PROGRESS_MIN_INTERVAL_MS: u64 = 250;
-// Use a smaller part size than the maximum to make progress updates smoother and avoid long stalls
-// where the helper is downloading but can't report partial progress.
-const DOWNLOAD_PART_SIZE_BYTES: i32 = 128 * 1024;
+// Use the recommended 512KiB chunk size to reduce protocol overhead and increase throughput. The
+// helper still emits progress events periodically while awaiting each chunk to avoid "UI stalls".
+const DOWNLOAD_PART_SIZE_BYTES: i32 = 512 * 1024;
 const DOWNLOAD_CHUNK_MAX_ATTEMPTS: usize = 4; // includes the initial attempt
 const SEND_MESSAGE_MAX_ATTEMPTS: usize = 3; // includes the initial attempt
 const MAX_CONCURRENT_UPLOADS_CAP: usize = 8;
@@ -67,12 +69,17 @@ fn upload_stream_timeout_secs(size: usize) -> u64 {
 }
 
 fn parse_flood_wait_secs(s: &str) -> Option<u64> {
-    // Common Telegram RPC error format: "FLOOD_WAIT_123"
-    if let Some(idx) = s.find("FLOOD_WAIT_") {
-        let rest = &s[idx + "FLOOD_WAIT_".len()..];
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !digits.is_empty() {
-            return digits.parse().ok();
+    // Common Telegram RPC error formats (case-insensitive):
+    // - "FLOOD_WAIT_123"
+    // - "FLOOD_PREMIUM_WAIT_123"
+    let upper = s.to_ascii_uppercase();
+    for prefix in ["FLOOD_PREMIUM_WAIT_", "FLOOD_WAIT_"] {
+        if let Some(idx) = upper.find(prefix) {
+            let rest = &upper[idx + prefix.len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                return digits.parse().ok();
+            }
         }
     }
 
@@ -109,6 +116,7 @@ fn upload_part_backoff(attempt: usize, flood_wait_secs: Option<u64>) -> Duration
 struct InvokeRateLimiter {
     min_delay: Duration,
     next_allowed: Mutex<Instant>,
+    cooldown_until: Mutex<Instant>,
 }
 
 impl InvokeRateLimiter {
@@ -116,22 +124,70 @@ impl InvokeRateLimiter {
         Self {
             min_delay,
             next_allowed: Mutex::new(Instant::now()),
+            cooldown_until: Mutex::new(Instant::now()),
+        }
+    }
+
+    async fn cooldown(&self, wait: Duration) {
+        if wait.is_zero() {
+            return;
+        }
+
+        let until = Instant::now() + wait;
+        let mut guard = self.cooldown_until.lock().await;
+        if *guard < until {
+            *guard = until;
         }
     }
 
     async fn wait_turn(&self) {
-        if self.min_delay.is_zero() {
+        loop {
+            let now = Instant::now();
+            let cooldown = *self.cooldown_until.lock().await;
+            let scheduled = {
+                let mut guard = self.next_allowed.lock().await;
+                let scheduled = (*guard).max(now).max(cooldown);
+                *guard = scheduled + self.min_delay;
+                scheduled
+            };
+            if scheduled > now {
+                tokio::time::sleep(scheduled - now).await;
+            }
+
+            // A cooldown may be raised while we're sleeping; re-check to avoid starting a request
+            // too early when another worker hits a FLOOD_*_WAIT.
+            let now = Instant::now();
+            let cooldown = *self.cooldown_until.lock().await;
+            if now < cooldown {
+                continue;
+            }
             return;
         }
-        let now = Instant::now();
-        let scheduled = {
-            let mut guard = self.next_allowed.lock().await;
-            let scheduled = if *guard > now { *guard } else { now };
-            *guard = scheduled + self.min_delay;
-            scheduled
-        };
-        if scheduled > now {
-            tokio::time::sleep(scheduled - now).await;
+    }
+
+    async fn wait_turn_with_upload_heartbeat(
+        &self,
+        emit_progress: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        loop {
+            let now = Instant::now();
+            let cooldown = *self.cooldown_until.lock().await;
+            let scheduled = {
+                let mut guard = self.next_allowed.lock().await;
+                let scheduled = (*guard).max(now).max(cooldown);
+                *guard = scheduled + self.min_delay;
+                scheduled
+            };
+            if scheduled > now {
+                wait_with_upload_heartbeat(scheduled - now, emit_progress).await?;
+            }
+
+            let now = Instant::now();
+            let cooldown = *self.cooldown_until.lock().await;
+            if now < cooldown {
+                continue;
+            }
+            return Ok(());
         }
     }
 }
@@ -175,7 +231,11 @@ async fn save_big_file_part_with_retry(
                     ));
                 }
                 let wait = parse_flood_wait_secs(&msg);
-                tokio::time::sleep(upload_part_backoff(attempt, wait)).await;
+                let backoff = upload_part_backoff(attempt, wait);
+                if wait.is_some() {
+                    limiter.cooldown(backoff).await;
+                }
+                tokio::time::sleep(backoff).await;
                 continue;
             }
             Err(_) => {
@@ -215,7 +275,7 @@ async fn save_file_part_with_retry_and_heartbeat(
         let mut last_net_reported: Option<u64> = None;
         let mut last_emit = Instant::now();
 
-        let mut maybe_emit = |out: &mut dyn Write| -> Result<(), String> {
+        let mut emit_progress = || -> Result<(), String> {
             let (_in_total, out_total) = net_stats.snapshot();
             let net_bytes_out = out_total.saturating_sub(base_net_out);
             let stale = last_emit.elapsed() >= Duration::from_secs(UPLOAD_PROGRESS_HEARTBEAT_SECS);
@@ -235,9 +295,11 @@ async fn save_file_part_with_retry_and_heartbeat(
 
         // Emit a heartbeat immediately so the core side won't wait too long on a stalled part.
         let _ = hb.tick().await;
-        maybe_emit(out)?;
+        emit_progress()?;
 
-        limiter.wait_turn().await;
+        limiter
+            .wait_turn_with_upload_heartbeat(&mut emit_progress)
+            .await?;
 
         let req = tl::functions::upload::SaveFilePart {
             file_id,
@@ -254,7 +316,7 @@ async fn save_file_part_with_retry_and_heartbeat(
             tokio::select! {
                 _ = hb.tick() => {
                     // Keep stdout alive even if the MTProto call is stuck inside the client.
-                    maybe_emit(out)?;
+                    emit_progress()?;
                 }
                 res = &mut fut => {
                     break res.map_err(|e| format!("{e}"));
@@ -270,7 +332,7 @@ async fn save_file_part_with_retry_and_heartbeat(
         match final_res {
             Ok(true) => {
                 // Emit one last sample at completion to avoid leaving the caller with a stale rate.
-                maybe_emit(out)?;
+                emit_progress()?;
                 return Ok(());
             }
             Ok(false) => {
@@ -288,12 +350,16 @@ async fn save_file_part_with_retry_and_heartbeat(
                     ));
                 }
                 let wait = parse_flood_wait_secs(&msg);
-                tokio::time::sleep(upload_part_backoff(attempt, wait)).await;
+                let backoff = upload_part_backoff(attempt, wait);
+                if wait.is_some() {
+                    limiter.cooldown(backoff).await;
+                }
+                wait_with_upload_heartbeat(backoff, &mut emit_progress).await?;
                 continue;
             }
         }
 
-        tokio::time::sleep(upload_part_backoff(attempt, None)).await;
+        wait_with_upload_heartbeat(upload_part_backoff(attempt, None), &mut emit_progress).await?;
     }
 
     Err("save_file_part retry loop exhausted".to_string())
@@ -306,15 +372,21 @@ mod tests {
     #[test]
     fn parse_flood_wait_secs_extracts_digits() {
         assert_eq!(parse_flood_wait_secs("FLOOD_WAIT_5"), Some(5));
+        assert_eq!(parse_flood_wait_secs("FLOOD_PREMIUM_WAIT_7"), Some(7));
         assert_eq!(
             parse_flood_wait_secs("rpc error: FLOOD_WAIT_123 (test)"),
             Some(123)
+        );
+        assert_eq!(
+            parse_flood_wait_secs("rpc error: flood_premium_wait_42 (test)"),
+            Some(42)
         );
         assert_eq!(
             parse_flood_wait_secs("rpc error 420: FLOOD_WAIT (value: 3)"),
             Some(3)
         );
         assert_eq!(parse_flood_wait_secs("FLOOD_WAIT_"), None);
+        assert_eq!(parse_flood_wait_secs("FLOOD_PREMIUM_WAIT_"), None);
         assert_eq!(parse_flood_wait_secs("no flood wait here"), None);
     }
 
@@ -1729,6 +1801,12 @@ async fn download_to_cache(
         let next: Option<Vec<u8>> = loop {
             // Apply a per-chunk timeout, but keep emitting progress while waiting.
             let res: Result<Option<Vec<u8>>, String> = {
+                let mut emit_progress = || maybe_emit(len, bytes_total, out as &mut dyn Write);
+                state
+                    .part_rate_limiter
+                    .wait_turn_with_upload_heartbeat(&mut emit_progress)
+                    .await?;
+
                 let fut = download.next();
                 tokio::pin!(fut);
                 let deadline = tokio::time::sleep(Duration::from_secs(DOWNLOAD_CHUNK_TIMEOUT_SECS));
@@ -1758,7 +1836,12 @@ async fn download_to_cache(
                         ));
                     }
                     let wait = parse_flood_wait_secs(&e);
-                    tokio::time::sleep(upload_part_backoff(attempt, wait)).await;
+                    let backoff = upload_part_backoff(attempt, wait);
+                    if wait.is_some() {
+                        state.part_rate_limiter.cooldown(backoff).await;
+                    }
+                    let mut emit_progress = || maybe_emit(len, bytes_total, out as &mut dyn Write);
+                    wait_with_upload_heartbeat(backoff, &mut emit_progress).await?;
                     attempt += 1;
                     download = state
                         .client

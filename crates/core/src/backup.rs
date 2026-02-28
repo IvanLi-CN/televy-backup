@@ -693,7 +693,13 @@ impl AdaptiveUploadController {
 
 fn error_has_flood_wait(error: &Error) -> bool {
     match error {
-        Error::Telegram { message } => message.to_ascii_uppercase().contains("FLOOD_WAIT"),
+        Error::Telegram { message } => {
+            let msg = message.to_ascii_uppercase();
+            msg.contains("FLOOD_WAIT")
+                || msg.contains("FLOOD WAIT")
+                || msg.contains("FLOOD_PREMIUM_WAIT")
+                || msg.contains("FLOOD PREMIUM WAIT")
+        }
         _ => false,
     }
 }
@@ -3641,4 +3647,32 @@ fn path_to_utf8(path: &Path) -> Result<String> {
         .ok_or_else(|| Error::NonUtf8Path {
             path: path.to_path_buf(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::error_has_flood_wait;
+    use crate::Error;
+
+    #[test]
+    fn flood_wait_detection_matches_regular_and_premium() {
+        assert!(error_has_flood_wait(&Error::Telegram {
+            message: "rpc error: FLOOD_WAIT_12".to_string(),
+        }));
+        assert!(error_has_flood_wait(&Error::Telegram {
+            message: "rpc error: FLOOD_PREMIUM_WAIT_34".to_string(),
+        }));
+
+        // Some errors include "flood wait" in a human-readable form.
+        assert!(error_has_flood_wait(&Error::Telegram {
+            message: "rpc error 420: flood wait (value: 5)".to_string(),
+        }));
+        assert!(error_has_flood_wait(&Error::Telegram {
+            message: "rpc error 420: flood premium wait (value: 5)".to_string(),
+        }));
+
+        assert!(!error_has_flood_wait(&Error::Telegram {
+            message: "AUTH_KEY_UNREGISTERED".to_string(),
+        }));
+    }
 }
