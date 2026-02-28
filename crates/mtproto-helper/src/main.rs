@@ -1595,16 +1595,24 @@ async fn upload_with_progress(
     .map_err(|_| format!("upload_stream timed out after {timeout_secs}s"))??;
 
     let (_base_in, send_base_out) = state.net_stats.snapshot();
-    let mut emit_send_message_progress = || {
+    let mut last_net_reported: Option<u64> = None;
+    let mut last_emit = Instant::now();
+    let mut emit_send_message_progress = || -> Result<(), String> {
         let (_in_total, out_total) = state.net_stats.snapshot();
         let net = out_total.saturating_sub(send_base_out);
-        write_upload_progress(
-            out,
-            Some(session_b64(&state.session)),
-            bytes_total,
-            bytes_total,
-            net,
-        )
+        let stale = last_emit.elapsed() >= Duration::from_secs(UPLOAD_PROGRESS_HEARTBEAT_SECS);
+        if last_net_reported != Some(net) || stale {
+            last_net_reported = Some(net);
+            last_emit = Instant::now();
+            write_upload_progress(
+                out,
+                Some(session_b64(&state.session)),
+                bytes_total,
+                bytes_total,
+                net,
+            )?;
+        }
+        Ok(())
     };
     let msg = send_media_message_with_retry(
         &state.client,
@@ -1632,16 +1640,28 @@ async fn send_media_message_with_retry(
 ) -> Result<grammers_client::types::Message, String> {
     for attempt in 1..=SEND_MESSAGE_MAX_ATTEMPTS {
         emit_progress()?;
-        let res = timeout(
-            Duration::from_secs(UPLOAD_SEND_MESSAGE_TIMEOUT_SECS),
-            client.send_message(chat, InputMessage::new().text("").file(uploaded.clone())),
-        )
-        .await;
+        let fut = client.send_message(chat, InputMessage::new().text("").file(uploaded.clone()));
+        tokio::pin!(fut);
+
+        // Keep stdout alive while awaiting the send_message RPC; otherwise the core side can
+        // assume the helper is dead (it expects an upload_progress JSON line at least every 45s).
+        let mut hb = tokio::time::interval(Duration::from_millis(250));
+        hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        let deadline = tokio::time::sleep(Duration::from_secs(UPLOAD_SEND_MESSAGE_TIMEOUT_SECS));
+        tokio::pin!(deadline);
+
+        let res: Result<Result<grammers_client::types::Message, String>, ()> = loop {
+            tokio::select! {
+                _ = hb.tick() => emit_progress()?,
+                res = &mut fut => break Ok(res.map_err(|e| format!("{e}"))),
+                _ = &mut deadline => break Err(()),
+            }
+        };
 
         match res {
             Ok(Ok(msg)) => return Ok(msg),
-            Ok(Err(e)) => {
-                let msg = format!("{e}");
+            Ok(Err(msg)) => {
                 if attempt >= SEND_MESSAGE_MAX_ATTEMPTS {
                     return Err(format!(
                         "send_message failed (attempt {attempt}/{SEND_MESSAGE_MAX_ATTEMPTS}): {msg}"
@@ -1651,7 +1671,7 @@ async fn send_media_message_with_retry(
                 wait_with_upload_heartbeat(upload_part_backoff(attempt, wait), emit_progress)
                     .await?;
             }
-            Err(_) => {
+            Err(()) => {
                 let msg =
                     format!("send_message timed out after {UPLOAD_SEND_MESSAGE_TIMEOUT_SECS}s");
                 if attempt >= SEND_MESSAGE_MAX_ATTEMPTS {
