@@ -96,7 +96,9 @@ mod tests {
         ));
         assert!(is_transient_telegram_message("rpc error: FLOOD_WAIT_12"));
         assert!(is_transient_telegram_message("transport disconnected"));
-        assert!(!is_transient_telegram_message("transport protocol violation"));
+        assert!(!is_transient_telegram_message(
+            "transport protocol violation"
+        ));
         assert!(!is_transient_telegram_message("AUTH_KEY_UNREGISTERED"));
         assert!(!is_transient_telegram_message("CHAT_WRITE_FORBIDDEN"));
     }
