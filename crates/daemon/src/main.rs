@@ -968,6 +968,7 @@ fn acquire_daemon_instance_lock(data_root: &Path) -> std::io::Result<File> {
 
     let mut file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)?;

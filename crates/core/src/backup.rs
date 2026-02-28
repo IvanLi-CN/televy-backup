@@ -3254,7 +3254,7 @@ async fn upload_index<S: Storage>(
     let index_parts = if compressed_len == 0 {
         0
     } else {
-        (compressed_len + INDEX_PART_BYTES as u64 - 1) / INDEX_PART_BYTES as u64
+        compressed_len.div_ceil(INDEX_PART_BYTES as u64)
     };
     let index_parts_payload_total =
         compressed_len.saturating_add(index_parts.saturating_mul(FRAMING_OVERHEAD_BYTES as u64));
