@@ -3479,8 +3479,10 @@ private struct TargetRowView: View {
         {
             let phase = TargetPresentation.stageText(p?.phase ?? t.progress?.phase) ?? "Working"
             let elapsed = elapsedText(nowMs: nowMs)
-            let bytesUploaded = p?.bytesUploaded ?? p?.bytesUploadedSource
-                ?? t.progress?.bytesUploaded ?? t.progress?.bytesUploadedSource ?? 0
+            // Help the Swift type-checker by splitting nil-coalescing chains.
+            let bytesUploadedLocal = p?.bytesUploaded ?? p?.bytesUploadedSource
+            let bytesUploadedTask = t.progress?.bytesUploaded ?? t.progress?.bytesUploadedSource
+            let bytesUploaded = bytesUploadedLocal ?? bytesUploadedTask ?? 0
             let bytesRead = p?.bytesRead ?? t.progress?.bytesRead ?? 0
             let metric: String
             switch t.kind {
