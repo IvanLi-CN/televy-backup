@@ -47,7 +47,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+            crates/mtproto-helper/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -59,6 +60,11 @@ jobs:
 
       - name: Cargo test
         run: cargo test --all-features
+
+      - name: Cargo test (mtproto-helper)
+        run: |
+          cd crates/mtproto-helper
+          cargo test
 
   release-tag:
     name: Create Tag and Release
