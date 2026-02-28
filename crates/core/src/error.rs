@@ -47,6 +47,23 @@ pub enum Error {
     NonUtf8Path { path: PathBuf },
 }
 
+pub fn is_transient_telegram_message(message: &str) -> bool {
+    let msg = message.to_ascii_lowercase();
+    msg.contains("timed out")
+        || msg.contains("timeout")
+        || msg.contains("connection reset")
+        || msg.contains("connection aborted")
+        || msg.contains("broken pipe")
+        || msg.contains("connection refused")
+        || msg.contains("temporarily unavailable")
+        || msg.contains("transport disconnected")
+        || msg.contains("transport timeout")
+        || msg.contains("network is unreachable")
+        || msg.contains("deadline exceeded")
+        || msg.contains("flood_wait")
+        || msg.contains("flood wait")
+}
+
 impl Error {
     pub fn code(&self) -> &'static str {
         match self {
@@ -65,5 +82,24 @@ impl Error {
             Self::Integrity { .. } => "integrity",
             Self::NonUtf8Path { .. } => "path.non_utf8",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_transient_telegram_message;
+
+    #[test]
+    fn transient_telegram_message_matches_expected_tokens() {
+        assert!(is_transient_telegram_message(
+            "save_file_part timed out after 60s"
+        ));
+        assert!(is_transient_telegram_message("rpc error: FLOOD_WAIT_12"));
+        assert!(is_transient_telegram_message("transport disconnected"));
+        assert!(!is_transient_telegram_message(
+            "transport protocol violation"
+        ));
+        assert!(!is_transient_telegram_message("AUTH_KEY_UNREGISTERED"));
+        assert!(!is_transient_telegram_message("CHAT_WRITE_FORBIDDEN"));
     }
 }

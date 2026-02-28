@@ -1,4 +1,8 @@
 use std::collections::{HashMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
@@ -13,13 +17,14 @@ use televy_backup_core::status::{
     write_status_snapshot_json_atomic_with_options,
 };
 use televy_backup_core::{
-    BackupConfig, BackupOptions, ChunkingConfig, TelegramMtProtoStorage,
+    BackupConfig, BackupOptions, ChunkingConfig, SourceQuickStats, TelegramMtProtoStorage,
     TelegramMtProtoStorageConfig,
 };
 use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod control_ipc;
@@ -163,9 +168,15 @@ impl StatusRuntimeState {
             phase: "running".to_string(),
             files_total: None,
             files_done: None,
+            source_files_total: None,
+            source_bytes_total: None,
+            source_bytes_need_upload_total: None,
             chunks_total: None,
             chunks_done: None,
             bytes_read: None,
+            upload_bytes_total: None,
+            bytes_uploaded_confirmed: Some(0),
+            bytes_uploaded_source: Some(0),
             bytes_uploaded: Some(0),
             bytes_downloaded: Some(0),
             bytes_deduped: Some(0),
@@ -192,9 +203,15 @@ impl StatusRuntimeState {
             phase: "running".to_string(),
             files_total: None,
             files_done: None,
+            source_files_total: None,
+            source_bytes_total: None,
+            source_bytes_need_upload_total: None,
             chunks_total: None,
             chunks_done: None,
             bytes_read: Some(0),
+            upload_bytes_total: None,
+            bytes_uploaded_confirmed: Some(0),
+            bytes_uploaded_source: Some(0),
             bytes_uploaded: Some(0),
             bytes_downloaded: Some(0),
             bytes_deduped: Some(0),
@@ -233,9 +250,15 @@ impl StatusRuntimeState {
             phase: p.phase,
             files_total: p.files_total,
             files_done: p.files_done,
+            source_files_total: p.source_files_total,
+            source_bytes_total: p.source_bytes_total,
+            source_bytes_need_upload_total: p.source_bytes_need_upload_total,
             chunks_total: p.chunks_total,
             chunks_done: p.chunks_done,
             bytes_read: p.bytes_read,
+            upload_bytes_total: p.upload_bytes_total,
+            bytes_uploaded_confirmed: p.bytes_uploaded_confirmed,
+            bytes_uploaded_source: p.bytes_uploaded_source,
             bytes_uploaded: p.bytes_uploaded,
             bytes_downloaded: p.bytes_downloaded,
             bytes_deduped: p.bytes_deduped,
@@ -296,9 +319,15 @@ impl StatusRuntimeState {
             phase: p.phase,
             files_total: p.files_total,
             files_done: p.files_done,
+            source_files_total: p.source_files_total,
+            source_bytes_total: p.source_bytes_total,
+            source_bytes_need_upload_total: p.source_bytes_need_upload_total,
             chunks_total: p.chunks_total,
             chunks_done: p.chunks_done,
             bytes_read: p.bytes_read,
+            upload_bytes_total: p.upload_bytes_total,
+            bytes_uploaded_confirmed: p.bytes_uploaded_confirmed,
+            bytes_uploaded_source: p.bytes_uploaded_source,
             bytes_uploaded: p.bytes_uploaded,
             bytes_downloaded: p.bytes_downloaded,
             bytes_deduped: p.bytes_deduped,
@@ -631,6 +660,15 @@ impl ProgressSink for StatusProgressSink {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn daemon_instance_lock_is_exclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let _first = acquire_daemon_instance_lock(dir.path()).unwrap();
+        let err = acquire_daemon_instance_lock(dir.path()).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::AddrInUse);
+    }
+
     #[test]
     fn manual_trigger_file_is_consumed_by_remove() {
         let dir = tempfile::tempdir().unwrap();
@@ -657,6 +695,17 @@ mod tests {
 
         // Ready: consume by remove.
         assert!(maybe_consume_manual_trigger_file(&path, true).unwrap());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn stale_manual_trigger_is_dropped_on_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup-now");
+
+        std::fs::write(&path, b"manual").unwrap();
+        let after = drop_stale_manual_trigger_file_on_startup(&path);
+        assert!(after.is_none());
         assert!(!path.exists());
     }
 
@@ -694,9 +743,15 @@ mod tests {
             phase: "upload".to_string(),
             files_total: None,
             files_done: None,
+            source_files_total: None,
+            source_bytes_total: None,
+            source_bytes_need_upload_total: None,
             chunks_total: None,
             chunks_done: None,
             bytes_read: None,
+            upload_bytes_total: None,
+            bytes_uploaded_confirmed: None,
+            bytes_uploaded_source: None,
             bytes_uploaded: Some(bytes_uploaded),
             net_bytes_uploaded: None,
             bytes_downloaded: None,
@@ -871,7 +926,7 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
     }
 }
 
-fn file_mtime(path: &PathBuf) -> Option<SystemTime> {
+fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
@@ -904,6 +959,45 @@ fn vault_key_load_error(err: &(dyn std::error::Error + 'static)) -> VaultKeyLoad
     }
 }
 
+#[cfg(unix)]
+fn acquire_daemon_instance_lock(data_root: &Path) -> std::io::Result<File> {
+    let lock_path = data_root.join("ipc").join("daemon.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        let raw = err.raw_os_error().unwrap_or_default();
+        if raw == libc::EWOULDBLOCK || raw == libc::EAGAIN {
+            return Err(std::io::Error::new(
+                ErrorKind::AddrInUse,
+                format!(
+                    "televybackupd already running for data dir {}; lock={}",
+                    data_root.display(),
+                    lock_path.display()
+                ),
+            ));
+        }
+        return Err(err);
+    }
+
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    writeln!(file, "{}", std::process::id())?;
+    file.flush()?;
+
+    Ok(file)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = std::env::var("TELEVYBACKUP_CONFIG_DIR")
@@ -916,6 +1010,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_root = config_dir.unwrap_or_else(default_config_dir);
     let data_root = data_dir.unwrap_or_else(default_data_dir);
     let index_dir = data_root.join("index");
+    #[cfg(unix)]
+    let _daemon_instance_lock = acquire_daemon_instance_lock(&data_root)?;
 
     let config_path = settings_config::config_path(&config_root);
     let mut settings = settings_config::load_settings_v2(&config_root)?;
@@ -1063,7 +1159,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut api_hash: Option<String> = None;
 
     if initial_manual_trigger_mtime.is_some() {
-        manual_trigger_last_attempted_mtime = initial_manual_trigger_mtime;
+        manual_trigger_last_attempted_mtime =
+            drop_stale_manual_trigger_file_on_startup(&manual_trigger_path);
     }
 
     // Do not eagerly retry Keychain access. We'll do a single best-effort warm-up attempt so
@@ -1343,6 +1440,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || settings.telegram.mtproto.api_hash_key.trim().is_empty()
         {
             // Keep the daemon alive so the UI can show status, but skip running backups until config is fixed.
+            storage_by_endpoint.clear();
             sleep(Duration::from_secs(1)).await;
             continue;
         }
@@ -1366,6 +1464,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "run.skip"
                 );
             }
+            storage_by_endpoint.clear();
             sleep(Duration::from_secs(1)).await;
             continue;
         }
@@ -1609,12 +1708,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 target_id: target.id.clone(),
                 state: status_state.clone(),
             };
-            let opts = BackupOptions {
-                cancel: None,
-                progress: Some(&sink),
-            };
+            let progress_sink = Some(&sink as &dyn ProgressSink);
+            let quick_stats_cancel = CancellationToken::new();
+            let quick_stats_cancel_for_task = quick_stats_cancel.clone();
+            let prepare_res = tokio::try_join!(
+                preflight_remote_first_index_sync_daemon(
+                    storage,
+                    &master_key,
+                    &target.id,
+                    &target.source_path,
+                    &db_path,
+                    is_likely_private_chat_id(&ep.chat_id),
+                    progress_sink,
+                ),
+                async {
+                    match preflight_local_quick_stats_daemon(
+                        Path::new(&target.source_path),
+                        progress_sink,
+                        Some(quick_stats_cancel_for_task),
+                    )
+                    .await
+                    {
+                        Ok(stats) => Ok(Some(stats)),
+                        Err(e) => {
+                            tracing::warn!(
+                                event = "prepare.local_quick_stats_failed",
+                                target_id = %target.id,
+                                source_path = %target.source_path,
+                                error_code = e.code(),
+                                error_message = %e,
+                                "prepare.local_quick_stats_failed"
+                            );
+                            Ok(None)
+                        }
+                    }
+                }
+            );
 
-            let result = televy_backup_core::run_backup_with(storage, cfg, opts).await;
+            let result = match prepare_res {
+                Ok(((), quick_stats)) => {
+                    let opts = BackupOptions {
+                        cancel: None,
+                        progress: progress_sink,
+                        source_quick_stats: quick_stats,
+                    };
+                    televy_backup_core::run_backup_with(storage, cfg, opts).await
+                }
+                Err(e) => {
+                    quick_stats_cancel.cancel();
+                    Err(e)
+                }
+            };
             let duration_seconds = started.elapsed().as_secs_f64();
 
             match result {
@@ -1725,6 +1869,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        storage_by_endpoint.clear();
         sleep(Duration::from_secs(1)).await;
     }
 }
@@ -1742,6 +1887,274 @@ fn maybe_consume_manual_trigger_file(path: &Path, can_attempt_run: bool) -> std:
         return Ok(false);
     }
     try_consume_manual_trigger_file(path)
+}
+
+fn drop_stale_manual_trigger_file_on_startup(path: &Path) -> Option<SystemTime> {
+    // Treat pre-existing trigger files as stale leftovers from previous app sessions.
+    // A manual "Backup Now" action should only fire when the user clicks it in this session.
+    if file_mtime(path).is_some() {
+        match try_consume_manual_trigger_file(path) {
+            Ok(true) => {
+                tracing::info!(
+                    event = "manual.trigger_stale_dropped",
+                    path = %path.display(),
+                    "dropped stale manual backup trigger on daemon startup"
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    event = "manual.trigger_stale_drop_failed",
+                    path = %path.display(),
+                    error = %e,
+                    "failed to drop stale manual backup trigger on daemon startup"
+                );
+            }
+        }
+    }
+    file_mtime(path)
+}
+
+async fn preflight_remote_first_index_sync_daemon(
+    storage: &TelegramMtProtoStorage,
+    master_key: &[u8; 32],
+    target_id: &str,
+    source_path: &str,
+    local_index_db: &Path,
+    is_private_chat: bool,
+    sink: Option<&dyn ProgressSink>,
+) -> televy_backup_core::Result<()> {
+    let started = Instant::now();
+    tracing::debug!(event = "phase.start", phase = "index_sync", "phase.start");
+    if let Some(sink) = sink {
+        sink.on_progress(TaskProgress {
+            phase: "index_sync".to_string(),
+            ..Default::default()
+        });
+    }
+
+    if is_private_chat {
+        tracing::warn!(
+            event = "index_sync.skipped",
+            reason = "unsupported_private_chat",
+            "index_sync requires pinned bootstrap catalog; use a group/channel (e.g. -100...) or @username chat id"
+        );
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "unsupported_chat",
+            "phase.finish"
+        );
+        return Ok(());
+    }
+
+    let catalog = match bootstrap::load_remote_catalog(storage, master_key).await {
+        Ok(Some(catalog)) => catalog,
+        Ok(None) | Err(televy_backup_core::Error::BootstrapMissing { .. }) => {
+            tracing::debug!(
+                event = "phase.finish",
+                phase = "index_sync",
+                duration_ms = started.elapsed().as_millis() as u64,
+                index_source = "skipped",
+                reason = "bootstrap_missing",
+                "phase.finish"
+            );
+            return Ok(());
+        }
+        Err(televy_backup_core::Error::Telegram { message }) => {
+            if televy_backup_core::is_transient_telegram_message(&message) {
+                tracing::warn!(
+                    event = "index_sync.skipped",
+                    reason = "remote_unavailable",
+                    error = %message,
+                    "bootstrap catalog fetch unavailable; continue backup without remote index sync"
+                );
+                tracing::debug!(
+                    event = "phase.finish",
+                    phase = "index_sync",
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    index_source = "skipped",
+                    reason = "remote_unavailable",
+                    "phase.finish"
+                );
+                return Ok(());
+            }
+            return Err(televy_backup_core::Error::Telegram { message });
+        }
+        Err(e) => return Err(e),
+    };
+
+    let latest = if let Some(t) = catalog.targets.iter().find(|t| t.target_id == target_id) {
+        if let Some(latest) = t.latest.clone() {
+            Some(latest)
+        } else {
+            tracing::warn!(
+                event = "index_sync.skipped",
+                reason = "bootstrap_target_latest_missing",
+                target_id,
+                "bootstrap target has no latest pointer; continue with local index and publish latest after backup"
+            );
+            None
+        }
+    } else {
+        let matches = catalog
+            .targets
+            .iter()
+            .filter(|t| t.source_path == source_path)
+            .collect::<Vec<_>>();
+
+        if matches.is_empty() {
+            tracing::warn!(
+                event = "index_sync.skipped",
+                reason = "bootstrap_target_mapping_missing",
+                target_id,
+                source_path,
+                "bootstrap has no mapping for this target/source path; continue with local index and publish latest after backup"
+            );
+            None
+        } else if matches.len() > 1 {
+            return Err(televy_backup_core::Error::InvalidConfig {
+                message: format!("bootstrap source_path is ambiguous: {source_path}"),
+            });
+        } else if let Some(latest) = matches[0].latest.clone() {
+            Some(latest)
+        } else {
+            tracing::warn!(
+                event = "index_sync.skipped",
+                reason = "bootstrap_source_latest_missing",
+                source_path,
+                "bootstrap source path has no latest pointer; continue with local index and publish latest after backup"
+            );
+            None
+        }
+    };
+
+    let Some(latest) = latest else {
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "bootstrap_mapping_missing",
+            "phase.finish"
+        );
+        return Ok(());
+    };
+
+    let provider = storage.provider();
+    let already_synced = televy_backup_core::index_sync::local_index_matches_remote_latest(
+        local_index_db,
+        provider,
+        &latest.snapshot_id,
+        &latest.manifest_object_id,
+    )
+    .await?;
+
+    if already_synced {
+        tracing::debug!(
+            event = "phase.finish",
+            phase = "index_sync",
+            duration_ms = started.elapsed().as_millis() as u64,
+            index_source = "skipped",
+            reason = "already_synced",
+            "phase.finish"
+        );
+        return Ok(());
+    }
+
+    let stats = match televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
+        storage,
+        &latest.snapshot_id,
+        &latest.manifest_object_id,
+        master_key,
+        local_index_db,
+        None,
+        Some(provider),
+        sink,
+    )
+    .await
+    {
+        Ok(stats) => stats,
+        Err(televy_backup_core::Error::Telegram { message }) => {
+            if televy_backup_core::is_transient_telegram_message(&message) {
+                tracing::warn!(
+                    event = "index_sync.skipped",
+                    reason = "remote_unavailable",
+                    snapshot_id = %latest.snapshot_id,
+                    error = %message,
+                    "remote index download unavailable; continue backup with local index"
+                );
+                tracing::debug!(
+                    event = "phase.finish",
+                    phase = "index_sync",
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    index_source = "skipped",
+                    reason = "remote_unavailable",
+                    "phase.finish"
+                );
+                return Ok(());
+            }
+            return Err(televy_backup_core::Error::Telegram { message });
+        }
+        Err(e) => return Err(e),
+    };
+
+    tracing::debug!(
+        event = "phase.finish",
+        phase = "index_sync",
+        duration_ms = started.elapsed().as_millis() as u64,
+        index_source = "downloaded",
+        bytes_downloaded = stats.bytes_downloaded,
+        bytes_written = stats.bytes_written,
+        snapshot_id = %latest.snapshot_id,
+        "phase.finish"
+    );
+
+    Ok(())
+}
+
+async fn preflight_local_quick_stats_daemon(
+    source_path: &Path,
+    sink: Option<&dyn ProgressSink>,
+    cancel: Option<CancellationToken>,
+) -> televy_backup_core::Result<SourceQuickStats> {
+    if let Some(sink) = sink {
+        sink.on_progress(TaskProgress {
+            phase: "prepare".to_string(),
+            ..Default::default()
+        });
+    }
+
+    let source_path = source_path.to_path_buf();
+    let cancel_for_task = cancel;
+    let stats = tokio::task::spawn_blocking(move || {
+        televy_backup_core::compute_source_quick_stats(&source_path, cancel_for_task.as_ref())
+    })
+    .await
+    .map_err(|e| televy_backup_core::Error::InvalidConfig {
+        message: format!("prepare local stats aborted: {e}"),
+    })??;
+
+    if let Some(sink) = sink {
+        sink.on_progress(TaskProgress {
+            phase: "prepare".to_string(),
+            source_files_total: Some(stats.files_total),
+            source_bytes_total: Some(stats.bytes_total),
+            ..Default::default()
+        });
+    }
+
+    Ok(stats)
+}
+
+fn is_likely_private_chat_id(chat_id: &str) -> bool {
+    let s = chat_id.trim();
+    let Ok(id) = s.parse::<i64>() else {
+        return false;
+    };
+    !s.starts_with("-100") && id > 0
 }
 
 fn parse_hhmm(s: &str) -> Result<(u8, u8), Box<dyn std::error::Error>> {

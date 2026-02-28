@@ -14,6 +14,10 @@ use crate::{Error, Result};
 
 const TG_MTPROTO_OBJECT_ID_PREFIX_V1: &str = "tgmtproto:v1:";
 const MTPROTO_HELPER_READ_TIMEOUT_SECS: u64 = 600;
+// Upload progress events should arrive quickly (the helper emits a 0-byte heartbeat
+// before the first network request). If nothing arrives for this long, treat it as
+// a stalled helper and fail fast so the caller can retry/respawn instead of freezing.
+const MTPROTO_HELPER_UPLOAD_EVENT_TIMEOUT_SECS: u64 = 45;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TgMtProtoObjectIdV1 {
@@ -191,7 +195,12 @@ impl TelegramMtProtoStorage {
 
     fn should_respawn_helper_after(err: &Error) -> bool {
         match err {
-            Error::Telegram { message } => message.contains("mtproto helper"),
+            Error::Telegram { message } => {
+                message.contains("mtproto helper")
+                    || message.to_ascii_lowercase().contains("timed out")
+                    || message.contains("save_file_part failed")
+                    || message.contains("save_big_file_part failed")
+            }
             _ => false,
         }
     }
@@ -685,7 +694,7 @@ impl MtProtoHelper {
         self.stdin.flush().ok();
 
         loop {
-            let env = self.read_json_line()?;
+            let env = self.read_json_line_with_timeout(MTPROTO_HELPER_UPLOAD_EVENT_TIMEOUT_SECS)?;
             self.apply_session(&env)?;
             if !env.ok {
                 return Err(Error::Telegram {
@@ -1029,6 +1038,10 @@ impl MtProtoHelper {
     }
 
     fn read_json_line(&mut self) -> Result<ResponseEnvelope> {
+        self.read_json_line_with_timeout(MTPROTO_HELPER_READ_TIMEOUT_SECS)
+    }
+
+    fn read_json_line_with_timeout(&mut self, timeout_secs: u64) -> Result<ResponseEnvelope> {
         let (child, stdout) = (&mut self.child, &mut self.stdout);
         let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
 
@@ -1048,8 +1061,7 @@ impl MtProtoHelper {
                 let _ = tx.send(res);
             });
 
-            let line = match rx.recv_timeout(Duration::from_secs(MTPROTO_HELPER_READ_TIMEOUT_SECS))
-            {
+            let line = match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
                 Ok(Ok(line)) => line,
                 Ok(Err(e)) => {
                     return Err(Error::Telegram {
@@ -1069,7 +1081,7 @@ impl MtProtoHelper {
                     }
                     return Err(Error::Telegram {
                         message: format!(
-                            "mtproto helper timed out waiting for response after {MTPROTO_HELPER_READ_TIMEOUT_SECS}s"
+                            "mtproto helper timed out waiting for response after {timeout_secs}s"
                         ),
                     });
                 }

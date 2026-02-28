@@ -54,13 +54,15 @@ const SEND_MESSAGE_MAX_ATTEMPTS: usize = 3; // includes the initial attempt
 const MAX_CONCURRENT_UPLOADS_CAP: usize = 8;
 
 fn upload_stream_timeout_secs(size: usize) -> u64 {
-    // Scale with size to avoid hanging forever, while allowing large objects to complete on slow links.
-    let min = 60u64;
-    let max = 30 * 60;
+    // Scale with payload size, but assume slower real-world uplinks than the previous 32KiB/s
+    // heuristic. This prevents medium objects (e.g. ~4MiB) from timing out during active uploads
+    // on weak links while still keeping a bounded upper limit.
+    let min = 3 * 60;
+    let max = 2 * 60 * 60;
     let size = size as u64;
 
-    // ~32KiB/s baseline + fixed overhead.
-    let scaled = min.saturating_add(size / (32 * 1024));
+    // ~8KiB/s baseline + fixed setup overhead.
+    let scaled = 120u64.saturating_add(size / (8 * 1024));
     scaled.clamp(min, max)
 }
 

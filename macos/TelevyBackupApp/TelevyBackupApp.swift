@@ -209,6 +209,8 @@ final class AppModel: ObservableObject {
                         upTotal: StatusCounter(bytes: 1_234_567_890),
                         progress: StatusProgress(
                             phase: "upload",
+                            sourceFilesTotal: 10_000,
+                            sourceBytesTotal: 5_120_000_000,
                             filesTotal: 10_000,
                             filesDone: 3_210,
                             chunksTotal: nil,
@@ -2251,15 +2253,23 @@ final class AppModel: ObservableObject {
             DispatchQueue.main.async {
                 let filesTotal = (obj["filesTotal"] as? NSNumber)?.int64Value
                 let filesDone = (obj["filesDone"] as? NSNumber)?.int64Value
+                let sourceFilesTotal = (obj["sourceFilesTotal"] as? NSNumber)?.int64Value
+                let sourceBytesTotal = (obj["sourceBytesTotal"] as? NSNumber)?.int64Value
+                let sourceBytesNeedUploadTotal =
+                    (obj["sourceBytesNeedUploadTotal"] as? NSNumber)?.int64Value
                 let chunksTotal = (obj["chunksTotal"] as? NSNumber)?.int64Value
                 let chunksDone = (obj["chunksDone"] as? NSNumber)?.int64Value
                 let bytesRead = (obj["bytesRead"] as? NSNumber)?.int64Value
+                let uploadBytesTotal = (obj["uploadBytesTotal"] as? NSNumber)?.int64Value
+                let bytesUploadedConfirmed =
+                    (obj["bytesUploadedConfirmed"] as? NSNumber)?.int64Value
+                let bytesUploadedSource = (obj["bytesUploadedSource"] as? NSNumber)?.int64Value
                 let bytesUploaded = (obj["bytesUploaded"] as? NSNumber)?.int64Value
                 let bytesDownloaded = (obj["bytesDownloaded"] as? NSNumber)?.int64Value
                 let bytesDeduped = (obj["bytesDeduped"] as? NSNumber)?.int64Value
 
                 self.phase = phase
-                self.currentBytesUploaded = bytesUploaded ?? 0
+                self.currentBytesUploaded = bytesUploaded ?? bytesUploadedSource ?? 0
                 self.currentBytesDeduped = bytesDeduped ?? 0
 
                 if taskId.isEmpty { return }
@@ -2284,11 +2294,17 @@ final class AppModel: ObservableObject {
                 task?.updatedAt = now
                 task?.progress = StatusProgress(
                     phase: phase,
+                    sourceFilesTotal: sourceFilesTotal,
+                    sourceBytesTotal: sourceBytesTotal,
+                    sourceBytesNeedUploadTotal: sourceBytesNeedUploadTotal,
                     filesTotal: filesTotal,
                     filesDone: filesDone,
                     chunksTotal: chunksTotal,
                     chunksDone: chunksDone,
                     bytesRead: bytesRead,
+                    uploadBytesTotal: uploadBytesTotal,
+                    bytesUploadedConfirmed: bytesUploadedConfirmed,
+                    bytesUploadedSource: bytesUploadedSource,
                     bytesUploaded: bytesUploaded,
                     bytesDownloaded: bytesDownloaded,
                     bytesDeduped: bytesDeduped
@@ -3398,19 +3414,10 @@ private struct TargetRowView: View {
     }
 
     private var progressBar: some View {
-        let bg = RoundedRectangle(cornerRadius: 3, style: .continuous)
-        return ZStack(alignment: .leading) {
-            bg.fill(Color.black.opacity(0.10))
-            if let frac = progressFraction() {
-                bg.fill(Color.blue.opacity(0.92))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .scaleEffect(x: max(0.02, CGFloat(min(1.0, frac))), y: 1, anchor: .leading)
-            } else {
-                bg.fill(Color.blue.opacity(0.55))
-                    .frame(width: 56)
-            }
-        }
-        .frame(height: 6)
+        BackupUnifiedProgressBar(
+            visual: TargetPresentation.backupProgressVisual(effectiveProgress()),
+            tint: .blue
+        )
     }
 
     private func rightTopText(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, disconnected: Bool) -> String {
@@ -3464,14 +3471,17 @@ private struct TargetRowView: View {
     }
 
     private func runningSummary(nowMs: Int64) -> String {
+        let p = effectiveProgress()
+
         if let t = model.activeTask,
            t.state == "running",
            t.targetId == target.targetId
         {
-            let phase = t.progress?.phase ?? "running"
+            let phase = TargetPresentation.stageText(p?.phase ?? t.progress?.phase) ?? "Working"
             let elapsed = elapsedText(nowMs: nowMs)
-            let bytesUploaded = t.progress?.bytesUploaded ?? 0
-            let bytesRead = t.progress?.bytesRead ?? 0
+            let bytesUploaded = p?.bytesUploaded ?? p?.bytesUploadedSource
+                ?? t.progress?.bytesUploaded ?? t.progress?.bytesUploadedSource ?? 0
+            let bytesRead = p?.bytesRead ?? t.progress?.bytesRead ?? 0
             let metric: String
             switch t.kind {
             case "backup":
@@ -3479,9 +3489,9 @@ private struct TargetRowView: View {
                     metric = "Uploaded \(formatBytes(bytesUploaded))"
                 } else if bytesRead > 0 {
                     metric = "Read \(formatBytes(bytesRead))"
-                } else if let files = t.progress?.filesDone, files > 0 {
+                } else if let files = p?.filesDone ?? t.progress?.filesDone, files > 0 {
                     metric = "Indexed \(files) files"
-                } else if let chunks = t.progress?.chunksDone, chunks > 0 {
+                } else if let chunks = p?.chunksDone ?? t.progress?.chunksDone, chunks > 0 {
                     metric = "Scanned \(chunks) chunks"
                 } else {
                     metric = "Running"
@@ -3497,17 +3507,17 @@ private struct TargetRowView: View {
         }
 
         let elapsed = elapsedText(nowMs: nowMs)
-        let phase = target.progress?.phase ?? "running"
-        let bytesUploaded = target.progress?.bytesUploaded ?? 0
-        let bytesRead = target.progress?.bytesRead ?? 0
+        let phase = TargetPresentation.stageText(p?.phase) ?? "Working"
+        let bytesUploaded = p?.bytesUploaded ?? p?.bytesUploadedSource ?? 0
+        let bytesRead = p?.bytesRead ?? 0
         let metric: String
         if bytesUploaded > 0 {
             metric = "Uploaded \(formatBytes(bytesUploaded))"
         } else if bytesRead > 0 {
             metric = "Read \(formatBytes(bytesRead))"
-        } else if let files = target.progress?.filesDone, files > 0 {
+        } else if let files = p?.filesDone, files > 0 {
             metric = "Indexed \(files) files"
-        } else if let chunks = target.progress?.chunksDone, chunks > 0 {
+        } else if let chunks = p?.chunksDone, chunks > 0 {
             metric = "Scanned \(chunks) chunks"
         } else {
             metric = "Running"
@@ -3515,32 +3525,15 @@ private struct TargetRowView: View {
         return "Backup \(phase) • \(metric) • Elapsed \(elapsed)"
     }
 
-    private func progressFraction() -> Double? {
-        let p: StatusProgress? = {
-            if let t = model.activeTask,
-               t.state == "running",
-               t.targetId == target.targetId
-            {
-                return t.progress
-            }
-            return target.progress
-        }()
-
-        if let p {
-            if let done = p.chunksDone, let total = p.chunksTotal, total > 0 {
-                // For phases without a stable total, core may report `done == total` as a
-                // "so far" counter. Treat that as indeterminate to avoid a stuck 100% bar.
-                if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
-                    return nil
-                }
-                return min(1.0, Double(done) / Double(total))
-            }
-            if let done = p.filesDone, let total = p.filesTotal, total > 0 {
-                if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
-                    return nil
-                }
-                return min(1.0, Double(done) / Double(total))
-            }
+    private func effectiveProgress() -> StatusProgress? {
+        if let t = model.activeTask,
+           t.state == "running",
+           t.targetId == target.targetId
+        {
+            return t.progress ?? target.progress
+        }
+        if let daemonProgress = target.progress {
+            return daemonProgress
         }
         return nil
     }

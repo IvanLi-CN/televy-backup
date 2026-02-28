@@ -201,10 +201,25 @@ If you move to a new machine (or lose `index/index.sqlite`), TelevyBackup can co
 - The pinned bootstrap catalog exists in the Telegram chat, and
 - You imported the correct master key (`TBK1`) via `televybackup secrets import-master-key`.
 
-By default, `televybackup backup run` performs a preflight `index_sync` step before `scan`:
+By default, `televybackup backup run` enters a parallel `prepare` stage before `scan`:
 
-- If needed, it downloads the remote latest index DB and atomically writes `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite`.
+- `index_sync`: if needed, download the remote latest index DB and atomically write `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite`.
+- `local_quick_stats`: metadata-only local walk to estimate source file count/bytes for progress denominator.
+- `prepare` keeps running if local quick stats fail (progress may fall back to indeterminate), while `index_sync` keeps existing blocking semantics on hard errors (for example `bootstrap.decrypt_failed`).
 - To force local-only behavior (offline/debug): `televybackup backup run --no-remote-index-sync`.
+
+Backup progress semantics for UI/events:
+
+- `prepare` phase is indeterminate only.
+- `scan` / `scan_upload` / `upload` / `index` use a single determinate bar with monotonic layers:
+  - `NeedUploadConfirmed <= UploadingCurrent <= BackedUp <= Scanned`
+  - `Scanned`: source walk/read progress (`bytesRead` + file-count fallback).
+  - `BackedUp`: source-level protected bytes, `(bytesUploadedSource + bytesDeduped) / sourceBytesTotal`.
+  - `UploadingCurrent`: current payload upload progress in discovered upload workload.
+  - `NeedUploadConfirmed`: confirmed uploaded payload progress in discovered upload workload.
+- Need-upload metrics are phase-scoped:
+  - `Need Upload (Disc.)` / `Remaining (Disc.)` during `scan` / `scan_upload`.
+  - `Need Upload (Final)` / `Remaining (Final)` during `upload` / `index`.
 
 ## Daemon (scheduled backups)
 

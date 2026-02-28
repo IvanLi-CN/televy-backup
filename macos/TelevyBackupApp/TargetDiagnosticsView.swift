@@ -56,12 +56,16 @@ struct TargetDiagnosticsView: View {
             keyValue("phase", target.progress?.phase ?? "—")
 
             if let p = target.progress {
+                let filesTotal = p.sourceFilesTotal ?? p.filesTotal
                 keyValue(
                     "progress",
-                    "chunks \(p.chunksDone ?? -1)/\(p.chunksTotal ?? -1)  files \(p.filesDone ?? -1)/\(p.filesTotal ?? -1)"
+                    "chunks \(p.chunksDone ?? -1)/\(p.chunksTotal ?? -1)  files \(p.filesDone ?? -1)/\(filesTotal ?? -1)"
                 )
                 keyValue("bytesRead", p.bytesRead.map(String.init) ?? "—")
-                keyValue("bytesUploaded", p.bytesUploaded.map(String.init) ?? "—")
+                keyValue(
+                    "bytesUploaded",
+                    "current=\(p.bytesUploaded.map(String.init) ?? "—")  source=\(p.bytesUploadedSource.map(String.init) ?? "—")  confirmed=\(p.bytesUploadedConfirmed.map(String.init) ?? "—")"
+                )
                 keyValue("bytesDownloaded", p.bytesDownloaded.map(String.init) ?? "—")
                 keyValue("bytesDeduped", p.bytesDeduped.map(String.init) ?? "—")
             } else {

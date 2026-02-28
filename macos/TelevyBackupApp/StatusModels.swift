@@ -10,11 +10,17 @@ struct StatusCounter: Codable {
 
 struct StatusProgress: Codable {
     var phase: String
+    var sourceFilesTotal: Int64?
+    var sourceBytesTotal: Int64?
+    var sourceBytesNeedUploadTotal: Int64? = nil
     var filesTotal: Int64?
     var filesDone: Int64?
     var chunksTotal: Int64?
     var chunksDone: Int64?
     var bytesRead: Int64?
+    var uploadBytesTotal: Int64? = nil
+    var bytesUploadedConfirmed: Int64? = nil
+    var bytesUploadedSource: Int64? = nil
     var bytesUploaded: Int64?
     var bytesDownloaded: Int64?
     var bytesDeduped: Int64?
