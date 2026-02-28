@@ -4050,6 +4050,53 @@ struct EndpointEditor: View {
                         .foregroundStyle(validateOk == true ? .green : (validateOk == false ? .red : .secondary))
                 }
 
+                Divider()
+                    .padding(.vertical, 14)
+
+                Text("Rate limit (advanced)")
+                    .font(.system(size: 13, weight: .semibold))
+                    .padding(.bottom, 2)
+
+                let maxConcurrentUploadsBinding = Binding(
+                    get: { settings.telegram_endpoints[epIndex].rate_limit.max_concurrent_uploads },
+                    set: { v in
+                        settings.telegram_endpoints[epIndex].rate_limit.max_concurrent_uploads = min(max(v, 1), 8)
+                        onEndpointTouchedPending(endpointId)
+                    }
+                )
+
+                let minDelayMsBinding = Binding(
+                    get: { settings.telegram_endpoints[epIndex].rate_limit.min_delay_ms },
+                    set: { v in
+                        settings.telegram_endpoints[epIndex].rate_limit.min_delay_ms = min(max(v, 0), 500)
+                        onEndpointTouchedPending(endpointId)
+                    }
+                )
+
+                HStack {
+                    Text("Max concurrent uploads")
+                    Spacer()
+                    TextField("", value: maxConcurrentUploadsBinding, formatter: NumberFormatter())
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                    Stepper("", value: maxConcurrentUploadsBinding, in: 1...8)
+                        .labelsHidden()
+                }
+
+                HStack {
+                    Text("Min delay (ms)")
+                    Spacer()
+                    TextField("", value: minDelayMsBinding, formatter: NumberFormatter())
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 80)
+                    Stepper("", value: minDelayMsBinding, in: 0...500, step: 10)
+                        .labelsHidden()
+                }
+
+                Text("Aggressive values may trigger Telegram rate limits (FLOOD_WAIT / FLOOD_PREMIUM_WAIT). If that happens, increase min delay and/or lower concurrency for stability.")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
                 Text("Delete: go to Targets to unbind if referenced")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
