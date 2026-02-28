@@ -2,9 +2,10 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-02-28
 - Last: 2026-02-28
+- Delivery: PR #49
 
 ## 背景 / 问题陈述
 
@@ -137,11 +138,11 @@
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
-- [ ] M1: helper part size 提升到 512KiB（upload+download），并通过单测/真实运行验证无 part size 错误
-- [ ] M2: helper FloodWait parser 支持 `FLOOD_PREMIUM_WAIT`，并加入全局冷却 + progress 心跳
-- [ ] M3: core 增加 `FLOOD_PREMIUM_WAIT` 的 transient/降档检测与单测
-- [ ] M4: macOS UI 增加 “Rate limit (advanced)” 控件并通过 swift 单测（如适用）
-- [ ] M5: CI 增加 helper tests 步骤并全绿
+- [x] M1: helper part size 提升到 512KiB（upload+download），并通过单测/真实运行验证无 part size 错误
+- [x] M2: helper FloodWait parser 支持 `FLOOD_PREMIUM_WAIT`，并加入全局冷却 + progress 心跳
+- [x] M3: core 增加 `FLOOD_PREMIUM_WAIT` 的 transient/降档检测与单测
+- [x] M4: macOS UI 增加 “Rate limit (advanced)” 控件并通过 swift 单测（如适用）
+- [x] M5: CI 增加 helper tests 步骤并全绿
 
 ## 方案概述（Approach, high-level）
 
@@ -162,4 +163,3 @@
 
 - Telegram: [Uploading and Downloading Files](https://core.telegram.org/api/files)
 - Telegram: [upload.getFile](https://core.telegram.org/method/upload.getFile)
-

@@ -34,4 +34,4 @@
 | 2e73n | Popover Targets 高度实时自适应与误滚动修复 | 已完成 | `2e73n-popover-targets-live-height/SPEC.md` | 2026-02-25 | PR #48 已创建并更新；CI run #251 通过；review-loop 无阻塞问题 |
 | dmts3 | backup 主流水线并行化（scan+upload）与进度语义修复 | 部分完成（4/5） | `dmts3-streaming-backup-pipeline/SPEC.md` | 2026-02-28 | 主循环并行 + retention 优化已落地；新增 index 流式压缩上传以压低 daemon 内存 footprint，待完成 UI 真机截图验收 |
 | z324m | 统一进度条规范（含 Prepare 并行）与四处 UI 对齐 | 已完成 | `z324m-unified-backup-progress-prepare/SPEC.md` | 2026-02-28 | 已同步为单条多层进度规范（NeedUploadConfirmed/UploadingCurrent/BackedUp/Scanned）并保留 Need Upload(Disc./Final) 口径 |
-| hqjd2 | MTProto 备份传输提速（更大分片 + FloodWait 处理 + 可调节流） | 待实现 | `hqjd2-mtproto-transfer-speed/SPEC.md` | 2026-02-28 | helper 分片提升到 512KiB；补齐 FLOOD_PREMIUM_WAIT；新增全局冷却与 UI 调参入口；CI 覆盖 helper tests |
+| hqjd2 | MTProto 备份传输提速（更大分片 + FloodWait 处理 + 可调节流） | 已完成 | `hqjd2-mtproto-transfer-speed/SPEC.md` | 2026-02-28 | PR #49；CI green；review-loop 无阻塞问题 |
