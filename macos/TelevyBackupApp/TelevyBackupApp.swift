@@ -2255,15 +2255,21 @@ final class AppModel: ObservableObject {
                 let filesDone = (obj["filesDone"] as? NSNumber)?.int64Value
                 let sourceFilesTotal = (obj["sourceFilesTotal"] as? NSNumber)?.int64Value
                 let sourceBytesTotal = (obj["sourceBytesTotal"] as? NSNumber)?.int64Value
+                let sourceBytesNeedUploadTotal =
+                    (obj["sourceBytesNeedUploadTotal"] as? NSNumber)?.int64Value
                 let chunksTotal = (obj["chunksTotal"] as? NSNumber)?.int64Value
                 let chunksDone = (obj["chunksDone"] as? NSNumber)?.int64Value
                 let bytesRead = (obj["bytesRead"] as? NSNumber)?.int64Value
+                let uploadBytesTotal = (obj["uploadBytesTotal"] as? NSNumber)?.int64Value
+                let bytesUploadedConfirmed =
+                    (obj["bytesUploadedConfirmed"] as? NSNumber)?.int64Value
+                let bytesUploadedSource = (obj["bytesUploadedSource"] as? NSNumber)?.int64Value
                 let bytesUploaded = (obj["bytesUploaded"] as? NSNumber)?.int64Value
                 let bytesDownloaded = (obj["bytesDownloaded"] as? NSNumber)?.int64Value
                 let bytesDeduped = (obj["bytesDeduped"] as? NSNumber)?.int64Value
 
                 self.phase = phase
-                self.currentBytesUploaded = bytesUploaded ?? 0
+                self.currentBytesUploaded = bytesUploaded ?? bytesUploadedSource ?? 0
                 self.currentBytesDeduped = bytesDeduped ?? 0
 
                 if taskId.isEmpty { return }
@@ -2290,11 +2296,15 @@ final class AppModel: ObservableObject {
                     phase: phase,
                     sourceFilesTotal: sourceFilesTotal,
                     sourceBytesTotal: sourceBytesTotal,
+                    sourceBytesNeedUploadTotal: sourceBytesNeedUploadTotal,
                     filesTotal: filesTotal,
                     filesDone: filesDone,
                     chunksTotal: chunksTotal,
                     chunksDone: chunksDone,
                     bytesRead: bytesRead,
+                    uploadBytesTotal: uploadBytesTotal,
+                    bytesUploadedConfirmed: bytesUploadedConfirmed,
+                    bytesUploadedSource: bytesUploadedSource,
                     bytesUploaded: bytesUploaded,
                     bytesDownloaded: bytesDownloaded,
                     bytesDeduped: bytesDeduped
@@ -3461,13 +3471,14 @@ private struct TargetRowView: View {
     }
 
     private func runningSummary(nowMs: Int64) -> String {
-        if let t = model.activeTask,
+        if target.progress == nil,
+           let t = model.activeTask,
            t.state == "running",
            t.targetId == target.targetId
         {
             let phase = TargetPresentation.stageText(t.progress?.phase) ?? "Working"
             let elapsed = elapsedText(nowMs: nowMs)
-            let bytesUploaded = t.progress?.bytesUploaded ?? 0
+            let bytesUploaded = t.progress?.bytesUploaded ?? t.progress?.bytesUploadedSource ?? 0
             let bytesRead = t.progress?.bytesRead ?? 0
             let metric: String
             switch t.kind {
@@ -3495,7 +3506,7 @@ private struct TargetRowView: View {
 
         let elapsed = elapsedText(nowMs: nowMs)
         let phase = TargetPresentation.stageText(target.progress?.phase) ?? "Working"
-        let bytesUploaded = target.progress?.bytesUploaded ?? 0
+        let bytesUploaded = target.progress?.bytesUploaded ?? target.progress?.bytesUploadedSource ?? 0
         let bytesRead = target.progress?.bytesRead ?? 0
         let metric: String
         if bytesUploaded > 0 {
@@ -3513,13 +3524,16 @@ private struct TargetRowView: View {
     }
 
     private func effectiveProgress() -> StatusProgress? {
+        if let daemonProgress = target.progress {
+            return daemonProgress
+        }
         if let t = model.activeTask,
            t.state == "running",
            t.targetId == target.targetId
         {
             return t.progress
         }
-        return target.progress
+        return nil
     }
 
     private func elapsedText(nowMs: Int64) -> String {

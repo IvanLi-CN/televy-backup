@@ -210,9 +210,16 @@ By default, `televybackup backup run` enters a parallel `prepare` stage before `
 
 Backup progress semantics for UI/events:
 
-- **Success segment**: `(bytesUploaded + bytesDeduped) / sourceBytesTotal`
-- **Scan segment**: `bytesRead / sourceBytesTotal`
-- `prepare` phase is indeterminate; `scan/upload/index` are determinate.
+- `prepare` phase is indeterminate only.
+- `scan` / `scan_upload` / `upload` / `index` use a single determinate bar with monotonic layers:
+  - `NeedUploadConfirmed <= UploadingCurrent <= BackedUp <= Scanned`
+  - `Scanned`: source walk/read progress (`bytesRead` + file-count fallback).
+  - `BackedUp`: source-level protected bytes, `(bytesUploadedSource + bytesDeduped) / sourceBytesTotal`.
+  - `UploadingCurrent`: current payload upload progress in discovered upload workload.
+  - `NeedUploadConfirmed`: confirmed uploaded payload progress in discovered upload workload.
+- Need-upload metrics are phase-scoped:
+  - `Need Upload (Disc.)` / `Remaining (Disc.)` during `scan` / `scan_upload`.
+  - `Need Upload (Final)` / `Remaining (Final)` during `upload` / `index`.
 
 ## Daemon (scheduled backups)
 

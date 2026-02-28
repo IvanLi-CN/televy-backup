@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-02-25
-- Last: 2026-02-25
+- Last: 2026-02-28
 
 ## 背景 / 问题陈述
 
@@ -18,10 +18,18 @@
 
 - 统一 backup 进度条语义与视觉：
   - 仅 `prepare` 使用滚动样式（indeterminate）。
-  - `scan/upload/index` 使用单条双段确定性进度（成功段 + 扫描段）。
+  - `scan/upload/index` 使用单条多层确定性进度（由弱到强单调覆盖）。
 - 统一进度口径：
-  - 成功段：`(bytesUploaded + bytesDeduped) / sourceBytesTotal`。
-  - 扫描段：`bytesRead / sourceBytesTotal`。
+  - `Scanned`：`bytesRead/sourceBytesTotal`（并带 files fallback）。
+  - `BackedUp`：`(bytesUploadedSource + bytesDeduped) / sourceBytesTotal`。
+  - `UploadingCurrent`：`bytesUploaded / discoveredNeedUploadTotal`。
+  - `NeedUploadConfirmed`：`bytesUploadedConfirmed / discoveredNeedUploadTotal`（不可用时回退到 `bytesUploaded`）。
+  - 单调约束：`NeedUploadConfirmed <= UploadingCurrent <= BackedUp <= Scanned`。
+- 统一上传相关口径并消除歧义：
+  - `Need Upload (Disc.)`：当前“已扫描范围内”已确认需要上传的总量。
+  - `Need Upload (Final)`：扫描完成后本轮最终需要上传的总量。
+  - `Remaining`：`max(Need Upload - Uploaded, 0)`，并与 Need Upload 同作用域（Disc./Final）。
+  - `Saved`：`bytesDeduped`，表示去重/复用节省量（可明显大于当前读取量）。
 - 统一入口行为：CLI 手动 backup 与 daemon 定时 backup 都采用并行 Prepare。
 
 ### Non-goals
@@ -49,8 +57,10 @@
 
 - Prepare 阶段并行执行：`index_sync` + `local_quick_stats`。
 - 仅 prepare 使用 indeterminate 进度条。
-- backup 确定性阶段统一显示双段进度。
+- backup 确定性阶段统一显示单条多层进度。
 - 进度字段变更保持 additive，旧客户端可容错。
+- 扫描未完成时必须显式区分 `Need Upload (Disc.)` 与最终值，避免与 `Uploaded` 语义冲突。
+- 运行态分层进度必须满足单调不反超：`NeedUploadConfirmed <= UploadingCurrent <= BackedUp <= Scanned`。
 
 ### SHOULD
 
@@ -67,7 +77,9 @@
 
 - 用户触发 backup（CLI/daemon 任一入口）后先进入 prepare。
 - prepare 内 `index_sync` 与 `local_quick_stats` 并行运行。
-- prepare 完成后进入 `scan/upload/index`，UI 使用双段确定性进度条展示。
+- prepare 完成后进入 `scan/upload/index`，UI 使用单条多层确定性进度条展示。
+- `scan` / `scan_upload` 阶段显示 `Need Upload (Disc.)` 与 `Remaining (Disc.)`。
+- `upload` / `index` 阶段切换为 `Need Upload (Final)` 与 `Remaining (Final)`。
 
 ### Edge cases / errors
 
@@ -93,13 +105,14 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given backup 触发，When 处于 prepare，Then 进度条为 indeterminate 且文案为 Preparing。
-- Given backup 进入 scan/upload/index，Then 四处进度条均显示双段确定性进度，且口径一致。
+- Given backup 进入 scan/upload/index，Then 四处进度条均显示单条多层确定性进度，且口径一致。
 - Given 高去重目录，When backup 运行，Then 成功段持续增长并最终收敛到 100%。
+- Given `scan_upload` 阶段上传队列被快速清空，When `Need Upload (Disc.) == Uploaded`，Then `Remaining (Disc.) == 0` 且不代表扫描已完成。
 - Given 旧 snapshot 缺少新增字段，When UI 渲染，Then 不崩溃并正确降级显示。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
-- 进度口径（成功段/扫描段）已冻结。
+- 进度口径（NeedUploadConfirmed / UploadingCurrent / BackedUp / Scanned）已冻结。
 - prepare 并行语义与失败语义已冻结。
 - 目标 UI 位点已冻结（MainWindow 3 处 + Popover 1 处）。
 
@@ -142,12 +155,14 @@
 
 - 风险：本地快速统计在超大目录下耗时过长；需保证 metadata-only 且可取消。
 - 开放问题：prepare 是否在 UI 上显示子任务完成计数（`1/2`）。
-- 假设：双段颜色采用现有 Running 蓝系（成功段实蓝、扫描段浅蓝）。
+- 假设：分层颜色采用“弱到强”可感知梯度（扫描弱化灰、BackedUp 浅蓝、UploadingCurrent 中蓝、NeedUploadConfirmed 主题蓝）。
 
 ## 变更记录（Change log）
 
 - 2026-02-25: 新建规格并冻结并行 Prepare + 双段进度口径。
 - 2026-02-25: 完成实现并通过 `cargo test`、`cargo test -p televybackup`、`cargo test -p televybackupd`、`scripts/macos/build-app.sh` 验证。
+- 2026-02-27: 增补 `Need Upload (Disc./Final)`、`Remaining`、`Saved` 口径定义，并要求 UI 按阶段切换文案避免歧义。
+- 2026-02-28: 将 runtime 进度视觉规范明确为单条多层（`NeedUploadConfirmed <= UploadingCurrent <= BackedUp <= Scanned`），并与当前实现/文案一致。
 
 ## 参考（References）
 

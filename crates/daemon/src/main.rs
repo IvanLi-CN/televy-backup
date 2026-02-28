@@ -1,4 +1,8 @@
 use std::collections::{HashMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
@@ -166,9 +170,13 @@ impl StatusRuntimeState {
             files_done: None,
             source_files_total: None,
             source_bytes_total: None,
+            source_bytes_need_upload_total: None,
             chunks_total: None,
             chunks_done: None,
             bytes_read: None,
+            upload_bytes_total: None,
+            bytes_uploaded_confirmed: Some(0),
+            bytes_uploaded_source: Some(0),
             bytes_uploaded: Some(0),
             bytes_downloaded: Some(0),
             bytes_deduped: Some(0),
@@ -197,9 +205,13 @@ impl StatusRuntimeState {
             files_done: None,
             source_files_total: None,
             source_bytes_total: None,
+            source_bytes_need_upload_total: None,
             chunks_total: None,
             chunks_done: None,
             bytes_read: Some(0),
+            upload_bytes_total: None,
+            bytes_uploaded_confirmed: Some(0),
+            bytes_uploaded_source: Some(0),
             bytes_uploaded: Some(0),
             bytes_downloaded: Some(0),
             bytes_deduped: Some(0),
@@ -240,9 +252,13 @@ impl StatusRuntimeState {
             files_done: p.files_done,
             source_files_total: p.source_files_total,
             source_bytes_total: p.source_bytes_total,
+            source_bytes_need_upload_total: p.source_bytes_need_upload_total,
             chunks_total: p.chunks_total,
             chunks_done: p.chunks_done,
             bytes_read: p.bytes_read,
+            upload_bytes_total: p.upload_bytes_total,
+            bytes_uploaded_confirmed: p.bytes_uploaded_confirmed,
+            bytes_uploaded_source: p.bytes_uploaded_source,
             bytes_uploaded: p.bytes_uploaded,
             bytes_downloaded: p.bytes_downloaded,
             bytes_deduped: p.bytes_deduped,
@@ -305,9 +321,13 @@ impl StatusRuntimeState {
             files_done: p.files_done,
             source_files_total: p.source_files_total,
             source_bytes_total: p.source_bytes_total,
+            source_bytes_need_upload_total: p.source_bytes_need_upload_total,
             chunks_total: p.chunks_total,
             chunks_done: p.chunks_done,
             bytes_read: p.bytes_read,
+            upload_bytes_total: p.upload_bytes_total,
+            bytes_uploaded_confirmed: p.bytes_uploaded_confirmed,
+            bytes_uploaded_source: p.bytes_uploaded_source,
             bytes_uploaded: p.bytes_uploaded,
             bytes_downloaded: p.bytes_downloaded,
             bytes_deduped: p.bytes_deduped,
@@ -640,6 +660,15 @@ impl ProgressSink for StatusProgressSink {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn daemon_instance_lock_is_exclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let _first = acquire_daemon_instance_lock(dir.path()).unwrap();
+        let err = acquire_daemon_instance_lock(dir.path()).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::AddrInUse);
+    }
+
     #[test]
     fn manual_trigger_file_is_consumed_by_remove() {
         let dir = tempfile::tempdir().unwrap();
@@ -666,6 +695,17 @@ mod tests {
 
         // Ready: consume by remove.
         assert!(maybe_consume_manual_trigger_file(&path, true).unwrap());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn stale_manual_trigger_is_dropped_on_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup-now");
+
+        std::fs::write(&path, b"manual").unwrap();
+        let after = drop_stale_manual_trigger_file_on_startup(&path);
+        assert!(after.is_none());
         assert!(!path.exists());
     }
 
@@ -705,9 +745,13 @@ mod tests {
             files_done: None,
             source_files_total: None,
             source_bytes_total: None,
+            source_bytes_need_upload_total: None,
             chunks_total: None,
             chunks_done: None,
             bytes_read: None,
+            upload_bytes_total: None,
+            bytes_uploaded_confirmed: None,
+            bytes_uploaded_source: None,
             bytes_uploaded: Some(bytes_uploaded),
             net_bytes_uploaded: None,
             bytes_downloaded: None,
@@ -882,7 +926,7 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
     }
 }
 
-fn file_mtime(path: &PathBuf) -> Option<SystemTime> {
+fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
@@ -915,6 +959,44 @@ fn vault_key_load_error(err: &(dyn std::error::Error + 'static)) -> VaultKeyLoad
     }
 }
 
+#[cfg(unix)]
+fn acquire_daemon_instance_lock(data_root: &Path) -> std::io::Result<File> {
+    let lock_path = data_root.join("ipc").join("daemon.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        let raw = err.raw_os_error().unwrap_or_default();
+        if raw == libc::EWOULDBLOCK || raw == libc::EAGAIN {
+            return Err(std::io::Error::new(
+                ErrorKind::AddrInUse,
+                format!(
+                    "televybackupd already running for data dir {}; lock={}",
+                    data_root.display(),
+                    lock_path.display()
+                ),
+            ));
+        }
+        return Err(err);
+    }
+
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    writeln!(file, "{}", std::process::id())?;
+    file.flush()?;
+
+    Ok(file)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = std::env::var("TELEVYBACKUP_CONFIG_DIR")
@@ -927,6 +1009,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_root = config_dir.unwrap_or_else(default_config_dir);
     let data_root = data_dir.unwrap_or_else(default_data_dir);
     let index_dir = data_root.join("index");
+    #[cfg(unix)]
+    let _daemon_instance_lock = acquire_daemon_instance_lock(&data_root)?;
 
     let config_path = settings_config::config_path(&config_root);
     let mut settings = settings_config::load_settings_v2(&config_root)?;
@@ -1074,7 +1158,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut api_hash: Option<String> = None;
 
     if initial_manual_trigger_mtime.is_some() {
-        manual_trigger_last_attempted_mtime = initial_manual_trigger_mtime;
+        manual_trigger_last_attempted_mtime =
+            drop_stale_manual_trigger_file_on_startup(&manual_trigger_path);
     }
 
     // Do not eagerly retry Keychain access. We'll do a single best-effort warm-up attempt so
@@ -1354,6 +1439,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || settings.telegram.mtproto.api_hash_key.trim().is_empty()
         {
             // Keep the daemon alive so the UI can show status, but skip running backups until config is fixed.
+            storage_by_endpoint.clear();
             sleep(Duration::from_secs(1)).await;
             continue;
         }
@@ -1377,6 +1463,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "run.skip"
                 );
             }
+            storage_by_endpoint.clear();
             sleep(Duration::from_secs(1)).await;
             continue;
         }
@@ -1781,6 +1868,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        storage_by_endpoint.clear();
         sleep(Duration::from_secs(1)).await;
     }
 }
@@ -1798,6 +1886,32 @@ fn maybe_consume_manual_trigger_file(path: &Path, can_attempt_run: bool) -> std:
         return Ok(false);
     }
     try_consume_manual_trigger_file(path)
+}
+
+fn drop_stale_manual_trigger_file_on_startup(path: &Path) -> Option<SystemTime> {
+    // Treat pre-existing trigger files as stale leftovers from previous app sessions.
+    // A manual "Backup Now" action should only fire when the user clicks it in this session.
+    if file_mtime(path).is_some() {
+        match try_consume_manual_trigger_file(path) {
+            Ok(true) => {
+                tracing::info!(
+                    event = "manual.trigger_stale_dropped",
+                    path = %path.display(),
+                    "dropped stale manual backup trigger on daemon startup"
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    event = "manual.trigger_stale_drop_failed",
+                    path = %path.display(),
+                    error = %e,
+                    "failed to drop stale manual backup trigger on daemon startup"
+                );
+            }
+        }
+    }
+    file_mtime(path)
 }
 
 async fn preflight_remote_first_index_sync_daemon(
@@ -1835,7 +1949,32 @@ async fn preflight_remote_first_index_sync_daemon(
         return Ok(());
     }
 
-    let Some(catalog) = bootstrap::load_remote_catalog(storage, master_key).await? else {
+    let Some(catalog) = (match bootstrap::load_remote_catalog(storage, master_key).await {
+        Ok(catalog) => Ok(catalog),
+        Err(televy_backup_core::Error::Telegram { message }) => {
+            if televy_backup_core::is_transient_telegram_message(&message) {
+                tracing::warn!(
+                    event = "index_sync.skipped",
+                    reason = "remote_unavailable",
+                    error = %message,
+                    "bootstrap catalog fetch unavailable; continue backup without remote index sync"
+                );
+                tracing::debug!(
+                    event = "phase.finish",
+                    phase = "index_sync",
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    index_source = "skipped",
+                    reason = "remote_unavailable",
+                    "phase.finish"
+                );
+                Ok(None)
+            } else {
+                Err(televy_backup_core::Error::Telegram { message })
+            }
+        }
+        Err(e) => Err(e),
+    })?
+    else {
         tracing::debug!(
             event = "phase.finish",
             phase = "index_sync",
@@ -1925,7 +2064,7 @@ async fn preflight_remote_first_index_sync_daemon(
         return Ok(());
     }
 
-    let stats = televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
+    let stats = match televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
         storage,
         &latest.snapshot_id,
         &latest.manifest_object_id,
@@ -1935,7 +2074,32 @@ async fn preflight_remote_first_index_sync_daemon(
         Some(provider),
         sink,
     )
-    .await?;
+    .await
+    {
+        Ok(stats) => stats,
+        Err(televy_backup_core::Error::Telegram { message }) => {
+            if televy_backup_core::is_transient_telegram_message(&message) {
+                tracing::warn!(
+                    event = "index_sync.skipped",
+                    reason = "remote_unavailable",
+                    snapshot_id = %latest.snapshot_id,
+                    error = %message,
+                    "remote index download unavailable; continue backup with local index"
+                );
+                tracing::debug!(
+                    event = "phase.finish",
+                    phase = "index_sync",
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    index_source = "skipped",
+                    reason = "remote_unavailable",
+                    "phase.finish"
+                );
+                return Ok(());
+            }
+            return Err(televy_backup_core::Error::Telegram { message });
+        }
+        Err(e) => return Err(e),
+    };
 
     tracing::debug!(
         event = "phase.finish",

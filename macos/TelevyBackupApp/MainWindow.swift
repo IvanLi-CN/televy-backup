@@ -2,6 +2,8 @@ import AppKit
 import Foundation
 import SwiftUI
 
+private let rateEstimateFreshnessSeconds: TimeInterval = 3.0
+
 struct RunLogSummary: Identifiable {
     let id: String
     let kind: String
@@ -125,6 +127,9 @@ struct MainWindowRootView: View {
             return parts.joined(separator: " · ")
         }()
 
+        let sidebarStatusLine1Display = sidebarStatusLine1 ?? " "
+        let sidebarStatusLine2Display = sidebarStatusLine2 ?? " "
+
         return VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
@@ -138,20 +143,21 @@ struct MainWindowRootView: View {
                     }
                 }
 
-                if let sidebarStatusLine1 {
-                    Text(sidebarStatusLine1)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
-                if let sidebarStatusLine2 {
-                    Text(sidebarStatusLine2)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+                Text(sidebarStatusLine1Display)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .opacity(sidebarStatusLine1 == nil ? 0 : 1)
+                    .accessibilityHidden(sidebarStatusLine1 == nil)
+
+                Text(sidebarStatusLine2Display)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .opacity(sidebarStatusLine2 == nil ? 0 : 1)
+                    .accessibilityHidden(sidebarStatusLine2 == nil)
             }
             .padding(.horizontal, 12)
             .padding(.top, 10)
@@ -261,10 +267,13 @@ private struct TargetListRow: View {
     }
 
     private var effectiveProgress: StatusProgress? {
-        if let t = activeForTarget {
-            return t.progress ?? target.progress
+        if let daemonProgress = target.progress {
+            return daemonProgress
         }
-        return target.progress
+        if let t = activeForTarget {
+            return t.progress
+        }
+        return nil
     }
 
     private func filesProgressText(_ p: StatusProgress?) -> String? {
@@ -304,16 +313,27 @@ private struct TargetListRow: View {
 
         let uploadBps: Int64? = {
             guard status == .running else { return nil }
+            let fallback: Int64? = {
+                guard let estimate = model.targetRateEstimates[target.targetId] else { return nil }
+                guard now.timeIntervalSince(estimate.updatedAt) <= rateEstimateFreshnessSeconds else {
+                    return nil
+                }
+                return estimate.uploadBytesPerSecond
+            }()
             let bps = (target.up.bytesPerSecond ?? 0) > 0
                 ? target.up.bytesPerSecond
-                : model.targetRateEstimates[target.targetId]?.uploadBytesPerSecond
+                : fallback
             if let bps, bps > 0 { return bps }
             return nil
         }()
 
         let downloadBps: Int64? = {
             guard status == .running else { return nil }
-            let bps = model.targetRateEstimates[target.targetId]?.downloadBytesPerSecond
+            guard let estimate = model.targetRateEstimates[target.targetId] else { return nil }
+            guard now.timeIntervalSince(estimate.updatedAt) <= rateEstimateFreshnessSeconds else {
+                return nil
+            }
+            let bps = estimate.downloadBytesPerSecond
             if let bps, bps > 0 { return bps }
             return nil
         }()
@@ -459,10 +479,13 @@ private struct TargetDetailView: View {
     }
 
     private var effectiveProgress: StatusProgress? {
-        if let t = activeForTarget {
-            return t.progress ?? target.progress
+        if let daemonProgress = target.progress {
+            return daemonProgress
         }
-        return target.progress
+        if let t = activeForTarget {
+            return t.progress
+        }
+        return nil
     }
 
     var body: some View {
@@ -637,13 +660,23 @@ private struct TargetDetailView: View {
         let speedText: String? = {
             switch kind {
             case .backup:
+                let fallback: Int64? = {
+                    guard let estimate = model.targetRateEstimates[target.targetId] else { return nil }
+                    guard now.timeIntervalSince(estimate.updatedAt) <= rateEstimateFreshnessSeconds else {
+                        return nil
+                    }
+                    return estimate.uploadBytesPerSecond
+                }()
                 let bps = (target.up.bytesPerSecond ?? 0) > 0
                     ? target.up.bytesPerSecond
-                    : model.targetRateEstimates[target.targetId]?.uploadBytesPerSecond
+                    : fallback
                 if let bps, bps > 0 { return "Upload \(formatBytes(bps))/s" }
                 return nil
             case .restore:
-                if let bps = model.targetRateEstimates[target.targetId]?.downloadBytesPerSecond, bps > 0 {
+                if let estimate = model.targetRateEstimates[target.targetId],
+                   now.timeIntervalSince(estimate.updatedAt) <= rateEstimateFreshnessSeconds,
+                   let bps = estimate.downloadBytesPerSecond, bps > 0
+                {
                     return "Download \(formatBytes(bps))/s"
                 }
                 return "Measuring…"
@@ -668,44 +701,56 @@ private struct TargetDetailView: View {
         let savedBytes = p?.bytesDeduped ?? 0
 
         func rowView(_ items: [OverviewMetricItem]) -> some View {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: 14) {
-                    ForEach(items) { item in
-                        OverviewMetric(title: item.title, value: item.value, systemImage: item.systemImage)
-                    }
-                    Spacer(minLength: 0)
-                }
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 160), spacing: 14, alignment: .leading)],
-                    alignment: .leading,
-                    spacing: 10
-                ) {
-                    ForEach(items) { item in
-                        OverviewMetric(title: item.title, value: item.value, systemImage: item.systemImage)
-                    }
+            LazyVGrid(
+                columns: [GridItem(.adaptive(minimum: 160), spacing: 14, alignment: .leading)],
+                alignment: .leading,
+                spacing: 10
+            ) {
+                ForEach(items) { item in
+                    OverviewMetric(title: item.title, value: item.value, systemImage: item.systemImage)
                 }
             }
         }
 
         var items: [OverviewMetricItem] = []
-        if let speedText {
-            items.append(.init(title: "Speed", value: speedText, systemImage: "arrow.up.arrow.down"))
+        if kind == .backup || kind == .restore {
+            let stableSpeedText = speedText ?? (kind == .backup ? "Upload 0 B/s" : "Download 0 B/s")
+            items.append(.init(title: "Speed", value: stableSpeedText, systemImage: "arrow.up.arrow.down"))
         }
 
         switch kind {
         case .backup:
-            items.append(.init(title: "Uploaded", value: bytesText(p?.bytesUploaded), systemImage: "arrow.up.circle"))
+            items.append(
+                .init(
+                    title: "Uploaded",
+                    value: bytesText(BackupProgressProjection.displayUploadedBytes(p)),
+                    systemImage: "arrow.up.circle"
+                )
+            )
             items.append(.init(title: "Files", value: filesText, systemImage: "doc.on.doc"))
-            if p?.bytesRead != nil || bytesReadValue > 0 {
-                items.append(.init(title: "Read", value: bytesText(p?.bytesRead), systemImage: "internaldrive"))
-            }
-            if savedBytes > 0 {
-                items.append(.init(title: "Saved", value: bytesText(p?.bytesDeduped), systemImage: "leaf"))
-            }
+            items.append(.init(title: "Read", value: bytesText(p?.bytesRead), systemImage: "internaldrive"))
+            items.append(.init(title: "Saved", value: bytesText(p?.bytesDeduped ?? (savedBytes > 0 ? savedBytes : 0)), systemImage: "leaf"))
+
             if let fractions = TargetPresentation.backupFractions(p) {
-                items.append(.init(title: "Backed Up", value: percentText(fractions.success), systemImage: "checkmark.circle"))
-                items.append(.init(title: "Deduped %", value: percentText(fractions.deduped), systemImage: "leaf"))
+                let needUploadScope = BackupProgressProjection.needUploadScope(p)
+                let needUploadTitle = needUploadScope == .final ? "Need Upload (Final)" : "Need Upload (Disc.)"
+                let remainingUploadTitle = needUploadScope == .final ? "Remaining (Final)" : "Remaining (Disc.)"
+                let needUploadBytes = BackupProgressProjection.displayNeedUploadBytes(p)
+                let remainingUploadBytes = BackupProgressProjection.displayRemainingUploadBytes(p)
+                items.append(.init(title: "Uploading", value: percentText(fractions.uploadCurrent), systemImage: "arrow.up.circle"))
+                items.append(.init(title: "Backed Up", value: percentText(fractions.backedUp), systemImage: "checkmark.circle"))
+                items.append(.init(title: needUploadTitle, value: bytesText(needUploadBytes), systemImage: "arrow.up.circle.badge.clock"))
+                items.append(.init(title: remainingUploadTitle, value: bytesText(remainingUploadBytes), systemImage: "hourglass"))
                 items.append(.init(title: "Scanned", value: percentText(fractions.scan), systemImage: "magnifyingglass"))
+            } else {
+                items.append(.init(title: "Uploading", value: "Waiting…", systemImage: "arrow.up.circle"))
+                items.append(.init(title: "Backed Up", value: "Waiting…", systemImage: "checkmark.circle"))
+                let needUploadScope = BackupProgressProjection.needUploadScope(p)
+                let needUploadTitle = needUploadScope == .final ? "Need Upload (Final)" : "Need Upload (Disc.)"
+                let remainingUploadTitle = needUploadScope == .final ? "Remaining (Final)" : "Remaining (Disc.)"
+                items.append(.init(title: needUploadTitle, value: "Waiting…", systemImage: "arrow.up.circle.badge.clock"))
+                items.append(.init(title: remainingUploadTitle, value: "Waiting…", systemImage: "hourglass"))
+                items.append(.init(title: "Scanned", value: "Waiting…", systemImage: "magnifyingglass"))
             }
         case .restore:
             items.append(.init(title: "Downloaded", value: bytesText(p?.bytesDownloaded), systemImage: "arrow.down.circle"))
@@ -753,7 +798,7 @@ private struct TargetDetailView: View {
         var parts: [String] = []
         parts.append("\(t.kind.uppercased()) · \(stage)")
 
-        let bytesUploaded = t.progress?.bytesUploaded ?? 0
+        let bytesUploaded = t.progress?.bytesUploaded ?? t.progress?.bytesUploadedSource ?? 0
         let bytesDownloaded = t.progress?.bytesDownloaded ?? 0
         let bytesRead = t.progress?.bytesRead ?? 0
         let bytesDeduped = t.progress?.bytesDeduped ?? 0
@@ -793,13 +838,13 @@ private struct TargetDetailView: View {
     private func activeTaskFraction(_ t: AppModel.ActiveTask) -> Double? {
         guard let p = t.progress else { return nil }
         if let done = p.chunksDone, let total = p.chunksTotal, total > 0 {
-            if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
+            if done == total && (p.phase == "scan" || p.phase == "scan_upload" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
                 return nil
             }
             return min(1.0, Double(done) / Double(total))
         }
         if let done = p.filesDone, let total = p.filesTotal, total > 0 {
-            if done == total && (p.phase == "scan" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
+            if done == total && (p.phase == "scan" || p.phase == "scan_upload" || p.phase == "upload" || p.phase == "index" || p.phase == "index_sync") {
                 return nil
             }
             return min(1.0, Double(done) / Double(total))

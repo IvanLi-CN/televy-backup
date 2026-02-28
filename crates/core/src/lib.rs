@@ -25,7 +25,7 @@ pub use backup::{
     BackupConfig, BackupOptions, BackupResult, ChunkingConfig, SourceQuickStats,
     compute_source_quick_stats, run_backup, run_backup_with,
 };
-pub use error::{Error, Result};
+pub use error::{Error, Result, is_transient_telegram_message};
 pub use progress::{ProgressSink, TaskProgress};
 pub use restore::{
     RestoreConfig, RestoreOptions, RestoreResult, VerifyConfig, VerifyOptions, VerifyResult,

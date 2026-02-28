@@ -217,6 +217,24 @@ Remote-first index sync (backup preflight):
   - If local quick stats fails: continue backup with degraded (indeterminate) progress until totals are available.
   - Can be disabled for offline/debug via `backup run --no-remote-index-sync` (no pinned read; no remote index download).
 
+Backup runtime progress model:
+
+- Only `prepare` is rendered as indeterminate.
+- Runtime phases `scan` / `scan_upload` / `upload` / `index` are determinate and use a monotonic layered bar:
+  - `NeedUploadConfirmed <= UploadingCurrent <= BackedUp <= Scanned`
+  - `Scanned`: source traversal/read progress.
+  - `BackedUp`: source bytes already protected (`uploaded_source + deduped`).
+  - `UploadingCurrent`: in-flight uploaded payload in discovered upload workload.
+  - `NeedUploadConfirmed`: confirmed uploaded payload in discovered upload workload.
+- Need-upload labels are scope-aware:
+  - `Need Upload (Disc.)` while scan is still discovering upload set.
+  - `Need Upload (Final)` after scan is complete (`upload`/`index`).
+
+Index publish memory model:
+
+- During `index` phase, SQLite is compressed with streaming zstd into a temporary file and then uploaded in fixed-size encrypted parts.
+- The process does **not** use whole-file `fs::read + encode_all` for index publish, to keep daemon memory bounded on large index databases.
+
 ## SQLite index
 
 The local index database schema is defined in:

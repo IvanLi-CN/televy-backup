@@ -347,11 +347,11 @@ impl ProgressSink for NdjsonProgressSink {
         // reports `*_total == *_done` as a "so far" counter which makes UI progress bars look
         // stuck at 100%. Only surface totals when they look meaningful.
         let chunks_total = match (p.phase.as_str(), p.chunks_total, p.chunks_done) {
-            ("scan" | "upload" | "index" | "index_sync", Some(total), Some(done))
-                if total > 0 && total == done =>
-            {
-                None
-            }
+            (
+                "scan" | "scan_upload" | "upload" | "index" | "index_sync",
+                Some(total),
+                Some(done),
+            ) if total > 0 && total == done => None,
             (_phase, other, _done) => other,
         };
 
@@ -363,9 +363,13 @@ impl ProgressSink for NdjsonProgressSink {
             "filesDone": p.files_done,
             "sourceFilesTotal": p.source_files_total,
             "sourceBytesTotal": p.source_bytes_total,
+            "sourceBytesNeedUploadTotal": p.source_bytes_need_upload_total,
             "chunksTotal": chunks_total,
             "chunksDone": p.chunks_done,
             "bytesRead": p.bytes_read,
+            "uploadBytesTotal": p.upload_bytes_total,
+            "bytesUploadedConfirmed": p.bytes_uploaded_confirmed,
+            "bytesUploadedSource": p.bytes_uploaded_source,
             "bytesUploaded": p.bytes_uploaded,
             "bytesDownloaded": p.bytes_downloaded,
             "bytesDeduped": p.bytes_deduped,
@@ -435,9 +439,13 @@ fn emit_task_progress_preflight(events: bool, task_id: &str) {
         "filesDone": serde_json::Value::Null,
         "sourceFilesTotal": serde_json::Value::Null,
         "sourceBytesTotal": serde_json::Value::Null,
+        "sourceBytesNeedUploadTotal": serde_json::Value::Null,
         "chunksTotal": serde_json::Value::Null,
         "chunksDone": serde_json::Value::Null,
         "bytesRead": 0,
+        "uploadBytesTotal": serde_json::Value::Null,
+        "bytesUploadedConfirmed": 0,
+        "bytesUploadedSource": 0,
         "bytesUploaded": 0,
         "bytesDownloaded": 0,
         "bytesDeduped": 0,
@@ -4209,53 +4217,9 @@ async fn backup_run(
         .await
         .map_err(map_core_err)?;
 
-        let quick_stats = if progress_sink.is_some() {
-            let quick_stats_cancel = CancellationToken::new();
-            let quick_stats_cancel_for_task = quick_stats_cancel.clone();
-
-            let prepare_res = tokio::try_join!(
-                preflight_remote_first_index_sync(
-                    &storage,
-                    &master_key,
-                    &target.id,
-                    &target.source_path,
-                    &db_path,
-                    no_remote_index_sync,
-                    is_likely_private_chat_id(&ep.chat_id),
-                    progress_sink,
-                ),
-                async {
-                    match preflight_local_quick_stats(
-                        Path::new(&target.source_path),
-                        progress_sink,
-                        Some(quick_stats_cancel_for_task),
-                    )
-                    .await
-                    {
-                        Ok(stats) => Ok(Some(stats)),
-                        Err(e) => {
-                            tracing::warn!(
-                                event = "prepare.local_quick_stats_failed",
-                                target_id = %target.id,
-                                source_path = %target.source_path,
-                                error_code = e.code,
-                                error_message = %e.message,
-                                "prepare.local_quick_stats_failed"
-                            );
-                            Ok(None)
-                        }
-                    }
-                }
-            );
-
-            match prepare_res {
-                Ok(((), stats)) => stats,
-                Err(e) => {
-                    quick_stats_cancel.cancel();
-                    return Err(e);
-                }
-            }
-        } else {
+        let quick_stats_cancel = CancellationToken::new();
+        let quick_stats_cancel_for_task = quick_stats_cancel.clone();
+        let prepare_res = tokio::try_join!(
             preflight_remote_first_index_sync(
                 &storage,
                 &master_key,
@@ -4265,9 +4229,37 @@ async fn backup_run(
                 no_remote_index_sync,
                 is_likely_private_chat_id(&ep.chat_id),
                 progress_sink,
-            )
-            .await?;
-            None
+            ),
+            async {
+                match preflight_local_quick_stats(
+                    Path::new(&target.source_path),
+                    progress_sink,
+                    Some(quick_stats_cancel_for_task),
+                )
+                .await
+                {
+                    Ok(stats) => Ok(Some(stats)),
+                    Err(e) => {
+                        tracing::warn!(
+                            event = "prepare.local_quick_stats_failed",
+                            target_id = %target.id,
+                            source_path = %target.source_path,
+                            error_code = e.code,
+                            error_message = %e.message,
+                            "prepare.local_quick_stats_failed"
+                        );
+                        Ok(None)
+                    }
+                }
+            }
+        );
+
+        let quick_stats = match prepare_res {
+            Ok(((), stats)) => stats,
+            Err(e) => {
+                quick_stats_cancel.cancel();
+                return Err(e);
+            }
         };
 
         let opts = BackupOptions {
@@ -4490,9 +4482,31 @@ async fn preflight_remote_first_index_sync(
         return Ok(());
     }
 
-    let catalog = televy_backup_core::bootstrap::load_remote_catalog(storage, master_key)
-        .await
-        .map_err(map_core_err)?;
+    let catalog =
+        match televy_backup_core::bootstrap::load_remote_catalog(storage, master_key).await {
+            Ok(catalog) => catalog,
+            Err(televy_backup_core::Error::Telegram { message }) => {
+                if televy_backup_core::is_transient_telegram_message(&message) {
+                    tracing::warn!(
+                        event = "index_sync.skipped",
+                        reason = "remote_unavailable",
+                        error = %message,
+                        "bootstrap catalog fetch unavailable; continue backup without remote index sync"
+                    );
+                    tracing::debug!(
+                        event = "phase.finish",
+                        phase = "index_sync",
+                        duration_ms = started.elapsed().as_millis() as u64,
+                        index_source = "skipped",
+                        reason = "remote_unavailable",
+                        "phase.finish"
+                    );
+                    return Ok(());
+                }
+                return Err(map_core_err(televy_backup_core::Error::Telegram { message }));
+            }
+            Err(e) => return Err(map_core_err(e)),
+        };
 
     let Some(catalog) = catalog else {
         tracing::debug!(
@@ -4585,7 +4599,7 @@ async fn preflight_remote_first_index_sync(
         return Ok(());
     }
 
-    let stats = televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
+    let stats = match televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
         storage,
         &latest.snapshot_id,
         &latest.manifest_object_id,
@@ -4596,7 +4610,31 @@ async fn preflight_remote_first_index_sync(
         sink,
     )
     .await
-    .map_err(map_core_err)?;
+    {
+        Ok(stats) => stats,
+        Err(televy_backup_core::Error::Telegram { message }) => {
+            if televy_backup_core::is_transient_telegram_message(&message) {
+                tracing::warn!(
+                    event = "index_sync.skipped",
+                    reason = "remote_unavailable",
+                    snapshot_id = %latest.snapshot_id,
+                    error = %message,
+                    "remote index download unavailable; continue backup with local index"
+                );
+                tracing::debug!(
+                    event = "phase.finish",
+                    phase = "index_sync",
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    index_source = "skipped",
+                    reason = "remote_unavailable",
+                    "phase.finish"
+                );
+                return Ok(());
+            }
+            return Err(map_core_err(televy_backup_core::Error::Telegram { message }));
+        }
+        Err(e) => return Err(map_core_err(e)),
+    };
 
     tracing::debug!(
         event = "phase.finish",
@@ -6609,9 +6647,13 @@ fn daemon_control_status_task_progress(
         files_done: p.files_done,
         source_files_total: p.source_files_total,
         source_bytes_total: p.source_bytes_total,
+        source_bytes_need_upload_total: p.source_bytes_need_upload_total,
         chunks_total: p.chunks_total,
         chunks_done: p.chunks_done,
         bytes_read: p.bytes_read,
+        upload_bytes_total: p.upload_bytes_total,
+        bytes_uploaded_confirmed: p.bytes_uploaded_confirmed,
+        bytes_uploaded_source: p.bytes_uploaded_source,
         bytes_uploaded: p.bytes_uploaded,
         bytes_downloaded: p.bytes_downloaded,
         bytes_deduped: p.bytes_deduped,
@@ -6843,11 +6885,15 @@ mod tests {
                     phase: "upload".to_string(),
                     source_files_total: None,
                     source_bytes_total: None,
+                    source_bytes_need_upload_total: None,
                     files_total: None,
                     files_done: None,
                     chunks_total: None,
                     chunks_done: None,
                     bytes_read: None,
+                    upload_bytes_total: None,
+                    bytes_uploaded_confirmed: None,
+                    bytes_uploaded_source: None,
                     bytes_uploaded: Some(123),
                     bytes_downloaded: None,
                     bytes_deduped: None,
@@ -6923,11 +6969,15 @@ mod tests {
                         phase: "upload".to_string(),
                         source_files_total: None,
                         source_bytes_total: None,
+                        source_bytes_need_upload_total: None,
                         files_total: None,
                         files_done: None,
                         chunks_total: None,
                         chunks_done: None,
                         bytes_read: None,
+                        upload_bytes_total: None,
+                        bytes_uploaded_confirmed: None,
+                        bytes_uploaded_source: None,
                         bytes_uploaded: Some(10),
                         bytes_downloaded: None,
                         bytes_deduped: None,
@@ -6951,11 +7001,15 @@ mod tests {
                         phase: "upload".to_string(),
                         source_files_total: None,
                         source_bytes_total: None,
+                        source_bytes_need_upload_total: None,
                         files_total: None,
                         files_done: None,
                         chunks_total: None,
                         chunks_done: None,
                         bytes_read: None,
+                        upload_bytes_total: None,
+                        bytes_uploaded_confirmed: None,
+                        bytes_uploaded_source: None,
                         bytes_uploaded: Some(20),
                         bytes_downloaded: None,
                         bytes_deduped: None,

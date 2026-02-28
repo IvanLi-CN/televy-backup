@@ -10,7 +10,7 @@ enum TargetWorkKind: String {
 
 enum BackupProgressVisual {
     case indeterminate
-    case determinate(deduped: Double, backedUp: Double, scanned: Double)
+    case determinate(uploadWork: Double, uploadCurrent: Double, backedUp: Double, scanned: Double)
 }
 
 struct TargetRateEstimate: Equatable {
@@ -68,6 +68,7 @@ enum TargetPresentation {
         switch normalized {
         case "preflight", "prepare", "index_sync": return "Preparing"
         case "scan": return "Scanning"
+        case "scan_upload": return "Scanning + Uploading"
         case "upload": return "Uploading"
         case "index": return "Indexing"
         case "verify": return "Verifying"
@@ -128,7 +129,7 @@ enum TargetPresentation {
         }
 
         let normalizedPhase = p.phase.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let unstableTotalPhases: Set<String> = ["scan", "upload", "index", "index_sync"]
+        let unstableTotalPhases: Set<String> = ["scan", "scan_upload", "upload", "index", "index_sync"]
 
         if let done = p.chunksDone, let total = p.chunksTotal, total > 0 {
             if done == total && unstableTotalPhases.contains(normalizedPhase) {
@@ -149,60 +150,36 @@ enum TargetPresentation {
 
     static func backupProgressVisual(_ p: StatusProgress?) -> BackupProgressVisual {
         // UX contract: only prepare renders as indeterminate.
-        guard let p else { return .determinate(deduped: 0, backedUp: 0, scanned: 0) }
+        guard let p else { return .determinate(uploadWork: 0, uploadCurrent: 0, backedUp: 0, scanned: 0) }
         if isPreparePhase(p.phase) {
             return .indeterminate
         }
 
         if let fractions = backupFractions(p) {
-            // Required semantics: Deduped <= BackedUp <= Scanned.
-            return .determinate(deduped: fractions.deduped, backedUp: fractions.success, scanned: fractions.scan)
+            // Required semantics: UploadWork <= UploadCurrent <= BackedUp <= Scanned.
+            return .determinate(
+                uploadWork: fractions.uploadWork,
+                uploadCurrent: fractions.uploadCurrent,
+                backedUp: fractions.backedUp,
+                scanned: fractions.scan
+            )
         }
 
         if let fallback = progressFraction(p) {
             // Fallback indicates work has been scanned but exact backup accounting is unavailable.
-            return .determinate(deduped: 0, backedUp: 0, scanned: fallback)
+            return .determinate(uploadWork: 0, uploadCurrent: 0, backedUp: 0, scanned: fallback)
         }
 
-        return .determinate(deduped: 0, backedUp: 0, scanned: 0)
+        return .determinate(uploadWork: 0, uploadCurrent: 0, backedUp: 0, scanned: 0)
     }
 
-    static func backupFractions(_ p: StatusProgress?) -> (scan: Double, uploaded: Double, deduped: Double, pending: Double, success: Double)? {
-        guard let p, let sourceBytesTotal = p.sourceBytesTotal, sourceBytesTotal > 0 else { return nil }
-        let total = Double(sourceBytesTotal)
-        let phase = p.phase.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let inRunningPhase = phase == "scan" || phase == "upload" || phase == "index"
-        let runtimeCap = inRunningPhase ? 0.999 : 1.0
-        let uploaded = max(Int64(0), p.bytesUploaded ?? 0)
-        let deduped = max(Int64(0), p.bytesDeduped ?? 0)
-        let read = max(Int64(0), p.bytesRead ?? 0)
-        let uploadedRatio = min(runtimeCap, max(0.0, Double(uploaded) / total))
-        let dedupedRatio = min(runtimeCap, max(0.0, Double(deduped) / total))
-        let successBytes = uploaded > (Int64.max - deduped) ? Int64.max : (uploaded + deduped)
-        let success = min(runtimeCap, max(0.0, Double(successBytes) / total))
-        // Scanned combines byte-level read progress and file-level traversal progress.
-        let scanRead = min(runtimeCap, max(0.0, Double(read) / total))
-        let scanFiles: Double = {
-            let filesDone = max(Int64(0), p.filesDone ?? 0)
-            if let sourceFilesTotal = p.sourceFilesTotal, sourceFilesTotal > 0 {
-                return min(runtimeCap, max(0.0, Double(filesDone) / Double(sourceFilesTotal)))
-            }
-            if let filesTotal = p.filesTotal, filesTotal > 0 {
-                return min(runtimeCap, max(0.0, Double(filesDone) / Double(filesTotal)))
-            }
-            return 0
-        }()
-        // Scanned is the weakest (largest) semantic layer: it should never be below backed-up bytes.
-        let scan = max(max(scanRead, scanFiles), success)
-        let dedupedClamped = min(dedupedRatio, success)
-        let uploadedClamped = max(0.0, min(uploadedRatio, 1.0 - dedupedClamped))
-        let pendingClamped = max(0.0, min(scan - success, 1.0 - dedupedClamped - uploadedClamped))
+    static func backupFractions(_ p: StatusProgress?) -> (scan: Double, backedUp: Double, uploadWork: Double, uploadCurrent: Double)? {
+        guard let fractions = BackupProgressProjection.compute(p) else { return nil }
         return (
-            scan: scan,
-            uploaded: uploadedClamped,
-            deduped: dedupedClamped,
-            pending: pendingClamped,
-            success: success
+            scan: fractions.scanned,
+            backedUp: fractions.backedUp,
+            uploadWork: fractions.needUploadConfirmed,
+            uploadCurrent: fractions.uploadingCurrent
         )
     }
 
@@ -307,16 +284,16 @@ struct BackupUnifiedProgressBar: View {
                 .progressViewStyle(.linear)
                 .controlSize(.mini)
                 .tint(tint.opacity(0.92))
-        case let .determinate(deduped, backedUp, scanned):
-            let dedupedFrac = min(1.0, max(0.0, deduped))
-            let backedUpFrac = max(dedupedFrac, min(1.0, max(0.0, backedUp)))
+        case let .determinate(uploadWork, uploadCurrent, backedUp, scanned):
+            let uploadWorkFrac = min(1.0, max(0.0, uploadWork))
+            let uploadCurrentFrac = max(uploadWorkFrac, min(1.0, max(0.0, uploadCurrent)))
+            let backedUpFrac = max(uploadCurrentFrac, min(1.0, max(0.0, backedUp)))
             let scannedFrac = max(backedUpFrac, min(1.0, max(0.0, scanned)))
             let track = RoundedRectangle(cornerRadius: height / 2, style: .continuous)
-            let laneHeight = max(2.5, height * 0.78)
-            let laneY = (height - laneHeight) / 2
-            let scanColor = Color.gray.opacity(0.42)
-            let backedUpColor = Color(red: 0.57, green: 0.78, blue: 0.98).opacity(0.95)
-            let dedupedColor = tint.opacity(0.98)
+            let scanColor = Color.gray.opacity(0.28)
+            let backedUpColor = Color(red: 0.55, green: 0.78, blue: 0.98).opacity(0.92)
+            let uploadCurrentColor = Color(red: 0.20, green: 0.58, blue: 0.95).opacity(0.95)
+            let uploadWorkColor = tint.opacity(0.98)
 
             GeometryReader { geo in
                 let width = geo.size.width
@@ -324,24 +301,27 @@ struct BackupUnifiedProgressBar: View {
                     track.fill(Color.primary.opacity(0.10))
 
                     if scannedFrac > 0 {
-                        RoundedRectangle(cornerRadius: laneHeight / 2, style: .continuous)
+                        RoundedRectangle(cornerRadius: height / 2, style: .continuous)
                             .fill(scanColor)
-                            .frame(width: width * CGFloat(scannedFrac), height: laneHeight)
-                            .offset(y: laneY)
+                            .frame(width: width * CGFloat(scannedFrac), height: height)
                     }
 
                     if backedUpFrac > 0 {
-                        RoundedRectangle(cornerRadius: laneHeight / 2, style: .continuous)
+                        RoundedRectangle(cornerRadius: height / 2, style: .continuous)
                             .fill(backedUpColor)
-                            .frame(width: width * CGFloat(backedUpFrac), height: laneHeight)
-                            .offset(y: laneY)
+                            .frame(width: width * CGFloat(backedUpFrac), height: height)
                     }
 
-                    if dedupedFrac > 0 {
-                        RoundedRectangle(cornerRadius: laneHeight / 2, style: .continuous)
-                            .fill(dedupedColor)
-                            .frame(width: width * CGFloat(dedupedFrac), height: laneHeight)
-                            .offset(y: laneY)
+                    if uploadCurrentFrac > 0 {
+                        RoundedRectangle(cornerRadius: height / 2, style: .continuous)
+                            .fill(uploadCurrentColor)
+                            .frame(width: width * CGFloat(uploadCurrentFrac), height: height)
+                    }
+
+                    if uploadWorkFrac > 0 {
+                        RoundedRectangle(cornerRadius: height / 2, style: .continuous)
+                            .fill(uploadWorkColor)
+                            .frame(width: width * CGFloat(uploadWorkFrac), height: height)
                     }
                 }
                 .clipShape(track)
@@ -349,7 +329,8 @@ struct BackupUnifiedProgressBar: View {
             .frame(height: height)
             .animation(.easeOut(duration: 0.18), value: scannedFrac)
             .animation(.easeOut(duration: 0.18), value: backedUpFrac)
-            .animation(.easeOut(duration: 0.18), value: dedupedFrac)
+            .animation(.easeOut(duration: 0.18), value: uploadCurrentFrac)
+            .animation(.easeOut(duration: 0.18), value: uploadWorkFrac)
         }
     }
 }
