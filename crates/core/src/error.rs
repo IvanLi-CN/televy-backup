@@ -93,13 +93,9 @@ mod tests {
         assert!(is_transient_telegram_message(
             "save_file_part timed out after 60s"
         ));
-        assert!(is_transient_telegram_message(
-            "rpc error: FLOOD_WAIT_12"
-        ));
+        assert!(is_transient_telegram_message("rpc error: FLOOD_WAIT_12"));
         assert!(is_transient_telegram_message("transport disconnected"));
         assert!(!is_transient_telegram_message("AUTH_KEY_UNREGISTERED"));
-        assert!(!is_transient_telegram_message(
-            "CHAT_WRITE_FORBIDDEN"
-        ));
+        assert!(!is_transient_telegram_message("CHAT_WRITE_FORBIDDEN"));
     }
 }

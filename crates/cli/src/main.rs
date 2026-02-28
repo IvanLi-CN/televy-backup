@@ -4482,31 +4482,34 @@ async fn preflight_remote_first_index_sync(
         return Ok(());
     }
 
-    let catalog =
-        match televy_backup_core::bootstrap::load_remote_catalog(storage, master_key).await {
-            Ok(catalog) => catalog,
-            Err(televy_backup_core::Error::Telegram { message }) => {
-                if televy_backup_core::is_transient_telegram_message(&message) {
-                    tracing::warn!(
-                        event = "index_sync.skipped",
-                        reason = "remote_unavailable",
-                        error = %message,
-                        "bootstrap catalog fetch unavailable; continue backup without remote index sync"
-                    );
-                    tracing::debug!(
-                        event = "phase.finish",
-                        phase = "index_sync",
-                        duration_ms = started.elapsed().as_millis() as u64,
-                        index_source = "skipped",
-                        reason = "remote_unavailable",
-                        "phase.finish"
-                    );
-                    return Ok(());
-                }
-                return Err(map_core_err(televy_backup_core::Error::Telegram { message }));
+    let catalog = match televy_backup_core::bootstrap::load_remote_catalog(storage, master_key)
+        .await
+    {
+        Ok(catalog) => catalog,
+        Err(televy_backup_core::Error::Telegram { message }) => {
+            if televy_backup_core::is_transient_telegram_message(&message) {
+                tracing::warn!(
+                    event = "index_sync.skipped",
+                    reason = "remote_unavailable",
+                    error = %message,
+                    "bootstrap catalog fetch unavailable; continue backup without remote index sync"
+                );
+                tracing::debug!(
+                    event = "phase.finish",
+                    phase = "index_sync",
+                    duration_ms = started.elapsed().as_millis() as u64,
+                    index_source = "skipped",
+                    reason = "remote_unavailable",
+                    "phase.finish"
+                );
+                return Ok(());
             }
-            Err(e) => return Err(map_core_err(e)),
-        };
+            return Err(map_core_err(televy_backup_core::Error::Telegram {
+                message,
+            }));
+        }
+        Err(e) => return Err(map_core_err(e)),
+    };
 
     let Some(catalog) = catalog else {
         tracing::debug!(
@@ -4631,7 +4634,9 @@ async fn preflight_remote_first_index_sync(
                 );
                 return Ok(());
             }
-            return Err(map_core_err(televy_backup_core::Error::Telegram { message }));
+            return Err(map_core_err(televy_backup_core::Error::Telegram {
+                message,
+            }));
         }
         Err(e) => return Err(map_core_err(e)),
     };
