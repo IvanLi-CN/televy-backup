@@ -3471,15 +3471,17 @@ private struct TargetRowView: View {
     }
 
     private func runningSummary(nowMs: Int64) -> String {
-        if target.progress == nil,
-           let t = model.activeTask,
+        let p = effectiveProgress()
+
+        if let t = model.activeTask,
            t.state == "running",
            t.targetId == target.targetId
         {
-            let phase = TargetPresentation.stageText(t.progress?.phase) ?? "Working"
+            let phase = TargetPresentation.stageText(p?.phase ?? t.progress?.phase) ?? "Working"
             let elapsed = elapsedText(nowMs: nowMs)
-            let bytesUploaded = t.progress?.bytesUploaded ?? t.progress?.bytesUploadedSource ?? 0
-            let bytesRead = t.progress?.bytesRead ?? 0
+            let bytesUploaded = p?.bytesUploaded ?? p?.bytesUploadedSource
+                ?? t.progress?.bytesUploaded ?? t.progress?.bytesUploadedSource ?? 0
+            let bytesRead = p?.bytesRead ?? t.progress?.bytesRead ?? 0
             let metric: String
             switch t.kind {
             case "backup":
@@ -3487,9 +3489,9 @@ private struct TargetRowView: View {
                     metric = "Uploaded \(formatBytes(bytesUploaded))"
                 } else if bytesRead > 0 {
                     metric = "Read \(formatBytes(bytesRead))"
-                } else if let files = t.progress?.filesDone, files > 0 {
+                } else if let files = p?.filesDone ?? t.progress?.filesDone, files > 0 {
                     metric = "Indexed \(files) files"
-                } else if let chunks = t.progress?.chunksDone, chunks > 0 {
+                } else if let chunks = p?.chunksDone ?? t.progress?.chunksDone, chunks > 0 {
                     metric = "Scanned \(chunks) chunks"
                 } else {
                     metric = "Running"
@@ -3505,17 +3507,17 @@ private struct TargetRowView: View {
         }
 
         let elapsed = elapsedText(nowMs: nowMs)
-        let phase = TargetPresentation.stageText(target.progress?.phase) ?? "Working"
-        let bytesUploaded = target.progress?.bytesUploaded ?? target.progress?.bytesUploadedSource ?? 0
-        let bytesRead = target.progress?.bytesRead ?? 0
+        let phase = TargetPresentation.stageText(p?.phase) ?? "Working"
+        let bytesUploaded = p?.bytesUploaded ?? p?.bytesUploadedSource ?? 0
+        let bytesRead = p?.bytesRead ?? 0
         let metric: String
         if bytesUploaded > 0 {
             metric = "Uploaded \(formatBytes(bytesUploaded))"
         } else if bytesRead > 0 {
             metric = "Read \(formatBytes(bytesRead))"
-        } else if let files = target.progress?.filesDone, files > 0 {
+        } else if let files = p?.filesDone, files > 0 {
             metric = "Indexed \(files) files"
-        } else if let chunks = target.progress?.chunksDone, chunks > 0 {
+        } else if let chunks = p?.chunksDone, chunks > 0 {
             metric = "Scanned \(chunks) chunks"
         } else {
             metric = "Running"
@@ -3524,14 +3526,14 @@ private struct TargetRowView: View {
     }
 
     private func effectiveProgress() -> StatusProgress? {
-        if let daemonProgress = target.progress {
-            return daemonProgress
-        }
         if let t = model.activeTask,
            t.state == "running",
            t.targetId == target.targetId
         {
-            return t.progress
+            return t.progress ?? target.progress
+        }
+        if let daemonProgress = target.progress {
+            return daemonProgress
         }
         return nil
     }

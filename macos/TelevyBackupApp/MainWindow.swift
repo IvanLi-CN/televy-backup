@@ -267,11 +267,11 @@ private struct TargetListRow: View {
     }
 
     private var effectiveProgress: StatusProgress? {
+        if let t = activeForTarget {
+            return t.progress ?? target.progress
+        }
         if let daemonProgress = target.progress {
             return daemonProgress
-        }
-        if let t = activeForTarget {
-            return t.progress
         }
         return nil
     }
@@ -372,7 +372,12 @@ private struct TargetListRow: View {
             }
         }()
 
-        let progressVisual = TargetPresentation.backupProgressVisual(effectiveProgress)
+        let progressVisual: BackupProgressVisual = {
+            if kind == .backup {
+                return TargetPresentation.backupProgressVisual(effectiveProgress)
+            }
+            return .indeterminate
+        }()
 
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -479,11 +484,11 @@ private struct TargetDetailView: View {
     }
 
     private var effectiveProgress: StatusProgress? {
+        if let t = activeForTarget {
+            return t.progress ?? target.progress
+        }
         if let daemonProgress = target.progress {
             return daemonProgress
-        }
-        if let t = activeForTarget {
-            return t.progress
         }
         return nil
     }
@@ -770,7 +775,12 @@ private struct TargetDetailView: View {
                 rowView(items)
 
                 BackupUnifiedProgressBar(
-                    visual: TargetPresentation.backupProgressVisual(p),
+                    visual: {
+                        if kind == .backup {
+                            return TargetPresentation.backupProgressVisual(p)
+                        }
+                        return .indeterminate
+                    }(),
                     tint: status.tint
                 )
             }

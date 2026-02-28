@@ -56,7 +56,8 @@ pub fn is_transient_telegram_message(message: &str) -> bool {
         || msg.contains("broken pipe")
         || msg.contains("connection refused")
         || msg.contains("temporarily unavailable")
-        || msg.contains("transport")
+        || msg.contains("transport disconnected")
+        || msg.contains("transport timeout")
         || msg.contains("network is unreachable")
         || msg.contains("deadline exceeded")
         || msg.contains("flood_wait")
@@ -95,6 +96,7 @@ mod tests {
         ));
         assert!(is_transient_telegram_message("rpc error: FLOOD_WAIT_12"));
         assert!(is_transient_telegram_message("transport disconnected"));
+        assert!(!is_transient_telegram_message("transport protocol violation"));
         assert!(!is_transient_telegram_message("AUTH_KEY_UNREGISTERED"));
         assert!(!is_transient_telegram_message("CHAT_WRITE_FORBIDDEN"));
     }

@@ -150,7 +150,7 @@ enum TargetPresentation {
 
     static func backupProgressVisual(_ p: StatusProgress?) -> BackupProgressVisual {
         // UX contract: only prepare renders as indeterminate.
-        guard let p else { return .determinate(uploadWork: 0, uploadCurrent: 0, backedUp: 0, scanned: 0) }
+        guard let p else { return .indeterminate }
         if isPreparePhase(p.phase) {
             return .indeterminate
         }
@@ -170,7 +170,7 @@ enum TargetPresentation {
             return .determinate(uploadWork: 0, uploadCurrent: 0, backedUp: 0, scanned: fallback)
         }
 
-        return .determinate(uploadWork: 0, uploadCurrent: 0, backedUp: 0, scanned: 0)
+        return .indeterminate
     }
 
     static func backupFractions(_ p: StatusProgress?) -> (scan: Double, backedUp: Double, uploadWork: Double, uploadCurrent: Double)? {

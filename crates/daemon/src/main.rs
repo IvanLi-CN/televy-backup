@@ -1950,8 +1950,19 @@ async fn preflight_remote_first_index_sync_daemon(
         return Ok(());
     }
 
-    let Some(catalog) = (match bootstrap::load_remote_catalog(storage, master_key).await {
-        Ok(catalog) => Ok(catalog),
+    let catalog = match bootstrap::load_remote_catalog(storage, master_key).await {
+        Ok(Some(catalog)) => catalog,
+        Ok(None) | Err(televy_backup_core::Error::BootstrapMissing { .. }) => {
+            tracing::debug!(
+                event = "phase.finish",
+                phase = "index_sync",
+                duration_ms = started.elapsed().as_millis() as u64,
+                index_source = "skipped",
+                reason = "bootstrap_missing",
+                "phase.finish"
+            );
+            return Ok(());
+        }
         Err(televy_backup_core::Error::Telegram { message }) => {
             if televy_backup_core::is_transient_telegram_message(&message) {
                 tracing::warn!(
@@ -1968,23 +1979,11 @@ async fn preflight_remote_first_index_sync_daemon(
                     reason = "remote_unavailable",
                     "phase.finish"
                 );
-                Ok(None)
-            } else {
-                Err(televy_backup_core::Error::Telegram { message })
+                return Ok(());
             }
+            return Err(televy_backup_core::Error::Telegram { message });
         }
-        Err(e) => Err(e),
-    })?
-    else {
-        tracing::debug!(
-            event = "phase.finish",
-            phase = "index_sync",
-            duration_ms = started.elapsed().as_millis() as u64,
-            index_source = "skipped",
-            reason = "bootstrap_missing",
-            "phase.finish"
-        );
-        return Ok(());
+        Err(e) => return Err(e),
     };
 
     let latest = if let Some(t) = catalog.targets.iter().find(|t| t.target_id == target_id) {
