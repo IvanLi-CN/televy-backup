@@ -292,33 +292,43 @@ async fn large_index_db_uploads_multiple_index_parts() {
     write_file(source.join("single.bin"), &[42u8; 4096]);
 
     let db_path = temp.path().join("index.sqlite");
-    std::fs::File::create(&db_path).unwrap();
-    let prep_pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
+    // Populate exported schema tables (chunks/chunk_objects) with noise so the *compact* index
+    // export is forced into multiple uploaded parts.
+    let prep_pool = televy_backup_core::index_db::open_index_db(&db_path)
         .await
         .unwrap();
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS stress_payload (
-            id INTEGER PRIMARY KEY,
-            blob BLOB NOT NULL
-        )
-        "#,
-    )
-    .execute(&prep_pool)
-    .await
-    .unwrap();
 
-    let mut blob = vec![0u8; 1024 * 1024];
+    let mut noise = vec![0u8; 512];
     let mut seed = 0xC0FFEE1234u64;
-    for _ in 0..12 {
-        seed = fill_deterministic_noise(&mut blob, seed);
-        sqlx::query("INSERT INTO stress_payload(blob) VALUES (?)")
-            .bind(blob.clone())
-            .execute(&prep_pool)
-            .await
-            .unwrap();
+    let mut tx = prep_pool.begin().await.unwrap();
+    for _ in 0..5_000 {
+        seed = fill_deterministic_noise(&mut noise, seed);
+        let chunk_hash = blake3::hash(&noise).to_hex().to_string();
+
+        let mut object_id = String::with_capacity("tgfile:".len() + noise.len() * 2);
+        object_id.push_str("tgfile:");
+        for b in &noise {
+            use std::fmt::Write as _;
+            let _ = write!(&mut object_id, "{:02x}", b);
+        }
+
+        sqlx::query(
+            "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES (?, 1, 'blake3', 'xchacha20poly1305', '2026-01-01T00:00:00Z')",
+        )
+        .bind(&chunk_hash)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at) VALUES (?, 'test.mem', ?, '2026-01-01T00:00:00Z')",
+        )
+        .bind(&chunk_hash)
+        .bind(object_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     }
-    sqlx::query("VACUUM").execute(&prep_pool).await.unwrap();
+    tx.commit().await.unwrap();
     prep_pool.close().await;
 
     let storage = InMemoryStorage::new();

@@ -3200,6 +3200,167 @@ async fn load_chunk_hashes_for_storage<S: Storage>(
     Ok(hashes)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CompactIndexExportStats {
+    source_db_bytes: u64,
+    export_db_bytes: u64,
+    kept_latest_snapshots: u64,
+}
+
+async fn export_compacted_index_db_for_upload(
+    source_db_path: &Path,
+    temp_parent: &Path,
+) -> Result<(tempfile::NamedTempFile, CompactIndexExportStats)> {
+    let source_db_bytes = source_db_path.metadata()?.len();
+
+    let exported_db = tempfile::Builder::new()
+        .prefix("televy-index-export-")
+        .suffix(".sqlite")
+        .tempfile_in(temp_parent)?;
+    let export_path = exported_db.path().to_path_buf();
+
+    let pool = open_index_db(&export_path).await?;
+    let mut conn: DbConn = pool.acquire().await?;
+    drop(pool);
+
+    // ATTACH needs a literal string; escape single quotes defensively.
+    let src_path_sql = source_db_path.to_string_lossy().replace('\'', "''");
+    sqlx::query(&format!("ATTACH DATABASE '{src_path_sql}' AS src"))
+        .execute(&mut *conn)
+        .await?;
+
+    // Keep `files`/`file_chunks` only for each source_path's latest snapshot.
+    sqlx::query("CREATE TEMP TABLE keep_snapshots (snapshot_id TEXT PRIMARY KEY)")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO keep_snapshots(snapshot_id)
+        SELECT snapshot_id
+        FROM (
+          SELECT snapshot_id,
+                 ROW_NUMBER() OVER (PARTITION BY source_path ORDER BY created_at DESC) AS rn
+          FROM src.snapshots
+        )
+        WHERE rn = 1
+        "#,
+    )
+    .execute(&mut *conn)
+    .await?;
+    let kept_latest_snapshots: u64 = sqlx::query("SELECT COUNT(*) AS n FROM keep_snapshots")
+        .fetch_one(&mut *conn)
+        .await?
+        .try_get::<i64, _>("n")
+        .unwrap_or(0)
+        .max(0) as u64;
+
+    // Copy in one transaction to keep export fast.
+    let mut tx = conn.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id)
+        SELECT snapshot_id, created_at, source_path, label, base_snapshot_id
+        FROM src.snapshots
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind)
+        SELECT file_id, snapshot_id, path, size, mtime_ms, mode, kind
+        FROM src.files
+        WHERE snapshot_id IN (SELECT snapshot_id FROM keep_snapshots)
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+        SELECT chunk_hash, size, hash_alg, enc_alg, created_at
+        FROM src.chunks
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at)
+        SELECT chunk_hash, provider, object_id, created_at
+        FROM src.chunk_objects
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO remote_indexes (snapshot_id, provider, manifest_object_id, created_at)
+        SELECT snapshot_id, provider, manifest_object_id, created_at
+        FROM src.remote_indexes
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO remote_index_parts (snapshot_id, part_no, provider, object_id, size, hash)
+        SELECT snapshot_id, part_no, provider, object_id, size, hash
+        FROM src.remote_index_parts
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO tasks (
+            task_id, kind, state, created_at, started_at, finished_at, snapshot_id, error_code, error_message
+        )
+        SELECT
+            task_id, kind, state, created_at, started_at, finished_at, snapshot_id, error_code, error_message
+        FROM src.tasks
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
+        SELECT fc.file_id, fc.seq, fc.chunk_hash, fc.offset, fc.len
+        FROM src.file_chunks fc
+        JOIN src.files f
+          ON f.file_id = fc.file_id
+        WHERE f.snapshot_id IN (SELECT snapshot_id FROM keep_snapshots)
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    sqlx::query("DETACH DATABASE src")
+        .execute(&mut *conn)
+        .await?;
+    drop(conn);
+
+    let export_db_bytes = export_path.metadata()?.len();
+    Ok((
+        exported_db,
+        CompactIndexExportStats {
+            source_db_bytes,
+            export_db_bytes,
+            kept_latest_snapshots,
+        },
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn upload_index<S: Storage>(
     conn: &mut DbConn,
@@ -3223,14 +3384,31 @@ async fn upload_index<S: Storage>(
     bytes_deduped: u64,
 ) -> Result<IndexManifest> {
     let provider = storage.provider();
-    // Ensure all file/chunk rows are committed, then stream-compress the DB into a temp file.
-    // This avoids holding multi-GB index databases in process memory.
-    let mut db_file = File::open(&config.db_path)?;
+    // Export a compact index DB for upload:
+    // - keep *all* global state (snapshots/chunks/chunk_objects/remote_indexes/...)
+    // - but only keep `files`/`file_chunks` for the latest snapshot of each source_path
+    //
+    // This bounds remote index size for large endpoints (millions of files across N snapshots)
+    // while still keeping enough state for `index_sync` + base-chunk-copy on the next run.
     let temp_parent = config
         .db_path
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(std::env::temp_dir);
+    let (exported_db, export_stats) =
+        export_compacted_index_db_for_upload(&config.db_path, &temp_parent).await?;
+    debug!(
+        event = "index.export.finish",
+        db_path = %config.db_path.display(),
+        source_bytes = export_stats.source_db_bytes,
+        export_bytes = export_stats.export_db_bytes,
+        kept_latest_snapshots = export_stats.kept_latest_snapshots,
+        "index.export.finish"
+    );
+
+    // Stream-compress the exported DB into a temp file. This avoids holding multi-GB index
+    // databases in process memory.
+    let mut db_file = File::open(exported_db.path())?;
     let mut compressed_file = tempfile::Builder::new()
         .prefix("televy-index-upload-")
         .tempfile_in(temp_parent)?;
@@ -3639,7 +3817,9 @@ fn path_to_utf8(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::error_has_flood_wait;
+    use sqlx::Row;
+
+    use super::{error_has_flood_wait, export_compacted_index_db_for_upload};
     use crate::Error;
 
     #[test]
@@ -3662,5 +3842,144 @@ mod tests {
         assert!(!error_has_flood_wait(&Error::Telegram {
             message: "AUTH_KEY_UNREGISTERED".to_string(),
         }));
+    }
+
+    #[tokio::test]
+    async fn index_export_keeps_only_latest_snapshot_filemaps_per_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_db = dir.path().join("source.sqlite");
+
+        let pool = crate::index_db::open_index_db(&source_db).await.unwrap();
+
+        // Two sources, two snapshots each.
+        for (snapshot_id, created_at, source_path) in [
+            ("snp_a1", "2026-01-01T00:00:00Z", "/a"),
+            ("snp_a2", "2026-01-02T00:00:00Z", "/a"),
+            ("snp_b1", "2026-01-01T00:00:00Z", "/b"),
+            ("snp_b2", "2026-01-03T00:00:00Z", "/b"),
+        ] {
+            sqlx::query(
+                "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, 'test', NULL)",
+            )
+            .bind(snapshot_id)
+            .bind(created_at)
+            .bind(source_path)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO remote_indexes (snapshot_id, provider, manifest_object_id, created_at) VALUES (?, 'telegram.mtproto/test', ?, ?)",
+            )
+            .bind(snapshot_id)
+            .bind(format!("man_{snapshot_id}"))
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO remote_index_parts (snapshot_id, part_no, provider, object_id, size, hash) VALUES (?, 0, 'telegram.mtproto/test', ?, 1, 'h')",
+            )
+            .bind(snapshot_id)
+            .bind(format!("part_{snapshot_id}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // One file per snapshot; only the latest per source should remain in the export.
+        for (snapshot_id, file_id, chunk_hash) in [
+            ("snp_a1", "f_a1", "chk_a1"),
+            ("snp_a2", "f_a2", "chk_a2"),
+            ("snp_b1", "f_b1", "chk_b1"),
+            ("snp_b2", "f_b2", "chk_b2"),
+        ] {
+            sqlx::query(
+                "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, ?, 'x.txt', 1, 0, 0, 'file')",
+            )
+            .bind(file_id)
+            .bind(snapshot_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES (?, 1, 'blake3', 'xchacha20poly1305', '2026-01-01T00:00:00Z')",
+            )
+            .bind(chunk_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at) VALUES (?, 'telegram.mtproto/test', ?, '2026-01-01T00:00:00Z')",
+            )
+            .bind(chunk_hash)
+            .bind(format!("tgfile:obj_{chunk_hash}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len) VALUES (?, 0, ?, 0, 1)",
+            )
+            .bind(file_id)
+            .bind(chunk_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Add a task row to ensure we keep it.
+        sqlx::query(
+            "INSERT INTO tasks (task_id, kind, state, created_at, started_at, finished_at, snapshot_id, error_code, error_message) VALUES ('t1', 'backup', 'done', '2026-01-01T00:00:00Z', NULL, NULL, 'snp_a1', NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        drop(pool);
+
+        let (exported_db, stats) = export_compacted_index_db_for_upload(&source_db, dir.path())
+            .await
+            .unwrap();
+        assert_eq!(stats.kept_latest_snapshots, 2);
+        assert!(stats.export_db_bytes > 0);
+
+        let export_pool = crate::index_db::open_existing_index_db(exported_db.path())
+            .await
+            .unwrap();
+
+        let snapshots: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(snapshots, 4);
+
+        let rows = sqlx::query("SELECT DISTINCT snapshot_id FROM files ORDER BY snapshot_id")
+            .fetch_all(&export_pool)
+            .await
+            .unwrap();
+        let kept = rows
+            .into_iter()
+            .map(|r| r.get::<String, _>("snapshot_id"))
+            .collect::<Vec<_>>();
+        assert_eq!(kept, vec!["snp_a2".to_string(), "snp_b2".to_string()]);
+
+        let file_chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM file_chunks")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(file_chunks, 2);
+
+        let tasks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM tasks")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(tasks, 1);
     }
 }
