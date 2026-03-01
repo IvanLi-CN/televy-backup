@@ -1380,7 +1380,13 @@ pub async fn run_backup_with<S: Storage>(
 
     // Retention must run before snapshot insertion so repeated failed runs do not keep inflating
     // the shared endpoint index DB beyond the configured window.
-    if let Err(e) = apply_retention_all_sources(&mut conn, config.keep_last_snapshots).await {
+    //
+    // NOTE: This used to run for *all* sources (apply_retention_all_sources). On large endpoints
+    // (e.g. millions of files across multiple targets) that makes every backup pay an O(db-size)
+    // maintenance cost before any scanning/upload begins, which can look like a "stuck" backup.
+    // Restrict retention to the source being backed up; other sources will be cleaned up when
+    // they run, or via an explicit maintenance task.
+    if let Err(e) = apply_retention(&mut conn, &config.source_path, config.keep_last_snapshots).await {
         warn!(
             event = "snapshots.retention.preflight_failed",
             source_path = %config.source_path.display(),
@@ -2923,28 +2929,6 @@ fn push_string_bind_list<'a>(query: &mut QueryBuilder<'a, Sqlite>, values: &'a [
     for value in values {
         separated.push_bind(value);
     }
-}
-
-async fn apply_retention_all_sources(conn: &mut DbConn, keep_last_snapshots: u32) -> Result<()> {
-    let rows = execute_sqlite_with_busy_retry!(
-        "snapshots.distinct_sources",
-        sqlx::query(
-            r#"
-            SELECT DISTINCT source_path
-            FROM snapshots
-            WHERE source_path IS NOT NULL
-              AND source_path <> ''
-            "#,
-        )
-        .fetch_all(&mut **conn)
-    )?;
-
-    for row in rows {
-        let source_path: String = row.get("source_path");
-        apply_retention(conn, Path::new(&source_path), keep_last_snapshots).await?;
-    }
-
-    Ok(())
 }
 
 async fn compact_index_db_if_needed(conn: &mut DbConn, db_path: &Path) {

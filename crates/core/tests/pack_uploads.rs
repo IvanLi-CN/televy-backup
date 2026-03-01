@@ -566,7 +566,7 @@ async fn retention_preflight_bounds_snapshot_growth_on_repeated_failures() {
 }
 
 #[tokio::test]
-async fn retention_preflight_prunes_other_sources_before_backup() {
+async fn retention_preflight_does_not_prune_other_sources_before_backup() {
     let temp = TempDir::new().unwrap();
     let source_sync = temp.path().join("sync");
     let source_projects = temp.path().join("projects");
@@ -645,8 +645,8 @@ async fn retention_preflight_prunes_other_sources_before_backup() {
     let projects_after = snapshot_count_for_source(&pool, &source_projects).await;
     let sync_after = snapshot_count_for_source(&pool, &source_sync).await;
     assert_eq!(
-        projects_after, 2,
-        "expected preflight retention to trim idle sources"
+        projects_after, 4,
+        "expected retention to only prune the active source (idle sources are cleaned when they run)"
     );
     assert_eq!(
         sync_after, 2,
