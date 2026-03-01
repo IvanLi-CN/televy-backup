@@ -164,21 +164,32 @@ impl TelegramMtProtoStorage {
 
         let pool_size = max_concurrent_uploads.unwrap_or(1).clamp(1, 8);
         let mut helpers = Vec::with_capacity(pool_size);
-        let mut session_bytes = None::<Vec<u8>>;
-        for _ in 0..pool_size {
+        let mut primary_session_bytes = None::<Vec<u8>>;
+        for i in 0..pool_size {
+            let is_primary = i == 0;
             let mut helper = MtProtoHelper::spawn(&helper_path)?;
             helper.init(InitRequest {
                 api_id,
                 api_hash: api_hash.clone(),
                 bot_token: bot_token.clone(),
                 chat_id: chat_id.clone(),
-                session_b64: session_b64.clone(),
+                // MTProto sessions are not safe to use concurrently across multiple processes.
+                // Only the primary helper (the one whose session we persist) should reuse the
+                // stored session; additional helpers start with a fresh session and authenticate
+                // via bot token.
+                session_b64: if is_primary {
+                    session_b64.clone()
+                } else {
+                    None
+                },
                 cache_dir: cache_dir.clone(),
                 min_delay_ms,
                 max_concurrent_uploads,
             })?;
-            session_bytes = helper.session_bytes().or(session_bytes);
-            helpers.push(helper);
+            if is_primary {
+                primary_session_bytes = helper.session_bytes();
+            }
+            helpers.push(PooledHelper { helper, is_primary });
         }
 
         Ok(Self {
@@ -191,7 +202,7 @@ impl TelegramMtProtoStorage {
             min_delay_ms,
             max_concurrent_uploads,
             helper_path,
-            session: Mutex::new(session_bytes),
+            session: Mutex::new(primary_session_bytes),
             helper_pool: MtProtoHelperPool::new(helpers),
         })
     }
@@ -212,12 +223,15 @@ impl TelegramMtProtoStorage {
         }
     }
 
-    fn replace_helper_locked(&self, helper: &mut MtProtoHelper) -> Result<()> {
+    fn replace_helper_locked(&self, helper: &mut MtProtoHelper, is_primary: bool) -> Result<()> {
         helper.kill_best_effort();
 
-        let session_b64 = self
-            .session_bytes()
-            .map(|b| base64::engine::general_purpose::STANDARD.encode(b));
+        let session_b64 = if is_primary {
+            self.session_bytes()
+                .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+        } else {
+            None
+        };
 
         let mut new_helper = MtProtoHelper::spawn(&self.helper_path)?;
         new_helper.init(InitRequest {
@@ -232,15 +246,21 @@ impl TelegramMtProtoStorage {
         })?;
 
         *helper = new_helper;
-        *self.session.lock().map_err(|_| Error::Telegram {
-            message: "mtproto helper session lock poisoned".to_string(),
-        })? = helper.session_bytes();
+        if is_primary {
+            *self.session.lock().map_err(|_| Error::Telegram {
+                message: "mtproto helper session lock poisoned".to_string(),
+            })? = helper.session_bytes();
+        }
         Ok(())
     }
 
-    fn ensure_helper_running_locked(&self, helper: &mut MtProtoHelper) -> Result<()> {
+    fn ensure_helper_running_locked(
+        &self,
+        helper: &mut MtProtoHelper,
+        is_primary: bool,
+    ) -> Result<()> {
         if helper.has_exited() {
-            self.replace_helper_locked(helper)?;
+            self.replace_helper_locked(helper, is_primary)?;
         }
         Ok(())
     }
@@ -250,32 +270,37 @@ impl TelegramMtProtoStorage {
             // Check out a helper from the pool (block the current blocking thread until one is
             // available). This is what makes `max_concurrent_uploads` actually enable parallel
             // upload *jobs* for the MTProto backend.
-            let mut helper = self.helper_pool.checkout()?;
+            let mut pooled = self.helper_pool.checkout()?;
+            let helper = &mut pooled.helper;
 
             // Always make sure we don't keep using a dead helper between runs.
-            if let Err(e) = self.ensure_helper_running_locked(&mut helper) {
-                self.helper_pool.checkin(helper);
+            if let Err(e) = self.ensure_helper_running_locked(helper, pooled.is_primary) {
+                self.helper_pool.checkin(pooled);
                 return Err(e);
             }
 
             // Ensure the helper is returned to the pool even if the caller panics (should be rare,
             // but better than permanently reducing pool capacity).
-            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut helper)));
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(helper)));
 
-            // Persist the latest session regardless of success/failure.
-            *self.session.lock().map_err(|_| Error::Telegram {
-                message: "mtproto helper session lock poisoned".to_string(),
-            })? = helper.session_bytes();
+            // Only the primary helper is allowed to update the persisted session; secondary helpers
+            // run with independent sessions to avoid MTProto seqno/message_id divergence across
+            // processes.
+            if pooled.is_primary {
+                *self.session.lock().map_err(|_| Error::Telegram {
+                    message: "mtproto helper session lock poisoned".to_string(),
+                })? = helper.session_bytes();
+            }
 
             // If the helper process itself is unhealthy, respawn it so the next run can proceed
             // without needing a full app/daemon restart.
             if let Ok(Err(ref e)) = res
                 && Self::should_respawn_helper_after(e)
             {
-                let _ = self.replace_helper_locked(&mut helper);
+                let _ = self.replace_helper_locked(helper, pooled.is_primary);
             }
 
-            self.helper_pool.checkin(helper);
+            self.helper_pool.checkin(pooled);
 
             match res {
                 Ok(v) => v,
@@ -310,20 +335,25 @@ impl TelegramMtProtoStorage {
     }
 }
 
+struct PooledHelper {
+    helper: MtProtoHelper,
+    is_primary: bool,
+}
+
 struct MtProtoHelperPool {
-    inner: Mutex<Vec<MtProtoHelper>>,
+    inner: Mutex<Vec<PooledHelper>>,
     available: Condvar,
 }
 
 impl MtProtoHelperPool {
-    fn new(helpers: Vec<MtProtoHelper>) -> Self {
+    fn new(helpers: Vec<PooledHelper>) -> Self {
         Self {
             inner: Mutex::new(helpers),
             available: Condvar::new(),
         }
     }
 
-    fn checkout(&self) -> Result<MtProtoHelper> {
+    fn checkout(&self) -> Result<PooledHelper> {
         let mut guard = self.inner.lock().map_err(|_| Error::Telegram {
             message: "mtproto helper pool lock poisoned".to_string(),
         })?;
@@ -337,7 +367,7 @@ impl MtProtoHelperPool {
         }
     }
 
-    fn checkin(&self, helper: MtProtoHelper) {
+    fn checkin(&self, helper: PooledHelper) {
         if let Ok(mut guard) = self.inner.lock() {
             guard.push(helper);
             self.available.notify_one();
