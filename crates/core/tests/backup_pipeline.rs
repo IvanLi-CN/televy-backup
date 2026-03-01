@@ -211,3 +211,77 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
         "expected upload bytes to advance before scan bytes reached source total"
     );
 }
+
+#[tokio::test]
+async fn backup_compacts_local_index_db_after_success() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("src");
+    std::fs::create_dir_all(&source).unwrap();
+
+    let file_path = source.join("single.bin");
+    write_file(file_path.clone(), &[1u8; 4096]);
+
+    let db_path = temp.path().join("index.sqlite");
+    let storage = InMemoryStorage::new();
+
+    let cfg = BackupConfig {
+        db_path: db_path.clone(),
+        source_path: source.clone(),
+        label: "compact".to_string(),
+        chunking: ChunkingConfig {
+            min_bytes: 4096,
+            avg_bytes: 4096,
+            max_bytes: 4096,
+        },
+        rate_limit: Default::default(),
+        master_key: [3u8; 32],
+        snapshot_id: None,
+        keep_last_snapshots: 10,
+    };
+
+    let r1 = run_backup(&storage, cfg.clone()).await.unwrap();
+
+    // Second run produces a newer snapshot for the same source_path.
+    write_file(file_path, &[2u8; 4096]);
+    let r2 = run_backup(&storage, cfg).await.unwrap();
+    assert_ne!(r1.snapshot_id, r2.snapshot_id);
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
+        .await
+        .unwrap();
+
+    let snapshots: i64 = sqlx::query("SELECT COUNT(*) as n FROM snapshots")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get("n");
+    assert_eq!(snapshots, 2);
+
+    // Only the latest snapshot keeps file maps in the compacted local DB.
+    let rows = sqlx::query(
+        "SELECT DISTINCT snapshot_id FROM files WHERE kind = 'file' ORDER BY snapshot_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let kept = rows
+        .into_iter()
+        .map(|r| r.get::<String, _>("snapshot_id"))
+        .collect::<Vec<_>>();
+    assert_eq!(kept, vec![r2.snapshot_id.clone()]);
+
+    let base_file_chunks: i64 = sqlx::query(
+        r#"
+        SELECT COUNT(*) as n
+        FROM file_chunks fc
+        JOIN files f ON f.file_id = fc.file_id
+        WHERE f.snapshot_id = ?
+        "#,
+    )
+    .bind(&r1.snapshot_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .get("n");
+    assert_eq!(base_file_chunks, 0);
+}

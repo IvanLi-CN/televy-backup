@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 部分完成（2/3）
+- Status: 部分完成（3/4）
 - Created: 2026-03-02
 - Last: 2026-03-02
 
@@ -26,6 +26,7 @@
 - 仍然保证：
   - `index_sync` 下载最新 remote index 后，可用于下一次备份的 base-chunk-copy（只需要每个 source 的 latest 快照文件映射）
   - 任意旧快照仍可恢复：通过其自身的 `manifest_object_id` 下载对应 remote index（该 index 在生成时包含当时的 latest 文件映射，即包含该快照）
+- 在备份成功后，自动把**本地** endpoint index DB 也压到“每个 source 仅保留 latest file map”的量级，从而避免单机长期跑导致本地 DB 多 GiB（即便不进行 remote-first index_sync）。
 - 运行时不增加 daemon 内存峰值（仍保持“流式压缩 + 分片上传”）。
 
 ### Non-goals
@@ -42,12 +43,13 @@
   - 全量复制：`snapshots` / `chunks` / `chunk_objects` / `remote_indexes` / `remote_index_parts` / `tasks`
   - 裁剪复制：`files` / `file_chunks` 仅包含“每个 `source_path` 的 latest snapshot”的数据
   - 对 export DB 进行 zstd + 加密分片上传（沿用现有 upload_index 逻辑）
+- core：在 backup 成功完成后，自动用 compact export DB **重写本地** endpoint index DB（同样的裁剪规则），以缩小磁盘占用并避免下次 index upload 受本地 DB 体积拖累。
 - 新增单元测试验证 export DB 的保留/裁剪规则（覆盖多 source、多 snapshot）。
 - 增加日志：输出 export 前后 DB 大小（bytes）与保留 snapshot 数，便于排障与验证收益。
 
 ### Out of scope
 
-- 自动在本地 DB 上执行同样裁剪（如需要，另开 spec 或作为可选 CLI/maintenance 命令）
+- 清理 `chunks/chunk_objects` 的“不可达”历史数据（需要额外的引用计数/可达性分析；另开 spec）
 
 ## 需求（Requirements）
 
@@ -57,6 +59,9 @@
   - 下载该 snapshot 的 `manifest_object_id` 对应 remote index 后，`files` / `file_chunks` 必须包含该 snapshot
 - index_sync 下载 latest remote index 后：
   - 对每个 `source_path`，`files` / `file_chunks` 至少包含该 source 的 latest snapshot（保证 base-chunk-copy 工作）
+- backup 成功后，本地 endpoint index DB 必须仍包含：
+  - `snapshots` 元数据 + `remote_indexes`（用于枚举/定位旧快照的 `manifest_object_id`）
+  - 每个 `source_path` 的 latest snapshot 的 `files/file_chunks`（用于下一次备份的 base-chunk-copy）
 - 不引入新的 Telegram 协议/限制风险：仍沿用现有分片上传路径与重试策略。
 
 ### SHOULD
@@ -100,6 +105,10 @@ None
 - Given 旧 snapshot 的 `manifest_object_id`
   When 下载其 remote index 并 restore
   Then restore 仍可从该 DB 找到该 snapshot 的 `files` / `file_chunks` 并完成恢复
+- Given 同一 `source_path` 连续完成两次 backup（产生 `S1` 与 `S2`）
+  When backup 结束并自动 compact 本地 index DB
+  Then 本地 DB 的 `snapshots` 仍包含 `S1` 与 `S2`
+  And 本地 DB 的 `files/file_chunks` 只保留 `S2`（latest）的映射
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
@@ -135,7 +144,8 @@ None
 
 - [x] M1: 在 `upload_index` 中实现 compact export DB（按 source latest 裁剪 files/file_chunks）
 - [x] M2: 添加单测覆盖裁剪规则
-- [ ] M3: 真机验证：观察 index upload bytes 与耗时下降，且 index_sync + 下一次 backup 正常
+- [x] M3: backup 成功后自动 compact 本地 endpoint index DB，并添加单测
+- [ ] M4: 真机验证：观察 index upload bytes 与耗时下降，且 index_sync + 下一次 backup 正常
 
 ## 方案概述（Approach, high-level）
 

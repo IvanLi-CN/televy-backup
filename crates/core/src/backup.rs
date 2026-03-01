@@ -2387,6 +2387,22 @@ pub async fn run_backup_with<S: Storage>(
         "phase.finish"
     );
 
+    // Post-success local maintenance: rewrite the endpoint index DB so only the latest snapshot
+    // file maps for each source_path are kept. This keeps restore metadata (snapshots +
+    // remote_indexes) while preventing multi-snapshot `files/file_chunks` growth from turning the
+    // local DB into multi-GB uploads.
+    //
+    // Best-effort: backup correctness depends on remote uploads, not local compaction.
+    drop(conn);
+    if let Err(e) = compact_local_index_db(&config.db_path).await {
+        warn!(
+            event = "index.local_compact.failed",
+            db_path = %config.db_path.display(),
+            error = %e,
+            "index.local_compact.failed"
+        );
+    }
+
     Ok(result)
 }
 
@@ -3359,6 +3375,66 @@ async fn export_compacted_index_db_for_upload(
             kept_latest_snapshots,
         },
     ))
+}
+
+async fn compact_local_index_db(db_path: &Path) -> Result<()> {
+    let temp_parent = db_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let (exported_db, export_stats) =
+        export_compacted_index_db_for_upload(db_path, &temp_parent).await?;
+
+    debug!(
+        event = "index.local_compact.export.finish",
+        db_path = %db_path.display(),
+        source_bytes = export_stats.source_db_bytes,
+        export_bytes = export_stats.export_db_bytes,
+        kept_latest_snapshots = export_stats.kept_latest_snapshots,
+        "index.local_compact.export.finish"
+    );
+
+    let (file, tmp_path) = exported_db.keep().map_err(|e| Error::Io(e.error))?;
+    drop(file);
+    if let Err(e) = replace_atomic(&tmp_path, db_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(Error::Io(e));
+    }
+
+    let new_bytes = db_path.metadata().map(|m| m.len()).unwrap_or(0);
+    debug!(
+        event = "index.local_compact.finish",
+        db_path = %db_path.display(),
+        bytes = new_bytes,
+        "index.local_compact.finish"
+    );
+    Ok(())
+}
+
+fn replace_atomic(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    match std::fs::rename(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Some platforms (e.g. Windows) do not allow renaming over an existing destination.
+            // Avoid deleting the existing DB: move it aside, then restore it if the replace fails.
+            let mut backup = path.to_path_buf();
+            backup.set_extension(format!("bak-{}", uuid::Uuid::new_v4()));
+
+            std::fs::rename(path, &backup)?;
+            match std::fs::rename(tmp, path) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&backup);
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = std::fs::rename(&backup, path);
+                    let _ = std::fs::remove_file(tmp);
+                    Err(e)
+                }
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
