@@ -1,10 +1,16 @@
 use std::path::Path;
+use std::time::Duration;
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use tracing::{debug, error};
 
 use crate::Result;
+
+// Large endpoint index DBs can legitimately take a long time to open (e.g. journal recovery after
+// crashes or forced termination). Keep the pool acquire timeout comfortably above the default so
+// backups don't fail with `pool timed out` while the DB is still doing valid work.
+const SQLITE_POOL_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 pub async fn open_index_db(path: &Path) -> Result<SqlitePool> {
     debug!(
@@ -21,6 +27,7 @@ pub async fn open_index_db(path: &Path) -> Result<SqlitePool> {
 
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
+        .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
         .connect_with(options)
         .await
         .map_err(|e| {
@@ -86,6 +93,7 @@ pub async fn open_existing_index_db(path: &Path) -> Result<SqlitePool> {
 
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
+        .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
         .connect_with(options)
         .await
         .map_err(|e| {
