@@ -156,11 +156,13 @@ async fn pack_enabled_by_count_reduces_upload_calls() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let res = run_backup(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {
@@ -181,7 +183,8 @@ async fn pack_enabled_by_count_reduces_upload_calls() {
     assert_eq!(res.data_objects_uploaded, 1);
 
     let uploads = storage.uploaded.load(Ordering::Relaxed) as u64;
-    assert_eq!(uploads, res.data_objects_uploaded + res.index_parts + 1);
+    // Two-level index uploads: filemap manifest + endpoint manifest.
+    assert_eq!(uploads, res.data_objects_uploaded + res.index_parts + 2);
 }
 
 #[tokio::test]
@@ -195,11 +198,13 @@ async fn small_batch_does_not_enable_pack() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let res = run_backup(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {
@@ -231,13 +236,15 @@ async fn packed_upload_source_bytes_match_source_need_upload_total() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let probe = ProgressProbe::default();
 
     let res = run_backup_with(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "pack-source-bytes".to_string(),
             chunking: ChunkingConfig {
@@ -292,6 +299,7 @@ async fn large_index_db_uploads_multiple_index_parts() {
     write_file(source.join("single.bin"), &[42u8; 4096]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     // Populate exported schema tables (chunks/chunk_objects) with noise so the *compact* index
     // export is forced into multiple uploaded parts.
     let prep_pool = televy_backup_core::index_db::open_index_db(&db_path)
@@ -335,7 +343,8 @@ async fn large_index_db_uploads_multiple_index_parts() {
     let res = run_backup(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "idx-large".to_string(),
             chunking: ChunkingConfig {
@@ -370,6 +379,7 @@ async fn restart_after_index_upload_failure_does_not_reupload_chunks() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
 
     // Fail on the 2nd upload: first pack upload succeeds, then index part upload fails.
@@ -377,7 +387,8 @@ async fn restart_after_index_upload_failure_does_not_reupload_chunks() {
     let err = run_backup(
         &failing,
         BackupConfig {
-            db_path: db_path.clone(),
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
             source_path: source.clone(),
             label: "t1".to_string(),
             chunking: ChunkingConfig {
@@ -410,7 +421,8 @@ async fn restart_after_index_upload_failure_does_not_reupload_chunks() {
     let res2 = run_backup(
         &storage,
         BackupConfig {
-            db_path: db_path.clone(),
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "t2".to_string(),
             chunking: ChunkingConfig {
@@ -439,6 +451,7 @@ async fn upload_retries_after_network_unreachable_failure() {
     std::fs::create_dir_all(&source).unwrap();
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let failing = FailOnRetryableUpload::with_message(
         &storage,
@@ -449,7 +462,8 @@ async fn upload_retries_after_network_unreachable_failure() {
     let res = run_backup(
         &failing,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "idx-retry-network-unreachable".to_string(),
             chunking: ChunkingConfig {
@@ -476,13 +490,15 @@ async fn index_part_upload_retries_after_transient_failure() {
     std::fs::create_dir_all(&source).unwrap();
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let failing = FailOnRetryableUpload::new(&storage, 1);
 
     let res = run_backup(
         &failing,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "idx-retry-part".to_string(),
             chunking: ChunkingConfig {
@@ -509,13 +525,15 @@ async fn index_manifest_upload_retries_after_transient_failure() {
     std::fs::create_dir_all(&source).unwrap();
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let failing = FailOnRetryableUpload::new(&storage, 2);
 
     let res = run_backup(
         &failing,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "idx-retry-manifest".to_string(),
             chunking: ChunkingConfig {
@@ -543,9 +561,11 @@ async fn retention_preflight_bounds_snapshot_growth_on_repeated_failures() {
     write_file(source.join("volatile.bin"), &[7u8; 4096]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let cfg = BackupConfig {
-        db_path: db_path.clone(),
+        endpoint_db_path: db_path.clone(),
+        filemap_dir: filemap_dir.clone(),
         source_path: source.clone(),
         label: "fail".to_string(),
         chunking: ChunkingConfig {
@@ -586,6 +606,7 @@ async fn retention_preflight_does_not_prune_other_sources_before_backup() {
     write_file(source_projects.join("p.bin"), &[2u8; 4096]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
 
     let base_chunking = ChunkingConfig {
@@ -598,7 +619,8 @@ async fn retention_preflight_does_not_prune_other_sources_before_backup() {
         run_backup(
             &storage,
             BackupConfig {
-                db_path: db_path.clone(),
+                endpoint_db_path: db_path.clone(),
+                filemap_dir: filemap_dir.clone(),
                 source_path: source_projects.clone(),
                 label: format!("projects-{i}"),
                 chunking: base_chunking.clone(),
@@ -616,7 +638,8 @@ async fn retention_preflight_does_not_prune_other_sources_before_backup() {
         run_backup(
             &storage,
             BackupConfig {
-                db_path: db_path.clone(),
+                endpoint_db_path: db_path.clone(),
+                filemap_dir: filemap_dir.clone(),
                 source_path: source_sync.clone(),
                 label: format!("sync-{i}"),
                 chunking: base_chunking.clone(),
@@ -639,7 +662,8 @@ async fn retention_preflight_does_not_prune_other_sources_before_backup() {
     run_backup(
         &storage,
         BackupConfig {
-            db_path: db_path.clone(),
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
             source_path: source_sync.clone(),
             label: "sync-trim".to_string(),
             chunking: base_chunking,
@@ -672,6 +696,7 @@ async fn retention_preflight_handles_large_backlog_with_batched_prune() {
     write_file(source.join("payload.bin"), &[5u8; 4096]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let chunking = ChunkingConfig {
         min_bytes: 4096,
@@ -683,7 +708,8 @@ async fn retention_preflight_handles_large_backlog_with_batched_prune() {
         run_backup(
             &storage,
             BackupConfig {
-                db_path: db_path.clone(),
+                endpoint_db_path: db_path.clone(),
+                filemap_dir: filemap_dir.clone(),
                 source_path: source.clone(),
                 label: format!("seed-{i}"),
                 chunking: chunking.clone(),
@@ -705,7 +731,8 @@ async fn retention_preflight_handles_large_backlog_with_batched_prune() {
     run_backup(
         &storage,
         BackupConfig {
-            db_path: db_path.clone(),
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
             source_path: source.clone(),
             label: "trim".to_string(),
             chunking,

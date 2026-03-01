@@ -25,13 +25,15 @@ async fn restore_and_verify_snapshot_from_remote_index() {
     write_file(source.join("nested/b.bin"), &[42u8; 10_000]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let master_key = [7u8; 32];
 
     let r1 = run_backup(
         &storage,
         BackupConfig {
-            db_path: db_path.clone(),
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
             source_path: source.clone(),
             label: "t1".to_string(),
             chunking: ChunkingConfig {
@@ -60,16 +62,28 @@ async fn restore_and_verify_snapshot_from_remote_index() {
             .unwrap()
             .get("manifest_object_id");
 
-    let restore_index_db_path = temp.path().join("restored-index.sqlite");
+    let endpoint_manifest_object_id: String =
+        sqlx::query("SELECT value FROM endpoint_state WHERE key = ? LIMIT 1")
+            .bind(televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("value");
+
+    let restore_filemap_db_path = temp.path().join("restored-filemap.sqlite");
+    let restore_endpoint_db_path = temp.path().join("restored-endpoint.sqlite");
     let restore_target = temp.path().join("restored");
 
     restore_snapshot(
         &storage,
         RestoreConfig {
             snapshot_id: r1.snapshot_id.clone(),
-            manifest_object_id: manifest_object_id.clone(),
+            filemap_manifest_object_id: manifest_object_id.clone(),
+            endpoint_manifest_object_id: Some(endpoint_manifest_object_id.clone()),
+            endpoint_index_id: None,
             master_key,
-            index_db_path: restore_index_db_path.clone(),
+            filemap_db_path: restore_filemap_db_path.clone(),
+            endpoint_db_path: Some(restore_endpoint_db_path.clone()),
             target_path: restore_target.clone(),
         },
     )
@@ -90,9 +104,12 @@ async fn restore_and_verify_snapshot_from_remote_index() {
         &storage,
         VerifyConfig {
             snapshot_id: r1.snapshot_id.clone(),
-            manifest_object_id,
+            filemap_manifest_object_id: manifest_object_id,
+            endpoint_manifest_object_id: Some(endpoint_manifest_object_id),
+            endpoint_index_id: None,
             master_key,
-            index_db_path: verify_index_db_path,
+            filemap_db_path: verify_index_db_path,
+            endpoint_db_path: Some(temp.path().join("verify-endpoint.sqlite")),
         },
     )
     .await
@@ -114,13 +131,15 @@ async fn verify_fails_when_any_chunk_missing() {
     );
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let master_key = [7u8; 32];
 
     let r1 = run_backup(
         &storage,
         BackupConfig {
-            db_path: db_path.clone(),
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
             source_path: source.clone(),
             label: "t1".to_string(),
             chunking: ChunkingConfig {
@@ -149,6 +168,14 @@ async fn verify_fails_when_any_chunk_missing() {
             .unwrap()
             .get("manifest_object_id");
 
+    let endpoint_manifest_object_id: String =
+        sqlx::query("SELECT value FROM endpoint_state WHERE key = ? LIMIT 1")
+            .bind(televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            .get("value");
+
     let row = sqlx::query(
         "SELECT chunk_hash, object_id FROM chunk_objects WHERE provider = 'test.mem' LIMIT 1",
     )
@@ -168,9 +195,12 @@ async fn verify_fails_when_any_chunk_missing() {
         &storage,
         VerifyConfig {
             snapshot_id: r1.snapshot_id.clone(),
-            manifest_object_id,
+            filemap_manifest_object_id: manifest_object_id,
+            endpoint_manifest_object_id: Some(endpoint_manifest_object_id),
+            endpoint_index_id: None,
             master_key,
-            index_db_path: temp.path().join("verify-index.sqlite"),
+            filemap_db_path: temp.path().join("verify-index.sqlite"),
+            endpoint_db_path: Some(temp.path().join("verify-endpoint.sqlite")),
         },
     )
     .await

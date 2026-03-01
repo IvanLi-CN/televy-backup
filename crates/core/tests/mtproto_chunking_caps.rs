@@ -49,6 +49,7 @@ async fn mtproto_provider_chunking_max_bytes_over_limit_fails_fast() {
     write_file(source.join("a.bin"), b"a");
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let mtproto = ProviderOverride {
         inner: &storage,
@@ -60,7 +61,8 @@ async fn mtproto_provider_chunking_max_bytes_over_limit_fails_fast() {
     let err = run_backup(
         &mtproto,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {
@@ -91,6 +93,7 @@ async fn mtproto_provider_chunking_max_bytes_allows_exact_limit() {
     write_file(source.join("a.bin"), b"a");
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let mtproto = ProviderOverride {
         inner: &storage,
@@ -102,7 +105,8 @@ async fn mtproto_provider_chunking_max_bytes_allows_exact_limit() {
     run_backup(
         &mtproto,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {

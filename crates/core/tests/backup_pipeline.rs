@@ -59,6 +59,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
     write_file(source.join("nested/b.bin"), &[42u8; 10_000]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
 
     let storage = InMemoryStorage::new();
     let chunking = ChunkingConfig {
@@ -68,7 +69,8 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
     };
 
     let cfg1 = BackupConfig {
-        db_path: db_path.clone(),
+        endpoint_db_path: db_path.clone(),
+        filemap_dir: filemap_dir.clone(),
         source_path: source.clone(),
         label: "t1".to_string(),
         chunking: chunking.clone(),
@@ -85,11 +87,13 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
     let uploads_after_r1 = storage.uploaded.load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
         uploads_after_r1 as u64,
-        r1.data_objects_uploaded + r1.index_parts + 1
+        // Two-level index uploads: filemap manifest + endpoint manifest.
+        r1.data_objects_uploaded + r1.index_parts + 2
     );
 
     let cfg2 = BackupConfig {
-        db_path: db_path.clone(),
+        endpoint_db_path: db_path.clone(),
+        filemap_dir: filemap_dir.clone(),
         source_path: source.clone(),
         label: "t2".to_string(),
         chunking,
@@ -107,7 +111,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
 
     let uploads_after_r2 = storage.uploaded.load(std::sync::atomic::Ordering::Relaxed);
     let delta = (uploads_after_r2 - uploads_after_r1) as u64;
-    assert_eq!(delta, r2.data_objects_uploaded + r2.index_parts + 1);
+    assert_eq!(delta, r2.data_objects_uploaded + r2.index_parts + 2);
 
     let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
         .await
@@ -153,9 +157,11 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
     write_file(file_path.clone(), &initial);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let cfg = BackupConfig {
-        db_path: db_path.clone(),
+        endpoint_db_path: db_path.clone(),
+        filemap_dir: filemap_dir.clone(),
         source_path: source.clone(),
         label: "volatile".to_string(),
         chunking: ChunkingConfig {
@@ -185,14 +191,14 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
     .await
     .unwrap();
 
-    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
+    let filemap_db_path = filemap_dir.join(format!("{}.sqlite", result.snapshot_id));
+    let filemap_pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", filemap_db_path.display()))
         .await
         .unwrap();
-
     let files_in_snapshot: i64 =
         sqlx::query("SELECT COUNT(*) as n FROM files WHERE snapshot_id = ? AND kind = 'file'")
             .bind(&result.snapshot_id)
-            .fetch_one(&pool)
+            .fetch_one(&filemap_pool)
             .await
             .unwrap()
             .get("n");
@@ -222,10 +228,12 @@ async fn backup_compacts_local_index_db_after_success() {
     write_file(file_path.clone(), &[1u8; 4096]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
 
     let cfg = BackupConfig {
-        db_path: db_path.clone(),
+        endpoint_db_path: db_path.clone(),
+        filemap_dir: filemap_dir.clone(),
         source_path: source.clone(),
         label: "compact".to_string(),
         chunking: ChunkingConfig {
@@ -257,31 +265,21 @@ async fn backup_compacts_local_index_db_after_success() {
         .get("n");
     assert_eq!(snapshots, 2);
 
-    // Only the latest snapshot keeps file maps in the compacted local DB.
-    let rows = sqlx::query(
-        "SELECT DISTINCT snapshot_id FROM files WHERE kind = 'file' ORDER BY snapshot_id",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
+    // Endpoint DB should not contain file maps (`files` / `file_chunks`) in two-level mode.
+    let rows = sqlx::query("SELECT DISTINCT snapshot_id FROM files ORDER BY snapshot_id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
     let kept = rows
         .into_iter()
         .map(|r| r.get::<String, _>("snapshot_id"))
         .collect::<Vec<_>>();
-    assert_eq!(kept, vec![r2.snapshot_id.clone()]);
+    assert_eq!(kept, Vec::<String>::new());
 
-    let base_file_chunks: i64 = sqlx::query(
-        r#"
-        SELECT COUNT(*) as n
-        FROM file_chunks fc
-        JOIN files f ON f.file_id = fc.file_id
-        WHERE f.snapshot_id = ?
-        "#,
-    )
-    .bind(&r1.snapshot_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap()
-    .get("n");
-    assert_eq!(base_file_chunks, 0);
+    let file_chunks: i64 = sqlx::query("SELECT COUNT(*) as n FROM file_chunks")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get("n");
+    assert_eq!(file_chunks, 0);
 }

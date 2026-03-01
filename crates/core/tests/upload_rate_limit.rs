@@ -102,12 +102,14 @@ async fn upload_concurrency_respects_limit() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = TimedStorage::new(Duration::from_millis(50));
 
     run_backup(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {
@@ -143,12 +145,14 @@ async fn upload_min_delay_is_global() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = TimedStorage::new(Duration::from_millis(0));
 
     run_backup(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {

@@ -6,6 +6,20 @@ use crate::{Error, Result};
 
 pub const BOOTSTRAP_CATALOG_VERSION: u32 = 1;
 pub const BOOTSTRAP_CATALOG_AAD: &[u8] = b"televy.bootstrap.catalog.v1";
+pub const ENDPOINT_INDEX_ID_PREFIX_V1: &str = "televy.endpoint_index.v1:";
+
+pub fn endpoint_index_id_from_scope(scope: &str) -> String {
+    format!("{ENDPOINT_INDEX_ID_PREFIX_V1}{scope}")
+}
+
+pub fn endpoint_index_id_for_storage<S: Storage>(storage: &S) -> Result<String> {
+    // MTProto uses `object_id_scope()` (chat_id/peer). For non-scoped providers (tests), fall back
+    // to the provider string so we can still upload/download an endpoint DB deterministically.
+    let scope = storage
+        .object_id_scope()
+        .unwrap_or_else(|| storage.provider());
+    Ok(endpoint_index_id_from_scope(scope))
+}
 
 pub trait PinnedStorage: Storage {
     fn get_pinned_object_id(&self) -> Result<Option<String>>;
@@ -16,7 +30,17 @@ pub trait PinnedStorage: Storage {
 pub struct BootstrapCatalogV1 {
     pub version: u32,
     pub updated_at: String,
+    #[serde(rename = "endpointLatest", default)]
+    pub endpoint_latest: Option<BootstrapEndpointLatest>,
     pub targets: Vec<BootstrapTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapEndpointLatest {
+    #[serde(rename = "endpointIndexId")]
+    pub endpoint_index_id: String,
+    #[serde(rename = "manifestObjectId")]
+    pub manifest_object_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +63,7 @@ impl Default for BootstrapCatalogV1 {
         Self {
             version: BOOTSTRAP_CATALOG_VERSION,
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            endpoint_latest: None,
             targets: Vec::new(),
         }
     }
@@ -111,9 +136,11 @@ pub async fn save_remote_catalog<S: PinnedStorage>(
     Ok(object_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_remote_latest<S: PinnedStorage>(
     storage: &S,
     master_key: &[u8; 32],
+    endpoint_latest: Option<BootstrapEndpointLatest>,
     target_id: &str,
     source_path: &str,
     label: &str,
@@ -124,6 +151,9 @@ pub async fn update_remote_latest<S: PinnedStorage>(
         .await?
         .unwrap_or_default();
     cat.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    if endpoint_latest.is_some() {
+        cat.endpoint_latest = endpoint_latest;
+    }
 
     let mut found = false;
     for t in &mut cat.targets {
@@ -153,6 +183,22 @@ pub async fn update_remote_latest<S: PinnedStorage>(
 
     let _ = save_remote_catalog(storage, master_key, &cat).await?;
     Ok(())
+}
+
+/// Resolve the remote endpoint index pointer (if present).
+pub async fn resolve_remote_endpoint_latest<S: PinnedStorage>(
+    storage: &S,
+    master_key: &[u8; 32],
+) -> Result<BootstrapEndpointLatest> {
+    let cat = load_remote_catalog(storage, master_key)
+        .await?
+        .ok_or_else(|| Error::BootstrapMissing {
+            message: "no pinned bootstrap catalog".to_string(),
+        })?;
+
+    cat.endpoint_latest.ok_or_else(|| Error::InvalidConfig {
+        message: "bootstrap missing endpointLatest".to_string(),
+    })
 }
 
 pub async fn resolve_remote_latest<S: PinnedStorage>(
@@ -272,7 +318,7 @@ mod tests {
         let store = MemPinned::new();
         let key = [3u8; 32];
 
-        update_remote_latest(&store, &key, "t1", "/A", "manual", "snp_1", "obj_1")
+        update_remote_latest(&store, &key, None, "t1", "/A", "manual", "snp_1", "obj_1")
             .await
             .unwrap();
 
@@ -294,7 +340,7 @@ mod tests {
             .unwrap();
         store.set_pinned_object_id(&pinned_before).unwrap();
 
-        update_remote_latest(&store, &key, "t1", "/A", "manual", "snp_1", "obj_1")
+        update_remote_latest(&store, &key, None, "t1", "/A", "manual", "snp_1", "obj_1")
             .await
             .unwrap();
 
@@ -314,9 +360,11 @@ mod tests {
         let key_ok = [3u8; 32];
         let key_bad = [4u8; 32];
 
-        update_remote_latest(&store, &key_ok, "t1", "/A", "manual", "snp_1", "obj_1")
-            .await
-            .unwrap();
+        update_remote_latest(
+            &store, &key_ok, None, "t1", "/A", "manual", "snp_1", "obj_1",
+        )
+        .await
+        .unwrap();
 
         let err = resolve_remote_latest(&store, &key_bad, Some("t1"), None)
             .await
