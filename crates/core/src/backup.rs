@@ -1225,7 +1225,9 @@ pub async fn run_backup_with<S: Storage>(
     let provider_owned = provider.to_string();
     let limits = compute_upload_limits(&config.rate_limit)?;
     let configured_concurrency = config.rate_limit.max_concurrent_uploads as usize;
-    let adaptive_max_concurrency = ADAPTIVE_MAX_CONCURRENCY;
+    // Treat `rate_limit.max_concurrent_uploads` as a hard cap. Adaptive mode may downshift on
+    // FloodWait, but should never exceed the configured maximum.
+    let adaptive_max_concurrency = configured_concurrency;
     let initial_concurrency = configured_concurrency;
     let configured_delay_ms = config.rate_limit.min_delay_ms as u64;
     if configured_delay_ms > ADAPTIVE_MAX_DELAY_MS {
@@ -1386,7 +1388,9 @@ pub async fn run_backup_with<S: Storage>(
     // maintenance cost before any scanning/upload begins, which can look like a "stuck" backup.
     // Restrict retention to the source being backed up; other sources will be cleaned up when
     // they run, or via an explicit maintenance task.
-    if let Err(e) = apply_retention(&mut conn, &config.source_path, config.keep_last_snapshots).await {
+    if let Err(e) =
+        apply_retention(&mut conn, &config.source_path, config.keep_last_snapshots).await
+    {
         warn!(
             event = "snapshots.retention.preflight_failed",
             source_path = %config.source_path.display(),
