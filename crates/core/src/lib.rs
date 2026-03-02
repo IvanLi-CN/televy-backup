@@ -4,6 +4,8 @@ pub mod config;
 pub mod config_bundle;
 pub mod control;
 mod crypto;
+pub mod dedupe_catalog;
+pub mod dedupe_sync;
 mod error;
 pub mod folder_compare;
 pub mod gold_key;
@@ -22,7 +24,7 @@ mod storage;
 pub const APP_NAME: &str = "TelevyBackup";
 
 pub use backup::{
-    BackupConfig, BackupOptions, BackupResult, ChunkingConfig, SourceQuickStats,
+    BackupConfig, BackupOptions, BackupResult, ChunkingConfig, RemoteDedupeMode, SourceQuickStats,
     compute_source_quick_stats, run_backup, run_backup_with,
 };
 pub use error::{Error, Result, is_transient_telegram_message};

@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use sqlx::Row;
 use televy_backup_core::{
-    BackupConfig, BackupOptions, ChunkingConfig, InMemoryStorage, ProgressSink, SourceQuickStats,
-    TaskProgress, run_backup, run_backup_with,
+    BackupConfig, BackupOptions, ChunkingConfig, InMemoryStorage, ProgressSink, RemoteDedupeMode,
+    SourceQuickStats, TaskProgress, run_backup, run_backup_with,
 };
 use tempfile::TempDir;
 
@@ -60,6 +60,8 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
 
     let db_path = temp.path().join("index.sqlite");
     let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
 
     let storage = InMemoryStorage::new();
     let chunking = ChunkingConfig {
@@ -71,6 +73,8 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
     let cfg1 = BackupConfig {
         endpoint_db_path: db_path.clone(),
         filemap_dir: filemap_dir.clone(),
+        dedupe_db_path: dedupe_db_path.clone(),
+        dedupe_pending_db_path: dedupe_pending_db_path.clone(),
         source_path: source.clone(),
         label: "t1".to_string(),
         chunking: chunking.clone(),
@@ -78,6 +82,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
         master_key: [7u8; 32],
         snapshot_id: None,
         keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
     };
 
     let r1 = run_backup(&storage, cfg1).await.unwrap();
@@ -94,6 +99,8 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
     let cfg2 = BackupConfig {
         endpoint_db_path: db_path.clone(),
         filemap_dir: filemap_dir.clone(),
+        dedupe_db_path: dedupe_db_path.clone(),
+        dedupe_pending_db_path: dedupe_pending_db_path.clone(),
         source_path: source.clone(),
         label: "t2".to_string(),
         chunking,
@@ -101,6 +108,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
         master_key: [7u8; 32],
         snapshot_id: None,
         keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
     };
 
     let r2 = run_backup(&storage, cfg2).await.unwrap();
@@ -158,10 +166,14 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
 
     let db_path = temp.path().join("index.sqlite");
     let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
     let storage = InMemoryStorage::new();
     let cfg = BackupConfig {
         endpoint_db_path: db_path.clone(),
         filemap_dir: filemap_dir.clone(),
+        dedupe_db_path,
+        dedupe_pending_db_path,
         source_path: source.clone(),
         label: "volatile".to_string(),
         chunking: ChunkingConfig {
@@ -173,6 +185,7 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
         master_key: [9u8; 32],
         snapshot_id: None,
         keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
     };
 
     let sink = MutateOnUpload::new(&file_path, changed);
@@ -229,11 +242,15 @@ async fn backup_compacts_local_index_db_after_success() {
 
     let db_path = temp.path().join("index.sqlite");
     let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
     let storage = InMemoryStorage::new();
 
     let cfg = BackupConfig {
         endpoint_db_path: db_path.clone(),
         filemap_dir: filemap_dir.clone(),
+        dedupe_db_path,
+        dedupe_pending_db_path,
         source_path: source.clone(),
         label: "compact".to_string(),
         chunking: ChunkingConfig {
@@ -245,6 +262,7 @@ async fn backup_compacts_local_index_db_after_success() {
         master_key: [3u8; 32],
         snapshot_id: None,
         keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
     };
 
     let r1 = run_backup(&storage, cfg.clone()).await.unwrap();

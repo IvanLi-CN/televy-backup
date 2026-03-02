@@ -12,7 +12,7 @@
   - `index_sync`/index upload 时间远大于 data upload，表现为“带宽没吃满 / 卡在 index”
   - 多机/重装时远端同步成本过高
 - 根因：当前 endpoint index DB 同时承担了两类职责：
-  - 全局去重映射与元数据（`chunks/chunk_objects/snapshots/...`）
+  - 全局元数据（`snapshots/remote_indexes/...`）
   - 每个 snapshot 的完整文件映射（`files/file_chunks`），且随快照线性增长
 - 一致性问题：当前 daemon/cli 对远端不可用采取 best-effort（skip index_sync / bootstrap 更新失败仍算成功），会导致“上传了数据但无法从远端发现/同步”的半成品状态。
 
@@ -49,7 +49,8 @@
 ### Remote：Index Objects
 
 - 一级 Endpoint DB（远端对象）
-  - 包含：`snapshots / chunks / chunk_objects / remote_indexes / remote_index_parts / tasks (+ endpoint_state)`
+  - 包含：`snapshots / remote_indexes / remote_index_parts / tasks (+ endpoint_state)`
+  - 说明：全端点去重映射（`chunks/chunk_objects`）在 #3z7rj 中迁移为独立的 remote dedupe（Base + Delta + Catalog），不再由 endpoint DB 承载
   - 不再包含：任何 `files / file_chunks`
   - 由 bootstrap 的 `endpointLatest` 指向
 - 二级 Snapshot Filemap DB（远端对象）
@@ -82,7 +83,8 @@
 
 2) Scan + upload pipeline
 
-- endpoint DB：只写全局表（`snapshots/chunks/chunk_objects/remote_indexes/...`）
+- endpoint DB：只写元数据表（`snapshots/remote_indexes/remote_index_parts/tasks/endpoint_state`）
+- dedupe DB：在 #3z7rj 中承担全端点去重映射（`chunks/chunk_objects`）
 - filemap DB（每个 snapshot 新建本地 sqlite）：写 `snapshots/files/file_chunks/chunks`
 - base-chunk-copy：
   - 从 base filemap DB 查 `files/file_chunks` 并复制到新 filemap DB（不依赖 endpoint DB 的 files/file_chunks）
@@ -106,7 +108,7 @@
 - 下载 filemap DB（目标 snapshot）
 - 打开 filemap DB 并 `ATTACH` endpoint DB：
   - file 列表来自 filemap DB（`files/file_chunks`）
-  - object_id 映射来自 endpoint DB（`chunk_objects`）
+  - object_id 映射来自 dedupe DB（#3z7rj）或旧格式 endpoint DB（`chunk_objects`）
 - 兼容旧 snapshot index：
   - 若下载到的 DB 自带 `chunk_objects` 且可满足查询：允许不下载 endpoint DB 直接 restore/verify
 

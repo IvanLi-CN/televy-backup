@@ -4,6 +4,8 @@ use sqlx::Row;
 
 pub const ENDPOINT_STATE_ENDPOINT_INDEX_ID_KEY: &str = "endpoint_index_id";
 pub const ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY: &str = "endpoint_manifest_object_id";
+pub const ENDPOINT_STATE_ENDPOINT_DEDUPE_ID_KEY: &str = "endpoint_dedupe_id";
+pub const ENDPOINT_STATE_DEDUPE_CATALOG_OBJECT_ID_KEY: &str = "dedupe_catalog_object_id";
 
 pub async fn local_endpoint_db_matches_remote_latest(
     db_path: &Path,

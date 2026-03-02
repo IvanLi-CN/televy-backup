@@ -1686,21 +1686,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let db_path = index_dir.join(format!("index.{}.sqlite", ep.id));
             let filemap_dir = index_dir.join("filemaps").join(&ep.id);
-            let cfg = BackupConfig {
-                endpoint_db_path: db_path.clone(),
-                filemap_dir: filemap_dir.clone(),
-                source_path: PathBuf::from(&target.source_path),
-                label: label.clone(),
-                chunking: ChunkingConfig {
-                    min_bytes: settings.chunking.min_bytes,
-                    avg_bytes: settings.chunking.avg_bytes,
-                    max_bytes: settings.chunking.max_bytes,
-                },
-                rate_limit: ep.rate_limit.clone(),
-                master_key,
-                snapshot_id: None,
-                keep_last_snapshots: settings.retention.keep_last_snapshots,
-            };
+            let dedupe_db_path = index_dir
+                .join("dedupe")
+                .join(format!("dedupe.{}.sqlite", ep.id));
+            let dedupe_pending_db_path = index_dir
+                .join("dedupe")
+                .join(format!("pending.{}.sqlite", ep.id));
 
             if let Ok(mut st) = status_state.lock() {
                 st.mark_run_start(&target.id);
@@ -1721,6 +1712,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &target.source_path,
                     &db_path,
                     &filemap_dir,
+                    &dedupe_db_path,
                     is_likely_private_chat_id(&ep.chat_id),
                     progress_sink,
                 ),
@@ -1749,7 +1741,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             let result = match prepare_res {
-                Ok(((), quick_stats)) => {
+                Ok((remote_dedupe, quick_stats)) => {
+                    let cfg = BackupConfig {
+                        endpoint_db_path: db_path.clone(),
+                        filemap_dir: filemap_dir.clone(),
+                        dedupe_db_path: dedupe_db_path.clone(),
+                        dedupe_pending_db_path: dedupe_pending_db_path.clone(),
+                        source_path: PathBuf::from(&target.source_path),
+                        label: label.clone(),
+                        chunking: ChunkingConfig {
+                            min_bytes: settings.chunking.min_bytes,
+                            avg_bytes: settings.chunking.avg_bytes,
+                            max_bytes: settings.chunking.max_bytes,
+                        },
+                        rate_limit: ep.rate_limit.clone(),
+                        master_key,
+                        snapshot_id: None,
+                        keep_last_snapshots: settings.retention.keep_last_snapshots,
+                        remote_dedupe,
+                    };
                     let opts = BackupOptions {
                         cancel: None,
                         progress: progress_sink,
@@ -1813,12 +1823,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             message: "missing endpoint_state.endpoint_manifest_object_id after backup".to_string(),
                         })?;
 
+                        let endpoint_dedupe_id =
+                            televy_backup_core::dedupe_catalog::endpoint_dedupe_id_for_storage(
+                                storage,
+                            )?;
+                        let dedupe_catalog_object_id =
+                            televy_backup_core::index_sync::endpoint_state_get(
+                                &dedupe_db_path,
+                                televy_backup_core::index_sync::ENDPOINT_STATE_DEDUPE_CATALOG_OBJECT_ID_KEY,
+                            )
+                            .await?
+                            .ok_or_else(|| televy_backup_core::Error::Integrity {
+                                message: "missing endpoint_state.dedupe_catalog_object_id after backup".to_string(),
+                            })?;
+
                         bootstrap::update_remote_latest(
                             storage,
                             &master_key,
                             Some(bootstrap::BootstrapEndpointLatest {
                                 endpoint_index_id,
                                 manifest_object_id: endpoint_manifest_object_id,
+                            }),
+                            Some(bootstrap::BootstrapEndpointDedupeLatest {
+                                endpoint_dedupe_id,
+                                catalog_object_id: dedupe_catalog_object_id,
                             }),
                             &target.id,
                             &target.source_path,
@@ -1990,9 +2018,10 @@ async fn preflight_remote_first_index_sync_daemon(
     source_path: &str,
     local_endpoint_db: &Path,
     filemap_dir: &Path,
+    local_dedupe_db: &Path,
     is_private_chat: bool,
     sink: Option<&dyn ProgressSink>,
-) -> televy_backup_core::Result<()> {
+) -> televy_backup_core::Result<televy_backup_core::RemoteDedupeMode> {
     let started = Instant::now();
     tracing::debug!(event = "phase.start", phase = "index_sync", "phase.start");
     if let Some(sink) = sink {
@@ -2016,7 +2045,7 @@ async fn preflight_remote_first_index_sync_daemon(
             reason = "unsupported_chat",
             "phase.finish"
         );
-        return Ok(());
+        return Ok(televy_backup_core::RemoteDedupeMode::Disabled);
     }
 
     std::fs::create_dir_all(filemap_dir)?;
@@ -2079,7 +2108,49 @@ async fn preflight_remote_first_index_sync_daemon(
         );
     }
 
-    // 2) Fail fast: if a base snapshot exists and its filemap DB is not cached locally, download it
+    // 2) Sync the remote dedupe catalog/base/deltas (if present).
+    let remote_dedupe = if let Some(dedupe_latest) = catalog
+        .as_ref()
+        .and_then(|c| c.endpoint_dedupe_latest.clone())
+    {
+        let already_synced =
+            televy_backup_core::dedupe_sync::local_dedupe_db_matches_remote_latest(
+                local_dedupe_db,
+                &dedupe_latest.catalog_object_id,
+            )
+            .await?;
+        if !already_synced {
+            let provider = storage.provider();
+            let stats = televy_backup_core::dedupe_sync::materialize_remote_dedupe_db(
+                storage,
+                master_key,
+                &dedupe_latest.endpoint_dedupe_id,
+                &dedupe_latest.catalog_object_id,
+                local_dedupe_db,
+                Some(provider),
+                sink,
+            )
+            .await?;
+            tracing::debug!(
+                event = "index_sync.dedupe.downloaded",
+                target_id,
+                base_bytes_downloaded = stats.base_bytes_downloaded,
+                delta_bytes_downloaded = stats.delta_bytes_downloaded,
+                "index_sync.dedupe.downloaded"
+            );
+        }
+
+        televy_backup_core::RemoteDedupeMode::Incremental {
+            endpoint_dedupe_id: dedupe_latest.endpoint_dedupe_id,
+            catalog_object_id: dedupe_latest.catalog_object_id,
+        }
+    } else {
+        let endpoint_dedupe_id =
+            televy_backup_core::dedupe_catalog::endpoint_dedupe_id_for_storage(storage)?;
+        televy_backup_core::RemoteDedupeMode::Enable { endpoint_dedupe_id }
+    };
+
+    // 3) Fail fast: if a base snapshot exists and its filemap DB is not cached locally, download it
     // now (so the scan phase won't hit a remote error hours later).
     if local_endpoint_db.exists() {
         let pool = televy_backup_core::index_db::open_index_db(local_endpoint_db).await?;
@@ -2153,7 +2224,7 @@ async fn preflight_remote_first_index_sync_daemon(
         "phase.finish"
     );
 
-    Ok(())
+    Ok(remote_dedupe)
 }
 
 async fn preflight_local_quick_stats_daemon(

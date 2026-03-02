@@ -14,7 +14,7 @@
 - 备份的 `index` 阶段会把整个 SQLite 文件 zstd 压缩后分片上传到 Telegram：
   - index 上传耗时可能远大于 data upload，表现为“卡住/带宽没吃满”
   - 多机器场景下 `index_sync` 也需要下载/写入巨大 DB，成本过高
-- 观察：`chunks` / `chunk_objects` 作为去重映射规模相对可控；真正爆炸的是历史快照的 `files` / `file_chunks`。
+- 观察：历史快照的 `files` / `file_chunks` 是主要爆炸源；全端点去重映射（`chunks` / `chunk_objects`）在 #3z7rj 中会迁移为独立的 remote dedupe（Base + Delta + Catalog），避免继续拖累 endpoint DB 上传。
 
 ## 目标 / 非目标
 
@@ -40,7 +40,7 @@
 ### In scope
 
 - core：在 `crates/core/src/backup.rs` 的 `upload_index` 中，上传前生成一个“compact export DB”：
-  - 全量复制：`snapshots` / `chunks` / `chunk_objects` / `remote_indexes` / `remote_index_parts` / `tasks`
+  - 全量复制：`snapshots` / `remote_indexes` / `remote_index_parts` / `tasks`（`chunks/chunk_objects` 在 #3z7rj 中迁移到 dedupe DB）
   - 裁剪复制：`files` / `file_chunks` 仅包含“每个 `source_path` 的 latest snapshot”的数据
   - 对 export DB 进行 zstd + 加密分片上传（沿用现有 upload_index 逻辑）
 - core：在 backup 成功完成后，自动用 compact export DB **重写本地** endpoint index DB（同样的裁剪规则），以缩小磁盘占用并避免下次 index upload 受本地 DB 体积拖累。
@@ -49,7 +49,7 @@
 
 ### Out of scope
 
-- 清理 `chunks/chunk_objects` 的“不可达”历史数据（需要额外的引用计数/可达性分析；另开 spec）
+- 清理 `chunks/chunk_objects` 的“不可达”历史数据（需要额外的引用计数/可达性分析；可在 #3z7rj 的 dedupe DB 上另开维护 spec）
 
 ## 需求（Requirements）
 
@@ -150,7 +150,7 @@ None
 ## 方案概述（Approach, high-level）
 
 - remote index 文件的“爆炸”来自历史快照的 `files` / `file_chunks` 重复存储；但运行时关键路径（base-chunk-copy）只需要每个 source 的 latest 快照映射。
-- 因此在上传前进行 export：把“全局去重映射与快照目录（chunks/chunk_objects/snapshots/remote_indexes）”保留为全量，把“文件映射（files/file_chunks）”裁剪为每个 source 的 latest。
+- 因此在上传前进行 export：把“快照目录与远端指针（snapshots/remote_indexes）”保留为全量，把“文件映射（files/file_chunks）”裁剪为每个 source 的 latest（去重映射在 #3z7rj 中迁移到 dedupe DB）。
 - 每个旧快照在其自身 remote index 中仍包含其文件映射（因为当时它是 latest），所以 restore 仍可按 manifest 单独下载。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）

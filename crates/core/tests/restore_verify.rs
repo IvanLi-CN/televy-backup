@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use sqlx::Row;
 use televy_backup_core::{
-    BackupConfig, ChunkObjectRef, ChunkingConfig, InMemoryStorage, RestoreConfig, VerifyConfig,
-    parse_chunk_object_ref, restore_snapshot, run_backup, verify_snapshot,
+    BackupConfig, ChunkObjectRef, ChunkingConfig, InMemoryStorage, RemoteDedupeMode, RestoreConfig,
+    VerifyConfig, parse_chunk_object_ref, restore_snapshot, run_backup, verify_snapshot,
 };
 use tempfile::TempDir;
 
@@ -26,6 +26,8 @@ async fn restore_and_verify_snapshot_from_remote_index() {
 
     let db_path = temp.path().join("index.sqlite");
     let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
     let storage = InMemoryStorage::new();
     let master_key = [7u8; 32];
 
@@ -34,6 +36,8 @@ async fn restore_and_verify_snapshot_from_remote_index() {
         BackupConfig {
             endpoint_db_path: db_path.clone(),
             filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: dedupe_db_path.clone(),
+            dedupe_pending_db_path: dedupe_pending_db_path.clone(),
             source_path: source.clone(),
             label: "t1".to_string(),
             chunking: ChunkingConfig {
@@ -45,6 +49,7 @@ async fn restore_and_verify_snapshot_from_remote_index() {
             master_key,
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -80,10 +85,13 @@ async fn restore_and_verify_snapshot_from_remote_index() {
             snapshot_id: r1.snapshot_id.clone(),
             filemap_manifest_object_id: manifest_object_id.clone(),
             endpoint_manifest_object_id: Some(endpoint_manifest_object_id.clone()),
+            dedupe_catalog_object_id: None,
+            endpoint_dedupe_id: None,
             endpoint_index_id: None,
             master_key,
             filemap_db_path: restore_filemap_db_path.clone(),
             endpoint_db_path: Some(restore_endpoint_db_path.clone()),
+            dedupe_db_path: None,
             target_path: restore_target.clone(),
         },
     )
@@ -106,10 +114,13 @@ async fn restore_and_verify_snapshot_from_remote_index() {
             snapshot_id: r1.snapshot_id.clone(),
             filemap_manifest_object_id: manifest_object_id,
             endpoint_manifest_object_id: Some(endpoint_manifest_object_id),
+            dedupe_catalog_object_id: None,
+            endpoint_dedupe_id: None,
             endpoint_index_id: None,
             master_key,
             filemap_db_path: verify_index_db_path,
             endpoint_db_path: Some(temp.path().join("verify-endpoint.sqlite")),
+            dedupe_db_path: None,
         },
     )
     .await
@@ -132,6 +143,8 @@ async fn verify_fails_when_any_chunk_missing() {
 
     let db_path = temp.path().join("index.sqlite");
     let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
     let storage = InMemoryStorage::new();
     let master_key = [7u8; 32];
 
@@ -140,6 +153,8 @@ async fn verify_fails_when_any_chunk_missing() {
         BackupConfig {
             endpoint_db_path: db_path.clone(),
             filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: dedupe_db_path.clone(),
+            dedupe_pending_db_path: dedupe_pending_db_path.clone(),
             source_path: source.clone(),
             label: "t1".to_string(),
             chunking: ChunkingConfig {
@@ -151,6 +166,7 @@ async fn verify_fails_when_any_chunk_missing() {
             master_key,
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -197,10 +213,13 @@ async fn verify_fails_when_any_chunk_missing() {
             snapshot_id: r1.snapshot_id.clone(),
             filemap_manifest_object_id: manifest_object_id,
             endpoint_manifest_object_id: Some(endpoint_manifest_object_id),
+            dedupe_catalog_object_id: None,
+            endpoint_dedupe_id: None,
             endpoint_index_id: None,
             master_key,
             filemap_db_path: temp.path().join("verify-index.sqlite"),
             endpoint_db_path: Some(temp.path().join("verify-endpoint.sqlite")),
+            dedupe_db_path: None,
         },
     )
     .await

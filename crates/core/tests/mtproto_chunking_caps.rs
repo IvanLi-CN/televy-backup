@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use televy_backup_core::{BackupConfig, ChunkingConfig, InMemoryStorage, Storage, run_backup};
+use televy_backup_core::{
+    BackupConfig, ChunkingConfig, InMemoryStorage, RemoteDedupeMode, Storage, run_backup,
+};
 use tempfile::TempDir;
 
 const MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES: usize = 128 * 1024 * 1024;
@@ -50,6 +52,8 @@ async fn mtproto_provider_chunking_max_bytes_over_limit_fails_fast() {
 
     let db_path = temp.path().join("index.sqlite");
     let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
     let storage = InMemoryStorage::new();
     let mtproto = ProviderOverride {
         inner: &storage,
@@ -63,6 +67,8 @@ async fn mtproto_provider_chunking_max_bytes_over_limit_fails_fast() {
         BackupConfig {
             endpoint_db_path: db_path,
             filemap_dir: filemap_dir.clone(),
+            dedupe_db_path,
+            dedupe_pending_db_path,
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {
@@ -74,6 +80,7 @@ async fn mtproto_provider_chunking_max_bytes_over_limit_fails_fast() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -94,6 +101,8 @@ async fn mtproto_provider_chunking_max_bytes_allows_exact_limit() {
 
     let db_path = temp.path().join("index.sqlite");
     let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
     let storage = InMemoryStorage::new();
     let mtproto = ProviderOverride {
         inner: &storage,
@@ -107,6 +116,8 @@ async fn mtproto_provider_chunking_max_bytes_allows_exact_limit() {
         BackupConfig {
             endpoint_db_path: db_path,
             filemap_dir: filemap_dir.clone(),
+            dedupe_db_path,
+            dedupe_pending_db_path,
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {
@@ -118,6 +129,7 @@ async fn mtproto_provider_chunking_max_bytes_allows_exact_limit() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await

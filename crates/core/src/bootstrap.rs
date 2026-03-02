@@ -32,6 +32,8 @@ pub struct BootstrapCatalogV1 {
     pub updated_at: String,
     #[serde(rename = "endpointLatest", default)]
     pub endpoint_latest: Option<BootstrapEndpointLatest>,
+    #[serde(rename = "endpointDedupeLatest", default)]
+    pub endpoint_dedupe_latest: Option<BootstrapEndpointDedupeLatest>,
     pub targets: Vec<BootstrapTarget>,
 }
 
@@ -41,6 +43,14 @@ pub struct BootstrapEndpointLatest {
     pub endpoint_index_id: String,
     #[serde(rename = "manifestObjectId")]
     pub manifest_object_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapEndpointDedupeLatest {
+    #[serde(rename = "endpointDedupeId")]
+    pub endpoint_dedupe_id: String,
+    #[serde(rename = "catalogObjectId")]
+    pub catalog_object_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +74,7 @@ impl Default for BootstrapCatalogV1 {
             version: BOOTSTRAP_CATALOG_VERSION,
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             endpoint_latest: None,
+            endpoint_dedupe_latest: None,
             targets: Vec::new(),
         }
     }
@@ -141,6 +152,7 @@ pub async fn update_remote_latest<S: PinnedStorage>(
     storage: &S,
     master_key: &[u8; 32],
     endpoint_latest: Option<BootstrapEndpointLatest>,
+    endpoint_dedupe_latest: Option<BootstrapEndpointDedupeLatest>,
     target_id: &str,
     source_path: &str,
     label: &str,
@@ -153,6 +165,9 @@ pub async fn update_remote_latest<S: PinnedStorage>(
     cat.updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     if endpoint_latest.is_some() {
         cat.endpoint_latest = endpoint_latest;
+    }
+    if endpoint_dedupe_latest.is_some() {
+        cat.endpoint_dedupe_latest = endpoint_dedupe_latest;
     }
 
     let mut found = false;
@@ -318,9 +333,11 @@ mod tests {
         let store = MemPinned::new();
         let key = [3u8; 32];
 
-        update_remote_latest(&store, &key, None, "t1", "/A", "manual", "snp_1", "obj_1")
-            .await
-            .unwrap();
+        update_remote_latest(
+            &store, &key, None, None, "t1", "/A", "manual", "snp_1", "obj_1",
+        )
+        .await
+        .unwrap();
 
         let latest = resolve_remote_latest(&store, &key, Some("t1"), None)
             .await
@@ -340,9 +357,11 @@ mod tests {
             .unwrap();
         store.set_pinned_object_id(&pinned_before).unwrap();
 
-        update_remote_latest(&store, &key, None, "t1", "/A", "manual", "snp_1", "obj_1")
-            .await
-            .unwrap();
+        update_remote_latest(
+            &store, &key, None, None, "t1", "/A", "manual", "snp_1", "obj_1",
+        )
+        .await
+        .unwrap();
 
         let pinned_after = store.get_pinned_object_id().unwrap().unwrap();
         assert_ne!(pinned_after, pinned_before);
@@ -361,7 +380,7 @@ mod tests {
         let key_bad = [4u8; 32];
 
         update_remote_latest(
-            &store, &key_ok, None, "t1", "/A", "manual", "snp_1", "obj_1",
+            &store, &key_ok, None, None, "t1", "/A", "manual", "snp_1", "obj_1",
         )
         .await
         .unwrap();
