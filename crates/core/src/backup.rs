@@ -488,15 +488,8 @@ fn ignore_error_is_not_found(err: &IgnoreError) -> bool {
 }
 
 fn map_ignore_error(err: IgnoreError, source_path: &Path) -> Error {
-    let message = err.to_string();
-    if let Some(io) = err.into_io_error() {
-        return Error::Io(io);
-    }
-    Error::InvalidConfig {
-        message: format!(
-            "source walk failed for {}: {message}",
-            source_path.display()
-        ),
+    Error::Walk {
+        message: format!("source walk failed for {}: {err}", source_path.display()),
     }
 }
 
