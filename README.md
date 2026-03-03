@@ -146,6 +146,17 @@ TelevyBackup stores non-secret settings in `config.toml`, and secrets in an encr
   - MTProto API hash: key = `telegram.mtproto.api_hash` (default; key name configurable via `telegram.mtproto.api_hash_key`)
   - MTProto session: key = `[[telegram_endpoints]].mtproto.session_key` (per-endpoint; Base64)
 
+### Target ignore rules (`.televyignore`)
+
+Backup target scanning supports gitignore-style rules via `.televyignore` files:
+
+- Place `.televyignore` in a target source root and/or any subdirectory.
+- Rules use gitignore semantics (`#` comments, `*`, `**`, `?`, `/` anchoring, trailing `/` for directories, `!` re-include).
+- Only `.televyignore` is read. `.gitignore`, `.ignore`, global gitignore, and parent directories outside the target root are not used.
+- There are no built-in default excludes; only explicit rules in `.televyignore` take effect.
+- Invalid rule lines are warned and ignored; other filesystem/scan errors keep existing failure behavior.
+- Rule scope: backup scan + prepare quick stats. `settings import-bundle --compare-folder` is unchanged and does not apply `.televyignore`.
+
 If upgrading from older versions that stored secrets in Keychain, run `televybackup secrets migrate-keychain`.
 
 ## Recovery key (TBK1)

@@ -9,11 +9,11 @@ use std::time::{Duration, Instant};
 use fastcdc::ronomon::FastCDC;
 use fastcdc::v2020::{ChunkData, Error as CdcError, MAXIMUM_MAX as V2020_MAXIMUM_MAX, StreamCDC};
 use futures::stream::{FuturesUnordered, StreamExt};
+use ignore::{Error as IgnoreError, Walk, WalkBuilder};
 use serde::{Deserialize, Serialize};
 use sqlx::pool::PoolConnection;
 use sqlx::{Connection, QueryBuilder, Row, Sqlite};
 use tracing::{debug, error, warn};
-use walkdir::WalkDir;
 
 use crate::config::TelegramRateLimit;
 use crate::crypto::FRAMING_OVERHEAD_BYTES;
@@ -65,6 +65,7 @@ const INDEX_COMPACT_MIN_FREE_PAGES: i64 = 16_384; // ~= 64 MiB @ 4 KiB pages
 const INDEX_COMPACT_MIN_FREE_RATIO: f64 = 0.20;
 const RETENTION_SNAPSHOT_BATCH_SIZE: usize = 8;
 const RETENTION_FILE_BATCH_SIZE: usize = 256;
+const TELEVYIGNORE_FILE_NAME: &str = ".televyignore";
 
 type CdcResult<T> = std::result::Result<T, CdcError>;
 type DbConn = PoolConnection<Sqlite>;
@@ -420,14 +421,94 @@ fn compute_upload_limits(rate_limit: &TelegramRateLimit) -> Result<UploadLimits>
     })
 }
 
+fn build_source_walk(source_path: &Path) -> Walk {
+    let mut builder = WalkBuilder::new(source_path);
+    builder
+        .follow_links(false)
+        .hidden(false)
+        .parents(false)
+        .ignore(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .add_custom_ignore_filename(TELEVYIGNORE_FILE_NAME);
+    builder.build()
+}
+
+fn ignore_error_is_rule_parse_only(err: &IgnoreError) -> bool {
+    match err {
+        IgnoreError::Partial(errs) => {
+            !errs.is_empty() && errs.iter().all(ignore_error_is_rule_parse_only)
+        }
+        IgnoreError::WithLineNumber { err, .. } => ignore_error_is_rule_parse_only(err),
+        IgnoreError::WithPath { err, .. } => ignore_error_is_rule_parse_only(err),
+        IgnoreError::WithDepth { err, .. } => ignore_error_is_rule_parse_only(err),
+        IgnoreError::Glob { .. } => true,
+        _ => false,
+    }
+}
+
+fn ignore_error_path(err: &IgnoreError) -> Option<&Path> {
+    match err {
+        IgnoreError::Partial(errs) => errs.iter().find_map(ignore_error_path),
+        IgnoreError::WithLineNumber { err, .. } => ignore_error_path(err),
+        IgnoreError::WithPath { path, .. } => Some(path.as_path()),
+        IgnoreError::WithDepth { err, .. } => ignore_error_path(err),
+        _ => None,
+    }
+}
+
+fn warn_invalid_televyignore_rule_once(
+    warned: &mut HashSet<String>,
+    err: &IgnoreError,
+    source_path: &Path,
+    phase: &'static str,
+) {
+    if !ignore_error_is_rule_parse_only(err) {
+        return;
+    }
+    let key = err.to_string();
+    if !warned.insert(key.clone()) {
+        return;
+    }
+    let ignore_file = ignore_error_path(err).unwrap_or_else(|| Path::new(""));
+    warn!(
+        event = "source.ignore.invalid_rule",
+        phase,
+        source_path = %source_path.display(),
+        ignore_file = %ignore_file.display(),
+        error = %key,
+        "source.ignore.invalid_rule"
+    );
+}
+
+fn ignore_error_is_not_found(err: &IgnoreError) -> bool {
+    err.io_error()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn map_ignore_error(err: IgnoreError, source_path: &Path) -> Error {
+    let message = err.to_string();
+    if let Some(io) = err.into_io_error() {
+        return Error::Io(io);
+    }
+    Error::InvalidConfig {
+        message: format!(
+            "source walk failed for {}: {message}",
+            source_path.display()
+        ),
+    }
+}
+
 pub fn compute_source_quick_stats(
     source_path: &Path,
     cancel: Option<&CancellationToken>,
 ) -> Result<SourceQuickStats> {
     let mut files_total = 0u64;
     let mut bytes_total = 0u64;
+    let mut warned_ignore_errors = HashSet::<String>::new();
 
-    for entry in WalkDir::new(source_path).follow_links(false) {
+    for entry in build_source_walk(source_path) {
         if let Some(cancel) = cancel
             && cancel.is_cancelled()
         {
@@ -437,16 +518,37 @@ pub fn compute_source_quick_stats(
         let entry = match entry {
             Ok(v) => v,
             Err(e) => {
-                let is_not_found = e
-                    .io_error()
-                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
-                let is_root = e.path().is_some_and(|p| p == source_path);
-                if is_not_found && !is_root {
+                if ignore_error_is_rule_parse_only(&e) {
+                    warn_invalid_televyignore_rule_once(
+                        &mut warned_ignore_errors,
+                        &e,
+                        source_path,
+                        "prepare",
+                    );
                     continue;
                 }
-                return Err(Error::Walkdir(e));
+                let is_root = e.depth() == Some(0);
+                if ignore_error_is_not_found(&e) && !is_root {
+                    continue;
+                }
+                return Err(map_ignore_error(e, source_path));
             }
         };
+
+        if let Some(err) = entry.error() {
+            if ignore_error_is_rule_parse_only(err) {
+                warn_invalid_televyignore_rule_once(
+                    &mut warned_ignore_errors,
+                    err,
+                    source_path,
+                    "prepare",
+                );
+            } else if ignore_error_is_not_found(err) && entry.path() != source_path {
+                continue;
+            } else {
+                return Err(map_ignore_error(err.clone(), source_path));
+            }
+        }
 
         let path = entry.path();
         if path == source_path {
@@ -456,13 +558,10 @@ pub fn compute_source_quick_stats(
         let metadata = match entry.metadata() {
             Ok(v) => v,
             Err(e) => {
-                let is_not_found = e
-                    .io_error()
-                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
-                if is_not_found {
+                if ignore_error_is_not_found(&e) {
                     continue;
                 }
-                return Err(Error::Walkdir(e));
+                return Err(map_ignore_error(e, source_path));
             }
         };
 
@@ -1602,6 +1701,7 @@ pub async fn run_backup_with<S: Storage>(
                 let mut pending_uploads: Vec<SourceBlob> = Vec::new();
                 let mut pack_state = PackState::new(provider, &snapshot_id);
                 let mut pending_base_chunk_copies: Vec<BaseFileChunkCopyRow> = Vec::new();
+                let mut warned_ignore_errors = HashSet::<String>::new();
 
                 if let Some(sink) = options.progress {
                     sink.on_progress(TaskProgress {
@@ -1629,7 +1729,7 @@ pub async fn run_backup_with<S: Storage>(
                     });
                 }
 
-                for entry in WalkDir::new(&scan_source_path).follow_links(false) {
+                for entry in build_source_walk(&scan_source_path) {
                     if let Some(cancel) = options.cancel
                         && cancel.is_cancelled()
                     {
@@ -1639,22 +1739,49 @@ pub async fn run_backup_with<S: Storage>(
                     let entry = match entry {
                         Ok(v) => v,
                         Err(e) => {
-                            let is_not_found = e
-                                .io_error()
-                                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
-                            let is_root = e.path().is_some_and(|p| p == scan_source_path);
-                            if is_not_found && !is_root {
+                            if ignore_error_is_rule_parse_only(&e) {
+                                warn_invalid_televyignore_rule_once(
+                                    &mut warned_ignore_errors,
+                                    &e,
+                                    &scan_source_path,
+                                    "scan",
+                                );
+                                continue;
+                            }
+                            let is_root = e.depth() == Some(0);
+                            if ignore_error_is_not_found(&e) && !is_root {
                                 debug!(
                                     event = "scan.walkdir.not_found",
-                                    path = %e.path().unwrap_or(Path::new("")).display(),
                                     error = %e,
                                     "scan.walkdir.not_found"
                                 );
                                 continue;
                             }
-                            return Err(Error::Walkdir(e));
+                            return Err(map_ignore_error(e, &scan_source_path));
                         }
                     };
+
+                    if let Some(err) = entry.error() {
+                        if ignore_error_is_rule_parse_only(err) {
+                            warn_invalid_televyignore_rule_once(
+                                &mut warned_ignore_errors,
+                                err,
+                                &scan_source_path,
+                                "scan",
+                            );
+                        } else if ignore_error_is_not_found(err) && entry.path() != scan_source_path
+                        {
+                            debug!(
+                                event = "scan.walkdir.not_found",
+                                path = %entry.path().display(),
+                                error = %err,
+                                "scan.walkdir.not_found"
+                            );
+                            continue;
+                        } else {
+                            return Err(map_ignore_error(err.clone(), &scan_source_path));
+                        }
+                    }
 
                     let path = entry.path();
                     if path == scan_source_path {
@@ -1671,10 +1798,7 @@ pub async fn run_backup_with<S: Storage>(
                     let metadata = match entry.metadata() {
                         Ok(v) => v,
                         Err(e) => {
-                            let is_not_found = e
-                                .io_error()
-                                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
-                            if is_not_found {
+                            if ignore_error_is_not_found(&e) {
                                 debug!(
                                     event = "scan.entry_not_found",
                                     path = %path.display(),
@@ -1683,7 +1807,7 @@ pub async fn run_backup_with<S: Storage>(
                                 );
                                 continue;
                             }
-                            return Err(Error::Walkdir(e));
+                            return Err(map_ignore_error(e, &scan_source_path));
                         }
                     };
 
