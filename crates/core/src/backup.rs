@@ -18,6 +18,11 @@ use walkdir::WalkDir;
 use crate::config::TelegramRateLimit;
 use crate::crypto::FRAMING_OVERHEAD_BYTES;
 use crate::crypto::encrypt_framed;
+use crate::dedupe_catalog::{
+    DEDUPE_CATALOG_VERSION, DedupeCatalogBase, DedupeCatalogDelta, DedupeCatalogV1,
+    dedupe_base_id_for_storage, dedupe_delta_id_from_scope, load_remote_dedupe_catalog,
+    save_remote_dedupe_catalog,
+};
 use crate::index_db::{open_existing_index_db, open_index_db};
 use crate::index_manifest::{IndexManifest, IndexManifestPart, index_part_aad};
 use crate::pack::{
@@ -49,6 +54,7 @@ const ADAPTIVE_DOWNGRADE_MIN_ERROR_RATE: f64 = 0.05;
 const ADAPTIVE_CONSECUTIVE_FAILURES_DOWNGRADE: usize = 3;
 const ADAPTIVE_UPSHIFT_DELAY_STEP_MS: i64 = -50;
 const ADAPTIVE_DOWNSHIFT_DELAY_STEP_MS: i64 = 50;
+const DEDUPE_MAX_DELTAS_BEFORE_COMPACT: usize = 128;
 const SQLITE_BUSY_RETRY_DELAYS_MS: [u64; 5] = [100, 250, 500, 1000, 2000];
 const UPLOAD_OBJECT_MAX_ATTEMPTS: usize = 3;
 const UPLOAD_OBJECT_RETRY_BASE_MS: u64 = 1_000;
@@ -308,7 +314,15 @@ impl<R: Read> Iterator for RonomonStreamCDC<R> {
 
 #[derive(Debug, Clone)]
 pub struct BackupConfig {
-    pub db_path: PathBuf,
+    pub endpoint_db_path: PathBuf,
+    /// Directory for per-snapshot filemap DBs (one sqlite per snapshot).
+    ///
+    /// Expected layout (per endpoint): `<filemap_dir>/<snapshot_id>.sqlite`.
+    pub filemap_dir: PathBuf,
+    /// Local materialized dedupe DB (`chunks` + `chunk_objects`) for this endpoint.
+    pub dedupe_db_path: PathBuf,
+    /// Local pending dedupe spool DB (used to publish remote dedupe deltas).
+    pub dedupe_pending_db_path: PathBuf,
     pub source_path: PathBuf,
     pub label: String,
     pub chunking: ChunkingConfig,
@@ -316,6 +330,27 @@ pub struct BackupConfig {
     pub master_key: [u8; 32],
     pub snapshot_id: Option<String>,
     pub keep_last_snapshots: u32,
+    pub remote_dedupe: RemoteDedupeMode,
+}
+
+#[derive(Debug, Clone)]
+pub enum RemoteDedupeMode {
+    Disabled,
+    /// Remote dedupe is not initialized yet; publish a base DB + empty catalog.
+    Enable {
+        endpoint_dedupe_id: String,
+    },
+    /// Remote dedupe is initialized; publish per-run delta DBs and update the catalog.
+    Incremental {
+        endpoint_dedupe_id: String,
+        catalog_object_id: String,
+    },
+}
+
+impl RemoteDedupeMode {
+    fn enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -693,7 +728,13 @@ impl AdaptiveUploadController {
 
 fn error_has_flood_wait(error: &Error) -> bool {
     match error {
-        Error::Telegram { message } => message.to_ascii_uppercase().contains("FLOOD_WAIT"),
+        Error::Telegram { message } => {
+            let msg = message.to_ascii_uppercase();
+            msg.contains("FLOOD_WAIT")
+                || msg.contains("FLOOD WAIT")
+                || msg.contains("FLOOD_PREMIUM_WAIT")
+                || msg.contains("FLOOD PREMIUM WAIT")
+        }
         _ => false,
     }
 }
@@ -825,6 +866,7 @@ enum UploadOutcome {
 struct ChunkObjectMapping {
     chunk_hash: String,
     object_id: String,
+    source_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1190,7 +1232,7 @@ pub async fn run_backup_with<S: Storage>(
 ) -> Result<BackupResult> {
     debug!(
         event = "backup.prepare",
-        db_path = %config.db_path.display(),
+        db_path = %config.endpoint_db_path.display(),
         source_path = %config.source_path.display(),
         label = %config.label,
         keep_last_snapshots = config.keep_last_snapshots,
@@ -1219,7 +1261,9 @@ pub async fn run_backup_with<S: Storage>(
     let provider_owned = provider.to_string();
     let limits = compute_upload_limits(&config.rate_limit)?;
     let configured_concurrency = config.rate_limit.max_concurrent_uploads as usize;
-    let adaptive_max_concurrency = ADAPTIVE_MAX_CONCURRENCY;
+    // Treat `rate_limit.max_concurrent_uploads` as a hard cap. Adaptive mode may downshift on
+    // FloodWait, but should never exceed the configured maximum.
+    let adaptive_max_concurrency = configured_concurrency;
     let initial_concurrency = configured_concurrency;
     let configured_delay_ms = config.rate_limit.min_delay_ms as u64;
     if configured_delay_ms > ADAPTIVE_MAX_DELAY_MS {
@@ -1262,10 +1306,19 @@ pub async fn run_backup_with<S: Storage>(
     let pending_bytes = Arc::new(AtomicU64::new(0));
 
     let scan_source_path = config.source_path.clone();
-    let scan_snapshot_id = config.snapshot_id.clone();
+    let snapshot_id = config
+        .snapshot_id
+        .clone()
+        .unwrap_or_else(|| format!("snp_{}", uuid::Uuid::new_v4()));
+    let filemap_db_path = config.filemap_dir.join(format!("{snapshot_id}.sqlite"));
     let scan_label = config.label.clone();
     let scan_chunking = config.chunking.clone();
     let scan_master_key = config.master_key;
+    let scan_endpoint_db_path = config.endpoint_db_path.clone();
+    let scan_filemap_dir = config.filemap_dir.clone();
+    let scan_filemap_db_path = filemap_db_path.clone();
+
+    std::fs::create_dir_all(&config.filemap_dir)?;
 
     let bytes_budget = u32::try_from(limits.max_pending_bytes).unwrap_or(u32::MAX) as usize;
     let upload_cancel = options
@@ -1368,24 +1421,63 @@ pub async fn run_backup_with<S: Storage>(
     // Acquire a single dedicated SQLite connection for the entire backup pipeline. This avoids
     // pool acquisition stalls/timeouts under heavy scan+upload workloads (especially for large
     // `file_chunks` tables).
-    let pool = open_index_db(&config.db_path).await?;
+    let pool = open_index_db(&config.endpoint_db_path).await?;
     let mut conn: DbConn = pool.acquire().await?;
     drop(pool);
 
+    let dedupe_enabled = config.remote_dedupe.enabled();
+    let mut dedupe_conn: Option<DbConn> = None;
+    if dedupe_enabled {
+        if let Some(parent) = config.dedupe_db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let pool = open_index_db(&config.dedupe_db_path).await?;
+        let conn: DbConn = pool.acquire().await?;
+        drop(pool);
+        dedupe_conn = Some(conn);
+
+        if let Some(parent) = config.dedupe_pending_db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Ensure the pending spool DB exists so upload checkpoints can append immediately.
+        let _ = open_index_db(&config.dedupe_pending_db_path).await?;
+
+        // First-time migration: if the local dedupe DB is empty, seed it from the legacy endpoint
+        // DB so we don't lose cross-target dedupe on upgrade.
+        if let Some(dedupe_conn) = dedupe_conn.as_mut()
+            && !dedupe_db_has_any_chunk_objects(dedupe_conn).await?
+        {
+            seed_dedupe_db_from_endpoint_db(dedupe_conn, &config.endpoint_db_path).await?;
+        }
+    }
+
     // Retention must run before snapshot insertion so repeated failed runs do not keep inflating
     // the shared endpoint index DB beyond the configured window.
-    if let Err(e) = apply_retention_all_sources(&mut conn, config.keep_last_snapshots).await {
-        warn!(
-            event = "snapshots.retention.preflight_failed",
-            source_path = %config.source_path.display(),
-            error = %e,
-            "snapshots.retention.preflight_failed"
-        );
-    }
-    compact_index_db_if_needed(&mut conn, &config.db_path).await;
+    //
+    // NOTE: This used to run for *all* sources (apply_retention_all_sources). On large endpoints
+    // (e.g. millions of files across multiple targets) that makes every backup pay an O(db-size)
+    // maintenance cost before any scanning/upload begins, which can look like a "stuck" backup.
+    // Restrict retention to the source being backed up; other sources will be cleaned up when
+    // they run, or via an explicit maintenance task.
+    let pruned_preflight =
+        match apply_retention(&mut conn, &config.source_path, config.keep_last_snapshots).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    event = "snapshots.retention.preflight_failed",
+                    source_path = %config.source_path.display(),
+                    error = %e,
+                    "snapshots.retention.preflight_failed"
+                );
+                Vec::new()
+            }
+        };
+    cleanup_filemap_cache_best_effort(&config.filemap_dir, &pruned_preflight);
+    compact_index_db_if_needed(&mut conn, &config.endpoint_db_path).await;
 
     let scan_future = {
         let conn = &mut conn;
+        let dedupe_conn = &mut dedupe_conn;
         let uploader = uploader.clone();
         let upload_tx = upload_tx.clone();
         let upload_tx_for_error = upload_tx.clone();
@@ -1408,10 +1500,8 @@ pub async fn run_backup_with<S: Storage>(
         async move {
             let res = async {
                 let base_snapshot_id =
-                    latest_snapshot_for_source(conn, &scan_source_path).await?;
-                let snapshot_id = scan_snapshot_id
-                    .clone()
-                    .unwrap_or_else(|| format!("snp_{}", uuid::Uuid::new_v4()));
+                    latest_snapshot_for_source(conn, &scan_source_path, provider).await?;
+                let snapshot_id = snapshot_id.clone();
                 let source_path_utf8 = path_to_utf8(&scan_source_path)?;
 
                 execute_sqlite_with_busy_retry!(
@@ -1429,13 +1519,84 @@ pub async fn run_backup_with<S: Storage>(
                     .execute(&mut **conn)
                 )?;
 
+                // Create per-snapshot filemap DB and seed the snapshot row. This DB is uploaded
+                // as the snapshot's "filemap index", while the endpoint DB remains small and only
+                // stores global/dedupe state.
+                let filemap_pool = open_index_db(&scan_filemap_db_path).await?;
+                let mut filemap_conn: DbConn = filemap_pool.acquire().await?;
+                drop(filemap_pool);
+                execute_sqlite_with_busy_retry!(
+                    "snapshots.insert.filemap",
+                    sqlx::query(
+                        r#"
+                        INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id)
+                        VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?, ?, ?)
+                        "#,
+                    )
+                    .bind(&snapshot_id)
+                    .bind(&source_path_utf8)
+                    .bind(&scan_label)
+                    .bind(&base_snapshot_id)
+                    .execute(&mut *filemap_conn)
+                )?;
+
+                // If we have a base snapshot, attach its filemap DB as `base` so base-chunk-copy
+                // can copy `file_chunks` without re-chunking file contents.
+                if let Some(base_snapshot_id) = base_snapshot_id.as_deref() {
+                    let cached_path = scan_filemap_dir.join(format!("{base_snapshot_id}.sqlite"));
+                    let base_db_path = if cached_path.exists() {
+                        cached_path
+                    } else if endpoint_db_has_snapshot_filemap(conn, base_snapshot_id).await? {
+                        // Upgrade/legacy path: endpoint DB might still contain the base snapshot's
+                        // filemap rows.
+                        scan_endpoint_db_path.clone()
+                    } else {
+                        let manifest_object_id = lookup_remote_index_manifest_object_id(
+                            conn,
+                            base_snapshot_id,
+                            provider,
+                        )
+                        .await?
+                        .ok_or_else(|| Error::Integrity {
+                            message: format!(
+                                "base snapshot missing remote index pointer: base_snapshot_id={base_snapshot_id}"
+                            ),
+                        })?;
+
+                        crate::remote_index_db::download_and_write_index_db_atomic(
+                            storage,
+                            base_snapshot_id,
+                            &manifest_object_id,
+                            &scan_master_key,
+                            &cached_path,
+                            options.cancel,
+                            Some(provider),
+                            None,
+                        )
+                        .await?;
+                        cached_path
+                    };
+
+                    attach_db(&mut filemap_conn, "base", &base_db_path).await?;
+                }
+
                 let mut result = BackupResult {
                     snapshot_id: snapshot_id.clone(),
                     ..BackupResult::default()
                 };
 
+                let global_conn: &mut DbConn = if dedupe_enabled {
+                    dedupe_conn
+                        .as_mut()
+                        .ok_or_else(|| Error::InvalidConfig {
+                            message: "dedupe_db_path is required when remote_dedupe is enabled"
+                                .to_string(),
+                        })?
+                } else {
+                    conn
+                };
                 let mut known_chunk_hashes =
-                    load_chunk_hashes_for_storage(conn, storage, provider).await?;
+                    load_chunk_hashes_for_storage(global_conn, storage, provider).await?;
                 let mut pack_enabled = false;
                 let mut pending_bytes: usize = 0;
                 let mut pending_uploads: Vec<SourceBlob> = Vec::new();
@@ -1574,7 +1735,7 @@ pub async fn run_backup_with<S: Storage>(
                         .bind(mtime_ms)
                         .bind(mode)
                         .bind(kind)
-                        .execute(&mut **conn)
+                        .execute(&mut *filemap_conn)
                     )?;
 
                     result.files_indexed += 1;
@@ -1590,7 +1751,7 @@ pub async fn run_backup_with<S: Storage>(
 
                     if let Some(base_snapshot_id) = base_snapshot_id.as_deref()
                         && let Some(base_row) =
-                            lookup_base_file_snapshot_row(conn, base_snapshot_id, &rel_path_str)
+                            lookup_base_file_snapshot_row(&mut filemap_conn, base_snapshot_id, &rel_path_str)
                                 .await?
                         && base_row.size == size
                         && base_row.mtime_ms == mtime_ms
@@ -1603,7 +1764,7 @@ pub async fn run_backup_with<S: Storage>(
                         });
                         if pending_base_chunk_copies.len() >= BASE_FILE_CHUNK_COPY_BATCH_SIZE {
                             let (copied_chunks, deduped_bytes) =
-                                flush_base_chunk_copy_batch(conn, &mut pending_base_chunk_copies)
+                                flush_base_chunk_copy_batch(&mut filemap_conn, &mut pending_base_chunk_copies)
                                     .await?;
                             if copied_chunks > 0 {
                                 result.chunks_total =
@@ -1652,6 +1813,21 @@ pub async fn run_backup_with<S: Storage>(
 
                         let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
 
+                        // `file_chunks` has a FK to `chunks`, so ensure the chunk row exists in
+                        // the per-snapshot filemap DB regardless of whether the chunk is deduped.
+                        execute_sqlite_with_busy_retry!(
+                            "chunks.insert.filemap",
+                            sqlx::query(
+                                r#"
+                                INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+                                VALUES (?, ?, 'blake3', 'xchacha20poly1305', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                                "#,
+                            )
+                            .bind(&chunk_hash)
+                            .bind(chunk.data.len() as i64)
+                            .execute(&mut *filemap_conn)
+                        )?;
+
                         let exists = known_chunk_hashes.contains(&chunk_hash);
                         if exists {
                             result.bytes_deduped += chunk.data.len() as u64;
@@ -1671,7 +1847,7 @@ pub async fn run_backup_with<S: Storage>(
                                 )
                                 .bind(&chunk_hash)
                                 .bind(chunk.data.len() as i64)
-                                .execute(&mut **conn)
+                                .execute(&mut **global_conn)
                             )?;
 
                             let encrypted =
@@ -1729,12 +1905,14 @@ pub async fn run_backup_with<S: Storage>(
 
                     }
 
-                    insert_file_chunks_batch(conn, &file_id, &file_chunk_rows).await?;
+                    insert_file_chunks_batch(&mut filemap_conn, &file_id, &file_chunk_rows)
+                        .await?;
                 }
 
                 if !pending_base_chunk_copies.is_empty() {
                     let (copied_chunks, deduped_bytes) =
-                        flush_base_chunk_copy_batch(conn, &mut pending_base_chunk_copies).await?;
+                        flush_base_chunk_copy_batch(&mut filemap_conn, &mut pending_base_chunk_copies)
+                            .await?;
                     if copied_chunks > 0 {
                         result.chunks_total = result.chunks_total.saturating_add(copied_chunks);
                         scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
@@ -1832,8 +2010,11 @@ pub async fn run_backup_with<S: Storage>(
     }
 
     let collect_future = {
-        let db_path_for_checkpoint = config.db_path.clone();
+        let db_path_for_checkpoint = config.endpoint_db_path.clone();
+        let dedupe_db_path_for_checkpoint = config.dedupe_db_path.clone();
+        let pending_dedupe_db_path_for_checkpoint = config.dedupe_pending_db_path.clone();
         let provider_for_checkpoint = provider_owned.clone();
+        let remote_dedupe_for_checkpoint = config.remote_dedupe.clone();
         let scan_files_indexed = Arc::clone(&scan_files_indexed);
         let scan_source_files_done = Arc::clone(&scan_source_files_done);
         let scan_chunks_total = Arc::clone(&scan_chunks_total);
@@ -1851,6 +2032,8 @@ pub async fn run_backup_with<S: Storage>(
             let mut stats = UploadStats::default();
             let mut checkpoint_pool: Option<sqlx::SqlitePool> = None;
             let mut checkpoint_conn: Option<DbConn> = None;
+            let mut pending_pool: Option<sqlx::SqlitePool> = None;
+            let mut pending_conn: Option<DbConn> = None;
             let mut checkpoint_disabled = false;
             let mut rx = result_rx;
             while let Some(outcome) = rx.recv().await {
@@ -1864,6 +2047,7 @@ pub async fn run_backup_with<S: Storage>(
                         stats.chunk_objects.push(ChunkObjectMapping {
                             chunk_hash,
                             object_id: encode_tgfile_object_id(&object_id),
+                            source_bytes,
                         });
                         stats.chunks_uploaded += 1;
                         stats.data_objects_uploaded += 1;
@@ -1885,6 +2069,7 @@ pub async fn run_backup_with<S: Storage>(
                                     entry.offset,
                                     entry.len,
                                 ),
+                                source_bytes: entry.source_bytes,
                             });
                             stats.chunks_uploaded += 1;
                         }
@@ -1904,7 +2089,12 @@ pub async fn run_backup_with<S: Storage>(
                     && stats.chunk_objects.len() >= CHUNK_OBJECT_CHECKPOINT_BATCH_SIZE
                 {
                     if checkpoint_conn.is_none() {
-                        match open_existing_index_db(&db_path_for_checkpoint).await {
+                        let path = if remote_dedupe_for_checkpoint.enabled() {
+                            &dedupe_db_path_for_checkpoint
+                        } else {
+                            &db_path_for_checkpoint
+                        };
+                        match open_existing_index_db(path).await {
                             Ok(pool) => match pool.acquire().await {
                                 Ok(conn) => {
                                     checkpoint_pool = Some(pool);
@@ -1930,7 +2120,60 @@ pub async fn run_backup_with<S: Storage>(
                         }
                     }
 
-                    if let Some(conn) = checkpoint_conn.as_mut()
+                    if remote_dedupe_for_checkpoint.enabled() {
+                        if pending_conn.is_none() {
+                            match open_existing_index_db(&pending_dedupe_db_path_for_checkpoint)
+                                .await
+                            {
+                                Ok(pool) => match pool.acquire().await {
+                                    Ok(conn) => {
+                                        pending_pool = Some(pool);
+                                        pending_conn = Some(conn);
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            event = "upload.checkpoint.open_failed",
+                                            error = %e,
+                                            "upload.checkpoint.open_failed"
+                                        );
+                                        checkpoint_disabled = true;
+                                    }
+                                },
+                                Err(e) => {
+                                    warn!(
+                                        event = "upload.checkpoint.open_failed",
+                                        error = %e,
+                                        "upload.checkpoint.open_failed"
+                                    );
+                                    checkpoint_disabled = true;
+                                }
+                            }
+                        }
+
+                        if let (Some(dedupe), Some(pending)) =
+                            (checkpoint_conn.as_mut(), pending_conn.as_mut())
+                            && let Err(e) = record_dedupe_chunk_objects_batch(
+                                dedupe,
+                                pending,
+                                &provider_for_checkpoint,
+                                &stats.chunk_objects,
+                            )
+                            .await
+                        {
+                            warn!(
+                                event = "upload.checkpoint.persist_failed",
+                                error = %e,
+                                "upload.checkpoint.persist_failed"
+                            );
+                            checkpoint_disabled = true;
+                            checkpoint_conn = None;
+                            checkpoint_pool = None;
+                            pending_conn = None;
+                            pending_pool = None;
+                        } else if checkpoint_conn.is_some() && pending_conn.is_some() {
+                            stats.chunk_objects.clear();
+                        }
+                    } else if let Some(conn) = checkpoint_conn.as_mut()
                         && let Err(e) = record_chunk_objects_batch(
                             conn,
                             &provider_for_checkpoint,
@@ -1991,7 +2234,12 @@ pub async fn run_backup_with<S: Storage>(
 
             if !checkpoint_disabled && !stats.chunk_objects.is_empty() {
                 if checkpoint_conn.is_none() {
-                    match open_existing_index_db(&db_path_for_checkpoint).await {
+                    let path = if remote_dedupe_for_checkpoint.enabled() {
+                        &dedupe_db_path_for_checkpoint
+                    } else {
+                        &db_path_for_checkpoint
+                    };
+                    match open_existing_index_db(path).await {
                         Ok(pool) => match pool.acquire().await {
                             Ok(conn) => {
                                 checkpoint_pool = Some(pool);
@@ -2015,7 +2263,55 @@ pub async fn run_backup_with<S: Storage>(
                     }
                 }
 
-                if let Some(conn) = checkpoint_conn.as_mut()
+                if remote_dedupe_for_checkpoint.enabled() {
+                    if pending_conn.is_none() {
+                        match open_existing_index_db(&pending_dedupe_db_path_for_checkpoint).await {
+                            Ok(pool) => match pool.acquire().await {
+                                Ok(conn) => {
+                                    pending_pool = Some(pool);
+                                    pending_conn = Some(conn);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        event = "upload.checkpoint.open_failed",
+                                        error = %e,
+                                        "upload.checkpoint.open_failed"
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                warn!(
+                                    event = "upload.checkpoint.open_failed",
+                                    error = %e,
+                                    "upload.checkpoint.open_failed"
+                                );
+                            }
+                        }
+                    }
+
+                    if let (Some(dedupe), Some(pending)) =
+                        (checkpoint_conn.as_mut(), pending_conn.as_mut())
+                        && let Err(e) = record_dedupe_chunk_objects_batch(
+                            dedupe,
+                            pending,
+                            &provider_for_checkpoint,
+                            &stats.chunk_objects,
+                        )
+                        .await
+                    {
+                        warn!(
+                            event = "upload.checkpoint.persist_failed",
+                            error = %e,
+                            "upload.checkpoint.persist_failed"
+                        );
+                        checkpoint_conn = None;
+                        checkpoint_pool = None;
+                        pending_conn = None;
+                        pending_pool = None;
+                    } else if checkpoint_conn.is_some() && pending_conn.is_some() {
+                        stats.chunk_objects.clear();
+                    }
+                } else if let Some(conn) = checkpoint_conn.as_mut()
                     && let Err(e) = record_chunk_objects_batch(
                         conn,
                         &provider_for_checkpoint,
@@ -2037,6 +2333,8 @@ pub async fn run_backup_with<S: Storage>(
 
             drop(checkpoint_conn);
             drop(checkpoint_pool);
+            drop(pending_conn);
+            drop(pending_pool);
 
             Ok::<UploadStats, Error>(stats)
         }
@@ -2256,9 +2554,27 @@ pub async fn run_backup_with<S: Storage>(
         chunk_objects,
     } = upload_stats;
 
-    if let Err(tail_err) =
+    let tail_res = if dedupe_enabled {
+        let dedupe_conn = dedupe_conn.as_mut().ok_or_else(|| Error::InvalidConfig {
+            message: "dedupe_db_path is required when remote_dedupe is enabled".to_string(),
+        })?;
+
+        let pool = open_existing_index_db(&config.dedupe_pending_db_path).await?;
+        let mut pending_conn: DbConn = pool.acquire().await?;
+        drop(pool);
+
+        record_dedupe_chunk_objects_batch(
+            dedupe_conn,
+            &mut pending_conn,
+            &provider_owned,
+            &chunk_objects,
+        )
+        .await
+    } else {
         record_chunk_objects_batch(&mut conn, &provider_owned, &chunk_objects).await
-    {
+    };
+
+    if let Err(tail_err) = tail_res {
         if let Some(upload_err) = first_error {
             error!(
                 event = "backup.upload_error_preserved",
@@ -2323,11 +2639,28 @@ pub async fn run_backup_with<S: Storage>(
 
     let index_started = Instant::now();
     debug!(event = "phase.start", phase = "index", "phase.start");
-    let manifest = upload_index(
-        &mut conn,
+    let files_done_for_progress = if source_files_total.is_some() {
+        scan_source_files_done.load(Ordering::Relaxed)
+    } else {
+        scan_files_indexed.load(Ordering::Relaxed)
+    };
+    let endpoint_temp_parent = config
+        .endpoint_db_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let filemap_temp_parent = filemap_db_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+
+    // 1) Upload per-snapshot filemap DB, then persist its manifest pointer in the endpoint DB.
+    let uploaded_filemap = upload_index_sqlite_db(
         storage,
         &config,
         &snapshot_id,
+        &filemap_db_path,
+        &filemap_temp_parent,
         &rate_limiter,
         uploaded_bytes.as_ref(),
         uploaded_net_bytes.as_ref(),
@@ -2337,11 +2670,7 @@ pub async fn run_backup_with<S: Storage>(
         options.progress,
         source_files_total,
         source_bytes_total,
-        if source_files_total.is_some() {
-            scan_source_files_done.load(Ordering::Relaxed)
-        } else {
-            scan_files_indexed.load(Ordering::Relaxed)
-        },
+        files_done_for_progress,
         scan_chunks_total.load(Ordering::Relaxed),
         scan_bytes_read.load(Ordering::Relaxed),
         uploaded_source_bytes.load(Ordering::Relaxed),
@@ -2349,19 +2678,112 @@ pub async fn run_backup_with<S: Storage>(
         scan_bytes_deduped.load(Ordering::Relaxed),
     )
     .await?;
-    result.index_parts = manifest.parts.len() as u64;
-    result.bytes_uploaded = uploaded_bytes.load(Ordering::Relaxed);
+    persist_snapshot_remote_index_meta(&mut conn, provider, &snapshot_id, &uploaded_filemap)
+        .await?;
 
-    if let Err(e) =
-        apply_retention(&mut conn, &config.source_path, config.keep_last_snapshots).await
-    {
-        warn!(
-            event = "snapshots.retention.final_failed",
-            source_path = %config.source_path.display(),
-            error = %e,
-            "snapshots.retention.final_failed"
-        );
+    // Apply retention now so the exported endpoint DB reflects the configured window.
+    let pruned_final =
+        match apply_retention(&mut conn, &config.source_path, config.keep_last_snapshots).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    event = "snapshots.retention.final_failed",
+                    source_path = %config.source_path.display(),
+                    error = %e,
+                    "snapshots.retention.final_failed"
+                );
+                Vec::new()
+            }
+        };
+    cleanup_filemap_cache_best_effort(&config.filemap_dir, &pruned_final);
+
+    // 2) Export+upload small endpoint DB (global/dedupe state, no file maps).
+    let endpoint_index_id = crate::bootstrap::endpoint_index_id_for_storage(storage)?;
+    let include_dedupe = matches!(config.remote_dedupe, RemoteDedupeMode::Disabled);
+    let (exported_endpoint_db, export_stats) = export_endpoint_index_db_for_upload(
+        &config.endpoint_db_path,
+        &endpoint_temp_parent,
+        include_dedupe,
+    )
+    .await?;
+    debug!(
+        event = "endpoint_index.export.finish",
+        db_path = %config.endpoint_db_path.display(),
+        source_bytes = export_stats.source_db_bytes,
+        export_bytes = export_stats.export_db_bytes,
+        "endpoint_index.export.finish"
+    );
+    let uploaded_endpoint = upload_index_sqlite_db(
+        storage,
+        &config,
+        &endpoint_index_id,
+        exported_endpoint_db.path(),
+        &endpoint_temp_parent,
+        &rate_limiter,
+        uploaded_bytes.as_ref(),
+        uploaded_net_bytes.as_ref(),
+        have_uploaded_net_bytes.as_ref(),
+        upload_workload_total.as_ref(),
+        upload_confirmed_bytes.as_ref(),
+        options.progress,
+        source_files_total,
+        source_bytes_total,
+        files_done_for_progress,
+        scan_chunks_total.load(Ordering::Relaxed),
+        scan_bytes_read.load(Ordering::Relaxed),
+        uploaded_source_bytes.load(Ordering::Relaxed),
+        scan_source_bytes_need_upload.load(Ordering::Relaxed),
+        scan_bytes_deduped.load(Ordering::Relaxed),
+    )
+    .await?;
+
+    execute_sqlite_with_busy_retry!(
+        "endpoint_state.endpoint_index_id.upsert",
+        sqlx::query("INSERT OR REPLACE INTO endpoint_state (key, value) VALUES (?, ?)")
+            .bind(crate::index_sync::ENDPOINT_STATE_ENDPOINT_INDEX_ID_KEY)
+            .bind(&endpoint_index_id)
+            .execute(&mut *conn)
+    )?;
+    execute_sqlite_with_busy_retry!(
+        "endpoint_state.endpoint_manifest_object_id.upsert",
+        sqlx::query("INSERT OR REPLACE INTO endpoint_state (key, value) VALUES (?, ?)")
+            .bind(crate::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY)
+            .bind(&uploaded_endpoint.manifest_object_id)
+            .execute(&mut *conn)
+    )?;
+
+    let mut index_parts_total = uploaded_filemap.manifest.parts.len() as u64
+        + uploaded_endpoint.manifest.parts.len() as u64;
+    if dedupe_enabled {
+        let dedupe_conn = dedupe_conn.as_mut().ok_or_else(|| Error::InvalidConfig {
+            message: "dedupe_db_path is required when remote_dedupe is enabled".to_string(),
+        })?;
+        let published = publish_remote_dedupe_if_needed(
+            storage,
+            &config,
+            dedupe_conn,
+            &rate_limiter,
+            uploaded_bytes.as_ref(),
+            uploaded_net_bytes.as_ref(),
+            have_uploaded_net_bytes.as_ref(),
+            upload_workload_total.as_ref(),
+            upload_confirmed_bytes.as_ref(),
+            options.progress,
+            source_files_total,
+            source_bytes_total,
+            files_done_for_progress,
+            scan_chunks_total.load(Ordering::Relaxed),
+            scan_bytes_read.load(Ordering::Relaxed),
+            uploaded_source_bytes.load(Ordering::Relaxed),
+            scan_source_bytes_need_upload.load(Ordering::Relaxed),
+            scan_bytes_deduped.load(Ordering::Relaxed),
+        )
+        .await?;
+        index_parts_total = index_parts_total.saturating_add(published.parts_uploaded);
     }
+
+    result.index_parts = index_parts_total;
+    result.bytes_uploaded = uploaded_bytes.load(Ordering::Relaxed);
 
     debug!(
         event = "phase.finish",
@@ -2370,6 +2792,23 @@ pub async fn run_backup_with<S: Storage>(
         index_parts = result.index_parts,
         "phase.finish"
     );
+
+    // Post-success local maintenance: rewrite the endpoint index DB so only the latest snapshot
+    // file maps for each source_path are kept. This keeps restore metadata (snapshots +
+    // remote_indexes) while preventing multi-snapshot `files/file_chunks` growth from turning the
+    // local DB into multi-GB uploads.
+    //
+    // Best-effort: backup correctness depends on remote uploads, not local compaction.
+    drop(conn);
+    let include_dedupe = matches!(config.remote_dedupe, RemoteDedupeMode::Disabled);
+    if let Err(e) = compact_local_index_db(&config.endpoint_db_path, include_dedupe).await {
+        warn!(
+            event = "index.local_compact.failed",
+            db_path = %config.endpoint_db_path.display(),
+            error = %e,
+            "index.local_compact.failed"
+        );
+    }
 
     Ok(result)
 }
@@ -2652,11 +3091,172 @@ async fn record_chunk_objects_batch(
     }
 }
 
+async fn dedupe_db_has_any_chunk_objects(conn: &mut DbConn) -> Result<bool> {
+    let row = sqlx::query("SELECT 1 AS n FROM chunk_objects LIMIT 1")
+        .fetch_optional(&mut **conn)
+        .await?;
+    Ok(row.is_some())
+}
+
+async fn seed_dedupe_db_from_endpoint_db(
+    dedupe_conn: &mut DbConn,
+    endpoint_db_path: &Path,
+) -> Result<()> {
+    if !endpoint_db_path.exists() {
+        return Ok(());
+    }
+
+    // ATTACH needs a literal string; escape single quotes defensively.
+    let src_path_sql = endpoint_db_path.to_string_lossy().replace('\'', "''");
+    sqlx::query(&format!("ATTACH DATABASE '{src_path_sql}' AS src"))
+        .execute(&mut **dedupe_conn)
+        .await?;
+
+    let mut tx = dedupe_conn.begin().await?;
+
+    sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+        SELECT chunk_hash, size, hash_alg, enc_alg, created_at
+        FROM src.chunks
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT OR REPLACE INTO chunk_objects (chunk_hash, provider, object_id, created_at)
+        SELECT chunk_hash, provider, object_id, created_at
+        FROM src.chunk_objects
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    sqlx::query("DETACH DATABASE src")
+        .execute(&mut **dedupe_conn)
+        .await?;
+
+    Ok(())
+}
+
+async fn record_dedupe_chunk_objects_batch(
+    dedupe_conn: &mut DbConn,
+    pending_conn: &mut DbConn,
+    provider: &str,
+    chunk_objects: &[ChunkObjectMapping],
+) -> Result<()> {
+    record_dedupe_chunk_objects_batch_inner(dedupe_conn, provider, chunk_objects).await?;
+    record_dedupe_chunk_objects_batch_inner(pending_conn, provider, chunk_objects).await?;
+    Ok(())
+}
+
+async fn record_dedupe_chunk_objects_batch_inner(
+    conn: &mut DbConn,
+    provider: &str,
+    chunk_objects: &[ChunkObjectMapping],
+) -> Result<()> {
+    if chunk_objects.is_empty() {
+        return Ok(());
+    }
+
+    let mut retry_idx = 0usize;
+    loop {
+        let mut tx = match conn.begin().await {
+            Ok(tx) => tx,
+            Err(e)
+                if is_sqlite_busy_or_locked(&e)
+                    && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() =>
+            {
+                let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                retry_idx += 1;
+                debug!(
+                    event = "sqlite.busy_retry",
+                    operation = "dedupe.chunk_objects.begin_tx",
+                    retry = retry_idx,
+                    wait_ms,
+                    error = %e,
+                    "sqlite.busy_retry"
+                );
+                sleep(Duration::from_millis(wait_ms)).await;
+                continue;
+            }
+            Err(e) => return Err(Error::Sqlite(e)),
+        };
+        let mut retry_err: Option<sqlx::Error> = None;
+
+        for m in chunk_objects {
+            if let Err(e) = sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+                VALUES (?, ?, 'blake3', 'xchacha20poly1305', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                "#,
+            )
+            .bind(&m.chunk_hash)
+            .bind(m.source_bytes as i64)
+            .execute(&mut *tx)
+            .await
+            {
+                retry_err = Some(e);
+                break;
+            }
+
+            if let Err(e) = sqlx::query(
+                r#"
+                INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at)
+                VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                ON CONFLICT(provider, chunk_hash) DO UPDATE SET
+                  object_id = excluded.object_id,
+                  created_at = excluded.created_at
+                "#,
+            )
+            .bind(&m.chunk_hash)
+            .bind(provider)
+            .bind(&m.object_id)
+            .execute(&mut *tx)
+            .await
+            {
+                retry_err = Some(e);
+                break;
+            }
+        }
+
+        if retry_err.is_none()
+            && let Err(e) = tx.commit().await
+        {
+            retry_err = Some(e);
+        }
+
+        if let Some(e) = retry_err {
+            if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
+                let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                retry_idx += 1;
+                debug!(
+                    event = "sqlite.busy_retry",
+                    operation = "dedupe.chunk_objects.upsert_batch",
+                    retry = retry_idx,
+                    wait_ms,
+                    error = %e,
+                    "sqlite.busy_retry"
+                );
+                sleep(Duration::from_millis(wait_ms)).await;
+                continue;
+            }
+            return Err(Error::Sqlite(e));
+        }
+
+        return Ok(());
+    }
+}
+
 async fn apply_retention(
     conn: &mut DbConn,
     source_path: &Path,
     keep_last_snapshots: u32,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let source = path_to_utf8(source_path)?;
     let rows = sqlx::query(
         r#"
@@ -2673,7 +3273,7 @@ async fn apply_retention(
     .await?;
 
     if rows.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let snapshot_ids = rows
@@ -2691,7 +3291,30 @@ async fn apply_retention(
         apply_retention_snapshot_batch(conn, &source, &batch_ids, batch_no, total_batches).await?;
     }
 
-    Ok(())
+    Ok(snapshot_ids)
+}
+
+fn cleanup_filemap_cache_best_effort(filemap_dir: &Path, snapshot_ids: &[String]) {
+    if snapshot_ids.is_empty() {
+        return;
+    }
+
+    for snapshot_id in snapshot_ids {
+        let path = filemap_dir.join(format!("{snapshot_id}.sqlite"));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                warn!(
+                    event = "filemap_cache.delete_failed",
+                    snapshot_id,
+                    path = %path.display(),
+                    error = %e,
+                    "filemap_cache.delete_failed"
+                );
+            }
+        }
+    }
 }
 
 async fn apply_retention_snapshot_batch(
@@ -2919,28 +3542,6 @@ fn push_string_bind_list<'a>(query: &mut QueryBuilder<'a, Sqlite>, values: &'a [
     }
 }
 
-async fn apply_retention_all_sources(conn: &mut DbConn, keep_last_snapshots: u32) -> Result<()> {
-    let rows = execute_sqlite_with_busy_retry!(
-        "snapshots.distinct_sources",
-        sqlx::query(
-            r#"
-            SELECT DISTINCT source_path
-            FROM snapshots
-            WHERE source_path IS NOT NULL
-              AND source_path <> ''
-            "#,
-        )
-        .fetch_all(&mut **conn)
-    )?;
-
-    for row in rows {
-        let source_path: String = row.get("source_path");
-        apply_retention(conn, Path::new(&source_path), keep_last_snapshots).await?;
-    }
-
-    Ok(())
-}
-
 async fn compact_index_db_if_needed(conn: &mut DbConn, db_path: &Path) {
     let page_count = match sqlx::query("PRAGMA page_count")
         .fetch_one(&mut **conn)
@@ -3024,22 +3625,75 @@ async fn compact_index_db_if_needed(conn: &mut DbConn, db_path: &Path) {
 async fn latest_snapshot_for_source(
     conn: &mut DbConn,
     source_path: &Path,
+    provider: &str,
 ) -> Result<Option<String>> {
     let source = path_to_utf8(source_path)?;
+    let kind = provider_kind(provider);
+    let like = format!("{kind}%");
     let row = sqlx::query(
         r#"
-        SELECT snapshot_id
-        FROM snapshots
-        WHERE source_path = ?
-        ORDER BY created_at DESC
+        SELECT s.snapshot_id as snapshot_id
+        FROM snapshots s
+        JOIN remote_indexes ri ON ri.snapshot_id = s.snapshot_id
+        WHERE s.source_path = ?
+          AND (ri.provider = ? OR ri.provider LIKE ?)
+        ORDER BY s.created_at DESC
         LIMIT 1
         "#,
     )
     .bind(source)
+    .bind(provider)
+    .bind(like)
     .fetch_optional(&mut **conn)
     .await?;
 
     Ok(row.map(|r| r.get::<String, _>("snapshot_id")))
+}
+
+fn provider_kind(provider: &str) -> &str {
+    provider.split(['/', ':']).next().unwrap_or(provider).trim()
+}
+
+async fn attach_db(conn: &mut DbConn, alias: &str, path: &Path) -> Result<()> {
+    // ATTACH needs a literal string; escape single quotes defensively.
+    let path_sql = path.to_string_lossy().replace('\'', "''");
+    let sql = format!("ATTACH DATABASE '{path_sql}' AS {alias}");
+    sqlx::query(&sql).execute(&mut **conn).await?;
+    Ok(())
+}
+
+async fn endpoint_db_has_snapshot_filemap(conn: &mut DbConn, snapshot_id: &str) -> Result<bool> {
+    let row = sqlx::query("SELECT 1 as present FROM files WHERE snapshot_id = ? LIMIT 1")
+        .bind(snapshot_id)
+        .fetch_optional(&mut **conn)
+        .await?;
+    Ok(row.is_some())
+}
+
+async fn lookup_remote_index_manifest_object_id(
+    conn: &mut DbConn,
+    snapshot_id: &str,
+    provider: &str,
+) -> Result<Option<String>> {
+    let row = sqlx::query(
+        "SELECT provider, manifest_object_id FROM remote_indexes WHERE snapshot_id = ? LIMIT 1",
+    )
+    .bind(snapshot_id)
+    .fetch_optional(&mut **conn)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let row_provider: String = row.get("provider");
+    let manifest_object_id: String = row.get("manifest_object_id");
+
+    if row_provider == provider || provider_kind(&row_provider) == provider_kind(provider) {
+        Ok(Some(manifest_object_id))
+    } else {
+        Ok(None)
+    }
 }
 
 async fn lookup_base_file_snapshot_row(
@@ -3052,7 +3706,7 @@ async fn lookup_base_file_snapshot_row(
         sqlx::query(
             r#"
             SELECT file_id, size, mtime_ms, mode
-            FROM files
+            FROM base.files
             WHERE snapshot_id = ? AND path = ? AND kind = 'file'
             LIMIT 1
             "#,
@@ -3084,11 +3738,50 @@ async fn flush_base_chunk_copy_batch(
         let mut copied_chunks = 0u64;
 
         for row in rows.iter() {
+            // `file_chunks` has a FK to `chunks`. When we base-copy file_chunks, we must also
+            // seed the referenced chunk rows in the destination filemap DB, otherwise SQLite
+            // will reject the insert with a FK violation.
+            //
+            // Note: base snapshot DB might be either the cached filemap DB, or the legacy
+            // endpoint DB (upgrade path).
+            if let Err(e) = sqlx::query(
+                r#"
+                INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+                SELECT c.chunk_hash, c.size, c.hash_alg, c.enc_alg, c.created_at
+                FROM base.chunks c
+                WHERE c.chunk_hash IN (
+                    SELECT DISTINCT chunk_hash
+                    FROM base.file_chunks
+                    WHERE file_id = ?
+                )
+                "#,
+            )
+            .bind(&row.base_file_id)
+            .execute(&mut *tx)
+            .await
+            {
+                let _ = tx.rollback().await;
+                if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
+                    let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
+                    retry_idx += 1;
+                    debug!(
+                        event = "sqlite.busy_retry",
+                        op = "chunks.copy_from_base.batch",
+                        retry = retry_idx,
+                        wait_ms,
+                        "sqlite.busy_retry"
+                    );
+                    sleep(Duration::from_millis(wait_ms)).await;
+                    continue 'retry;
+                }
+                return Err(Error::from(e));
+            }
+
             let copied = match sqlx::query(
                 r#"
                 INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
                 SELECT ?, seq, chunk_hash, offset, len
-                FROM file_chunks
+                FROM base.file_chunks
                 WHERE file_id = ?
                 ORDER BY seq
                 "#,
@@ -3174,14 +3867,17 @@ async fn load_chunk_hashes_for_storage<S: Storage>(
     storage: &S,
     provider: &str,
 ) -> Result<HashSet<String>> {
+    let kind = provider_kind(provider);
+    let like = format!("{kind}%");
     let rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
         r#"
         SELECT chunk_hash, object_id
         FROM chunk_objects
-        WHERE provider = ?
+        WHERE provider = ? OR provider LIKE ?
         "#,
     )
     .bind(provider)
+    .bind(&like)
     .fetch_all(&mut **conn)
     .await?;
 
@@ -3206,12 +3902,139 @@ async fn load_chunk_hashes_for_storage<S: Storage>(
     Ok(hashes)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EndpointIndexExportStats {
+    source_db_bytes: u64,
+    export_db_bytes: u64,
+}
+
+async fn export_endpoint_index_db_for_upload(
+    source_db_path: &Path,
+    temp_parent: &Path,
+    include_dedupe: bool,
+) -> Result<(tempfile::NamedTempFile, EndpointIndexExportStats)> {
+    let source_db_bytes = source_db_path.metadata()?.len();
+
+    let exported_db = tempfile::Builder::new()
+        .prefix("televy-index-export-")
+        .suffix(".sqlite")
+        .tempfile_in(temp_parent)?;
+    let export_path = exported_db.path().to_path_buf();
+
+    let pool = open_index_db(&export_path).await?;
+    let mut conn: DbConn = pool.acquire().await?;
+    drop(pool);
+
+    // ATTACH needs a literal string; escape single quotes defensively.
+    let src_path_sql = source_db_path.to_string_lossy().replace('\'', "''");
+    sqlx::query(&format!("ATTACH DATABASE '{src_path_sql}' AS src"))
+        .execute(&mut *conn)
+        .await?;
+
+    // Copy in one transaction to keep export fast.
+    let mut tx = conn.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id)
+        SELECT snapshot_id, created_at, source_path, label, base_snapshot_id
+        FROM src.snapshots
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    if include_dedupe {
+        sqlx::query(
+            r#"
+            INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+            SELECT chunk_hash, size, hash_alg, enc_alg, created_at
+            FROM src.chunks
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at)
+            SELECT chunk_hash, provider, object_id, created_at
+            FROM src.chunk_objects
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO remote_indexes (snapshot_id, provider, manifest_object_id, created_at)
+        SELECT snapshot_id, provider, manifest_object_id, created_at
+        FROM src.remote_indexes
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO remote_index_parts (snapshot_id, part_no, provider, object_id, size, hash)
+        SELECT snapshot_id, part_no, provider, object_id, size, hash
+        FROM src.remote_index_parts
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO endpoint_state (key, value)
+        SELECT key, value
+        FROM src.endpoint_state
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO tasks (
+            task_id, kind, state, created_at, started_at, finished_at, snapshot_id, error_code, error_message
+        )
+        SELECT
+            task_id, kind, state, created_at, started_at, finished_at, snapshot_id, error_code, error_message
+        FROM src.tasks
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    sqlx::query("DETACH DATABASE src")
+        .execute(&mut *conn)
+        .await?;
+    drop(conn);
+
+    let export_db_bytes = export_path.metadata()?.len();
+    Ok((
+        exported_db,
+        EndpointIndexExportStats {
+            source_db_bytes,
+            export_db_bytes,
+        },
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct PublishedDedupe {
+    parts_uploaded: u64,
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn upload_index<S: Storage>(
-    conn: &mut DbConn,
+async fn publish_remote_dedupe_if_needed<S: Storage>(
     storage: &S,
     config: &BackupConfig,
-    snapshot_id: &str,
+    dedupe_conn: &mut DbConn,
     rate_limiter: &UploadRateLimiter,
     uploaded_bytes: &AtomicU64,
     uploaded_net_bytes: &AtomicU64,
@@ -3227,16 +4050,471 @@ async fn upload_index<S: Storage>(
     bytes_uploaded_source: u64,
     source_bytes_need_upload_total: u64,
     bytes_deduped: u64,
-) -> Result<IndexManifest> {
-    let provider = storage.provider();
-    // Ensure all file/chunk rows are committed, then stream-compress the DB into a temp file.
-    // This avoids holding multi-GB index databases in process memory.
-    let mut db_file = File::open(&config.db_path)?;
-    let temp_parent = config
-        .db_path
+) -> Result<PublishedDedupe> {
+    let dedupe_temp_parent = config
+        .dedupe_db_path
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(std::env::temp_dir);
+
+    match &config.remote_dedupe {
+        RemoteDedupeMode::Disabled => Ok(PublishedDedupe { parts_uploaded: 0 }),
+        RemoteDedupeMode::Enable { endpoint_dedupe_id } => {
+            let base_id = dedupe_base_id_for_storage(storage);
+            let exported_base =
+                export_dedupe_db_for_upload(&config.dedupe_db_path, &dedupe_temp_parent).await?;
+            let uploaded_base = upload_index_sqlite_db(
+                storage,
+                config,
+                &base_id,
+                exported_base.path(),
+                &dedupe_temp_parent,
+                rate_limiter,
+                uploaded_bytes,
+                uploaded_net_bytes,
+                have_uploaded_net_bytes,
+                upload_workload_total,
+                upload_confirmed_bytes,
+                progress,
+                source_files_total,
+                source_bytes_total,
+                files_indexed,
+                chunks_total,
+                bytes_read,
+                bytes_uploaded_source,
+                source_bytes_need_upload_total,
+                bytes_deduped,
+            )
+            .await?;
+
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let cat = DedupeCatalogV1 {
+                version: DEDUPE_CATALOG_VERSION,
+                updated_at: now.clone(),
+                endpoint_dedupe_id: endpoint_dedupe_id.clone(),
+                base: DedupeCatalogBase {
+                    base_id,
+                    manifest_object_id: uploaded_base.manifest_object_id.clone(),
+                },
+                deltas: Vec::new(),
+            };
+
+            rate_limiter.wait_turn().await;
+            let catalog_object_id =
+                save_remote_dedupe_catalog(storage, &config.master_key, &cat).await?;
+
+            // Only clear pending once base+catalog is fully published.
+            reset_dedupe_pending_spool_db(&config.dedupe_pending_db_path).await?;
+
+            // Record state so future runs can skip rebuilding when bootstrap points at this catalog.
+            execute_sqlite_with_busy_retry!(
+                "endpoint_state.endpoint_dedupe_id.upsert",
+                sqlx::query("INSERT OR REPLACE INTO endpoint_state (key, value) VALUES (?, ?)")
+                    .bind(crate::index_sync::ENDPOINT_STATE_ENDPOINT_DEDUPE_ID_KEY)
+                    .bind(endpoint_dedupe_id)
+                    .execute(&mut **dedupe_conn)
+            )?;
+            execute_sqlite_with_busy_retry!(
+                "endpoint_state.dedupe_catalog_object_id.upsert",
+                sqlx::query("INSERT OR REPLACE INTO endpoint_state (key, value) VALUES (?, ?)")
+                    .bind(crate::index_sync::ENDPOINT_STATE_DEDUPE_CATALOG_OBJECT_ID_KEY)
+                    .bind(&catalog_object_id)
+                    .execute(&mut **dedupe_conn)
+            )?;
+
+            debug!(
+                event = "dedupe.publish.enable.finish",
+                endpoint_dedupe_id,
+                catalog_object_id,
+                base_manifest_object_id = %uploaded_base.manifest_object_id,
+                base_parts = uploaded_base.manifest.parts.len() as u64,
+                "dedupe.publish.enable.finish"
+            );
+
+            Ok(PublishedDedupe {
+                parts_uploaded: uploaded_base.manifest.parts.len() as u64,
+            })
+        }
+        RemoteDedupeMode::Incremental {
+            endpoint_dedupe_id,
+            catalog_object_id,
+        } => {
+            let mut parts_uploaded = 0u64;
+
+            // Always ensure local state is populated (even if no deltas are generated).
+            execute_sqlite_with_busy_retry!(
+                "endpoint_state.endpoint_dedupe_id.upsert",
+                sqlx::query("INSERT OR REPLACE INTO endpoint_state (key, value) VALUES (?, ?)")
+                    .bind(crate::index_sync::ENDPOINT_STATE_ENDPOINT_DEDUPE_ID_KEY)
+                    .bind(endpoint_dedupe_id)
+                    .execute(&mut **dedupe_conn)
+            )?;
+            execute_sqlite_with_busy_retry!(
+                "endpoint_state.dedupe_catalog_object_id.upsert",
+                sqlx::query("INSERT OR REPLACE INTO endpoint_state (key, value) VALUES (?, ?)")
+                    .bind(crate::index_sync::ENDPOINT_STATE_DEDUPE_CATALOG_OBJECT_ID_KEY)
+                    .bind(catalog_object_id)
+                    .execute(&mut **dedupe_conn)
+            )?;
+
+            if !db_path_has_any_chunk_objects(&config.dedupe_pending_db_path).await? {
+                return Ok(PublishedDedupe { parts_uploaded });
+            }
+
+            let mut cat =
+                load_remote_dedupe_catalog(storage, &config.master_key, catalog_object_id).await?;
+            if cat.endpoint_dedupe_id != *endpoint_dedupe_id {
+                return Err(Error::InvalidConfig {
+                    message: format!(
+                        "dedupe catalog endpoint mismatch: expected={} got={}",
+                        endpoint_dedupe_id, cat.endpoint_dedupe_id
+                    ),
+                });
+            }
+
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let next_catalog_object_id = if cat.deltas.len() >= DEDUPE_MAX_DELTAS_BEFORE_COMPACT {
+                // Compaction: re-upload a fresh base DB and reset deltas.
+                let base_id = cat.base.base_id.clone();
+                let exported_base =
+                    export_dedupe_db_for_upload(&config.dedupe_db_path, &dedupe_temp_parent)
+                        .await?;
+                let uploaded_base = upload_index_sqlite_db(
+                    storage,
+                    config,
+                    &base_id,
+                    exported_base.path(),
+                    &dedupe_temp_parent,
+                    rate_limiter,
+                    uploaded_bytes,
+                    uploaded_net_bytes,
+                    have_uploaded_net_bytes,
+                    upload_workload_total,
+                    upload_confirmed_bytes,
+                    progress,
+                    source_files_total,
+                    source_bytes_total,
+                    files_indexed,
+                    chunks_total,
+                    bytes_read,
+                    bytes_uploaded_source,
+                    source_bytes_need_upload_total,
+                    bytes_deduped,
+                )
+                .await?;
+                parts_uploaded =
+                    parts_uploaded.saturating_add(uploaded_base.manifest.parts.len() as u64);
+
+                let new_cat = DedupeCatalogV1 {
+                    version: DEDUPE_CATALOG_VERSION,
+                    updated_at: now.clone(),
+                    endpoint_dedupe_id: endpoint_dedupe_id.clone(),
+                    base: DedupeCatalogBase {
+                        base_id,
+                        manifest_object_id: uploaded_base.manifest_object_id.clone(),
+                    },
+                    deltas: Vec::new(),
+                };
+
+                rate_limiter.wait_turn().await;
+                let new_id =
+                    save_remote_dedupe_catalog(storage, &config.master_key, &new_cat).await?;
+
+                reset_dedupe_pending_spool_db(&config.dedupe_pending_db_path).await?;
+
+                debug!(
+                    event = "dedupe.publish.compaction.finish",
+                    endpoint_dedupe_id,
+                    old_catalog_object_id = catalog_object_id,
+                    new_catalog_object_id = %new_id,
+                    base_manifest_object_id = %uploaded_base.manifest_object_id,
+                    base_parts = uploaded_base.manifest.parts.len() as u64,
+                    "dedupe.publish.compaction.finish"
+                );
+
+                new_id
+            } else {
+                let scope = storage
+                    .object_id_scope()
+                    .unwrap_or_else(|| storage.provider());
+                let uuid_simple = uuid::Uuid::new_v4().simple().to_string();
+                let delta_id = dedupe_delta_id_from_scope(scope, &uuid_simple);
+
+                let exported_delta = export_pending_dedupe_delta_db(
+                    &config.dedupe_pending_db_path,
+                    &dedupe_temp_parent,
+                )
+                .await?;
+                let delta_bytes = exported_delta
+                    .path()
+                    .metadata()
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                let uploaded_delta = upload_index_sqlite_db(
+                    storage,
+                    config,
+                    &delta_id,
+                    exported_delta.path(),
+                    &dedupe_temp_parent,
+                    rate_limiter,
+                    uploaded_bytes,
+                    uploaded_net_bytes,
+                    have_uploaded_net_bytes,
+                    upload_workload_total,
+                    upload_confirmed_bytes,
+                    progress,
+                    source_files_total,
+                    source_bytes_total,
+                    files_indexed,
+                    chunks_total,
+                    bytes_read,
+                    bytes_uploaded_source,
+                    source_bytes_need_upload_total,
+                    bytes_deduped,
+                )
+                .await?;
+                parts_uploaded =
+                    parts_uploaded.saturating_add(uploaded_delta.manifest.parts.len() as u64);
+
+                cat.updated_at = now.clone();
+                cat.deltas.push(DedupeCatalogDelta {
+                    delta_id,
+                    manifest_object_id: uploaded_delta.manifest_object_id.clone(),
+                    created_at: now.clone(),
+                    bytes: Some(delta_bytes),
+                });
+
+                rate_limiter.wait_turn().await;
+                let new_id = save_remote_dedupe_catalog(storage, &config.master_key, &cat).await?;
+
+                reset_dedupe_pending_spool_db(&config.dedupe_pending_db_path).await?;
+
+                debug!(
+                    event = "dedupe.publish.delta.finish",
+                    endpoint_dedupe_id,
+                    old_catalog_object_id = catalog_object_id,
+                    new_catalog_object_id = %new_id,
+                    delta_manifest_object_id = %uploaded_delta.manifest_object_id,
+                    delta_parts = uploaded_delta.manifest.parts.len() as u64,
+                    "dedupe.publish.delta.finish"
+                );
+
+                new_id
+            };
+
+            // Record the catalog pointer for next run/bootstrap update.
+            execute_sqlite_with_busy_retry!(
+                "endpoint_state.dedupe_catalog_object_id.upsert",
+                sqlx::query("INSERT OR REPLACE INTO endpoint_state (key, value) VALUES (?, ?)")
+                    .bind(crate::index_sync::ENDPOINT_STATE_DEDUPE_CATALOG_OBJECT_ID_KEY)
+                    .bind(&next_catalog_object_id)
+                    .execute(&mut **dedupe_conn)
+            )?;
+
+            Ok(PublishedDedupe { parts_uploaded })
+        }
+    }
+}
+
+async fn db_path_has_any_chunk_objects(db_path: &Path) -> Result<bool> {
+    if !db_path.exists() {
+        return Ok(false);
+    }
+    let pool = match open_existing_index_db(db_path).await {
+        Ok(pool) => pool,
+        Err(_) => return Ok(false),
+    };
+    let row = sqlx::query("SELECT 1 AS n FROM chunk_objects LIMIT 1")
+        .fetch_optional(&pool)
+        .await?;
+    Ok(row.is_some())
+}
+
+async fn export_dedupe_db_for_upload(
+    source_db_path: &Path,
+    temp_parent: &Path,
+) -> Result<tempfile::NamedTempFile> {
+    export_dedupe_tables_only_db(source_db_path, temp_parent, "televy-dedupe-base-export-").await
+}
+
+async fn export_pending_dedupe_delta_db(
+    pending_db_path: &Path,
+    temp_parent: &Path,
+) -> Result<tempfile::NamedTempFile> {
+    export_dedupe_tables_only_db(pending_db_path, temp_parent, "televy-dedupe-delta-export-").await
+}
+
+async fn export_dedupe_tables_only_db(
+    source_db_path: &Path,
+    temp_parent: &Path,
+    prefix: &str,
+) -> Result<tempfile::NamedTempFile> {
+    let exported_db = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(".sqlite")
+        .tempfile_in(temp_parent)?;
+    let export_path = exported_db.path().to_path_buf();
+
+    // Create schema.
+    let pool = open_index_db(&export_path).await?;
+    let mut conn: DbConn = pool.acquire().await?;
+    drop(pool);
+
+    if source_db_path.exists() {
+        // ATTACH needs a literal string; escape single quotes defensively.
+        let src_path_sql = source_db_path.to_string_lossy().replace('\'', "''");
+        sqlx::query(&format!("ATTACH DATABASE '{src_path_sql}' AS src"))
+            .execute(&mut *conn)
+            .await?;
+
+        let mut tx = conn.begin().await?;
+
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+            SELECT chunk_hash, size, hash_alg, enc_alg, created_at
+            FROM src.chunks
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at)
+            SELECT chunk_hash, provider, object_id, created_at
+            FROM src.chunk_objects
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        sqlx::query("DETACH DATABASE src")
+            .execute(&mut *conn)
+            .await?;
+    }
+
+    drop(conn);
+    Ok(exported_db)
+}
+
+async fn reset_dedupe_pending_spool_db(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let temp_parent = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let tmp = tempfile::Builder::new()
+        .prefix("televy-dedupe-pending-reset-")
+        .suffix(".sqlite")
+        .tempfile_in(&temp_parent)?;
+    let tmp_path = tmp.path().to_path_buf();
+    // Ensure schema exists (migrations).
+    let _ = open_index_db(&tmp_path).await?;
+
+    let (file, kept_path) = tmp.keep().map_err(|e| Error::Io(e.error))?;
+    drop(file);
+    replace_atomic(&kept_path, path).map_err(Error::Io)?;
+    Ok(())
+}
+
+async fn compact_local_index_db(db_path: &Path, include_dedupe: bool) -> Result<()> {
+    let temp_parent = db_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    let (exported_db, export_stats) =
+        export_endpoint_index_db_for_upload(db_path, &temp_parent, include_dedupe).await?;
+
+    debug!(
+        event = "index.local_compact.export.finish",
+        db_path = %db_path.display(),
+        source_bytes = export_stats.source_db_bytes,
+        export_bytes = export_stats.export_db_bytes,
+        "index.local_compact.export.finish"
+    );
+
+    let (file, tmp_path) = exported_db.keep().map_err(|e| Error::Io(e.error))?;
+    drop(file);
+    if let Err(e) = replace_atomic(&tmp_path, db_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(Error::Io(e));
+    }
+
+    let new_bytes = db_path.metadata().map(|m| m.len()).unwrap_or(0);
+    debug!(
+        event = "index.local_compact.finish",
+        db_path = %db_path.display(),
+        bytes = new_bytes,
+        "index.local_compact.finish"
+    );
+    Ok(())
+}
+
+fn replace_atomic(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    match std::fs::rename(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Some platforms (e.g. Windows) do not allow renaming over an existing destination.
+            // Avoid deleting the existing DB: move it aside, then restore it if the replace fails.
+            let mut backup = path.to_path_buf();
+            backup.set_extension(format!("bak-{}", uuid::Uuid::new_v4()));
+
+            std::fs::rename(path, &backup)?;
+            match std::fs::rename(tmp, path) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&backup);
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = std::fs::rename(&backup, path);
+                    let _ = std::fs::remove_file(tmp);
+                    Err(e)
+                }
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+struct UploadedIndex {
+    manifest: IndexManifest,
+    manifest_object_id: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_index_sqlite_db<S: Storage>(
+    storage: &S,
+    config: &BackupConfig,
+    index_id: &str,
+    sqlite_db_path: &Path,
+    temp_parent: &Path,
+    rate_limiter: &UploadRateLimiter,
+    uploaded_bytes: &AtomicU64,
+    uploaded_net_bytes: &AtomicU64,
+    have_uploaded_net_bytes: &AtomicBool,
+    upload_workload_total: &AtomicU64,
+    upload_confirmed_bytes: &AtomicU64,
+    progress: Option<&dyn ProgressSink>,
+    source_files_total: Option<u64>,
+    source_bytes_total: Option<u64>,
+    files_indexed: u64,
+    chunks_total: u64,
+    bytes_read: u64,
+    bytes_uploaded_source: u64,
+    source_bytes_need_upload_total: u64,
+    bytes_deduped: u64,
+) -> Result<UploadedIndex> {
+    let provider = storage.provider();
+
+    // Stream-compress the DB into a temp file. This avoids holding multi-GB index
+    // databases in process memory.
+    let mut db_file = File::open(sqlite_db_path)?;
     let mut compressed_file = tempfile::Builder::new()
         .prefix("televy-index-upload-")
         .tempfile_in(temp_parent)?;
@@ -3280,7 +4558,7 @@ async fn upload_index<S: Storage>(
             break;
         }
         let part_plain = &part_buf[..filled];
-        let aad = index_part_aad(snapshot_id, part_no);
+        let aad = index_part_aad(index_id, part_no);
         let part_enc = encrypt_framed(&config.master_key, aad.as_bytes(), part_plain)?;
         let part_hash = blake3::hash(&part_enc).to_hex().to_string();
         let part_len = part_enc.len();
@@ -3372,7 +4650,7 @@ async fn upload_index<S: Storage>(
                             event = "io.telegram.upload_retry",
                             provider,
                             kind = "index_part",
-                            snapshot_id,
+                            snapshot_id = index_id,
                             part_no,
                             blob_bytes = part_len_u64,
                             attempt,
@@ -3388,7 +4666,7 @@ async fn upload_index<S: Storage>(
                     error!(
                         event = "io.telegram.upload_failed",
                         provider,
-                        snapshot_id,
+                        snapshot_id = index_id,
                         part_no,
                         blob_bytes = part_len_u64,
                         attempts = attempt,
@@ -3397,7 +4675,7 @@ async fn upload_index<S: Storage>(
                     );
                     return Err(Error::Telegram {
                         message: format!(
-                            "upload failed: kind=index_part snapshot_id={snapshot_id} part_no={part_no} bytes={part_len_u64}; {e}"
+                            "upload failed: kind=index_part snapshot_id={index_id} part_no={part_no} bytes={part_len_u64}; {e}"
                         ),
                     });
                 }
@@ -3405,7 +4683,7 @@ async fn upload_index<S: Storage>(
         }
         let object_id = object_id.ok_or_else(|| Error::Telegram {
             message: format!(
-                "upload failed: kind=index_part snapshot_id={snapshot_id} part_no={part_no} bytes={part_len_u64}; retry loop exhausted"
+                "upload failed: kind=index_part snapshot_id={index_id} part_no={part_no} bytes={part_len_u64}; retry loop exhausted"
             ),
         })?;
         upload_confirmed_bytes.fetch_add(part_len_u64, Ordering::Relaxed);
@@ -3433,23 +4711,6 @@ async fn upload_index<S: Storage>(
             });
         }
 
-        execute_sqlite_with_busy_retry!(
-            "remote_index_parts.upsert",
-            sqlx::query(
-                r#"
-                INSERT OR REPLACE INTO remote_index_parts (snapshot_id, part_no, provider, object_id, size, hash)
-                VALUES (?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(snapshot_id)
-            .bind(part_no as i64)
-            .bind(provider)
-            .bind(&object_id)
-            .bind(part_len as i64)
-            .bind(&part_hash)
-            .execute(&mut **conn)
-        )?;
-
         parts.push(IndexManifestPart {
             no: part_no,
             size: part_len,
@@ -3461,7 +4722,7 @@ async fn upload_index<S: Storage>(
 
     let manifest = IndexManifest {
         version: 1,
-        snapshot_id: snapshot_id.to_string(),
+        snapshot_id: index_id.to_string(),
         hash_alg: "blake3".to_string(),
         enc_alg: "xchacha20poly1305".to_string(),
         compression: "zstd".to_string(),
@@ -3471,7 +4732,7 @@ async fn upload_index<S: Storage>(
         message: "serialize index manifest failed".to_string(),
     })?;
 
-    let manifest_enc = encrypt_framed(&config.master_key, snapshot_id.as_bytes(), &manifest_json)?;
+    let manifest_enc = encrypt_framed(&config.master_key, index_id.as_bytes(), &manifest_json)?;
     let manifest_bytes = manifest_enc.len() as u64;
     upload_workload_total.fetch_add(manifest_bytes, Ordering::Relaxed);
     let mut manifest_object_id: Option<String> = None;
@@ -3557,7 +4818,7 @@ async fn upload_index<S: Storage>(
                         event = "io.telegram.upload_retry",
                         provider,
                         kind = "index_manifest",
-                        snapshot_id,
+                        snapshot_id = index_id,
                         blob_bytes = manifest_bytes,
                         attempt,
                         max_attempts = UPLOAD_OBJECT_MAX_ATTEMPTS,
@@ -3572,7 +4833,7 @@ async fn upload_index<S: Storage>(
                 error!(
                     event = "io.telegram.upload_failed",
                     provider,
-                    snapshot_id,
+                    snapshot_id = index_id,
                     kind = "index_manifest",
                     blob_bytes = manifest_bytes,
                     attempts = attempt,
@@ -3581,7 +4842,7 @@ async fn upload_index<S: Storage>(
                 );
                 return Err(Error::Telegram {
                     message: format!(
-                        "upload failed: kind=index_manifest snapshot_id={snapshot_id} bytes={manifest_bytes}; {e}"
+                        "upload failed: kind=index_manifest snapshot_id={index_id} bytes={manifest_bytes}; {e}"
                     ),
                 });
             }
@@ -3589,7 +4850,7 @@ async fn upload_index<S: Storage>(
     }
     let manifest_object_id = manifest_object_id.ok_or_else(|| Error::Telegram {
         message: format!(
-            "upload failed: kind=index_manifest snapshot_id={snapshot_id} bytes={manifest_bytes}; retry loop exhausted"
+            "upload failed: kind=index_manifest snapshot_id={index_id} bytes={manifest_bytes}; retry loop exhausted"
         ),
     })?;
 
@@ -3618,6 +4879,37 @@ async fn upload_index<S: Storage>(
         });
     }
 
+    Ok(UploadedIndex {
+        manifest,
+        manifest_object_id,
+    })
+}
+
+async fn persist_snapshot_remote_index_meta(
+    conn: &mut DbConn,
+    provider: &str,
+    snapshot_id: &str,
+    uploaded: &UploadedIndex,
+) -> Result<()> {
+    for part in &uploaded.manifest.parts {
+        execute_sqlite_with_busy_retry!(
+            "remote_index_parts.upsert",
+            sqlx::query(
+                r#"
+                INSERT OR REPLACE INTO remote_index_parts (snapshot_id, part_no, provider, object_id, size, hash)
+                VALUES (?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(snapshot_id)
+            .bind(part.no as i64)
+            .bind(provider)
+            .bind(&part.object_id)
+            .bind(part.size as i64)
+            .bind(&part.hash)
+            .execute(&mut **conn)
+        )?;
+    }
+
     execute_sqlite_with_busy_retry!(
         "remote_indexes.upsert",
         sqlx::query(
@@ -3628,11 +4920,11 @@ async fn upload_index<S: Storage>(
         )
         .bind(snapshot_id)
         .bind(provider)
-        .bind(&manifest_object_id)
+        .bind(&uploaded.manifest_object_id)
         .execute(&mut **conn)
     )?;
 
-    Ok(manifest)
+    Ok(())
 }
 
 fn path_to_utf8(path: &Path) -> Result<String> {
@@ -3641,4 +4933,205 @@ fn path_to_utf8(path: &Path) -> Result<String> {
         .ok_or_else(|| Error::NonUtf8Path {
             path: path.to_path_buf(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::Row;
+
+    use super::{error_has_flood_wait, export_endpoint_index_db_for_upload};
+    use crate::Error;
+
+    #[test]
+    fn flood_wait_detection_matches_regular_and_premium() {
+        assert!(error_has_flood_wait(&Error::Telegram {
+            message: "rpc error: FLOOD_WAIT_12".to_string(),
+        }));
+        assert!(error_has_flood_wait(&Error::Telegram {
+            message: "rpc error: FLOOD_PREMIUM_WAIT_34".to_string(),
+        }));
+
+        // Some errors include "flood wait" in a human-readable form.
+        assert!(error_has_flood_wait(&Error::Telegram {
+            message: "rpc error 420: flood wait (value: 5)".to_string(),
+        }));
+        assert!(error_has_flood_wait(&Error::Telegram {
+            message: "rpc error 420: flood premium wait (value: 5)".to_string(),
+        }));
+
+        assert!(!error_has_flood_wait(&Error::Telegram {
+            message: "AUTH_KEY_UNREGISTERED".to_string(),
+        }));
+    }
+
+    #[tokio::test]
+    async fn endpoint_index_export_excludes_file_maps() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_db = dir.path().join("source.sqlite");
+
+        let pool = crate::index_db::open_index_db(&source_db).await.unwrap();
+
+        // Two sources, two snapshots each.
+        for (snapshot_id, created_at, source_path) in [
+            ("snp_a1", "2026-01-01T00:00:00Z", "/a"),
+            ("snp_a2", "2026-01-02T00:00:00Z", "/a"),
+            ("snp_b1", "2026-01-01T00:00:00Z", "/b"),
+            ("snp_b2", "2026-01-03T00:00:00Z", "/b"),
+        ] {
+            sqlx::query(
+                "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, 'test', NULL)",
+            )
+            .bind(snapshot_id)
+            .bind(created_at)
+            .bind(source_path)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO remote_indexes (snapshot_id, provider, manifest_object_id, created_at) VALUES (?, 'telegram.mtproto/test', ?, ?)",
+            )
+            .bind(snapshot_id)
+            .bind(format!("man_{snapshot_id}"))
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO remote_index_parts (snapshot_id, part_no, provider, object_id, size, hash) VALUES (?, 0, 'telegram.mtproto/test', ?, 1, 'h')",
+            )
+            .bind(snapshot_id)
+            .bind(format!("part_{snapshot_id}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // One file per snapshot; only the latest per source should remain in the export.
+        for (snapshot_id, file_id, chunk_hash) in [
+            ("snp_a1", "f_a1", "chk_a1"),
+            ("snp_a2", "f_a2", "chk_a2"),
+            ("snp_b1", "f_b1", "chk_b1"),
+            ("snp_b2", "f_b2", "chk_b2"),
+        ] {
+            sqlx::query(
+                "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, ?, 'x.txt', 1, 0, 0, 'file')",
+            )
+            .bind(file_id)
+            .bind(snapshot_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES (?, 1, 'blake3', 'xchacha20poly1305', '2026-01-01T00:00:00Z')",
+            )
+            .bind(chunk_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at) VALUES (?, 'telegram.mtproto/test', ?, '2026-01-01T00:00:00Z')",
+            )
+            .bind(chunk_hash)
+            .bind(format!("tgfile:obj_{chunk_hash}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len) VALUES (?, 0, ?, 0, 1)",
+            )
+            .bind(file_id)
+            .bind(chunk_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Add a task row to ensure we keep it.
+        sqlx::query(
+            "INSERT INTO tasks (task_id, kind, state, created_at, started_at, finished_at, snapshot_id, error_code, error_message) VALUES ('t1', 'backup', 'done', '2026-01-01T00:00:00Z', NULL, NULL, 'snp_a1', NULL, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        drop(pool);
+
+        let (exported_db, _stats) =
+            export_endpoint_index_db_for_upload(&source_db, dir.path(), true)
+                .await
+                .unwrap();
+
+        let export_pool = crate::index_db::open_existing_index_db(exported_db.path())
+            .await
+            .unwrap();
+
+        let snapshots: i64 = sqlx::query("SELECT COUNT(*) AS n FROM snapshots")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(snapshots, 4);
+
+        // Endpoint DB export must not include file maps (`files` / `file_chunks`).
+        let files: i64 = sqlx::query("SELECT COUNT(*) AS n FROM files")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(files, 0);
+
+        let file_chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM file_chunks")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(file_chunks, 0);
+
+        let tasks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM tasks")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(tasks, 1);
+
+        // Global/dedupe state must remain.
+        let chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM chunks")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(chunks, 4);
+        let chunk_objects: i64 = sqlx::query("SELECT COUNT(*) AS n FROM chunk_objects")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(chunk_objects, 4);
+
+        // When remote dedupe is enabled, endpoint DB exports should exclude dedupe tables too.
+        let (exported_db, _stats) =
+            export_endpoint_index_db_for_upload(&source_db, dir.path(), false)
+                .await
+                .unwrap();
+        let export_pool = crate::index_db::open_existing_index_db(exported_db.path())
+            .await
+            .unwrap();
+        let chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM chunks")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(chunks, 0);
+        let chunk_objects: i64 = sqlx::query("SELECT COUNT(*) AS n FROM chunk_objects")
+            .fetch_one(&export_pool)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(chunk_objects, 0);
+    }
 }

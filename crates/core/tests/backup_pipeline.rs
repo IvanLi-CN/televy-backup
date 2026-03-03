@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use sqlx::Row;
 use televy_backup_core::{
-    BackupConfig, BackupOptions, ChunkingConfig, InMemoryStorage, ProgressSink, SourceQuickStats,
-    TaskProgress, run_backup, run_backup_with,
+    BackupConfig, BackupOptions, ChunkingConfig, InMemoryStorage, ProgressSink, RemoteDedupeMode,
+    SourceQuickStats, TaskProgress, run_backup, run_backup_with,
 };
 use tempfile::TempDir;
 
@@ -59,6 +59,9 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
     write_file(source.join("nested/b.bin"), &[42u8; 10_000]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
 
     let storage = InMemoryStorage::new();
     let chunking = ChunkingConfig {
@@ -68,7 +71,10 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
     };
 
     let cfg1 = BackupConfig {
-        db_path: db_path.clone(),
+        endpoint_db_path: db_path.clone(),
+        filemap_dir: filemap_dir.clone(),
+        dedupe_db_path: dedupe_db_path.clone(),
+        dedupe_pending_db_path: dedupe_pending_db_path.clone(),
         source_path: source.clone(),
         label: "t1".to_string(),
         chunking: chunking.clone(),
@@ -76,6 +82,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
         master_key: [7u8; 32],
         snapshot_id: None,
         keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
     };
 
     let r1 = run_backup(&storage, cfg1).await.unwrap();
@@ -85,11 +92,15 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
     let uploads_after_r1 = storage.uploaded.load(std::sync::atomic::Ordering::Relaxed);
     assert_eq!(
         uploads_after_r1 as u64,
-        r1.data_objects_uploaded + r1.index_parts + 1
+        // Two-level index uploads: filemap manifest + endpoint manifest.
+        r1.data_objects_uploaded + r1.index_parts + 2
     );
 
     let cfg2 = BackupConfig {
-        db_path: db_path.clone(),
+        endpoint_db_path: db_path.clone(),
+        filemap_dir: filemap_dir.clone(),
+        dedupe_db_path: dedupe_db_path.clone(),
+        dedupe_pending_db_path: dedupe_pending_db_path.clone(),
         source_path: source.clone(),
         label: "t2".to_string(),
         chunking,
@@ -97,6 +108,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
         master_key: [7u8; 32],
         snapshot_id: None,
         keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
     };
 
     let r2 = run_backup(&storage, cfg2).await.unwrap();
@@ -107,7 +119,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
 
     let uploads_after_r2 = storage.uploaded.load(std::sync::atomic::Ordering::Relaxed);
     let delta = (uploads_after_r2 - uploads_after_r1) as u64;
-    assert_eq!(delta, r2.data_objects_uploaded + r2.index_parts + 1);
+    assert_eq!(delta, r2.data_objects_uploaded + r2.index_parts + 2);
 
     let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
         .await
@@ -153,9 +165,15 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
     write_file(file_path.clone(), &initial);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
     let storage = InMemoryStorage::new();
     let cfg = BackupConfig {
-        db_path: db_path.clone(),
+        endpoint_db_path: db_path.clone(),
+        filemap_dir: filemap_dir.clone(),
+        dedupe_db_path,
+        dedupe_pending_db_path,
         source_path: source.clone(),
         label: "volatile".to_string(),
         chunking: ChunkingConfig {
@@ -167,6 +185,7 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
         master_key: [9u8; 32],
         snapshot_id: None,
         keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
     };
 
     let sink = MutateOnUpload::new(&file_path, changed);
@@ -185,14 +204,14 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
     .await
     .unwrap();
 
-    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
+    let filemap_db_path = filemap_dir.join(format!("{}.sqlite", result.snapshot_id));
+    let filemap_pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", filemap_db_path.display()))
         .await
         .unwrap();
-
     let files_in_snapshot: i64 =
         sqlx::query("SELECT COUNT(*) as n FROM files WHERE snapshot_id = ? AND kind = 'file'")
             .bind(&result.snapshot_id)
-            .fetch_one(&pool)
+            .fetch_one(&filemap_pool)
             .await
             .unwrap()
             .get("n");
@@ -210,4 +229,75 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
         overlapped,
         "expected upload bytes to advance before scan bytes reached source total"
     );
+}
+
+#[tokio::test]
+async fn backup_compacts_local_index_db_after_success() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("src");
+    std::fs::create_dir_all(&source).unwrap();
+
+    let file_path = source.join("single.bin");
+    write_file(file_path.clone(), &[1u8; 4096]);
+
+    let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
+    let storage = InMemoryStorage::new();
+
+    let cfg = BackupConfig {
+        endpoint_db_path: db_path.clone(),
+        filemap_dir: filemap_dir.clone(),
+        dedupe_db_path,
+        dedupe_pending_db_path,
+        source_path: source.clone(),
+        label: "compact".to_string(),
+        chunking: ChunkingConfig {
+            min_bytes: 4096,
+            avg_bytes: 4096,
+            max_bytes: 4096,
+        },
+        rate_limit: Default::default(),
+        master_key: [3u8; 32],
+        snapshot_id: None,
+        keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
+    };
+
+    let r1 = run_backup(&storage, cfg.clone()).await.unwrap();
+
+    // Second run produces a newer snapshot for the same source_path.
+    write_file(file_path, &[2u8; 4096]);
+    let r2 = run_backup(&storage, cfg).await.unwrap();
+    assert_ne!(r1.snapshot_id, r2.snapshot_id);
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
+        .await
+        .unwrap();
+
+    let snapshots: i64 = sqlx::query("SELECT COUNT(*) as n FROM snapshots")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get("n");
+    assert_eq!(snapshots, 2);
+
+    // Endpoint DB should not contain file maps (`files` / `file_chunks`) in two-level mode.
+    let rows = sqlx::query("SELECT DISTINCT snapshot_id FROM files ORDER BY snapshot_id")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    let kept = rows
+        .into_iter()
+        .map(|r| r.get::<String, _>("snapshot_id"))
+        .collect::<Vec<_>>();
+    assert_eq!(kept, Vec::<String>::new());
+
+    let file_chunks: i64 = sqlx::query("SELECT COUNT(*) as n FROM file_chunks")
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .get("n");
+    assert_eq!(file_chunks, 0);
 }

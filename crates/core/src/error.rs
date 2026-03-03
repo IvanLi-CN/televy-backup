@@ -61,7 +61,9 @@ pub fn is_transient_telegram_message(message: &str) -> bool {
         || msg.contains("network is unreachable")
         || msg.contains("deadline exceeded")
         || msg.contains("flood_wait")
+        || msg.contains("flood_premium_wait")
         || msg.contains("flood wait")
+        || msg.contains("flood premium wait")
 }
 
 impl Error {
@@ -95,6 +97,9 @@ mod tests {
             "save_file_part timed out after 60s"
         ));
         assert!(is_transient_telegram_message("rpc error: FLOOD_WAIT_12"));
+        assert!(is_transient_telegram_message(
+            "rpc error: FLOOD_PREMIUM_WAIT_12"
+        ));
         assert!(is_transient_telegram_message("transport disconnected"));
         assert!(!is_transient_telegram_message(
             "transport protocol violation"

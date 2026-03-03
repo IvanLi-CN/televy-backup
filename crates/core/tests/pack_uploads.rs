@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sqlx::Row;
 use televy_backup_core::{
-    BackupConfig, BackupOptions, ChunkingConfig, Error, InMemoryStorage, ProgressSink, Result,
-    SourceQuickStats, Storage, TaskProgress, run_backup, run_backup_with,
+    BackupConfig, BackupOptions, ChunkingConfig, Error, InMemoryStorage, ProgressSink,
+    RemoteDedupeMode, Result, SourceQuickStats, Storage, TaskProgress, run_backup, run_backup_with,
 };
 use tempfile::TempDir;
 
@@ -156,11 +156,15 @@ async fn pack_enabled_by_count_reduces_upload_calls() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let res = run_backup(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {
@@ -172,6 +176,7 @@ async fn pack_enabled_by_count_reduces_upload_calls() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -181,7 +186,8 @@ async fn pack_enabled_by_count_reduces_upload_calls() {
     assert_eq!(res.data_objects_uploaded, 1);
 
     let uploads = storage.uploaded.load(Ordering::Relaxed) as u64;
-    assert_eq!(uploads, res.data_objects_uploaded + res.index_parts + 1);
+    // Two-level index uploads: filemap manifest + endpoint manifest.
+    assert_eq!(uploads, res.data_objects_uploaded + res.index_parts + 2);
 }
 
 #[tokio::test]
@@ -195,11 +201,15 @@ async fn small_batch_does_not_enable_pack() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let res = run_backup(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {
@@ -211,6 +221,7 @@ async fn small_batch_does_not_enable_pack() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -231,13 +242,17 @@ async fn packed_upload_source_bytes_match_source_need_upload_total() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let probe = ProgressProbe::default();
 
     let res = run_backup_with(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source,
             label: "pack-source-bytes".to_string(),
             chunking: ChunkingConfig {
@@ -249,6 +264,7 @@ async fn packed_upload_source_bytes_match_source_need_upload_total() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
         BackupOptions {
             cancel: None,
@@ -292,40 +308,54 @@ async fn large_index_db_uploads_multiple_index_parts() {
     write_file(source.join("single.bin"), &[42u8; 4096]);
 
     let db_path = temp.path().join("index.sqlite");
-    std::fs::File::create(&db_path).unwrap();
-    let prep_pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
+    let filemap_dir = temp.path().join("filemaps");
+    // Populate exported schema tables (chunks/chunk_objects) with noise so the *compact* index
+    // export is forced into multiple uploaded parts.
+    let prep_pool = televy_backup_core::index_db::open_index_db(&db_path)
         .await
         .unwrap();
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS stress_payload (
-            id INTEGER PRIMARY KEY,
-            blob BLOB NOT NULL
-        )
-        "#,
-    )
-    .execute(&prep_pool)
-    .await
-    .unwrap();
 
-    let mut blob = vec![0u8; 1024 * 1024];
+    let mut noise = vec![0u8; 512];
     let mut seed = 0xC0FFEE1234u64;
-    for _ in 0..12 {
-        seed = fill_deterministic_noise(&mut blob, seed);
-        sqlx::query("INSERT INTO stress_payload(blob) VALUES (?)")
-            .bind(blob.clone())
-            .execute(&prep_pool)
-            .await
-            .unwrap();
+    let mut tx = prep_pool.begin().await.unwrap();
+    for _ in 0..5_000 {
+        seed = fill_deterministic_noise(&mut noise, seed);
+        let chunk_hash = blake3::hash(&noise).to_hex().to_string();
+
+        let mut object_id = String::with_capacity("tgfile:".len() + noise.len() * 2);
+        object_id.push_str("tgfile:");
+        for b in &noise {
+            use std::fmt::Write as _;
+            let _ = write!(&mut object_id, "{:02x}", b);
+        }
+
+        sqlx::query(
+            "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES (?, 1, 'blake3', 'xchacha20poly1305', '2026-01-01T00:00:00Z')",
+        )
+        .bind(&chunk_hash)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at) VALUES (?, 'test.mem', ?, '2026-01-01T00:00:00Z')",
+        )
+        .bind(&chunk_hash)
+        .bind(object_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     }
-    sqlx::query("VACUUM").execute(&prep_pool).await.unwrap();
+    tx.commit().await.unwrap();
     prep_pool.close().await;
 
     let storage = InMemoryStorage::new();
     let res = run_backup(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source,
             label: "idx-large".to_string(),
             chunking: ChunkingConfig {
@@ -337,6 +367,7 @@ async fn large_index_db_uploads_multiple_index_parts() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -360,6 +391,7 @@ async fn restart_after_index_upload_failure_does_not_reupload_chunks() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
 
     // Fail on the 2nd upload: first pack upload succeeds, then index part upload fails.
@@ -367,7 +399,10 @@ async fn restart_after_index_upload_failure_does_not_reupload_chunks() {
     let err = run_backup(
         &failing,
         BackupConfig {
-            db_path: db_path.clone(),
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source.clone(),
             label: "t1".to_string(),
             chunking: ChunkingConfig {
@@ -379,6 +414,7 @@ async fn restart_after_index_upload_failure_does_not_reupload_chunks() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -400,7 +436,10 @@ async fn restart_after_index_upload_failure_does_not_reupload_chunks() {
     let res2 = run_backup(
         &storage,
         BackupConfig {
-            db_path: db_path.clone(),
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source,
             label: "t2".to_string(),
             chunking: ChunkingConfig {
@@ -412,6 +451,7 @@ async fn restart_after_index_upload_failure_does_not_reupload_chunks() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -429,6 +469,7 @@ async fn upload_retries_after_network_unreachable_failure() {
     std::fs::create_dir_all(&source).unwrap();
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let failing = FailOnRetryableUpload::with_message(
         &storage,
@@ -439,7 +480,10 @@ async fn upload_retries_after_network_unreachable_failure() {
     let res = run_backup(
         &failing,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source,
             label: "idx-retry-network-unreachable".to_string(),
             chunking: ChunkingConfig {
@@ -451,6 +495,7 @@ async fn upload_retries_after_network_unreachable_failure() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -466,13 +511,17 @@ async fn index_part_upload_retries_after_transient_failure() {
     std::fs::create_dir_all(&source).unwrap();
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let failing = FailOnRetryableUpload::new(&storage, 1);
 
     let res = run_backup(
         &failing,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source,
             label: "idx-retry-part".to_string(),
             chunking: ChunkingConfig {
@@ -484,6 +533,7 @@ async fn index_part_upload_retries_after_transient_failure() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -499,13 +549,17 @@ async fn index_manifest_upload_retries_after_transient_failure() {
     std::fs::create_dir_all(&source).unwrap();
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let failing = FailOnRetryableUpload::new(&storage, 2);
 
     let res = run_backup(
         &failing,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source,
             label: "idx-retry-manifest".to_string(),
             chunking: ChunkingConfig {
@@ -517,6 +571,7 @@ async fn index_manifest_upload_retries_after_transient_failure() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -533,9 +588,13 @@ async fn retention_preflight_bounds_snapshot_growth_on_repeated_failures() {
     write_file(source.join("volatile.bin"), &[7u8; 4096]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let cfg = BackupConfig {
-        db_path: db_path.clone(),
+        endpoint_db_path: db_path.clone(),
+        filemap_dir: filemap_dir.clone(),
+        dedupe_db_path: temp.path().join("dedupe.sqlite"),
+        dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
         source_path: source.clone(),
         label: "fail".to_string(),
         chunking: ChunkingConfig {
@@ -547,6 +606,7 @@ async fn retention_preflight_bounds_snapshot_growth_on_repeated_failures() {
         master_key: [9u8; 32],
         snapshot_id: None,
         keep_last_snapshots: 2,
+        remote_dedupe: RemoteDedupeMode::Disabled,
     };
 
     for _ in 0..6 {
@@ -566,7 +626,7 @@ async fn retention_preflight_bounds_snapshot_growth_on_repeated_failures() {
 }
 
 #[tokio::test]
-async fn retention_preflight_prunes_other_sources_before_backup() {
+async fn retention_preflight_does_not_prune_other_sources_before_backup() {
     let temp = TempDir::new().unwrap();
     let source_sync = temp.path().join("sync");
     let source_projects = temp.path().join("projects");
@@ -576,6 +636,7 @@ async fn retention_preflight_prunes_other_sources_before_backup() {
     write_file(source_projects.join("p.bin"), &[2u8; 4096]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
 
     let base_chunking = ChunkingConfig {
@@ -588,7 +649,10 @@ async fn retention_preflight_prunes_other_sources_before_backup() {
         run_backup(
             &storage,
             BackupConfig {
-                db_path: db_path.clone(),
+                endpoint_db_path: db_path.clone(),
+                filemap_dir: filemap_dir.clone(),
+                dedupe_db_path: temp.path().join("dedupe.sqlite"),
+                dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
                 source_path: source_projects.clone(),
                 label: format!("projects-{i}"),
                 chunking: base_chunking.clone(),
@@ -596,6 +660,7 @@ async fn retention_preflight_prunes_other_sources_before_backup() {
                 master_key: [3u8; 32],
                 snapshot_id: None,
                 keep_last_snapshots: 10,
+                remote_dedupe: RemoteDedupeMode::Disabled,
             },
         )
         .await
@@ -606,7 +671,10 @@ async fn retention_preflight_prunes_other_sources_before_backup() {
         run_backup(
             &storage,
             BackupConfig {
-                db_path: db_path.clone(),
+                endpoint_db_path: db_path.clone(),
+                filemap_dir: filemap_dir.clone(),
+                dedupe_db_path: temp.path().join("dedupe.sqlite"),
+                dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
                 source_path: source_sync.clone(),
                 label: format!("sync-{i}"),
                 chunking: base_chunking.clone(),
@@ -614,6 +682,7 @@ async fn retention_preflight_prunes_other_sources_before_backup() {
                 master_key: [3u8; 32],
                 snapshot_id: None,
                 keep_last_snapshots: 10,
+                remote_dedupe: RemoteDedupeMode::Disabled,
             },
         )
         .await
@@ -629,7 +698,10 @@ async fn retention_preflight_prunes_other_sources_before_backup() {
     run_backup(
         &storage,
         BackupConfig {
-            db_path: db_path.clone(),
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source_sync.clone(),
             label: "sync-trim".to_string(),
             chunking: base_chunking,
@@ -637,6 +709,7 @@ async fn retention_preflight_prunes_other_sources_before_backup() {
             master_key: [3u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 2,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -645,8 +718,8 @@ async fn retention_preflight_prunes_other_sources_before_backup() {
     let projects_after = snapshot_count_for_source(&pool, &source_projects).await;
     let sync_after = snapshot_count_for_source(&pool, &source_sync).await;
     assert_eq!(
-        projects_after, 2,
-        "expected preflight retention to trim idle sources"
+        projects_after, 4,
+        "expected retention to only prune the active source (idle sources are cleaned when they run)"
     );
     assert_eq!(
         sync_after, 2,
@@ -662,6 +735,7 @@ async fn retention_preflight_handles_large_backlog_with_batched_prune() {
     write_file(source.join("payload.bin"), &[5u8; 4096]);
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
     let storage = InMemoryStorage::new();
     let chunking = ChunkingConfig {
         min_bytes: 4096,
@@ -673,7 +747,10 @@ async fn retention_preflight_handles_large_backlog_with_batched_prune() {
         run_backup(
             &storage,
             BackupConfig {
-                db_path: db_path.clone(),
+                endpoint_db_path: db_path.clone(),
+                filemap_dir: filemap_dir.clone(),
+                dedupe_db_path: temp.path().join("dedupe.sqlite"),
+                dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
                 source_path: source.clone(),
                 label: format!("seed-{i}"),
                 chunking: chunking.clone(),
@@ -681,6 +758,7 @@ async fn retention_preflight_handles_large_backlog_with_batched_prune() {
                 master_key: [5u8; 32],
                 snapshot_id: None,
                 keep_last_snapshots: 64,
+                remote_dedupe: RemoteDedupeMode::Disabled,
             },
         )
         .await
@@ -695,7 +773,10 @@ async fn retention_preflight_handles_large_backlog_with_batched_prune() {
     run_backup(
         &storage,
         BackupConfig {
-            db_path: db_path.clone(),
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
             source_path: source.clone(),
             label: "trim".to_string(),
             chunking,
@@ -703,6 +784,7 @@ async fn retention_preflight_handles_large_backlog_with_batched_prune() {
             master_key: [5u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 2,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await

@@ -10,6 +10,8 @@ use sqlx::{Row, SqlitePool};
 use tracing::{debug, error};
 
 use crate::crypto::decrypt_framed;
+use crate::dedupe_catalog::endpoint_dedupe_id_for_storage;
+use crate::dedupe_sync::materialize_remote_dedupe_db;
 use crate::index_db::open_existing_index_db;
 use crate::pack::extract_pack_blob;
 use crate::progress::{ProgressSink, TaskProgress};
@@ -21,9 +23,24 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone)]
 pub struct RestoreConfig {
     pub snapshot_id: String,
-    pub manifest_object_id: String,
+    /// Snapshot filemap manifest object id (the "per snapshot" index DB).
+    pub filemap_manifest_object_id: String,
+    /// Endpoint DB manifest object id (two-level mode). When set, restore/verify will download the
+    /// endpoint DB and use it for `chunk_objects` lookups.
+    pub endpoint_manifest_object_id: Option<String>,
+    /// Optional dedupe catalog object id (remote delta mode). When set, restore/verify will
+    /// download and materialize a local dedupe DB and prefer it for `chunk_objects` lookups.
+    pub dedupe_catalog_object_id: Option<String>,
+    /// Optional endpoint dedupe id. When omitted, it is derived from `storage.object_id_scope()`
+    /// (or falls back to `storage.provider()` for tests).
+    pub endpoint_dedupe_id: Option<String>,
+    /// Optional endpoint index id (AAD for endpoint DB manifest/parts). When omitted, it is
+    /// derived from `storage.object_id_scope()` (or falls back to `storage.provider()` for tests).
+    pub endpoint_index_id: Option<String>,
     pub master_key: [u8; 32],
-    pub index_db_path: PathBuf,
+    pub filemap_db_path: PathBuf,
+    pub endpoint_db_path: Option<PathBuf>,
+    pub dedupe_db_path: Option<PathBuf>,
     pub target_path: PathBuf,
 }
 
@@ -37,9 +54,15 @@ pub struct RestoreResult {
 #[derive(Debug, Clone)]
 pub struct VerifyConfig {
     pub snapshot_id: String,
-    pub manifest_object_id: String,
+    pub filemap_manifest_object_id: String,
+    pub endpoint_manifest_object_id: Option<String>,
+    pub dedupe_catalog_object_id: Option<String>,
+    pub endpoint_dedupe_id: Option<String>,
+    pub endpoint_index_id: Option<String>,
     pub master_key: [u8; 32],
-    pub index_db_path: PathBuf,
+    pub filemap_db_path: PathBuf,
+    pub endpoint_db_path: Option<PathBuf>,
+    pub dedupe_db_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -72,9 +95,9 @@ pub async fn restore_snapshot_with<S: Storage>(
     let stats = download_and_write_index_db_atomic(
         storage,
         &config.snapshot_id,
-        &config.manifest_object_id,
+        &config.filemap_manifest_object_id,
         &config.master_key,
-        &config.index_db_path,
+        &config.filemap_db_path,
         options.cancel,
         Some(storage.provider()),
         options.progress,
@@ -85,9 +108,108 @@ pub async fn restore_snapshot_with<S: Storage>(
     let mut net_bytes_downloaded = stats.net_bytes_downloaded.unwrap_or(0);
     let have_net_bytes_downloaded = Arc::new(AtomicBool::new(stats.net_bytes_downloaded.is_some()));
 
+    let use_dedupe_db = config.dedupe_catalog_object_id.is_some();
+    let use_endpoint_db = !use_dedupe_db && config.endpoint_manifest_object_id.is_some();
+
+    if let Some(catalog_object_id) = config.dedupe_catalog_object_id.as_deref() {
+        let dedupe_db_path =
+            config
+                .dedupe_db_path
+                .as_deref()
+                .ok_or_else(|| Error::InvalidConfig {
+                    message: "dedupe_db_path is required when dedupe_catalog_object_id is set"
+                        .to_string(),
+                })?;
+        let endpoint_dedupe_id = match &config.endpoint_dedupe_id {
+            Some(v) => v.clone(),
+            None => endpoint_dedupe_id_for_storage(storage)?,
+        };
+
+        struct OffsetProgress<'a> {
+            inner: &'a dyn ProgressSink,
+            bytes_offset: u64,
+            net_bytes_offset: u64,
+        }
+        impl ProgressSink for OffsetProgress<'_> {
+            fn on_progress(&self, mut progress: TaskProgress) {
+                if let Some(v) = progress.bytes_downloaded {
+                    progress.bytes_downloaded = Some(self.bytes_offset.saturating_add(v));
+                }
+                if let Some(v) = progress.net_bytes_downloaded {
+                    progress.net_bytes_downloaded = Some(self.net_bytes_offset.saturating_add(v));
+                }
+                self.inner.on_progress(progress);
+            }
+        }
+
+        let progress = options.progress.map(|sink| OffsetProgress {
+            inner: sink,
+            bytes_offset: bytes_downloaded,
+            net_bytes_offset: net_bytes_downloaded,
+        });
+        let progress_ref = progress.as_ref().map(|v| v as &dyn ProgressSink);
+
+        let dd_stats = materialize_remote_dedupe_db(
+            storage,
+            &config.master_key,
+            &endpoint_dedupe_id,
+            catalog_object_id,
+            dedupe_db_path,
+            Some(storage.provider()),
+            progress_ref,
+        )
+        .await?;
+
+        bytes_downloaded = bytes_downloaded
+            .saturating_add(dd_stats.base_bytes_downloaded)
+            .saturating_add(dd_stats.delta_bytes_downloaded);
+    }
+
+    if use_endpoint_db
+        && let Some(endpoint_manifest_object_id) = config.endpoint_manifest_object_id.as_deref()
+    {
+        let endpoint_db_path =
+            config
+                .endpoint_db_path
+                .as_deref()
+                .ok_or_else(|| Error::InvalidConfig {
+                    message: "endpoint_db_path is required when endpoint_manifest_object_id is set"
+                        .to_string(),
+                })?;
+        let endpoint_index_id = match &config.endpoint_index_id {
+            Some(v) => v.clone(),
+            None => crate::bootstrap::endpoint_index_id_for_storage(storage)?,
+        };
+
+        let ep_stats = download_and_write_index_db_atomic(
+            storage,
+            &endpoint_index_id,
+            endpoint_manifest_object_id,
+            &config.master_key,
+            endpoint_db_path,
+            options.cancel,
+            Some(storage.provider()),
+            options.progress,
+        )
+        .await?;
+
+        bytes_downloaded = bytes_downloaded.saturating_add(ep_stats.bytes_downloaded);
+        if let Some(net) = ep_stats.net_bytes_downloaded {
+            have_net_bytes_downloaded.store(true, Ordering::Relaxed);
+            net_bytes_downloaded = net_bytes_downloaded.saturating_add(net);
+        }
+    }
+
     ensure_empty_dir(&config.target_path)?;
 
-    let pool = open_existing_index_db(&config.index_db_path).await?;
+    let pool = open_existing_index_db(&config.filemap_db_path).await?;
+    if use_dedupe_db {
+        let dedupe_db_path = config.dedupe_db_path.as_deref().expect("checked above");
+        attach_db(&pool, "dd", dedupe_db_path).await?;
+    } else if use_endpoint_db {
+        let endpoint_db_path = config.endpoint_db_path.as_deref().expect("checked above");
+        attach_db(&pool, "ep", endpoint_db_path).await?;
+    }
     ensure_snapshot_present(&pool, &config.snapshot_id).await?;
 
     restore_dirs(&pool, &config.snapshot_id, &config.target_path).await?;
@@ -96,6 +218,8 @@ pub async fn restore_snapshot_with<S: Storage>(
         &pool,
         &config.snapshot_id,
         &config.target_path,
+        use_endpoint_db,
+        use_dedupe_db,
         &config.master_key,
         options.cancel,
         &mut bytes_downloaded,
@@ -142,9 +266,9 @@ pub async fn verify_snapshot_with<S: Storage>(
     let stats = download_and_write_index_db_atomic(
         storage,
         &config.snapshot_id,
-        &config.manifest_object_id,
+        &config.filemap_manifest_object_id,
         &config.master_key,
-        &config.index_db_path,
+        &config.filemap_db_path,
         options.cancel,
         Some(storage.provider()),
         options.progress,
@@ -155,13 +279,114 @@ pub async fn verify_snapshot_with<S: Storage>(
     let mut net_bytes_downloaded = stats.net_bytes_downloaded.unwrap_or(0);
     let have_net_bytes_downloaded = Arc::new(AtomicBool::new(stats.net_bytes_downloaded.is_some()));
 
-    let pool = open_existing_index_db(&config.index_db_path).await?;
+    let use_dedupe_db = config.dedupe_catalog_object_id.is_some();
+    let use_endpoint_db = !use_dedupe_db && config.endpoint_manifest_object_id.is_some();
+
+    if let Some(catalog_object_id) = config.dedupe_catalog_object_id.as_deref() {
+        let dedupe_db_path =
+            config
+                .dedupe_db_path
+                .as_deref()
+                .ok_or_else(|| Error::InvalidConfig {
+                    message: "dedupe_db_path is required when dedupe_catalog_object_id is set"
+                        .to_string(),
+                })?;
+        let endpoint_dedupe_id = match &config.endpoint_dedupe_id {
+            Some(v) => v.clone(),
+            None => endpoint_dedupe_id_for_storage(storage)?,
+        };
+
+        struct OffsetProgress<'a> {
+            inner: &'a dyn ProgressSink,
+            bytes_offset: u64,
+            net_bytes_offset: u64,
+        }
+        impl ProgressSink for OffsetProgress<'_> {
+            fn on_progress(&self, mut progress: TaskProgress) {
+                if let Some(v) = progress.bytes_downloaded {
+                    progress.bytes_downloaded = Some(self.bytes_offset.saturating_add(v));
+                }
+                if let Some(v) = progress.net_bytes_downloaded {
+                    progress.net_bytes_downloaded = Some(self.net_bytes_offset.saturating_add(v));
+                }
+                self.inner.on_progress(progress);
+            }
+        }
+
+        let progress = options.progress.map(|sink| OffsetProgress {
+            inner: sink,
+            bytes_offset: bytes_downloaded,
+            net_bytes_offset: net_bytes_downloaded,
+        });
+        let progress_ref = progress.as_ref().map(|v| v as &dyn ProgressSink);
+
+        let dd_stats = materialize_remote_dedupe_db(
+            storage,
+            &config.master_key,
+            &endpoint_dedupe_id,
+            catalog_object_id,
+            dedupe_db_path,
+            Some(storage.provider()),
+            progress_ref,
+        )
+        .await?;
+
+        bytes_downloaded = bytes_downloaded
+            .saturating_add(dd_stats.base_bytes_downloaded)
+            .saturating_add(dd_stats.delta_bytes_downloaded);
+    }
+
+    if use_endpoint_db
+        && let Some(endpoint_manifest_object_id) = config.endpoint_manifest_object_id.as_deref()
+    {
+        let endpoint_db_path =
+            config
+                .endpoint_db_path
+                .as_deref()
+                .ok_or_else(|| Error::InvalidConfig {
+                    message: "endpoint_db_path is required when endpoint_manifest_object_id is set"
+                        .to_string(),
+                })?;
+        let endpoint_index_id = match &config.endpoint_index_id {
+            Some(v) => v.clone(),
+            None => crate::bootstrap::endpoint_index_id_for_storage(storage)?,
+        };
+
+        let ep_stats = download_and_write_index_db_atomic(
+            storage,
+            &endpoint_index_id,
+            endpoint_manifest_object_id,
+            &config.master_key,
+            endpoint_db_path,
+            options.cancel,
+            Some(storage.provider()),
+            options.progress,
+        )
+        .await?;
+
+        bytes_downloaded = bytes_downloaded.saturating_add(ep_stats.bytes_downloaded);
+        if let Some(net) = ep_stats.net_bytes_downloaded {
+            have_net_bytes_downloaded.store(true, Ordering::Relaxed);
+            net_bytes_downloaded = net_bytes_downloaded.saturating_add(net);
+        }
+    }
+
+    let pool = open_existing_index_db(&config.filemap_db_path).await?;
+    if use_dedupe_db {
+        let dedupe_db_path = config.dedupe_db_path.as_deref().expect("checked above");
+        attach_db(&pool, "dd", dedupe_db_path).await?;
+    } else if use_endpoint_db {
+        let endpoint_db_path = config.endpoint_db_path.as_deref().expect("checked above");
+        attach_db(&pool, "ep", endpoint_db_path).await?;
+    }
     ensure_snapshot_present(&pool, &config.snapshot_id).await?;
 
     let result = verify_chunks(
         storage,
         &pool,
         &config.snapshot_id,
+        use_endpoint_db,
+        use_dedupe_db,
         &config.master_key,
         options.cancel,
         &mut bytes_downloaded,
@@ -196,6 +421,14 @@ async fn ensure_snapshot_present(pool: &SqlitePool, snapshot_id: &str) -> Result
     Ok(())
 }
 
+async fn attach_db(pool: &SqlitePool, alias: &str, path: &Path) -> Result<()> {
+    // ATTACH needs a literal string; escape single quotes defensively.
+    let path_sql = path.to_string_lossy().replace('\'', "''");
+    let sql = format!("ATTACH DATABASE '{path_sql}' AS {alias}");
+    sqlx::query(&sql).execute(pool).await?;
+    Ok(())
+}
+
 async fn restore_dirs(pool: &SqlitePool, snapshot_id: &str, target: &Path) -> Result<()> {
     let rows =
         sqlx::query("SELECT path FROM files WHERE snapshot_id = ? AND kind = 'dir' ORDER BY path")
@@ -218,6 +451,8 @@ async fn restore_files<S: Storage>(
     pool: &SqlitePool,
     snapshot_id: &str,
     target: &Path,
+    use_endpoint_db: bool,
+    use_dedupe_db: bool,
     master_key: &[u8; 32],
     cancel: Option<&CancellationToken>,
     bytes_downloaded: &mut u64,
@@ -257,21 +492,65 @@ async fn restore_files<S: Storage>(
 
         let mut out = fs::File::create(&out_path)?;
 
-        let chunks = sqlx::query(
-            r#"
-            SELECT fc.seq, fc.chunk_hash, fc.offset, fc.len, co.object_id as object_id
-            FROM file_chunks fc
-            LEFT JOIN chunk_objects co
-              ON co.chunk_hash = fc.chunk_hash
-             AND co.provider = ?
-            WHERE fc.file_id = ?
-            ORDER BY fc.seq
-            "#,
-        )
-        .bind(storage.provider())
-        .bind(&file_id)
-        .fetch_all(pool)
-        .await?;
+        let chunks = if use_dedupe_db {
+            sqlx::query(
+                r#"
+                SELECT fc.seq, fc.chunk_hash, fc.offset, fc.len,
+                       COALESCE(dd_co.object_id, co.object_id) as object_id
+                FROM file_chunks fc
+                LEFT JOIN dd.chunk_objects dd_co
+                  ON dd_co.chunk_hash = fc.chunk_hash
+                 AND dd_co.provider = ?
+                LEFT JOIN chunk_objects co
+                  ON co.chunk_hash = fc.chunk_hash
+                 AND co.provider = ?
+                WHERE fc.file_id = ?
+                ORDER BY fc.seq
+                "#,
+            )
+            .bind(storage.provider())
+            .bind(storage.provider())
+            .bind(&file_id)
+            .fetch_all(pool)
+            .await?
+        } else if use_endpoint_db {
+            sqlx::query(
+                r#"
+                SELECT fc.seq, fc.chunk_hash, fc.offset, fc.len,
+                       COALESCE(ep_co.object_id, co.object_id) as object_id
+                FROM file_chunks fc
+                LEFT JOIN ep.chunk_objects ep_co
+                  ON ep_co.chunk_hash = fc.chunk_hash
+                 AND ep_co.provider = ?
+                LEFT JOIN chunk_objects co
+                  ON co.chunk_hash = fc.chunk_hash
+                 AND co.provider = ?
+                WHERE fc.file_id = ?
+                ORDER BY fc.seq
+                "#,
+            )
+            .bind(storage.provider())
+            .bind(storage.provider())
+            .bind(&file_id)
+            .fetch_all(pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT fc.seq, fc.chunk_hash, fc.offset, fc.len, co.object_id as object_id
+                FROM file_chunks fc
+                LEFT JOIN chunk_objects co
+                  ON co.chunk_hash = fc.chunk_hash
+                 AND co.provider = ?
+                WHERE fc.file_id = ?
+                ORDER BY fc.seq
+                "#,
+            )
+            .bind(storage.provider())
+            .bind(&file_id)
+            .fetch_all(pool)
+            .await?
+        };
 
         for chunk_row in chunks {
             if let Some(cancel) = cancel
@@ -565,6 +844,8 @@ async fn verify_chunks<S: Storage>(
     storage: &S,
     pool: &SqlitePool,
     snapshot_id: &str,
+    use_endpoint_db: bool,
+    use_dedupe_db: bool,
     master_key: &[u8; 32],
     cancel: Option<&CancellationToken>,
     bytes_downloaded: &mut u64,
@@ -575,24 +856,78 @@ async fn verify_chunks<S: Storage>(
     let mut result = VerifyResult::default();
     let mut pack_cache: Option<(String, Vec<u8>)> = None;
 
-    let rows = sqlx::query(
-        r#"
-        SELECT co.chunk_hash as chunk_hash, co.object_id as object_id
-        FROM chunk_objects co
-        JOIN (
-          SELECT DISTINCT fc.chunk_hash as chunk_hash
-          FROM file_chunks fc
-          JOIN files f ON f.file_id = fc.file_id
-          WHERE f.snapshot_id = ?
-        ) used ON used.chunk_hash = co.chunk_hash
-        WHERE co.provider = ?
-        ORDER BY co.object_id, co.chunk_hash
-        "#,
-    )
-    .bind(snapshot_id)
-    .bind(storage.provider())
-    .fetch_all(pool)
-    .await?;
+    let rows = if use_dedupe_db {
+        sqlx::query(
+            r#"
+            SELECT used.chunk_hash as chunk_hash,
+                   COALESCE(dd_co.object_id, co.object_id) as object_id
+            FROM (
+              SELECT DISTINCT fc.chunk_hash as chunk_hash
+              FROM file_chunks fc
+              JOIN files f ON f.file_id = fc.file_id
+              WHERE f.snapshot_id = ?
+            ) used
+            LEFT JOIN dd.chunk_objects dd_co
+              ON dd_co.chunk_hash = used.chunk_hash
+             AND dd_co.provider = ?
+            LEFT JOIN chunk_objects co
+              ON co.chunk_hash = used.chunk_hash
+             AND co.provider = ?
+            WHERE COALESCE(dd_co.object_id, co.object_id) IS NOT NULL
+            ORDER BY COALESCE(dd_co.object_id, co.object_id), used.chunk_hash
+            "#,
+        )
+        .bind(snapshot_id)
+        .bind(storage.provider())
+        .bind(storage.provider())
+        .fetch_all(pool)
+        .await?
+    } else if use_endpoint_db {
+        sqlx::query(
+            r#"
+            SELECT used.chunk_hash as chunk_hash,
+                   COALESCE(ep_co.object_id, co.object_id) as object_id
+            FROM (
+              SELECT DISTINCT fc.chunk_hash as chunk_hash
+              FROM file_chunks fc
+              JOIN files f ON f.file_id = fc.file_id
+              WHERE f.snapshot_id = ?
+            ) used
+            LEFT JOIN ep.chunk_objects ep_co
+              ON ep_co.chunk_hash = used.chunk_hash
+             AND ep_co.provider = ?
+            LEFT JOIN chunk_objects co
+              ON co.chunk_hash = used.chunk_hash
+             AND co.provider = ?
+            WHERE COALESCE(ep_co.object_id, co.object_id) IS NOT NULL
+            ORDER BY COALESCE(ep_co.object_id, co.object_id), used.chunk_hash
+            "#,
+        )
+        .bind(snapshot_id)
+        .bind(storage.provider())
+        .bind(storage.provider())
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT co.chunk_hash as chunk_hash, co.object_id as object_id
+            FROM chunk_objects co
+            JOIN (
+              SELECT DISTINCT fc.chunk_hash as chunk_hash
+              FROM file_chunks fc
+              JOIN files f ON f.file_id = fc.file_id
+              WHERE f.snapshot_id = ?
+            ) used ON used.chunk_hash = co.chunk_hash
+            WHERE co.provider = ?
+            ORDER BY co.object_id, co.chunk_hash
+            "#,
+        )
+        .bind(snapshot_id)
+        .bind(storage.provider())
+        .fetch_all(pool)
+        .await?
+    };
 
     for row in rows {
         if let Some(cancel) = cancel

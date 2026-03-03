@@ -34,3 +34,7 @@
 | 2e73n | Popover Targets 高度实时自适应与误滚动修复 | 已完成 | `2e73n-popover-targets-live-height/SPEC.md` | 2026-02-25 | PR #48 已创建并更新；CI run #251 通过；review-loop 无阻塞问题 |
 | dmts3 | backup 主流水线并行化（scan+upload）与进度语义修复 | 部分完成（4/5） | `dmts3-streaming-backup-pipeline/SPEC.md` | 2026-02-28 | 主循环并行 + retention 优化已落地；新增 index 流式压缩上传以压低 daemon 内存 footprint，待完成 UI 真机截图验收 |
 | z324m | 统一进度条规范（含 Prepare 并行）与四处 UI 对齐 | 已完成 | `z324m-unified-backup-progress-prepare/SPEC.md` | 2026-02-28 | 已同步为单条多层进度规范（NeedUploadConfirmed/UploadingCurrent/BackedUp/Scanned）并保留 Need Upload(Disc./Final) 口径 |
+| hqjd2 | MTProto 备份传输提速（更大分片 + FloodWait 处理 + 可调节流） | 已完成 | `hqjd2-mtproto-transfer-speed/SPEC.md` | 2026-03-02 | PR #49（open）；follow-up：helper pool 并行 uploads + helper session 隔离 |
+| dyu56 | 索引分级：Remote Index 仅保留每个 Source 最新文件映射 | 部分完成（3/4） | `dyu56-index-tiered-filemaps/SPEC.md` | 2026-03-02 | 已实现 remote export + 本地自动 compact + 单测；待真机验证 index 上传耗时与体积收益 |
+| t764g | 端点索引二级拆分：Endpoint DB（一级）+ Snapshot Filemap DB（二级）+ 严格远端门禁（Fail Fast） | 已完成 | `t764g-endpoint-two-level-index/SPEC.md` | 2026-03-02 | 已落地两级索引（endpoint DB + per-snapshot filemap DB）、base filemap 预取与严格远端门禁；restore/verify 支持 ATTACH 两级 DB 并兼容旧格式 |
+| 3z7rj | Endpoint 去重索引增量化：Remote Delta + 本地物化库 + 周期性 Compaction | 已完成 | `3z7rj-endpoint-dedupe-delta-index/SPEC.md` | 2026-03-02 | Remote dedupe 由 Base+Delta+Catalog 组成；endpoint meta DB 不再上传 chunks/chunk_objects；restore/verify 优先使用 dedupe DB |

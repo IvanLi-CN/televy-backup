@@ -1,0 +1,169 @@
+# 索引分级：Remote Index 仅保留每个 Source 最新文件映射（#dyu56）
+
+## 状态
+
+- Status: 部分完成（3/4）
+- Created: 2026-03-02
+- Last: 2026-03-02
+
+## 背景 / 问题陈述
+
+- 当前 endpoint 的本地索引库（`index/index.ep_<endpoint_id>.sqlite`）在 retention=7 且百万级文件规模时会膨胀到多 GiB：
+  - `files` / `file_chunks` 会为**每个快照**存一份完整映射（尽管大多数文件未变化）
+  - `file_id`（UUID）与 `chunk_hash`（hex）随机性强，压缩率较差
+- 备份的 `index` 阶段会把整个 SQLite 文件 zstd 压缩后分片上传到 Telegram：
+  - index 上传耗时可能远大于 data upload，表现为“卡住/带宽没吃满”
+  - 多机器场景下 `index_sync` 也需要下载/写入巨大 DB，成本过高
+- 观察：历史快照的 `files` / `file_chunks` 是主要爆炸源；全端点去重映射（`chunks` / `chunk_objects`）在 #3z7rj 中会迁移为独立的 remote dedupe（Base + Delta + Catalog），避免继续拖累 endpoint DB 上传。
+
+## 目标 / 非目标
+
+### Goals
+
+- 在**不改变**现有加密/manifest 协议（`IndexManifest` v1）的前提下，把 remote index 的体积从
+  - `O(keep_last_snapshots * files_per_snapshot)`
+  - 降到 `O(sources * files_latest_per_source)`
+- 仍然保证：
+  - `index_sync` 下载最新 remote index 后，可用于下一次备份的 base-chunk-copy（只需要每个 source 的 latest 快照文件映射）
+  - 任意旧快照仍可恢复：通过其自身的 `manifest_object_id` 下载对应 remote index（该 index 在生成时包含当时的 latest 文件映射，即包含该快照）
+- 在备份成功后，自动把**本地** endpoint index DB 也压到“每个 source 仅保留 latest file map”的量级，从而避免单机长期跑导致本地 DB 多 GiB（即便不进行 remote-first index_sync）。
+- 运行时不增加 daemon 内存峰值（仍保持“流式压缩 + 分片上传”）。
+
+### Non-goals
+
+- 改造本地 index schema（例如 path 字典化、`chunk_hash` 改 BLOB、delta snapshots）
+- 改 `IndexManifest` 版本/格式（v2）或增加额外 remote objects
+- 一次性解决“本地 index 文件长期膨胀”的全部问题（可作为后续 maintenance 任务）
+
+## 范围（Scope）
+
+### In scope
+
+- core：在 `crates/core/src/backup.rs` 的 `upload_index` 中，上传前生成一个“compact export DB”：
+  - 全量复制：`snapshots` / `remote_indexes` / `remote_index_parts` / `tasks`（`chunks/chunk_objects` 在 #3z7rj 中迁移到 dedupe DB）
+  - 裁剪复制：`files` / `file_chunks` 仅包含“每个 `source_path` 的 latest snapshot”的数据
+  - 对 export DB 进行 zstd + 加密分片上传（沿用现有 upload_index 逻辑）
+- core：在 backup 成功完成后，自动用 compact export DB **重写本地** endpoint index DB（同样的裁剪规则），以缩小磁盘占用并避免下次 index upload 受本地 DB 体积拖累。
+- 新增单元测试验证 export DB 的保留/裁剪规则（覆盖多 source、多 snapshot）。
+- 增加日志：输出 export 前后 DB 大小（bytes）与保留 snapshot 数，便于排障与验证收益。
+
+### Out of scope
+
+- 清理 `chunks/chunk_objects` 的“不可达”历史数据（需要额外的引用计数/可达性分析；可在 #3z7rj 的 dedupe DB 上另开维护 spec）
+
+## 需求（Requirements）
+
+### MUST
+
+- restore/verify 对任意 snapshot：
+  - 下载该 snapshot 的 `manifest_object_id` 对应 remote index 后，`files` / `file_chunks` 必须包含该 snapshot
+- index_sync 下载 latest remote index 后：
+  - 对每个 `source_path`，`files` / `file_chunks` 至少包含该 source 的 latest snapshot（保证 base-chunk-copy 工作）
+- backup 成功后，本地 endpoint index DB 必须仍包含：
+  - `snapshots` 元数据 + `remote_indexes`（用于枚举/定位旧快照的 `manifest_object_id`）
+  - 每个 `source_path` 的 latest snapshot 的 `files/file_chunks`（用于下一次备份的 base-chunk-copy）
+- 不引入新的 Telegram 协议/限制风险：仍沿用现有分片上传路径与重试策略。
+
+### SHOULD
+
+- latest remote index 的字节数显著下降（通常约为旧方案的 `~1/keep_last_snapshots`，取决于 source 数量）
+- index 阶段耗时显著下降
+
+### COULD
+
+- 后续补充本地 maintenance：对本地 index 执行同样裁剪并触发 VACUUM，从而缩小磁盘占用
+
+## 功能与行为规格（Functional/Behavior Spec）
+
+### Core flows
+
+- backup run 生成新 snapshot `S`
+- `upload_index`：
+  - 从本地 index DB 生成 compact export DB `E`
+  - 对 `E` 做 zstd 流式压缩，分片加密上传，生成 `IndexManifest`（v1）
+  - 将 manifest 上传并返回 object id（bootstrap 仍只存 `manifest_object_id`）
+
+### Edge cases / errors
+
+- 多 source_path：每个 source 都保留各自 latest snapshot 的 `files` / `file_chunks`
+- 空目录/无文件：允许 `files` / `file_chunks` 为空，但 snapshot 行必须存在
+- 任何 export 失败都应使 backup 失败并打印错误（避免上传一个“缺表/缺行”的 index）
+
+## 接口契约（Interfaces & Contracts）
+
+None
+
+## 验收标准（Acceptance Criteria）
+
+- Given 一个 index DB 含两个 `source_path`，各自 2 个 snapshot（共 4 个 snapshot 行）
+  When 生成 compact export DB
+  Then export DB 仍包含 4 条 `snapshots` 元数据与全部 `remote_indexes`（若存在）
+  And `files` / `file_chunks` 只包含两个 source 的 latest snapshot
+- Given latest remote index 被 `index_sync` 写入本地
+  When 对其中一个 source 再跑一次 backup 且文件未变化
+  Then base-chunk-copy 逻辑仍可命中（不会重新 chunk 整棵树的所有文件）
+- Given 旧 snapshot 的 `manifest_object_id`
+  When 下载其 remote index 并 restore
+  Then restore 仍可从该 DB 找到该 snapshot 的 `files` / `file_chunks` 并完成恢复
+- Given 同一 `source_path` 连续完成两次 backup（产生 `S1` 与 `S2`）
+  When backup 结束并自动 compact 本地 index DB
+  Then 本地 DB 的 `snapshots` 仍包含 `S1` 与 `S2`
+  And 本地 DB 的 `files/file_chunks` 只保留 `S2`（latest）的映射
+
+## 实现前置条件（Definition of Ready / Preconditions）
+
+- 规格已明确“裁剪规则（按 source latest）”与恢复/同步不变式
+- 单测覆盖多 source、多 snapshot 的裁剪正确性
+
+## 非功能性验收 / 质量门槛（Quality Gates）
+
+### Testing
+
+- Unit tests: `cargo test -p televy-backup-core`
+- Full workspace: `cargo test --all-features`
+
+### Quality checks
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
+## 文档更新（Docs to Update）
+
+- `docs/specs/dyu56-index-tiered-filemaps/SPEC.md`: 本规格
+- `docs/specs/README.md`: Index 表新增条目并跟踪状态
+
+## 计划资产（Plan assets）
+
+None
+
+## 资产晋升（Asset promotion）
+
+None
+
+## 实现里程碑（Milestones / Delivery checklist）
+
+- [x] M1: 在 `upload_index` 中实现 compact export DB（按 source latest 裁剪 files/file_chunks）
+- [x] M2: 添加单测覆盖裁剪规则
+- [x] M3: backup 成功后自动 compact 本地 endpoint index DB，并添加单测
+- [ ] M4: 真机验证：观察 index upload bytes 与耗时下降，且 index_sync + 下一次 backup 正常
+
+## 方案概述（Approach, high-level）
+
+- remote index 文件的“爆炸”来自历史快照的 `files` / `file_chunks` 重复存储；但运行时关键路径（base-chunk-copy）只需要每个 source 的 latest 快照映射。
+- 因此在上传前进行 export：把“快照目录与远端指针（snapshots/remote_indexes）”保留为全量，把“文件映射（files/file_chunks）”裁剪为每个 source 的 latest（去重映射在 #3z7rj 中迁移到 dedupe DB）。
+- 每个旧快照在其自身 remote index 中仍包含其文件映射（因为当时它是 latest），所以 restore 仍可按 manifest 单独下载。
+
+## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
+
+- 风险：若未来新增“离线浏览旧快照文件列表”的 UI 功能，下载 latest index 将不再包含旧快照文件映射；届时需按需下载对应 snapshot 的 remote index。
+- 风险：export 过程会增加一些本地 SQLite I/O（copy rows）；但相比减少 GB 级上传通常仍是净收益。
+- 假设：restore/verify 始终以 snapshot 的 `manifest_object_id` 为入口下载对应 remote index（不依赖 latest index 内含旧快照 files/file_chunks）。
+
+## 变更记录（Change log）
+
+- 2026-03-02: 创建规格
+
+## 参考（References）
+
+- 本地大库样本：`/Users/ivan/Library/Application Support/TelevyBackup/index/index.ep_*.sqlite`（multi-GB）
+- Schema：`crates/core/migrations/0001_init.sql`

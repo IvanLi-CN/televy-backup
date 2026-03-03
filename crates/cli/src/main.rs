@@ -1707,6 +1707,24 @@ fn endpoint_index_db_path(data_dir: &Path, endpoint_id: &str) -> PathBuf {
         .join(format!("index.{endpoint_id}.sqlite"))
 }
 
+fn endpoint_filemap_dir(data_dir: &Path, endpoint_id: &str) -> PathBuf {
+    data_dir.join("index").join("filemaps").join(endpoint_id)
+}
+
+fn endpoint_dedupe_db_path(data_dir: &Path, endpoint_id: &str) -> PathBuf {
+    data_dir
+        .join("index")
+        .join("dedupe")
+        .join(format!("dedupe.{endpoint_id}.sqlite"))
+}
+
+fn endpoint_dedupe_pending_db_path(data_dir: &Path, endpoint_id: &str) -> PathBuf {
+    data_dir
+        .join("index")
+        .join("dedupe")
+        .join(format!("pending.{endpoint_id}.sqlite"))
+}
+
 fn legacy_global_index_db_path(data_dir: &Path) -> PathBuf {
     data_dir.join("index").join("index.sqlite")
 }
@@ -4171,21 +4189,9 @@ async fn backup_run(
         };
         let progress_sink = events.then_some(&sink as &dyn ProgressSink);
 
-        let cfg = BackupConfig {
-            db_path: db_path.clone(),
-            source_path: PathBuf::from(target.source_path.clone()),
-            label,
-            chunking: ChunkingConfig {
-                min_bytes: settings.chunking.min_bytes,
-                avg_bytes: settings.chunking.avg_bytes,
-                max_bytes: settings.chunking.max_bytes,
-            },
-            rate_limit: ep.rate_limit.clone(),
-            master_key,
-            snapshot_id: None,
-            keep_last_snapshots: settings.retention.keep_last_snapshots,
-        };
-        let label_for_bootstrap = cfg.label.clone();
+        let filemap_dir = endpoint_filemap_dir(data_dir, &ep.id);
+        let dedupe_db_path = endpoint_dedupe_db_path(data_dir, &ep.id);
+        let dedupe_pending_db_path = endpoint_dedupe_pending_db_path(data_dir, &ep.id);
 
         let api_hash = get_secret(config_dir, data_dir, &settings.telegram.mtproto.api_hash_key)?
             .ok_or_else(|| CliError::new("telegram.mtproto.missing_api_hash", "mtproto api_hash missing"))?;
@@ -4226,6 +4232,8 @@ async fn backup_run(
                 &target.id,
                 &target.source_path,
                 &db_path,
+                &filemap_dir,
+                &dedupe_db_path,
                 no_remote_index_sync,
                 is_likely_private_chat_id(&ep.chat_id),
                 progress_sink,
@@ -4254,13 +4262,33 @@ async fn backup_run(
             }
         );
 
-        let quick_stats = match prepare_res {
-            Ok(((), stats)) => stats,
+        let (remote_dedupe, quick_stats) = match prepare_res {
+            Ok((remote_dedupe, stats)) => (remote_dedupe, stats),
             Err(e) => {
                 quick_stats_cancel.cancel();
                 return Err(e);
             }
         };
+
+        let cfg = BackupConfig {
+            endpoint_db_path: db_path.clone(),
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path: dedupe_db_path.clone(),
+            dedupe_pending_db_path: dedupe_pending_db_path.clone(),
+            source_path: PathBuf::from(target.source_path.clone()),
+            label,
+            chunking: ChunkingConfig {
+                min_bytes: settings.chunking.min_bytes,
+                avg_bytes: settings.chunking.avg_bytes,
+                max_bytes: settings.chunking.max_bytes,
+            },
+            rate_limit: ep.rate_limit.clone(),
+            master_key,
+            snapshot_id: None,
+            keep_last_snapshots: settings.retention.keep_last_snapshots,
+            remote_dedupe: remote_dedupe.clone(),
+        };
+        let label_for_bootstrap = cfg.label.clone();
 
         let opts = BackupOptions {
             cancel: None,
@@ -4301,9 +4329,63 @@ async fn backup_run(
                     ),
                 ));
             }
+
+            let endpoint_index_id = match televy_backup_core::index_sync::endpoint_state_get(
+                &db_path,
+                televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_INDEX_ID_KEY,
+            )
+            .await
+            .map_err(map_core_err)?
+            {
+                Some(v) => v,
+                None => televy_backup_core::bootstrap::endpoint_index_id_for_storage(&storage)
+                    .map_err(map_core_err)?,
+            };
+            let endpoint_manifest_object_id = televy_backup_core::index_sync::endpoint_state_get(
+                &db_path,
+                televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY,
+            )
+            .await
+            .map_err(map_core_err)?
+            .ok_or_else(|| {
+                CliError::new(
+                    "index.endpoint_manifest_missing",
+                    "missing endpoint_state.endpoint_manifest_object_id after backup".to_string(),
+                )
+            })?;
+
+            let endpoint_dedupe_latest = match &remote_dedupe {
+                televy_backup_core::RemoteDedupeMode::Disabled => None,
+                televy_backup_core::RemoteDedupeMode::Enable { endpoint_dedupe_id }
+                | televy_backup_core::RemoteDedupeMode::Incremental { endpoint_dedupe_id, .. } => {
+                    let catalog_object_id = televy_backup_core::index_sync::endpoint_state_get(
+                        &dedupe_db_path,
+                        televy_backup_core::index_sync::ENDPOINT_STATE_DEDUPE_CATALOG_OBJECT_ID_KEY,
+                    )
+                    .await
+                    .map_err(map_core_err)?
+                    .ok_or_else(|| {
+                        CliError::new(
+                            "index.dedupe_catalog_missing",
+                            "missing endpoint_state.dedupe_catalog_object_id after backup"
+                                .to_string(),
+                        )
+                    })?;
+                    Some(televy_backup_core::bootstrap::BootstrapEndpointDedupeLatest {
+                        endpoint_dedupe_id: endpoint_dedupe_id.clone(),
+                        catalog_object_id,
+                    })
+                }
+            };
+
             televy_backup_core::bootstrap::update_remote_latest(
                 &storage,
                 &master_key,
+                Some(televy_backup_core::bootstrap::BootstrapEndpointLatest {
+                    endpoint_index_id,
+                    manifest_object_id: endpoint_manifest_object_id,
+                }),
+                endpoint_dedupe_latest,
                 &target.id,
                 &target.source_path,
                 &label_for_bootstrap,
@@ -4447,13 +4529,15 @@ async fn preflight_remote_first_index_sync(
     master_key: &[u8; 32],
     target_id: &str,
     source_path: &str,
-    local_index_db: &Path,
+    local_endpoint_db: &Path,
+    filemap_dir: &Path,
+    local_dedupe_db: &Path,
     no_remote_index_sync: bool,
     is_private_chat: bool,
     sink: Option<&dyn ProgressSink>,
-) -> Result<(), CliError> {
+) -> Result<televy_backup_core::RemoteDedupeMode, CliError> {
     if no_remote_index_sync {
-        return Ok(());
+        return Ok(televy_backup_core::RemoteDedupeMode::Disabled);
     }
 
     let started = Instant::now();
@@ -4479,180 +4563,204 @@ async fn preflight_remote_first_index_sync(
             reason = "unsupported_chat",
             "phase.finish"
         );
-        return Ok(());
+        return Ok(televy_backup_core::RemoteDedupeMode::Disabled);
     }
 
-    let catalog = match televy_backup_core::bootstrap::load_remote_catalog(storage, master_key)
+    std::fs::create_dir_all(filemap_dir)
+        .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+
+    // Strict remote gating: Telegram errors in bootstrap/index fetch are fatal; only "bootstrap is
+    // missing" is allowed (first initialization / user pinned something else).
+    let catalog = televy_backup_core::bootstrap::load_remote_catalog(storage, master_key)
         .await
-    {
-        Ok(catalog) => catalog,
-        Err(televy_backup_core::Error::Telegram { message }) => {
-            if televy_backup_core::is_transient_telegram_message(&message) {
-                tracing::warn!(
-                    event = "index_sync.skipped",
-                    reason = "remote_unavailable",
-                    error = %message,
-                    "bootstrap catalog fetch unavailable; continue backup without remote index sync"
-                );
-                tracing::debug!(
-                    event = "phase.finish",
-                    phase = "index_sync",
-                    duration_ms = started.elapsed().as_millis() as u64,
-                    index_source = "skipped",
-                    reason = "remote_unavailable",
-                    "phase.finish"
-                );
-                return Ok(());
-            }
-            return Err(map_core_err(televy_backup_core::Error::Telegram {
-                message,
-            }));
-        }
-        Err(e) => return Err(map_core_err(e)),
-    };
+        .map_err(map_core_err)?;
 
-    let Some(catalog) = catalog else {
-        tracing::debug!(
-            event = "phase.finish",
-            phase = "index_sync",
-            duration_ms = started.elapsed().as_millis() as u64,
-            index_source = "skipped",
-            reason = "bootstrap_missing",
-            "phase.finish"
-        );
-        return Ok(());
-    };
+    // 1) Sync the endpoint DB from bootstrap.endpointLatest (if present).
+    if let Some(endpoint_latest) = catalog.as_ref().and_then(|c| c.endpoint_latest.clone()) {
+        let already_synced =
+            televy_backup_core::index_sync::local_endpoint_db_matches_remote_latest(
+                local_endpoint_db,
+                &endpoint_latest.manifest_object_id,
+            )
+            .await
+            .map_err(map_core_err)?;
 
-    let latest = if let Some(t) = catalog.targets.iter().find(|t| t.target_id == target_id) {
-        if let Some(latest) = t.latest.clone() {
-            Some(latest)
-        } else {
-            tracing::warn!(
-                event = "index_sync.skipped",
-                reason = "bootstrap_target_latest_missing",
+        if !already_synced {
+            let provider = storage.provider();
+            let stats = televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
+                storage,
+                &endpoint_latest.endpoint_index_id,
+                &endpoint_latest.manifest_object_id,
+                master_key,
+                local_endpoint_db,
+                None,
+                Some(provider),
+                sink,
+            )
+            .await
+            .map_err(map_core_err)?;
+
+            // The remote endpoint DB may have been uploaded before it knew its own manifest id.
+            // Record the pointer locally so future runs can skip redundant downloads.
+            televy_backup_core::index_sync::endpoint_state_set(
+                local_endpoint_db,
+                televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_INDEX_ID_KEY,
+                &endpoint_latest.endpoint_index_id,
+            )
+            .await
+            .map_err(map_core_err)?;
+            televy_backup_core::index_sync::endpoint_state_set(
+                local_endpoint_db,
+                televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY,
+                &endpoint_latest.manifest_object_id,
+            )
+            .await
+            .map_err(map_core_err)?;
+
+            tracing::debug!(
+                event = "index_sync.endpoint.downloaded",
                 target_id,
-                "bootstrap target has no latest pointer; continue with local index and publish latest after backup"
+                bytes_downloaded = stats.bytes_downloaded,
+                bytes_written = stats.bytes_written,
+                "index_sync.endpoint.downloaded"
             );
-            None
+        }
+    } else if catalog.is_none() {
+        tracing::debug!(
+            event = "index_sync.skipped",
+            reason = "bootstrap_missing",
+            target_id,
+            "no pinned bootstrap catalog (first init); continue without remote endpoint sync"
+        );
+    }
+
+    // 2) Sync the remote dedupe catalog/base/deltas (if present).
+    let remote_dedupe = if let Some(dedupe_latest) = catalog
+        .as_ref()
+        .and_then(|c| c.endpoint_dedupe_latest.clone())
+    {
+        let already_synced =
+            televy_backup_core::dedupe_sync::local_dedupe_db_matches_remote_latest(
+                local_dedupe_db,
+                &dedupe_latest.catalog_object_id,
+            )
+            .await
+            .map_err(map_core_err)?;
+        if !already_synced {
+            let provider = storage.provider();
+            let stats = televy_backup_core::dedupe_sync::materialize_remote_dedupe_db(
+                storage,
+                master_key,
+                &dedupe_latest.endpoint_dedupe_id,
+                &dedupe_latest.catalog_object_id,
+                local_dedupe_db,
+                Some(provider),
+                sink,
+            )
+            .await
+            .map_err(map_core_err)?;
+            tracing::debug!(
+                event = "index_sync.dedupe.downloaded",
+                target_id,
+                base_bytes_downloaded = stats.base_bytes_downloaded,
+                delta_bytes_downloaded = stats.delta_bytes_downloaded,
+                "index_sync.dedupe.downloaded"
+            );
+        }
+
+        televy_backup_core::RemoteDedupeMode::Incremental {
+            endpoint_dedupe_id: dedupe_latest.endpoint_dedupe_id,
+            catalog_object_id: dedupe_latest.catalog_object_id,
         }
     } else {
-        let matches = catalog
-            .targets
-            .iter()
-            .filter(|t| t.source_path == source_path)
-            .collect::<Vec<_>>();
-
-        if matches.is_empty() {
-            tracing::warn!(
-                event = "index_sync.skipped",
-                reason = "bootstrap_target_mapping_missing",
-                target_id,
-                source_path,
-                "bootstrap has no mapping for this target/source path; continue with local index and publish latest after backup"
-            );
-            None
-        } else if matches.len() > 1 {
-            return Err(CliError::new(
-                "config.invalid",
-                format!("bootstrap source_path is ambiguous: {source_path}"),
-            ));
-        } else if let Some(latest) = matches[0].latest.clone() {
-            Some(latest)
-        } else {
-            tracing::warn!(
-                event = "index_sync.skipped",
-                reason = "bootstrap_source_latest_missing",
-                source_path,
-                "bootstrap source path has no latest pointer; continue with local index and publish latest after backup"
-            );
-            None
-        }
-    };
-    let Some(latest) = latest else {
-        tracing::debug!(
-            event = "phase.finish",
-            phase = "index_sync",
-            duration_ms = started.elapsed().as_millis() as u64,
-            index_source = "skipped",
-            reason = "bootstrap_mapping_missing",
-            "phase.finish"
-        );
-        return Ok(());
+        // Remote dedupe is not initialized yet; enable it so this run can publish base+catalog.
+        let endpoint_dedupe_id =
+            televy_backup_core::dedupe_catalog::endpoint_dedupe_id_for_storage(storage)
+                .map_err(map_core_err)?;
+        televy_backup_core::RemoteDedupeMode::Enable { endpoint_dedupe_id }
     };
 
-    let provider = storage.provider();
-    let already_synced = televy_backup_core::index_sync::local_index_matches_remote_latest(
-        local_index_db,
-        provider,
-        &latest.snapshot_id,
-        &latest.manifest_object_id,
-    )
-    .await
-    .map_err(map_core_err)?;
+    // 3) Fail fast: if a base snapshot exists and its filemap DB is not cached locally, download it
+    // now (so the scan phase won't hit a remote error hours later).
+    if local_endpoint_db.exists() {
+        let pool = televy_backup_core::index_db::open_index_db(local_endpoint_db)
+            .await
+            .map_err(map_core_err)?;
 
-    if already_synced {
-        tracing::debug!(
-            event = "phase.finish",
-            phase = "index_sync",
-            duration_ms = started.elapsed().as_millis() as u64,
-            index_source = "skipped",
-            reason = "already_synced",
-            "phase.finish"
-        );
-        return Ok(());
-    }
+        let provider = storage.provider();
+        let kind = provider.split(['/', ':']).next().unwrap_or(provider).trim();
+        let like = format!("{kind}%");
+        let base_row = sqlx::query(
+            r#"
+            SELECT s.snapshot_id as snapshot_id
+            FROM snapshots s
+            JOIN remote_indexes ri ON ri.snapshot_id = s.snapshot_id
+            WHERE s.source_path = ?
+              AND (ri.provider = ? OR ri.provider LIKE ?)
+            ORDER BY s.created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(source_path)
+        .bind(provider)
+        .bind(&like)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| CliError::new("db.failed", e.to_string()))?;
 
-    let stats = match televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
-        storage,
-        &latest.snapshot_id,
-        &latest.manifest_object_id,
-        master_key,
-        local_index_db,
-        None,
-        Some(provider),
-        sink,
-    )
-    .await
-    {
-        Ok(stats) => stats,
-        Err(televy_backup_core::Error::Telegram { message }) => {
-            if televy_backup_core::is_transient_telegram_message(&message) {
-                tracing::warn!(
-                    event = "index_sync.skipped",
-                    reason = "remote_unavailable",
-                    snapshot_id = %latest.snapshot_id,
-                    error = %message,
-                    "remote index download unavailable; continue backup with local index"
-                );
-                tracing::debug!(
-                    event = "phase.finish",
-                    phase = "index_sync",
-                    duration_ms = started.elapsed().as_millis() as u64,
-                    index_source = "skipped",
-                    reason = "remote_unavailable",
-                    "phase.finish"
-                );
-                return Ok(());
+        if let Some(base_row) = base_row {
+            let base_snapshot_id: String = base_row.get("snapshot_id");
+            let cached_path = filemap_dir.join(format!("{base_snapshot_id}.sqlite"));
+            if !cached_path.exists() {
+                let row = sqlx::query(
+                    "SELECT provider, manifest_object_id FROM remote_indexes WHERE snapshot_id = ? LIMIT 1",
+                )
+                .bind(&base_snapshot_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+
+                let row = row.ok_or_else(|| {
+                    CliError::new(
+                        "integrity.base_snapshot_missing_remote_index",
+                        format!("base snapshot missing remote index pointer: {base_snapshot_id}"),
+                    )
+                })?;
+
+                let row_provider: String = row.get("provider");
+                let manifest_object_id: String = row.get("manifest_object_id");
+                let row_kind = row_provider
+                    .split(['/', ':'])
+                    .next()
+                    .unwrap_or(&row_provider)
+                    .trim();
+                if row_provider == provider || row_kind == kind {
+                    televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
+                        storage,
+                        &base_snapshot_id,
+                        &manifest_object_id,
+                        master_key,
+                        &cached_path,
+                        None,
+                        Some(provider),
+                        None,
+                    )
+                    .await
+                    .map_err(map_core_err)?;
+                }
             }
-            return Err(map_core_err(televy_backup_core::Error::Telegram {
-                message,
-            }));
         }
-        Err(e) => return Err(map_core_err(e)),
-    };
+    }
 
     tracing::debug!(
         event = "phase.finish",
         phase = "index_sync",
         duration_ms = started.elapsed().as_millis() as u64,
-        index_source = "downloaded",
-        bytes_downloaded = stats.bytes_downloaded,
-        bytes_written = stats.bytes_written,
-        snapshot_id = %latest.snapshot_id,
+        target_id,
         "phase.finish"
     );
 
-    Ok(())
+    Ok(remote_dedupe)
 }
 
 async fn preflight_local_quick_stats(
@@ -4762,11 +4870,9 @@ async fn restore_run(
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
         let master_key = load_master_key(config_dir, data_dir)?;
 
-        let cache_db = data_dir
-            .join("cache")
-            .join("remote-index")
+        let filemap_db_path = endpoint_filemap_dir(data_dir, &ep.id)
             .join(format!("{snapshot_id}.sqlite"));
-        if let Some(parent) = cache_db.parent() {
+        if let Some(parent) = filemap_db_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
         }
@@ -4789,14 +4895,6 @@ async fn restore_run(
         let opts = RestoreOptions {
             cancel: None,
             progress: if events { Some(&sink) } else { None },
-        };
-
-        let cfg = RestoreConfig {
-            snapshot_id: snapshot_id.clone(),
-            manifest_object_id,
-            master_key,
-            index_db_path: cache_db,
-            target_path: target,
         };
 
         let api_hash = get_secret(config_dir, data_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(
@@ -4828,6 +4926,58 @@ async fn restore_run(
         })
         .await
         .map_err(map_core_err)?;
+
+        let local_endpoint_db_path = endpoint_index_db_path(data_dir, &ep.id);
+        let (endpoint_latest, endpoint_dedupe_latest) = if is_likely_private_chat_id(&ep.chat_id) {
+            (None, None)
+        } else {
+            match televy_backup_core::bootstrap::load_remote_catalog(&storage, &master_key)
+                .await
+                .map_err(map_core_err)?
+            {
+                Some(cat) => (cat.endpoint_latest, cat.endpoint_dedupe_latest),
+                None => (None, None),
+            }
+        };
+        let endpoint_manifest_object_id = match endpoint_latest.as_ref() {
+            Some(v) => Some(v.manifest_object_id.clone()),
+            None => televy_backup_core::index_sync::endpoint_state_get(
+                &local_endpoint_db_path,
+                televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY,
+            )
+            .await
+            .map_err(map_core_err)?,
+        };
+        let endpoint_index_id = match endpoint_latest.as_ref() {
+            Some(v) => Some(v.endpoint_index_id.clone()),
+            None => televy_backup_core::index_sync::endpoint_state_get(
+                &local_endpoint_db_path,
+                televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_INDEX_ID_KEY,
+            )
+            .await
+            .map_err(map_core_err)?,
+        };
+
+        let local_dedupe_db_path = endpoint_dedupe_db_path(data_dir, &ep.id);
+        let dedupe_catalog_object_id =
+            endpoint_dedupe_latest.as_ref().map(|v| v.catalog_object_id.clone());
+        let endpoint_dedupe_id =
+            endpoint_dedupe_latest.as_ref().map(|v| v.endpoint_dedupe_id.clone());
+
+        let cfg = RestoreConfig {
+            snapshot_id: snapshot_id.clone(),
+            filemap_manifest_object_id: manifest_object_id,
+            endpoint_manifest_object_id: endpoint_manifest_object_id.clone(),
+            dedupe_catalog_object_id: dedupe_catalog_object_id.clone(),
+            endpoint_dedupe_id,
+            endpoint_index_id,
+            master_key,
+            filemap_db_path: filemap_db_path.clone(),
+            endpoint_db_path: (dedupe_catalog_object_id.is_none() && endpoint_manifest_object_id.is_some())
+                .then_some(local_endpoint_db_path),
+            dedupe_db_path: dedupe_catalog_object_id.is_some().then_some(local_dedupe_db_path),
+            target_path: target,
+        };
 
         let res = restore_snapshot_with(&storage, cfg, opts).await.map_err(map_core_err)?;
 
@@ -5268,14 +5418,24 @@ async fn restore_latest(
         .await
         .map_err(map_core_err)?;
 
-        let latest = televy_backup_core::bootstrap::resolve_remote_latest(
-            &storage,
-            &master_key,
-            Some(&t.id),
-            None,
-        )
-        .await
-        .map_err(map_core_err)?;
+        let cat = televy_backup_core::bootstrap::load_remote_catalog(&storage, &master_key)
+            .await
+            .map_err(map_core_err)?
+            .ok_or_else(|| CliError::new("bootstrap.missing", "no pinned bootstrap catalog"))?;
+
+        let latest = cat
+            .targets
+            .iter()
+            .find(|it| it.target_id == t.id)
+            .and_then(|it| it.latest.clone())
+            .ok_or_else(|| {
+                CliError::new(
+                    "bootstrap.latest_missing",
+                    format!("bootstrap missing latest for target_id: {}", t.id),
+                )
+            })?;
+        let endpoint_latest = cat.endpoint_latest.clone();
+        let endpoint_dedupe_latest = cat.endpoint_dedupe_latest.clone();
 
         emit_task_state_running(
             events,
@@ -5285,11 +5445,9 @@ async fn restore_latest(
             Some(latest.snapshot_id.as_str()),
         );
 
-        let cache_db = data_dir
-            .join("cache")
-            .join("remote-index")
-            .join(format!("{}.sqlite", latest.snapshot_id));
-        if let Some(parent) = cache_db.parent() {
+        let filemap_db_path =
+            endpoint_filemap_dir(data_dir, &ep.id).join(format!("{}.sqlite", latest.snapshot_id));
+        if let Some(parent) = filemap_db_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
         }
@@ -5308,11 +5466,34 @@ async fn restore_latest(
             progress: if events { Some(&sink) } else { None },
         };
 
+        let local_endpoint_db_path = endpoint_index_db_path(data_dir, &ep.id);
+        let local_dedupe_db_path = endpoint_dedupe_db_path(data_dir, &ep.id);
+        let endpoint_manifest_object_id = endpoint_latest
+            .as_ref()
+            .map(|v| v.manifest_object_id.clone());
+        let dedupe_catalog_object_id = endpoint_dedupe_latest
+            .as_ref()
+            .map(|v| v.catalog_object_id.clone());
+        let endpoint_dedupe_id = endpoint_dedupe_latest
+            .as_ref()
+            .map(|v| v.endpoint_dedupe_id.clone());
         let cfg = RestoreConfig {
             snapshot_id: latest.snapshot_id.clone(),
-            manifest_object_id: latest.manifest_object_id,
+            filemap_manifest_object_id: latest.manifest_object_id,
+            endpoint_manifest_object_id: endpoint_manifest_object_id.clone(),
+            dedupe_catalog_object_id: dedupe_catalog_object_id.clone(),
+            endpoint_dedupe_id,
+            endpoint_index_id: endpoint_latest
+                .as_ref()
+                .map(|v| v.endpoint_index_id.clone()),
             master_key,
-            index_db_path: cache_db,
+            filemap_db_path: filemap_db_path.clone(),
+            endpoint_db_path: (dedupe_catalog_object_id.is_none()
+                && endpoint_manifest_object_id.is_some())
+            .then_some(local_endpoint_db_path),
+            dedupe_db_path: dedupe_catalog_object_id
+                .is_some()
+                .then_some(local_dedupe_db_path),
             target_path: target,
         };
 
@@ -5661,14 +5842,24 @@ async fn verify_latest(
         .await
         .map_err(map_core_err)?;
 
-        let latest = televy_backup_core::bootstrap::resolve_remote_latest(
-            &storage,
-            &master_key,
-            Some(&t.id),
-            None,
-        )
-        .await
-        .map_err(map_core_err)?;
+        let cat = televy_backup_core::bootstrap::load_remote_catalog(&storage, &master_key)
+            .await
+            .map_err(map_core_err)?
+            .ok_or_else(|| CliError::new("bootstrap.missing", "no pinned bootstrap catalog"))?;
+
+        let latest = cat
+            .targets
+            .iter()
+            .find(|it| it.target_id == t.id)
+            .and_then(|it| it.latest.clone())
+            .ok_or_else(|| {
+                CliError::new(
+                    "bootstrap.latest_missing",
+                    format!("bootstrap missing latest for target_id: {}", t.id),
+                )
+            })?;
+        let endpoint_latest = cat.endpoint_latest.clone();
+        let endpoint_dedupe_latest = cat.endpoint_dedupe_latest.clone();
 
         emit_task_state_running(
             events,
@@ -5678,11 +5869,9 @@ async fn verify_latest(
             Some(latest.snapshot_id.as_str()),
         );
 
-        let cache_db = data_dir
-            .join("cache")
-            .join("remote-index")
-            .join(format!("{}.sqlite", latest.snapshot_id));
-        if let Some(parent) = cache_db.parent() {
+        let filemap_db_path =
+            endpoint_filemap_dir(data_dir, &ep.id).join(format!("{}.sqlite", latest.snapshot_id));
+        if let Some(parent) = filemap_db_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
         }
@@ -5701,11 +5890,34 @@ async fn verify_latest(
             progress: if events { Some(&sink) } else { None },
         };
 
+        let local_endpoint_db_path = endpoint_index_db_path(data_dir, &ep.id);
+        let local_dedupe_db_path = endpoint_dedupe_db_path(data_dir, &ep.id);
+        let endpoint_manifest_object_id = endpoint_latest
+            .as_ref()
+            .map(|v| v.manifest_object_id.clone());
+        let dedupe_catalog_object_id = endpoint_dedupe_latest
+            .as_ref()
+            .map(|v| v.catalog_object_id.clone());
+        let endpoint_dedupe_id = endpoint_dedupe_latest
+            .as_ref()
+            .map(|v| v.endpoint_dedupe_id.clone());
         let cfg = VerifyConfig {
             snapshot_id: latest.snapshot_id.clone(),
-            manifest_object_id: latest.manifest_object_id,
+            filemap_manifest_object_id: latest.manifest_object_id,
+            endpoint_manifest_object_id: endpoint_manifest_object_id.clone(),
+            dedupe_catalog_object_id: dedupe_catalog_object_id.clone(),
+            endpoint_dedupe_id,
+            endpoint_index_id: endpoint_latest
+                .as_ref()
+                .map(|v| v.endpoint_index_id.clone()),
             master_key,
-            index_db_path: cache_db,
+            filemap_db_path: filemap_db_path.clone(),
+            endpoint_db_path: (dedupe_catalog_object_id.is_none()
+                && endpoint_manifest_object_id.is_some())
+            .then_some(local_endpoint_db_path),
+            dedupe_db_path: dedupe_catalog_object_id
+                .is_some()
+                .then_some(local_dedupe_db_path),
         };
 
         let res = verify_snapshot_with(&storage, cfg, opts)
@@ -5887,11 +6099,9 @@ async fn verify_run(
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
         let master_key = load_master_key(config_dir, data_dir)?;
 
-        let cache_db = data_dir
-            .join("cache")
-            .join("remote-index")
+        let filemap_db_path = endpoint_filemap_dir(data_dir, &ep.id)
             .join(format!("{snapshot_id}.sqlite"));
-        if let Some(parent) = cache_db.parent() {
+        if let Some(parent) = filemap_db_path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
         }
@@ -5914,13 +6124,6 @@ async fn verify_run(
         let opts = VerifyOptions {
             cancel: None,
             progress: if events { Some(&sink) } else { None },
-        };
-
-        let cfg = VerifyConfig {
-            snapshot_id: snapshot_id.clone(),
-            manifest_object_id,
-            master_key,
-            index_db_path: cache_db,
         };
 
         let api_hash = get_secret(config_dir, data_dir, &settings.telegram.mtproto.api_hash_key)?.ok_or_else(
@@ -5952,6 +6155,57 @@ async fn verify_run(
         })
         .await
         .map_err(map_core_err)?;
+
+        let local_endpoint_db_path = endpoint_index_db_path(data_dir, &ep.id);
+        let (endpoint_latest, endpoint_dedupe_latest) = if is_likely_private_chat_id(&ep.chat_id) {
+            (None, None)
+        } else {
+            match televy_backup_core::bootstrap::load_remote_catalog(&storage, &master_key)
+                .await
+                .map_err(map_core_err)?
+            {
+                Some(cat) => (cat.endpoint_latest, cat.endpoint_dedupe_latest),
+                None => (None, None),
+            }
+        };
+        let endpoint_manifest_object_id = match endpoint_latest.as_ref() {
+            Some(v) => Some(v.manifest_object_id.clone()),
+            None => televy_backup_core::index_sync::endpoint_state_get(
+                &local_endpoint_db_path,
+                televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY,
+            )
+            .await
+            .map_err(map_core_err)?,
+        };
+        let endpoint_index_id = match endpoint_latest.as_ref() {
+            Some(v) => Some(v.endpoint_index_id.clone()),
+            None => televy_backup_core::index_sync::endpoint_state_get(
+                &local_endpoint_db_path,
+                televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_INDEX_ID_KEY,
+            )
+            .await
+            .map_err(map_core_err)?,
+        };
+
+        let local_dedupe_db_path = endpoint_dedupe_db_path(data_dir, &ep.id);
+        let dedupe_catalog_object_id =
+            endpoint_dedupe_latest.as_ref().map(|v| v.catalog_object_id.clone());
+        let endpoint_dedupe_id =
+            endpoint_dedupe_latest.as_ref().map(|v| v.endpoint_dedupe_id.clone());
+
+        let cfg = VerifyConfig {
+            snapshot_id: snapshot_id.clone(),
+            filemap_manifest_object_id: manifest_object_id,
+            endpoint_manifest_object_id: endpoint_manifest_object_id.clone(),
+            dedupe_catalog_object_id: dedupe_catalog_object_id.clone(),
+            endpoint_dedupe_id,
+            endpoint_index_id,
+            master_key,
+            filemap_db_path: filemap_db_path.clone(),
+            endpoint_db_path: (dedupe_catalog_object_id.is_none() && endpoint_manifest_object_id.is_some())
+                .then_some(local_endpoint_db_path),
+            dedupe_db_path: dedupe_catalog_object_id.is_some().then_some(local_dedupe_db_path),
+        };
 
         let res = verify_snapshot_with(&storage, cfg, opts).await.map_err(map_core_err)?;
 

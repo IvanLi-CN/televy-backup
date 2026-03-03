@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use televy_backup_core::config::TelegramRateLimit;
-use televy_backup_core::{BackupConfig, ChunkingConfig, Error, Storage, run_backup};
+use televy_backup_core::{
+    BackupConfig, ChunkingConfig, Error, RemoteDedupeMode, Storage, run_backup,
+};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
@@ -102,12 +104,18 @@ async fn upload_concurrency_respects_limit() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
     let storage = TimedStorage::new(Duration::from_millis(50));
 
     run_backup(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path,
+            dedupe_pending_db_path,
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {
@@ -122,6 +130,7 @@ async fn upload_concurrency_respects_limit() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
@@ -143,12 +152,18 @@ async fn upload_min_delay_is_global() {
     }
 
     let db_path = temp.path().join("index.sqlite");
+    let filemap_dir = temp.path().join("filemaps");
+    let dedupe_db_path = temp.path().join("dedupe.sqlite");
+    let dedupe_pending_db_path = temp.path().join("dedupe.pending.sqlite");
     let storage = TimedStorage::new(Duration::from_millis(0));
 
     run_backup(
         &storage,
         BackupConfig {
-            db_path,
+            endpoint_db_path: db_path,
+            filemap_dir: filemap_dir.clone(),
+            dedupe_db_path,
+            dedupe_pending_db_path,
             source_path: source,
             label: "t".to_string(),
             chunking: ChunkingConfig {
@@ -163,6 +178,7 @@ async fn upload_min_delay_is_global() {
             master_key: [7u8; 32],
             snapshot_id: None,
             keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
         },
     )
     .await
