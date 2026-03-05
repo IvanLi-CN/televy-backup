@@ -14,7 +14,7 @@ use ignore::{Error as IgnoreError, Walk, WalkBuilder};
 use serde::{Deserialize, Serialize};
 use sqlx::pool::PoolConnection;
 use sqlx::{Connection, QueryBuilder, Row, Sqlite};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::TelegramRateLimit;
 use crate::crypto::FRAMING_OVERHEAD_BYTES;
@@ -490,6 +490,34 @@ fn ignore_error_is_not_found(err: &IgnoreError) -> bool {
         .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
 }
 
+fn ignore_error_is_non_root_not_found(err: &IgnoreError, source_path: &Path) -> bool {
+    if !ignore_error_is_not_found(err) {
+        return false;
+    }
+    if err.depth() == Some(0) {
+        return false;
+    }
+    ignore_error_path(err).map_or_else(
+        || source_path.exists(),
+        |path| path != source_path,
+    )
+}
+
+fn count_ignore_file_for_dir(seen: &mut HashSet<PathBuf>, dir_path: &Path) -> u64 {
+    let ignore_path = dir_path.join(TELEVYIGNORE_FILE_NAME);
+    if seen.contains(&ignore_path) {
+        return 0;
+    }
+    let is_file = std::fs::metadata(&ignore_path)
+        .map(|meta| meta.is_file())
+        .unwrap_or(false);
+    if !is_file {
+        return 0;
+    }
+    seen.insert(ignore_path);
+    1
+}
+
 fn map_ignore_error(err: IgnoreError, source_path: &Path) -> Error {
     Error::Walk {
         message: format!("source walk failed for {}: {err}", source_path.display()),
@@ -523,8 +551,7 @@ pub fn compute_source_quick_stats(
                     );
                     continue;
                 }
-                let is_root = e.depth() == Some(0);
-                if ignore_error_is_not_found(&e) && !is_root {
+                if ignore_error_is_non_root_not_found(&e, source_path) {
                     continue;
                 }
                 return Err(map_ignore_error(e, source_path));
@@ -1698,6 +1725,7 @@ pub async fn run_backup_with<S: Storage>(
                 let mut pack_state = PackState::new(provider, &snapshot_id);
                 let mut pending_base_chunk_copies: Vec<BaseFileChunkCopyRow> = Vec::new();
                 let mut warned_ignore_errors = HashSet::<String>::new();
+                let mut seen_ignore_files = HashSet::<PathBuf>::new();
                 let mut ignore_rule_files = 0u64;
 
                 if let Some(sink) = options.progress {
@@ -1745,8 +1773,7 @@ pub async fn run_backup_with<S: Storage>(
                                 );
                                 continue;
                             }
-                            let is_root = e.depth() == Some(0);
-                            if ignore_error_is_not_found(&e) && !is_root {
+                            if ignore_error_is_non_root_not_found(&e, &scan_source_path) {
                                 debug!(
                                     event = "scan.walkdir.not_found",
                                     error = %e,
@@ -1781,17 +1808,6 @@ pub async fn run_backup_with<S: Storage>(
                     }
 
                     let path = entry.path();
-                    if path == scan_source_path {
-                        continue;
-                    }
-
-                    let rel_path =
-                        path.strip_prefix(&scan_source_path)
-                            .map_err(|_| Error::InvalidConfig {
-                                message: "path strip_prefix failed".to_string(),
-                            })?;
-                    let rel_path_str = path_to_utf8(rel_path)?;
-
                     let metadata = match entry.metadata() {
                         Ok(v) => v,
                         Err(e) => {
@@ -1808,11 +1824,29 @@ pub async fn run_backup_with<S: Storage>(
                         }
                     };
 
+                    if metadata.is_dir() {
+                        ignore_rule_files = ignore_rule_files.saturating_add(
+                            count_ignore_file_for_dir(&mut seen_ignore_files, path),
+                        );
+                    }
+
                     if metadata.is_file()
                         && path.file_name() == Some(OsStr::new(TELEVYIGNORE_FILE_NAME))
+                        && seen_ignore_files.insert(path.to_path_buf())
                     {
                         ignore_rule_files = ignore_rule_files.saturating_add(1);
                     }
+
+                    if path == scan_source_path {
+                        continue;
+                    }
+
+                    let rel_path =
+                        path.strip_prefix(&scan_source_path)
+                            .map_err(|_| Error::InvalidConfig {
+                                message: "path strip_prefix failed".to_string(),
+                            })?;
+                    let rel_path_str = path_to_utf8(rel_path)?;
 
                     let kind = if metadata.is_dir() {
                         "dir"
@@ -2062,15 +2096,27 @@ pub async fn run_backup_with<S: Storage>(
 
                 result.ignore_rule_files = ignore_rule_files;
                 result.ignore_invalid_rules = warned_ignore_errors.len() as u64;
-                warn!(
-                    event = "source.ignore.summary",
-                    phase = "scan",
-                    source_path = %scan_source_path.display(),
-                    ignore_file = TELEVYIGNORE_FILE_NAME,
-                    ignore_rule_files = result.ignore_rule_files,
-                    ignore_invalid_rules = result.ignore_invalid_rules,
-                    "source.ignore.summary"
-                );
+                if result.ignore_invalid_rules > 0 {
+                    warn!(
+                        event = "source.ignore.summary",
+                        phase = "scan",
+                        source_path = %scan_source_path.display(),
+                        ignore_file = TELEVYIGNORE_FILE_NAME,
+                        ignore_rule_files = result.ignore_rule_files,
+                        ignore_invalid_rules = result.ignore_invalid_rules,
+                        "source.ignore.summary"
+                    );
+                } else {
+                    info!(
+                        event = "source.ignore.summary",
+                        phase = "scan",
+                        source_path = %scan_source_path.display(),
+                        ignore_file = TELEVYIGNORE_FILE_NAME,
+                        ignore_rule_files = result.ignore_rule_files,
+                        ignore_invalid_rules = result.ignore_invalid_rules,
+                        "source.ignore.summary"
+                    );
+                }
 
                 debug!(
                     event = "phase.finish",
@@ -5076,9 +5122,14 @@ fn path_to_utf8(path: &Path) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
+    use ignore::Error as IgnoreError;
     use sqlx::Row;
 
-    use super::{error_has_flood_wait, export_endpoint_index_db_for_upload};
+    use super::{
+        error_has_flood_wait, export_endpoint_index_db_for_upload, ignore_error_is_non_root_not_found,
+    };
     use crate::Error;
 
     #[test]
@@ -5101,6 +5152,36 @@ mod tests {
         assert!(!error_has_flood_wait(&Error::Telegram {
             message: "AUTH_KEY_UNREGISTERED".to_string(),
         }));
+    }
+
+    #[test]
+    fn non_root_not_found_without_path_is_skipped_only_when_root_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_exists = temp.path().join("source");
+        std::fs::create_dir_all(&root_exists).unwrap();
+        let root_missing = temp.path().join("missing");
+
+        let non_root_not_found = IgnoreError::WithDepth {
+            depth: 1,
+            err: Box::new(IgnoreError::Io(io::Error::from(io::ErrorKind::NotFound))),
+        };
+        let root_not_found = IgnoreError::WithDepth {
+            depth: 0,
+            err: Box::new(IgnoreError::Io(io::Error::from(io::ErrorKind::NotFound))),
+        };
+
+        assert!(ignore_error_is_non_root_not_found(
+            &non_root_not_found,
+            &root_exists,
+        ));
+        assert!(!ignore_error_is_non_root_not_found(
+            &non_root_not_found,
+            &root_missing,
+        ));
+        assert!(!ignore_error_is_non_root_not_found(
+            &root_not_found,
+            &root_exists,
+        ));
     }
 
     #[tokio::test]
