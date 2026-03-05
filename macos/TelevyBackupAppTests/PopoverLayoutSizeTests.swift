@@ -169,6 +169,7 @@ private func test_popover_height_tracks_sizeThatFits_across_scenarios() {
     model.statusSnapshot = mkSnapshot(targets: [], nowMs: t0)
     model.requestPopoverResize()
     waitForPopoverHeightToMatchExpected(harness: harness, "0 targets popover height should match sizeThatFits (clamped)")
+    expect(harness.observedHeight < PopoverAutoSize.maxHeight, "0 targets should not clamp to maxHeight")
 
     // B) 1 target (idle)
     let targets1 = [
@@ -177,6 +178,7 @@ private func test_popover_height_tracks_sizeThatFits_across_scenarios() {
     model.statusSnapshot = mkSnapshot(targets: targets1, nowMs: t0)
     model.requestPopoverResize()
     waitForPopoverHeightToMatchExpected(harness: harness, "1 target idle popover height should match sizeThatFits (clamped)")
+    expect(harness.observedHeight < PopoverAutoSize.maxHeight, "1 target should not clamp to maxHeight")
 
     // C) 3 targets (idle, long-ish paths)
     let longPath = "/Users/ivan/Library/Application Support/TelevyBackup/test-source-mtproto"
@@ -188,6 +190,7 @@ private func test_popover_height_tracks_sizeThatFits_across_scenarios() {
     model.statusSnapshot = mkSnapshot(targets: targets3, nowMs: t0)
     model.requestPopoverResize()
     waitForPopoverHeightToMatchExpected(harness: harness, "3 targets idle popover height should match sizeThatFits (clamped)")
+    expect(harness.observedHeight < PopoverAutoSize.maxHeight, "3 targets should not clamp to maxHeight")
 
     // D) 2 targets (running + idle)
     let targets2 = [
@@ -197,6 +200,7 @@ private func test_popover_height_tracks_sizeThatFits_across_scenarios() {
     model.statusSnapshot = mkSnapshot(targets: targets2, nowMs: t0)
     model.requestPopoverResize()
     waitForPopoverHeightToMatchExpected(harness: harness, "2 targets (running+idle) popover height should match sizeThatFits (clamped)")
+    expect(harness.observedHeight < PopoverAutoSize.maxHeight, "2 targets should not clamp to maxHeight")
 
     // E) Many targets (should scroll + max clamp semantics must hold)
     var many: [StatusTarget] = []

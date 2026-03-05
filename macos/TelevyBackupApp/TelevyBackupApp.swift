@@ -2761,29 +2761,29 @@ struct PopoverRootView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            VisualEffectView(material: .popover, blendingMode: .behindWindow, state: .active)
-                .ignoresSafeArea()
-
-            // Liquid-glass shell (one shape, no nested rounding)
-            ContainerRelativeShape()
-                .fill(glassFill)
-                .ignoresSafeArea()
-            ContainerRelativeShape()
-                .fill(glassHighlight)
-                .blendMode(.screen)
-                .ignoresSafeArea()
-            ContainerRelativeShape()
-                .strokeBorder(glassStroke, lineWidth: 1)
-                .ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 12) {
-                header
-                OverviewView()
-            }
-            .padding(16)
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            OverviewView()
         }
-        .frame(width: PopoverAutoSize.width)
+        .padding(16)
+        .frame(width: PopoverAutoSize.width, alignment: .topLeading)
+        .background {
+            // Background is applied via `.background` so it never participates in sizeThatFits
+            // (unlike being a sibling in a ZStack), keeping popover height truly content-driven.
+            ZStack {
+                VisualEffectView(material: .popover, blendingMode: .behindWindow, state: .active)
+
+                // Liquid-glass shell (one shape, no nested rounding)
+                ContainerRelativeShape()
+                    .fill(glassFill)
+                ContainerRelativeShape()
+                    .fill(glassHighlight)
+                    .blendMode(.screen)
+                ContainerRelativeShape()
+                    .strokeBorder(glassStroke, lineWidth: 1)
+            }
+            .ignoresSafeArea()
+        }
         .preferredColorScheme(.light)
         .overlay(alignment: .bottom) {
             if let toast = model.toastText {
