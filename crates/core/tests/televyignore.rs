@@ -153,7 +153,7 @@ async fn invalid_televyignore_line_warns_and_continues() {
     let source = temp.path().join("src");
     std::fs::create_dir_all(&source).unwrap();
 
-    write_file(source.join(".televyignore"), b"a/***/b\n*.tmp\n");
+    write_file(source.join(".televyignore"), b"{\n*.tmp\n");
     write_file(source.join("keep.txt"), b"keep");
     write_file(source.join("drop.tmp"), b"drop");
 
@@ -167,6 +167,7 @@ async fn invalid_televyignore_line_warns_and_continues() {
     assert!(file_paths.contains(&"keep.txt"));
     assert!(!file_paths.contains(&"drop.tmp"));
     assert_eq!(result.ignore_rule_files, 1);
+    assert_eq!(result.ignore_invalid_rules, 1);
 }
 
 #[tokio::test]
@@ -187,4 +188,34 @@ async fn hidden_files_not_implicitly_excluded() {
 
     assert!(file_paths.contains(&".hidden.txt"));
     assert!(file_paths.contains(&"visible.txt"));
+}
+
+#[test]
+fn quick_stats_missing_source_root_fails() {
+    let temp = TempDir::new().unwrap();
+    let missing_source = temp.path().join("missing");
+    let err = compute_source_quick_stats(&missing_source, None).unwrap_err();
+    assert_eq!(err.code(), "walkdir");
+}
+
+#[tokio::test]
+async fn ignore_rule_file_count_includes_self_ignored_rule_file() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("src");
+    std::fs::create_dir_all(&source).unwrap();
+
+    write_file(source.join(".televyignore"), b".televyignore\n*.tmp\n");
+    write_file(source.join("drop.tmp"), b"drop");
+    write_file(source.join("keep.txt"), b"keep");
+
+    let storage = InMemoryStorage::new();
+    let cfg = base_backup_config(&temp, &source);
+    let filemap_dir = cfg.filemap_dir.clone();
+    let result = run_backup(&storage, cfg).await.unwrap();
+    let files = snapshot_files(&filemap_dir, &result.snapshot_id).await;
+    let file_paths = files.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>();
+
+    assert!(file_paths.contains(&"keep.txt"));
+    assert!(!file_paths.contains(&"drop.tmp"));
+    assert_eq!(result.ignore_rule_files, 1);
 }
