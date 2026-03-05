@@ -3784,7 +3784,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var cancellables: Set<AnyCancellable> = []
     private var popoverHost: NSHostingController<AnyView>? = nil
-    private var popoverResizeWork: DispatchWorkItem? = nil
+    private var popoverResizeScheduled: Bool = false
 
     // Prevent accidental multi-launch (e.g. `open -n`) from creating duplicate status bar items and
     // competing daemons. We keep the earliest-launched instance alive and exit the rest.
@@ -3995,14 +3995,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func schedulePopoverResize() {
-        popoverResizeWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.applyPopoverSizeThatFits()
-        }
-        popoverResizeWork = work
+        if popoverResizeScheduled { return }
+        popoverResizeScheduled = true
         // Defer by one runloop tick so SwiftUI has a chance to apply any state/layout changes
         // (e.g. Targets list measurement updates).
-        DispatchQueue.main.async(execute: work)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.popoverResizeScheduled = false
+            self.applyPopoverSizeThatFits()
+        }
     }
 
     private func applyPopoverSizeThatFits() {

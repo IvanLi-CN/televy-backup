@@ -135,6 +135,30 @@ private func waitForPopoverHeightToMatchExpected(
     return lastExpected
 }
 
+private func test_popover_clampHeight_semantics() {
+    expectClose(PopoverAutoSize.clampHeight(0), PopoverAutoSize.minHeight, "clampHeight should clamp to minHeight")
+    expectClose(
+        PopoverAutoSize.clampHeight(PopoverAutoSize.minHeight - 0.1),
+        PopoverAutoSize.minHeight,
+        "clampHeight should ceil before applying minHeight"
+    )
+    expectClose(
+        PopoverAutoSize.clampHeight(PopoverAutoSize.minHeight + 0.1),
+        PopoverAutoSize.minHeight + 1,
+        "clampHeight should use ceil to avoid fractional jitter"
+    )
+    expectClose(
+        PopoverAutoSize.clampHeight(PopoverAutoSize.maxHeight - 0.1),
+        PopoverAutoSize.maxHeight,
+        "clampHeight should ceil near maxHeight"
+    )
+    expectClose(
+        PopoverAutoSize.clampHeight(PopoverAutoSize.maxHeight + 0.1),
+        PopoverAutoSize.maxHeight,
+        "clampHeight should clamp to maxHeight"
+    )
+}
+
 private func test_popover_height_tracks_sizeThatFits_across_scenarios() {
     let model = AppModel()
     let harness = PopoverSizingHarness(model: model)
@@ -243,6 +267,7 @@ private func test_popover_resize_threshold_avoids_jitter() {
 @main
 enum PopoverLayoutSizeTestsMain {
     static func main() {
+        test_popover_clampHeight_semantics()
         test_popover_height_tracks_sizeThatFits_across_scenarios()
         test_popover_auto_resize_triggers_on_target_change()
         test_popover_resize_threshold_avoids_jitter()
