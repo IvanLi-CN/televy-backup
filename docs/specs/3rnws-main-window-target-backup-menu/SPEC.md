@@ -2,9 +2,10 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-03-05
 - Last: 2026-03-05
+- Notes: PR #51；CI run #273 通过；review-loop 无阻塞问题
 
 ## 背景 / 问题陈述
 
@@ -76,4 +77,3 @@
 - `scripts/macos/swift-unit-tests.sh` 通过。
 - `cargo fmt --all`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test --all-features` 通过。
 - `scripts/macos/build-app.sh` 通过。
-
