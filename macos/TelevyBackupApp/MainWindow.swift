@@ -25,6 +25,8 @@ struct RunLogSummary: Identifiable {
     let filesRestored: Int64?
     let chunksDownloaded: Int64?
     let chunksChecked: Int64?
+    let ignoreRuleFiles: Int64?
+    let ignoreInvalidRules: Int64?
 }
 
 struct MainWindowRootView: View {
@@ -629,8 +631,28 @@ private struct TargetDetailView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
+            sourceIgnoreHintView
+
             overviewStats(now: now, status: status, kind: kind)
         }
+    }
+
+    private var sourceIgnoreHintView: some View {
+        let rootIgnorePath = URL(fileURLWithPath: target.sourcePath, isDirectory: true)
+            .appendingPathComponent(".televyignore", isDirectory: false)
+        let rootIgnoreExists = FileManager.default.fileExists(atPath: rootIgnorePath.path)
+
+        return Label(
+            rootIgnoreExists
+                ? "Ignore active · root .televyignore detected"
+                : "Ignore active · root .televyignore not found",
+            systemImage: rootIgnoreExists ? "checkmark.shield" : "shield"
+        )
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .help("Backup scanning reads .televyignore from this source tree (root and nested folders).")
     }
 
     private func overviewStats(now: Date, status: TargetUserStatus, kind: TargetWorkKind) -> some View {
@@ -1204,6 +1226,14 @@ private struct RunLogRow: View {
         }
         if let c = r.chunksChecked, c > 0 {
             parts.append("Checked \(c) chunks")
+        }
+        if r.kind == "backup" {
+            if let files = r.ignoreRuleFiles, files > 0 {
+                parts.append("Ignore files \(files)")
+            }
+            if let invalid = r.ignoreInvalidRules, invalid > 0 {
+                parts.append("Bad ignore rules \(invalid)")
+            }
         }
         if parts.isEmpty {
             return "—"

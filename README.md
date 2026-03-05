@@ -156,6 +156,7 @@ Backup target scanning supports gitignore-style rules via `.televyignore` files:
 - There are no built-in default excludes; only explicit rules in `.televyignore` take effect.
 - Invalid rule lines are warned and ignored; other filesystem/scan errors keep existing failure behavior.
 - Rule scope: backup scan + prepare quick stats. `settings import-bundle --compare-folder` is unchanged and does not apply `.televyignore`.
+- Backup `run.finish` logs include ignore summary fields: `ignore_rule_files` and `ignore_invalid_rules`.
 
 If upgrading from older versions that stored secrets in Keychain, run `televybackup secrets migrate-keychain`.
 

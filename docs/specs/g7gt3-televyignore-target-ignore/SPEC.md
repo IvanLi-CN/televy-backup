@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-04
-- Last: 2026-03-04
+- Last: 2026-03-05
 
 ## 背景 / 问题陈述
 
@@ -57,3 +57,4 @@
 ## Change log
 
 - 2026-03-04: core 扫描改为 `.televyignore` 级联匹配；quick stats 对齐同一规则；新增 ignore 相关回归测试与 README 文档说明。
+- 2026-03-05: backup `run.finish` 新增 ignore 汇总字段（`ignore_rule_files` / `ignore_invalid_rules`）；macOS 主界面补充 ignore 状态与历史摘要显示。

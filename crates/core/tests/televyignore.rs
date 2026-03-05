@@ -71,6 +71,8 @@ async fn backup_respects_televyignore_file_and_dir_patterns() {
     assert!(file_paths.contains(&"kept.txt"));
     assert!(!file_paths.contains(&"ignored.tmp"));
     assert!(!file_paths.contains(&"cache/inner.txt"));
+    assert_eq!(result.ignore_rule_files, 1);
+    assert_eq!(result.ignore_invalid_rules, 0);
 }
 
 #[tokio::test]
@@ -114,6 +116,8 @@ async fn backup_respects_nested_televyignore_precedence() {
 
     assert!(file_paths.contains(&"nested/keep.txt"));
     assert!(!file_paths.contains(&"nested/drop.txt"));
+    assert_eq!(result.ignore_rule_files, 2);
+    assert_eq!(result.ignore_invalid_rules, 0);
 }
 
 #[tokio::test]
@@ -149,7 +153,7 @@ async fn invalid_televyignore_line_warns_and_continues() {
     let source = temp.path().join("src");
     std::fs::create_dir_all(&source).unwrap();
 
-    write_file(source.join(".televyignore"), b"[abc\n*.tmp\n");
+    write_file(source.join(".televyignore"), b"a/***/b\n*.tmp\n");
     write_file(source.join("keep.txt"), b"keep");
     write_file(source.join("drop.tmp"), b"drop");
 
@@ -162,6 +166,7 @@ async fn invalid_televyignore_line_warns_and_continues() {
 
     assert!(file_paths.contains(&"keep.txt"));
     assert!(!file_paths.contains(&"drop.tmp"));
+    assert_eq!(result.ignore_rule_files, 1);
 }
 
 #[tokio::test]
