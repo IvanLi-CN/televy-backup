@@ -54,6 +54,11 @@
 
 - `cargo test -p televy_backup_core`
 
+## Visual Evidence (PR)
+
+![真实主窗口：ignore 状态提示](./assets/main-real-ignore-status.png)
+![Demo 主窗口：History 中 Ignore files 指标](./assets/main-demo-ignore-history.png)
+
 ## Change log
 
 - 2026-03-04: core 扫描改为 `.televyignore` 级联匹配；quick stats 对齐同一规则；新增 ignore 相关回归测试与 README 文档说明。
