@@ -4070,6 +4070,10 @@ extension AppDelegate {
         schedulePopoverResize()
         return (popover: popover, host: host)
     }
+
+    func testing_applyPopoverSizeThatFitsNow() {
+        applyPopoverSizeThatFits()
+    }
 }
 #endif
 
