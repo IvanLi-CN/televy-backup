@@ -497,10 +497,7 @@ fn ignore_error_is_non_root_not_found(err: &IgnoreError, source_path: &Path) -> 
     if err.depth() == Some(0) {
         return false;
     }
-    ignore_error_path(err).map_or_else(
-        || source_path.exists(),
-        |path| path != source_path,
-    )
+    ignore_error_path(err).map_or_else(|| source_path.exists(), |path| path != source_path)
 }
 
 fn count_ignore_file_for_dir(seen: &mut HashSet<PathBuf>, dir_path: &Path) -> u64 {
@@ -5128,7 +5125,8 @@ mod tests {
     use sqlx::Row;
 
     use super::{
-        error_has_flood_wait, export_endpoint_index_db_for_upload, ignore_error_is_non_root_not_found,
+        error_has_flood_wait, export_endpoint_index_db_for_upload,
+        ignore_error_is_non_root_not_found,
     };
     use crate::Error;
 
