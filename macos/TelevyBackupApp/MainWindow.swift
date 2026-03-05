@@ -71,6 +71,9 @@ struct MainWindowRootView: View {
                    let target = (model.statusSnapshot?.targets ?? []).first(where: { $0.targetId == selection })
                 {
                     Menu {
+                        Button("Backup now") { model.backupRun(targetId: target.targetId) }
+                            .disabled(model.isRunning)
+                        Divider()
                         Button("Restore…") { model.promptRestoreLatest(targetId: target.targetId) }
                             .disabled(model.isRunning)
                         Button("Verify") { model.verifyLatest(targetId: target.targetId) }
@@ -169,6 +172,9 @@ struct MainWindowRootView: View {
                         target: target,
                         isSelected: selection == target.targetId,
                         isBusy: model.isRunning,
+                        onBackup: {
+                            model.backupRun(targetId: target.targetId)
+                        },
                         onRestore: {
                             model.promptRestoreLatest(targetId: target.targetId)
                         },
@@ -248,6 +254,7 @@ private struct TargetListRow: View {
     let target: StatusTarget
     let isSelected: Bool
     let isBusy: Bool
+    let onBackup: () -> Void
     let onRestore: () -> Void
     let onVerify: () -> Void
     let onSelect: () -> Void
@@ -425,6 +432,9 @@ private struct TargetListRow: View {
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
         .contextMenu {
+            Button("Backup now") { onBackup() }
+                .disabled(isBusy)
+            Divider()
             Button("Restore…") { onRestore() }
                 .disabled(isBusy)
             Button("Verify") { onVerify() }
