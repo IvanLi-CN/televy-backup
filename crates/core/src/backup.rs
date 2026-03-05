@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -367,6 +368,8 @@ pub struct BackupResult {
     pub bytes_uploaded: u64,
     pub bytes_deduped: u64,
     pub index_parts: u64,
+    pub ignore_rule_files: u64,
+    pub ignore_invalid_rules: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -1695,6 +1698,7 @@ pub async fn run_backup_with<S: Storage>(
                 let mut pack_state = PackState::new(provider, &snapshot_id);
                 let mut pending_base_chunk_copies: Vec<BaseFileChunkCopyRow> = Vec::new();
                 let mut warned_ignore_errors = HashSet::<String>::new();
+                let mut ignore_rule_files = 0u64;
 
                 if let Some(sink) = options.progress {
                     sink.on_progress(TaskProgress {
@@ -1803,6 +1807,12 @@ pub async fn run_backup_with<S: Storage>(
                             return Err(map_ignore_error(e, &scan_source_path));
                         }
                     };
+
+                    if metadata.is_file()
+                        && path.file_name() == Some(OsStr::new(TELEVYIGNORE_FILE_NAME))
+                    {
+                        ignore_rule_files = ignore_rule_files.saturating_add(1);
+                    }
 
                     let kind = if metadata.is_dir() {
                         "dir"
@@ -2049,6 +2059,18 @@ pub async fn run_backup_with<S: Storage>(
                             .await?;
                     }
                 }
+
+                result.ignore_rule_files = ignore_rule_files;
+                result.ignore_invalid_rules = warned_ignore_errors.len() as u64;
+                warn!(
+                    event = "source.ignore.summary",
+                    phase = "scan",
+                    source_path = %scan_source_path.display(),
+                    ignore_file = TELEVYIGNORE_FILE_NAME,
+                    ignore_rule_files = result.ignore_rule_files,
+                    ignore_invalid_rules = result.ignore_invalid_rules,
+                    "source.ignore.summary"
+                );
 
                 debug!(
                     event = "phase.finish",
