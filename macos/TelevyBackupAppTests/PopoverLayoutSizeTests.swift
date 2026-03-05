@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import Foundation
 import SwiftUI
 
@@ -87,22 +86,25 @@ private func expectedPopoverHeight(host: NSHostingController<AnyView>) -> CGFloa
 
 private final class PopoverSizingHarness {
     let model: AppModel
+    let appDelegate: AppDelegate
+    let popover: NSPopover
     let host: NSHostingController<AnyView>
-    private var cancellable: AnyCancellable?
-    private(set) var observedHeight: CGFloat = 0
+
+    var observedHeight: CGFloat {
+        popover.contentSize.height
+    }
 
     init(model: AppModel) {
         self.model = model
-        host = NSHostingController(rootView: AnyView(PopoverRootView().environmentObject(model)))
-        _ = host.view // force view load
-        observedHeight = PopoverAutoSize.clampedHeightThatFits(host)
-        cancellable = model.$popoverResizeToken.sink { [weak self] _ in
-            guard let self else { return }
-            self.observedHeight = PopoverAutoSize.clampedHeightThatFits(self.host)
-        }
+        appDelegate = AppDelegate()
+        let setup = appDelegate.testing_setUpPopoverForSizingOnly(model: model)
+        popover = setup.popover
+        host = setup.host
     }
 
     func settleLayout() {
+        // Let SwiftUI apply model updates, then let the AppDelegate resize work execute.
+        pumpRunLoop()
         let s = host.sizeThatFits(in: NSSize(width: PopoverAutoSize.width, height: 10_000))
         host.view.frame = NSRect(x: 0, y: 0, width: PopoverAutoSize.width, height: s.height)
         host.view.layoutSubtreeIfNeeded()
@@ -186,11 +188,38 @@ private func test_popover_height_tracks_sizeThatFits_across_scenarios() {
     )
 }
 
+private func test_popover_resize_threshold_avoids_jitter() {
+    let model = AppModel()
+    let harness = PopoverSizingHarness(model: model)
+
+    let t0 = nowMs()
+    let targets1 = [
+        mkTarget(id: "t1", label: "Sync", sourcePath: "/Users/ivan/Sync", state: "idle", nowMs: t0),
+    ]
+    model.statusSnapshot = mkSnapshot(targets: targets1, nowMs: t0)
+    model.requestPopoverResize()
+    harness.settleLayout()
+
+    let expected = expectedPopoverHeight(host: harness.host)
+    expectClose(harness.observedHeight, expected, "baseline popover height should match sizeThatFits (clamped)")
+
+    // Nudge popover height within the updateThreshold; apply should early-return and keep the existing size.
+    let jittered = expected + 0.5
+    harness.popover.contentSize = NSSize(width: PopoverAutoSize.width, height: jittered)
+    model.requestPopoverResize()
+    harness.settleLayout()
+    expectClose(
+        harness.observedHeight,
+        jittered,
+        "popover height should not be updated when within updateThreshold"
+    )
+}
+
 @main
 enum PopoverLayoutSizeTestsMain {
     static func main() {
         test_popover_height_tracks_sizeThatFits_across_scenarios()
+        test_popover_resize_threshold_avoids_jitter()
         print("OK: PopoverLayoutSizeTests")
     }
 }
-

@@ -4044,6 +4044,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+#if TELEVYBACKUP_TESTING
+extension AppDelegate {
+    // Minimal wiring to exercise the production popover sizing pipeline in layout tests,
+    // without creating status bar items or spawning side-effectful processes.
+    func testing_setUpPopoverForSizingOnly(
+        model: AppModel
+    ) -> (popover: NSPopover, host: NSHostingController<AnyView>) {
+        popover.behavior = .transient
+        popover.animates = false
+        popover.contentSize = NSSize(width: PopoverAutoSize.width, height: 460)
+
+        let host = NSHostingController(rootView: AnyView(PopoverRootView().environmentObject(model)))
+        _ = host.view // force view load
+        popover.contentViewController = host
+        popoverHost = host
+
+        model.$popoverResizeToken
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.schedulePopoverResize()
+            }
+            .store(in: &cancellables)
+
+        schedulePopoverResize()
+        return (popover: popover, host: host)
+    }
+}
+#endif
+
 #if !TELEVYBACKUP_TESTING
 @main
 struct TelevyBackupApp: App {
