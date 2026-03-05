@@ -1387,6 +1387,31 @@ final class AppModel: ObservableObject {
         runProcess(exe: cli, args: ["--events", "backup", "run", "--source", sourcePath, "--label", label])
     }
 
+    func backupRun(targetId: String) {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            return
+        }
+        ensureDaemonRunning()
+        showToast("Starting backup…", isError: false)
+        runProcess(
+            exe: cli,
+            args: [
+                "--events",
+                "backup",
+                "run",
+                "--target-id",
+                targetId,
+                "--label",
+                "manual",
+            ],
+            timeoutSeconds: nil,
+            onExit: { _ in
+                self.refreshRunHistory()
+            }
+        )
+    }
+
     func promptRestoreLatest(targetId: String) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
