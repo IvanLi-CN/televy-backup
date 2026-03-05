@@ -4433,6 +4433,8 @@ async fn backup_run(
                 bytes_uploaded = res.bytes_uploaded,
                 bytes_deduped = res.bytes_deduped,
                 index_parts = res.index_parts,
+                ignore_rule_files = res.ignore_rule_files,
+                ignore_invalid_rules = res.ignore_invalid_rules,
                 "run.finish"
             );
 
@@ -4452,6 +4454,8 @@ async fn backup_run(
                         "bytesUploaded": res.bytes_uploaded,
                         "bytesDeduped": res.bytes_deduped,
                         "indexParts": res.index_parts,
+                        "ignoreRuleFiles": res.ignore_rule_files,
+                        "ignoreInvalidRules": res.ignore_invalid_rules,
                         "durationSeconds": duration_seconds,
                     }
                 }));
@@ -4474,13 +4478,15 @@ async fn backup_run(
             } else {
                 println!("snapshotId={}", res.snapshot_id);
                 println!(
-                    "filesIndexed={} chunksUploaded={} dataObjectsUploaded={} dataObjectsEstimatedWithoutPack={} bytesUploaded={} bytesDeduped={}",
+                    "filesIndexed={} chunksUploaded={} dataObjectsUploaded={} dataObjectsEstimatedWithoutPack={} bytesUploaded={} bytesDeduped={} ignoreRuleFiles={} ignoreInvalidRules={}",
                     res.files_indexed,
                     res.chunks_uploaded,
                     res.data_objects_uploaded,
                     res.data_objects_estimated_without_pack,
                     res.bytes_uploaded,
-                    res.bytes_deduped
+                    res.bytes_deduped,
+                    res.ignore_rule_files,
+                    res.ignore_invalid_rules
                 );
             }
             Ok(())
