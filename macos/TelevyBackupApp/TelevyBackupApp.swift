@@ -186,7 +186,7 @@ final class AppModel: ObservableObject {
         static let chromeHeightEstimate: CGFloat = 240
         // Fallback-only estimate used before live layout metrics arrive.
         // Keep this aligned with `TargetRowView` visual density to avoid early under-sizing.
-        static let rowHeight: CGFloat = 86
+        static let rowHeight: CGFloat = 68
         static let listInsetTop: CGFloat = 10
         static let listInsetBottom: CGFloat = 16
         static let listInsetCompactTop: CGFloat = 0
@@ -3041,27 +3041,9 @@ struct OverviewView: View {
             : model.estimatedTargetsRowsHeight(targetCount: targets.count)
         let shouldScroll = model.shouldScrollTargetsList(contentRowsHeight: rowsHeight)
         let listInsets = model.targetsListInsets(scrollEnabled: shouldScroll)
-        let listHeight = model.desiredTargetsListHeight(contentRowsHeight: rowsHeight)
         let listMaxHeight = model.targetsListMaxHeight()
-        let height: CGFloat = {
-            if targets.isEmpty {
-                return model.targetsEmptyStateHeight()
-            }
-            return min(listMaxHeight, listHeight)
-        }()
 
         return ZStack(alignment: .topLeading) {
-            LinearGradient(
-                colors: [
-                    Color.white.opacity(0.16),
-                    Color.white.opacity(0.10),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .clipShape(container)
-            .overlay(container.strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
-
             if targets.isEmpty {
                 if snap == nil {
                     waitingForStatusEmptyState()
@@ -3083,7 +3065,26 @@ struct OverviewView: View {
                 waitingForStatusEmptyState()
             }
         }
-        .frame(height: height)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background {
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.16),
+                    Color.white.opacity(0.10),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .clipShape(container)
+        }
+        .overlay(container.strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
+        .clipShape(container)
+        .popoverTargetsContainerHeight(
+            empty: targets.isEmpty,
+            scroll: !targets.isEmpty && shouldScroll,
+            emptyHeight: model.targetsEmptyStateHeight(),
+            scrollHeight: listMaxHeight
+        )
     }
 
     private func targetsEmptyState() -> some View {
@@ -3161,6 +3162,24 @@ struct OverviewView: View {
         if hide { return "—" }
         guard let bps else { return "—" }
         return "\(formatBytes(bps))/s"
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func popoverTargetsContainerHeight(
+        empty: Bool,
+        scroll: Bool,
+        emptyHeight: CGFloat,
+        scrollHeight: CGFloat
+    ) -> some View {
+        if empty {
+            self.frame(height: emptyHeight)
+        } else if scroll {
+            self.frame(height: scrollHeight, alignment: .top)
+        } else {
+            self
+        }
     }
 }
 
@@ -3303,13 +3322,13 @@ private struct TargetRowView: View {
             if running {
                 runningRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
+                    .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.white.opacity(0.10))
             } else {
                 idleRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -3361,7 +3380,7 @@ private struct TargetRowView: View {
     }
 
     private func runningRow(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, disconnected: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(displayLabel())
                     .font(.system(size: 13.5, weight: .heavy))
@@ -3387,7 +3406,7 @@ private struct TargetRowView: View {
         let failed = target.state == "failed" || target.lastRun?.status == "failed"
         let showStale = (!isDaemon) || staleAgeMs > StatusFreshness.staleMs
 
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(displayLabel())
                     .font(.system(size: 13.5, weight: .heavy))
