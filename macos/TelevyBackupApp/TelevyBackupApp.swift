@@ -10,6 +10,27 @@ enum StatusFreshness {
     static let toastMaxAgeSeconds: Int = 15
 }
 
+// Popover size is driven by real SwiftUI fitting height (sizeThatFits) and then clamped.
+// Keep these constants centralized so AppDelegate + tests agree on the exact behavior.
+enum PopoverAutoSize {
+    static let width: CGFloat = 360
+    static let minHeight: CGFloat = 320
+    static let maxHeight: CGFloat = 720
+    static let updateThreshold: CGFloat = 1
+
+    static func clampHeight(_ h: CGFloat) -> CGFloat {
+        // Avoid fractional resize jitter; keep behavior stable across runs.
+        let snapped = ceil(h)
+        return max(minHeight, min(maxHeight, snapped))
+    }
+
+    static func clampedHeightThatFits(_ host: NSHostingController<AnyView>) -> CGFloat {
+        // Prefer real SwiftUI fitting size over hand-maintained "chrome height" estimates.
+        let s = host.sizeThatFits(in: NSSize(width: width, height: 10_000))
+        return clampHeight(s.height)
+    }
+}
+
 fileprivate func isDevAppVariant() -> Bool {
     (Bundle.main.bundleIdentifier ?? "").hasSuffix(".dev")
 }
@@ -83,7 +104,8 @@ final class AppModel: ObservableObject {
 
     @Published var statusSnapshot: StatusSnapshot? = nil
     @Published var statusSnapshotReceivedAt: Date? = nil
-    @Published var popoverDesiredHeight: CGFloat = 460
+    // UI -> AppKit invalidation signal. AppDelegate recomputes popover height using sizeThatFits.
+    @Published var popoverResizeToken: Int = 0
     @Published var runHistory: [RunLogSummary] = []
     @Published var runHistoryRefreshInFlight: Bool = false
     @Published var targetRateEstimates: [String: TargetRateEstimate] = [:]
@@ -158,17 +180,18 @@ final class AppModel: ObservableObject {
     }
 
     private enum PopoverSizing {
-        static let maxHeight: CGFloat = 720
+        static let maxHeight: CGFloat = PopoverAutoSize.maxHeight
+        // Estimate used to reserve room for fixed "chrome" (header/network/titles) when deciding
+        // how tall the Targets list area is allowed to grow before scrolling.
         static let chromeHeightEstimate: CGFloat = 240
         // Fallback-only estimate used before live layout metrics arrive.
         // Keep this aligned with `TargetRowView` visual density to avoid early under-sizing.
-        static let rowHeight: CGFloat = 86
+        static let rowHeight: CGFloat = 68
         static let listInsetTop: CGFloat = 10
         static let listInsetBottom: CGFloat = 16
         static let listInsetCompactTop: CGFloat = 0
         static let listInsetCompactBottom: CGFloat = 6
         static let emptyStateHeight: CGFloat = 276
-        static let minHeight: CGFloat = 320
     }
 
     init() {
@@ -838,39 +861,10 @@ final class AppModel: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    func updatePopoverHeightForTargets(targetCount: Int) {
-        let listContentHeight: CGFloat
-        if targetCount <= 0 {
-            listContentHeight = targetsEmptyStateHeight()
-        } else {
-            let rowsHeight = estimatedTargetsRowsHeight(targetCount: targetCount)
-            listContentHeight = desiredTargetsListHeight(contentRowsHeight: rowsHeight)
-        }
-        let desired = min(PopoverSizing.maxHeight, PopoverSizing.chromeHeightEstimate + listContentHeight)
-        let clamped = max(PopoverSizing.minHeight, desired)
-        if abs(popoverDesiredHeight - clamped) >= 1 {
-            popoverDesiredHeight = clamped
-        }
-    }
-
-    func updatePopoverHeightForMeasuredTargets(
-        measuredContentHeight: CGFloat,
-        targetCount: Int
-    ) {
-        guard targetCount > 0 else {
-            updatePopoverHeightForTargets(targetCount: 0)
-            return
-        }
-
-        let rowsHeight = measuredContentHeight > 1
-            ? measuredContentHeight
-            : estimatedTargetsRowsHeight(targetCount: targetCount)
-        let desiredListHeight = desiredTargetsListHeight(contentRowsHeight: rowsHeight)
-        let desired = PopoverSizing.chromeHeightEstimate + desiredListHeight
-        let clamped = max(PopoverSizing.minHeight, min(PopoverSizing.maxHeight, desired))
-        if abs(popoverDesiredHeight - clamped) >= 1 {
-            popoverDesiredHeight = clamped
-        }
+    func requestPopoverResize() {
+        // Intentionally an invalidation signal (not a height): AppDelegate will recompute the
+        // real SwiftUI fitting height (sizeThatFits) and apply the clamp/jitter threshold.
+        popoverResizeToken &+= 1
     }
 
     func targetsListMaxHeight() -> CGFloat {
@@ -2767,29 +2761,29 @@ struct PopoverRootView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        ZStack {
-            VisualEffectView(material: .popover, blendingMode: .behindWindow, state: .active)
-                .ignoresSafeArea()
-
-            // Liquid-glass shell (one shape, no nested rounding)
-            ContainerRelativeShape()
-                .fill(glassFill)
-                .ignoresSafeArea()
-            ContainerRelativeShape()
-                .fill(glassHighlight)
-                .blendMode(.screen)
-                .ignoresSafeArea()
-            ContainerRelativeShape()
-                .strokeBorder(glassStroke, lineWidth: 1)
-                .ignoresSafeArea()
-
-            VStack(alignment: .leading, spacing: 12) {
-                header
-                OverviewView()
-            }
-            .padding(16)
+        VStack(alignment: .leading, spacing: 12) {
+            header
+            OverviewView()
         }
-        .frame(width: 360)
+        .padding(16)
+        .frame(width: PopoverAutoSize.width, alignment: .topLeading)
+        .background {
+            // Background is applied via `.background` so it never participates in sizeThatFits
+            // (unlike being a sibling in a ZStack), keeping popover height truly content-driven.
+            ZStack {
+                VisualEffectView(material: .popover, blendingMode: .behindWindow, state: .active)
+
+                // Liquid-glass shell (one shape, no nested rounding)
+                ContainerRelativeShape()
+                    .fill(glassFill)
+                ContainerRelativeShape()
+                    .fill(glassHighlight)
+                    .blendMode(.screen)
+                ContainerRelativeShape()
+                    .strokeBorder(glassStroke, lineWidth: 1)
+            }
+            .ignoresSafeArea()
+        }
         .preferredColorScheme(.light)
         .overlay(alignment: .bottom) {
             if let toast = model.toastText {
@@ -2938,30 +2932,21 @@ struct OverviewView: View {
             targetsSection(snap: snap, nowMs: nowMs)
         }
         .onAppear {
+#if !TELEVYBACKUP_TESTING
             model.ensureDaemonRunning()
             model.ensureStatusStreamRunning()
+#endif
             measuredTargetsContentHeight = 0
-            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
+            model.requestPopoverResize()
         }
         .onChange(of: targetIds) { _, _ in
             // Prevent a one-frame stale height when the target set changes.
             measuredTargetsContentHeight = 0
-            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
+            model.requestPopoverResize()
         }
         .onChange(of: measuredTargetsContentHeight) { _, _ in
-            syncPopoverHeight(targetCount: snap?.targets.count ?? 0)
+            model.requestPopoverResize()
         }
-    }
-
-    private func syncPopoverHeight(targetCount: Int) {
-        if targetCount <= 0 {
-            model.updatePopoverHeightForTargets(targetCount: 0)
-            return
-        }
-        model.updatePopoverHeightForMeasuredTargets(
-            measuredContentHeight: measuredTargetsContentHeight,
-            targetCount: targetCount
-        )
     }
 
     private func networkSection(snap: StatusSnapshot?, nowMs: Int64) -> some View {
@@ -3056,27 +3041,9 @@ struct OverviewView: View {
             : model.estimatedTargetsRowsHeight(targetCount: targets.count)
         let shouldScroll = model.shouldScrollTargetsList(contentRowsHeight: rowsHeight)
         let listInsets = model.targetsListInsets(scrollEnabled: shouldScroll)
-        let listHeight = model.desiredTargetsListHeight(contentRowsHeight: rowsHeight)
         let listMaxHeight = model.targetsListMaxHeight()
-        let height: CGFloat = {
-            if targets.isEmpty {
-                return model.targetsEmptyStateHeight()
-            }
-            return min(listMaxHeight, listHeight)
-        }()
 
-        return ZStack {
-            LinearGradient(
-                colors: [
-                    Color.white.opacity(0.16),
-                    Color.white.opacity(0.10),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .clipShape(container)
-            .overlay(container.strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
-
+        return ZStack(alignment: .topLeading) {
             if targets.isEmpty {
                 if snap == nil {
                     waitingForStatusEmptyState()
@@ -3098,7 +3065,26 @@ struct OverviewView: View {
                 waitingForStatusEmptyState()
             }
         }
-        .frame(height: height)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background {
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.16),
+                    Color.white.opacity(0.10),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .clipShape(container)
+        }
+        .overlay(container.strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
+        .clipShape(container)
+        .popoverTargetsContainerHeight(
+            empty: targets.isEmpty,
+            scroll: !targets.isEmpty && shouldScroll,
+            emptyHeight: model.targetsEmptyStateHeight(),
+            scrollHeight: listMaxHeight
+        )
     }
 
     private func targetsEmptyState() -> some View {
@@ -3176,6 +3162,24 @@ struct OverviewView: View {
         if hide { return "—" }
         guard let bps else { return "—" }
         return "\(formatBytes(bps))/s"
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func popoverTargetsContainerHeight(
+        empty: Bool,
+        scroll: Bool,
+        emptyHeight: CGFloat,
+        scrollHeight: CGFloat
+    ) -> some View {
+        if empty {
+            self.frame(height: emptyHeight)
+        } else if scroll {
+            self.frame(height: scrollHeight, alignment: .top)
+        } else {
+            self
+        }
     }
 }
 
@@ -3318,13 +3322,13 @@ private struct TargetRowView: View {
             if running {
                 runningRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 12)
+                    .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Color.white.opacity(0.10))
             } else {
                 idleRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -3376,7 +3380,7 @@ private struct TargetRowView: View {
     }
 
     private func runningRow(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, disconnected: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(displayLabel())
                     .font(.system(size: 13.5, weight: .heavy))
@@ -3402,7 +3406,7 @@ private struct TargetRowView: View {
         let failed = target.state == "failed" || target.lastRun?.status == "failed"
         let showStale = (!isDaemon) || staleAgeMs > StatusFreshness.staleMs
 
-        return VStack(alignment: .leading, spacing: 6) {
+        return VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(displayLabel())
                     .font(.system(size: 13.5, weight: .heavy))
@@ -3798,6 +3802,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var statusItem: NSStatusItem?
     private var cancellables: Set<AnyCancellable> = []
+    private var popoverHost: NSHostingController<AnyView>? = nil
+    private var popoverResizeScheduled: Bool = false
 
     // Prevent accidental multi-launch (e.g. `open -n`) from creating duplicate status bar items and
     // competing daemons. We keep the earliest-launched instance alive and exit the rest.
@@ -3895,12 +3901,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover.behavior = .transient
         popover.animates = true
-        popover.contentSize = NSSize(width: 360, height: 460)
+        popover.contentSize = NSSize(width: PopoverAutoSize.width, height: 460)
         popover.appearance = NSAppearance(named: .vibrantLight)
-        let host = NSHostingController(rootView: PopoverRootView().environmentObject(ModelStore.shared))
+        let host = NSHostingController(rootView: AnyView(PopoverRootView().environmentObject(ModelStore.shared)))
         host.view.wantsLayer = true
         host.view.layer?.backgroundColor = NSColor.clear.cgColor
         popover.contentViewController = host
+        popoverHost = host
 
         // Best-effort: keep daemon running even if the popover is not opened yet.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
@@ -3912,16 +3919,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ModelStore.shared.ensureStatusStreamRunning()
         }
 
-        ModelStore.shared.$popoverDesiredHeight
+        ModelStore.shared.$popoverResizeToken
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] h in
+            .sink { [weak self] _ in
                 guard let self else { return }
-                let height = min(max(320, h), 720)
-                if self.popover.contentSize.height != height {
-                    self.popover.contentSize = NSSize(width: 360, height: height)
-                }
+                self.schedulePopoverResize()
             }
             .store(in: &cancellables)
+
+        schedulePopoverResize()
 
         if ProcessInfo.processInfo.environment["TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH"] != "0" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
@@ -4007,6 +4013,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func schedulePopoverResize() {
+        if popoverResizeScheduled { return }
+        popoverResizeScheduled = true
+        // Defer by one runloop tick so SwiftUI has a chance to apply any state/layout changes
+        // (e.g. Targets list measurement updates).
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.popoverResizeScheduled = false
+            self.applyPopoverSizeThatFits()
+        }
+    }
+
+    private func applyPopoverSizeThatFits() {
+        guard let host = popoverHost else { return }
+        let height = PopoverAutoSize.clampedHeightThatFits(host)
+        if popover.contentSize.width == PopoverAutoSize.width,
+           abs(popover.contentSize.height - height) < PopoverAutoSize.updateThreshold
+        {
+            return
+        }
+        popover.contentSize = NSSize(width: PopoverAutoSize.width, height: height)
+    }
+
     private func showPopover(_ sender: Any?) {
         guard let button = statusItem?.button else { return }
         ModelStore.shared.ensureDaemonRunning()
@@ -4015,6 +4044,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         configurePopoverWindowIfNeeded()
+        schedulePopoverResize()
     }
 
     private func closePopover(_ sender: Any?) {
@@ -4034,6 +4064,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+#if TELEVYBACKUP_TESTING
+extension AppDelegate {
+    // Minimal wiring to exercise the production popover sizing pipeline in layout tests,
+    // without creating status bar items or spawning side-effectful processes.
+    func testing_setUpPopoverForSizingOnly(
+        model: AppModel
+    ) -> (popover: NSPopover, host: NSHostingController<AnyView>) {
+        popover.behavior = .transient
+        popover.animates = false
+        popover.contentSize = NSSize(width: PopoverAutoSize.width, height: 460)
+
+        let host = NSHostingController(rootView: AnyView(PopoverRootView().environmentObject(model)))
+        _ = host.view // force view load
+        popover.contentViewController = host
+        popoverHost = host
+
+        model.$popoverResizeToken
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.schedulePopoverResize()
+            }
+            .store(in: &cancellables)
+
+        schedulePopoverResize()
+        return (popover: popover, host: host)
+    }
+
+    func testing_applyPopoverSizeThatFitsNow() {
+        applyPopoverSizeThatFits()
+    }
+}
+#endif
+
+#if !TELEVYBACKUP_TESTING
 @main
 struct TelevyBackupApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -4051,3 +4115,4 @@ struct TelevyBackupApp: App {
         }
     }
 }
+#endif

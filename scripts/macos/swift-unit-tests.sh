@@ -27,3 +27,15 @@ bin_progress="$out_dir/backup-progress-projection-tests"
   "$root_dir/macos/TelevyBackupApp/BackupProgressProjection.swift" \
   "$root_dir/macos/TelevyBackupAppTests/BackupProgressProjectionTests.swift"
 "$bin_progress"
+
+bin_popover="$out_dir/popover-layout-size-tests"
+"$swiftc" \
+  -sdk "$sdk_path" \
+  -O \
+  -D TELEVYBACKUP_TESTING \
+  -framework SwiftUI \
+  -framework AppKit \
+  -o "$bin_popover" \
+  "$root_dir/macos/TelevyBackupApp"/*.swift \
+  "$root_dir/macos/TelevyBackupAppTests/PopoverLayoutSizeTests.swift"
+"$bin_popover"

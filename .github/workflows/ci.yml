@@ -66,10 +66,22 @@ jobs:
           cd crates/mtproto-helper
           cargo test
 
+  macos-swift:
+    name: macOS Swift tests
+    runs-on: macos-latest
+    env:
+      CI: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Swift unit/UI layout tests
+        run: bash scripts/macos/swift-unit-tests.sh
+
   release-tag:
     name: Create Tag and Release
     runs-on: ubuntu-latest
-    needs: quality
+    needs: [quality, macos-swift]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
