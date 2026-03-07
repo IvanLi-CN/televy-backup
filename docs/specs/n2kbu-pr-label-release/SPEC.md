@@ -56,6 +56,7 @@
 - `Release`：
   - 默认由 `workflow_run` 监听 `CI (main)` 成功完成；
   - 允许 `workflow_dispatch(head_sha)` 做补发，但 `head_sha` 必须可证明属于 `main` 历史。
+  - `Release` workflow 自身必须串行化，避免不同 merge commit 并发计算出同一个 stable semver。
 - `Release` 只在 merge commit / backfill commit 能映射到且仅映射到 1 个 PR 时继续；否则保守跳过。
 
 ### 版本与 tag 规则
@@ -99,3 +100,4 @@
 
 - 2026-03-07：按 `style-playbook` 的 `pr-label-release` 参考落地 label gate、拆分 CI 与 label-driven release。
 - 2026-03-07：补充 release backfill 的 `main` ancestry 校验，并让 tag 并发竞争按幂等成功处理。
+- 2026-03-07：将 `Release` workflow 改为全局串行，避免不同 merge commit 并发抢占同一 stable 版号。
