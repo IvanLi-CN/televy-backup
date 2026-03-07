@@ -73,6 +73,26 @@ run_label_gate_tests() {
   fi
 }
 
+
+run_freeze_release_intent_tests() {
+  local out_file="$tmp_dir/release-intent.json"
+  PULLS_JSON='[{"number":54,"html_url":"https://github.com/IvanLi-CN/televy-backup/pull/54"}]'   LABELS_JSON='[{"name":"type:minor"},{"name":"channel:rc"}]'   WORKFLOW_RUN_SHA='cafebabe'   bash "$root_dir/.github/scripts/freeze-release-intent.sh" "$out_file"
+
+  python3 - <<'PY_INNER' "$out_file"
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert payload["should_release"] == "true", payload
+assert payload["bump_level"] == "minor", payload
+assert payload["release_channel"] == "rc", payload
+assert payload["pr_number"] == "54", payload
+PY_INNER
+}
+
 run_release_intent_tests() {
   local out
   out="$(
@@ -105,6 +125,7 @@ run_release_intent_tests() {
 
 run_compute_version_tests
 run_label_gate_tests
+run_freeze_release_intent_tests
 run_release_intent_tests
 
 echo 'release script tests passed'

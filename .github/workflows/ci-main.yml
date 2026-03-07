@@ -81,3 +81,31 @@ jobs:
 
       - name: Swift unit/UI layout tests
         run: bash scripts/macos/swift-unit-tests.sh
+
+  release-intent-freeze:
+    name: Freeze release intent
+    runs-on: ubuntu-latest
+    needs: [quality, macos-swift]
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Freeze merged PR release intent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          bash ./.github/scripts/freeze-release-intent.sh dist/release-intent/release-intent.json
+
+      - name: Upload frozen release intent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-intent-${{ github.sha }}
+          path: dist/release-intent/release-intent.json
+          if-no-files-found: error
+          retention-days: 7

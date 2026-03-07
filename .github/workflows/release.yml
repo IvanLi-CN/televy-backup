@@ -23,6 +23,7 @@ permissions:
 
 env:
   RELEASE_HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.head_sha || github.event.workflow_run.head_sha }}
+  RELEASE_INTENT_ARTIFACT: release-intent-${{ github.event_name == 'workflow_dispatch' && inputs.head_sha || github.event.workflow_run.head_sha }}
 
 jobs:
   prepare:
@@ -60,12 +61,55 @@ jobs:
             exit 1
           fi
 
-      - name: Determine release intent from merged PR labels
-        id: intent
+      - name: Resolve CI (main) run id for frozen intent
+        id: source-run
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WORKFLOW_RUN_SHA: ${{ env.RELEASE_HEAD_SHA }}
-        run: bash ./.github/scripts/release-intent.sh
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          api_root="${GITHUB_API_URL:-https://api.github.com}"
+          runs_json="$(
+            curl -fsSL               --max-time 20               -H "Accept: application/vnd.github+json"               -H "Authorization: Bearer ${GITHUB_TOKEN}"               -H "X-GitHub-Api-Version: 2022-11-28"               "${api_root}/repos/${GITHUB_REPOSITORY}/actions/workflows/ci-main.yml/runs?branch=main&event=push&per_page=100"
+          )"
+
+          run_id="$(RUNS_JSON="$runs_json" RELEASE_HEAD_SHA="$RELEASE_HEAD_SHA" python3 -c 'import json, os; runs=json.loads(os.environ["RUNS_JSON"]).get("workflow_runs", []); head=os.environ["RELEASE_HEAD_SHA"]; print(next((str(run.get("id", "")) for run in runs if run.get("head_sha") == head and run.get("conclusion") == "success"), ""))')"
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+
+      - name: Download frozen release intent artifact
+        id: download-intent
+        if: ${{ steps.source-run.outputs.run_id != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.RELEASE_INTENT_ARTIFACT }}
+          path: dist/release-intent
+          run-id: ${{ steps.source-run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Load frozen release intent
+        id: intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_path="dist/release-intent/release-intent.json"
+          if [[ ! -f "$artifact_path" ]]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "bump_level=" >> "$GITHUB_OUTPUT"
+            echo "release_intent_label=" >> "$GITHUB_OUTPUT"
+            echo "release_channel=stable" >> "$GITHUB_OUTPUT"
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
+            echo "pr_url=" >> "$GITHUB_OUTPUT"
+            echo "reason=frozen_intent_missing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ARTIFACT_PATH="$artifact_path" GITHUB_OUTPUT_PATH="$GITHUB_OUTPUT" python3 -c 'import json, os; artifact=json.loads(open(os.environ["ARTIFACT_PATH"], encoding="utf-8").read()); keys=["should_release","bump_level","release_intent_label","release_channel","pr_number","pr_url","reason"]; f=open(os.environ["GITHUB_OUTPUT_PATH"], "a", encoding="utf-8"); [f.write(f"{key}={artifact.get(key, "")}\n") for key in keys]; f.close()'
 
       - name: Compute effective version
         if: ${{ steps.intent.outputs.should_release == 'true' }}
