@@ -55,8 +55,8 @@
 - `CI (main)`：`push(main)` + `workflow_dispatch` 触发，`concurrency.cancel-in-progress=false`。
 - `Release`：
   - 默认由 `workflow_run` 监听 `CI (main)` 成功完成；
-  - 允许 `workflow_dispatch(head_sha)` 做补发。
-- `Release` 只在 merge commit 能映射到且仅映射到 1 个 PR 时继续；否则保守跳过。
+  - 允许 `workflow_dispatch(head_sha)` 做补发，但 `head_sha` 必须可证明属于 `main` 历史。
+- `Release` 只在 merge commit / backfill commit 能映射到且仅映射到 1 个 PR 时继续；否则保守跳过。
 
 ### 版本与 tag 规则
 
@@ -68,7 +68,7 @@
 
 ### 幂等与保守策略
 
-- tag 已存在时跳过创建，不视为失败。
+- tag 已存在时跳过创建，不视为失败；若并发窗口中被其他 run 先创建，也应视为成功。
 - GitHub Release 使用可重跑的更新模式。
 - GitHub API 反查 PR 或读取 labels 失败时，Release 输出 skip reason，而不是盲目发版。
 
@@ -98,3 +98,4 @@
 ## Change log
 
 - 2026-03-07：按 `style-playbook` 的 `pr-label-release` 参考落地 label gate、拆分 CI 与 label-driven release。
+- 2026-03-07：补充 release backfill 的 `main` ancestry 校验，并让 tag 并发竞争按幂等成功处理。

@@ -50,6 +50,16 @@ jobs:
           fetch-depth: 0
           ref: ${{ env.RELEASE_HEAD_SHA }}
 
+      - name: Verify release head is reachable from main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${RELEASE_HEAD_SHA}" "origin/main"; then
+            echo "::error::RELEASE_HEAD_SHA (${RELEASE_HEAD_SHA}) is not reachable from origin/main"
+            exit 1
+          fi
+
       - name: Determine release intent from merged PR labels
         id: intent
         env:
@@ -106,11 +116,22 @@ jobs:
           set -euo pipefail
           tag="v${APP_EFFECTIVE_VERSION}"
           echo "target tag: $tag"
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+          git fetch --tags --force >/dev/null 2>&1 || true
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null             || git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
             echo "Tag ${tag} already exists. Skipping push."
           else
             git tag -a "$tag" -m "$tag"
-            git push origin "$tag"
+            if git push origin "refs/tags/${tag}"; then
+              echo "Pushed ${tag}."
+            else
+              git fetch --tags --force >/dev/null 2>&1 || true
+              if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+                echo "Tag ${tag} was created concurrently. Treating as success."
+              else
+                echo "::error::Failed to push tag ${tag}." >&2
+                exit 1
+              fi
+            fi
           fi
 
   publish:
