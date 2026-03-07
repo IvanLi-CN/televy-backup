@@ -1,0 +1,32 @@
+name: PR Label Gate
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+
+concurrency:
+  group: label-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  label-gate:
+    name: Release intent label gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted gate scripts (base)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Validate release intent + channel labels
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash ./.github/scripts/label-gate.sh

@@ -232,3 +232,17 @@ Homebrew templates live under `packaging/homebrew/`.
 - `docs/requirements.md`
 - `docs/architecture.md`
 - `docs/plan/README.md`
+
+## PR label release flow
+
+Merges to `main` use the merged PR labels as the release source of truth.
+
+- Every PR targeting `main` must carry exactly one release intent label:
+  - `type:patch`, `type:minor`, `type:major` -> publish a release
+  - `type:docs`, `type:skip` -> skip release
+- Every PR targeting `main` must carry exactly one release channel label:
+  - `channel:stable` -> publish stable tag `vX.Y.Z`
+  - `channel:rc` -> publish prerelease tag `vX.Y.Z-rc.<sha7>`
+- Unknown or conflicting `type:*` / `channel:*` labels fail the PR label gate.
+- Release versioning starts from the highest existing stable semver tag and applies the PR bump level.
+- If a merged commit cannot be mapped to exactly one PR, release is skipped conservatively.

@@ -1,0 +1,82 @@
+name: CI (PR)
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CI: true
+  RUST_TOOLCHAIN: 1.91.0
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: target/ci/pr/rust
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential \
+            libsqlite3-dev \
+            pkg-config \
+            curl
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Install Rust components
+        run: rustup component add rustfmt clippy
+
+      - name: Release script contract tests
+        run: bash ./.github/scripts/test-release-scripts.sh
+
+      - name: Cache cargo directories
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            crates/mtproto-helper/target
+          key: ${{ runner.os }}-cargo-pr-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-pr-${{ env.RUST_TOOLCHAIN }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Cargo fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --all-features
+
+      - name: Cargo test (mtproto-helper)
+        run: |
+          cd crates/mtproto-helper
+          cargo test
+
+  macos-swift:
+    name: macOS Swift tests
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Swift unit/UI layout tests
+        run: bash scripts/macos/swift-unit-tests.sh
