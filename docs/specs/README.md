@@ -31,6 +31,7 @@
 
 | ID   | Title | Status | Spec | Last | Notes |
 |-----:|-------|--------|------|------|-------|
+| n2kbu | PR + Label 发布能力 | 已完成 | `n2kbu-pr-label-release/SPEC.md` | 2026-03-07 | label gate / CI(main) / Release 已落地；待 PR checks 与 review-loop 收敛 |
 | 3rnws | Main Window：Targets 菜单补齐 “Backup now” | 已完成 | `3rnws-main-window-target-backup-menu/SPEC.md` | 2026-03-05 | PR #51；CI run #273 通过；review-loop 无阻塞问题 |
 | 2e73n | Popover Targets 高度实时自适应与误滚动修复 | 已完成 | `2e73n-popover-targets-live-height/SPEC.md` | 2026-02-25 | PR #48 已创建并更新；CI run #251 通过；review-loop 无阻塞问题 |
 | dmts3 | backup 主流水线并行化（scan+upload）与进度语义修复 | 部分完成（4/5） | `dmts3-streaming-backup-pipeline/SPEC.md` | 2026-02-28 | 主循环并行 + retention 优化已落地；新增 index 流式压缩上传以压低 daemon 内存 footprint，待完成 UI 真机截图验收 |
