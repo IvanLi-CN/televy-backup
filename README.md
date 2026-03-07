@@ -232,6 +232,7 @@ Homebrew templates live under `packaging/homebrew/`.
 - `docs/requirements.md`
 - `docs/architecture.md`
 - `docs/plan/README.md`
+- `docs/quality-gates.md`
 
 ## PR label release flow
 

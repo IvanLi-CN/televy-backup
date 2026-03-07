@@ -80,6 +80,7 @@
 - merge 到 `main` 后，`Release` 能基于 merged PR labels 正确区分 stable / rc / skip。
 - `compute-version.sh` 不再只做“Cargo.toml patch 自增”，而是按最大稳定 tag + bump level 计算下一版本。
 - 所有新增脚本具备最小本地回归测试，并纳入 CI。
+- 仓库需声明 PR merge gate 的 `required_checks`，并记录任何临时 waiver。
 
 ## 质量门槛（Quality Gates）
 
@@ -96,6 +97,7 @@
 - [x] M4: 改造 `compute-version.sh` 为 semver bump 驱动
 - [x] M5: 新增 `Release` workflow，支持 stable/rc/skip 与手动 backfill
 - [x] M6: 补充脚本合同测试与 README 发布规则说明
+- [x] M7: 补充 `docs/quality-gates.md`，声明 required checks 与 bootstrap waiver
 
 ## Change log
 
@@ -103,3 +105,4 @@
 - 2026-03-07：补充 release backfill 的 `main` ancestry 校验，并让 tag 并发竞争按幂等成功处理。
 - 2026-03-07：将 `Release` workflow 改为全局串行，避免不同 merge commit 并发抢占同一 stable 版号。
 - 2026-03-07：在 `CI (main)` 冻结 release intent artifact，避免 rerun/backfill 被 merge 后改标签污染。
+- 2026-03-07：补充 `docs/quality-gates.md`，把 PR required checks / waiver / GitHub 对齐边界显式化。
