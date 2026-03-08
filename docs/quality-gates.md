@@ -29,12 +29,13 @@ Use the exact GitHub check names below as the merge gate contract for PRs target
 
 ## Waivers
 
-### 2026-03-07: bootstrap waiver for PR #53
+- None.
 
-- Scope: PR `#53` only.
-- Waived check: `Release intent label gate`
-- Reason: the workflow is introduced by PR `#53` itself, and `pull_request_target` uses the base branch workflow definition. Therefore this PR cannot emit the new check until the workflow exists on `main`.
-- Expiry: automatically expires once PR `#53` is merged; subsequent PRs must satisfy the full required check set.
+## Bootstrap note
+
+- PR `#53` introduces the `pull_request_target` workflow that backs `Release intent label gate`.
+- Until that workflow exists on `main`, bootstrap validation for PR `#53` is satisfied by manually dispatching `PR Label Gate` from the PR branch with `pr_number=53`.
+- After PR `#53` merges, subsequent PRs are validated automatically through `pull_request_target`.
 
 ## GitHub alignment
 
