@@ -40,8 +40,10 @@ Use the exact GitHub check names below as the merge gate contract for PRs target
 
 - Repo-local declaration is the source of truth.
 - GitHub branch protection / rulesets must be reconciled to the `required_checks` set above.
-- Current GitHub-side required-check configuration: `未检查`.
-  - Reason: the available GitHub MCP tooling in this session can manage PRs/issues/labels/workflows, but it does not expose branch-protection / ruleset reconciliation for required checks.
+- Current GitHub-side required-check configuration: `存在`.
+  - Verified on GitHub Settings > Branches on 2026-03-08.
+  - Enforced required checks: `quality`, `macOS Swift tests`, `Release intent label gate`.
+  - `Require a pull request before merging` is also enabled for `main`.
 
 ## Local quality workflow
 
