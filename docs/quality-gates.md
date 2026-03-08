@@ -34,8 +34,9 @@ Use the exact GitHub check names below as the merge gate contract for PRs target
 ## Bootstrap note
 
 - PR `#53` introduces the `pull_request_target` workflow that backs `Release intent label gate`.
-- Until that workflow exists on `main`, bootstrap validation for PR `#53` is satisfied by manually dispatching `PR Label Gate` from the PR branch with `pr_number=53`.
-- After PR `#53` merges, subsequent PRs are validated automatically through `pull_request_target`.
+- Because `pull_request_target` resolves workflow definitions from the base branch, PR `#53` cannot receive that check from `main` yet.
+- Bootstrap validation for PR `#53` is therefore emitted by a temporary `CI (PR)` job with the exact check name `Release intent label gate`.
+- After PR `#53` merges, subsequent PRs are validated automatically through `pull_request_target`; the bootstrap-only PR job stays inactive for every PR other than `#53`.
 
 ## GitHub alignment
 

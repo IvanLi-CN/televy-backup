@@ -10,6 +10,8 @@ concurrency:
 
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
 
 env:
   CI: true
@@ -80,3 +82,17 @@ jobs:
 
       - name: Swift unit/UI layout tests
         run: bash scripts/macos/swift-unit-tests.sh
+
+  bootstrap-label-gate:
+    name: Release intent label gate
+    if: github.event.pull_request.number == 53
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate release intent + channel labels
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash ./.github/scripts/label-gate.sh
