@@ -1,0 +1,208 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows: ["CI (main)"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      head_sha:
+        description: Commit SHA on main to backfill release for
+        required: true
+        type: string
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: read
+  pull-requests: read
+
+env:
+  RELEASE_HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.head_sha || github.event.workflow_run.head_sha }}
+  RELEASE_INTENT_ARTIFACT: release-intent-${{ github.event_name == 'workflow_dispatch' && inputs.head_sha || github.event.workflow_run.head_sha }}
+
+jobs:
+  prepare:
+    name: Prepare release metadata
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push') ||
+      github.event_name == 'workflow_dispatch'
+    outputs:
+      should_release: ${{ steps.meta.outputs.should_release }}
+      app_effective_version: ${{ steps.meta.outputs.app_effective_version }}
+      release_tag: ${{ steps.meta.outputs.release_tag }}
+      release_channel: ${{ steps.meta.outputs.release_channel }}
+      bump_level: ${{ steps.meta.outputs.bump_level }}
+      pr_number: ${{ steps.meta.outputs.pr_number }}
+      pr_url: ${{ steps.meta.outputs.pr_url }}
+      release_intent_label: ${{ steps.meta.outputs.release_intent_label }}
+      reason: ${{ steps.meta.outputs.reason }}
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_HEAD_SHA }}
+
+      - name: Verify release head is reachable from main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "${RELEASE_HEAD_SHA}" "origin/main"; then
+            echo "::error::RELEASE_HEAD_SHA (${RELEASE_HEAD_SHA}) is not reachable from origin/main"
+            exit 1
+          fi
+
+      - name: Resolve CI (main) run id for frozen intent
+        id: source-run
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          api_root="${GITHUB_API_URL:-https://api.github.com}"
+          runs_json="$(
+            curl -fsSL               --max-time 20               -H "Accept: application/vnd.github+json"               -H "Authorization: Bearer ${GITHUB_TOKEN}"               -H "X-GitHub-Api-Version: 2022-11-28"               "${api_root}/repos/${GITHUB_REPOSITORY}/actions/workflows/ci-main.yml/runs?branch=main&event=push&per_page=100"
+          )"
+
+          run_id="$(RUNS_JSON="$runs_json" RELEASE_HEAD_SHA="$RELEASE_HEAD_SHA" python3 -c 'import json, os; runs=json.loads(os.environ["RUNS_JSON"]).get("workflow_runs", []); head=os.environ["RELEASE_HEAD_SHA"]; print(next((str(run.get("id", "")) for run in runs if run.get("head_sha") == head and run.get("conclusion") == "success"), ""))')"
+          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
+
+      - name: Download frozen release intent artifact
+        id: download-intent
+        if: ${{ steps.source-run.outputs.run_id != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.RELEASE_INTENT_ARTIFACT }}
+          path: dist/release-intent
+          run-id: ${{ steps.source-run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Load frozen release intent
+        id: intent
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_path="dist/release-intent/release-intent.json"
+          if [[ ! -f "$artifact_path" ]]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "bump_level=" >> "$GITHUB_OUTPUT"
+            echo "release_intent_label=" >> "$GITHUB_OUTPUT"
+            echo "release_channel=stable" >> "$GITHUB_OUTPUT"
+            echo "pr_number=" >> "$GITHUB_OUTPUT"
+            echo "pr_url=" >> "$GITHUB_OUTPUT"
+            echo "reason=frozen_intent_missing" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ARTIFACT_PATH="$artifact_path" GITHUB_OUTPUT_PATH="$GITHUB_OUTPUT" python3 -c 'import json, os; artifact=json.loads(open(os.environ["ARTIFACT_PATH"], encoding="utf-8").read()); keys=["should_release","bump_level","release_intent_label","release_channel","pr_number","pr_url","reason"]; f=open(os.environ["GITHUB_OUTPUT_PATH"], "a", encoding="utf-8"); [f.write(f"{key}={artifact.get(key, "")}\n") for key in keys]; f.close()'
+
+      - name: Compute effective version
+        if: ${{ steps.intent.outputs.should_release == 'true' }}
+        env:
+          BUMP_LEVEL: ${{ steps.intent.outputs.bump_level }}
+        run: bash ./.github/scripts/compute-version.sh
+
+      - name: Apply prerelease suffix
+        if: ${{ steps.intent.outputs.should_release == 'true' && steps.intent.outputs.release_channel == 'rc' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="$(git rev-parse --short HEAD)"
+          echo "APP_EFFECTIVE_VERSION=${APP_EFFECTIVE_VERSION}-rc.${short_sha}" >> "$GITHUB_ENV"
+          echo "Computed prerelease APP_EFFECTIVE_VERSION=${APP_EFFECTIVE_VERSION}-rc.${short_sha}"
+
+      - name: Export release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "should_release=${{ steps.intent.outputs.should_release }}" >> "$GITHUB_OUTPUT"
+          echo "release_channel=${{ steps.intent.outputs.release_channel }}" >> "$GITHUB_OUTPUT"
+          echo "bump_level=${{ steps.intent.outputs.bump_level }}" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${{ steps.intent.outputs.pr_number }}" >> "$GITHUB_OUTPUT"
+          echo "pr_url=${{ steps.intent.outputs.pr_url }}" >> "$GITHUB_OUTPUT"
+          echo "release_intent_label=${{ steps.intent.outputs.release_intent_label }}" >> "$GITHUB_OUTPUT"
+          echo "reason=${{ steps.intent.outputs.reason }}" >> "$GITHUB_OUTPUT"
+
+          if [[ "${{ steps.intent.outputs.should_release }}" == "true" ]]; then
+            echo "app_effective_version=${APP_EFFECTIVE_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "release_tag=v${APP_EFFECTIVE_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "app_effective_version=" >> "$GITHUB_OUTPUT"
+            echo "release_tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure Git user
+        if: ${{ steps.intent.outputs.should_release == 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and push tag (if missing)
+        if: ${{ steps.intent.outputs.should_release == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v${APP_EFFECTIVE_VERSION}"
+          echo "target tag: $tag"
+          git fetch --tags --force >/dev/null 2>&1 || true
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null             || git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists. Skipping push."
+          else
+            git tag -a "$tag" -m "$tag"
+            if git push origin "refs/tags/${tag}"; then
+              echo "Pushed ${tag}."
+            else
+              git fetch --tags --force >/dev/null 2>&1 || true
+              if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+                echo "Tag ${tag} was created concurrently. Treating as success."
+              else
+                echo "::error::Failed to push tag ${tag}." >&2
+                exit 1
+              fi
+            fi
+          fi
+
+  publish:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [prepare]
+    if: ${{ needs.prepare.outputs.should_release == 'true' }}
+    steps:
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: ${{ needs.prepare.outputs.release_tag }}
+          prerelease: ${{ needs.prepare.outputs.release_channel == 'rc' }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  skipped:
+    name: Release skipped
+    runs-on: ubuntu-latest
+    needs: [prepare]
+    if: ${{ needs.prepare.outputs.should_release != 'true' }}
+    steps:
+      - name: Explain skip reason
+        run: |
+          echo "Release skipped."
+          echo "reason=${{ needs.prepare.outputs.reason }}"
+          echo "pr_number=${{ needs.prepare.outputs.pr_number }}"
+          echo "release_intent_label=${{ needs.prepare.outputs.release_intent_label }}"

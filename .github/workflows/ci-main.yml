@@ -1,24 +1,26 @@
-name: CI
+name: CI (main)
 
 on:
   push:
-    branches: [main]
-  pull_request:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
+
+env:
+  CI: true
+  RUST_TOOLCHAIN: 1.91.0
 
 jobs:
   quality:
     runs-on: ubuntu-latest
     env:
-      CI: true
+      CARGO_TARGET_DIR: target/ci/main/rust
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,10 +37,13 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@v1
         with:
-          toolchain: 1.91.0
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Install Rust components
         run: rustup component add rustfmt clippy
+
+      - name: Release script contract tests
+        run: bash ./.github/scripts/test-release-scripts.sh
 
       - name: Cache cargo directories
         uses: actions/cache@v4
@@ -48,8 +53,9 @@ jobs:
             ~/.cargo/git
             target
             crates/mtproto-helper/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-main-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-main-${{ env.RUST_TOOLCHAIN }}-
             ${{ runner.os }}-cargo-
 
       - name: Cargo fmt check
@@ -69,8 +75,6 @@ jobs:
   macos-swift:
     name: macOS Swift tests
     runs-on: macos-latest
-    env:
-      CI: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -78,48 +82,30 @@ jobs:
       - name: Swift unit/UI layout tests
         run: bash scripts/macos/swift-unit-tests.sh
 
-  release-tag:
-    name: Create Tag and Release
+  release-intent-freeze:
+    name: Freeze release intent
     runs-on: ubuntu-latest
     needs: [quality, macos-swift]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
-      contents: write
+      contents: read
+      issues: read
+      pull-requests: read
     steps:
-      - name: Checkout (full history)
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Compute effective version
-        shell: bash
-        run: |
-          bash ./.github/scripts/compute-version.sh
-
-      - name: Configure Git user
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Create and push tag (if missing)
-        id: tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="v${APP_EFFECTIVE_VERSION}"
-          echo "target tag: $tag"
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            echo "Tag ${tag} already exists. Skipping push."
-          else
-            git tag -a "${tag}" -m "${tag}"
-            git push origin "${tag}"
-          fi
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ env.APP_EFFECTIVE_VERSION }}
-          name: v${{ env.APP_EFFECTIVE_VERSION }}
-          generate_release_notes: true
+      - name: Freeze merged PR release intent
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_RUN_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          bash ./.github/scripts/freeze-release-intent.sh dist/release-intent/release-intent.json
+
+      - name: Upload frozen release intent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-intent-${{ github.sha }}
+          path: dist/release-intent/release-intent.json
+          if-no-files-found: error
+          retention-days: 7
