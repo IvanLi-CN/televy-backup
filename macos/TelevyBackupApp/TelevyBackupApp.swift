@@ -457,10 +457,24 @@ final class AppModel: ObservableObject {
         return defaultDataDir()
     }
 
+    private func bundledMacOSDirURL() -> URL {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("MacOS")
+    }
+
     private func televybackupToolEnv() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["TELEVYBACKUP_CONFIG_DIR"] = effectiveConfigDirURL().path
         env["TELEVYBACKUP_DATA_DIR"] = effectiveDataDirURL().path
+        let bundledBinDir = bundledMacOSDirURL().path
+        if let currentPath = env["PATH"], !currentPath.isEmpty {
+            if !currentPath.split(separator: ":").contains(Substring(bundledBinDir)) {
+                env["PATH"] = "\(bundledBinDir):\(currentPath)"
+            }
+        } else {
+            env["PATH"] = bundledBinDir
+        }
         let disableKeychain = effectiveDisableKeychain()
         if disableKeychain {
             env["TELEVYBACKUP_DISABLE_KEYCHAIN"] = "1"
@@ -731,6 +745,7 @@ final class AppModel: ObservableObject {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: daemon)
         task.environment = televybackupToolEnv()
+        task.currentDirectoryURL = URL(fileURLWithPath: daemon).deletingLastPathComponent()
 
         // Best-effort logging for the spawned daemon (dev fallback).
         let logDir = logDirURL()
