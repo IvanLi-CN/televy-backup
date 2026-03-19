@@ -25,6 +25,9 @@ pub enum Error {
     #[error("walkdir error: {0}")]
     Walkdir(#[from] walkdir::Error),
 
+    #[error("walk error: {message}")]
+    Walk { message: String },
+
     #[error("crypto error: {message}")]
     Crypto { message: String },
 
@@ -76,6 +79,7 @@ impl Error {
             Self::Sqlite(_) => "sqlite",
             Self::SqliteMigrate(_) => "sqlite.migrate",
             Self::Walkdir(_) => "walkdir",
+            Self::Walk { .. } => "walkdir",
             Self::Crypto { .. } => "crypto",
             Self::Cancelled => "task.cancelled",
             Self::Telegram { .. } => "telegram.unavailable",

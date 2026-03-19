@@ -314,7 +314,9 @@ final class AppModel: ObservableObject {
                     bytesChecked: nil,
                     filesRestored: nil,
                     chunksDownloaded: nil,
-                    chunksChecked: nil
+                    chunksChecked: nil,
+                    ignoreRuleFiles: 1,
+                    ignoreInvalidRules: 0
                 ),
                 RunLogSummary(
                     id: "r_demo_verify",
@@ -335,7 +337,9 @@ final class AppModel: ObservableObject {
                     bytesChecked: 0,
                     filesRestored: nil,
                     chunksDownloaded: nil,
-                    chunksChecked: 0
+                    chunksChecked: 0,
+                    ignoreRuleFiles: nil,
+                    ignoreInvalidRules: nil
                 ),
                 RunLogSummary(
                     id: "r_demo_unknown",
@@ -356,7 +360,9 @@ final class AppModel: ObservableObject {
                     bytesChecked: nil,
                     filesRestored: 42,
                     chunksDownloaded: 128,
-                    chunksChecked: nil
+                    chunksChecked: nil,
+                    ignoreRuleFiles: nil,
+                    ignoreInvalidRules: nil
                 ),
             ]
         }
@@ -451,10 +457,24 @@ final class AppModel: ObservableObject {
         return defaultDataDir()
     }
 
+    private func bundledMacOSDirURL() -> URL {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("MacOS")
+    }
+
     private func televybackupToolEnv() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["TELEVYBACKUP_CONFIG_DIR"] = effectiveConfigDirURL().path
         env["TELEVYBACKUP_DATA_DIR"] = effectiveDataDirURL().path
+        let bundledBinDir = bundledMacOSDirURL().path
+        if let currentPath = env["PATH"], !currentPath.isEmpty {
+            if !currentPath.split(separator: ":").contains(Substring(bundledBinDir)) {
+                env["PATH"] = "\(bundledBinDir):\(currentPath)"
+            }
+        } else {
+            env["PATH"] = bundledBinDir
+        }
         let disableKeychain = effectiveDisableKeychain()
         if disableKeychain {
             env["TELEVYBACKUP_DISABLE_KEYCHAIN"] = "1"
@@ -725,6 +745,7 @@ final class AppModel: ObservableObject {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: daemon)
         task.environment = televybackupToolEnv()
+        task.currentDirectoryURL = URL(fileURLWithPath: daemon).deletingLastPathComponent()
 
         // Best-effort logging for the spawned daemon (dev fallback).
         let logDir = logDirURL()
@@ -1589,6 +1610,8 @@ final class AppModel: ObservableObject {
         var filesRestored: Int64?
         var chunksDownloaded: Int64?
         var chunksChecked: Int64?
+        var ignoreRuleFiles: Int64?
+        var ignoreInvalidRules: Int64?
 
         var startedAt: Date?
         var finishedAt: Date?
@@ -1634,6 +1657,8 @@ final class AppModel: ObservableObject {
                 filesRestored = (fields?["files_restored"] as? NSNumber)?.int64Value ?? filesRestored
                 chunksDownloaded = (fields?["chunks_downloaded"] as? NSNumber)?.int64Value ?? chunksDownloaded
                 chunksChecked = (fields?["chunks_checked"] as? NSNumber)?.int64Value ?? chunksChecked
+                ignoreRuleFiles = (fields?["ignore_rule_files"] as? NSNumber)?.int64Value ?? ignoreRuleFiles
+                ignoreInvalidRules = (fields?["ignore_invalid_rules"] as? NSNumber)?.int64Value ?? ignoreInvalidRules
 
                 if let ts, let d = Self.parseIso8601(ts) {
                     finishedAt = d
@@ -1672,7 +1697,9 @@ final class AppModel: ObservableObject {
             bytesChecked: bytesChecked,
             filesRestored: filesRestored,
             chunksDownloaded: chunksDownloaded,
-            chunksChecked: chunksChecked
+            chunksChecked: chunksChecked,
+            ignoreRuleFiles: ignoreRuleFiles,
+            ignoreInvalidRules: ignoreInvalidRules
         )
     }
 
