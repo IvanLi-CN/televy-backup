@@ -262,7 +262,17 @@ private struct TargetListRow: View {
     let onSelect: () -> Void
 
     private var runs: [RunLogSummary] {
-        model.runHistory.filter { run in run.targetId == target.targetId }
+        model.runHistory
+            .filter { run in run.targetId == target.targetId }
+            .sorted {
+                let a = $0.finishedAt ?? $0.startedAt ?? .distantPast
+                let b = $1.finishedAt ?? $1.startedAt ?? .distantPast
+                return a > b
+            }
+    }
+
+    private var latestHistoricalRun: RunLogSummary? {
+        runs.first(where: { $0.status != "running" }) ?? runs.first
     }
 
     private var hasInProgressRunLog: Bool {
@@ -295,6 +305,16 @@ private struct TargetListRow: View {
         }
         if let done = p.filesDone, done > 0 {
             return "\(done) files"
+        }
+        return nil
+    }
+
+    private func lastRunCompactText(now: Date) -> String? {
+        if let text = TargetPresentation.lastRunCompact(target: target, now: now) {
+            return text
+        }
+        if let latestHistoricalRun {
+            return TargetPresentation.lastRunCompact(run: latestHistoricalRun, now: now)
         }
         return nil
     }
@@ -355,9 +375,9 @@ private struct TargetListRow: View {
                 if let fp = filesProgressText(effectiveProgress) { parts.append(fp) }
                 return parts.isEmpty ? "Working…" : parts.joined(separator: " · ")
             case .idle:
-                return TargetPresentation.lastRunCompact(target: target, now: now) ?? "No recent runs."
+                return lastRunCompactText(now: now) ?? "No recent runs."
             case .failed:
-                return TargetPresentation.lastRunCompact(target: target, now: now) ?? "Last run: Failed"
+                return lastRunCompactText(now: now) ?? "Last run: Failed"
             case .offline:
                 return "No recent updates."
             }
@@ -483,6 +503,10 @@ private struct TargetDetailView: View {
                 let b = $1.finishedAt ?? $1.startedAt ?? .distantPast
                 return a > b
             }
+    }
+
+    private var latestHistoricalRun: RunLogSummary? {
+        runs.first(where: { $0.status != "running" }) ?? runs.first
     }
 
     private var hasInProgressRunLog: Bool {
@@ -667,13 +691,14 @@ private struct TargetDetailView: View {
 
     private func overviewStats(now: Date, status: TargetUserStatus, kind: TargetWorkKind) -> some View {
         let p = effectiveProgress
+        let lastSummary = TargetPresentation.lastRunSummary(target: target, now: now)
+            ?? latestHistoricalRun.map { TargetPresentation.lastRunSummary(run: $0, now: now) }
 
         if status != .running {
             return AnyView(
                 VStack(alignment: .leading, spacing: 8) {
-                    let last = TargetPresentation.lastRunSummary(target: target, now: now)
-                    if let last {
-                        Text(last)
+                    if let lastSummary {
+                        Text(lastSummary)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
@@ -896,7 +921,10 @@ private struct TargetDetailView: View {
 
     @ViewBuilder
     private var history: some View {
-        if runs.isEmpty {
+        if model.runHistoryRefreshInFlight && runs.isEmpty {
+            historyLoadingState
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else if runs.isEmpty {
             historyEmptyState
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
@@ -907,6 +935,32 @@ private struct TargetDetailView: View {
             .scrollContentBackground(.hidden)
             .frame(maxHeight: .infinity)
         }
+    }
+
+    private var historyLoadingState: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading history…")
+                    .font(.system(size: 14, weight: .bold))
+            }
+
+            Text("Existing run logs are being indexed from disk.")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            if let latestHistoricalRun {
+                Text(TargetPresentation.lastRunSummary(run: latestHistoricalRun, now: Date()))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 6)
     }
 
     private var historyEmptyState: some View {
@@ -924,7 +978,9 @@ private struct TargetDetailView: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
 
-                if let last = TargetPresentation.lastRunSummary(target: target, now: Date()) {
+                if let last = TargetPresentation.lastRunSummary(target: target, now: Date())
+                    ?? latestHistoricalRun.map({ TargetPresentation.lastRunSummary(run: $0, now: Date()) })
+                {
                     Text(last)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.secondary)

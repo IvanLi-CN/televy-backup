@@ -186,74 +186,51 @@ enum TargetPresentation {
     static func lastRunSummary(target: StatusTarget, now: Date) -> String? {
         guard let r = target.lastRun else { return nil }
 
-        let status = (r.status?.isEmpty == false) ? (r.status ?? "unknown") : "unknown"
-        let statusTitle = status.prefix(1).uppercased() + status.dropFirst()
+        return runSummary(
+            status: r.status,
+            errorCode: r.errorCode,
+            finishedAt: r.finishedAt.flatMap(parseIsoDate),
+            bytesUploaded: r.bytesUploaded,
+            bytesDeduped: r.bytesDeduped,
+            durationSeconds: r.durationSeconds,
+            now: now
+        )
+    }
 
-        var parts: [String] = []
-        if status == "failed" {
-            if let code = r.errorCode, !code.isEmpty {
-                parts.append("Last run: Failed (\(code))")
-            } else {
-                parts.append("Last run: Failed")
-            }
-        } else {
-            parts.append("Last run: \(statusTitle)")
-        }
-
-        if let finishedAt = r.finishedAt, let d = parseIsoDate(finishedAt) {
-            let ageSeconds = Int(now.timeIntervalSince(d))
-            if ageSeconds >= 0 {
-                let rel = formatRelativeSeconds(ageSeconds)
-                parts.append(rel == "just now" ? rel : (rel + " ago"))
-            }
-        }
-
-        if status != "failed" {
-            if let uploaded = r.bytesUploaded, uploaded > 0 {
-                parts.append("Uploaded \(formatBytes(uploaded))")
-            }
-            if let saved = r.bytesDeduped, saved > 0 {
-                parts.append("Saved \(formatBytes(saved))")
-            }
-        }
-
-        if let dur = r.durationSeconds, dur > 0 {
-            parts.append(formatDuration(dur))
-        }
-
-        return parts.joined(separator: " · ")
+    static func lastRunSummary(run: RunLogSummary, now: Date) -> String {
+        runSummary(
+            status: run.status,
+            errorCode: run.errorCode,
+            finishedAt: run.finishedAt,
+            bytesUploaded: run.bytesUploaded,
+            bytesDeduped: run.bytesDeduped,
+            durationSeconds: run.durationSeconds,
+            now: now
+        )
     }
 
     static func lastRunCompact(target: StatusTarget, now: Date) -> String? {
         guard let r = target.lastRun else { return nil }
 
-        let status = (r.status?.isEmpty == false) ? (r.status ?? "unknown") : "unknown"
-        if status == "failed" {
-            if let code = r.errorCode, !code.isEmpty {
-                return "Last run: Failed (\(code))"
-            }
-            return "Last run: Failed"
-        }
+        return runCompact(
+            status: r.status,
+            errorCode: r.errorCode,
+            finishedAt: r.finishedAt.flatMap(parseIsoDate),
+            bytesUploaded: r.bytesUploaded,
+            durationSeconds: r.durationSeconds,
+            now: now
+        )
+    }
 
-        var parts: [String] = ["Last run: \(status.prefix(1).uppercased() + status.dropFirst())"]
-
-        if let finishedAt = r.finishedAt, let d = parseIsoDate(finishedAt) {
-            let ageSeconds = Int(now.timeIntervalSince(d))
-            if ageSeconds >= 0 {
-                let rel = formatRelativeSeconds(ageSeconds)
-                parts.append(rel == "just now" ? rel : (rel + " ago"))
-            }
-        }
-
-        if let uploaded = r.bytesUploaded, uploaded > 0 {
-            parts.append("+\(formatBytes(uploaded))")
-        }
-
-        if let dur = r.durationSeconds, dur > 0 {
-            parts.append(formatDuration(dur))
-        }
-
-        return parts.joined(separator: " · ")
+    static func lastRunCompact(run: RunLogSummary, now: Date) -> String {
+        runCompact(
+            status: run.status,
+            errorCode: run.errorCode,
+            finishedAt: run.finishedAt,
+            bytesUploaded: run.bytesUploaded,
+            durationSeconds: run.durationSeconds,
+            now: now
+        )
     }
 
     static func parseIsoDate(_ s: String) -> Date? {
@@ -269,6 +246,95 @@ enum TargetPresentation {
         if s < 3600 { return "\(s / 60)m" }
         if s < 86400 { return "\(s / 3600)h" }
         return "\(s / 86400)d"
+    }
+
+    private static func runSummary(
+        status: String?,
+        errorCode: String?,
+        finishedAt: Date?,
+        bytesUploaded: Int64?,
+        bytesDeduped: Int64?,
+        durationSeconds: Double?,
+        now: Date
+    ) -> String {
+        let status = normalizedStatus(status)
+        let statusTitle = status.prefix(1).uppercased() + status.dropFirst()
+
+        var parts: [String] = []
+        if status == "failed" {
+            if let errorCode, !errorCode.isEmpty {
+                parts.append("Last run: Failed (\(errorCode))")
+            } else {
+                parts.append("Last run: Failed")
+            }
+        } else {
+            parts.append("Last run: \(statusTitle)")
+        }
+
+        if let finishedAt {
+            let ageSeconds = Int(now.timeIntervalSince(finishedAt))
+            if ageSeconds >= 0 {
+                let rel = formatRelativeSeconds(ageSeconds)
+                parts.append(rel == "just now" ? rel : (rel + " ago"))
+            }
+        }
+
+        if status != "failed" {
+            if let bytesUploaded, bytesUploaded > 0 {
+                parts.append("Uploaded \(formatBytes(bytesUploaded))")
+            }
+            if let bytesDeduped, bytesDeduped > 0 {
+                parts.append("Saved \(formatBytes(bytesDeduped))")
+            }
+        }
+
+        if let durationSeconds, durationSeconds > 0 {
+            parts.append(formatDuration(durationSeconds))
+        }
+
+        return parts.joined(separator: " · ")
+    }
+
+    private static func runCompact(
+        status: String?,
+        errorCode: String?,
+        finishedAt: Date?,
+        bytesUploaded: Int64?,
+        durationSeconds: Double?,
+        now: Date
+    ) -> String {
+        let status = normalizedStatus(status)
+        if status == "failed" {
+            if let errorCode, !errorCode.isEmpty {
+                return "Last run: Failed (\(errorCode))"
+            }
+            return "Last run: Failed"
+        }
+
+        var parts: [String] = ["Last run: \(status.prefix(1).uppercased() + status.dropFirst())"]
+
+        if let finishedAt {
+            let ageSeconds = Int(now.timeIntervalSince(finishedAt))
+            if ageSeconds >= 0 {
+                let rel = formatRelativeSeconds(ageSeconds)
+                parts.append(rel == "just now" ? rel : (rel + " ago"))
+            }
+        }
+
+        if let bytesUploaded, bytesUploaded > 0 {
+            parts.append("+\(formatBytes(bytesUploaded))")
+        }
+
+        if let durationSeconds, durationSeconds > 0 {
+            parts.append(formatDuration(durationSeconds))
+        }
+
+        return parts.joined(separator: " · ")
+    }
+
+    private static func normalizedStatus(_ status: String?) -> String {
+        if let status, !status.isEmpty { return status }
+        return "unknown"
     }
 }
 
