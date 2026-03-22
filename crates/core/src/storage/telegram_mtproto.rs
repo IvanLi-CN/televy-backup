@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Condvar, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -18,6 +18,7 @@ const MTPROTO_HELPER_READ_TIMEOUT_SECS: u64 = 600;
 // before the first network request). If nothing arrives for this long, treat it as
 // a stalled helper and fail fast so the caller can retry/respawn instead of freezing.
 const MTPROTO_HELPER_UPLOAD_EVENT_TIMEOUT_SECS: u64 = 45;
+const MTPROTO_HELPER_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TgMtProtoObjectIdV1 {
@@ -224,7 +225,7 @@ impl TelegramMtProtoStorage {
     }
 
     fn replace_helper_locked(&self, helper: &mut MtProtoHelper, is_primary: bool) -> Result<()> {
-        helper.kill_best_effort();
+        helper.shutdown_best_effort();
 
         let session_b64 = if is_primary {
             self.session_bytes()
@@ -498,6 +499,12 @@ impl Storage for TelegramMtProtoStorage {
     }
 }
 
+impl Drop for MtProtoHelper {
+    fn drop(&mut self) {
+        self.shutdown_best_effort();
+    }
+}
+
 fn maybe_block_in_place<T>(f: impl FnOnce() -> T) -> T {
     match tokio::runtime::Handle::try_current() {
         Ok(handle)
@@ -552,6 +559,32 @@ fn default_helper_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use tempfile::TempDir;
+
+    #[cfg(unix)]
+    const FAKE_HELPER_SESSION_B64: &str = "c2Vzc2lvbg==";
+    #[cfg(unix)]
+    const PRIMARY_SESSION_B64: &str = "c2F2ZWQ=";
+
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum FakeHelperMode {
+        Graceful,
+        HangAfterShutdownAck,
+    }
+
+    #[cfg(unix)]
+    struct FakeHelperEnv {
+        _tempdir: TempDir,
+        script_path: PathBuf,
+        requests_path: PathBuf,
+        events_path: PathBuf,
+    }
 
     #[test]
     fn tgmtproto_object_id_v1_roundtrip() {
@@ -581,12 +614,232 @@ mod tests {
         let bad_at = format!("{TG_MTPROTO_OBJECT_ID_PREFIX_V1}abc@def");
         assert!(parse_tgmtproto_object_id_v1(&bad_at).is_err());
     }
+
+    #[cfg(unix)]
+    fn write_fake_helper(mode: FakeHelperMode) -> FakeHelperEnv {
+        let tempdir = tempfile::tempdir().unwrap();
+        let script_path = tempdir.path().join("fake-helper.sh");
+        let requests_path = tempdir.path().join("requests.log");
+        let events_path = tempdir.path().join("events.log");
+        fs::write(&requests_path, "").unwrap();
+        fs::write(&events_path, "").unwrap();
+
+        let mode = match mode {
+            FakeHelperMode::Graceful => "graceful",
+            FakeHelperMode::HangAfterShutdownAck => "hang_after_ack",
+        };
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+REQUESTS="$SCRIPT_DIR/requests.log"
+EVENTS="$SCRIPT_DIR/events.log"
+MODE="{mode}"
+
+touch "$REQUESTS" "$EVENTS"
+
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$REQUESTS"
+  case "$line" in
+    *'"cmd":"init"'*)
+      printf '%s\n' '{{"ok":true,"session":"{FAKE_HELPER_SESSION_B64}"}}'
+      ;;
+    *'"cmd":"shutdown"'*)
+      printf 'shutdown\n' >> "$EVENTS"
+      printf '%s\n' '{{"ok":true,"session":"{FAKE_HELPER_SESSION_B64}"}}'
+      if [ "$MODE" = "hang_after_ack" ]; then
+        while :; do
+          sleep 3600
+        done
+      fi
+      exit 0
+      ;;
+    *)
+      printf 'unexpected:%s\n' "$line" >> "$EVENTS"
+      printf '%s\n' '{{"ok":false,"error":"unexpected request"}}'
+      ;;
+  esac
+done
+
+printf 'eof\n' >> "$EVENTS"
+"#,
+        );
+        fs::write(&script_path, script).unwrap();
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        FakeHelperEnv {
+            _tempdir: tempdir,
+            script_path,
+            requests_path,
+            events_path,
+        }
+    }
+
+    #[cfg(unix)]
+    fn fake_init_request(cache_dir: &Path, session_b64: Option<String>) -> InitRequest {
+        InitRequest {
+            api_id: 1,
+            api_hash: "hash".to_string(),
+            bot_token: "bot".to_string(),
+            chat_id: String::new(),
+            session_b64,
+            cache_dir: cache_dir.to_path_buf(),
+            min_delay_ms: None,
+            max_concurrent_uploads: Some(1),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn connect_fake_storage(
+        script_path: &Path,
+        cache_dir: &Path,
+        session: Option<Vec<u8>>,
+        max_concurrent_uploads: Option<usize>,
+    ) -> TelegramMtProtoStorage {
+        TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+            provider: "telegram_mtproto".to_string(),
+            api_id: 1,
+            api_hash: "hash".to_string(),
+            bot_token: "bot".to_string(),
+            chat_id: String::new(),
+            session,
+            cache_dir: cache_dir.to_path_buf(),
+            min_delay_ms: None,
+            max_concurrent_uploads,
+            helper_path: Some(script_path.to_path_buf()),
+        })
+        .await
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .output()
+            .unwrap();
+        output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+    }
+
+    #[cfg(unix)]
+    fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !process_exists(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        !process_exists(pid)
+    }
+
+    #[cfg(unix)]
+    fn wait_for_request_count(path: &Path, expected: usize) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let content = fs::read_to_string(path).unwrap();
+            let count = content
+                .lines()
+                .filter(|line| line.contains(r#""cmd":"init""#))
+                .count();
+            if count >= expected {
+                return content;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        fs::read_to_string(path).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn mtproto_storage_drop_gracefully_shutdowns_helper() {
+        let fake = write_fake_helper(FakeHelperMode::Graceful);
+        let cache_dir = fake
+            .script_path
+            .parent()
+            .unwrap()
+            .join("cache-storage-drop");
+        let storage = connect_fake_storage(&fake.script_path, &cache_dir, None, Some(1)).await;
+        assert_eq!(storage.session_bytes(), Some(b"session".to_vec()));
+
+        let pid = {
+            let guard = storage.helper_pool.inner.lock().unwrap();
+            guard[0].helper.child.id()
+        };
+
+        drop(storage);
+
+        assert!(wait_for_process_exit(pid, Duration::from_secs(5)));
+        let events = fs::read_to_string(&fake.events_path).unwrap();
+        assert_eq!(events.lines().collect::<Vec<_>>(), vec!["shutdown"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn connect_reuses_session_only_for_primary_helper() {
+        let fake = write_fake_helper(FakeHelperMode::Graceful);
+        let cache_dir = fake.script_path.parent().unwrap().join("cache-connect");
+        let storage = connect_fake_storage(
+            &fake.script_path,
+            &cache_dir,
+            Some(b"saved".to_vec()),
+            Some(2),
+        )
+        .await;
+
+        assert_eq!(storage.session_bytes(), Some(b"session".to_vec()));
+
+        let requests = wait_for_request_count(&fake.requests_path, 2);
+        let init_lines: Vec<_> = requests
+            .lines()
+            .filter(|line| line.contains(r#""cmd":"init""#))
+            .collect();
+        assert_eq!(init_lines.len(), 2);
+        assert_eq!(
+            init_lines
+                .iter()
+                .filter(|line| line.contains(&format!(r#""session":"{PRIMARY_SESSION_B64}""#)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            init_lines
+                .iter()
+                .filter(|line| line.contains(r#""session":null"#))
+                .count(),
+            1
+        );
+
+        drop(storage);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mtproto_helper_drop_kills_when_shutdown_hangs() {
+        let fake = write_fake_helper(FakeHelperMode::HangAfterShutdownAck);
+        let cache_dir = fake.script_path.parent().unwrap().join("cache-helper-drop");
+        let mut helper = MtProtoHelper::spawn(&fake.script_path).unwrap();
+        helper
+            .init(fake_init_request(
+                &cache_dir,
+                Some(PRIMARY_SESSION_B64.to_string()),
+            ))
+            .unwrap();
+        let pid = helper.child.id();
+
+        drop(helper);
+
+        assert!(wait_for_process_exit(pid, Duration::from_secs(5)));
+        let events = fs::read_to_string(&fake.events_path).unwrap();
+        assert!(events.lines().any(|line| line == "shutdown"));
+    }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 enum Request {
     Init(InitRequest),
+    Shutdown,
     Upload(UploadRequestMeta),
     Download(DownloadRequest),
     GetPinned,
@@ -732,6 +985,40 @@ impl MtProtoHelper {
                 Ok(None) => std::thread::sleep(Duration::from_millis(100)),
                 Err(_) => break,
             }
+        }
+    }
+
+    fn wait_for_exit_best_effort(&mut self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return true,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => return true,
+            }
+        }
+    }
+
+    fn shutdown_best_effort(&mut self) {
+        if self.has_exited() {
+            return;
+        }
+
+        if self.send_json(&Request::Shutdown).is_ok()
+            && let Ok(env) = self.read_json_line_with_timeout(MTPROTO_HELPER_SHUTDOWN_TIMEOUT_SECS)
+        {
+            let _ = self.apply_session(&env);
+        }
+
+        if !self
+            .wait_for_exit_best_effort(Duration::from_secs(MTPROTO_HELPER_SHUTDOWN_TIMEOUT_SECS))
+        {
+            self.kill_best_effort();
         }
     }
 

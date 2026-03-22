@@ -13,10 +13,10 @@ use grammers_client::session::storages::TlSession;
 use grammers_client::types::media::Uploaded;
 use grammers_client::types::{Media, Peer};
 use grammers_client::{Client, InputMessage, Update, UpdatesConfiguration};
-use grammers_mtsender::{NetStats, SenderPool};
+use grammers_mtsender::{NetStats, SenderPool, SenderPoolHandle};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, Instant, timeout};
 
 const TG_MTPROTO_OBJECT_ID_PREFIX_V1: &str = "tgmtproto:v1:";
@@ -405,6 +405,7 @@ mod tests {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 enum Request {
     Init(InitRequest),
+    Shutdown,
     Upload(UploadRequest),
     Download(DownloadRequest),
     GetPinned,
@@ -502,6 +503,22 @@ struct State {
     max_concurrent_uploads: usize,
     chat: Option<Peer>,
     updates: grammers_client::client::updates::UpdateStream,
+    sender_pool_handle: SenderPoolHandle,
+    runner_task: JoinHandle<()>,
+}
+
+impl State {
+    async fn shutdown(self) {
+        let State {
+            updates,
+            sender_pool_handle,
+            runner_task,
+            ..
+        } = self;
+        drop(updates);
+        let _ = sender_pool_handle.quit();
+        let _ = runner_task.await;
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -527,7 +544,12 @@ async fn main() {
     loop {
         let mut line = String::new();
         match input.read_line(&mut line) {
-            Ok(0) => return,
+            Ok(0) => {
+                if let Some(s) = state.take() {
+                    s.shutdown().await;
+                }
+                return;
+            }
             Ok(_) => {}
             Err(e) => {
                 let _ = write_response(
@@ -539,6 +561,9 @@ async fn main() {
                         data: BTreeMap::new(),
                     },
                 );
+                if let Some(s) = state.take() {
+                    s.shutdown().await;
+                }
                 return;
             }
         }
@@ -566,6 +591,9 @@ async fn main() {
 
         match req {
             Request::Init(req) => {
+                if let Some(s) = state.take() {
+                    s.shutdown().await;
+                }
                 let res = init(req).await;
                 match res {
                     Ok(s) => {
@@ -593,6 +621,22 @@ async fn main() {
                         );
                     }
                 }
+            }
+            Request::Shutdown => {
+                let session_b64 = state.as_ref().map(|s| session_b64(&s.session));
+                let _ = write_response(
+                    &mut output,
+                    Response {
+                        ok: true,
+                        error: None,
+                        session_b64,
+                        data: BTreeMap::new(),
+                    },
+                );
+                if let Some(s) = state.take() {
+                    s.shutdown().await;
+                }
+                return;
             }
             Request::Upload(req) => {
                 let Some(s) = state.as_mut() else {
@@ -945,11 +989,12 @@ async fn init(req: InitRequest) -> Result<State, String> {
     let client = Client::new(&pool);
     let SenderPool {
         runner,
+        handle,
         updates,
         net_stats,
         ..
     } = pool;
-    tokio::spawn(runner.run());
+    let runner_task = tokio::spawn(runner.run());
 
     let authorized = timeout(
         Duration::from_secs(INIT_IS_AUTHORIZED_TIMEOUT_SECS),
@@ -1029,6 +1074,8 @@ async fn init(req: InitRequest) -> Result<State, String> {
         max_concurrent_uploads,
         chat,
         updates,
+        sender_pool_handle: handle,
+        runner_task,
     })
 }
 

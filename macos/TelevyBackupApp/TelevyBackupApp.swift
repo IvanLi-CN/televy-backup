@@ -1592,8 +1592,6 @@ final class AppModel: ObservableObject {
     }
 
     private func parseRunLogSummary(url: URL) -> RunLogSummary? {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-
         var kind: String?
         var targetId: String?
         var endpointId: String?
@@ -1618,10 +1616,10 @@ final class AppModel: ObservableObject {
         var sawStart: Bool = false
         var sawFinish: Bool = false
 
-        for line in text.split(separator: "\n") {
+        func applyLine(_ line: String) {
             guard let data = line.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { continue }
+            else { return }
 
             let ts = obj["timestamp"] as? String
             let fields = obj["fields"] as? [String: Any]
@@ -1636,7 +1634,7 @@ final class AppModel: ObservableObject {
                 if startedAt == nil, let ts, let d = Self.parseIso8601(ts) {
                     startedAt = d
                 }
-                continue
+                return
             }
 
             if event == "run.finish" {
@@ -1664,6 +1662,13 @@ final class AppModel: ObservableObject {
                     finishedAt = d
                 }
             }
+        }
+
+        for line in Self.readRunLogPrefixLines(url: url) {
+            applyLine(line)
+        }
+        for line in Self.readRunLogSuffixLines(url: url) {
+            applyLine(line)
         }
 
         guard let kind else { return nil }
@@ -1701,6 +1706,47 @@ final class AppModel: ObservableObject {
             ignoreRuleFiles: ignoreRuleFiles,
             ignoreInvalidRules: ignoreInvalidRules
         )
+    }
+
+    private static func readRunLogPrefixLines(url: URL, maxBytes: Int = 64 * 1024) -> [String] {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: maxBytes) else { return [] }
+        return decodeRunLogLines(data, dropFirstPartialLine: false)
+    }
+
+    private static func readRunLogSuffixLines(url: URL, maxBytes: Int = 256 * 1024) -> [String] {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+        defer { try? handle.close() }
+
+        guard let fileSize = try? handle.seekToEnd() else { return [] }
+        let readCount = min(UInt64(maxBytes), fileSize)
+        guard readCount > 0 else { return [] }
+
+        let startOffset = fileSize - readCount
+        let dropFirstPartialLine: Bool = {
+            guard startOffset > 0 else { return false }
+            try? handle.seek(toOffset: startOffset - 1)
+            let prefixByte = handle.readData(ofLength: 1).first
+            return prefixByte != 0x0A && prefixByte != 0x0D
+        }()
+
+        try? handle.seek(toOffset: startOffset)
+        let data = handle.readData(ofLength: Int(readCount))
+        return decodeRunLogLines(data, dropFirstPartialLine: dropFirstPartialLine)
+    }
+
+    private static func decodeRunLogLines(_ data: Data, dropFirstPartialLine: Bool) -> [String] {
+        let text = String(decoding: data, as: UTF8.self)
+        var lines = text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+
+        if dropFirstPartialLine, !lines.isEmpty {
+            lines.removeFirst()
+        }
+
+        return lines
     }
 
     private static func parseIso8601(_ s: String) -> Date? {
