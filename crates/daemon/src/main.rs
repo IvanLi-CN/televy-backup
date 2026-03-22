@@ -1206,7 +1206,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 has_enabled_targets = settings.targets.iter().any(|t| t.enabled);
                                 *control_ipc_settings.write().await = settings.clone();
                                 last_config_mtime = config_mtime;
-                                storage_by_endpoint.clear();
+                                clear_mtproto_storage_cache(
+                                    &mut storage_by_endpoint,
+                                    "config_reloaded",
+                                );
                                 schedule_state_by_target
                                     .retain(|k, _| settings.targets.iter().any(|t| t.id == *k));
                                 if let Ok(mut st) = status_state.lock() {
@@ -1239,7 +1242,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     master_key = None;
                     api_hash = None;
                     last_secrets_crypto_error_mtime = None;
-                    storage_by_endpoint.clear();
+                    clear_mtproto_storage_cache(&mut storage_by_endpoint, "secrets_changed");
 
                     tracing::info!(
                         event = "secrets.changed",
@@ -1440,7 +1443,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             || settings.telegram.mtproto.api_hash_key.trim().is_empty()
         {
             // Keep the daemon alive so the UI can show status, but skip running backups until config is fixed.
-            storage_by_endpoint.clear();
+            clear_mtproto_storage_cache(&mut storage_by_endpoint, "invalid_mtproto_api_config");
             sleep(Duration::from_secs(1)).await;
             continue;
         }
@@ -1464,7 +1467,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "run.skip"
                 );
             }
-            storage_by_endpoint.clear();
+            clear_mtproto_storage_cache(&mut storage_by_endpoint, "secrets_unavailable");
             sleep(Duration::from_secs(1)).await;
             continue;
         }
@@ -1964,9 +1967,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        storage_by_endpoint.clear();
+        clear_mtproto_storage_cache(&mut storage_by_endpoint, "idle_loop_end");
         sleep(Duration::from_secs(1)).await;
     }
+}
+
+fn clear_mtproto_storage_cache(
+    storage_by_endpoint: &mut HashMap<String, TelegramMtProtoStorage>,
+    reason: &str,
+) {
+    if storage_by_endpoint.is_empty() {
+        return;
+    }
+
+    tracing::info!(
+        event = "mtproto.storage_cache.clear",
+        reason,
+        endpoint_count = storage_by_endpoint.len(),
+        "mtproto.storage_cache.clear"
+    );
+    storage_by_endpoint.clear();
 }
 
 fn try_consume_manual_trigger_file(path: &Path) -> std::io::Result<bool> {
