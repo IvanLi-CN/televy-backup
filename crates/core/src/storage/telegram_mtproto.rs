@@ -376,6 +376,30 @@ impl MtProtoHelperPool {
     }
 }
 
+impl Drop for MtProtoHelperPool {
+    fn drop(&mut self) {
+        let helpers = match self.inner.get_mut() {
+            Ok(inner) => std::mem::take(inner),
+            Err(poisoned) => std::mem::take(poisoned.into_inner()),
+        };
+        if helpers.is_empty() {
+            return;
+        }
+
+        let spawn_result = std::thread::Builder::new()
+            .name("televy-mtproto-shutdown".to_string())
+            .spawn(move || drop(helpers));
+
+        if let Err(e) = spawn_result {
+            tracing::warn!(
+                event = "mtproto.helper_pool.drop_spawn_failed",
+                error = %e,
+                "failed to offload helper shutdown; falling back to inline drop"
+            );
+        }
+    }
+}
+
 impl crate::bootstrap::PinnedStorage for TelegramMtProtoStorage {
     fn get_pinned_object_id(&self) -> Result<Option<String>> {
         self.pinned_object_id()
@@ -496,6 +520,12 @@ impl Storage for TelegramMtProtoStorage {
             })?;
             Ok(resp)
         })
+    }
+}
+
+impl Drop for MtProtoHelper {
+    fn drop(&mut self) {
+        self.shutdown_best_effort();
     }
 }
 
@@ -805,6 +835,33 @@ printf 'eof\n' >> "$EVENTS"
         );
 
         drop(storage);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn mtproto_storage_drop_does_not_block_on_hung_helper_shutdown() {
+        let fake = write_fake_helper(FakeHelperMode::HangAfterShutdownAck);
+        let cache_dir = fake
+            .script_path
+            .parent()
+            .unwrap()
+            .join("cache-storage-drop-hang");
+        let storage = connect_fake_storage(&fake.script_path, &cache_dir, None, Some(1)).await;
+
+        let pid = {
+            let guard = storage.helper_pool.inner.lock().unwrap();
+            guard[0].helper.child.id()
+        };
+
+        let start = Instant::now();
+        drop(storage);
+
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "drop took {:?}",
+            start.elapsed()
+        );
+        assert!(wait_for_process_exit(pid, Duration::from_secs(5)));
     }
 
     #[cfg(unix)]
@@ -1460,11 +1517,5 @@ impl MtProtoHelper {
                 message: format!("mtproto helper invalid response: {e}"),
             })
         })
-    }
-}
-
-impl Drop for MtProtoHelper {
-    fn drop(&mut self) {
-        self.shutdown_best_effort();
     }
 }

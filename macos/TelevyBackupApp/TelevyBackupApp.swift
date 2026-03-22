@@ -1723,9 +1723,17 @@ final class AppModel: ObservableObject {
         let readCount = min(UInt64(maxBytes), fileSize)
         guard readCount > 0 else { return [] }
 
-        try? handle.seek(toOffset: fileSize - readCount)
+        let startOffset = fileSize - readCount
+        let dropFirstPartialLine: Bool = {
+            guard startOffset > 0 else { return false }
+            try? handle.seek(toOffset: startOffset - 1)
+            let prefixByte = handle.readData(ofLength: 1).first
+            return prefixByte != 0x0A && prefixByte != 0x0D
+        }()
+
+        try? handle.seek(toOffset: startOffset)
         let data = handle.readData(ofLength: Int(readCount))
-        return decodeRunLogLines(data, dropFirstPartialLine: fileSize > readCount)
+        return decodeRunLogLines(data, dropFirstPartialLine: dropFirstPartialLine)
     }
 
     private static func decodeRunLogLines(_ data: Data, dropFirstPartialLine: Bool) -> [String] {
