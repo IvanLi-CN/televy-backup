@@ -272,7 +272,7 @@ private struct TargetListRow: View {
     }
 
     private var latestHistoricalRun: RunLogSummary? {
-        runs.first(where: { $0.status != "running" }) ?? runs.first
+        runs.first(where: { $0.status != "running" })
     }
 
     private var hasInProgressRunLog: Bool {
@@ -506,7 +506,7 @@ private struct TargetDetailView: View {
     }
 
     private var latestHistoricalRun: RunLogSummary? {
-        runs.first(where: { $0.status != "running" }) ?? runs.first
+        runs.first(where: { $0.status != "running" })
     }
 
     private var hasInProgressRunLog: Bool {

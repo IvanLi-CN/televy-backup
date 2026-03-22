@@ -11,6 +11,7 @@
 - 当前 MTProto helper 由 core 进程拉起并在 backup run 期间复用；run 结束后 daemon 会清空 endpoint storage cache，但 helper 进程没有可靠退出协议。
 - 在 helper 已失去父进程控制、Telegram 连接进入异常状态时，helper 可能长期残留并在读错误路径上自旋，表现为“当前没有在备份，但 `televybackup-mtproto-helper` 长时间占满一个核心”。
 - 该问题出现在正式版稳定运行路径里，会直接破坏用户对“空闲时应零副作用”的基本预期。
+- 在切换到修复版正式版做回归时，还暴露出 macOS 历史视图的第二个问题：daemon 重启后内存态 `lastRun` 会清空，而 UI 读取超大 NDJSON 日志时又会整文件载入，导致“数据还在磁盘上，但界面短时间看起来像没数据”。
 
 ## 目标 / 非目标
 
@@ -20,6 +21,7 @@
 - 为 core-helper 内部协议补上显式 `shutdown`，让 drop / respawn 优先走优雅退出，失败时再走 kill fallback。
 - 保持现有 primary helper session 持久化、secondary helper session 隔离、upload/download/pin/`wait-chat` 兼容语义不变。
 - 为 helper 退出路径补进程级回归测试，防止再次出现 orphan process。
+- 让 macOS 主界面在 daemon 重启后仍能从磁盘历史回填最近完成的 run，并避免读取超大日志时误显示空历史。
 
 ### Non-goals
 
@@ -35,6 +37,7 @@
 - core：`MtProtoHelper` 增加统一 teardown 路径；drop 与 respawn 都先尝试 graceful shutdown，超时或异常时 kill fallback。
 - daemon：保留现有 `storage_by_endpoint.clear()` 设计，把它作为 idle teardown 的触发点，并为清理动作增加结构化日志。
 - tests：新增 helper 进程级退出测试，以及 core drop/fallback 测试。
+- macOS UI：历史索引改为只读取 NDJSON 头尾窗口；sidebar/detail 在 daemon `lastRun` 缺失时回退到最近完成的磁盘历史，而不是错误显示“没有数据”。
 
 ### Out of scope
 
@@ -50,6 +53,8 @@
 - 若 helper 对 `shutdown` 无响应或退出卡住，core 必须在短超时后执行 kill fallback，不能静默悬挂。
 - stdin EOF 仍必须触发 helper 退出，避免父进程异常终止时留下孤儿进程。
 - daemon 在清空 MTProto storage cache 时必须记录结构化清理日志，便于追查“为什么 helper 被回收”。
+- macOS 历史索引不得为读取 run summary 而整文件载入超大 NDJSON 日志。
+- daemon `lastRun` 缺失时，macOS 列表页与详情页只允许回退到最近完成的磁盘 run；不得把 stale `running` 日志当成权威最近状态重新显示出来。
 
 ### SHOULD
 
@@ -75,6 +80,7 @@
 - helper 未初始化也必须接受 `shutdown` 并直接退出，避免 teardown 依赖 init 成功。
 - helper 收到 `shutdown` 但不返回确认、或返回确认后仍不退出时，core 在固定短超时后强制 kill。
 - 父进程只关闭 stdin 未发送 `shutdown` 时，helper 也必须退出，不得继续保活 sender pool。
+- UI 历史回填只可把磁盘日志作为“最近完成 run”的补充信息；运行态与失败态仍以 live daemon 状态为权威，避免 stale `running` run log 误导用户。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -99,6 +105,12 @@
 - Given 父进程仅关闭 stdin
   When helper 主循环读到 EOF
   Then helper 会终止 sender pool 并退出。
+- Given 磁盘上已存在历史 run log 且 daemon 刚重启、`lastRun` 为空
+  When macOS 主界面刷新目标列表与详情页
+  Then UI 会回填最近完成的历史 run，而不是直接显示 “No recent runs.” / “No history yet”。
+- Given 历史目录里存在超大 NDJSON 日志
+  When macOS 读取 run history summary
+  Then 只读取必要的头尾窗口，不整文件载入到内存。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -106,6 +118,7 @@
 
 - helper: `cargo test --manifest-path crates/mtproto-helper/Cargo.toml -- --nocapture`
 - core: `cargo test -p televy_backup_core telegram_mtproto -- --nocapture`
+- macOS app build: `TELEVYBACKUP_APP_VARIANT=prod TELEVYBACKUP_CODESIGN_IDENTITY=- ./scripts/macos/build-app.sh`
 
 ### Quality checks
 
@@ -117,18 +130,21 @@
 - [x] M2: core helper wrapper 改为 graceful shutdown + kill fallback，并覆盖 drop / respawn
 - [x] M3: daemon idle cache clear 增加结构化 teardown 日志
 - [x] M4: helper/core 补进程级回归测试并通过定向验证
+- [x] M5: macOS run history 改为磁盘历史回填 + 大日志头尾索引，避免重启后空白误报
 
 ## 方案概述（Approach, high-level）
 
 - 把“helper 进程退出”从隐式依赖 pipe EOF，提升为显式内部协议能力。
 - core 端所有 teardown 入口共享同一条 helper 终止路径，避免 respawn、drop、异常恢复行为分叉。
 - daemon 不新增新的 stop surface，只继续复用既有 cache clear 生命周期，降低产品面变更。
+- macOS 历史摘要从“整文件读取”收敛为“前缀 + 后缀窗口”解析，既保留 `run.start` / `run.finish` 所需字段，也避免 UI 因超大日志卡住后误报空历史。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
 - 风险：
   - 若 shutdown 超时设置过短，极端慢机上可能过早落入 kill fallback；因此需保持“短但不激进”的超时窗口。
   - helper teardown 若处理不当，可能误伤现有 session 持久化时机；需要维持 primary helper 的 session 读写口径不变。
+  - macOS 历史回填若把 stale `running` 行也当成候选，可能让 idle/failed 视图重新显示 “Last run: Running”；因此历史 fallback 只能选择已完成 run。
 - 假设：
   - daemon loop 中 `storage_by_endpoint` 是正式版空闲 helper 的唯一长期持有者；本轮不扩展到新的用户可见 stop 入口。
 
