@@ -18,7 +18,10 @@ enum UISnapshot {
 
         // Most of our views rely on materials/transparent backgrounds. For a readable snapshot,
         // composite on a neutral background instead of leaving alpha as-is.
-        let backgroundColor: NSColor = .windowBackgroundColor
+        var backgroundColor: NSColor = .windowBackgroundColor
+        window.effectiveAppearance.performAsCurrentDrawingAppearance {
+            backgroundColor = .windowBackgroundColor
+        }
 
         // NSOpenPanel (folder picker) embeds a remote view; make a best-effort to flush layout
         // before capturing. This still won't be perfect on every macOS version, but avoids
@@ -34,7 +37,7 @@ enum UISnapshot {
         //
         // Note: NSOpenPanel sometimes renders blank via PDF in sandboxed/deterministic snapshot
         // mode; fall back to `cacheDisplay` for it.
-        if window is NSPanel, !(window is NSOpenPanel) {
+        if window is NSPanel, !(window is NSOpenPanel), !window.title.isEmpty {
             let pdf = view.dataWithPDF(inside: bounds)
             if let img = NSImage(data: pdf) {
                 let rep = NSBitmapImageRep(
@@ -100,18 +103,29 @@ enum UISnapshot {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let windows = NSApp.windows.filter { w in
-            w.isVisible && !w.isMiniaturized && w.alphaValue > 0.01 && w.contentView != nil
+            guard w.isVisible, !w.isMiniaturized, w.alphaValue > 0.01, let contentView = w.contentView else {
+                return false
+            }
+            let size = contentView.bounds.size
+            return size.width >= 120 && size.height >= 120
         }
 
         for (idx, w) in windows.enumerated() {
             let title = w.title
+            let contentSize = w.contentView?.bounds.size ?? .zero
             let name: String
             if title == "Settings" {
                 name = "settings"
+            } else if title == "TelevyBackup" {
+                name = "main-window"
             } else if title.localizedCaseInsensitiveContains("Export backup config") {
                 name = "export"
             } else if title.localizedCaseInsensitiveContains("Import backup config") {
                 name = "import"
+            } else if title.isEmpty, abs(contentSize.width - PopoverAutoSize.width) <= 2 {
+                name = "popover"
+            } else if title.isEmpty, contentSize.width >= PopoverAutoSize.width + 200, contentSize.height >= 240 {
+                name = "main-window"
             } else if title.isEmpty {
                 name = "window-\(idx)"
             } else {

@@ -60,6 +60,13 @@ struct MainWindowRootView: View {
             }
         }
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button(action: toggleSidebar) {
+                    Image(systemName: "sidebar.leading")
+                }
+                .help("Toggle sidebar")
+            }
+
             ToolbarItemGroup {
                 Button {
                     model.refresh()
@@ -99,6 +106,10 @@ struct MainWindowRootView: View {
             }
         }
         .frame(minWidth: 860, minHeight: 520)
+    }
+
+    private func toggleSidebar() {
+        NSApp.keyWindow?.firstResponder?.tryToPerform(#selector(NSSplitViewController.toggleSidebar(_:)), with: nil)
     }
 
     private var sidebar: some View {
@@ -1095,6 +1106,7 @@ private struct OverviewMetric: View {
 }
 
 private struct UnknownTargetListRow: View {
+    @Environment(\.colorScheme) private var colorScheme
     let isSelected: Bool
     let count: Int
     let onSelect: () -> Void
@@ -1114,11 +1126,15 @@ private struct UnknownTargetListRow: View {
             Spacer(minLength: 0)
 
             Image(systemName: "questionmark.circle")
-                .foregroundStyle(isSelected ? Color.white.opacity(0.95) : Color.secondary)
+                .foregroundStyle(isSelected ? selectedIconColor : Color.secondary)
         }
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
         .padding(.vertical, 2)
+    }
+
+    private var selectedIconColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.90) : Color.white.opacity(0.95)
     }
 }
 
@@ -1163,6 +1179,8 @@ private struct UnknownTargetDetailView: View {
 }
 
 private struct StatusBadge: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     enum Style {
         case pill
         case inline
@@ -1181,9 +1199,9 @@ private struct StatusBadge: View {
                 // status dot doesn't get swallowed by the selection highlight.
                 .overlay(
                     Circle()
-                        .strokeBorder(Color.white.opacity(isSelected ? 0.85 : 0.0), lineWidth: 1)
+                        .strokeBorder(selectionOutlineColor.opacity(isSelected ? 1.0 : 0.0), lineWidth: 1)
                 )
-                .shadow(color: Color.black.opacity(isSelected ? 0.18 : 0.0), radius: 1, x: 0, y: 0)
+                .shadow(color: selectionShadowColor.opacity(isSelected ? 1.0 : 0.0), radius: 1, x: 0, y: 0)
             Text(status.title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle({
@@ -1201,14 +1219,22 @@ private struct StatusBadge: View {
             content
                 .padding(.vertical, 3)
                 .padding(.horizontal, 8)
-                .background(status.tint.opacity(0.12), in: Capsule())
+                .background(status.tint.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Capsule())
                 .overlay(
                     Capsule()
-                        .strokeBorder(status.tint.opacity(0.18), lineWidth: 1)
+                        .strokeBorder(status.tint.opacity(colorScheme == .dark ? 0.28 : 0.18), lineWidth: 1)
                 )
         case .inline:
             content
         }
+    }
+
+    private var selectionOutlineColor: Color {
+        colorScheme == .dark ? Color.white.opacity(0.42) : Color.white.opacity(0.85)
+    }
+
+    private var selectionShadowColor: Color {
+        colorScheme == .dark ? Color.black.opacity(0.30) : Color.black.opacity(0.18)
     }
 }
 

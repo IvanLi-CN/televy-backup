@@ -118,6 +118,7 @@ final class AppModel: ObservableObject {
     private var lastTaskKind: String? = nil
     private var lastTaskState: String? = nil
     private let launchOverrides: LaunchOverrides = .parse(CommandLine.arguments)
+    let appearanceOverride: AppAppearanceOverride = .fromEnvironment()
 
     private enum UIDemo {
         static var enabled: Bool {
@@ -1962,16 +1963,17 @@ final class AppModel: ObservableObject {
 	            if let existing = self.settingsWindow {
 	                window = existing
 	            } else {
-	                let root = SettingsWindowRootView()
-	                    .environmentObject(self)
-	                let controller = NSHostingController(rootView: root)
-	                controller.view.wantsLayer = true
-	                controller.view.layer?.backgroundColor = NSColor.clear.cgColor
+                let root = SettingsWindowRootView()
+                    .environmentObject(self)
+                    .appAppearanceOverride(self.appearanceOverride)
+                let controller = NSHostingController(rootView: root)
+                controller.view.wantsLayer = true
+                controller.view.layer?.backgroundColor = NSColor.clear.cgColor
 	                let w = NSWindow(contentViewController: controller)
 	                w.title = "Settings"
 	                w.titleVisibility = .hidden
 	                if #available(macOS 11.0, *) {
-	                    w.toolbarStyle = .unified
+	                    w.toolbarStyle = .automatic
 	                }
 	                let fixedWidth: CGFloat = 820
 	                w.setContentSize(NSSize(width: fixedWidth, height: 560))
@@ -2002,11 +2004,9 @@ final class AppModel: ObservableObject {
 	        if !window.styleMask.contains(.fullSizeContentView) {
 	            window.styleMask.insert(.fullSizeContentView)
 	        }
-	        if window.appearance?.name != .vibrantLight {
-	            window.appearance = NSAppearance(named: .vibrantLight)
-	        }
-	        window.titlebarAppearsTransparent = true
-	        window.isMovableByWindowBackground = true
+        appearanceOverride.apply(to: window)
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
 
 	        // Lock Settings window width (only allow vertical resizing).
 	        let fixedWidth: CGFloat = 820
@@ -2036,16 +2036,17 @@ final class AppModel: ObservableObject {
 	            if let existing = self.mainWindow {
 	                window = existing
 	            } else {
-	                let root = MainWindowRootView()
-	                    .environmentObject(self)
-	                let controller = NSHostingController(rootView: root)
-	                controller.view.wantsLayer = true
-	                controller.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-	                let w = NSWindow(contentViewController: controller)
+                let root = MainWindowRootView()
+                    .environmentObject(self)
+                    .appAppearanceOverride(self.appearanceOverride)
+                let controller = NSHostingController(rootView: root)
+                controller.view.wantsLayer = true
+                controller.view.layer?.backgroundColor = NSColor.clear.cgColor
+                let w = NSWindow(contentViewController: controller)
 	                w.title = "TelevyBackup"
-	                w.titleVisibility = .visible
+	                w.titleVisibility = .hidden
 	                if #available(macOS 11.0, *) {
-	                    w.toolbarStyle = .unified
+	                    w.toolbarStyle = .automatic
 	                }
 	                w.setContentSize(NSSize(width: 980, height: 640))
 	                w.minSize = NSSize(width: 860, height: 520)
@@ -2071,10 +2072,8 @@ final class AppModel: ObservableObject {
 	        if window.backgroundColor != .windowBackgroundColor {
 	            window.backgroundColor = .windowBackgroundColor
 	        }
-	        if window.appearance?.name != .vibrantLight {
-	            window.appearance = NSAppearance(named: .vibrantLight)
-	        }
-	    }
+        appearanceOverride.apply(to: window)
+    }
 
     private func appendLog(_ line: String) {
         let trimmed = sanitizeLogLine(line.trimmingCharacters(in: .newlines))
@@ -2810,6 +2809,7 @@ struct StatusLED: View {
 }
 
 struct GlassCard<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
     @ViewBuilder var content: Content
 
@@ -2822,16 +2822,21 @@ struct GlassCard<Content: View>: View {
             content
         }
         .padding(12)
-        .background(Color.white.opacity(0.18), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(theme.cardBackground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+                .strokeBorder(theme.cardStroke, lineWidth: 1)
         )
+    }
+
+    private var theme: PopoverTheme {
+        PopoverTheme(colorScheme: colorScheme)
     }
 }
 
 struct PopoverRootView: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2857,7 +2862,6 @@ struct PopoverRootView: View {
             }
             .ignoresSafeArea()
         }
-        .preferredColorScheme(.light)
         .overlay(alignment: .bottom) {
             if let toast = model.toastText {
                 ToastPill(text: toast, isError: model.toastIsError)
@@ -2892,11 +2896,11 @@ struct PopoverRootView: View {
             HStack(alignment: .center, spacing: 10) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color.white.opacity(0.32))
+                        .fill(theme.headerIconTileBackground)
                         .frame(width: 28, height: 28)
                         .overlay(
                             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
+                                .strokeBorder(theme.headerIconTileStroke, lineWidth: 1)
                         )
                     Circle()
                         .fill(Color.blue)
@@ -2921,10 +2925,10 @@ struct PopoverRootView: View {
                     Image(systemName: "play.fill")
                         .font(.system(size: 11, weight: .heavy))
                         .frame(width: 22, height: 22)
-                        .background(Color.white.opacity(0.26), in: RoundedRectangle(cornerRadius: 10))
+                        .background(theme.actionButtonBackground, in: RoundedRectangle(cornerRadius: 10))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
+                                .strokeBorder(theme.actionButtonStroke, lineWidth: 1)
                         )
                 }
                 .buttonStyle(.plain)
@@ -2938,10 +2942,10 @@ struct PopoverRootView: View {
                     Image(systemName: "rectangle.grid.2x2.fill")
                         .font(.system(size: 13, weight: .semibold))
                         .frame(width: 22, height: 22)
-                        .background(Color.white.opacity(0.26), in: RoundedRectangle(cornerRadius: 10))
+                        .background(theme.actionButtonBackground, in: RoundedRectangle(cornerRadius: 10))
                         .overlay(
                             RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(Color.white.opacity(0.35), lineWidth: 1)
+                                .strokeBorder(theme.actionButtonStroke, lineWidth: 1)
                         )
                 }
                 .buttonStyle(.plain)
@@ -2950,7 +2954,7 @@ struct PopoverRootView: View {
             .padding(.bottom, 12)
 
             Rectangle()
-                .fill(Color.black.opacity(0.08))
+                .fill(theme.divider)
                 .frame(height: 1)
         }
         .padding(.bottom, 2)
@@ -2958,10 +2962,7 @@ struct PopoverRootView: View {
 
     private var glassFill: LinearGradient {
         LinearGradient(
-            colors: [
-                Color.white.opacity(0.18),
-                Color.white.opacity(0.08),
-            ],
+            colors: theme.glassFill,
             startPoint: .top,
             endPoint: .bottom
         )
@@ -2969,11 +2970,7 @@ struct PopoverRootView: View {
 
     private var glassStroke: LinearGradient {
         LinearGradient(
-            colors: [
-                Color.white.opacity(0.55),
-                Color.white.opacity(0.22),
-                Color.black.opacity(0.08),
-            ],
+            colors: theme.glassStroke,
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
@@ -2981,18 +2978,20 @@ struct PopoverRootView: View {
 
     private var glassHighlight: LinearGradient {
         LinearGradient(
-            colors: [
-                Color.white.opacity(0.12),
-                Color.white.opacity(0.00),
-            ],
+            colors: theme.glassHighlight,
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
+    }
+
+    private var theme: PopoverTheme {
+        PopoverTheme(colorScheme: colorScheme)
     }
 }
 
 struct OverviewView: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
     @State private var measuredTargetsContentHeight: CGFloat = 0
 
     var body: some View {
@@ -3006,8 +3005,10 @@ struct OverviewView: View {
         }
         .onAppear {
 #if !TELEVYBACKUP_TESTING
-            model.ensureDaemonRunning()
-            model.ensureStatusStreamRunning()
+            if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] != "1" {
+                model.ensureDaemonRunning()
+                model.ensureStatusStreamRunning()
+            }
 #endif
             measuredTargetsContentHeight = 0
             model.requestPopoverResize()
@@ -3072,10 +3073,10 @@ struct OverviewView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(theme.statChipBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                .strokeBorder(theme.statChipStroke, lineWidth: 1)
         )
     }
 
@@ -3141,16 +3142,13 @@ struct OverviewView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background {
             LinearGradient(
-                colors: [
-                    Color.white.opacity(0.16),
-                    Color.white.opacity(0.10),
-                ],
+                colors: theme.targetsContainerGradient,
                 startPoint: .top,
                 endPoint: .bottom
             )
             .clipShape(container)
         }
-        .overlay(container.strokeBorder(Color.white.opacity(0.16), lineWidth: 1))
+        .overlay(container.strokeBorder(theme.targetsContainerStroke, lineWidth: 1))
         .clipShape(container)
         .popoverTargetsContainerHeight(
             empty: targets.isEmpty,
@@ -3164,14 +3162,14 @@ struct OverviewView: View {
         VStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.white.opacity(0.12))
+                    .fill(theme.emptyStateTileBackground)
                     .overlay(
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                            .strokeBorder(theme.emptyStateTileStroke, lineWidth: 1)
                     )
                 Image(systemName: "folder.badge.plus")
                     .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(Color.secondary.opacity(0.7))
+                    .foregroundStyle(theme.emptyStateSymbol)
             }
             .frame(width: 80, height: 80)
             .padding(.bottom, 2)
@@ -3197,14 +3195,14 @@ struct OverviewView: View {
         VStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.white.opacity(0.12))
+                    .fill(theme.emptyStateTileBackground)
                     .overlay(
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.14), lineWidth: 1)
+                            .strokeBorder(theme.emptyStateTileStroke, lineWidth: 1)
                     )
                 Image(systemName: "waveform.path.ecg")
                     .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(Color.secondary.opacity(0.7))
+                    .foregroundStyle(theme.emptyStateSymbol)
             }
             .frame(width: 80, height: 80)
             .padding(.bottom, 2)
@@ -3236,6 +3234,10 @@ struct OverviewView: View {
         guard let bps else { return "—" }
         return "\(formatBytes(bps))/s"
     }
+
+    private var theme: PopoverTheme {
+        PopoverTheme(colorScheme: colorScheme)
+    }
 }
 
 private extension View {
@@ -3258,6 +3260,7 @@ private extension View {
 
 private struct TargetsListView: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
     let targets: [StatusTarget]
     let snapshotGeneratedAtMs: Int64
     let snapshotSourceKind: String
@@ -3339,7 +3342,7 @@ private struct TargetsListView: View {
                 TargetRowView(target: t, snapshotGeneratedAtMs: snapshotGeneratedAtMs, snapshotSourceKind: snapshotSourceKind)
                 if idx != targets.count - 1 {
                     Rectangle()
-                        .fill(Color.black.opacity(0.08))
+                        .fill(theme.divider)
                         .frame(height: 1)
                         .padding(.horizontal, 12)
                 }
@@ -3372,10 +3375,15 @@ private struct TargetsListView: View {
             .frame(height: fade)
         }
     }
+
+    private var theme: PopoverTheme {
+        PopoverTheme(colorScheme: colorScheme)
+    }
 }
 
 private struct TargetRowView: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
     let target: StatusTarget
     let snapshotGeneratedAtMs: Int64
     let snapshotSourceKind: String
@@ -3397,7 +3405,7 @@ private struct TargetRowView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.white.opacity(0.10))
+                    .background(theme.runningRowBackground)
             } else {
                 idleRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
                     .padding(.horizontal, 16)
@@ -3440,10 +3448,10 @@ private struct TargetRowView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .background(Color.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 9.5, style: .continuous))
+        .background(theme.badgeBackground, in: RoundedRectangle(cornerRadius: 9.5, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 9.5, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+                .strokeBorder(theme.badgeStroke, lineWidth: 1)
         )
     }
 
@@ -3702,6 +3710,10 @@ private struct TargetRowView: View {
         return "\(ms / 3_600_000)h"
     }
 
+    private var theme: PopoverTheme {
+        PopoverTheme(colorScheme: colorScheme)
+    }
+
 }
 
 struct SettingsView: View {
@@ -3843,9 +3855,11 @@ struct SettingsView: View {
             }
         }
     }
+
 }
 
 struct ToastPill: View {
+    @Environment(\.colorScheme) private var colorScheme
     let text: String
     let isError: Bool
 
@@ -3862,8 +3876,12 @@ struct ToastPill: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.28), lineWidth: 1))
-        .shadow(color: Color.black.opacity(0.14), radius: 10, x: 0, y: 4)
+        .overlay(Capsule().strokeBorder(theme.toastStroke, lineWidth: 1))
+        .shadow(color: theme.toastShadow, radius: 10, x: 0, y: 4)
+    }
+
+    private var theme: PopoverTheme {
+        PopoverTheme(colorScheme: colorScheme)
     }
 }
 
@@ -3877,6 +3895,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables: Set<AnyCancellable> = []
     private var popoverHost: NSHostingController<AnyView>? = nil
     private var popoverResizeScheduled: Bool = false
+    private let appearanceOverride = ModelStore.shared.appearanceOverride
 
     // Prevent accidental multi-launch (e.g. `open -n`) from creating duplicate status bar items and
     // competing daemons. We keep the earliest-launched instance alive and exit the rest.
@@ -3961,6 +3980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         exitIfSecondaryInstance()
+        appearanceOverride.apply(to: NSApp)
 
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = status.button {
@@ -3975,8 +3995,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.animates = true
         popover.contentSize = NSSize(width: PopoverAutoSize.width, height: 460)
-        popover.appearance = NSAppearance(named: .vibrantLight)
-        let host = NSHostingController(rootView: AnyView(PopoverRootView().environmentObject(ModelStore.shared)))
+        appearanceOverride.apply(to: popover)
+        let host = NSHostingController(
+            rootView: AnyView(
+                PopoverRootView()
+                    .environmentObject(ModelStore.shared)
+                    .appAppearanceOverride(appearanceOverride)
+            )
+        )
         host.view.wantsLayer = true
         host.view.layer?.backgroundColor = NSColor.clear.cgColor
         popover.contentViewController = host
@@ -4111,10 +4137,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPopover(_ sender: Any?) {
         guard let button = statusItem?.button else { return }
-        ModelStore.shared.ensureDaemonRunning()
-        ModelStore.shared.ensureStatusStreamRunning()
-        ModelStore.shared.refresh()
+        if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] != "1" {
+            ModelStore.shared.ensureDaemonRunning()
+            ModelStore.shared.ensureStatusStreamRunning()
+            ModelStore.shared.refresh()
+        }
         NSApp.activate(ignoringOtherApps: true)
+        appearanceOverride.apply(to: popover)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         configurePopoverWindowIfNeeded()
         schedulePopoverResize()
@@ -4127,6 +4156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func configurePopoverWindowIfNeeded() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
             guard let window = self.popover.contentViewController?.view.window else { return }
+            self.appearanceOverride.apply(to: window)
             if window.isOpaque {
                 window.isOpaque = false
             }
@@ -4142,13 +4172,21 @@ extension AppDelegate {
     // Minimal wiring to exercise the production popover sizing pipeline in layout tests,
     // without creating status bar items or spawning side-effectful processes.
     func testing_setUpPopoverForSizingOnly(
-        model: AppModel
+        model: AppModel,
+        appearanceOverride: AppAppearanceOverride = .system
     ) -> (popover: NSPopover, host: NSHostingController<AnyView>) {
         popover.behavior = .transient
         popover.animates = false
         popover.contentSize = NSSize(width: PopoverAutoSize.width, height: 460)
+        appearanceOverride.apply(to: popover)
 
-        let host = NSHostingController(rootView: AnyView(PopoverRootView().environmentObject(model)))
+        let host = NSHostingController(
+            rootView: AnyView(
+                PopoverRootView()
+                    .environmentObject(model)
+                    .appAppearanceOverride(appearanceOverride)
+            )
+        )
         _ = host.view // force view load
         popover.contentViewController = host
         popoverHost = host

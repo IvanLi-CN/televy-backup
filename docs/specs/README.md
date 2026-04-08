@@ -42,3 +42,4 @@
 | 3z7rj | Endpoint 去重索引增量化：Remote Delta + 本地物化库 + 周期性 Compaction | 已完成 | `3z7rj-endpoint-dedupe-delta-index/SPEC.md` | 2026-03-02 | Remote dedupe 由 Base+Delta+Catalog 组成；endpoint meta DB 不再上传 chunks/chunk_objects；restore/verify 优先使用 dedupe DB |
 | g7gt3 | 支持 `.televyignore` 的文件/目录忽略能力 | 已完成 | `g7gt3-televyignore-target-ignore/SPEC.md` | 2026-03-19 | core 扫描/quick stats 已支持 `.televyignore`；run.finish 输出 ignore 汇总字段；macOS 主界面显示 ignore 状态；正式版补齐 bundled daemon/helper 启动路径稳定性修复 |
 | cac6x | MTProto 空闲 Helper 退出治理 | 已完成 | `cac6x-mtproto-helper-idle-shutdown/SPEC.md` | 2026-03-22 | internal lifecycle 修复：graceful shutdown + kill fallback，解决 idle orphan helper 高 CPU；macOS 历史页改为磁盘回填 + 大日志头尾索引 |
+| fdwoo | macOS 明暗主题支持与系统自动切换 | 已完成 | `fdwoo-macos-light-dark-theme/SPEC.md` | 2026-04-08 | 主题实现、回归验证与最终视觉证据已完成；当前版本按 macOS 系统外观自动切换 |

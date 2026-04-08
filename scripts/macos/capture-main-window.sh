@@ -23,9 +23,32 @@ TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH=0 \
 TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH=0 \
 TELEVYBACKUP_OPEN_MAIN_WINDOW_ON_LAUNCH=1 \
 "$app_bin" >/dev/null 2>&1 &
+app_pid=$!
 
 # Give SwiftUI time to render the main window.
 sleep 1.4
+
+# Ensure the exact app process we launched is active/key before capturing. Otherwise macOS
+# renders toolbar/titlebar controls in their inactive appearance, which makes segmented controls
+# and traffic-light buttons look washed out in screenshots. Activating by PID avoids focusing a
+# different installed Stable/Dev variant that happens to share the same display name.
+swift -e '
+import AppKit
+import Foundation
+
+guard CommandLine.arguments.count > 1, let pid = Int32(CommandLine.arguments[1]) else {
+    exit(1)
+}
+
+guard let app = NSRunningApplication(processIdentifier: pid) else {
+    exit(1)
+}
+
+if !app.activate(options: [.activateIgnoringOtherApps]) {
+    exit(1)
+}
+' "$app_pid" >/dev/null 2>&1 || true
+sleep 0.2
 
 workdir="$(mktemp -d)"
 cat > "$workdir/find_window.swift" <<'SWIFT'
