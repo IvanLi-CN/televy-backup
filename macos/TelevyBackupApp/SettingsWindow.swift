@@ -309,6 +309,91 @@ private struct EmptyStateView: View {
     }
 }
 
+private struct SettingsSidebarSurface<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        ZStack {
+            // AppKit's native guidance for source-list sidebars is to use the `.sidebar` material.
+            // We provide that surface explicitly because this Settings window is transparent and the
+            // custom split layout does not get the automatic sidebar background that a stock split
+            // view/source list would normally receive.
+            VisualEffectView(material: .sidebar, blendingMode: .withinWindow, state: .active)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                content
+            }
+        }
+        .clipped()
+    }
+}
+
+private struct SettingsSidebarSelectionBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let isSelected: Bool
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(selectionFill.opacity(isSelected ? 1 : 0))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(selectionStroke.opacity(isSelected ? 1 : 0), lineWidth: 1)
+            }
+    }
+
+    private var selectionFill: Color {
+        colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06)
+    }
+
+    private var selectionStroke: Color {
+        colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)
+    }
+}
+
+private struct SettingsSidebarList<Item: Identifiable, RowContent: View>: View where Item.ID == String {
+    let items: [Item]
+    @Binding var selection: String?
+    let rowContent: (Item, Bool) -> RowContent
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(items) { item in
+                        let isSelected = selection == item.id
+                        Button {
+                            selection = item.id
+                        } label: {
+                            rowContent(item, isSelected)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .background(SettingsSidebarSelectionBackground(isSelected: isSelected))
+                        }
+                        .buttonStyle(.plain)
+                        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .id(item.id)
+                    }
+                }
+                .padding(8)
+            }
+            .onChange(of: selection) { _, id in
+                guard let id else { return }
+                proxy.scrollTo(id, anchor: .center)
+            }
+            .onAppear {
+                guard let id = selection else { return }
+                proxy.scrollTo(id, anchor: .center)
+            }
+        }
+    }
+}
+
 private enum SettingsUIDemo {
     static var enabled: Bool {
         ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1"
@@ -510,66 +595,52 @@ struct SettingsWindowRootView: View {
         let targets = settings?.targets ?? []
 
         return HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                ScrollViewReader { proxy in
-                    List(selection: $selectedTargetId) {
-                        ForEach(targets) { t in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(t.label.isEmpty ? t.id : t.label)
-                                    .font(.system(size: 13, weight: .semibold))
-                                Text(t.source_path)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            .id(t.id)
-                            .tag(t.id as String?)
+            SettingsSidebarSurface {
+                VStack(spacing: 0) {
+                    SettingsSidebarList(items: targets, selection: $selectedTargetId) { target, _ in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(target.label.isEmpty ? target.id : target.label)
+                                .font(.system(size: 13, weight: .semibold))
+                            Text(target.source_path)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
                         }
                     }
-                    .onChange(of: selectedTargetId) { _, id in
-                        guard let id else { return }
-                        proxy.scrollTo(id, anchor: .center)
+                    .onChange(of: targets.map(\.id)) { _, ids in
+                        guard settings != nil else { return }
+                        guard !SettingsUIDemo.disableAutoSelect else { return }
+                        if let selectedTargetId, ids.contains(selectedTargetId) { return }
+                        selectedTargetId = ids.first
                     }
-                    .onAppear {
-                        guard let id = selectedTargetId else { return }
-                        proxy.scrollTo(id, anchor: .center)
+
+                    Divider()
+
+                    HStack(spacing: 10) {
+                        Button { addTarget() } label: {
+                            Image(systemName: "plus")
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(settings == nil)
+
+                        Button { deleteSelectedTarget() } label: {
+                            Image(systemName: "minus")
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(selectedTargetId == nil)
+
+                        Spacer()
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
                 }
-                .scrollContentBackground(.hidden)
-                .background(Color(nsColor: .windowBackgroundColor))
-                .onChange(of: targets.map(\.id)) { _, ids in
-                    guard settings != nil else { return }
-                    guard !SettingsUIDemo.disableAutoSelect else { return }
-                    if let selectedTargetId, ids.contains(selectedTargetId) { return }
-                    selectedTargetId = ids.first
-                }
-
-                Divider()
-
-                HStack(spacing: 10) {
-                    Button { addTarget() } label: {
-                        Image(systemName: "plus")
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(settings == nil)
-
-                    Button { deleteSelectedTarget() } label: {
-                        Image(systemName: "minus")
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(selectedTargetId == nil)
-
-                    Spacer()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-        }
-        .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)
+            .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)
 
-        Divider()
+            Divider()
 
             GroupBox {
                 if let idx = selectedTargetIndex(), settings != nil {
@@ -636,48 +707,34 @@ struct SettingsWindowRootView: View {
         let endpoints = sortedEndpoints()
 
         return HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                ScrollViewReader { proxy in
-                    List(selection: $selectedEndpointId) {
-                        ForEach(endpoints) { ep in
-                            EndpointListRow(endpoint: ep)
-                            .id(ep.id)
-                            .tag(ep.id as String?)
+            SettingsSidebarSurface {
+                VStack(spacing: 0) {
+                    SettingsSidebarList(items: endpoints, selection: $selectedEndpointId) { endpoint, _ in
+                        EndpointListRow(endpoint: endpoint)
+                    }
+
+                    Divider()
+
+                    HStack(spacing: 10) {
+                        Button { addEndpoint() } label: {
+                            Image(systemName: "plus")
+                                .frame(width: 20, height: 20)
                         }
+                        .buttonStyle(.bordered)
+                        .disabled(settings == nil)
+
+                        Button { deleteSelectedEndpoint() } label: {
+                            Image(systemName: "minus")
+                                .frame(width: 20, height: 20)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(selectedEndpointId == nil || settings == nil)
+
+                        Spacer()
                     }
-                    .onChange(of: selectedEndpointId) { _, id in
-                        guard let id else { return }
-                        proxy.scrollTo(id, anchor: .center)
-                    }
-                    .onAppear {
-                        guard let id = selectedEndpointId else { return }
-                        proxy.scrollTo(id, anchor: .center)
-                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
                 }
-                .scrollContentBackground(.hidden)
-                .background(Color(nsColor: .windowBackgroundColor))
-
-                Divider()
-
-                HStack(spacing: 10) {
-                    Button { addEndpoint() } label: {
-                        Image(systemName: "plus")
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(settings == nil)
-
-                    Button { deleteSelectedEndpoint() } label: {
-                        Image(systemName: "minus")
-                            .frame(width: 20, height: 20)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(selectedEndpointId == nil || settings == nil)
-
-                    Spacer()
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
             }
             .frame(minWidth: 220, idealWidth: 240, maxWidth: 280)
 
