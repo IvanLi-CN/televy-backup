@@ -333,28 +333,6 @@ private struct SettingsSidebarSurface<Content: View>: View {
     }
 }
 
-private struct SettingsSidebarSelectionBackground: View {
-    @Environment(\.colorScheme) private var colorScheme
-    let isSelected: Bool
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(selectionFill.opacity(isSelected ? 1 : 0))
-            .overlay {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(selectionStroke.opacity(isSelected ? 1 : 0), lineWidth: 1)
-            }
-    }
-
-    private var selectionFill: Color {
-        colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.06)
-    }
-
-    private var selectionStroke: Color {
-        colorScheme == .dark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)
-    }
-}
-
 private struct SettingsSidebarList<Item: Identifiable, RowContent: View>: View where Item.ID == String {
     let items: [Item]
     @Binding var selection: String?
@@ -362,26 +340,15 @@ private struct SettingsSidebarList<Item: Identifiable, RowContent: View>: View w
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    ForEach(items) { item in
-                        let isSelected = selection == item.id
-                        Button {
-                            selection = item.id
-                        } label: {
-                            rowContent(item, isSelected)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 10)
-                                .background(SettingsSidebarSelectionBackground(isSelected: isSelected))
-                        }
-                        .buttonStyle(.plain)
-                        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            List(selection: $selection) {
+                ForEach(items) { item in
+                    rowContent(item, selection == item.id)
                         .id(item.id)
-                    }
+                        .tag(item.id as String?)
                 }
-                .padding(8)
             }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
             .onChange(of: selection) { _, id in
                 guard let id else { return }
                 proxy.scrollTo(id, anchor: .center)
