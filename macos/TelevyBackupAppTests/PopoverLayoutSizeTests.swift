@@ -103,10 +103,13 @@ private final class PopoverSizingHarness {
         popover.contentSize.height
     }
 
-    init(model: AppModel) {
+    init(model: AppModel, appearanceOverride: AppAppearanceOverride = .system) {
         self.model = model
         appDelegate = AppDelegate()
-        let setup = appDelegate.testing_setUpPopoverForSizingOnly(model: model)
+        let setup = appDelegate.testing_setUpPopoverForSizingOnly(
+            model: model,
+            appearanceOverride: appearanceOverride
+        )
         popover = setup.popover
         host = setup.host
     }
@@ -268,6 +271,58 @@ private func test_popover_resize_threshold_avoids_jitter() {
     )
 }
 
+private func test_app_appearance_override_parsing() {
+    expect(
+        AppAppearanceOverride.fromEnvironment([:]) == .system,
+        "missing appearance env should fall back to system"
+    )
+    expect(
+        AppAppearanceOverride.fromEnvironment([AppAppearanceOverride.environmentKey: "system"]) == .system,
+        "system appearance env should parse as system"
+    )
+    expect(
+        AppAppearanceOverride.fromEnvironment([AppAppearanceOverride.environmentKey: "light"]) == .light,
+        "light appearance env should parse as light"
+    )
+    expect(
+        AppAppearanceOverride.fromEnvironment([AppAppearanceOverride.environmentKey: "dark"]) == .dark,
+        "dark appearance env should parse as dark"
+    )
+    expect(
+        AppAppearanceOverride.fromEnvironment([AppAppearanceOverride.environmentKey: "invalid"]) == .system,
+        "invalid appearance env should fall back to system"
+    )
+}
+
+private func test_popover_layout_is_stable_across_appearance_overrides() {
+    let targets = [
+        mkTarget(id: "t1", label: "Photos", sourcePath: "/Users/ivan/Photos", state: "running", nowMs: nowMs()),
+        mkTarget(id: "t2", label: "Docs", sourcePath: "/Users/ivan/Documents", state: "idle", nowMs: nowMs()),
+    ]
+
+    for appearanceOverride in [AppAppearanceOverride.light, .dark] {
+        let model = AppModel()
+        let harness = PopoverSizingHarness(model: model, appearanceOverride: appearanceOverride)
+        let t0 = nowMs()
+        model.statusSnapshot = mkSnapshot(targets: targets, nowMs: t0)
+        model.requestPopoverResize()
+        let expected = waitForPopoverHeightToMatchExpected(
+            harness: harness,
+            "popover height should match sizeThatFits in \(appearanceOverride.rawValue) appearance"
+        )
+        expectClose(
+            harness.host.sizeThatFits(in: NSSize(width: PopoverAutoSize.width, height: 10_000)).height,
+            expected,
+            "sizeThatFits should stay stable in \(appearanceOverride.rawValue) appearance",
+            eps: 2.0
+        )
+        expect(
+            harness.popover.appearance?.bestMatch(from: [.aqua, .darkAqua]) == appearanceOverride.nsAppearance?.name,
+            "popover should apply \(appearanceOverride.rawValue) appearance override"
+        )
+    }
+}
+
 @main
 enum PopoverLayoutSizeTestsMain {
     static func main() {
@@ -275,6 +330,8 @@ enum PopoverLayoutSizeTestsMain {
         test_popover_height_tracks_sizeThatFits_across_scenarios()
         test_popover_auto_resize_triggers_on_target_change()
         test_popover_resize_threshold_avoids_jitter()
+        test_app_appearance_override_parsing()
+        test_popover_layout_is_stable_across_appearance_overrides()
         print("OK: PopoverLayoutSizeTests")
     }
 }

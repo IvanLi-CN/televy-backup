@@ -324,6 +324,7 @@ private enum SettingsUIDemo {
 
     static var initialSection: SettingsSection {
         if enabled && scene.hasPrefix("backup-config") { return .recoveryKey }
+        if scene == "schedule" { return .schedule }
         if scene.hasPrefix("endpoints") { return .endpoints }
         return .targets
     }
@@ -448,11 +449,6 @@ struct SettingsWindowRootView: View {
             }
         }
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Text("Settings")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.primary)
-            }
             ToolbarItem(placement: .principal) {
                 Picker("", selection: $section) {
                     ForEach(SettingsSection.allCases) { s in
@@ -541,7 +537,7 @@ struct SettingsWindowRootView: View {
                     }
                 }
                 .scrollContentBackground(.hidden)
-                .background(Color.clear)
+                .background(Color(nsColor: .windowBackgroundColor))
                 .onChange(of: targets.map(\.id)) { _, ids in
                     guard settings != nil else { return }
                     guard !SettingsUIDemo.disableAutoSelect else { return }
@@ -659,7 +655,7 @@ struct SettingsWindowRootView: View {
                     }
                 }
                 .scrollContentBackground(.hidden)
-                .background(Color.clear)
+                .background(Color(nsColor: .windowBackgroundColor))
 
                 Divider()
 
@@ -851,77 +847,91 @@ struct SettingsWindowRootView: View {
     }
 
     private var scheduleView: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Schedule")
-                .font(.system(size: 18, weight: .bold))
-            Text("Global schedule (targets inherit by default).")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Schedule")
+                    .font(.system(size: 22, weight: .bold))
 
-            if let s = settings {
-                Toggle("Enable", isOn: Binding(
-                    get: { s.schedule.enabled },
-                    set: { v in
-                        settings?.schedule.enabled = v
-                        queueAutoSave()
-                    }
-                ))
+                Text("Global schedule applies to targets by default. Individual targets can still override it when needed.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 520, alignment: .leading)
 
-                HStack {
-                    Text("Frequency")
-                    Spacer()
-                    Picker("", selection: Binding(
-                        get: { s.schedule.kind },
-                        set: { v in
-                            settings?.schedule.kind = v
-                            queueAutoSave()
-                        }
-                    )) {
-                        Text("Hourly").tag("hourly")
-                        Text("Daily").tag("daily")
-                    }
-                    .pickerStyle(.menu)
-                    .frame(width: 140)
-                }
-
-                if s.schedule.kind == "hourly" {
-                    HStack {
-                        Text("Minute")
-                        Spacer()
-                        Stepper(
-                            value: Binding(
-                                get: { s.schedule.hourly_minute },
+                if let s = settings {
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Toggle("Enable scheduled backups", isOn: Binding(
+                                get: { s.schedule.enabled },
                                 set: { v in
-                                    settings?.schedule.hourly_minute = v
+                                    settings?.schedule.enabled = v
                                     queueAutoSave()
                                 }
-                            ),
-                            in: 0...59
-                        ) {
-                            Text(String(format: "%02d", s.schedule.hourly_minute))
-                                .font(.system(.body, design: .monospaced))
-                        }
-                    }
-                } else {
-                    HStack {
-                        Text("Daily at")
-                        Spacer()
-                        TextField("02:00", text: Binding(
-                            get: { s.schedule.daily_at },
-                            set: { v in
-                                settings?.schedule.daily_at = v
-                                queueAutoSave()
+                            ))
+
+                            Divider()
+
+                            LabeledContent("Frequency") {
+                                Picker("", selection: Binding(
+                                    get: { s.schedule.kind },
+                                    set: { v in
+                                        settings?.schedule.kind = v
+                                        queueAutoSave()
+                                    }
+                                )) {
+                                    Text("Hourly").tag("hourly")
+                                    Text("Daily").tag("daily")
+                                }
+                                .pickerStyle(.menu)
+                                .frame(width: 140)
                             }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 120)
+
+                            if s.schedule.kind == "hourly" {
+                                LabeledContent("Minute") {
+                                    Stepper(
+                                        value: Binding(
+                                            get: { s.schedule.hourly_minute },
+                                            set: { v in
+                                                settings?.schedule.hourly_minute = v
+                                                queueAutoSave()
+                                            }
+                                        ),
+                                        in: 0...59
+                                    ) {
+                                        Text(String(format: "%02d", s.schedule.hourly_minute))
+                                            .font(.system(.body, design: .monospaced))
+                                    }
+                                    .frame(width: 110, alignment: .trailing)
+                                }
+                            } else {
+                                LabeledContent("Daily at") {
+                                    TextField("02:00", text: Binding(
+                                        get: { s.schedule.daily_at },
+                                        set: { v in
+                                            settings?.schedule.daily_at = v
+                                            queueAutoSave()
+                                        }
+                                    ))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 120)
+                                }
+                            }
+                        }
+                        .padding(14)
+                    } label: {
+                        Text("Default backup schedule")
+                            .font(.system(size: 13, weight: .semibold))
                     }
+
+                    Text("Targets inherit this schedule unless you set a target-specific override.")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
             }
-
-            Spacer()
+            .frame(maxWidth: 700, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 22)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
-        .padding()
     }
 
     private func selectedTargetIndex() -> Int? {
