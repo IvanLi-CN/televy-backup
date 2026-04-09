@@ -17,7 +17,7 @@ macOS desktop backup app + Rust backend (work in progress).
 
 ### macOS app variants (prod vs dev)
 
-To avoid conflicts with an installed/release build on the same machine, local development uses a separate app variant:
+To avoid conflicts with an installed Release app on the same machine, local development uses a separate app variant:
 
 - **Prod app**
   - Name: `TelevyBackup`
@@ -32,11 +32,11 @@ To avoid conflicts with an installed/release build on the same machine, local de
 
 Note: `scripts/macos/run-app.sh` will warn if you start the prod variant with `TELEVYBACKUP_DISABLE_KEYCHAIN=1`.
 
-### Terminology used in troubleshooting ("stable"/"dev")
+### Terminology used in troubleshooting ("release"/"dev")
 
-When an agent is asked to "restart stable version" on a dev machine, this repo uses:
+When an agent is asked to "restart release version" on a dev machine, this repo uses:
 
-- **Stable** = the **prod variant** (bundle id `com.ivan.televybackup`) started by:
+- **Release** = the **prod variant** (bundle id `com.ivan.televybackup`) started by:
   - `TELEVYBACKUP_APP_VARIANT=prod ./scripts/macos/run-app.sh`
 - **Dev** = the **dev variant** (bundle id `com.ivan.televybackup.dev`) started by:
   - `./scripts/macos/run-app.sh` (default)

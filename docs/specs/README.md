@@ -40,6 +40,6 @@
 | dyu56 | 索引分级：Remote Index 仅保留每个 Source 最新文件映射 | 部分完成（3/4） | `dyu56-index-tiered-filemaps/SPEC.md` | 2026-03-02 | 已实现 remote export + 本地自动 compact + 单测；待真机验证 index 上传耗时与体积收益 |
 | t764g | 端点索引二级拆分：Endpoint DB（一级）+ Snapshot Filemap DB（二级）+ 严格远端门禁（Fail Fast） | 已完成 | `t764g-endpoint-two-level-index/SPEC.md` | 2026-03-02 | 已落地两级索引（endpoint DB + per-snapshot filemap DB）、base filemap 预取与严格远端门禁；restore/verify 支持 ATTACH 两级 DB 并兼容旧格式 |
 | 3z7rj | Endpoint 去重索引增量化：Remote Delta + 本地物化库 + 周期性 Compaction | 已完成 | `3z7rj-endpoint-dedupe-delta-index/SPEC.md` | 2026-03-02 | Remote dedupe 由 Base+Delta+Catalog 组成；endpoint meta DB 不再上传 chunks/chunk_objects；restore/verify 优先使用 dedupe DB |
-| g7gt3 | 支持 `.televyignore` 的文件/目录忽略能力 | 已完成 | `g7gt3-televyignore-target-ignore/SPEC.md` | 2026-03-19 | core 扫描/quick stats 已支持 `.televyignore`；run.finish 输出 ignore 汇总字段；macOS 主界面显示 ignore 状态；正式版补齐 bundled daemon/helper 启动路径稳定性修复 |
+| g7gt3 | 支持 `.televyignore` 的文件/目录忽略能力 | 已完成 | `g7gt3-televyignore-target-ignore/SPEC.md` | 2026-03-19 | core 扫描/quick stats 已支持 `.televyignore`；run.finish 输出 ignore 汇总字段；macOS 主界面显示 ignore 状态；发行版补齐 bundled daemon/helper 启动路径稳定性修复 |
 | cac6x | MTProto 空闲 Helper 退出治理 | 已完成 | `cac6x-mtproto-helper-idle-shutdown/SPEC.md` | 2026-03-22 | internal lifecycle 修复：graceful shutdown + kill fallback，解决 idle orphan helper 高 CPU；macOS 历史页改为磁盘回填 + 大日志头尾索引 |
 | fdwoo | macOS 明暗主题支持与系统自动切换 | 已完成 | `fdwoo-macos-light-dark-theme/SPEC.md` | 2026-04-09 | 主题实现已完成；2026-04-09 追加修复 Settings 左侧 sidebar 暗色纯黑回归，并补充真实窗口视觉证据 |

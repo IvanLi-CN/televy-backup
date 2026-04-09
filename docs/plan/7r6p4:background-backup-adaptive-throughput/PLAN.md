@@ -9,7 +9,7 @@
 
 ## 背景 / 问题陈述
 
-正式版 `Projects` 目标备份长期后台运行时出现“低吞吐 + 频繁超时 + 最终失败”的组合问题：
+发行版 `Projects` 目标备份长期后台运行时出现“低吞吐 + 频繁超时 + 最终失败”的组合问题：
 
 - 上传链路反复出现 `save_file_part/save_big_file_part/upload_stream` 超时。
 - helper 与 core 之间存在“长调用期间无新响应”导致的 watchdog 误判风险。

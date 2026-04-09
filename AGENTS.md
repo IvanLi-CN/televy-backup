@@ -1,6 +1,6 @@
 # AGENTS.md
 
-## macOS: "正式版/Stable" identification (do NOT guess by `/Applications`)
+## macOS: "发行版/Release" identification (do NOT guess by `/Applications`)
 
 This repo has two **app variants** that may exist both as an installed release app and as a local
 build output. **Do not infer the variant from the app's install path (e.g. `/Applications`) or
@@ -8,7 +8,7 @@ from the app name.**
 
 Canonical meaning used in troubleshooting:
 
-- **Stable / 正式版**: bundle id `com.ivan.televybackup` (prod variant)
+- **Release / 发行版**: bundle id `com.ivan.televybackup` (prod variant)
 - **Dev / 开发版**: bundle id `com.ivan.televybackup.dev` (dev variant)
 
 ### How to confirm what is currently running
@@ -19,7 +19,7 @@ Prefer checking the **bundle id** of the running process:
 # Find TelevyBackup PIDs and their bundle paths
 lsappinfo list | rg -n '"TelevyBackup"'
 
-# Confirm the bundle id (Stable vs Dev) by PID
+# Confirm the bundle id (Release vs Dev) by PID
 lsappinfo info -only bundleid -pid <PID>
 
 # Optional: confirm executable path
@@ -40,6 +40,6 @@ Log location depends on the **config dir**:
 - Keychain disabled (dev default): `scripts/macos/run-app.sh` defaults to workspace
   `.dev/televybackup/config` and `.dev/televybackup/data`
 
-When debugging "正式版" issues, always confirm the actual `--config-dir` / `TELEVYBACKUP_CONFIG_DIR`
+When debugging "发行版" issues, always confirm the actual `--config-dir` / `TELEVYBACKUP_CONFIG_DIR`
 used by the running instance before assuming a log path.
 

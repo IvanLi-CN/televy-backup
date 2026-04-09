@@ -10,8 +10,8 @@
 
 - 当前 MTProto helper 由 core 进程拉起并在 backup run 期间复用；run 结束后 daemon 会清空 endpoint storage cache，但 helper 进程没有可靠退出协议。
 - 在 helper 已失去父进程控制、Telegram 连接进入异常状态时，helper 可能长期残留并在读错误路径上自旋，表现为“当前没有在备份，但 `televybackup-mtproto-helper` 长时间占满一个核心”。
-- 该问题出现在正式版稳定运行路径里，会直接破坏用户对“空闲时应零副作用”的基本预期。
-- 在切换到修复版正式版做回归时，还暴露出 macOS 历史视图的第二个问题：daemon 重启后内存态 `lastRun` 会清空，而 UI 读取超大 NDJSON 日志时又会整文件载入，导致“数据还在磁盘上，但界面短时间看起来像没数据”。
+- 该问题出现在发行版稳定运行路径里，会直接破坏用户对“空闲时应零副作用”的基本预期。
+- 在切换到修复版发行版做回归时，还暴露出 macOS 历史视图的第二个问题：daemon 重启后内存态 `lastRun` 会清空，而 UI 读取超大 NDJSON 日志时又会整文件载入，导致“数据还在磁盘上，但界面短时间看起来像没数据”。
 
 ## 目标 / 非目标
 
@@ -146,7 +146,7 @@
   - helper teardown 若处理不当，可能误伤现有 session 持久化时机；需要维持 primary helper 的 session 读写口径不变。
   - macOS 历史回填若把 stale `running` 行也当成候选，可能让 idle/failed 视图重新显示 “Last run: Running”；因此历史 fallback 只能选择已完成 run。
 - 假设：
-  - daemon loop 中 `storage_by_endpoint` 是正式版空闲 helper 的唯一长期持有者；本轮不扩展到新的用户可见 stop 入口。
+  - daemon loop 中 `storage_by_endpoint` 是发行版空闲 helper 的唯一长期持有者；本轮不扩展到新的用户可见 stop 入口。
 
 ## 参考（References）
 

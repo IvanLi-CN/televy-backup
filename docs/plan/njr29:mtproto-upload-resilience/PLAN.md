@@ -9,7 +9,7 @@
 
 ## 背景 / 问题陈述
 
-- 正式版在执行 backup 时反复失败，UI 显示 `err=telegram.unavailable`。
+- 发行版在执行 backup 时反复失败，UI 显示 `err=telegram.unavailable`。
 - 任务日志显示失败发生在 upload 阶段（扫描与打包完成后）：
   - `save_file_part timed out after 60s`
   - `save_big_file_part timed out after 60s`
