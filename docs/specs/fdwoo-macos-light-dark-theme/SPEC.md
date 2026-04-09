@@ -4,8 +4,8 @@
 
 - Status: 已完成
 - Created: 2026-04-08
-- Last: 2026-04-09
-- Notes: 主题实现与系统跟随已完成；2026-04-09 继续修复 Settings 左侧 sidebar 在暗色模式下回落成纯黑背景的回归，并补充真实窗口视觉证据。
+- Last: 2026-04-10
+- Notes: 主题实现与系统跟随已完成；已补齐 Settings sidebar 暗色回归修复；UI demo / snapshot 路径现已强制隔离 config/data 目录，避免截图脚本污染真实 Application Support 数据。
 
 ## 背景 / 问题陈述
 
@@ -43,6 +43,7 @@
   - 支持主题截图命名与动态背景解析。
 - `scripts/macos/*.sh`
   - 增加基于应用内 snapshot 的主题截图脚本。
+  - 所有 UI demo / snapshot 脚本必须把 `TELEVYBACKUP_CONFIG_DIR` / `TELEVYBACKUP_DATA_DIR` 隔离到工作区 `.dev/ui-snapshot/`。
 - `macos/TelevyBackupAppTests/*.swift`
   - 覆盖 appearance override 解析与 light/dark 下的 popover 布局回归。
 
@@ -60,6 +61,8 @@
 - Popover 的玻璃卡片、边框、分隔线、提示条、空状态、运行态底色在深色下不可出现明显“浅色残留块”。
 - Main Window 的状态徽章与选中态装饰在深色下保持可读，不依赖浅色背景。
 - Settings Window 的 `Targets` / `Endpoints` 左侧列表区在深色下必须使用连续的 sidebar surface，列表、分隔线与 `+/-` footer 不可回落成不透明纯黑块。
+- 当 `TELEVYBACKUP_UI_DEMO=1` 且未显式指定 `TELEVYBACKUP_CONFIG_DIR` / `TELEVYBACKUP_DATA_DIR` 时，macOS app 必须自动回落到临时 UI demo sandbox，而不是写入 `~/Library/Application Support/TelevyBackup`。
+- 任一 `scripts/macos/capture-*.sh` 的 demo/snapshot 运行都不得改写真实 `config.toml`、`secrets.enc` 或真实日志/index 目录。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -70,6 +73,7 @@
 - Given 现有 popover sizing 回归测试，When 在 light/dark 外观下运行，Then 高度计算与滚动语义保持一致。
 - Given 代码扫描，Then 不再存在会把 UI 强制锁成浅色的 `.vibrantLight` 或 `.preferredColorScheme(.light)` 路径。
 - Given `TELEVYBACKUP_UI_DEMO=1` 且 `TELEVYBACKUP_UI_APPEARANCE=dark`，When 打开 `Targets` / `Endpoints` 的未选中状态，Then Settings 左侧 sidebar 与 footer 保持同一材质层次，不出现左栏纯黑断层。
+- Given 任一 UI demo / snapshot 脚本运行且未显式传 config/data dir，When app 进入 `TELEVYBACKUP_UI_DEMO=1`，Then 真实 `~/Library/Application Support/TelevyBackup/config.toml` 不被改写，demo 数据仅落在隔离 sandbox。
 
 ## 质量门槛（Quality Gates）
 
@@ -99,3 +103,4 @@
 - 2026-04-08: 完成主题桥接、Popover/Main/Settings 适配、Swift 回归、app 构建与 light/dark 视觉证据生成。
 - 2026-04-08: 收敛主窗口/设置窗口的 macOS 原生风格细节，改用激活态窗口截图作为最终视觉证据，消除非激活 titlebar/toolbar 的低对比度误导。
 - 2026-04-09: 修复 Settings `Targets` / `Endpoints` 左侧 sidebar 在暗色模式下回落成纯黑背景的回归，补充真实运行窗口截图并确认左栏/footer 共享同一 sidebar surface。
+- 2026-04-10: 修复 UI demo / snapshot 污染真实配置目录的问题：截图脚本显式隔离 `.dev/ui-snapshot/{config,data}`，app 在 `TELEVYBACKUP_UI_DEMO=1` 且未传目录时也会自动回落到临时 sandbox。

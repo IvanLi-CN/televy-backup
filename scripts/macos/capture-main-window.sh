@@ -10,15 +10,22 @@ if [[ -z "$scene" || -z "$out" ]]; then
   exit 2
 fi
 
-app_bin="$(git rev-parse --show-toplevel)/target/macos-app/TelevyBackup.app/Contents/MacOS/TelevyBackup"
+root_dir="$(git rev-parse --show-toplevel)"
+app_bin="$root_dir/target/macos-app/TelevyBackup.app/Contents/MacOS/TelevyBackup"
+demo_root="$root_dir/.dev/ui-snapshot"
+data_dir="$demo_root/data"
+config_dir="$demo_root/config"
 
 mkdir -p "$(dirname "$out")"
+mkdir -p "$data_dir" "$config_dir"
 
 pkill -x TelevyBackup >/dev/null 2>&1 || true
 
 TELEVYBACKUP_UI_DEMO=1 \
 TELEVYBACKUP_UI_DEMO_SCENE="$scene" \
 TELEVYBACKUP_DISABLE_KEYCHAIN=1 \
+TELEVYBACKUP_DATA_DIR="$data_dir" \
+TELEVYBACKUP_CONFIG_DIR="$config_dir" \
 TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH=0 \
 TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH=0 \
 TELEVYBACKUP_OPEN_MAIN_WINDOW_ON_LAUNCH=1 \

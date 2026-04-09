@@ -22,7 +22,11 @@ root_dir="$(git rev-parse --show-toplevel)"
 TELEVYBACKUP_CODESIGN_IDENTITY="$TELEVYBACKUP_CODESIGN_IDENTITY" "$root_dir/scripts/macos/build-app.sh" >/dev/null
 
 app_bin="$root_dir/target/macos-app/TelevyBackup.app/Contents/MacOS/TelevyBackup"
+demo_root="$root_dir/.dev/ui-snapshot"
+data_dir="$demo_root/data"
+config_dir="$demo_root/config"
 mkdir -p "$out_dir"
+mkdir -p "$data_dir" "$config_dir"
 rm -f "$out_dir/theme-$appearance-"*.png >/dev/null 2>&1 || true
 
 common_env=(
@@ -32,6 +36,8 @@ common_env=(
   TELEVYBACKUP_UI_SNAPSHOT_DIR="$out_dir"
   TELEVYBACKUP_UI_SNAPSHOT_PREFIX="theme-$appearance"
   TELEVYBACKUP_UI_SNAPSHOT_MODE=timer
+  TELEVYBACKUP_DATA_DIR="$data_dir"
+  TELEVYBACKUP_CONFIG_DIR="$config_dir"
 )
 
 # Popover uses the main-window demo scene for seeded status data, but should remain the only visible window.

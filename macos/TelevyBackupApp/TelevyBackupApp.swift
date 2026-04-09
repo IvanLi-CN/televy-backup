@@ -118,6 +118,7 @@ final class AppModel: ObservableObject {
     private var lastTaskKind: String? = nil
     private var lastTaskState: String? = nil
     private let launchOverrides: LaunchOverrides = .parse(CommandLine.arguments)
+    private let uiDemoSandboxRunID: String = UUID().uuidString
     let appearanceOverride: AppAppearanceOverride = .fromEnvironment()
 
     private enum UIDemo {
@@ -428,6 +429,21 @@ final class AppModel: ObservableObject {
         defaultConfigDir()
     }
 
+    private func uiDemoSandboxRootDir() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("TelevyBackup-ui-demo", isDirectory: true)
+            .appendingPathComponent(isDevAppVariant() ? "dev" : "release", isDirectory: true)
+            .appendingPathComponent(uiDemoSandboxRunID, isDirectory: true)
+    }
+
+    private func uiDemoSandboxConfigDirURL() -> URL {
+        uiDemoSandboxRootDir().appendingPathComponent("config", isDirectory: true)
+    }
+
+    private func uiDemoSandboxDataDirURL() -> URL {
+        uiDemoSandboxRootDir().appendingPathComponent("data", isDirectory: true)
+    }
+
     func isKeychainDisabled() -> Bool {
         effectiveDisableKeychain()
     }
@@ -447,6 +463,9 @@ final class AppModel: ObservableObject {
         if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_CONFIG_DIR"], !env.isEmpty {
             return URL(fileURLWithPath: env)
         }
+        if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1" {
+            return uiDemoSandboxConfigDirURL()
+        }
         return defaultConfigDir()
     }
 
@@ -454,6 +473,9 @@ final class AppModel: ObservableObject {
         if let p = launchOverrides.dataDir, !p.isEmpty { return URL(fileURLWithPath: p) }
         if let env = ProcessInfo.processInfo.environment["TELEVYBACKUP_DATA_DIR"], !env.isEmpty {
             return URL(fileURLWithPath: env)
+        }
+        if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1" {
+            return uiDemoSandboxDataDirURL()
         }
         return defaultDataDir()
     }
