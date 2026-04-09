@@ -8,8 +8,8 @@
 
 ## 背景 / 问题
 
-- 目前开发构建出来的 `.app` 与正式版使用相同的 `CFBundleIdentifier` / App 名称，导致在同一台电脑上安装/运行正式版时，开发体验不友好（互相“像是同一个 app”，难以并存与区分）。
-- 状态栏（menubar）图标目前也与正式版一致，开发/正式更容易混淆。
+- 目前开发构建出来的 `.app` 与发行版使用相同的 `CFBundleIdentifier` / App 名称，导致在同一台电脑上安装/运行发行版时，开发体验不友好（互相“像是同一个 app”，难以并存与区分）。
+- 状态栏（menubar）图标目前也与发行版一致，开发/发行更容易混淆。
 
 ## 目标 / 非目标
 
@@ -18,7 +18,7 @@
 - 提供 prod/dev 两个 macOS app 变体（只改 Bundle ID + 显示名，不改变核心功能逻辑）：
   - prod：`com.ivan.televybackup`，显示名 `TelevyBackup`
   - dev：`com.ivan.televybackup.dev`，显示名 `TelevyBackup Dev`
-- dev 默认禁用 Keychain（避免开发过程访问/污染正式版 Keychain；仍可通过参数显式启用用于 prod-like 测试）。
+- dev 默认禁用 Keychain（避免开发过程访问/污染发行版 Keychain；仍可通过参数显式启用用于 prod-like 测试）。
 - dev 状态栏图标带清晰的 `DEV` 字样（图标内叠加徽标），避免误操作。
 - 两个 `.app` 可同时存在并可同时运行（互不覆盖、互不抢占）。
 - `scripts/macos/run-app.sh` 默认启动 dev 变体；打包/发布链路保持 prod 不变。
@@ -76,7 +76,7 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 同一台电脑上已有正式版（prod），When 启动本地开发版（dev），Then 两者可同时运行且不会互相替换/覆盖。
+- Given 同一台电脑上已有发行版（prod），When 启动本地开发版（dev），Then 两者可同时运行且不会互相替换/覆盖。
 - Given dev 版正在运行，When 观察状态栏图标，Then 图标内可清晰看到 `DEV` 字样，并与 prod 区分明显。
 - Given 同时运行 dev + prod，When 执行 `scripts/macos/run-app.sh` 的重启/清理逻辑，Then 只影响 dev，不误杀 prod。
 - Given 启动 dev 变体（无额外参数），When app 启动并拉起 daemon/CLI，Then 默认 `TELEVYBACKUP_DISABLE_KEYCHAIN=1`（禁用 Keychain）；如显式传 `--enable-keychain` 则允许启用 Keychain 用于测试。

@@ -31,7 +31,7 @@ sleep 1.4
 # Ensure the exact app process we launched is active/key before capturing. Otherwise macOS
 # renders toolbar/titlebar controls in their inactive appearance, which makes segmented controls
 # and traffic-light buttons look washed out in screenshots. Activating by PID avoids focusing a
-# different installed Stable/Dev variant that happens to share the same display name.
+# different installed Release/Dev variant that happens to share the same display name.
 swift -e '
 import AppKit
 import Foundation
