@@ -4,8 +4,8 @@
 
 - Status: 已完成
 - Created: 2026-04-08
-- Last: 2026-04-08
-- Notes: 主题实现、回归验证与最终视觉证据已完成；当前版本按 macOS 系统外观自动切换，并使用激活态窗口截图作为交付证据。
+- Last: 2026-04-09
+- Notes: 主题实现与系统跟随已完成；2026-04-09 继续修复 Settings 左侧 sidebar 在暗色模式下回落成纯黑背景的回归，并补充真实窗口视觉证据。
 
 ## 背景 / 问题陈述
 
@@ -59,6 +59,7 @@
 - 系统外观在 app 运行中切换时，Popover / Main Window / Settings Window 无需重启即可更新。
 - Popover 的玻璃卡片、边框、分隔线、提示条、空状态、运行态底色在深色下不可出现明显“浅色残留块”。
 - Main Window 的状态徽章与选中态装饰在深色下保持可读，不依赖浅色背景。
+- Settings Window 的 `Targets` / `Endpoints` 左侧列表区在深色下必须使用连续的 sidebar surface，列表、分隔线与 `+/-` footer 不可回落成不透明纯黑块。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -68,6 +69,7 @@
 - Given `TELEVYBACKUP_UI_APPEARANCE=light|dark`，When 运行截图脚本，Then 生成对应 light/dark 证据图。
 - Given 现有 popover sizing 回归测试，When 在 light/dark 外观下运行，Then 高度计算与滚动语义保持一致。
 - Given 代码扫描，Then 不再存在会把 UI 强制锁成浅色的 `.vibrantLight` 或 `.preferredColorScheme(.light)` 路径。
+- Given `TELEVYBACKUP_UI_DEMO=1` 且 `TELEVYBACKUP_UI_APPEARANCE=dark`，When 打开 `Targets` / `Endpoints` 的未选中状态，Then Settings 左侧 sidebar 与 footer 保持同一材质层次，不出现左栏纯黑断层。
 
 ## 质量门槛（Quality Gates）
 
@@ -84,8 +86,16 @@
 ![Light Settings Window](./assets/theme-light-settings.png)
 ![Dark Settings Window](./assets/theme-dark-settings.png)
 
+### Settings sidebar dark regression fix
+
+![Dark Settings Targets Unselected](./assets/settings-sidebar-dark-targets-unselected.png)
+![Dark Settings Endpoints Unselected](./assets/settings-sidebar-dark-endpoints-unselected.png)
+![Dark Settings Endpoints Live](./assets/settings-sidebar-dark-endpoints-live.png)
+![Light Settings Endpoints Sanity](./assets/settings-sidebar-light-endpoints.png)
+
 ## Change log
 
 - 2026-04-08: 创建 spec，冻结范围、验收口径与 merge-ready 收口目标。
 - 2026-04-08: 完成主题桥接、Popover/Main/Settings 适配、Swift 回归、app 构建与 light/dark 视觉证据生成。
 - 2026-04-08: 收敛主窗口/设置窗口的 macOS 原生风格细节，改用激活态窗口截图作为最终视觉证据，消除非激活 titlebar/toolbar 的低对比度误导。
+- 2026-04-09: 修复 Settings `Targets` / `Endpoints` 左侧 sidebar 在暗色模式下回落成纯黑背景的回归，补充真实运行窗口截图并确认左栏/footer 共享同一 sidebar surface。
