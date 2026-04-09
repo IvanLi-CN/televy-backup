@@ -39,3 +39,15 @@ bin_popover="$out_dir/popover-layout-size-tests"
   "$root_dir/macos/TelevyBackupApp"/*.swift \
   "$root_dir/macos/TelevyBackupAppTests/PopoverLayoutSizeTests.swift"
 "$bin_popover"
+
+bin_demo_paths="$out_dir/ui-demo-sandbox-path-tests"
+"$swiftc" \
+  -sdk "$sdk_path" \
+  -O \
+  -D TELEVYBACKUP_TESTING \
+  -framework SwiftUI \
+  -framework AppKit \
+  -o "$bin_demo_paths" \
+  "$root_dir/macos/TelevyBackupApp"/*.swift \
+  "$root_dir/macos/TelevyBackupAppTests/UIDemoSandboxPathTests.swift"
+"$bin_demo_paths"

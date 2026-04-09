@@ -118,6 +118,7 @@ final class AppModel: ObservableObject {
     private var lastTaskKind: String? = nil
     private var lastTaskState: String? = nil
     private let launchOverrides: LaunchOverrides = .parse(CommandLine.arguments)
+    private let uiDemoSandboxRunID: String = UUID().uuidString
     let appearanceOverride: AppAppearanceOverride = .fromEnvironment()
 
     private enum UIDemo {
@@ -432,6 +433,7 @@ final class AppModel: ObservableObject {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("TelevyBackup-ui-demo", isDirectory: true)
             .appendingPathComponent(isDevAppVariant() ? "dev" : "release", isDirectory: true)
+            .appendingPathComponent(uiDemoSandboxRunID, isDirectory: true)
     }
 
     private func uiDemoSandboxConfigDirURL() -> URL {
