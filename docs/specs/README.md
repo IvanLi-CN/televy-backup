@@ -30,6 +30,7 @@
 ## Index（固定表格）
 
 | ID   | Title | Status | Spec | Last | Notes |
+| zx5n2 | Release 失败 Telegram 告警接入 | 待实现 | `zx5n2-release-failure-telegram-alerts/SPEC.md` | 2026-04-12 | release notifier wrapper、SHA 标记、Telegram smoke test |
 |-----:|-------|--------|------|------|-------|
 | n2kbu | PR + Label 发布能力 | 已完成 | `n2kbu-pr-label-release/SPEC.md` | 2026-03-08 | 已补 frozen intent、required checks 声明、bootstrap waiver；GitHub ruleset 已于 2026-03-08 对齐 |
 | 3rnws | Main Window：Targets 菜单补齐 “Backup now” | 已完成 | `3rnws-main-window-target-backup-menu/SPEC.md` | 2026-03-05 | PR #51；CI run #273 通过；review-loop 无阻塞问题 |
