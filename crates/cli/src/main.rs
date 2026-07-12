@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -9,6 +9,8 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use sqlx::Row;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use televy_backup_core::{
     APP_NAME, BackupConfig, BackupOptions, ChunkingConfig, ProgressSink, RestoreConfig,
     RestoreOptions, Storage, TelegramMtProtoStorage, TelegramMtProtoStorageConfig, VerifyConfig,
@@ -836,16 +838,28 @@ async fn daemon_start(config_dir: &Path, data_dir: &Path, json: bool) -> Result<
     }
 
     let daemon = daemon_binary_path();
-    let mut child = ProcessCommand::new(&daemon)
+    let mut command = ProcessCommand::new(&daemon);
+    command
         .env("TELEVYBACKUP_CONFIG_DIR", config_dir)
         .env("TELEVYBACKUP_DATA_DIR", data_dir)
-        .spawn()
-        .map_err(|e| {
-            CliError::retryable(
-                "daemon.start_failed",
-                format!("failed to start {}: {e}", daemon.display()),
-            )
-        })?;
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|e| {
+        CliError::retryable(
+            "daemon.start_failed",
+            format!("failed to start {}: {e}", daemon.display()),
+        )
+    })?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {

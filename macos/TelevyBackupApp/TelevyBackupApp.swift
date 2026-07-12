@@ -221,6 +221,11 @@ final class AppModel: ObservableObject {
 
         guard fullyStopDaemon else { return nil }
         let service = "gui/\(getuid())/homebrew.mxcl.televybackupd"
+        let launchAgentLoaded = runCommandCapture(
+            exe: "/bin/launchctl",
+            args: ["print", service],
+            timeoutSeconds: 2
+        ).status == 0
         let disabled = runCommandCapture(
             exe: "/bin/launchctl",
             args: ["print-disabled", "gui/\(getuid())"],
@@ -235,6 +240,14 @@ final class AppModel: ObservableObject {
             appendLog("INFO: LaunchAgent not disabled: exit=\(disable.status)")
         }
 
+        func restoreLaunchAgentIfNeeded() {
+            guard disabledForShutdown else { return }
+            let enable = runCommandCapture(exe: "/bin/launchctl", args: ["enable", service], timeoutSeconds: 3)
+            if enable.status != 0 {
+                appendLog("WARN: LaunchAgent could not be re-enabled: exit=\(enable.status)")
+            }
+        }
+
         var failure: String?
         if let cli = cliPath() {
             let result = runCommandCapture(exe: cli, args: ["daemon", "stop"], timeoutSeconds: 10)
@@ -247,18 +260,19 @@ final class AppModel: ObservableObject {
         }
 
         if failure != nil {
-            if disabledForShutdown {
-                let enable = runCommandCapture(exe: "/bin/launchctl", args: ["enable", service], timeoutSeconds: 3)
-                if enable.status != 0 {
-                    appendLog("WARN: LaunchAgent could not be re-enabled: exit=\(enable.status)")
-                }
-            }
+            restoreLaunchAgentIfNeeded()
             return failure
         }
 
-        let unload = runCommandCapture(exe: "/bin/launchctl", args: ["bootout", service], timeoutSeconds: 5)
-        if unload.status != 0 {
-            appendLog("INFO: LaunchAgent not unloaded: exit=\(unload.status)")
+        if launchAgentLoaded {
+            let unload = runCommandCapture(exe: "/bin/launchctl", args: ["bootout", service], timeoutSeconds: 5)
+            if unload.status != 0 {
+                appendLog("ERROR: LaunchAgent not unloaded: exit=\(unload.status)")
+                restoreLaunchAgentIfNeeded()
+                return unload.stderr.isEmpty
+                    ? "The scheduled daemon service could not be unloaded."
+                    : unload.stderr
+            }
         }
 
         if let task = daemonTask, task.isRunning {

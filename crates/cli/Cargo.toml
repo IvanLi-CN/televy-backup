@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+libc = "0.2"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.2"
