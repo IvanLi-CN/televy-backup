@@ -118,7 +118,7 @@
 
 ## 风险 / 开放问题 / 假设
 
-- release 默认运行环境中，用户选择完全退出时先 disable Homebrew LaunchAgent 阻止 keep-alive 重启，再请求 daemon 优雅停止，成功后 bootout 原本已加载的服务；dev 或自定义目录运行只停止当前环境的 daemon，绝不变更 release LaunchAgent。停止或 bootout 失败时取消 App 退出并恢复本次 disable。
+- release 默认运行环境中，用户选择完全退出时先 disable Homebrew LaunchAgent 阻止 keep-alive 重启，再使用 Formula 的 config/data 目录请求 daemon 优雅停止，成功后 bootout 原本已加载的服务；App 等待比 CLI 的十秒收尾窗口多出返回余量。dev 或自定义目录运行只停止当前环境的 daemon，绝不变更 release LaunchAgent。停止或 bootout 失败时取消 App 退出并恢复本次 disable。
 - 十秒是用户确认的优雅退出上限；强制终止仅用于已确认归属的 daemon。
 
 ## 参考

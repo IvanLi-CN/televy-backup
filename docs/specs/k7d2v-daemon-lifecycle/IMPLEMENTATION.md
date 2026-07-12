@@ -14,7 +14,7 @@
 - CLI 新增 `daemon start|status|stop`。
 - macOS App 新增退出图标与统一终止回调；完整退出请求 daemon 停止并尝试卸载 LaunchAgent。
 - 完整退出期间显示阻塞式收尾状态；daemon 未在十秒内停止时取消 App 退出、恢复 App 状态流与计时器，并保留失败说明。
-- 完整退出仅在 release 默认环境 disable LaunchAgent 以阻止 keep-alive 重启，优雅停止后再 bootout；dev/custom-dir 不变更 release 服务；bootout 失败会取消 App 退出；remote index preflight 与 post-backup bootstrap update 均接入任务取消 token，CLI start 脱离调用终端。
+- 完整退出仅在 release 默认环境 disable LaunchAgent 以阻止 keep-alive 重启，并将 CLI stop 指向 Formula 的 config/data 目录，优雅停止后再 bootout；App 等待 CLI 十秒窗口加返回余量；dev/custom-dir 不变更 release 服务；bootout 失败会取消 App 退出；remote index preflight 与 post-backup bootstrap update 均接入任务取消 token，CLI start 脱离调用终端。
 
 ## Remaining Gaps
 

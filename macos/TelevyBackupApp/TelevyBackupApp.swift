@@ -227,6 +227,15 @@ final class AppModel: ObservableObject {
             args: ["print", service],
             timeoutSeconds: 2
         ).status == 0
+        let daemonStopEnvironment: [String: String]
+        if launchAgentLoaded {
+            guard let homebrewEnvironment = homebrewDaemonEnvironment() else {
+                return "The Homebrew daemon service location could not be determined."
+            }
+            daemonStopEnvironment = homebrewEnvironment
+        } else {
+            daemonStopEnvironment = [:]
+        }
         let disabledForShutdown: Bool
         if managesHomebrewLaunchAgent {
             let disabled = runCommandCapture(
@@ -256,7 +265,12 @@ final class AppModel: ObservableObject {
 
         var failure: String?
         if let cli = cliPath() {
-            let result = runCommandCapture(exe: cli, args: ["daemon", "stop"], timeoutSeconds: 10)
+            let result = runCommandCapture(
+                exe: cli,
+                args: ["daemon", "stop"],
+                timeoutSeconds: 11,
+                env: daemonStopEnvironment
+            )
             if result.status != 0 {
                 appendLog("ERROR: daemon stop failed: exit=\(result.status) reason=\(result.reason.rawValue)")
                 failure = result.stderr.isEmpty
@@ -942,6 +956,26 @@ final class AppModel: ObservableObject {
         if let v = env["TELEVYBACKUP_DATA_DIR"], !v.isEmpty { return true }
         if let v = env["TELEVYBACKUP_CONFIG_DIR"], !v.isEmpty { return true }
         return false
+    }
+
+    private func homebrewDaemonEnvironment() -> [String: String]? {
+        let brewCandidates = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+        for brew in brewCandidates where FileManager.default.isExecutableFile(atPath: brew) {
+            let prefix = runCommandCapture(
+                exe: brew,
+                args: ["--prefix"],
+                timeoutSeconds: 3
+            )
+            guard prefix.status == 0 else { continue }
+            let path = prefix.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { continue }
+            let root = URL(fileURLWithPath: path, isDirectory: true)
+            return [
+                "TELEVYBACKUP_CONFIG_DIR": root.appendingPathComponent("etc/televybackup").path,
+                "TELEVYBACKUP_DATA_DIR": root.appendingPathComponent("var/lib/televybackup").path,
+            ]
+        }
+        return nil
     }
 
     private func waitForDaemonIpcReady(timeoutSeconds: Double) -> Bool {
