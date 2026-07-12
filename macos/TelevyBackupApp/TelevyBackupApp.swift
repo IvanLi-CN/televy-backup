@@ -60,6 +60,11 @@ final class ModelStore {
 }
 
 final class AppModel: ObservableObject {
+    enum ShutdownPresentation {
+        case stopping
+        case failed(String)
+    }
+
     @Published var sourcePath: String = ""
     @Published var label: String = "manual"
     @Published var chatId: String = ""
@@ -85,6 +90,7 @@ final class AppModel: ObservableObject {
 
     @Published var toastText: String? = nil
     @Published var toastIsError: Bool = false
+    @Published var shutdownPresentation: ShutdownPresentation? = nil
 
     @Published var lastRunOk: Bool? = nil
     @Published var lastRunErrorCode: String? = nil
@@ -179,7 +185,26 @@ final class AppModel: ObservableObject {
         scheduleEnabled
     }
 
-    func stopRuntimeResources(fullyStopDaemon: Bool) {
+    func beginDaemonShutdownPresentation() {
+        DispatchQueue.main.async {
+            self.shutdownPresentation = .stopping
+        }
+    }
+
+    func finishDaemonShutdownPresentation(error: String?) {
+        DispatchQueue.main.async {
+            self.shutdownPresentation = error.map(ShutdownPresentation.failed)
+        }
+    }
+
+    func restoreRuntimeResourcesAfterFailedDaemonShutdown() {
+        lastDaemonStartAttemptAt = nil
+        startStatusStaleTimer()
+        ensureDaemonRunning()
+        ensureStatusStreamRunning()
+    }
+
+    func stopRuntimeResources(fullyStopDaemon: Bool) -> String? {
         statusStreamReconnectWork?.cancel()
         statusStreamReconnectWork = nil
         daemonIpcRetryWork?.cancel()
@@ -194,12 +219,20 @@ final class AppModel: ObservableObject {
         }
         statusStreamTask = nil
 
-        guard fullyStopDaemon else { return }
+        guard fullyStopDaemon else { return nil }
+        var failure: String?
         if let cli = cliPath() {
             let result = runCommandCapture(exe: cli, args: ["daemon", "stop"], timeoutSeconds: 10)
             if result.status != 0 {
                 appendLog("ERROR: daemon stop failed: exit=\(result.status) reason=\(result.reason.rawValue)")
+                failure = result.stderr.isEmpty
+                    ? "The daemon did not stop within 10 seconds."
+                    : result.stderr
             }
+        }
+
+        if failure != nil {
+            return failure
         }
 
         let service = "gui/\(getuid())/homebrew.mxcl.televybackupd"
@@ -217,6 +250,7 @@ final class AppModel: ObservableObject {
             }
         }
         daemonTask = nil
+        return nil
     }
 
     private struct RateSample {
@@ -243,6 +277,9 @@ final class AppModel: ObservableObject {
     init() {
         startStatusStaleTimer()
         installUIDemoDataIfNeeded()
+        if UIDemo.enabled, UIDemo.scene == "shutdown-waiting" {
+            shutdownPresentation = .stopping
+        }
     }
 
     private func installUIDemoDataIfNeeded() {
@@ -2900,6 +2937,43 @@ struct GlassCard<Content: View>: View {
     }
 }
 
+private struct ShutdownControl: View {
+    @EnvironmentObject private var model: AppModel
+    let theme: PopoverTheme
+
+    var body: some View {
+        Group {
+            if let presentation = model.shutdownPresentation, case .stopping = presentation {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 22, height: 22)
+                    .background(theme.actionButtonBackground, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(theme.actionButtonStroke, lineWidth: 1)
+                    )
+                    .accessibilityLabel("Closing background service")
+                    .help("Closing background service")
+            } else {
+                Button {
+                    NSApp.terminate(nil)
+                } label: {
+                    Image(systemName: "power")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                        .background(theme.actionButtonBackground, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(theme.actionButtonStroke, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Quit TelevyBackup")
+            }
+        }
+    }
+}
+
 struct PopoverRootView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
@@ -2907,7 +2981,12 @@ struct PopoverRootView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+                .disabled(model.shutdownPresentation != nil)
+            if let shutdownPresentation = model.shutdownPresentation {
+                shutdownNotice(shutdownPresentation)
+            }
             OverviewView()
+                .disabled(model.shutdownPresentation != nil)
         }
         .padding(16)
         .frame(width: PopoverAutoSize.width, alignment: .topLeading)
@@ -3017,20 +3096,7 @@ struct PopoverRootView: View {
                 .buttonStyle(.plain)
                 .help("Open main window")
 
-                Button {
-                    NSApp.terminate(nil)
-                } label: {
-                    Image(systemName: "power")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 22, height: 22)
-                        .background(theme.actionButtonBackground, in: RoundedRectangle(cornerRadius: 10))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .strokeBorder(theme.actionButtonStroke, lineWidth: 1)
-                        )
-                }
-                .buttonStyle(.plain)
-                .help("Quit TelevyBackup")
+                ShutdownControl(theme: theme)
             }
             .padding(.bottom, 12)
 
@@ -3039,6 +3105,50 @@ struct PopoverRootView: View {
                 .frame(height: 1)
         }
         .padding(.bottom, 2)
+    }
+
+    private func shutdownNotice(_ state: AppModel.ShutdownPresentation) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            switch state {
+            case .stopping:
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 16, height: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Closing background service")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("Finishing background work. Up to 10 seconds.")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            case let .failed(message):
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .frame(width: 16, height: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Background service is still running")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(message)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Button("Keep Open") {
+                    model.shutdownPresentation = nil
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11, weight: .semibold))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(theme.divider)
+                .frame(height: 1)
+        }
     }
 
     private var glassFill: LinearGradient {
@@ -4207,10 +4317,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         terminationInProgress = true
+        if fullyStopDaemon {
+            ModelStore.shared.beginDaemonShutdownPresentation()
+        }
         DispatchQueue.global(qos: .userInitiated).async {
-            ModelStore.shared.stopRuntimeResources(fullyStopDaemon: fullyStopDaemon)
+            let failure = ModelStore.shared.stopRuntimeResources(fullyStopDaemon: fullyStopDaemon)
             DispatchQueue.main.async {
-                sender.reply(toApplicationShouldTerminate: true)
+                if let failure {
+                    self.terminationInProgress = false
+                    ModelStore.shared.restoreRuntimeResourcesAfterFailedDaemonShutdown()
+                    ModelStore.shared.finishDaemonShutdownPresentation(error: failure)
+                    sender.reply(toApplicationShouldTerminate: false)
+                } else {
+                    sender.reply(toApplicationShouldTerminate: true)
+                }
             }
         }
         return .terminateLater

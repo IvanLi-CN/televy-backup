@@ -108,6 +108,10 @@
 
 ![Quit control in status popover](./assets/quit-control-popover.png)
 
+完全退出期间，界面阻止重复操作，并显示 daemon 正在收尾及十秒上限。
+
+![Daemon shutdown waiting state](./assets/shutdown-waiting-popover.png)
+
 ## Related PRs
 
 - None
