@@ -221,9 +221,18 @@ final class AppModel: ObservableObject {
 
         guard fullyStopDaemon else { return nil }
         let service = "gui/\(getuid())/homebrew.mxcl.televybackupd"
-        let unload = runCommandCapture(exe: "/bin/launchctl", args: ["bootout", service], timeoutSeconds: 5)
-        if unload.status != 0 {
-            appendLog("INFO: LaunchAgent not unloaded: exit=\(unload.status)")
+        let disabled = runCommandCapture(
+            exe: "/bin/launchctl",
+            args: ["print-disabled", "gui/\(getuid())"],
+            timeoutSeconds: 2
+        )
+        let launchAgentWasDisabled = disabled.stdout.contains("\"homebrew.mxcl.televybackupd\" => true")
+        let disable = launchAgentWasDisabled
+            ? nil
+            : runCommandCapture(exe: "/bin/launchctl", args: ["disable", service], timeoutSeconds: 3)
+        let disabledForShutdown = disable?.status == 0
+        if let disable, disable.status != 0 {
+            appendLog("INFO: LaunchAgent not disabled: exit=\(disable.status)")
         }
 
         var failure: String?
@@ -238,7 +247,18 @@ final class AppModel: ObservableObject {
         }
 
         if failure != nil {
+            if disabledForShutdown {
+                let enable = runCommandCapture(exe: "/bin/launchctl", args: ["enable", service], timeoutSeconds: 3)
+                if enable.status != 0 {
+                    appendLog("WARN: LaunchAgent could not be re-enabled: exit=\(enable.status)")
+                }
+            }
             return failure
+        }
+
+        let unload = runCommandCapture(exe: "/bin/launchctl", args: ["bootout", service], timeoutSeconds: 5)
+        if unload.status != 0 {
+            appendLog("INFO: LaunchAgent not unloaded: exit=\(unload.status)")
         }
 
         if let task = daemonTask, task.isRunning {

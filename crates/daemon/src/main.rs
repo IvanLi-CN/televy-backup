@@ -1842,75 +1842,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         Ok(())
                     } else {
-                        let pool = televy_backup_core::index_db::open_index_db(&db_path).await?;
+                        tokio::select! {
+                            _ = task_cancel.cancelled() => Err(televy_backup_core::Error::Cancelled),
+                            update = async {
+                                let pool = televy_backup_core::index_db::open_index_db(&db_path).await?;
 
-                        let row = sqlx::query(
-                            "SELECT manifest_object_id FROM remote_indexes WHERE snapshot_id = ? AND provider = ? LIMIT 1",
-                        )
-                        .bind(&res.snapshot_id)
-                        .bind(storage.provider())
-                        .fetch_one(&pool)
-                        .await?;
-                        let filemap_manifest_object_id: String = row.get("manifest_object_id");
+                                let row = sqlx::query(
+                                    "SELECT manifest_object_id FROM remote_indexes WHERE snapshot_id = ? AND provider = ? LIMIT 1",
+                                )
+                                .bind(&res.snapshot_id)
+                                .bind(storage.provider())
+                                .fetch_one(&pool)
+                                .await?;
+                                let filemap_manifest_object_id: String = row.get("manifest_object_id");
 
-                        let endpoint_index_id = match sqlx::query(
-                            "SELECT value FROM endpoint_state WHERE key = ? LIMIT 1",
-                        )
-                        .bind(televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_INDEX_ID_KEY)
-                        .fetch_optional(&pool)
-                        .await?
-                        {
-                            Some(r) => r.get::<String, _>("value"),
-                            None => televy_backup_core::bootstrap::endpoint_index_id_for_storage(
-                                storage,
-                            )?,
-                        };
+                                let endpoint_index_id = match sqlx::query(
+                                    "SELECT value FROM endpoint_state WHERE key = ? LIMIT 1",
+                                )
+                                .bind(televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_INDEX_ID_KEY)
+                                .fetch_optional(&pool)
+                                .await?
+                                {
+                                    Some(r) => r.get::<String, _>("value"),
+                                    None => televy_backup_core::bootstrap::endpoint_index_id_for_storage(
+                                        storage,
+                                    )?,
+                                };
 
-                        let endpoint_manifest_object_id = sqlx::query(
-                            "SELECT value FROM endpoint_state WHERE key = ? LIMIT 1",
-                        )
-                        .bind(
-                            televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY,
-                        )
-                        .fetch_optional(&pool)
-                        .await?
-                        .map(|r| r.get::<String, _>("value"))
-                        .ok_or_else(|| televy_backup_core::Error::Integrity {
-                            message: "missing endpoint_state.endpoint_manifest_object_id after backup".to_string(),
-                        })?;
+                                let endpoint_manifest_object_id = sqlx::query(
+                                    "SELECT value FROM endpoint_state WHERE key = ? LIMIT 1",
+                                )
+                                .bind(
+                                    televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY,
+                                )
+                                .fetch_optional(&pool)
+                                .await?
+                                .map(|r| r.get::<String, _>("value"))
+                                .ok_or_else(|| televy_backup_core::Error::Integrity {
+                                    message: "missing endpoint_state.endpoint_manifest_object_id after backup".to_string(),
+                                })?;
 
-                        let endpoint_dedupe_id =
-                            televy_backup_core::dedupe_catalog::endpoint_dedupe_id_for_storage(
-                                storage,
-                            )?;
-                        let dedupe_catalog_object_id =
-                            televy_backup_core::index_sync::endpoint_state_get(
-                                &dedupe_db_path,
-                                televy_backup_core::index_sync::ENDPOINT_STATE_DEDUPE_CATALOG_OBJECT_ID_KEY,
-                            )
-                            .await?
-                            .ok_or_else(|| televy_backup_core::Error::Integrity {
-                                message: "missing endpoint_state.dedupe_catalog_object_id after backup".to_string(),
-                            })?;
+                                let endpoint_dedupe_id =
+                                    televy_backup_core::dedupe_catalog::endpoint_dedupe_id_for_storage(
+                                        storage,
+                                    )?;
+                                let dedupe_catalog_object_id =
+                                    televy_backup_core::index_sync::endpoint_state_get(
+                                        &dedupe_db_path,
+                                        televy_backup_core::index_sync::ENDPOINT_STATE_DEDUPE_CATALOG_OBJECT_ID_KEY,
+                                    )
+                                    .await?
+                                    .ok_or_else(|| televy_backup_core::Error::Integrity {
+                                        message: "missing endpoint_state.dedupe_catalog_object_id after backup".to_string(),
+                                    })?;
 
-                        bootstrap::update_remote_latest(
-                            storage,
-                            &master_key,
-                            Some(bootstrap::BootstrapEndpointLatest {
-                                endpoint_index_id,
-                                manifest_object_id: endpoint_manifest_object_id,
-                            }),
-                            Some(bootstrap::BootstrapEndpointDedupeLatest {
-                                endpoint_dedupe_id,
-                                catalog_object_id: dedupe_catalog_object_id,
-                            }),
-                            &target.id,
-                            &target.source_path,
-                            &label,
-                            &res.snapshot_id,
-                            &filemap_manifest_object_id,
-                        )
-                        .await
+                                bootstrap::update_remote_latest(
+                                    storage,
+                                    &master_key,
+                                    Some(bootstrap::BootstrapEndpointLatest {
+                                        endpoint_index_id,
+                                        manifest_object_id: endpoint_manifest_object_id,
+                                    }),
+                                    Some(bootstrap::BootstrapEndpointDedupeLatest {
+                                        endpoint_dedupe_id,
+                                        catalog_object_id: dedupe_catalog_object_id,
+                                    }),
+                                    &target.id,
+                                    &target.source_path,
+                                    &label,
+                                    &res.snapshot_id,
+                                    &filemap_manifest_object_id,
+                                )
+                                .await
+                            } => update,
+                        }
                     };
 
                     match bootstrap_update {

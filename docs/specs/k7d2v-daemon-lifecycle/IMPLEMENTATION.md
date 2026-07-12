@@ -14,7 +14,7 @@
 - CLI 新增 `daemon start|status|stop`。
 - macOS App 新增退出图标与统一终止回调；完整退出请求 daemon 停止并尝试卸载 LaunchAgent。
 - 完整退出期间显示阻塞式收尾状态；daemon 未在十秒内停止时取消 App 退出、恢复 App 状态流与计时器，并保留失败说明。
-- 完整退出先卸载 LaunchAgent 以阻止 keep-alive 重启；remote index preflight 也接入任务取消 token。
+- 完整退出先 disable LaunchAgent 以阻止 keep-alive 重启，优雅停止后再 bootout；remote index preflight 与 post-backup bootstrap update 均接入任务取消 token。
 
 ## Remaining Gaps
 

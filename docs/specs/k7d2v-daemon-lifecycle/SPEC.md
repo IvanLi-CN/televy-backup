@@ -118,7 +118,7 @@
 
 ## 风险 / 开放问题 / 假设
 
-- 用户选择完全退出时，先 unload Homebrew LaunchAgent，再请求 daemon 停止，避免 keep-alive 重启。
+- 用户选择完全退出时，先 disable Homebrew LaunchAgent 阻止 keep-alive 重启，再请求 daemon 优雅停止，成功后 bootout 服务；停止失败时恢复本次 disable。
 - 十秒是用户确认的优雅退出上限；强制终止仅用于已确认归属的 daemon。
 
 ## 参考
