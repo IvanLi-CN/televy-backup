@@ -221,23 +221,29 @@ final class AppModel: ObservableObject {
 
         guard fullyStopDaemon else { return nil }
         let service = "gui/\(getuid())/homebrew.mxcl.televybackupd"
-        let launchAgentLoaded = runCommandCapture(
+        let managesHomebrewLaunchAgent = !preferBundledDaemonForCurrentEnvironment()
+        let launchAgentLoaded = managesHomebrewLaunchAgent && runCommandCapture(
             exe: "/bin/launchctl",
             args: ["print", service],
             timeoutSeconds: 2
         ).status == 0
-        let disabled = runCommandCapture(
-            exe: "/bin/launchctl",
-            args: ["print-disabled", "gui/\(getuid())"],
-            timeoutSeconds: 2
-        )
-        let launchAgentWasDisabled = disabled.stdout.contains("\"homebrew.mxcl.televybackupd\" => true")
-        let disable = launchAgentWasDisabled
-            ? nil
-            : runCommandCapture(exe: "/bin/launchctl", args: ["disable", service], timeoutSeconds: 3)
-        let disabledForShutdown = disable?.status == 0
-        if let disable, disable.status != 0 {
-            appendLog("INFO: LaunchAgent not disabled: exit=\(disable.status)")
+        let disabledForShutdown: Bool
+        if managesHomebrewLaunchAgent {
+            let disabled = runCommandCapture(
+                exe: "/bin/launchctl",
+                args: ["print-disabled", "gui/\(getuid())"],
+                timeoutSeconds: 2
+            )
+            let launchAgentWasDisabled = disabled.stdout.contains("\"homebrew.mxcl.televybackupd\" => true")
+            let disable = launchAgentWasDisabled
+                ? nil
+                : runCommandCapture(exe: "/bin/launchctl", args: ["disable", service], timeoutSeconds: 3)
+            disabledForShutdown = disable?.status == 0
+            if let disable, disable.status != 0 {
+                appendLog("INFO: LaunchAgent not disabled: exit=\(disable.status)")
+            }
+        } else {
+            disabledForShutdown = false
         }
 
         func restoreLaunchAgentIfNeeded() {
