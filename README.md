@@ -237,6 +237,16 @@ Backup progress semantics for UI/events:
 
 The scheduled runner is `televybackupd` (`crates/daemon/`). It uses the same `config.toml` and `secrets.enc` (vault key in Keychain).
 
+The CLI can manage the local daemon explicitly:
+
+```bash
+televybackup daemon start
+televybackup daemon status
+televybackup daemon stop
+```
+
+`daemon start` returns after the local IPC service is ready. `daemon stop` cancels an active scheduled backup and waits up to 10 seconds for graceful shutdown. In the macOS app, quitting with schedules enabled offers a choice between quitting the app only and fully stopping the daemon; a full stop unloads the Homebrew LaunchAgent so its keep-alive setting cannot restart the process.
+
 Homebrew templates live under `packaging/homebrew/`.
 
 ## Docs

@@ -51,6 +51,7 @@ pub fn spawn_control_ipc_server(
     config_root: PathBuf,
     settings: Arc<RwLock<Settings>>,
     status_state: Arc<Mutex<crate::StatusRuntimeState>>,
+    lifecycle: Arc<crate::DaemonLifecycle>,
 ) -> std::io::Result<ControlIpcServerHandle> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -124,8 +125,9 @@ pub fn spawn_control_ipc_server(
                     let config_root = config_root.clone();
                     let settings = settings.clone();
                     let status_state = status_state.clone();
+                    let lifecycle = lifecycle.clone();
                     tokio::spawn(async move {
-                        let _ = handle_control_ipc_client(stream, &config_root, settings, status_state, &mut shutdown).await;
+                        let _ = handle_control_ipc_client(stream, &config_root, settings, status_state, lifecycle, &mut shutdown).await;
                     });
                 }
             }
@@ -144,6 +146,7 @@ async fn handle_control_ipc_client(
     config_root: &std::path::Path,
     settings: Arc<RwLock<Settings>>,
     status_state: Arc<Mutex<crate::StatusRuntimeState>>,
+    lifecycle: Arc<crate::DaemonLifecycle>,
     shutdown: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let (r, w) = stream.into_split();
@@ -227,7 +230,7 @@ async fn handle_control_ipc_client(
 
     let resp = {
         let settings = settings.read().await;
-        handle_request(&req, config_root, &settings, &status_state)
+        handle_request(&req, config_root, &settings, &status_state, &lifecycle)
     };
     write_json_line(&mut w, &resp).await?;
     Ok(())
@@ -238,6 +241,7 @@ fn handle_request(
     config_root: &std::path::Path,
     settings: &Settings,
     status_state: &Arc<Mutex<crate::StatusRuntimeState>>,
+    lifecycle: &Arc<crate::DaemonLifecycle>,
 ) -> ControlResponse {
     if req.type_ != "control.request" || req.id.trim().is_empty() || req.method.trim().is_empty() {
         return ControlResponse::err(
@@ -253,6 +257,13 @@ fn handle_request(
     }
 
     match req.method.as_str() {
+        "daemon.stop" => {
+            lifecycle.request_shutdown();
+            ControlResponse::ok(
+                req.id.clone(),
+                serde_json::json!({ "shutdownRequested": true }),
+            )
+        }
         "vault.status" => match vault_status(config_root) {
             Ok(s) => ControlResponse::ok(
                 req.id.clone(),
@@ -762,6 +773,7 @@ mod tests {
             cfg_root.clone(),
             Arc::new(RwLock::new(settings())),
             status_state,
+            Arc::new(crate::DaemonLifecycle::default()),
         )
         .unwrap();
 
@@ -781,5 +793,23 @@ mod tests {
             resp.error.as_ref().unwrap().code,
             "control.method_not_found"
         );
+    }
+
+    #[test]
+    fn daemon_stop_requests_lifecycle_shutdown() {
+        let lifecycle = Arc::new(crate::DaemonLifecycle::default());
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let response = handle_request(
+            &ControlRequest::new("1", "daemon.stop", serde_json::json!({})),
+            std::path::Path::new("/tmp"),
+            &settings(),
+            &status_state,
+            &lifecycle,
+        );
+
+        assert!(response.ok);
+        assert!(lifecycle.is_shutdown_requested());
     }
 }

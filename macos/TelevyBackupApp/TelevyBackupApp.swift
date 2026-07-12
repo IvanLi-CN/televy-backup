@@ -60,6 +60,11 @@ final class ModelStore {
 }
 
 final class AppModel: ObservableObject {
+    enum ShutdownPresentation {
+        case stopping
+        case failed(String)
+    }
+
     @Published var sourcePath: String = ""
     @Published var label: String = "manual"
     @Published var chatId: String = ""
@@ -85,6 +90,7 @@ final class AppModel: ObservableObject {
 
     @Published var toastText: String? = nil
     @Published var toastIsError: Bool = false
+    @Published var shutdownPresentation: ShutdownPresentation? = nil
 
     @Published var lastRunOk: Bool? = nil
     @Published var lastRunErrorCode: String? = nil
@@ -175,6 +181,132 @@ final class AppModel: ObservableObject {
     private var lastDaemonStartAttemptAt: Date? = nil
     private var lastRateSampleByTargetId: [String: RateSample] = [:]
 
+    func hasEnabledSchedule() -> Bool {
+        scheduleEnabled
+    }
+
+    func beginDaemonShutdownPresentation() {
+        DispatchQueue.main.async {
+            self.shutdownPresentation = .stopping
+        }
+    }
+
+    func finishDaemonShutdownPresentation(error: String?) {
+        DispatchQueue.main.async {
+            self.shutdownPresentation = error.map(ShutdownPresentation.failed)
+        }
+    }
+
+    func restoreRuntimeResourcesAfterFailedDaemonShutdown() {
+        lastDaemonStartAttemptAt = nil
+        startStatusStaleTimer()
+        ensureDaemonRunning()
+        ensureStatusStreamRunning()
+    }
+
+    func stopRuntimeResources(fullyStopDaemon: Bool) -> String? {
+        statusStreamReconnectWork?.cancel()
+        statusStreamReconnectWork = nil
+        daemonIpcRetryWork?.cancel()
+        daemonIpcRetryWork = nil
+        statusStaleTimer?.cancel()
+        statusStaleTimer = nil
+        statusPollTimer?.cancel()
+        statusPollTimer = nil
+
+        if let task = statusStreamTask, task.isRunning {
+            task.terminate()
+        }
+        statusStreamTask = nil
+
+        guard fullyStopDaemon else { return nil }
+        let service = "gui/\(getuid())/homebrew.mxcl.televybackupd"
+        let managesHomebrewLaunchAgent = !preferBundledDaemonForCurrentEnvironment()
+        let launchAgentLoaded = managesHomebrewLaunchAgent && runCommandCapture(
+            exe: "/bin/launchctl",
+            args: ["print", service],
+            timeoutSeconds: 2
+        ).status == 0
+        let daemonStopEnvironment: [String: String]
+        if launchAgentLoaded {
+            guard let homebrewEnvironment = homebrewDaemonEnvironment() else {
+                return "The Homebrew daemon service location could not be determined."
+            }
+            daemonStopEnvironment = homebrewEnvironment
+        } else {
+            daemonStopEnvironment = [:]
+        }
+        let disabledForShutdown: Bool
+        if managesHomebrewLaunchAgent {
+            let disabled = runCommandCapture(
+                exe: "/bin/launchctl",
+                args: ["print-disabled", "gui/\(getuid())"],
+                timeoutSeconds: 2
+            )
+            let launchAgentWasDisabled = disabled.stdout.contains("\"homebrew.mxcl.televybackupd\" => true")
+            let disable = launchAgentWasDisabled
+                ? nil
+                : runCommandCapture(exe: "/bin/launchctl", args: ["disable", service], timeoutSeconds: 3)
+            disabledForShutdown = disable?.status == 0
+            if let disable, disable.status != 0 {
+                appendLog("INFO: LaunchAgent not disabled: exit=\(disable.status)")
+            }
+        } else {
+            disabledForShutdown = false
+        }
+
+        func restoreLaunchAgentIfNeeded() {
+            guard disabledForShutdown else { return }
+            let enable = runCommandCapture(exe: "/bin/launchctl", args: ["enable", service], timeoutSeconds: 3)
+            if enable.status != 0 {
+                appendLog("WARN: LaunchAgent could not be re-enabled: exit=\(enable.status)")
+            }
+        }
+
+        var failure: String?
+        if let cli = cliPath() {
+            let result = runCommandCapture(
+                exe: cli,
+                args: ["daemon", "stop"],
+                timeoutSeconds: 11,
+                env: daemonStopEnvironment
+            )
+            if result.status != 0 {
+                appendLog("ERROR: daemon stop failed: exit=\(result.status) reason=\(result.reason.rawValue)")
+                failure = result.stderr.isEmpty
+                    ? "The daemon did not stop within 10 seconds."
+                    : result.stderr
+            }
+        }
+
+        if failure != nil {
+            restoreLaunchAgentIfNeeded()
+            return failure
+        }
+
+        if launchAgentLoaded {
+            let unload = runCommandCapture(exe: "/bin/launchctl", args: ["bootout", service], timeoutSeconds: 5)
+            if unload.status != 0 {
+                appendLog("ERROR: LaunchAgent not unloaded: exit=\(unload.status)")
+                restoreLaunchAgentIfNeeded()
+                return unload.stderr.isEmpty
+                    ? "The scheduled daemon service could not be unloaded."
+                    : unload.stderr
+            }
+        }
+
+        if let task = daemonTask, task.isRunning {
+            task.terminate()
+            let pid = task.processIdentifier
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                guard task.isRunning, task.processIdentifier == pid else { return }
+                _ = kill(pid_t(pid), SIGKILL)
+            }
+        }
+        daemonTask = nil
+        return nil
+    }
+
     private struct RateSample {
         let at: Date
         let uploaded: Int64?
@@ -199,6 +331,9 @@ final class AppModel: ObservableObject {
     init() {
         startStatusStaleTimer()
         installUIDemoDataIfNeeded()
+        if UIDemo.enabled, UIDemo.scene == "shutdown-waiting" {
+            shutdownPresentation = .stopping
+        }
     }
 
     private func installUIDemoDataIfNeeded() {
@@ -821,6 +956,26 @@ final class AppModel: ObservableObject {
         if let v = env["TELEVYBACKUP_DATA_DIR"], !v.isEmpty { return true }
         if let v = env["TELEVYBACKUP_CONFIG_DIR"], !v.isEmpty { return true }
         return false
+    }
+
+    private func homebrewDaemonEnvironment() -> [String: String]? {
+        let brewCandidates = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+        for brew in brewCandidates where FileManager.default.isExecutableFile(atPath: brew) {
+            let prefix = runCommandCapture(
+                exe: brew,
+                args: ["--prefix"],
+                timeoutSeconds: 3
+            )
+            guard prefix.status == 0 else { continue }
+            let path = prefix.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { continue }
+            let root = URL(fileURLWithPath: path, isDirectory: true)
+            return [
+                "TELEVYBACKUP_CONFIG_DIR": root.appendingPathComponent("etc/televybackup").path,
+                "TELEVYBACKUP_DATA_DIR": root.appendingPathComponent("var/lib/televybackup").path,
+            ]
+        }
+        return nil
     }
 
     private func waitForDaemonIpcReady(timeoutSeconds: Double) -> Bool {
@@ -2856,6 +3011,43 @@ struct GlassCard<Content: View>: View {
     }
 }
 
+private struct ShutdownControl: View {
+    @EnvironmentObject private var model: AppModel
+    let theme: PopoverTheme
+
+    var body: some View {
+        Group {
+            if let presentation = model.shutdownPresentation, case .stopping = presentation {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 22, height: 22)
+                    .background(theme.actionButtonBackground, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(theme.actionButtonStroke, lineWidth: 1)
+                    )
+                    .accessibilityLabel("Closing background service")
+                    .help("Closing background service")
+            } else {
+                Button {
+                    NSApp.terminate(nil)
+                } label: {
+                    Image(systemName: "power")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                        .background(theme.actionButtonBackground, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(theme.actionButtonStroke, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Quit TelevyBackup")
+            }
+        }
+    }
+}
+
 struct PopoverRootView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
@@ -2863,7 +3055,12 @@ struct PopoverRootView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+                .disabled(model.shutdownPresentation != nil)
+            if let shutdownPresentation = model.shutdownPresentation {
+                shutdownNotice(shutdownPresentation)
+            }
             OverviewView()
+                .disabled(model.shutdownPresentation != nil)
         }
         .padding(16)
         .frame(width: PopoverAutoSize.width, alignment: .topLeading)
@@ -2972,6 +3169,8 @@ struct PopoverRootView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Open main window")
+
+                ShutdownControl(theme: theme)
             }
             .padding(.bottom, 12)
 
@@ -2980,6 +3179,50 @@ struct PopoverRootView: View {
                 .frame(height: 1)
         }
         .padding(.bottom, 2)
+    }
+
+    private func shutdownNotice(_ state: AppModel.ShutdownPresentation) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            switch state {
+            case .stopping:
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 16, height: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Closing background service")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("Finishing background work. Up to 10 seconds.")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            case let .failed(message):
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .frame(width: 16, height: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Background service is still running")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(message)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Button("Keep Open") {
+                    model.shutdownPresentation = nil
+                }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11, weight: .semibold))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(theme.divider)
+                .frame(height: 1)
+        }
     }
 
     private var glassFill: LinearGradient {
@@ -3918,6 +4161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popoverHost: NSHostingController<AnyView>? = nil
     private var popoverResizeScheduled: Bool = false
     private let appearanceOverride = ModelStore.shared.appearanceOverride
+    private var terminationInProgress = false
 
     // Prevent accidental multi-launch (e.g. `open -n`) from creating duplicate status bar items and
     // competing daemons. We keep the earliest-launched instance alive and exit the rest.
@@ -4119,6 +4363,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationInProgress {
+            return .terminateNow
+        }
+
+        let fullyStopDaemon: Bool
+        if ModelStore.shared.hasEnabledSchedule() {
+            let alert = NSAlert()
+            alert.messageText = "Quit TelevyBackup?"
+            alert.informativeText = "Scheduled backups are enabled. You can close the app and leave the daemon running, or stop scheduled backups completely."
+            alert.addButton(withTitle: "Quit App")
+            alert.addButton(withTitle: "Quit Completely")
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                fullyStopDaemon = false
+            case .alertSecondButtonReturn:
+                fullyStopDaemon = true
+            default:
+                return .terminateCancel
+            }
+        } else {
+            fullyStopDaemon = true
+        }
+
+        terminationInProgress = true
+        if fullyStopDaemon {
+            ModelStore.shared.beginDaemonShutdownPresentation()
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let failure = ModelStore.shared.stopRuntimeResources(fullyStopDaemon: fullyStopDaemon)
+            DispatchQueue.main.async {
+                if let failure {
+                    self.terminationInProgress = false
+                    ModelStore.shared.restoreRuntimeResourcesAfterFailedDaemonShutdown()
+                    ModelStore.shared.finishDaemonShutdownPresentation(error: failure)
+                    sender.reply(toApplicationShouldTerminate: false)
+                } else {
+                    sender.reply(toApplicationShouldTerminate: true)
+                }
+            }
+        }
+        return .terminateLater
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

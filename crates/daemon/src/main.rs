@@ -31,6 +31,50 @@ mod control_ipc;
 mod status_ipc;
 mod vault_ipc;
 
+#[derive(Default)]
+pub(crate) struct DaemonLifecycle {
+    shutdown: CancellationToken,
+    active_task: Mutex<Option<CancellationToken>>,
+}
+
+impl DaemonLifecycle {
+    fn begin_task(&self) -> CancellationToken {
+        let token = self.shutdown.child_token();
+        *self
+            .active_task
+            .lock()
+            .expect("daemon lifecycle lock poisoned") = Some(token.clone());
+        token
+    }
+
+    fn finish_task(&self) {
+        *self
+            .active_task
+            .lock()
+            .expect("daemon lifecycle lock poisoned") = None;
+    }
+
+    pub(crate) fn request_shutdown(&self) {
+        self.shutdown.cancel();
+        if let Some(task) = self
+            .active_task
+            .lock()
+            .expect("daemon lifecycle lock poisoned")
+            .as_ref()
+        {
+            task.cancel();
+        }
+    }
+
+    fn is_shutdown_requested(&self) -> bool {
+        self.shutdown.is_cancelled()
+    }
+
+    fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+}
+
 #[derive(Default, Clone)]
 struct TargetScheduleState {
     last_hourly: Option<(i32, u32, u32, u32)>, // year, month, day, hour
@@ -1020,6 +1064,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_config_mtime = file_mtime(&config_path);
 
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
+    let lifecycle = Arc::new(DaemonLifecycle::default());
     let status_path = status_json_path(&data_root);
     tokio::spawn(status_writer_loop(status_state.clone(), status_path));
 
@@ -1111,6 +1156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_root.clone(),
         control_ipc_settings.clone(),
         status_state.clone(),
+        lifecycle.clone(),
     ) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -1177,6 +1223,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut storage_by_endpoint = HashMap::<String, TelegramMtProtoStorage>::new();
 
     loop {
+        if lifecycle.is_shutdown_requested() {
+            break;
+        }
         let now = chrono::Local::now();
 
         // Hot-reload settings + secrets when files change. This avoids confusing situations where the
@@ -1707,7 +1756,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state: status_state.clone(),
             };
             let progress_sink = Some(&sink as &dyn ProgressSink);
-            let quick_stats_cancel = CancellationToken::new();
+            let task_cancel = lifecycle.begin_task();
+            let quick_stats_cancel = task_cancel.clone();
             let quick_stats_cancel_for_task = quick_stats_cancel.clone();
             let prepare_res = tokio::try_join!(
                 preflight_remote_first_index_sync_daemon(
@@ -1720,6 +1770,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &dedupe_db_path,
                     is_likely_private_chat_id(&ep.chat_id),
                     progress_sink,
+                    &task_cancel,
                 ),
                 async {
                     match preflight_local_quick_stats_daemon(
@@ -1766,7 +1817,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         remote_dedupe,
                     };
                     let opts = BackupOptions {
-                        cancel: None,
+                        cancel: Some(&task_cancel),
                         progress: progress_sink,
                         source_quick_stats: quick_stats,
                     };
@@ -1791,75 +1842,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         Ok(())
                     } else {
-                        let pool = televy_backup_core::index_db::open_index_db(&db_path).await?;
+                        tokio::select! {
+                            _ = task_cancel.cancelled() => Err(televy_backup_core::Error::Cancelled),
+                            update = async {
+                                let pool = televy_backup_core::index_db::open_index_db(&db_path).await?;
 
-                        let row = sqlx::query(
-                            "SELECT manifest_object_id FROM remote_indexes WHERE snapshot_id = ? AND provider = ? LIMIT 1",
-                        )
-                        .bind(&res.snapshot_id)
-                        .bind(storage.provider())
-                        .fetch_one(&pool)
-                        .await?;
-                        let filemap_manifest_object_id: String = row.get("manifest_object_id");
+                                let row = sqlx::query(
+                                    "SELECT manifest_object_id FROM remote_indexes WHERE snapshot_id = ? AND provider = ? LIMIT 1",
+                                )
+                                .bind(&res.snapshot_id)
+                                .bind(storage.provider())
+                                .fetch_one(&pool)
+                                .await?;
+                                let filemap_manifest_object_id: String = row.get("manifest_object_id");
 
-                        let endpoint_index_id = match sqlx::query(
-                            "SELECT value FROM endpoint_state WHERE key = ? LIMIT 1",
-                        )
-                        .bind(televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_INDEX_ID_KEY)
-                        .fetch_optional(&pool)
-                        .await?
-                        {
-                            Some(r) => r.get::<String, _>("value"),
-                            None => televy_backup_core::bootstrap::endpoint_index_id_for_storage(
-                                storage,
-                            )?,
-                        };
+                                let endpoint_index_id = match sqlx::query(
+                                    "SELECT value FROM endpoint_state WHERE key = ? LIMIT 1",
+                                )
+                                .bind(televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_INDEX_ID_KEY)
+                                .fetch_optional(&pool)
+                                .await?
+                                {
+                                    Some(r) => r.get::<String, _>("value"),
+                                    None => televy_backup_core::bootstrap::endpoint_index_id_for_storage(
+                                        storage,
+                                    )?,
+                                };
 
-                        let endpoint_manifest_object_id = sqlx::query(
-                            "SELECT value FROM endpoint_state WHERE key = ? LIMIT 1",
-                        )
-                        .bind(
-                            televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY,
-                        )
-                        .fetch_optional(&pool)
-                        .await?
-                        .map(|r| r.get::<String, _>("value"))
-                        .ok_or_else(|| televy_backup_core::Error::Integrity {
-                            message: "missing endpoint_state.endpoint_manifest_object_id after backup".to_string(),
-                        })?;
+                                let endpoint_manifest_object_id = sqlx::query(
+                                    "SELECT value FROM endpoint_state WHERE key = ? LIMIT 1",
+                                )
+                                .bind(
+                                    televy_backup_core::index_sync::ENDPOINT_STATE_ENDPOINT_MANIFEST_OBJECT_ID_KEY,
+                                )
+                                .fetch_optional(&pool)
+                                .await?
+                                .map(|r| r.get::<String, _>("value"))
+                                .ok_or_else(|| televy_backup_core::Error::Integrity {
+                                    message: "missing endpoint_state.endpoint_manifest_object_id after backup".to_string(),
+                                })?;
 
-                        let endpoint_dedupe_id =
-                            televy_backup_core::dedupe_catalog::endpoint_dedupe_id_for_storage(
-                                storage,
-                            )?;
-                        let dedupe_catalog_object_id =
-                            televy_backup_core::index_sync::endpoint_state_get(
-                                &dedupe_db_path,
-                                televy_backup_core::index_sync::ENDPOINT_STATE_DEDUPE_CATALOG_OBJECT_ID_KEY,
-                            )
-                            .await?
-                            .ok_or_else(|| televy_backup_core::Error::Integrity {
-                                message: "missing endpoint_state.dedupe_catalog_object_id after backup".to_string(),
-                            })?;
+                                let endpoint_dedupe_id =
+                                    televy_backup_core::dedupe_catalog::endpoint_dedupe_id_for_storage(
+                                        storage,
+                                    )?;
+                                let dedupe_catalog_object_id =
+                                    televy_backup_core::index_sync::endpoint_state_get(
+                                        &dedupe_db_path,
+                                        televy_backup_core::index_sync::ENDPOINT_STATE_DEDUPE_CATALOG_OBJECT_ID_KEY,
+                                    )
+                                    .await?
+                                    .ok_or_else(|| televy_backup_core::Error::Integrity {
+                                        message: "missing endpoint_state.dedupe_catalog_object_id after backup".to_string(),
+                                    })?;
 
-                        bootstrap::update_remote_latest(
-                            storage,
-                            &master_key,
-                            Some(bootstrap::BootstrapEndpointLatest {
-                                endpoint_index_id,
-                                manifest_object_id: endpoint_manifest_object_id,
-                            }),
-                            Some(bootstrap::BootstrapEndpointDedupeLatest {
-                                endpoint_dedupe_id,
-                                catalog_object_id: dedupe_catalog_object_id,
-                            }),
-                            &target.id,
-                            &target.source_path,
-                            &label,
-                            &res.snapshot_id,
-                            &filemap_manifest_object_id,
-                        )
-                        .await
+                                bootstrap::update_remote_latest(
+                                    storage,
+                                    &master_key,
+                                    Some(bootstrap::BootstrapEndpointLatest {
+                                        endpoint_index_id,
+                                        manifest_object_id: endpoint_manifest_object_id,
+                                    }),
+                                    Some(bootstrap::BootstrapEndpointDedupeLatest {
+                                        endpoint_dedupe_id,
+                                        catalog_object_id: dedupe_catalog_object_id,
+                                    }),
+                                    &target.id,
+                                    &target.source_path,
+                                    &label,
+                                    &res.snapshot_id,
+                                    &filemap_manifest_object_id,
+                                )
+                                .await
+                            } => update,
+                        }
                     };
 
                     match bootstrap_update {
@@ -1967,11 +2023,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            lifecycle.finish_task();
+
+            if lifecycle.is_shutdown_requested() {
+                break;
+            }
         }
 
         clear_mtproto_storage_cache(&mut storage_by_endpoint, "idle_loop_end").await;
-        sleep(Duration::from_secs(1)).await;
+        let shutdown_token = lifecycle.shutdown_token();
+        tokio::select! {
+            _ = sleep(Duration::from_secs(1)) => {}
+            _ = shutdown_token.cancelled() => break,
+        }
     }
+
+    clear_mtproto_storage_cache(&mut storage_by_endpoint, "daemon_shutdown").await;
+    tracing::info!(
+        event = "daemon.shutdown_complete",
+        "daemon.shutdown_complete"
+    );
+    Ok(())
 }
 
 async fn clear_mtproto_storage_cache(
@@ -2036,6 +2108,39 @@ fn drop_stale_manual_trigger_file_on_startup(path: &Path) -> Option<SystemTime> 
 
 #[allow(clippy::too_many_arguments)]
 async fn preflight_remote_first_index_sync_daemon(
+    storage: &TelegramMtProtoStorage,
+    master_key: &[u8; 32],
+    target_id: &str,
+    source_path: &str,
+    local_endpoint_db: &Path,
+    filemap_dir: &Path,
+    local_dedupe_db: &Path,
+    is_private_chat: bool,
+    sink: Option<&dyn ProgressSink>,
+    cancel: &CancellationToken,
+) -> televy_backup_core::Result<televy_backup_core::RemoteDedupeMode> {
+    if cancel.is_cancelled() {
+        return Err(televy_backup_core::Error::Cancelled);
+    }
+
+    tokio::select! {
+        _ = cancel.cancelled() => Err(televy_backup_core::Error::Cancelled),
+        result = preflight_remote_first_index_sync_daemon_inner(
+            storage,
+            master_key,
+            target_id,
+            source_path,
+            local_endpoint_db,
+            filemap_dir,
+            local_dedupe_db,
+            is_private_chat,
+            sink,
+        ) => result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn preflight_remote_first_index_sync_daemon_inner(
     storage: &TelegramMtProtoStorage,
     master_key: &[u8; 32],
     target_id: &str,

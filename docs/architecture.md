@@ -13,6 +13,7 @@
   - Runs scheduled backups (hourly/daily) and applies retention policy.
   - Intended to be managed by `brew services` as a user-level LaunchAgent.
   - Owns all secrets access (Keychain / `vault.key` / `secrets.enc`). Other components must use daemon IPC.
+  - Supports a local `daemon.stop` control request. App and CLI use it for graceful cancellation and shutdown; the caller waits for IPC disappearance before treating shutdown as complete.
 
 ## Status snapshots (Popover / Developer dashboard)
 

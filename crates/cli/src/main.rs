@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,8 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use sqlx::Row;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use televy_backup_core::{
     APP_NAME, BackupConfig, BackupOptions, ChunkingConfig, ProgressSink, RestoreConfig,
     RestoreOptions, Storage, TelegramMtProtoStorage, TelegramMtProtoStorageConfig, VerifyConfig,
@@ -85,6 +88,17 @@ enum Command {
         #[command(subcommand)]
         cmd: VerifyCmd,
     },
+    Daemon {
+        #[command(subcommand)]
+        cmd: DaemonCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCmd {
+    Start,
+    Status,
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -772,7 +786,159 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 .await
             }
         },
+        Command::Daemon { cmd } => match cmd {
+            DaemonCmd::Start => daemon_start(&config_dir, &data_dir, cli.json).await,
+            DaemonCmd::Status => daemon_status(&data_dir, cli.json),
+            DaemonCmd::Stop => daemon_stop(&data_dir, cli.json).await,
+        },
     }
+}
+
+fn daemon_binary_path() -> PathBuf {
+    if let Ok(path) = std::env::var("TELEVYBACKUP_DAEMON_PATH") {
+        return PathBuf::from(path);
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        let sibling = parent.join("televybackupd");
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+    PathBuf::from("televybackupd")
+}
+
+fn daemon_ipc_ready(data_dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::connect(
+            televy_backup_core::control::control_ipc_socket_path(data_dir),
+        )
+        .is_ok()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = data_dir;
+        false
+    }
+}
+
+async fn daemon_start(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
+    if daemon_ipc_ready(data_dir) {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "running": true, "started": false })
+            );
+        } else {
+            println!("daemon already running");
+        }
+        return Ok(());
+    }
+
+    let daemon = daemon_binary_path();
+    let mut command = ProcessCommand::new(&daemon);
+    command
+        .env("TELEVYBACKUP_CONFIG_DIR", config_dir)
+        .env("TELEVYBACKUP_DATA_DIR", data_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|e| {
+        CliError::retryable(
+            "daemon.start_failed",
+            format!("failed to start {}: {e}", daemon.display()),
+        )
+    })?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if daemon_ipc_ready(data_dir) {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "running": true, "started": true, "pid": child.id() })
+                );
+            } else {
+                println!("daemon started (pid {})", child.id());
+            }
+            return Ok(());
+        }
+        if child
+            .try_wait()
+            .map_err(|e| CliError::new("daemon.start_failed", e.to_string()))?
+            .is_some()
+        {
+            return Err(CliError::new(
+                "daemon.start_failed",
+                "daemon exited before IPC became ready",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = child.kill();
+    Err(CliError::retryable(
+        "daemon.start_timeout",
+        "daemon IPC did not become ready within 5s",
+    ))
+}
+
+fn daemon_status(data_dir: &Path, json: bool) -> Result<(), CliError> {
+    let running = daemon_ipc_ready(data_dir);
+    if json {
+        println!("{}", serde_json::json!({ "running": running }));
+    } else {
+        println!("daemon {}", if running { "running" } else { "stopped" });
+    }
+    if running {
+        Ok(())
+    } else {
+        Err(CliError::retryable(
+            "daemon.unavailable",
+            "daemon IPC unavailable",
+        ))
+    }
+}
+
+async fn daemon_stop(data_dir: &Path, json: bool) -> Result<(), CliError> {
+    if !daemon_ipc_ready(data_dir) {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "stopped": true, "alreadyStopped": true })
+            );
+        } else {
+            println!("daemon already stopped");
+        }
+        return Ok(());
+    }
+    control_ipc_call(data_dir, "daemon.stop", serde_json::json!({}))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if !daemon_ipc_ready(data_dir) {
+            if json {
+                println!("{}", serde_json::json!({ "stopped": true }));
+            } else {
+                println!("daemon stopped");
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    Err(CliError::retryable(
+        "daemon.stop_timeout",
+        "daemon did not exit within 10s",
+    ))
 }
 
 async fn vault_ensure(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
