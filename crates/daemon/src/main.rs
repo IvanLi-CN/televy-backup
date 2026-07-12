@@ -1770,6 +1770,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &dedupe_db_path,
                     is_likely_private_chat_id(&ep.chat_id),
                     progress_sink,
+                    &task_cancel,
                 ),
                 async {
                     match preflight_local_quick_stats_daemon(
@@ -2102,6 +2103,39 @@ fn drop_stale_manual_trigger_file_on_startup(path: &Path) -> Option<SystemTime> 
 
 #[allow(clippy::too_many_arguments)]
 async fn preflight_remote_first_index_sync_daemon(
+    storage: &TelegramMtProtoStorage,
+    master_key: &[u8; 32],
+    target_id: &str,
+    source_path: &str,
+    local_endpoint_db: &Path,
+    filemap_dir: &Path,
+    local_dedupe_db: &Path,
+    is_private_chat: bool,
+    sink: Option<&dyn ProgressSink>,
+    cancel: &CancellationToken,
+) -> televy_backup_core::Result<televy_backup_core::RemoteDedupeMode> {
+    if cancel.is_cancelled() {
+        return Err(televy_backup_core::Error::Cancelled);
+    }
+
+    tokio::select! {
+        _ = cancel.cancelled() => Err(televy_backup_core::Error::Cancelled),
+        result = preflight_remote_first_index_sync_daemon_inner(
+            storage,
+            master_key,
+            target_id,
+            source_path,
+            local_endpoint_db,
+            filemap_dir,
+            local_dedupe_db,
+            is_private_chat,
+            sink,
+        ) => result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn preflight_remote_first_index_sync_daemon_inner(
     storage: &TelegramMtProtoStorage,
     master_key: &[u8; 32],
     target_id: &str,

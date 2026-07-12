@@ -220,6 +220,12 @@ final class AppModel: ObservableObject {
         statusStreamTask = nil
 
         guard fullyStopDaemon else { return nil }
+        let service = "gui/\(getuid())/homebrew.mxcl.televybackupd"
+        let unload = runCommandCapture(exe: "/bin/launchctl", args: ["bootout", service], timeoutSeconds: 5)
+        if unload.status != 0 {
+            appendLog("INFO: LaunchAgent not unloaded: exit=\(unload.status)")
+        }
+
         var failure: String?
         if let cli = cliPath() {
             let result = runCommandCapture(exe: cli, args: ["daemon", "stop"], timeoutSeconds: 10)
@@ -233,12 +239,6 @@ final class AppModel: ObservableObject {
 
         if failure != nil {
             return failure
-        }
-
-        let service = "gui/\(getuid())/homebrew.mxcl.televybackupd"
-        let unload = runCommandCapture(exe: "/bin/launchctl", args: ["bootout", service], timeoutSeconds: 5)
-        if unload.status != 0 {
-            appendLog("INFO: LaunchAgent not unloaded: exit=\(unload.status)")
         }
 
         if let task = daemonTask, task.isRunning {
