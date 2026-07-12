@@ -175,6 +175,50 @@ final class AppModel: ObservableObject {
     private var lastDaemonStartAttemptAt: Date? = nil
     private var lastRateSampleByTargetId: [String: RateSample] = [:]
 
+    func hasEnabledSchedule() -> Bool {
+        scheduleEnabled
+    }
+
+    func stopRuntimeResources(fullyStopDaemon: Bool) {
+        statusStreamReconnectWork?.cancel()
+        statusStreamReconnectWork = nil
+        daemonIpcRetryWork?.cancel()
+        daemonIpcRetryWork = nil
+        statusStaleTimer?.cancel()
+        statusStaleTimer = nil
+        statusPollTimer?.cancel()
+        statusPollTimer = nil
+
+        if let task = statusStreamTask, task.isRunning {
+            task.terminate()
+        }
+        statusStreamTask = nil
+
+        guard fullyStopDaemon else { return }
+        if let cli = cliPath() {
+            let result = runCommandCapture(exe: cli, args: ["daemon", "stop"], timeoutSeconds: 10)
+            if result.status != 0 {
+                appendLog("ERROR: daemon stop failed: exit=\(result.status) reason=\(result.reason.rawValue)")
+            }
+        }
+
+        let service = "gui/\(getuid())/homebrew.mxcl.televybackupd"
+        let unload = runCommandCapture(exe: "/bin/launchctl", args: ["bootout", service], timeoutSeconds: 5)
+        if unload.status != 0 {
+            appendLog("INFO: LaunchAgent not unloaded: exit=\(unload.status)")
+        }
+
+        if let task = daemonTask, task.isRunning {
+            task.terminate()
+            let pid = task.processIdentifier
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                guard task.isRunning, task.processIdentifier == pid else { return }
+                _ = kill(pid_t(pid), SIGKILL)
+            }
+        }
+        daemonTask = nil
+    }
+
     private struct RateSample {
         let at: Date
         let uploaded: Int64?
@@ -2972,6 +3016,21 @@ struct PopoverRootView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Open main window")
+
+                Button {
+                    NSApp.terminate(nil)
+                } label: {
+                    Image(systemName: "power")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                        .background(theme.actionButtonBackground, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .strokeBorder(theme.actionButtonStroke, lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Quit TelevyBackup")
             }
             .padding(.bottom, 12)
 
@@ -3918,6 +3977,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popoverHost: NSHostingController<AnyView>? = nil
     private var popoverResizeScheduled: Bool = false
     private let appearanceOverride = ModelStore.shared.appearanceOverride
+    private var terminationInProgress = false
 
     // Prevent accidental multi-launch (e.g. `open -n`) from creating duplicate status bar items and
     // competing daemons. We keep the earliest-launched instance alive and exit the rest.
@@ -4119,6 +4179,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationInProgress {
+            return .terminateNow
+        }
+
+        let fullyStopDaemon: Bool
+        if ModelStore.shared.hasEnabledSchedule() {
+            let alert = NSAlert()
+            alert.messageText = "Quit TelevyBackup?"
+            alert.informativeText = "Scheduled backups are enabled. You can close the app and leave the daemon running, or stop scheduled backups completely."
+            alert.addButton(withTitle: "Quit App")
+            alert.addButton(withTitle: "Quit Completely")
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                fullyStopDaemon = false
+            case .alertSecondButtonReturn:
+                fullyStopDaemon = true
+            default:
+                return .terminateCancel
+            }
+        } else {
+            fullyStopDaemon = true
+        }
+
+        terminationInProgress = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            ModelStore.shared.stopRuntimeResources(fullyStopDaemon: fullyStopDaemon)
+            DispatchQueue.main.async {
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

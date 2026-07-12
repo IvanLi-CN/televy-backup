@@ -31,6 +31,50 @@ mod control_ipc;
 mod status_ipc;
 mod vault_ipc;
 
+#[derive(Default)]
+pub(crate) struct DaemonLifecycle {
+    shutdown: CancellationToken,
+    active_task: Mutex<Option<CancellationToken>>,
+}
+
+impl DaemonLifecycle {
+    fn begin_task(&self) -> CancellationToken {
+        let token = self.shutdown.child_token();
+        *self
+            .active_task
+            .lock()
+            .expect("daemon lifecycle lock poisoned") = Some(token.clone());
+        token
+    }
+
+    fn finish_task(&self) {
+        *self
+            .active_task
+            .lock()
+            .expect("daemon lifecycle lock poisoned") = None;
+    }
+
+    pub(crate) fn request_shutdown(&self) {
+        self.shutdown.cancel();
+        if let Some(task) = self
+            .active_task
+            .lock()
+            .expect("daemon lifecycle lock poisoned")
+            .as_ref()
+        {
+            task.cancel();
+        }
+    }
+
+    fn is_shutdown_requested(&self) -> bool {
+        self.shutdown.is_cancelled()
+    }
+
+    fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
+    }
+}
+
 #[derive(Default, Clone)]
 struct TargetScheduleState {
     last_hourly: Option<(i32, u32, u32, u32)>, // year, month, day, hour
@@ -1020,6 +1064,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_config_mtime = file_mtime(&config_path);
 
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
+    let lifecycle = Arc::new(DaemonLifecycle::default());
     let status_path = status_json_path(&data_root);
     tokio::spawn(status_writer_loop(status_state.clone(), status_path));
 
@@ -1111,6 +1156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_root.clone(),
         control_ipc_settings.clone(),
         status_state.clone(),
+        lifecycle.clone(),
     ) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -1177,6 +1223,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut storage_by_endpoint = HashMap::<String, TelegramMtProtoStorage>::new();
 
     loop {
+        if lifecycle.is_shutdown_requested() {
+            break;
+        }
         let now = chrono::Local::now();
 
         // Hot-reload settings + secrets when files change. This avoids confusing situations where the
@@ -1707,7 +1756,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state: status_state.clone(),
             };
             let progress_sink = Some(&sink as &dyn ProgressSink);
-            let quick_stats_cancel = CancellationToken::new();
+            let task_cancel = lifecycle.begin_task();
+            let quick_stats_cancel = task_cancel.clone();
             let quick_stats_cancel_for_task = quick_stats_cancel.clone();
             let prepare_res = tokio::try_join!(
                 preflight_remote_first_index_sync_daemon(
@@ -1766,7 +1816,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         remote_dedupe,
                     };
                     let opts = BackupOptions {
-                        cancel: None,
+                        cancel: Some(&task_cancel),
                         progress: progress_sink,
                         source_quick_stats: quick_stats,
                     };
@@ -1967,11 +2017,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            lifecycle.finish_task();
+
+            if lifecycle.is_shutdown_requested() {
+                break;
+            }
         }
 
         clear_mtproto_storage_cache(&mut storage_by_endpoint, "idle_loop_end").await;
-        sleep(Duration::from_secs(1)).await;
+        let shutdown_token = lifecycle.shutdown_token();
+        tokio::select! {
+            _ = sleep(Duration::from_secs(1)) => {}
+            _ = shutdown_token.cancelled() => break,
+        }
     }
+
+    clear_mtproto_storage_cache(&mut storage_by_endpoint, "daemon_shutdown").await;
+    tracing::info!(
+        event = "daemon.shutdown_complete",
+        "daemon.shutdown_complete"
+    );
+    Ok(())
 }
 
 async fn clear_mtproto_storage_cache(
