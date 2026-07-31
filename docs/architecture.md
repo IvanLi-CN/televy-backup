@@ -65,13 +65,18 @@ daemon-only boundary:
 
 The app and daemon can share the same data locations via env vars:
 
-- `TELEVYBACKUP_CONFIG_DIR`: config directory (contains `config.toml`)
+- `TELEVYBACKUP_CONFIG_DIR`: config directory (contains portable `config.toml` and machine-local `local.toml`)
 - `TELEVYBACKUP_DATA_DIR`: data directory (contains `index/index.<endpoint_id>.sqlite`)
 - `TELEVYBACKUP_LOG_DIR`: override per-run log directory (defaults to `TELEVYBACKUP_DATA_DIR/logs/`)
 
 When env vars are not set, the GUI uses `~/Library/Application Support/TelevyBackup`.
 
 Per-run logs are written to files as NDJSON and never mixed into stdout/stderr, so `televybackup --events` stdout remains NDJSON-only and stderr remains error-JSON-only.
+
+Run-log filtering resolves in this order: `TELEVYBACKUP_LOG`, `RUST_LOG`, the
+machine-local Diagnostics preference, then the safe `Normal` default. The daemon
+keeps one filter for an active task and applies preference changes before the
+next task. `local.toml` is deliberately excluded from Backup Config.
 
 The macOS GUI also writes an append-only UI log file `ui.log` into the same log directory (best effort; redacts `api.telegram.org` URL segments).
 

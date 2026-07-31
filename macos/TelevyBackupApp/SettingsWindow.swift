@@ -31,6 +31,31 @@ struct CliSecretsError: Decodable {
     let retryable: Bool?
 }
 
+enum AppLogLevel: String, Codable, CaseIterable, Identifiable {
+    case normal
+    case verbose
+    case debug
+
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+}
+
+struct CliDiagnosticsStatus: Decodable, Equatable {
+    let configuredLevel: AppLogLevel
+    let effectiveLevel: String
+    let effectiveFilter: String
+    let source: String
+    let overriddenBy: String?
+    let pendingLevel: AppLogLevel?
+    let logDirectory: String
+    let logBytes: UInt64?
+    let configurationError: String?
+    let daemonAvailable: Bool
+
+    var pickerDisabled: Bool { overriddenBy != nil }
+    var debugWarningVisible: Bool { effectiveLevel == AppLogLevel.debug.rawValue }
+}
+
 struct CliSettingsExportBundleResponse: Decodable {
     let bundleKey: String
     let format: String
@@ -212,6 +237,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case endpoints = "Endpoints"
     case recoveryKey = "Backup Config"
     case schedule = "Schedule"
+    case diagnostics = "Diagnostics"
 
     var id: String { rawValue }
 }
@@ -375,6 +401,7 @@ private enum SettingsUIDemo {
     }
 
     static var initialSection: SettingsSection {
+        if enabled && scene.hasPrefix("diagnostics") { return .diagnostics }
         if enabled && scene.hasPrefix("backup-config") { return .recoveryKey }
         if scene == "schedule" { return .schedule }
         if scene.hasPrefix("endpoints") { return .endpoints }
@@ -454,6 +481,9 @@ struct SettingsWindowRootView: View {
     @State private var secrets: CliSecretsPresence?
     @State private var secretsError: CliSecretsError?
     @State private var loadError: String?
+    @State private var diagnostics: CliDiagnosticsStatus?
+    @State private var diagnosticsError: String?
+    @State private var isSavingDiagnostics = false
 
     @State private var selectedTargetId: String?
     @State private var selectedEndpointId: String?
@@ -508,7 +538,7 @@ struct SettingsWindowRootView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 360)
+                .frame(width: 500)
             }
             ToolbarItemGroup(placement: .automatic) {
                 Button {
@@ -538,6 +568,7 @@ struct SettingsWindowRootView: View {
                 }
             }
             reload()
+            reloadDiagnostics()
         }
         .onChange(of: selectedTargetId) { _, _ in
             ensureSelectedTargetEndpointValid()
@@ -555,6 +586,162 @@ struct SettingsWindowRootView: View {
             configBundleView
         case .schedule:
             scheduleView
+        case .diagnostics:
+            diagnosticsView
+        }
+    }
+
+    private var diagnosticsView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Diagnostics")
+                    .font(.system(size: 18, weight: .bold))
+
+                GroupBox("Logging") {
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack {
+                            Text("Log level")
+                                .font(.system(size: 13, weight: .semibold))
+                            Spacer()
+                            Picker("Log level", selection: Binding(
+                                get: { diagnostics?.configuredLevel ?? .normal },
+                                set: { saveLogLevel($0) }
+                            )) {
+                                ForEach(AppLogLevel.allCases) { level in
+                                    Text(level.title).tag(level)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(width: 280)
+                            .disabled((diagnostics?.pickerDisabled ?? true) || isSavingDiagnostics)
+                        }
+
+                        if let diagnostics {
+                            LabeledContent("Effective level", value: diagnostics.effectiveLevel.capitalized)
+                            LabeledContent("Source", value: diagnostics.overriddenBy ?? diagnostics.source)
+                            if let pending = diagnostics.pendingLevel {
+                                LabeledContent("Next task", value: pending.title)
+                            }
+                            if let override = diagnostics.overriddenBy {
+                                Label("Controlled by \(override). Remove the environment override to change this setting here.", systemImage: "lock.fill")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                            if diagnostics.debugWarningVisible {
+                                Label {
+                                    Text("Debug includes detailed dependency logs and may use a large amount of disk space. It remains enabled until you turn it off.")
+                                } icon: {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                }
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.orange)
+                                .padding(12)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                            }
+                        }
+                    }
+                    .padding(12)
+                }
+
+                GroupBox("Log storage") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        LabeledContent("Directory", value: diagnostics?.logDirectory ?? "Unavailable")
+                        LabeledContent("Current usage", value: formattedLogBytes)
+                        Button {
+                            openDiagnosticsLogDirectory()
+                        } label: {
+                            Label("Open in Finder", systemImage: "folder")
+                        }
+                        .disabled(diagnostics == nil)
+                    }
+                    .padding(12)
+                }
+
+                if let diagnosticsError {
+                    Label(diagnosticsError, systemImage: "exclamationmark.circle")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.red)
+                }
+            }
+            .frame(maxWidth: 700, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 22)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private var formattedLogBytes: String {
+        guard let bytes = diagnostics?.logBytes else { return "Unavailable" }
+        return ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file)
+    }
+
+    private func openDiagnosticsLogDirectory() {
+        guard let path = diagnostics?.logDirectory else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
+    }
+
+    private func reloadDiagnostics() {
+        if SettingsUIDemo.enabled {
+            let scene = SettingsUIDemo.scene
+            let effective = scene == "diagnostics-debug" ? "debug" : "normal"
+            let override = scene == "diagnostics-override" ? "TELEVYBACKUP_LOG" : nil
+            diagnostics = CliDiagnosticsStatus(
+                configuredLevel: scene == "diagnostics-debug" ? .debug : .normal,
+                effectiveLevel: override == nil ? effective : "custom",
+                effectiveFilter: override == nil ? effective : "info,sqlx=warn",
+                source: override == nil ? "local.toml" : "environment",
+                overriddenBy: override,
+                pendingLevel: nil,
+                logDirectory: "/Users/demo/Library/Application Support/TelevyBackup/logs",
+                logBytes: scene == "diagnostics-debug" ? 39_720_000_000 : 18_400_000,
+                configurationError: nil,
+                daemonAvailable: true
+            )
+            diagnosticsError = nil
+            return
+        }
+        guard let cli = model.cliPath() else {
+            diagnosticsError = "televybackup CLI not found"
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = model.runCommandCapture(exe: cli, args: ["--json", "diagnostics", "get"], timeoutSeconds: 10)
+            guard result.status == 0, let data = result.stdout.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode(CliDiagnosticsStatus.self, from: data) else {
+                DispatchQueue.main.async { self.diagnosticsError = "Could not load diagnostics settings." }
+                return
+            }
+            DispatchQueue.main.async {
+                self.diagnostics = decoded
+                self.diagnosticsError = decoded.configurationError
+            }
+        }
+    }
+
+    private func saveLogLevel(_ level: AppLogLevel) {
+        guard diagnostics?.pickerDisabled == false, let cli = model.cliPath() else { return }
+        isSavingDiagnostics = true
+        diagnosticsError = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = model.runCommandCapture(
+                exe: cli,
+                args: ["--json", "diagnostics", "set-log-level", "--level", level.rawValue],
+                timeoutSeconds: 10
+            )
+            let decoded = result.stdout.data(using: .utf8).flatMap {
+                try? JSONDecoder().decode(CliDiagnosticsStatus.self, from: $0)
+            }
+            DispatchQueue.main.async {
+                self.isSavingDiagnostics = false
+                if result.status == 0, let decoded {
+                    self.diagnostics = decoded
+                    self.diagnosticsError = decoded.configurationError
+                } else {
+                    self.diagnosticsError = "Could not save the log level."
+                }
+            }
         }
     }
 

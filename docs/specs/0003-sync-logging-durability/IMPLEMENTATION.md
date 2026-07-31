@@ -3,17 +3,25 @@
 ## Current State
 
 - Per-run NDJSON creation, unique naming, flush, and fsync are implemented.
-- `TELEVYBACKUP_LOG` and `RUST_LOG` filters are implemented.
-- The current implementation still defaults to global `debug` and has no App
-  preference or runtime status interface.
+- `local.toml` version 1 stores the machine-local log preset with atomic writes
+  and safe `Normal` fallback.
+- The shared resolver implements environment precedence, preset mappings, and
+  invalid-filter fallback without enabling global debug.
+- The run logger reloads its filter between tasks. The daemon keeps its active
+  runtime filter stable and reports pending local changes over `logging.status`.
+- CLI diagnostics commands expose local/runtime state and best-effort disk use.
+- macOS Settings includes Diagnostics controls, override locking, persistent
+  Debug warning, and mock-only visual evidence scenes.
 
-## Required Coverage
+## Validation Coverage
 
-- Add machine-local logging settings and atomic persistence.
-- Add safe preset/filter resolution and reload the filter between daemon runs.
-- Add CLI and control-IPC diagnostics status.
-- Add the macOS Diagnostics settings surface and deterministic UI demo states.
-- Update unit, integration, Swift, documentation, and visual evidence coverage.
+- Rust unit tests cover parsing, defaults, atomic persistence, precedence,
+  invalid filters, NDJSON output, and SQLx filtering across preset reloads.
+- Daemon and CLI tests cover runtime status, pending state, and daemon fallback.
+- Swift tests cover status decoding, picker locking, pending state, and Debug
+  warning visibility.
+- CI-equivalent formatting, lint, Rust test, and Swift test commands are the
+  required release gate.
 
 ## Migration State
 

@@ -1065,6 +1065,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
     let lifecycle = Arc::new(DaemonLifecycle::default());
+    let runtime_logging = Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
+        &config_root,
+    )));
     let status_path = status_json_path(&data_root);
     tokio::spawn(status_writer_loop(status_state.clone(), status_path));
 
@@ -1157,6 +1160,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         control_ipc_settings.clone(),
         status_state.clone(),
         lifecycle.clone(),
+        runtime_logging.clone(),
+        data_root.clone(),
     ) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -1232,6 +1237,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // UI saved new endpoint chat_id but the long-running daemon kept using the old one.
         let has_running = status_state.lock().ok().is_some_and(|st| st.has_running());
         if !has_running {
+            let next_logging = televy_backup_core::local_settings::resolve(&config_root);
+            if *runtime_logging.read().await != next_logging {
+                *runtime_logging.write().await = next_logging;
+            }
             let config_mtime = file_mtime(&config_path);
             let secrets_mtime = file_mtime(&secrets_path);
             let config_changed = config_mtime.is_some() && config_mtime != last_config_mtime;
@@ -1709,8 +1718,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let task_id = format!("tsk_{}", Uuid::new_v4());
-            let run_log =
-                televy_backup_core::run_log::start_run_log("backup", &task_id, &data_root)?;
+            let logging = runtime_logging.read().await.clone();
+            let run_log = televy_backup_core::run_log::start_run_log(
+                "backup",
+                &task_id,
+                &data_root,
+                &logging.effective_filter,
+            )?;
 
             // Run summaries must appear even when the daemon is started with `RUST_LOG=warn`,
             // otherwise successful runs create empty NDJSON files and the UI shows no history.

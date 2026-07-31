@@ -12,6 +12,7 @@ pub mod gold_key;
 pub mod index_db;
 mod index_manifest;
 pub mod index_sync;
+pub mod local_settings;
 mod pack;
 mod progress;
 pub mod remote_index_db;
