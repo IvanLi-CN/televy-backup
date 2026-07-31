@@ -19,3 +19,9 @@ advanced operation. Debug intentionally remains uncapped and persistent, so the
 App must display an ongoing disk-risk warning.
 
 The legacy plan directory remains present pending explicit delete approval.
+
+Review hardening made the schema version mandatory, preserved current
+configuration errors while a task retains its previous runtime filter, and
+defined every target start as a task boundary for filter reload. The Settings
+surface also refreshes after daemon startup and creates the log directory before
+opening it.

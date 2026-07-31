@@ -3,20 +3,25 @@
 ## Current State
 
 - Per-run NDJSON creation, unique naming, flush, and fsync are implemented.
-- `local.toml` version 1 stores the machine-local log preset with atomic writes
-  and safe `Normal` fallback.
+- `local.toml` requires schema version 1 and stores the machine-local log preset
+  with atomic writes and safe `Normal` fallback for missing, unversioned, or
+  invalid content.
 - The shared resolver implements environment precedence, preset mappings, and
   invalid-filter fallback without enabling global debug.
-- The run logger reloads its filter between tasks. The daemon keeps its active
-  runtime filter stable and reports pending local changes over `logging.status`.
+- The run logger reloads its filter at every task boundary, including between
+  targets in one daemon scheduling pass. The daemon keeps its active runtime
+  filter stable and reports pending local changes and current validation errors
+  over `logging.status`.
 - CLI diagnostics commands expose local/runtime state and best-effort disk use.
 - macOS Settings includes Diagnostics controls, override locking, persistent
-  Debug warning, and mock-only visual evidence scenes.
+  Debug warning, daemon-start refresh, a reliable Open in Finder action, and
+  mock-only visual evidence scenes.
 
 ## Validation Coverage
 
-- Rust unit tests cover parsing, defaults, atomic persistence, precedence,
-  invalid filters, NDJSON output, and SQLx filtering across preset reloads.
+- Rust unit tests cover parsing, required schema version, defaults, atomic
+  persistence, precedence, invalid filters, NDJSON output, and SQLx filtering
+  across preset reloads.
 - Daemon and CLI tests cover runtime status, pending state, and daemon fallback.
 - Swift tests cover status decoding, picker locking, pending state, and Debug
   warning visibility.
