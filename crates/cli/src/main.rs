@@ -4429,7 +4429,13 @@ async fn backup_run(
     );
     emit_task_progress_preflight(events, &task_id);
     if events {
-        daemon_control_status_task_start(data_dir, &task_id, "backup", ctx_target_id.as_str());
+        daemon_control_status_task_start(
+            config_dir,
+            data_dir,
+            &task_id,
+            "backup",
+            ctx_target_id.as_str(),
+        );
     }
 
     let result: Result<televy_backup_core::BackupResult, CliError> = async {
@@ -5655,7 +5661,7 @@ async fn restore_latest(
     );
     emit_task_progress_preflight(events, &task_id);
     if events {
-        daemon_control_status_task_start(data_dir, &task_id, "restore", t.id.as_str());
+        daemon_control_status_task_start(config_dir, data_dir, &task_id, "restore", t.id.as_str());
     }
 
     let result: Result<(String, televy_backup_core::RestoreResult), CliError> = async {
@@ -6085,7 +6091,7 @@ async fn verify_latest(
     );
     emit_task_progress_preflight(events, &task_id);
     if events {
-        daemon_control_status_task_start(data_dir, &task_id, "verify", t.id.as_str());
+        daemon_control_status_task_start(config_dir, data_dir, &task_id, "verify", t.id.as_str());
     }
 
     let result: Result<(String, televy_backup_core::VerifyResult), CliError> = async {
@@ -7176,11 +7182,18 @@ fn daemon_control_secrets_clear_telegram_mtproto_session(
 }
 
 #[cfg(unix)]
-fn daemon_control_status_task_start(data_dir: &Path, task_id: &str, kind: &str, target_id: &str) {
+fn daemon_control_status_task_start(
+    config_dir: &Path,
+    data_dir: &Path,
+    task_id: &str,
+    kind: &str,
+    target_id: &str,
+) {
     let params = televy_backup_core::control::StatusTaskStartParams {
         task_id: task_id.to_string(),
         kind: kind.to_string(),
         target_id: target_id.to_string(),
+        logging: Some(televy_backup_core::local_settings::resolve(config_dir)),
     };
     let params = serde_json::to_value(params).unwrap_or_else(|_| serde_json::json!({}));
     let _ = control_ipc_call_with_timeouts(
@@ -7194,6 +7207,7 @@ fn daemon_control_status_task_start(data_dir: &Path, task_id: &str, kind: &str, 
 
 #[cfg(not(unix))]
 fn daemon_control_status_task_start(
+    _config_dir: &Path,
     _data_dir: &Path,
     _task_id: &str,
     _kind: &str,

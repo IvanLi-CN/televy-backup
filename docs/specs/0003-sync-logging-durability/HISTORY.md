@@ -31,3 +31,8 @@ Upgrade hardening distinguishes an incompatible older daemon from an unavailable
 daemon, preventing the App from presenting a local-only status as applied at
 runtime. Debug-capable custom environment filters receive the same persistent
 disk warning as the Debug preset.
+
+External CLI tasks now report their resolved logging state to daemon IPC for the
+duration of the task, so Diagnostics reflects the process that is actually
+writing the active run log. Settings diagnostics refreshes are sequenced to
+discard stale asynchronous completions.

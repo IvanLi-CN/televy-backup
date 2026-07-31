@@ -23,9 +23,12 @@
 - Rust unit tests cover parsing, required schema version, defaults, atomic
   persistence, precedence, invalid filters, NDJSON output, and SQLx filtering
   across preset reloads.
-- Daemon and CLI tests cover runtime status, pending state, and daemon fallback.
+- Daemon and CLI tests cover daemon-owned and external CLI runtime status,
+  pending state, and daemon fallback.
 - Swift tests cover status decoding, picker locking, pending state, and Debug
-  warning visibility for presets and debug-capable custom filters.
+  warning visibility for presets and debug-capable custom filters. Diagnostics
+  reloads use sequence guards so stale asynchronous results cannot replace a
+  newer save or daemon-backed refresh.
 - CI-equivalent formatting, lint, Rust test, and Swift test commands are the
   required release gate.
 

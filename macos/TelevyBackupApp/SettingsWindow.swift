@@ -493,6 +493,7 @@ struct SettingsWindowRootView: View {
     @State private var diagnostics: CliDiagnosticsStatus?
     @State private var diagnosticsError: String?
     @State private var isSavingDiagnostics = false
+    @State private var diagnosticsReloadSeq: Int = 0
 
     @State private var selectedTargetId: String?
     @State private var selectedEndpointId: String?
@@ -729,14 +730,20 @@ struct SettingsWindowRootView: View {
             diagnosticsError = "televybackup CLI not found"
             return
         }
+        diagnosticsReloadSeq += 1
+        let seq = diagnosticsReloadSeq
         DispatchQueue.global(qos: .userInitiated).async {
             let result = model.runCommandCapture(exe: cli, args: ["--json", "diagnostics", "get"], timeoutSeconds: 10)
             guard result.status == 0, let data = result.stdout.data(using: .utf8),
                   let decoded = try? JSONDecoder().decode(CliDiagnosticsStatus.self, from: data) else {
-                DispatchQueue.main.async { self.diagnosticsError = "Could not load diagnostics settings." }
+                DispatchQueue.main.async {
+                    guard seq == self.diagnosticsReloadSeq else { return }
+                    self.diagnosticsError = "Could not load diagnostics settings."
+                }
                 return
             }
             DispatchQueue.main.async {
+                guard seq == self.diagnosticsReloadSeq else { return }
                 self.diagnostics = decoded
                 self.diagnosticsError = decoded.configurationError
             }
@@ -746,6 +753,7 @@ struct SettingsWindowRootView: View {
     private func saveLogLevel(_ level: AppLogLevel) {
         guard diagnostics?.pickerDisabled == false, let cli = model.cliPath() else { return }
         isSavingDiagnostics = true
+        diagnosticsReloadSeq += 1
         diagnosticsError = nil
         DispatchQueue.global(qos: .userInitiated).async {
             let result = model.runCommandCapture(

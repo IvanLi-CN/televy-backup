@@ -304,18 +304,26 @@ fn handle_request(
     match req.method.as_str() {
         "logging.status" => {
             let configured = televy_backup_core::local_settings::resolve(config_root);
-            let has_running = status_state
+            let (has_running, external_logging) = status_state
                 .lock()
                 .ok()
-                .is_some_and(|state| state.has_running());
-            let pending_level = (has_running
-                && configured.configured_level != logging.runtime.configured_level)
-                .then_some(configured.configured_level);
-            let effective = if has_running {
+                .map(|state| {
+                    (
+                        state.has_running(),
+                        state.active_external_logging().cloned(),
+                    )
+                })
+                .unwrap_or((false, None));
+            let effective = if let Some(external_logging) = external_logging.as_ref() {
+                external_logging
+            } else if has_running {
                 logging.runtime
             } else {
                 &configured
             };
+            let pending_level = (has_running
+                && configured.configured_level != effective.configured_level)
+                .then_some(configured.configured_level);
             let mut status = televy_backup_core::local_settings::status_with_log_bytes(
                 effective,
                 pending_level,
@@ -448,7 +456,7 @@ fn handle_request(
             };
 
             if let Ok(mut st) = status_state.lock() {
-                st.mark_external_run_start(&params.target_id, &params.task_id);
+                st.mark_external_run_start(&params.target_id, &params.task_id, params.logging);
             }
             ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
         }
@@ -953,6 +961,35 @@ mod tests {
             Some(televy_backup_core::local_settings::LogLevel::Debug)
         );
         assert!(status.daemon_available);
+
+        let external_logging =
+            televy_backup_core::local_settings::resolve_from(&config_root, Some("debug"), None);
+        status_state.lock().unwrap().mark_external_run_start(
+            "t1",
+            "cli-task",
+            Some(external_logging),
+        );
+        let response = handle_request(
+            &ControlRequest::new("external", "logging.status", serde_json::json!({})),
+            &config_root,
+            &settings(),
+            &status_state,
+            &Arc::new(crate::DaemonLifecycle::default()),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: &data_root,
+                log_bytes: Some(0),
+            },
+        );
+        let status: televy_backup_core::local_settings::LoggingStatus =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(status.effective_level, "debug");
+        assert_eq!(status.overridden_by.as_deref(), Some("TELEVYBACKUP_LOG"));
+        status_state
+            .lock()
+            .unwrap()
+            .mark_external_run_finish("t1", "cli-task");
+        status_state.lock().unwrap().mark_run_start("t1");
 
         std::fs::write(
             televy_backup_core::local_settings::local_settings_path(&config_root),

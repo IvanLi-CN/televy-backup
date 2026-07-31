@@ -104,6 +104,7 @@ struct TargetRuntime {
     // When a CLI-run task reports progress to the daemon for UI status purposes, we keep the
     // current task id here so stale updates don't clobber newer runs.
     external_task_id: Option<String>,
+    external_logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
 
     up_bps: Option<u64>,
     up_total_bytes: Option<u64>,
@@ -143,6 +144,7 @@ impl StatusRuntimeState {
                     progress: None,
                     last_run: None,
                     external_task_id: None,
+                    external_logging: None,
                     up_bps: None,
                     up_total_bytes: None,
                     up_rate: ByteRateWindow::default(),
@@ -176,6 +178,7 @@ impl StatusRuntimeState {
                 progress: None,
                 last_run: None,
                 external_task_id: None,
+                external_logging: None,
                 up_bps: None,
                 up_total_bytes: None,
                 up_rate: ByteRateWindow::default(),
@@ -234,13 +237,19 @@ impl StatusRuntimeState {
         t.down_rate.reset(Instant::now(), 0);
     }
 
-    fn mark_external_run_start(&mut self, target_id: &str, task_id: &str) {
+    fn mark_external_run_start(
+        &mut self,
+        target_id: &str,
+        task_id: &str,
+        logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
+    ) {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
 
         let now = now_unix_ms();
         t.external_task_id = Some(task_id.to_string());
+        t.external_logging = logging;
         t.state = "running".to_string();
         t.running_since = Some(now);
         t.progress = Some(Progress {
@@ -337,6 +346,7 @@ impl StatusRuntimeState {
         }
 
         t.external_task_id = None;
+        t.external_logging = None;
         t.state = "idle".to_string();
         t.running_since = None;
         t.progress = None;
@@ -456,6 +466,15 @@ impl StatusRuntimeState {
 
     fn has_running(&self) -> bool {
         self.targets.values().any(|t| t.state == "running")
+    }
+
+    fn active_external_logging(
+        &self,
+    ) -> Option<&televy_backup_core::local_settings::ResolvedLogging> {
+        self.targets
+            .values()
+            .find(|target| target.external_task_id.is_some())
+            .and_then(|target| target.external_logging.as_ref())
     }
 
     fn tick_rates_at(&mut self, now: Instant) {
@@ -771,6 +790,7 @@ mod tests {
                 progress: None,
                 last_run: None,
                 external_task_id: None,
+                external_logging: None,
                 up_bps: None,
                 up_total_bytes: None,
                 up_rate: ByteRateWindow::default(),
