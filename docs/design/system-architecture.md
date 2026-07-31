@@ -43,9 +43,13 @@
 
 系统支持通过环境变量对齐 GUI/CLI/daemon 的工作目录：
 
-- `TELEVYBACKUP_CONFIG_DIR`：配置目录（`config.toml` / `secrets.enc`）
+- `TELEVYBACKUP_CONFIG_DIR`：配置目录（`config.toml` / `secrets.enc` / 本机 `local.toml`）
 - `TELEVYBACKUP_DATA_DIR`：数据目录（索引库、cache、status）
 - `TELEVYBACKUP_LOG_DIR`：日志目录（默认 `TELEVYBACKUP_DATA_DIR/logs/`）
+
+任务日志等级由 `TELEVYBACKUP_LOG → RUST_LOG → local.toml → Normal` 解析。
+`local.toml` 仅保存本机 Diagnostics 偏好，不进入 Backup Config；daemon 在
+当前任务结束后、下一任务开始前应用变更。
 
 macOS 默认（未设置 env 时，GUI 侧）：
 

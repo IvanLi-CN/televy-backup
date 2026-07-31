@@ -165,6 +165,8 @@ pub struct StatusTaskStartParams {
     pub task_id: String,
     pub kind: String, // "backup" | "restore" | "verify"
     pub target_id: String,
+    #[serde(default)]
+    pub logging: Option<crate::local_settings::ResolvedLogging>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

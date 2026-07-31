@@ -132,11 +132,13 @@ TelevyBackup stores non-secret settings in `config.toml`, and secrets in an encr
   - `[[telegram_endpoints]]` (one endpoint per chat/bot) provides `chat_id` plus secret key names (`bot_token_key`, `mtproto.session_key`)
 
 - `config.toml` location: `TELEVYBACKUP_CONFIG_DIR/config.toml` (default: `~/Library/Application Support/TelevyBackup/config.toml`)
+- Machine-local preferences: `TELEVYBACKUP_CONFIG_DIR/local.toml`. The logging level is available under **Settings → Diagnostics** and is not included in Backup Config export/import.
 - `secrets.enc` location: `TELEVYBACKUP_CONFIG_DIR/secrets.enc` (default: `~/Library/Application Support/TelevyBackup/secrets.enc`)
 - Per-endpoint local index DB: `TELEVYBACKUP_DATA_DIR/index/index.<endpoint_id>.sqlite`
   - Legacy (migration): `TELEVYBACKUP_DATA_DIR/index/index.sqlite` may exist but is ignored and auto-cleaned when all in-use per-endpoint DBs are usable.
 - Per-run logs (NDJSON): `TELEVYBACKUP_LOG_DIR/` (override) or `TELEVYBACKUP_DATA_DIR/logs/` (default: `~/Library/Application Support/TelevyBackup/logs/`)
-  - Log level filter: `TELEVYBACKUP_LOG` → `RUST_LOG` → default `debug`
+  - Log level filter: `TELEVYBACKUP_LOG` → `RUST_LOG` → `local.toml` → `Normal`
+  - `Normal` records TelevyBackup at info and dependencies at warn; `Verbose` raises TelevyBackup to debug and dependencies to info; `Debug` enables global debug and may consume substantial disk space.
 - UI logs (macOS app): `TELEVYBACKUP_LOG_DIR/ui.log` (override) or `TELEVYBACKUP_DATA_DIR/logs/ui.log` (default: `~/Library/Application Support/TelevyBackup/logs/ui.log`)
 - Keychain:
   - Vault key: key = `televybackup.vault_key` (Base64 32 bytes)

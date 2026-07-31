@@ -14,6 +14,22 @@ use televy_backup_core::control::{
 
 type Settings = televy_backup_core::config::SettingsV2;
 
+struct LoggingStatusContext<'a> {
+    runtime: &'a televy_backup_core::local_settings::ResolvedLogging,
+    data_root: &'a std::path::Path,
+    log_bytes: Option<u64>,
+}
+
+#[derive(Clone)]
+struct ControlContext {
+    config_root: PathBuf,
+    settings: Arc<RwLock<Settings>>,
+    status_state: Arc<Mutex<crate::StatusRuntimeState>>,
+    lifecycle: Arc<crate::DaemonLifecycle>,
+    runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
+    data_root: PathBuf,
+}
+
 pub struct ControlIpcServerHandle {
     socket_path: PathBuf,
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -52,6 +68,8 @@ pub fn spawn_control_ipc_server(
     settings: Arc<RwLock<Settings>>,
     status_state: Arc<Mutex<crate::StatusRuntimeState>>,
     lifecycle: Arc<crate::DaemonLifecycle>,
+    runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
+    data_root: PathBuf,
 ) -> std::io::Result<ControlIpcServerHandle> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -99,6 +117,14 @@ pub fn spawn_control_ipc_server(
     let handle_socket_path = socket_path.clone();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     let (shutdown_broadcast, _) = broadcast::channel::<()>(8);
+    let context = ControlContext {
+        config_root,
+        settings,
+        status_state,
+        lifecycle,
+        runtime_logging,
+        data_root,
+    };
 
     let task = tokio::spawn(async move {
         loop {
@@ -122,12 +148,9 @@ pub fn spawn_control_ipc_server(
                     };
 
                     let mut shutdown = shutdown_broadcast.subscribe();
-                    let config_root = config_root.clone();
-                    let settings = settings.clone();
-                    let status_state = status_state.clone();
-                    let lifecycle = lifecycle.clone();
+                    let context = context.clone();
                     tokio::spawn(async move {
-                        let _ = handle_control_ipc_client(stream, &config_root, settings, status_state, lifecycle, &mut shutdown).await;
+                        let _ = handle_control_ipc_client(stream, context, &mut shutdown).await;
                     });
                 }
             }
@@ -143,10 +166,7 @@ pub fn spawn_control_ipc_server(
 
 async fn handle_control_ipc_client(
     stream: UnixStream,
-    config_root: &std::path::Path,
-    settings: Arc<RwLock<Settings>>,
-    status_state: Arc<Mutex<crate::StatusRuntimeState>>,
-    lifecycle: Arc<crate::DaemonLifecycle>,
+    context: ControlContext,
     shutdown: &mut broadcast::Receiver<()>,
 ) -> std::io::Result<()> {
     let (r, w) = stream.into_split();
@@ -228,9 +248,33 @@ async fn handle_control_ipc_client(
         }
     };
 
+    let log_bytes = if req.method == "logging.status" {
+        let log_dir = televy_backup_core::run_log::resolve_log_dir(&context.data_root);
+        tokio::task::spawn_blocking(move || {
+            televy_backup_core::local_settings::directory_bytes(&log_dir).ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
+    let runtime_logging = context.runtime_logging.read().await;
     let resp = {
-        let settings = settings.read().await;
-        handle_request(&req, config_root, &settings, &status_state, &lifecycle)
+        let settings = context.settings.read().await;
+        handle_request(
+            &req,
+            &context.config_root,
+            &settings,
+            &context.status_state,
+            &context.lifecycle,
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: &context.data_root,
+                log_bytes,
+            },
+        )
     };
     write_json_line(&mut w, &resp).await?;
     Ok(())
@@ -242,6 +286,7 @@ fn handle_request(
     settings: &Settings,
     status_state: &Arc<Mutex<crate::StatusRuntimeState>>,
     lifecycle: &Arc<crate::DaemonLifecycle>,
+    logging: &LoggingStatusContext<'_>,
 ) -> ControlResponse {
     if req.type_ != "control.request" || req.id.trim().is_empty() || req.method.trim().is_empty() {
         return ControlResponse::err(
@@ -257,6 +302,42 @@ fn handle_request(
     }
 
     match req.method.as_str() {
+        "logging.status" => {
+            let configured = televy_backup_core::local_settings::resolve(config_root);
+            let (has_running, external_logging) = status_state
+                .lock()
+                .ok()
+                .map(|state| {
+                    (
+                        state.has_running(),
+                        state.active_external_logging().cloned(),
+                    )
+                })
+                .unwrap_or((false, None));
+            let effective = if let Some(external_logging) = external_logging.as_ref() {
+                external_logging
+            } else if has_running {
+                logging.runtime
+            } else {
+                &configured
+            };
+            let pending_level = (has_running
+                && configured.configured_level != effective.configured_level)
+                .then_some(configured.configured_level);
+            let mut status = televy_backup_core::local_settings::status_with_log_bytes(
+                effective,
+                pending_level,
+                logging.data_root,
+                true,
+                logging.log_bytes,
+            );
+            status.configured_level = configured.configured_level;
+            status.configuration_error = configured.configuration_error;
+            ControlResponse::ok(
+                req.id.clone(),
+                serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({})),
+            )
+        }
         "daemon.stop" => {
             lifecycle.request_shutdown();
             ControlResponse::ok(
@@ -375,7 +456,7 @@ fn handle_request(
             };
 
             if let Ok(mut st) = status_state.lock() {
-                st.mark_external_run_start(&params.target_id, &params.task_id);
+                st.mark_external_run_start(&params.target_id, &params.task_id, params.logging);
             }
             ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
         }
@@ -755,6 +836,14 @@ mod tests {
                 mtproto: televy_backup_core::config::TelegramEndpointMtproto::default(),
                 rate_limit: televy_backup_core::config::TelegramRateLimit::default(),
             });
+        s.targets.push(televy_backup_core::config::Target {
+            id: "t1".to_string(),
+            source_path: "/tmp/source".to_string(),
+            label: "test".to_string(),
+            endpoint_id: "ep1".to_string(),
+            enabled: true,
+            schedule: None,
+        });
         s
     }
 
@@ -768,12 +857,17 @@ mod tests {
         let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
             &settings(),
         )));
+        let runtime_logging = Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
+            &cfg_root,
+        )));
         let _server = spawn_control_ipc_server(
             socket_path.clone(),
             cfg_root.clone(),
             Arc::new(RwLock::new(settings())),
             status_state,
             Arc::new(crate::DaemonLifecycle::default()),
+            runtime_logging,
+            dir.path().join("data"),
         )
         .unwrap();
 
@@ -801,15 +895,122 @@ mod tests {
         let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
             &settings(),
         )));
+        let runtime_logging =
+            televy_backup_core::local_settings::resolve(std::path::Path::new("/tmp"));
         let response = handle_request(
             &ControlRequest::new("1", "daemon.stop", serde_json::json!({})),
             std::path::Path::new("/tmp"),
             &settings(),
             &status_state,
             &lifecycle,
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: std::path::Path::new("/tmp"),
+                log_bytes: None,
+            },
         );
 
         assert!(response.ok);
         assert!(lifecycle.is_shutdown_requested());
+    }
+
+    #[test]
+    fn logging_status_reports_runtime_filter_and_pending_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_root = dir.path().join("config");
+        let data_root = dir.path().join("data");
+        let runtime_logging =
+            televy_backup_core::local_settings::resolve_from(&config_root, None, None);
+        televy_backup_core::local_settings::save(
+            &config_root,
+            &televy_backup_core::local_settings::LocalSettings {
+                version: 1,
+                logging: televy_backup_core::local_settings::LoggingSettings {
+                    level: televy_backup_core::local_settings::LogLevel::Debug,
+                },
+            },
+        )
+        .unwrap();
+
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        status_state.lock().unwrap().mark_run_start("t1");
+        let response = handle_request(
+            &ControlRequest::new("1", "logging.status", serde_json::json!({})),
+            &config_root,
+            &settings(),
+            &status_state,
+            &Arc::new(crate::DaemonLifecycle::default()),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: &data_root,
+                log_bytes: Some(0),
+            },
+        );
+
+        let status: televy_backup_core::local_settings::LoggingStatus =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(status.effective_level, "normal");
+        assert_eq!(
+            status.configured_level,
+            televy_backup_core::local_settings::LogLevel::Debug
+        );
+        assert_eq!(
+            status.pending_level,
+            Some(televy_backup_core::local_settings::LogLevel::Debug)
+        );
+        assert!(status.daemon_available);
+
+        let external_logging =
+            televy_backup_core::local_settings::resolve_from(&config_root, Some("debug"), None);
+        status_state.lock().unwrap().mark_external_run_start(
+            "t1",
+            "cli-task",
+            Some(external_logging),
+        );
+        let response = handle_request(
+            &ControlRequest::new("external", "logging.status", serde_json::json!({})),
+            &config_root,
+            &settings(),
+            &status_state,
+            &Arc::new(crate::DaemonLifecycle::default()),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: &data_root,
+                log_bytes: Some(0),
+            },
+        );
+        let status: televy_backup_core::local_settings::LoggingStatus =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(status.effective_level, "debug");
+        assert_eq!(status.overridden_by.as_deref(), Some("TELEVYBACKUP_LOG"));
+        status_state
+            .lock()
+            .unwrap()
+            .mark_external_run_finish("t1", "cli-task");
+        status_state.lock().unwrap().mark_run_start("t1");
+
+        std::fs::write(
+            televy_backup_core::local_settings::local_settings_path(&config_root),
+            "[logging]\nlevel = 'debug'\n",
+        )
+        .unwrap();
+        let response = handle_request(
+            &ControlRequest::new("2", "logging.status", serde_json::json!({})),
+            &config_root,
+            &settings(),
+            &status_state,
+            &Arc::new(crate::DaemonLifecycle::default()),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: &data_root,
+                log_bytes: Some(0),
+            },
+        );
+        let status: televy_backup_core::local_settings::LoggingStatus =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(status.configuration_error.is_some());
+        assert_eq!(status.effective_level, "normal");
     }
 }

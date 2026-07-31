@@ -5,10 +5,11 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use chrono::Utc;
 use tracing::Dispatch;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
+use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt, reload};
 
 static RUN_LOGGER: OnceLock<RunLogger> = OnceLock::new();
 static RUN_LOG_DISPATCH: OnceLock<Dispatch> = OnceLock::new();
+static RUN_LOG_FILTER: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
 static TRACING_INIT: OnceLock<()> = OnceLock::new();
 
 #[derive(Debug)]
@@ -106,36 +107,22 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for &RunLogger {
     }
 }
 
-fn build_env_filter_from(televybackup_log: Option<&str>, rust_log: Option<&str>) -> EnvFilter {
-    let default = || EnvFilter::new("debug");
-
-    if let Some(v) = televybackup_log {
-        return EnvFilter::try_new(v).unwrap_or_else(|_| default());
-    }
-    if let Some(v) = rust_log {
-        return EnvFilter::try_new(v).unwrap_or_else(|_| default());
-    }
-    default()
-}
-
-fn build_env_filter() -> EnvFilter {
-    build_env_filter_from(
-        std::env::var("TELEVYBACKUP_LOG").ok().as_deref(),
-        std::env::var("RUST_LOG").ok().as_deref(),
-    )
-}
-
-pub fn init_run_logging() {
+pub fn init_run_logging(filter: &str) -> std::io::Result<()> {
+    let env_filter = EnvFilter::try_new(filter)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     TRACING_INIT.get_or_init(|| {
         let logger = RUN_LOGGER.get_or_init(RunLogger::new);
-        let env_filter = build_env_filter();
+        let (filter_layer, filter_handle) = reload::Layer::new(env_filter.clone());
+        let _ = RUN_LOG_FILTER.set(filter_handle);
 
         let layer = tracing_subscriber::fmt::layer()
             .json()
             .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
             .with_writer(logger);
 
-        let subscriber = tracing_subscriber::registry().with(env_filter).with(layer);
+        let subscriber = tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(layer);
         let dispatch = Dispatch::new(subscriber);
 
         // Keep a handle so `start_run_log` can always install a thread-local dispatcher,
@@ -146,6 +133,12 @@ pub fn init_run_logging() {
         // to thread-local dispatchers in `start_run_log`.
         let _ = tracing::dispatcher::set_global_default(dispatch);
     });
+
+    RUN_LOG_FILTER
+        .get()
+        .expect("run log filter missing")
+        .reload(env_filter)
+        .map_err(std::io::Error::other)
 }
 
 pub struct RunLogGuard {
@@ -168,8 +161,13 @@ impl Drop for RunLogGuard {
     }
 }
 
-pub fn start_run_log(kind: &str, run_id: &str, data_dir: &Path) -> std::io::Result<RunLogGuard> {
-    init_run_logging();
+pub fn start_run_log(
+    kind: &str,
+    run_id: &str,
+    data_dir: &Path,
+    effective_filter: &str,
+) -> std::io::Result<RunLogGuard> {
+    init_run_logging(effective_filter)?;
 
     match kind {
         "backup" | "restore" | "verify" => {}
@@ -209,7 +207,7 @@ pub fn start_run_log(kind: &str, run_id: &str, data_dir: &Path) -> std::io::Resu
     })
 }
 
-fn resolve_log_dir(data_dir: &Path) -> PathBuf {
+pub fn resolve_log_dir(data_dir: &Path) -> PathBuf {
     if let Ok(v) = std::env::var("TELEVYBACKUP_LOG_DIR") {
         return PathBuf::from(v);
     }
@@ -230,20 +228,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_filter_precedence_is_televybackup_then_rust_log_then_default() {
-        let f1 = build_env_filter_from(Some("info"), Some("debug"));
-        let f2 = build_env_filter_from(None, Some("warn"));
-        let f3 = build_env_filter_from(None, None);
-
-        assert_eq!(f1.to_string(), "info");
-        assert_eq!(f2.to_string(), "warn");
-        assert_eq!(f3.to_string(), "debug");
-    }
-
-    #[test]
-    fn run_log_is_ndjson_and_flushed_on_drop() {
+    fn run_log_reloads_filter_between_runs_and_is_ndjson() {
         let temp = tempfile::tempdir().expect("create tempdir");
-        let guard = start_run_log("backup", "tsk_test", temp.path()).expect("start_run_log");
+        let guard = start_run_log(
+            "backup",
+            "tsk_normal",
+            temp.path(),
+            crate::local_settings::NORMAL_FILTER,
+        )
+        .expect("start_run_log");
 
         let expected_dir = temp.path().join("logs");
         assert_eq!(guard.path().parent(), Some(expected_dir.as_path()));
@@ -256,6 +249,7 @@ mod tests {
             task_id = "tsk_test",
             "run.start"
         );
+        tracing::debug!(target: "sqlx::query", event = "query", "query details");
         tracing::warn!(event = "phase.start", phase = "scan", "phase.start");
         tracing::warn!(event = "phase.finish", phase = "scan", "phase.finish");
         tracing::warn!(
@@ -291,5 +285,17 @@ mod tests {
                 "fields missing expected keys (message/event/summary)"
             );
         }
+        assert!(!text.contains("query details"));
+
+        let debug_guard = start_run_log("backup", "tsk_debug", temp.path(), "debug")
+            .expect("start debug run log");
+        tracing::debug!(target: "sqlx::query", event = "query", "query details");
+        let debug_path = debug_guard.path().to_path_buf();
+        drop(debug_guard);
+        assert!(
+            std::fs::read_to_string(debug_path)
+                .unwrap()
+                .contains("query details")
+        );
     }
 }

@@ -114,7 +114,7 @@
 ## 文档更新（Docs to Update）
 
 - `docs/architecture.md`: 补充“备份管线分阶段（scan/upload/index）”以及 upload worker/队列/回压的高层说明。
-- `docs/plan/0003:sync-logging-durability/PLAN.md`: 如 scan/upload 阶段语义发生变化（scan 不再包含上传等待），在 Notes 或验收口径中补充说明。
+- `docs/specs/0003-sync-logging-durability/SPEC.md`: 如 scan/upload 阶段语义发生变化（scan 不再包含上传等待），在规范或验收口径中补充说明。
 
 ## 实现里程碑（Milestones）
 

@@ -104,6 +104,7 @@ struct TargetRuntime {
     // When a CLI-run task reports progress to the daemon for UI status purposes, we keep the
     // current task id here so stale updates don't clobber newer runs.
     external_task_id: Option<String>,
+    external_logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
 
     up_bps: Option<u64>,
     up_total_bytes: Option<u64>,
@@ -143,6 +144,7 @@ impl StatusRuntimeState {
                     progress: None,
                     last_run: None,
                     external_task_id: None,
+                    external_logging: None,
                     up_bps: None,
                     up_total_bytes: None,
                     up_rate: ByteRateWindow::default(),
@@ -176,6 +178,7 @@ impl StatusRuntimeState {
                 progress: None,
                 last_run: None,
                 external_task_id: None,
+                external_logging: None,
                 up_bps: None,
                 up_total_bytes: None,
                 up_rate: ByteRateWindow::default(),
@@ -234,13 +237,19 @@ impl StatusRuntimeState {
         t.down_rate.reset(Instant::now(), 0);
     }
 
-    fn mark_external_run_start(&mut self, target_id: &str, task_id: &str) {
+    fn mark_external_run_start(
+        &mut self,
+        target_id: &str,
+        task_id: &str,
+        logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
+    ) {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
 
         let now = now_unix_ms();
         t.external_task_id = Some(task_id.to_string());
+        t.external_logging = logging;
         t.state = "running".to_string();
         t.running_since = Some(now);
         t.progress = Some(Progress {
@@ -337,6 +346,7 @@ impl StatusRuntimeState {
         }
 
         t.external_task_id = None;
+        t.external_logging = None;
         t.state = "idle".to_string();
         t.running_since = None;
         t.progress = None;
@@ -456,6 +466,15 @@ impl StatusRuntimeState {
 
     fn has_running(&self) -> bool {
         self.targets.values().any(|t| t.state == "running")
+    }
+
+    fn active_external_logging(
+        &self,
+    ) -> Option<&televy_backup_core::local_settings::ResolvedLogging> {
+        self.targets
+            .values()
+            .find(|target| target.external_task_id.is_some())
+            .and_then(|target| target.external_logging.as_ref())
     }
 
     fn tick_rates_at(&mut self, now: Instant) {
@@ -771,6 +790,7 @@ mod tests {
                 progress: None,
                 last_run: None,
                 external_task_id: None,
+                external_logging: None,
                 up_bps: None,
                 up_total_bytes: None,
                 up_rate: ByteRateWindow::default(),
@@ -1065,6 +1085,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
     let lifecycle = Arc::new(DaemonLifecycle::default());
+    let runtime_logging = Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
+        &config_root,
+    )));
     let status_path = status_json_path(&data_root);
     tokio::spawn(status_writer_loop(status_state.clone(), status_path));
 
@@ -1157,6 +1180,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         control_ipc_settings.clone(),
         status_state.clone(),
         lifecycle.clone(),
+        runtime_logging.clone(),
+        data_root.clone(),
     ) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -1232,6 +1257,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // UI saved new endpoint chat_id but the long-running daemon kept using the old one.
         let has_running = status_state.lock().ok().is_some_and(|st| st.has_running());
         if !has_running {
+            let next_logging = televy_backup_core::local_settings::resolve(&config_root);
+            if *runtime_logging.read().await != next_logging {
+                *runtime_logging.write().await = next_logging;
+            }
             let config_mtime = file_mtime(&config_path);
             let secrets_mtime = file_mtime(&secrets_path);
             let config_changed = config_mtime.is_some() && config_mtime != last_config_mtime;
@@ -1709,8 +1738,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let task_id = format!("tsk_{}", Uuid::new_v4());
-            let run_log =
-                televy_backup_core::run_log::start_run_log("backup", &task_id, &data_root)?;
+            // A previous target may have finished after local.toml changed. Resolve again at the
+            // run boundary so each target gets the level configured for its own next task.
+            let logging = televy_backup_core::local_settings::resolve(&config_root);
+            if *runtime_logging.read().await != logging {
+                *runtime_logging.write().await = logging.clone();
+            }
+            let run_log = televy_backup_core::run_log::start_run_log(
+                "backup",
+                &task_id,
+                &data_root,
+                &logging.effective_filter,
+            )?;
 
             // Run summaries must appear even when the daemon is started with `RUST_LOG=warn`,
             // otherwise successful runs create empty NDJSON files and the UI shows no history.

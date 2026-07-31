@@ -45,3 +45,4 @@
 | cac6x | MTProto 空闲 Helper 退出治理 | 已完成 | `cac6x-mtproto-helper-idle-shutdown/SPEC.md` | 2026-03-22 | internal lifecycle 修复：graceful shutdown + kill fallback，解决 idle orphan helper 高 CPU；macOS 历史页改为磁盘回填 + 大日志头尾索引 |
 | fdwoo | macOS 明暗主题支持与系统自动切换 | 已完成 | `fdwoo-macos-light-dark-theme/SPEC.md` | 2026-04-10 | 主题实现已完成；已修复 Settings 左侧 sidebar 暗色纯黑回归；UI demo / snapshot 路径现已隔离 config/data，避免污染真实 Application Support 数据 |
 | k7d2v | Daemon 生命周期与可控退出 | 部分完成（3/4） | `k7d2v-daemon-lifecycle/SPEC.md` | 2026-07-12 | daemon 停止 IPC、CLI 管理命令、App 退出与 LaunchAgent 完全退出治理 |
+| 0003 | Sync Logging Durability and Local Diagnostics | 部分完成（1/5） | `0003-sync-logging-durability/SPEC.md` | 2026-07-31 | 已迁移 legacy spec；待实现安全默认、日志偏好、Diagnostics UI 与视觉证据 |

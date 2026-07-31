@@ -52,6 +52,10 @@ enum Command {
         #[command(subcommand)]
         cmd: SettingsCmd,
     },
+    Diagnostics {
+        #[command(subcommand)]
+        cmd: DiagnosticsCmd,
+    },
     Vault {
         #[command(subcommand)]
         cmd: VaultCmd,
@@ -99,6 +103,15 @@ enum DaemonCmd {
     Start,
     Status,
     Stop,
+}
+
+#[derive(Subcommand)]
+enum DiagnosticsCmd {
+    Get,
+    SetLogLevel {
+        #[arg(long, value_parser = ["normal", "verbose", "debug"])]
+        level: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -640,6 +653,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 }
             }
         },
+        Command::Diagnostics { cmd } => match cmd {
+            DiagnosticsCmd::Get => diagnostics_get(&config_dir, &data_dir, cli.json),
+            DiagnosticsCmd::SetLogLevel { level } => {
+                diagnostics_set_log_level(&config_dir, &data_dir, &level, cli.json)
+            }
+        },
         Command::Vault { cmd } => match cmd {
             VaultCmd::Ensure => vault_ensure(&config_dir, &data_dir, cli.json).await,
         },
@@ -792,6 +811,80 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             DaemonCmd::Stop => daemon_stop(&data_dir, cli.json).await,
         },
     }
+}
+
+fn diagnostics_get(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
+    let status = match control_ipc_call_with_timeouts(
+        data_dir,
+        "logging.status",
+        serde_json::json!({}),
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    ) {
+        Ok(response) if response.ok => response.result.ok_or_else(|| {
+            CliError::new("diagnostics.invalid", "daemon returned no logging status")
+        })?,
+        Ok(response) => {
+            let message = response
+                .error
+                .map(|error| error.message)
+                .unwrap_or_else(|| "daemon logging status failed".to_owned());
+            return Err(CliError::new("diagnostics.failed", message));
+        }
+        Err(error) if matches!(error.code, "control.unavailable" | "control.timeout") => {
+            let resolved = televy_backup_core::local_settings::resolve(config_dir);
+            serde_json::to_value(televy_backup_core::local_settings::status(
+                &resolved, None, data_dir, false,
+            ))
+            .map_err(|error| CliError::new("diagnostics.invalid", error.to_string()))?
+        }
+        Err(error) if error.code == "control.method_not_found" => {
+            return Err(CliError::new(
+                "diagnostics.daemon_incompatible",
+                "running daemon does not support logging diagnostics; restart the app to update it",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+
+    if json {
+        println!("{status}");
+    } else {
+        let status: televy_backup_core::local_settings::LoggingStatus =
+            serde_json::from_value(status)
+                .map_err(|error| CliError::new("diagnostics.invalid", error.to_string()))?;
+        println!(
+            "logging: configured={} effective={} source={} directory={} bytes={}",
+            status.configured_level,
+            status.effective_level,
+            status.source,
+            status.log_directory,
+            status
+                .log_bytes
+                .map(|bytes| bytes.to_string())
+                .unwrap_or_else(|| "unavailable".to_owned())
+        );
+    }
+    Ok(())
+}
+
+fn diagnostics_set_log_level(
+    config_dir: &Path,
+    data_dir: &Path,
+    level: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let level: televy_backup_core::local_settings::LogLevel = level
+        .parse()
+        .map_err(|error: String| CliError::new("diagnostics.invalid", error))?;
+    let settings = televy_backup_core::local_settings::LocalSettings {
+        version: televy_backup_core::local_settings::LOCAL_SETTINGS_VERSION,
+        logging: televy_backup_core::local_settings::LoggingSettings { level },
+    };
+    televy_backup_core::local_settings::save(config_dir, &settings)
+        .map_err(|error| CliError::new("diagnostics.save_failed", error.to_string()))?;
+
+    diagnostics_get(config_dir, data_dir, json)
 }
 
 fn daemon_binary_path() -> PathBuf {
@@ -4169,8 +4262,14 @@ async fn backup_run(
     events: bool,
 ) -> Result<(), CliError> {
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
-    let run_log = televy_backup_core::run_log::start_run_log("backup", &task_id, data_dir)
-        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
+    let logging = televy_backup_core::local_settings::resolve(config_dir);
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "backup",
+        &task_id,
+        data_dir,
+        &logging.effective_filter,
+    )
+    .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
     let started = std::time::Instant::now();
 
@@ -4330,7 +4429,13 @@ async fn backup_run(
     );
     emit_task_progress_preflight(events, &task_id);
     if events {
-        daemon_control_status_task_start(data_dir, &task_id, "backup", ctx_target_id.as_str());
+        daemon_control_status_task_start(
+            config_dir,
+            data_dir,
+            &task_id,
+            "backup",
+            ctx_target_id.as_str(),
+        );
     }
 
     let result: Result<televy_backup_core::BackupResult, CliError> = async {
@@ -4984,8 +5089,14 @@ async fn restore_run(
     events: bool,
 ) -> Result<(), CliError> {
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
-    let run_log = televy_backup_core::run_log::start_run_log("restore", &task_id, data_dir)
-        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
+    let logging = televy_backup_core::local_settings::resolve(config_dir);
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "restore",
+        &task_id,
+        data_dir,
+        &logging.effective_filter,
+    )
+    .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
     tracing::warn!(
         event = "run.start",
@@ -5369,8 +5480,14 @@ async fn restore_latest(
     events: bool,
 ) -> Result<(), CliError> {
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
-    let run_log = televy_backup_core::run_log::start_run_log("restore", &task_id, data_dir)
-        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
+    let logging = televy_backup_core::local_settings::resolve(config_dir);
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "restore",
+        &task_id,
+        data_dir,
+        &logging.effective_filter,
+    )
+    .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
     let started = std::time::Instant::now();
 
     let settings = match load_settings(config_dir) {
@@ -5544,7 +5661,7 @@ async fn restore_latest(
     );
     emit_task_progress_preflight(events, &task_id);
     if events {
-        daemon_control_status_task_start(data_dir, &task_id, "restore", t.id.as_str());
+        daemon_control_status_task_start(config_dir, data_dir, &task_id, "restore", t.id.as_str());
     }
 
     let result: Result<(String, televy_backup_core::RestoreResult), CliError> = async {
@@ -5793,8 +5910,14 @@ async fn verify_latest(
     events: bool,
 ) -> Result<(), CliError> {
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
-    let run_log = televy_backup_core::run_log::start_run_log("verify", &task_id, data_dir)
-        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
+    let logging = televy_backup_core::local_settings::resolve(config_dir);
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "verify",
+        &task_id,
+        data_dir,
+        &logging.effective_filter,
+    )
+    .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
     let started = std::time::Instant::now();
 
     let settings = match load_settings(config_dir) {
@@ -5968,7 +6091,7 @@ async fn verify_latest(
     );
     emit_task_progress_preflight(events, &task_id);
     if events {
-        daemon_control_status_task_start(data_dir, &task_id, "verify", t.id.as_str());
+        daemon_control_status_task_start(config_dir, data_dir, &task_id, "verify", t.id.as_str());
     }
 
     let result: Result<(String, televy_backup_core::VerifyResult), CliError> = async {
@@ -6213,8 +6336,14 @@ async fn verify_run(
     events: bool,
 ) -> Result<(), CliError> {
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
-    let run_log = televy_backup_core::run_log::start_run_log("verify", &task_id, data_dir)
-        .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
+    let logging = televy_backup_core::local_settings::resolve(config_dir);
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "verify",
+        &task_id,
+        data_dir,
+        &logging.effective_filter,
+    )
+    .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
     tracing::warn!(
         event = "run.start",
@@ -6799,6 +6928,20 @@ fn control_ipc_call_with_timeouts(
     }
 }
 
+#[cfg(not(unix))]
+fn control_ipc_call_with_timeouts(
+    _data_dir: &Path,
+    _method: &str,
+    _params: serde_json::Value,
+    _read_timeout: Duration,
+    _write_timeout: Duration,
+) -> Result<televy_backup_core::control::ControlResponse, CliError> {
+    Err(CliError::new(
+        "control.unavailable",
+        "control IPC is only supported on unix",
+    ))
+}
+
 #[cfg(unix)]
 fn control_ipc_call(
     data_dir: &Path,
@@ -7039,11 +7182,18 @@ fn daemon_control_secrets_clear_telegram_mtproto_session(
 }
 
 #[cfg(unix)]
-fn daemon_control_status_task_start(data_dir: &Path, task_id: &str, kind: &str, target_id: &str) {
+fn daemon_control_status_task_start(
+    config_dir: &Path,
+    data_dir: &Path,
+    task_id: &str,
+    kind: &str,
+    target_id: &str,
+) {
     let params = televy_backup_core::control::StatusTaskStartParams {
         task_id: task_id.to_string(),
         kind: kind.to_string(),
         target_id: target_id.to_string(),
+        logging: Some(televy_backup_core::local_settings::resolve(config_dir)),
     };
     let params = serde_json::to_value(params).unwrap_or_else(|_| serde_json::json!({}));
     let _ = control_ipc_call_with_timeouts(
@@ -7057,6 +7207,7 @@ fn daemon_control_status_task_start(data_dir: &Path, task_id: &str, kind: &str, 
 
 #[cfg(not(unix))]
 fn daemon_control_status_task_start(
+    _config_dir: &Path,
     _data_dir: &Path,
     _task_id: &str,
     _kind: &str,
@@ -7578,5 +7729,45 @@ endpoint_id = "missing"
         let err = select_endpoint(&settings, None).unwrap_err();
         assert_eq!(err.code, "config.invalid");
         assert!(err.message.contains("multiple endpoints configured"));
+    }
+
+    #[test]
+    fn diagnostics_commands_parse_json_contract() {
+        let get = Cli::try_parse_from(["televybackup", "--json", "diagnostics", "get"])
+            .expect("parse diagnostics get");
+        assert!(get.json);
+        assert!(matches!(
+            get.cmd,
+            Command::Diagnostics {
+                cmd: DiagnosticsCmd::Get
+            }
+        ));
+
+        let set = Cli::try_parse_from([
+            "televybackup",
+            "--json",
+            "diagnostics",
+            "set-log-level",
+            "--level",
+            "verbose",
+        ])
+        .expect("parse diagnostics set");
+        assert!(matches!(
+            set.cmd,
+            Command::Diagnostics {
+                cmd: DiagnosticsCmd::SetLogLevel { level }
+            } if level == "verbose"
+        ));
+
+        assert!(
+            Cli::try_parse_from([
+                "televybackup",
+                "diagnostics",
+                "set-log-level",
+                "--level",
+                "trace",
+            ])
+            .is_err()
+        );
     }
 }
