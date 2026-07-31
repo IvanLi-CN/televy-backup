@@ -24,4 +24,5 @@ Review hardening made the schema version mandatory, preserved current
 configuration errors while a task retains its previous runtime filter, and
 defined every target start as a task boundary for filter reload. The Settings
 surface also refreshes after daemon startup and creates the log directory before
-opening it.
+opening it. Unknown local-setting fields are rejected so misspelled keys remain
+observable instead of silently selecting a default.

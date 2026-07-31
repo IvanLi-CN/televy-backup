@@ -5,7 +5,7 @@
 - Per-run NDJSON creation, unique naming, flush, and fsync are implemented.
 - `local.toml` requires schema version 1 and stores the machine-local log preset
   with atomic writes and safe `Normal` fallback for missing, unversioned, or
-  invalid content.
+  invalid content, including unknown fields caused by misspelled keys.
 - The shared resolver implements environment precedence, preset mappings, and
   invalid-filter fallback without enabling global debug.
 - The run logger reloads its filter at every task boundary, including between
