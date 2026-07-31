@@ -26,3 +26,8 @@ defined every target start as a task boundary for filter reload. The Settings
 surface also refreshes after daemon startup and creates the log directory before
 opening it. Unknown local-setting fields are rejected so misspelled keys remain
 observable instead of silently selecting a default.
+
+Upgrade hardening distinguishes an incompatible older daemon from an unavailable
+daemon, preventing the App from presenting a local-only status as applied at
+runtime. Debug-capable custom environment filters receive the same persistent
+disk warning as the Debug preset.

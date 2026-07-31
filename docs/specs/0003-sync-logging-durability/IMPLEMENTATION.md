@@ -12,7 +12,8 @@
   targets in one daemon scheduling pass. The daemon keeps its active runtime
   filter stable and reports pending local changes and current validation errors
   over `logging.status`.
-- CLI diagnostics commands expose local/runtime state and best-effort disk use.
+- CLI diagnostics commands expose local/runtime state and best-effort disk use;
+  protocol skew with an older daemon is reported as requiring an app restart.
 - macOS Settings includes Diagnostics controls, override locking, persistent
   Debug warning, daemon-start refresh, a reliable Open in Finder action, and
   mock-only visual evidence scenes.
@@ -24,7 +25,7 @@
   across preset reloads.
 - Daemon and CLI tests cover runtime status, pending state, and daemon fallback.
 - Swift tests cover status decoding, picker locking, pending state, and Debug
-  warning visibility.
+  warning visibility for presets and debug-capable custom filters.
 - CI-equivalent formatting, lint, Rust test, and Swift test commands are the
   required release gate.
 

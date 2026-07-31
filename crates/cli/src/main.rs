@@ -831,13 +831,20 @@ fn diagnostics_get(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(),
                 .unwrap_or_else(|| "daemon logging status failed".to_owned());
             return Err(CliError::new("diagnostics.failed", message));
         }
-        Err(_) => {
+        Err(error) if matches!(error.code, "control.unavailable" | "control.timeout") => {
             let resolved = televy_backup_core::local_settings::resolve(config_dir);
             serde_json::to_value(televy_backup_core::local_settings::status(
                 &resolved, None, data_dir, false,
             ))
             .map_err(|error| CliError::new("diagnostics.invalid", error.to_string()))?
         }
+        Err(error) if error.code == "control.method_not_found" => {
+            return Err(CliError::new(
+                "diagnostics.daemon_incompatible",
+                "running daemon does not support logging diagnostics; restart the app to update it",
+            ));
+        }
+        Err(error) => return Err(error),
     };
 
     if json {

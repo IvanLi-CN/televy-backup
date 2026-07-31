@@ -53,7 +53,15 @@ struct CliDiagnosticsStatus: Decodable, Equatable {
     let daemonAvailable: Bool
 
     var pickerDisabled: Bool { overriddenBy != nil }
-    var debugWarningVisible: Bool { effectiveLevel == AppLogLevel.debug.rawValue }
+    var debugWarningVisible: Bool {
+        if effectiveLevel == AppLogLevel.debug.rawValue { return true }
+        return effectiveFilter.split(separator: ",").contains { directive in
+            let level = directive.split(separator: "=", maxSplits: 1).last?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            return level == "debug" || level == "trace"
+        }
+    }
     var runtimeStatusUnavailable: Bool { !daemonAvailable }
 }
 
