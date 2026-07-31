@@ -23,6 +23,7 @@ private func runDiagnosticsSettingsTests() {
     expect(normal.configuredLevel == .normal, "normal level should decode")
     expect(!normal.pickerDisabled, "normal status should leave picker enabled")
     expect(!normal.debugWarningVisible, "normal status should hide debug warning")
+    expect(normal.runtimeStatusUnavailable, "offline status should flag runtime as unavailable")
 
     let overridden = decode(#"{"configuredLevel":"verbose","effectiveLevel":"custom","effectiveFilter":"info","source":"environment","overriddenBy":"RUST_LOG","pendingLevel":null,"logDirectory":"/tmp/logs","logBytes":null,"daemonAvailable":true}"#)
     expect(overridden.pickerDisabled, "environment override should disable picker")

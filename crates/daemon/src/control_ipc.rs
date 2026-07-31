@@ -14,6 +14,12 @@ use televy_backup_core::control::{
 
 type Settings = televy_backup_core::config::SettingsV2;
 
+struct LoggingStatusContext<'a> {
+    runtime: &'a televy_backup_core::local_settings::ResolvedLogging,
+    data_root: &'a std::path::Path,
+    log_bytes: Option<u64>,
+}
+
 #[derive(Clone)]
 struct ControlContext {
     config_root: PathBuf,
@@ -242,6 +248,18 @@ async fn handle_control_ipc_client(
         }
     };
 
+    let log_bytes = if req.method == "logging.status" {
+        let log_dir = televy_backup_core::run_log::resolve_log_dir(&context.data_root);
+        tokio::task::spawn_blocking(move || {
+            televy_backup_core::local_settings::directory_bytes(&log_dir).ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
     let runtime_logging = context.runtime_logging.read().await;
     let resp = {
         let settings = context.settings.read().await;
@@ -251,8 +269,11 @@ async fn handle_control_ipc_client(
             &settings,
             &context.status_state,
             &context.lifecycle,
-            &runtime_logging,
-            &context.data_root,
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: &context.data_root,
+                log_bytes,
+            },
         )
     };
     write_json_line(&mut w, &resp).await?;
@@ -265,8 +286,7 @@ fn handle_request(
     settings: &Settings,
     status_state: &Arc<Mutex<crate::StatusRuntimeState>>,
     lifecycle: &Arc<crate::DaemonLifecycle>,
-    runtime_logging: &televy_backup_core::local_settings::ResolvedLogging,
-    data_root: &std::path::Path,
+    logging: &LoggingStatusContext<'_>,
 ) -> ControlResponse {
     if req.type_ != "control.request" || req.id.trim().is_empty() || req.method.trim().is_empty() {
         return ControlResponse::err(
@@ -289,18 +309,19 @@ fn handle_request(
                 .ok()
                 .is_some_and(|state| state.has_running());
             let pending_level = (has_running
-                && configured.configured_level != runtime_logging.configured_level)
+                && configured.configured_level != logging.runtime.configured_level)
                 .then_some(configured.configured_level);
             let effective = if has_running {
-                runtime_logging
+                logging.runtime
             } else {
                 &configured
             };
-            let mut status = televy_backup_core::local_settings::status(
+            let mut status = televy_backup_core::local_settings::status_with_log_bytes(
                 effective,
                 pending_level,
-                data_root,
+                logging.data_root,
                 true,
+                logging.log_bytes,
             );
             status.configured_level = configured.configured_level;
             ControlResponse::ok(
@@ -873,8 +894,11 @@ mod tests {
             &settings(),
             &status_state,
             &lifecycle,
-            &runtime_logging,
-            std::path::Path::new("/tmp"),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: std::path::Path::new("/tmp"),
+                log_bytes: None,
+            },
         );
 
         assert!(response.ok);
@@ -909,8 +933,11 @@ mod tests {
             &settings(),
             &status_state,
             &Arc::new(crate::DaemonLifecycle::default()),
-            &runtime_logging,
-            &data_root,
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: &data_root,
+                log_bytes: Some(0),
+            },
         );
 
         let status: televy_backup_core::local_settings::LoggingStatus =

@@ -54,6 +54,7 @@ struct CliDiagnosticsStatus: Decodable, Equatable {
 
     var pickerDisabled: Bool { overriddenBy != nil }
     var debugWarningVisible: Bool { effectiveLevel == AppLogLevel.debug.rawValue }
+    var runtimeStatusUnavailable: Bool { !daemonAvailable }
 }
 
 struct CliSettingsExportBundleResponse: Decodable {
@@ -620,6 +621,11 @@ struct SettingsWindowRootView: View {
                         if let diagnostics {
                             LabeledContent("Effective level", value: diagnostics.effectiveLevel.capitalized)
                             LabeledContent("Source", value: diagnostics.overriddenBy ?? diagnostics.source)
+                            if diagnostics.runtimeStatusUnavailable {
+                                Label("Daemon unavailable. The effective runtime level cannot be verified.", systemImage: "bolt.slash")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
                             if let pending = diagnostics.pendingLevel {
                                 LabeledContent("Next task", value: pending.title)
                             }

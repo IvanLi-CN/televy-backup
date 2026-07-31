@@ -112,6 +112,24 @@ pub fn status(
     daemon_available: bool,
 ) -> LoggingStatus {
     let log_dir = crate::run_log::resolve_log_dir(data_dir);
+    let log_bytes = directory_bytes(&log_dir).ok();
+    status_with_log_bytes(
+        resolved,
+        pending_level,
+        data_dir,
+        daemon_available,
+        log_bytes,
+    )
+}
+
+pub fn status_with_log_bytes(
+    resolved: &ResolvedLogging,
+    pending_level: Option<LogLevel>,
+    data_dir: &Path,
+    daemon_available: bool,
+    log_bytes: Option<u64>,
+) -> LoggingStatus {
+    let log_dir = crate::run_log::resolve_log_dir(data_dir);
     LoggingStatus {
         configured_level: resolved.configured_level,
         effective_level: resolved.effective_level.clone(),
@@ -120,7 +138,7 @@ pub fn status(
         overridden_by: resolved.overridden_by.clone(),
         pending_level,
         log_directory: log_dir.display().to_string(),
-        log_bytes: directory_bytes(&log_dir).ok(),
+        log_bytes,
         configuration_error: resolved.configuration_error.clone(),
         daemon_available,
     }
