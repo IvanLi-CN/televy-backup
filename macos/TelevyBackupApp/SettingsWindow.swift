@@ -685,7 +685,16 @@ struct SettingsWindowRootView: View {
 
     private func openDiagnosticsLogDirectory() {
         guard let path = diagnostics?.logDirectory else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
+        let directory = URL(fileURLWithPath: path, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            diagnosticsError = "Could not create the log directory."
+            return
+        }
+        if !NSWorkspace.shared.open(directory) {
+            diagnosticsError = "Could not open the log directory."
+        }
     }
 
     private func reloadDiagnostics() {

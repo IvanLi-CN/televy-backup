@@ -55,7 +55,6 @@ impl std::str::FromStr for LogLevel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct LocalSettings {
     pub version: u32,
     pub logging: LoggingSettings,
@@ -316,6 +315,15 @@ mod tests {
         let resolved = resolve_from(temp.path(), None, None);
         assert_eq!(resolved.effective_level, "normal");
         assert!(resolved.configuration_error.is_some());
+
+        std::fs::write(
+            local_settings_path(temp.path()),
+            "[logging]\nlevel = 'debug'\n",
+        )
+        .unwrap();
+        let unversioned = resolve_from(temp.path(), None, None);
+        assert_eq!(unversioned.effective_level, "normal");
+        assert!(unversioned.configuration_error.is_some());
     }
 
     #[test]

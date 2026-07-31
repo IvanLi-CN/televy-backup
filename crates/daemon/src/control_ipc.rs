@@ -324,6 +324,7 @@ fn handle_request(
                 logging.log_bytes,
             );
             status.configured_level = configured.configured_level;
+            status.configuration_error = configured.configuration_error;
             ControlResponse::ok(
                 req.id.clone(),
                 serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({})),
@@ -952,5 +953,27 @@ mod tests {
             Some(televy_backup_core::local_settings::LogLevel::Debug)
         );
         assert!(status.daemon_available);
+
+        std::fs::write(
+            televy_backup_core::local_settings::local_settings_path(&config_root),
+            "[logging]\nlevel = 'debug'\n",
+        )
+        .unwrap();
+        let response = handle_request(
+            &ControlRequest::new("2", "logging.status", serde_json::json!({})),
+            &config_root,
+            &settings(),
+            &status_state,
+            &Arc::new(crate::DaemonLifecycle::default()),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: &data_root,
+                log_bytes: Some(0),
+            },
+        );
+        let status: televy_backup_core::local_settings::LoggingStatus =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(status.configuration_error.is_some());
+        assert_eq!(status.effective_level, "normal");
     }
 }
