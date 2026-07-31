@@ -29,6 +29,9 @@
   warning visibility for presets and debug-capable custom filters. Diagnostics
   reloads use sequence guards so stale asynchronous results cannot replace a
   newer save or daemon-backed refresh.
+- The mock-only capture script permits an isolated second app instance and
+  captures only the PID-owned Settings window without enabling the app's timer
+  snapshot path or falling back to a full-screen capture.
 - CI-equivalent formatting, lint, Rust test, and Swift test commands are the
   required release gate.
 
