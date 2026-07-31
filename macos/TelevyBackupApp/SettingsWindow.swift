@@ -1269,6 +1269,9 @@ struct SettingsWindowRootView: View {
                 if !SettingsUIDemo.disableAutoSelect, self.selectedEndpointId == nil {
                     self.selectedEndpointId = self.sortedEndpoints(settings: decoded.settings).first?.id
                 }
+                // reload() starts the daemon before loading settings. Query diagnostics again now
+                // so an earlier startup fallback cannot leave this window showing stale status.
+                self.reloadDiagnostics()
             }
         }
     }

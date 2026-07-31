@@ -1718,7 +1718,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let task_id = format!("tsk_{}", Uuid::new_v4());
-            let logging = runtime_logging.read().await.clone();
+            // A previous target may have finished after local.toml changed. Resolve again at the
+            // run boundary so each target gets the level configured for its own next task.
+            let logging = televy_backup_core::local_settings::resolve(&config_root);
+            if *runtime_logging.read().await != logging {
+                *runtime_logging.write().await = logging.clone();
+            }
             let run_log = televy_backup_core::run_log::start_run_log(
                 "backup",
                 &task_id,
