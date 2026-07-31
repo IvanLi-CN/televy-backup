@@ -296,12 +296,13 @@ fn handle_request(
             } else {
                 &configured
             };
-            let status = televy_backup_core::local_settings::status(
+            let mut status = televy_backup_core::local_settings::status(
                 effective,
                 pending_level,
                 data_root,
                 true,
             );
+            status.configured_level = configured.configured_level;
             ControlResponse::ok(
                 req.id.clone(),
                 serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({})),
@@ -915,6 +916,10 @@ mod tests {
         let status: televy_backup_core::local_settings::LoggingStatus =
             serde_json::from_value(response.result.unwrap()).unwrap();
         assert_eq!(status.effective_level, "normal");
+        assert_eq!(
+            status.configured_level,
+            televy_backup_core::local_settings::LogLevel::Debug
+        );
         assert_eq!(
             status.pending_level,
             Some(televy_backup_core::local_settings::LogLevel::Debug)

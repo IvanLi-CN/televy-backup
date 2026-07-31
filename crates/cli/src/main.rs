@@ -6915,6 +6915,20 @@ fn control_ipc_call_with_timeouts(
     }
 }
 
+#[cfg(not(unix))]
+fn control_ipc_call_with_timeouts(
+    _data_dir: &Path,
+    _method: &str,
+    _params: serde_json::Value,
+    _read_timeout: Duration,
+    _write_timeout: Duration,
+) -> Result<televy_backup_core::control::ControlResponse, CliError> {
+    Err(CliError::new(
+        "control.unavailable",
+        "control IPC is only supported on unix",
+    ))
+}
+
 #[cfg(unix)]
 fn control_ipc_call(
     data_dir: &Path,
