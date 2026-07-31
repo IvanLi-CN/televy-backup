@@ -112,9 +112,16 @@ Invalid environment filters resolve to `Normal`, never global debug.
 ## Visual Evidence
 
 PR: include
+![Diagnostics Normal](assets/diagnostics-normal.png)
 
-Visual evidence is captured from the deterministic Settings `ui_demo` after the
-implementation is rendered and verified.
+PR: include
+![Diagnostics Debug warning](assets/diagnostics-debug.png)
+
+PR: include
+![Diagnostics environment override](assets/diagnostics-override.png)
+
+The images come from deterministic, mock-only Settings `ui_demo` scenes and are
+limited to the Settings window launched for the capture.
 
 ## References
 
