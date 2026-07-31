@@ -31,7 +31,8 @@
   newer save or daemon-backed refresh.
 - The mock-only capture script permits an isolated second app instance and
   captures only the PID-owned Settings window without enabling the app's timer
-  snapshot path or falling back to a full-screen capture.
+  snapshot path or falling back to a full-screen capture. An exit trap reaps the
+  isolated app and temporary files on both success and failure.
 - CI-equivalent formatting, lint, Rust test, and Swift test commands are the
   required release gate.
 

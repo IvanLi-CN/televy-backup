@@ -29,6 +29,16 @@ TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH=0 \
 TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH=1 \
 "$app_bin" >/dev/null 2>&1 &
 app_pid=$!
+workdir=""
+
+cleanup() {
+  kill -TERM "$app_pid" >/dev/null 2>&1 || true
+  wait "$app_pid" >/dev/null 2>&1 || true
+  if [[ -n "$workdir" ]]; then
+    rm -rf "$workdir"
+  fi
+}
+trap cleanup EXIT
 
 # Give SwiftUI time to render the Settings window.
 sleep 0.9
@@ -104,12 +114,5 @@ if [[ -n "$wid" ]]; then
   screencapture -x -l "$wid" "$out"
 else
   echo "ERROR: Settings window not found; refusing full-screen capture" >&2
-  kill -TERM "$app_pid" >/dev/null 2>&1 || true
-  rm -rf "$workdir"
   exit 1
 fi
-
-kill -TERM "$app_pid" >/dev/null 2>&1 || true
-wait "$app_pid" >/dev/null 2>&1 || true
-
-rm -rf "$workdir"
