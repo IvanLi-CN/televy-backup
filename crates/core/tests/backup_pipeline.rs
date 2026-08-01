@@ -342,17 +342,41 @@ async fn backup_writes_normal_level_performance_intervals_to_run_log() {
             .all(|bucket| bucket.get("unattributed_us").is_none()),
         "unmeasured time must stay visibly absent from the resource trace"
     );
+    let scan_finish = log_entries
+        .iter()
+        .find(|line| line["fields"]["event"] == "performance.scan.finish")
+        .expect("scan finish performance event");
+    for (trace_field, summary_field) in [
+        ("walk_us", "walk_ms"),
+        ("metadata_us", "metadata_ms"),
+        ("read_chunk_us", "read_chunk_ms"),
+        ("encrypt_us", "encrypt_ms"),
+        ("sqlite_us", "sqlite_timed_ms"),
+    ] {
+        let trace_ms = buckets
+            .iter()
+            .map(|bucket| bucket[trace_field].as_u64().unwrap_or(0))
+            .sum::<u64>()
+            / 1_000;
+        assert_eq!(
+            scan_finish["fields"][summary_field].as_u64(),
+            Some(trace_ms),
+            "scan finish {summary_field} must agree with the measured trace"
+        );
+    }
 
-    let queue_wait_starts = log_entries
+    let mut queue_wait_starts = log_entries
         .iter()
         .filter(|line| line["fields"]["event"] == "performance.scan.queue_wait.start")
-        .map(|line| line["fields"]["queue_wait_id"].clone())
+        .map(|line| line["fields"]["queue_wait_id"].as_u64().unwrap())
         .collect::<Vec<_>>();
-    let queue_wait_finishes = log_entries
+    let mut queue_wait_finishes = log_entries
         .iter()
         .filter(|line| line["fields"]["event"] == "performance.scan.queue_wait.finish")
-        .map(|line| line["fields"]["queue_wait_id"].clone())
+        .map(|line| line["fields"]["queue_wait_id"].as_u64().unwrap())
         .collect::<Vec<_>>();
+    queue_wait_starts.sort_unstable();
+    queue_wait_finishes.sort_unstable();
     assert_eq!(queue_wait_starts, queue_wait_finishes);
 }
 

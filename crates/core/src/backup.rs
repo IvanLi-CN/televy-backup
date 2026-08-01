@@ -1106,7 +1106,7 @@ impl ScanActivityTrace {
             cursor_us = segment_end_us;
         }
 
-        end_us.saturating_sub(start_us) / 1_000
+        end_us.saturating_sub(start_us)
     }
 
     fn to_json(&self) -> (String, u64) {
@@ -1142,11 +1142,11 @@ fn is_zero(value: &u64) -> bool {
 
 #[derive(Debug)]
 struct ScanPerformance {
-    walk_ms: u64,
-    metadata_ms: u64,
-    read_chunk_ms: u64,
-    encrypt_ms: u64,
-    sqlite_timed_ms: u64,
+    walk_us: u64,
+    metadata_us: u64,
+    read_chunk_us: u64,
+    encrypt_us: u64,
+    sqlite_timed_us: u64,
     upload_queue_blocked_ms: u64,
     trace: ScanActivityTrace,
 }
@@ -1154,35 +1154,35 @@ struct ScanPerformance {
 impl ScanPerformance {
     fn new(scan_started: Instant) -> Self {
         Self {
-            walk_ms: 0,
-            metadata_ms: 0,
-            read_chunk_ms: 0,
-            encrypt_ms: 0,
-            sqlite_timed_ms: 0,
+            walk_us: 0,
+            metadata_us: 0,
+            read_chunk_us: 0,
+            encrypt_us: 0,
+            sqlite_timed_us: 0,
             upload_queue_blocked_ms: 0,
             trace: ScanActivityTrace::new(scan_started),
         }
     }
 
     fn record(&mut self, kind: ScanWorkKind, operation_started: Instant) {
-        let elapsed_ms = self.trace.record(kind, operation_started);
+        let elapsed_us = self.trace.record(kind, operation_started);
         let slot = match kind {
-            ScanWorkKind::Walk => &mut self.walk_ms,
-            ScanWorkKind::Metadata => &mut self.metadata_ms,
-            ScanWorkKind::ReadChunk => &mut self.read_chunk_ms,
-            ScanWorkKind::Encrypt => &mut self.encrypt_ms,
-            ScanWorkKind::Sqlite => &mut self.sqlite_timed_ms,
+            ScanWorkKind::Walk => &mut self.walk_us,
+            ScanWorkKind::Metadata => &mut self.metadata_us,
+            ScanWorkKind::ReadChunk => &mut self.read_chunk_us,
+            ScanWorkKind::Encrypt => &mut self.encrypt_us,
+            ScanWorkKind::Sqlite => &mut self.sqlite_timed_us,
         };
-        *slot = slot.saturating_add(elapsed_ms);
+        *slot = slot.saturating_add(elapsed_us);
     }
 
-    fn attributed_ms(&self) -> u64 {
-        self.walk_ms
-            .saturating_add(self.metadata_ms)
-            .saturating_add(self.read_chunk_ms)
-            .saturating_add(self.encrypt_ms)
-            .saturating_add(self.sqlite_timed_ms)
-            .saturating_add(self.upload_queue_blocked_ms)
+    fn attributed_us(&self) -> u64 {
+        self.walk_us
+            .saturating_add(self.metadata_us)
+            .saturating_add(self.read_chunk_us)
+            .saturating_add(self.encrypt_us)
+            .saturating_add(self.sqlite_timed_us)
+            .saturating_add(self.upload_queue_blocked_ms.saturating_mul(1_000))
     }
 }
 
@@ -2650,16 +2650,15 @@ pub async fn run_backup_with<S: Storage>(
                         event = "performance.scan.finish",
                         phase = "scan",
                         scan_duration_ms = scan_duration.as_millis() as u64,
-                        walk_ms = performance.walk_ms,
-                        metadata_ms = performance.metadata_ms,
-                        read_chunk_ms = performance.read_chunk_ms,
-                        encrypt_ms = performance.encrypt_ms,
-                        sqlite_timed_ms = performance.sqlite_timed_ms,
+                        walk_ms = performance.walk_us / 1_000,
+                        metadata_ms = performance.metadata_us / 1_000,
+                        read_chunk_ms = performance.read_chunk_us / 1_000,
+                        encrypt_ms = performance.encrypt_us / 1_000,
+                        sqlite_timed_ms = performance.sqlite_timed_us / 1_000,
                         upload_queue_blocked_ms = performance.upload_queue_blocked_ms,
-                        unattributed_ms = scan_duration
-                            .as_millis()
-                            .saturating_sub(performance.attributed_ms() as u128)
-                            as u64,
+                        unattributed_ms = (scan_duration.as_micros() as u64)
+                            .saturating_sub(performance.attributed_us())
+                            / 1_000,
                         files_indexed = result.files_indexed,
                         chunks_total = result.chunks_total,
                         bytes_read = result.bytes_read,

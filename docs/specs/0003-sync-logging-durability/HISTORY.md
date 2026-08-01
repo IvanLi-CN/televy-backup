@@ -52,3 +52,7 @@ Scan coroutine lifetime proved insufficient for resource analysis because it
 overlaps the upload pipeline by design. Successful runs therefore preserve a
 compressed trace of measured scan work and retain gaps for unmeasured time,
 rather than presenting the scan lifecycle as a resource-occupancy interval.
+
+The scan-finish summary accumulates measurements before converting to
+milliseconds, preserving high-volume short SQLite and metadata operations that
+would otherwise disappear through per-operation rounding.

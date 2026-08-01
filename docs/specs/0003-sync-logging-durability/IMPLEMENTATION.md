@@ -22,8 +22,10 @@
   compressed, actual scan-resource trace. The trace records walk, metadata,
   read-chunk, encryption, and SQLite usage in one-second buckets; queue,
   direct/pack/index RPC, rate-limit/retry waits, and index compression retain
-  their own correlatable intervals. All identifiers are opaque and no file or
-  remote-object identifier is logged.
+  their own correlatable intervals. Sub-millisecond measurements accumulate in
+  microseconds before the scan-finish summary is rounded to milliseconds, so
+  high-volume short operations retain their full measured time. All identifiers
+  are opaque and no file or remote-object identifier is logged.
 - macOS Settings includes Diagnostics controls, override locking, persistent
   Debug warning, daemon-start refresh, a reliable Open in Finder action, and
   editable capacity/age retention controls with mock-only visual evidence.
