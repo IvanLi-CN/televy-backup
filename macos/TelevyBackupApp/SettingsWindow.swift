@@ -54,6 +54,17 @@ enum LogRetentionControlMapping {
     static let capacityTicks = [1, 2, 5, 10, 20, 50, 100]
     static let ageTicks = [7, 14, 30, 60, 90, 180, 365]
 
+    static func ageTickLabel(for days: Int) -> String {
+        switch days {
+        case 180:
+            "6 months"
+        case 365:
+            "1 year"
+        default:
+            "\(days) days"
+        }
+    }
+
     static func sliderPosition(value: Int, minimum: Int, maximum: Int) -> Double {
         let bounded = min(max(value, minimum), maximum)
         let numerator = log(Double(bounded) / Double(minimum))
@@ -713,7 +724,8 @@ struct SettingsWindowRootView: View {
                                 inputLabel: "GiB",
                                 suffix: "GiB",
                                 slider: capacitySliderBinding,
-                                ticks: LogRetentionControlMapping.capacityTicks
+                                ticks: LogRetentionControlMapping.capacityTicks,
+                                tickLabel: { "\($0) GiB" }
                             )
                             retentionControl(
                                 title: "Maximum age",
@@ -721,7 +733,8 @@ struct SettingsWindowRootView: View {
                                 inputLabel: "Days",
                                 suffix: "days",
                                 slider: ageSliderBinding,
-                                ticks: LogRetentionControlMapping.ageTicks
+                                ticks: LogRetentionControlMapping.ageTicks,
+                                tickLabel: { LogRetentionControlMapping.ageTickLabel(for: $0) }
                             )
                         }
 
@@ -822,10 +835,13 @@ struct SettingsWindowRootView: View {
         )
     }
 
-    private func retentionTickLabels(_ ticks: [Int], suffix: String) -> some View {
-        HStack {
+    private func retentionTickLabels(
+        _ ticks: [Int],
+        tickLabel: @escaping (Int) -> String
+    ) -> some View {
+        HStack(spacing: 0) {
             ForEach(ticks, id: \.self) { tick in
-                Text("\(tick) \(suffix)")
+                Text(tickLabel(tick))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -839,7 +855,8 @@ struct SettingsWindowRootView: View {
         inputLabel: String,
         suffix: String,
         slider: Binding<Double>,
-        ticks: [Int]
+        ticks: [Int],
+        tickLabel: @escaping (Int) -> String
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
@@ -853,7 +870,7 @@ struct SettingsWindowRootView: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: slider, in: 0...1)
-            retentionTickLabels(ticks, suffix: suffix)
+            retentionTickLabels(ticks, tickLabel: tickLabel)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

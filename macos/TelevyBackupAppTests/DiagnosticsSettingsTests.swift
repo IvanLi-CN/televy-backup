@@ -51,6 +51,9 @@ private func runDiagnosticsSettingsTests() {
     }
     expect(LogRetentionControlMapping.capacityTicks == [1, 2, 5, 10, 20, 50, 100], "capacity ticks should remain stable")
     expect(LogRetentionControlMapping.ageTicks == [7, 14, 30, 60, 90, 180, 365], "age ticks should remain stable")
+    expect(LogRetentionControlMapping.ageTickLabel(for: 90) == "90 days", "ordinary age ticks should show days")
+    expect(LogRetentionControlMapping.ageTickLabel(for: 180) == "6 months", "180-day tick should show six months")
+    expect(LogRetentionControlMapping.ageTickLabel(for: 365) == "1 year", "365-day tick should show one year")
 
     print("OK: DiagnosticsSettingsTests")
 }
