@@ -423,8 +423,9 @@ fn is_completed_run_log(path: &Path) -> std::io::Result<bool> {
     let length = file.metadata()?.len();
     let offset = length.saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(offset))?;
-    let mut tail = String::new();
-    file.read_to_string(&mut tail)?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail)?;
+    let tail = String::from_utf8_lossy(&tail);
     Ok(tail.lines().rev().any(|line| {
         serde_json::from_str::<serde_json::Value>(line)
             .ok()
@@ -654,6 +655,21 @@ mod tests {
                 file_count: 1,
             }
         );
+    }
+
+    #[test]
+    fn completed_log_tail_allows_a_utf8_boundary_split() {
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let path = temp.path().join("sync-backup-20240102T000000Z-utf8.ndjson");
+        let finish = b"\n{\"fields\":{\"event\":\"run.finish\"}}\n";
+        let mut file = File::create(&path).expect("create run log");
+        file.write_all(b"x").expect("write prefix");
+        file.write_all(&[0xE7, 0x95, 0x8C]).expect("write utf8");
+        file.write_all(&vec![b'x'; 65_534 - finish.len()])
+            .expect("write tail filler");
+        file.write_all(finish).expect("write finish");
+
+        assert!(is_completed_run_log(&path).expect("read completed run log"));
     }
 
     #[test]

@@ -893,6 +893,7 @@ fn diagnostics_set_log_level(
     let level: televy_backup_core::local_settings::LogLevel = level
         .parse()
         .map_err(|error: String| CliError::new("diagnostics.invalid", error))?;
+    ensure_daemon_supports_log_retention(data_dir)?;
     let (mut settings, _) = televy_backup_core::local_settings::load_or_default(config_dir);
     settings.logging.level = level;
     televy_backup_core::local_settings::save(config_dir, &settings)
@@ -915,12 +916,60 @@ fn diagnostics_set_log_retention(
     retention
         .validate()
         .map_err(|error| CliError::new("diagnostics.invalid", error))?;
+    ensure_daemon_supports_log_retention(data_dir)?;
     let (mut settings, _) = televy_backup_core::local_settings::load_or_default(config_dir);
     settings.logging.retention = retention;
     televy_backup_core::local_settings::save(config_dir, &settings)
         .map_err(|error| CliError::new("diagnostics.save_failed", error.to_string()))?;
 
     diagnostics_get(config_dir, data_dir, json)
+}
+
+fn ensure_daemon_supports_log_retention(data_dir: &Path) -> Result<(), CliError> {
+    let response = match control_ipc_call_with_timeouts(
+        data_dir,
+        "logging.status",
+        serde_json::json!({}),
+        Duration::from_secs(2),
+        Duration::from_secs(2),
+    ) {
+        Ok(response) if response.ok => response,
+        Ok(response) => {
+            let message = response
+                .error
+                .map(|error| error.message)
+                .unwrap_or_else(|| "daemon logging status failed".to_owned());
+            return Err(CliError::new("diagnostics.failed", message));
+        }
+        Err(error) if matches!(error.code, "control.unavailable" | "control.timeout") => {
+            return Ok(());
+        }
+        Err(error) if error.code == "control.method_not_found" => {
+            return Err(incompatible_log_retention_daemon_error());
+        }
+        Err(error) => return Err(error),
+    };
+
+    if response
+        .result
+        .as_ref()
+        .is_some_and(daemon_status_supports_log_retention)
+    {
+        Ok(())
+    } else {
+        Err(incompatible_log_retention_daemon_error())
+    }
+}
+
+fn daemon_status_supports_log_retention(status: &serde_json::Value) -> bool {
+    status.get("retention").is_some() && status.get("retentionPruneEnabled").is_some()
+}
+
+fn incompatible_log_retention_daemon_error() -> CliError {
+    CliError::new(
+        "diagnostics.daemon_incompatible",
+        "running daemon does not support log retention; restart the app to update it",
+    )
 }
 
 fn daemon_binary_path() -> PathBuf {
@@ -7843,5 +7892,16 @@ endpoint_id = "missing"
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn daemon_log_retention_capability_requires_additive_status_fields() {
+        assert!(daemon_status_supports_log_retention(&serde_json::json!({
+            "retention": { "max_total_gib": 5, "max_age_days": 30 },
+            "retentionPruneEnabled": true,
+        })));
+        assert!(!daemon_status_supports_log_retention(&serde_json::json!({
+            "configuredLevel": "normal",
+        })));
     }
 }
