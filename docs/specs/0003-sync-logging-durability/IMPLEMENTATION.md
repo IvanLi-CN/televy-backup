@@ -58,6 +58,9 @@
   isolated app and temporary files on both success and failure.
 - CI-equivalent formatting, lint, Rust test, and Swift test commands are the
   required release gate.
+- Failed scans retain their measured resource counters and partial trace in
+  `performance.scan.finish` / `performance.scan.trace`, so interrupted runs
+  remain analyzable without treating elapsed lifecycle time as work time.
 
 ## Migration State
 

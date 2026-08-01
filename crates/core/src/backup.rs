@@ -2633,9 +2633,7 @@ pub async fn run_backup_with<S: Storage>(
                 }
                 drop(upload_tx);
 
-                scan_performance.upload_queue_blocked_ms =
-                    scan_queue_blocked_ms.load(Ordering::Relaxed);
-                Ok((snapshot_id, result, upload_started, scan_performance))
+                Ok((snapshot_id, result, upload_started))
             }
             .await;
 
@@ -2644,31 +2642,33 @@ pub async fn run_backup_with<S: Storage>(
                 drop(upload_tx_for_error);
             }
             scan_done.store(true, Ordering::Relaxed);
+            scan_performance.upload_queue_blocked_ms =
+                scan_queue_blocked_ms.load(Ordering::Relaxed);
+            let scan_duration = performance_scan_started.elapsed();
+            let (trace_json, trace_resolution_ms) = scan_performance.trace.to_json();
+            info!(
+                event = "performance.scan.trace",
+                phase = "scan",
+                trace_version = 1_u8,
+                resolution_ms = trace_resolution_ms,
+                trace_json = %trace_json,
+                "performance.scan.trace"
+            );
             match &res {
-                Ok((_, result, _, performance)) => {
-                    let scan_duration = performance_scan_started.elapsed();
-                    let (trace_json, trace_resolution_ms) = performance.trace.to_json();
-                    info!(
-                        event = "performance.scan.trace",
-                        phase = "scan",
-                        trace_version = 1_u8,
-                        resolution_ms = trace_resolution_ms,
-                        trace_json = %trace_json,
-                        "performance.scan.trace"
-                    );
+                Ok((_, result, _)) => {
                     info!(
                         event = "performance.scan.finish",
                         phase = "scan",
                         scan_duration_ms = scan_duration.as_millis() as u64,
-                        walk_ms = performance.walk_us / 1_000,
-                        metadata_ms = performance.metadata_us / 1_000,
-                        read_chunk_ms = performance.read_chunk_us / 1_000,
-                        hash_ms = performance.hash_us / 1_000,
-                        encrypt_ms = performance.encrypt_us / 1_000,
-                        sqlite_timed_ms = performance.sqlite_timed_us / 1_000,
-                        upload_queue_blocked_ms = performance.upload_queue_blocked_ms,
+                        walk_ms = scan_performance.walk_us / 1_000,
+                        metadata_ms = scan_performance.metadata_us / 1_000,
+                        read_chunk_ms = scan_performance.read_chunk_us / 1_000,
+                        hash_ms = scan_performance.hash_us / 1_000,
+                        encrypt_ms = scan_performance.encrypt_us / 1_000,
+                        sqlite_timed_ms = scan_performance.sqlite_timed_us / 1_000,
+                        upload_queue_blocked_ms = scan_performance.upload_queue_blocked_ms,
                         unattributed_ms = (scan_duration.as_micros() as u64)
-                            .saturating_sub(performance.attributed_us())
+                            .saturating_sub(scan_performance.attributed_us())
                             / 1_000,
                         files_indexed = result.files_indexed,
                         chunks_total = result.chunks_total,
@@ -2677,13 +2677,25 @@ pub async fn run_backup_with<S: Storage>(
                         "performance.scan.finish"
                     );
                 }
-                Err(_) => info!(
-                    event = "performance.scan.finish",
-                    phase = "scan",
-                    scan_duration_ms = performance_scan_started.elapsed().as_millis() as u64,
-                    result = "failed",
-                    "performance.scan.finish"
-                ),
+                Err(_) => {
+                    info!(
+                        event = "performance.scan.finish",
+                        phase = "scan",
+                        scan_duration_ms = scan_duration.as_millis() as u64,
+                        walk_ms = scan_performance.walk_us / 1_000,
+                        metadata_ms = scan_performance.metadata_us / 1_000,
+                        read_chunk_ms = scan_performance.read_chunk_us / 1_000,
+                        hash_ms = scan_performance.hash_us / 1_000,
+                        encrypt_ms = scan_performance.encrypt_us / 1_000,
+                        sqlite_timed_ms = scan_performance.sqlite_timed_us / 1_000,
+                        upload_queue_blocked_ms = scan_performance.upload_queue_blocked_ms,
+                        unattributed_ms = (scan_duration.as_micros() as u64)
+                            .saturating_sub(scan_performance.attributed_us())
+                            / 1_000,
+                        result = "failed",
+                        "performance.scan.finish"
+                    );
+                }
             }
             res
         }
@@ -3235,7 +3247,7 @@ pub async fn run_backup_with<S: Storage>(
         progress_future,
         adaptive_future
     );
-    let (snapshot_id, mut result, upload_started, _) = scan_res?;
+    let (snapshot_id, mut result, upload_started) = scan_res?;
 
     let upload_stats = upload_stats?;
     let UploadStats {

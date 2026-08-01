@@ -99,7 +99,8 @@ Invalid environment filters resolve to `Normal`, never global debug.
   bars. The finish event includes accumulated walk, metadata, timed SQLite,
   read-chunk, hashing, encryption, upload-queue-blocked, and unattributed
   milliseconds.
-- `performance.scan.trace` is emitted before a successful scan finish. Its
+- `performance.scan.trace` is emitted before every scan finish, including a
+  failed scan. Its
   `trace_json` is a versioned JSON payload indexed from the scan start and
   contains only measured `walk_us`, `metadata_us`, `read_chunk_us`, `hash_us`,
   `encrypt_us`, and `sqlite_us` activity. It uses one-second buckets for normal

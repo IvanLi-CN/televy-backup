@@ -68,3 +68,6 @@ Diagnostics serializes log-level and retention writes so the atomic local TOML
 replacement cannot discard a concurrent user change. Scan telemetry records
 content hashing separately from encryption, preserving an exact encryption
 interval for later resource timelines.
+
+Failed scans retain their accumulated resource counters and partial trace so
+diagnostics can analyze work already performed before the failure.

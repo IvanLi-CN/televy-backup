@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use sqlx::Row;
 use televy_backup_core::{
@@ -19,6 +19,13 @@ struct MutateOnUpload {
     bytes: Vec<u8>,
     fired: AtomicBool,
     seen: Mutex<Vec<TaskProgress>>,
+}
+
+async fn run_log_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
 }
 
 impl MutateOnUpload {
@@ -149,6 +156,99 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
 }
 
 #[tokio::test]
+async fn failed_scan_keeps_accumulated_performance_metrics() {
+    let _run_log_lock = run_log_test_lock().await;
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("cancelled-source");
+    std::fs::create_dir_all(&source).unwrap();
+    write_file(source.join("file.bin"), &[5u8; 4096]);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "backup",
+        "failed-performance-test",
+        temp.path(),
+        televy_backup_core::local_settings::NORMAL_FILTER,
+    )
+    .expect("start run log");
+    let run_log_path = run_log.path().to_path_buf();
+    let result = run_backup_with(
+        &InMemoryStorage::new(),
+        BackupConfig {
+            endpoint_db_path: temp.path().join("index.sqlite"),
+            filemap_dir: temp.path().join("filemaps"),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
+            source_path: source,
+            label: "failed-performance".to_string(),
+            chunking: ChunkingConfig {
+                min_bytes: 4096,
+                avg_bytes: 4096,
+                max_bytes: 4096,
+            },
+            rate_limit: Default::default(),
+            master_key: [5u8; 32],
+            snapshot_id: None,
+            keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
+        },
+        BackupOptions {
+            cancel: Some(&cancel),
+            progress: None,
+            source_quick_stats: None,
+        },
+    )
+    .await;
+    assert!(result.is_err(), "cancelled source scan must fail");
+    drop(run_log);
+
+    let log_entries = std::fs::read_to_string(run_log_path)
+        .expect("read run log")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid NDJSON"))
+        .collect::<Vec<_>>();
+    let scan_trace = log_entries
+        .iter()
+        .find(|line| line["fields"]["event"] == "performance.scan.trace")
+        .expect("failed scan trace performance event");
+    let trace: serde_json::Value = serde_json::from_str(
+        scan_trace["fields"]["trace_json"]
+            .as_str()
+            .expect("failed scan trace JSON string"),
+    )
+    .expect("valid failed scan trace JSON");
+    assert!(
+        trace["buckets"]
+            .as_array()
+            .expect("failed scan trace buckets")
+            .iter()
+            .any(|bucket| bucket["walk_us"].as_u64().unwrap_or(0) > 0),
+        "failed scans must keep their measured walk slice"
+    );
+    let scan_finish = log_entries
+        .iter()
+        .find(|line| line["fields"]["event"] == "performance.scan.finish")
+        .expect("failed scan finish performance event");
+    assert_eq!(scan_finish["fields"]["result"], "failed");
+    for field in [
+        "walk_ms",
+        "metadata_ms",
+        "read_chunk_ms",
+        "hash_ms",
+        "encrypt_ms",
+        "sqlite_timed_ms",
+        "upload_queue_blocked_ms",
+        "unattributed_ms",
+    ] {
+        assert!(
+            scan_finish["fields"].get(field).is_some(),
+            "failed scan finish must include {field}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");
@@ -233,6 +333,7 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
 
 #[tokio::test]
 async fn backup_writes_normal_level_performance_intervals_to_run_log() {
+    let _run_log_lock = run_log_test_lock().await;
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");
     std::fs::create_dir_all(&source).unwrap();

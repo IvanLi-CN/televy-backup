@@ -37,7 +37,8 @@ remote object IDs so later Gantt charts can join interval endpoints without
 disclosing additional file-level data.
 
 `performance.scan.start` and `.finish` bound the scan coroutine lifetime, not
-resource occupancy. A successful scan also emits `performance.scan.trace` with
+resource occupancy. Every scan finish, including a failed scan, is preceded by
+`performance.scan.trace` with
 a `trace_json` string. The inner JSON has `version`, `resolution_ms`, and
 `buckets`; each bucket has an `offset_ms` from scan start plus any measured
 `walk_us`, `metadata_us`, `read_chunk_us`, `hash_us`, `encrypt_us`, or
