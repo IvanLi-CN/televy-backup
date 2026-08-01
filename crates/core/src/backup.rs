@@ -1413,6 +1413,7 @@ async fn acquire_bytes(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_upload_job<S: Storage>(
     storage: &S,
     provider: &str,

@@ -731,6 +731,6 @@ mod tests {
 
         assert!(active.exists());
         assert_eq!(summary.skipped_active_files, 1);
-        assert!(summary.over_limit == false);
+        assert!(!summary.over_limit);
     }
 }
