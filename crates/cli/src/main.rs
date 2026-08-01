@@ -112,6 +112,12 @@ enum DiagnosticsCmd {
         #[arg(long, value_parser = ["normal", "verbose", "debug"])]
         level: String,
     },
+    SetLogRetention {
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=100))]
+        max_total_gib: u16,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(7..=365))]
+        max_age_days: u16,
+    },
 }
 
 #[derive(Subcommand)]
@@ -658,6 +664,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             DiagnosticsCmd::SetLogLevel { level } => {
                 diagnostics_set_log_level(&config_dir, &data_dir, &level, cli.json)
             }
+            DiagnosticsCmd::SetLogRetention {
+                max_total_gib,
+                max_age_days,
+            } => diagnostics_set_log_retention(
+                &config_dir,
+                &data_dir,
+                max_total_gib,
+                max_age_days,
+                cli.json,
+            ),
         },
         Command::Vault { cmd } => match cmd {
             VaultCmd::Ensure => vault_ensure(&config_dir, &data_dir, cli.json).await,
@@ -877,10 +893,30 @@ fn diagnostics_set_log_level(
     let level: televy_backup_core::local_settings::LogLevel = level
         .parse()
         .map_err(|error: String| CliError::new("diagnostics.invalid", error))?;
-    let settings = televy_backup_core::local_settings::LocalSettings {
-        version: televy_backup_core::local_settings::LOCAL_SETTINGS_VERSION,
-        logging: televy_backup_core::local_settings::LoggingSettings { level },
+    let (mut settings, _) = televy_backup_core::local_settings::load_or_default(config_dir);
+    settings.logging.level = level;
+    televy_backup_core::local_settings::save(config_dir, &settings)
+        .map_err(|error| CliError::new("diagnostics.save_failed", error.to_string()))?;
+
+    diagnostics_get(config_dir, data_dir, json)
+}
+
+fn diagnostics_set_log_retention(
+    config_dir: &Path,
+    data_dir: &Path,
+    max_total_gib: u16,
+    max_age_days: u16,
+    json: bool,
+) -> Result<(), CliError> {
+    let retention = televy_backup_core::local_settings::LogRetentionSettings {
+        max_total_gib,
+        max_age_days,
     };
+    retention
+        .validate()
+        .map_err(|error| CliError::new("diagnostics.invalid", error))?;
+    let (mut settings, _) = televy_backup_core::local_settings::load_or_default(config_dir);
+    settings.logging.retention = retention;
     televy_backup_core::local_settings::save(config_dir, &settings)
         .map_err(|error| CliError::new("diagnostics.save_failed", error.to_string()))?;
 
@@ -4263,11 +4299,12 @@ async fn backup_run(
 ) -> Result<(), CliError> {
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
     let logging = televy_backup_core::local_settings::resolve(config_dir);
-    let run_log = televy_backup_core::run_log::start_run_log(
+    let run_log = televy_backup_core::run_log::start_run_log_with_retention(
         "backup",
         &task_id,
         data_dir,
         &logging.effective_filter,
+        logging.retention_prune_enabled.then_some(logging.retention),
     )
     .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
@@ -5090,11 +5127,12 @@ async fn restore_run(
 ) -> Result<(), CliError> {
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
     let logging = televy_backup_core::local_settings::resolve(config_dir);
-    let run_log = televy_backup_core::run_log::start_run_log(
+    let run_log = televy_backup_core::run_log::start_run_log_with_retention(
         "restore",
         &task_id,
         data_dir,
         &logging.effective_filter,
+        logging.retention_prune_enabled.then_some(logging.retention),
     )
     .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
@@ -5481,11 +5519,12 @@ async fn restore_latest(
 ) -> Result<(), CliError> {
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
     let logging = televy_backup_core::local_settings::resolve(config_dir);
-    let run_log = televy_backup_core::run_log::start_run_log(
+    let run_log = televy_backup_core::run_log::start_run_log_with_retention(
         "restore",
         &task_id,
         data_dir,
         &logging.effective_filter,
+        logging.retention_prune_enabled.then_some(logging.retention),
     )
     .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
     let started = std::time::Instant::now();
@@ -5911,11 +5950,12 @@ async fn verify_latest(
 ) -> Result<(), CliError> {
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
     let logging = televy_backup_core::local_settings::resolve(config_dir);
-    let run_log = televy_backup_core::run_log::start_run_log(
+    let run_log = televy_backup_core::run_log::start_run_log_with_retention(
         "verify",
         &task_id,
         data_dir,
         &logging.effective_filter,
+        logging.retention_prune_enabled.then_some(logging.retention),
     )
     .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
     let started = std::time::Instant::now();
@@ -6337,11 +6377,12 @@ async fn verify_run(
 ) -> Result<(), CliError> {
     let task_id = format!("tsk_{}", uuid::Uuid::new_v4());
     let logging = televy_backup_core::local_settings::resolve(config_dir);
-    let run_log = televy_backup_core::run_log::start_run_log(
+    let run_log = televy_backup_core::run_log::start_run_log_with_retention(
         "verify",
         &task_id,
         data_dir,
         &logging.effective_filter,
+        logging.retention_prune_enabled.then_some(logging.retention),
     )
     .map_err(|e| CliError::new("log.init_failed", e.to_string()))?;
 
@@ -7759,6 +7800,27 @@ endpoint_id = "missing"
             } if level == "verbose"
         ));
 
+        let retention = Cli::try_parse_from([
+            "televybackup",
+            "--json",
+            "diagnostics",
+            "set-log-retention",
+            "--max-total-gib",
+            "17",
+            "--max-age-days",
+            "45",
+        ])
+        .expect("parse retention settings");
+        assert!(matches!(
+            retention.cmd,
+            Command::Diagnostics {
+                cmd: DiagnosticsCmd::SetLogRetention {
+                    max_total_gib: 17,
+                    max_age_days: 45,
+                }
+            }
+        ));
+
         assert!(
             Cli::try_parse_from([
                 "televybackup",
@@ -7766,6 +7828,18 @@ endpoint_id = "missing"
                 "set-log-level",
                 "--level",
                 "trace",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "televybackup",
+                "diagnostics",
+                "set-log-retention",
+                "--max-total-gib",
+                "0",
+                "--max-age-days",
+                "30",
             ])
             .is_err()
         );

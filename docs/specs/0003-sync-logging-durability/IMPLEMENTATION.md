@@ -14,9 +14,16 @@
   over `logging.status`.
 - CLI diagnostics commands expose local/runtime state and best-effort disk use;
   protocol skew with an older daemon is reported as requiring an app restart.
+- Completed run logs are identified by their accepted filename and a terminal
+  `run.finish` record, then retained by age and managed byte cap. The current
+  log is fsynced before pruning; active shared locks and all unrecognised files
+  are skipped.
+- Normal-level performance records bound scan execution, direct/pack/index RPC
+  attempts, queue/rate-limit/retry waits, and index compression using opaque
+  sequence values rather than file or remote-object identifiers.
 - macOS Settings includes Diagnostics controls, override locking, persistent
   Debug warning, daemon-start refresh, a reliable Open in Finder action, and
-  mock-only visual evidence scenes.
+  editable capacity/age retention controls with mock-only visual evidence.
 
 ## Validation Coverage
 
@@ -26,9 +33,12 @@
 - Daemon and CLI tests cover daemon-owned and external CLI runtime status,
   pending state, and daemon fallback.
 - Swift tests cover status decoding, picker locking, pending state, and Debug
-  warning visibility for presets and debug-capable custom filters. Diagnostics
-  reloads use sequence guards so stale asynchronous results cannot replace a
-  newer save or daemon-backed refresh.
+  warning visibility for presets and debug-capable custom filters, plus
+  retention decoding and logarithmic control mappings. Diagnostics reloads use
+  sequence guards so stale asynchronous results cannot replace a newer save or
+  daemon-backed refresh.
+- Backup pipeline tests verify that Normal NDJSON contains actual scan,
+  upload-attempt, rate-limit-wait, and index-compression event boundaries.
 - The mock-only capture script permits an isolated second app instance and
   captures only the PID-owned Settings window without enabling the app's timer
   snapshot path or falling back to a full-screen capture. An exit trap reaps the

@@ -232,6 +232,64 @@ async fn small_batch_does_not_enable_pack() {
 }
 
 #[tokio::test]
+async fn retry_wait_is_written_as_a_normal_performance_event() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    write_file(source.join("retry.bin"), &[7u8; 4096]);
+
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "backup",
+        "retry-performance-test",
+        temp.path(),
+        televy_backup_core::local_settings::NORMAL_FILTER,
+    )
+    .expect("start run log");
+    let run_log_path = run_log.path().to_path_buf();
+    let inner = InMemoryStorage::new();
+    let storage = FailOnRetryableUpload::new(&inner, 1);
+    let result = run_backup(
+        &storage,
+        BackupConfig {
+            endpoint_db_path: temp.path().join("index.sqlite"),
+            filemap_dir: temp.path().join("filemaps"),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
+            source_path: source,
+            label: "retry".to_string(),
+            chunking: ChunkingConfig {
+                min_bytes: 4096,
+                avg_bytes: 4096,
+                max_bytes: 4096,
+            },
+            rate_limit: Default::default(),
+            master_key: [5u8; 32],
+            snapshot_id: None,
+            keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
+        },
+    )
+    .await
+    .expect("backup retries successfully");
+    assert!(result.chunks_uploaded > 0);
+    drop(run_log);
+
+    let retry = std::fs::read_to_string(run_log_path)
+        .expect("read run log")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid NDJSON"))
+        .find(|line| line["fields"]["event"] == "performance.upload.retry_wait")
+        .expect("retry wait performance event");
+    assert_eq!(retry["fields"]["kind"], "direct");
+    assert!(
+        retry["fields"]["retry_wait_ms"]
+            .as_u64()
+            .unwrap_or_default()
+            >= 1_000
+    );
+}
+
+#[tokio::test]
 async fn packed_upload_source_bytes_match_source_need_upload_total() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");

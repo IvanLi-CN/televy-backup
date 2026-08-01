@@ -232,6 +232,73 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
 }
 
 #[tokio::test]
+async fn backup_writes_normal_level_performance_intervals_to_run_log() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    for i in 0..11 {
+        write_file(source.join(format!("f{i}.bin")), &[i as u8; 4096]);
+    }
+
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "backup",
+        "performance-test",
+        temp.path(),
+        televy_backup_core::local_settings::NORMAL_FILTER,
+    )
+    .expect("start run log");
+    let run_log_path = run_log.path().to_path_buf();
+    let storage = InMemoryStorage::new();
+    let result = run_backup(
+        &storage,
+        BackupConfig {
+            endpoint_db_path: temp.path().join("index.sqlite"),
+            filemap_dir: temp.path().join("filemaps"),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
+            source_path: source,
+            label: "performance".to_string(),
+            chunking: ChunkingConfig {
+                min_bytes: 4096,
+                avg_bytes: 4096,
+                max_bytes: 4096,
+            },
+            rate_limit: Default::default(),
+            master_key: [4u8; 32],
+            snapshot_id: None,
+            keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
+        },
+    )
+    .await
+    .expect("backup succeeds");
+    assert!(result.data_objects_uploaded > 0);
+    drop(run_log);
+
+    let events = std::fs::read_to_string(run_log_path)
+        .expect("read run log")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid NDJSON"))
+        .filter_map(|line| line["fields"]["event"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+
+    for expected in [
+        "performance.scan.start",
+        "performance.scan.finish",
+        "performance.upload.rate_limit_wait",
+        "performance.upload.start",
+        "performance.upload.finish",
+        "performance.index.compression.start",
+        "performance.index.compression.finish",
+    ] {
+        assert!(
+            events.iter().any(|event| event == expected),
+            "missing performance event {expected}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn backup_compacts_local_index_db_after_success() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");

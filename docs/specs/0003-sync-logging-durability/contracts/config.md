@@ -9,11 +9,20 @@ version = 1
 
 [logging]
 level = "normal"
+
+[logging.retention]
+max_total_gib = 5
+max_age_days = 30
 ```
 
 `level` accepts `normal`, `verbose`, or `debug`. Missing and invalid local
 configuration resolve to `normal`. Writes must be atomic. This file is local to
 the machine and is excluded from Backup Config export/import.
+
+`max_total_gib` accepts an integer from `1` through `100`; `max_age_days`
+accepts an integer from `7` through `365`. Missing retention fields resolve to
+`5 GiB` and `30 days`. An invalid local retention configuration disables run-log
+pruning until corrected; it never broadens deletion to other log files.
 
 ## Environment
 

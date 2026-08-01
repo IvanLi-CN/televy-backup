@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
 pub const LOCAL_SETTINGS_VERSION: u32 = 1;
+pub const DEFAULT_MAX_TOTAL_GIB: u16 = 5;
+pub const DEFAULT_MAX_AGE_DAYS: u16 = 30;
+pub const MIN_MAX_TOTAL_GIB: u16 = 1;
+pub const MAX_MAX_TOTAL_GIB: u16 = 100;
+pub const MIN_MAX_AGE_DAYS: u16 = 7;
+pub const MAX_MAX_AGE_DAYS: u16 = 365;
 pub const NORMAL_FILTER: &str = "warn,televy_backup_core=info,televybackup=info,televybackupd=info";
 pub const VERBOSE_FILTER: &str =
     "info,televy_backup_core=debug,televybackup=debug,televybackupd=debug";
@@ -74,6 +80,43 @@ impl Default for LocalSettings {
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingSettings {
     pub level: LogLevel,
+    pub retention: LogRetentionSettings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LogRetentionSettings {
+    pub max_total_gib: u16,
+    pub max_age_days: u16,
+}
+
+impl Default for LogRetentionSettings {
+    fn default() -> Self {
+        Self {
+            max_total_gib: DEFAULT_MAX_TOTAL_GIB,
+            max_age_days: DEFAULT_MAX_AGE_DAYS,
+        }
+    }
+}
+
+impl LogRetentionSettings {
+    pub fn validate(self) -> Result<(), String> {
+        if !(MIN_MAX_TOTAL_GIB..=MAX_MAX_TOTAL_GIB).contains(&self.max_total_gib) {
+            return Err(format!(
+                "logging.retention.max_total_gib must be between {MIN_MAX_TOTAL_GIB} and {MAX_MAX_TOTAL_GIB}"
+            ));
+        }
+        if !(MIN_MAX_AGE_DAYS..=MAX_MAX_AGE_DAYS).contains(&self.max_age_days) {
+            return Err(format!(
+                "logging.retention.max_age_days must be between {MIN_MAX_AGE_DAYS} and {MAX_MAX_AGE_DAYS}"
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn max_total_bytes(self) -> u64 {
+        u64::from(self.max_total_gib) * 1024 * 1024 * 1024
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +126,8 @@ pub struct ResolvedLogging {
     pub effective_level: String,
     pub effective_filter: String,
     pub source: String,
+    pub retention: LogRetentionSettings,
+    pub retention_prune_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overridden_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -100,6 +145,10 @@ pub struct LoggingStatus {
     pub pending_level: Option<LogLevel>,
     pub log_directory: String,
     pub log_bytes: Option<u64>,
+    pub managed_log_bytes: Option<u64>,
+    pub managed_log_count: Option<u64>,
+    pub retention: LogRetentionSettings,
+    pub retention_prune_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configuration_error: Option<String>,
     pub daemon_available: bool,
@@ -113,21 +162,24 @@ pub fn status(
 ) -> LoggingStatus {
     let log_dir = crate::run_log::resolve_log_dir(data_dir);
     let log_bytes = directory_bytes(&log_dir).ok();
-    status_with_log_bytes(
+    let managed_usage = crate::run_log::managed_log_usage(&log_dir).ok();
+    status_with_log_usage(
         resolved,
         pending_level,
         data_dir,
         daemon_available,
         log_bytes,
+        managed_usage,
     )
 }
 
-pub fn status_with_log_bytes(
+pub fn status_with_log_usage(
     resolved: &ResolvedLogging,
     pending_level: Option<LogLevel>,
     data_dir: &Path,
     daemon_available: bool,
     log_bytes: Option<u64>,
+    managed_usage: Option<crate::run_log::ManagedLogUsage>,
 ) -> LoggingStatus {
     let log_dir = crate::run_log::resolve_log_dir(data_dir);
     LoggingStatus {
@@ -139,6 +191,10 @@ pub fn status_with_log_bytes(
         pending_level,
         log_directory: log_dir.display().to_string(),
         log_bytes,
+        managed_log_bytes: managed_usage.map(|usage| usage.bytes),
+        managed_log_count: managed_usage.map(|usage| usage.file_count),
+        retention: resolved.retention,
+        retention_prune_enabled: resolved.retention_prune_enabled,
         configuration_error: resolved.configuration_error.clone(),
         daemon_available,
     }
@@ -177,6 +233,12 @@ pub fn load(config_dir: &Path) -> io::Result<LocalSettings> {
             format!("unsupported local settings version: {}", settings.version),
         ));
     }
+    settings.logging.retention.validate().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid {}: {error}", path.display()),
+        )
+    })?;
     Ok(settings)
 }
 
@@ -189,6 +251,11 @@ pub fn load_or_default(config_dir: &Path) -> (LocalSettings, Option<String>) {
 }
 
 pub fn save(config_dir: &Path, settings: &LocalSettings) -> io::Result<()> {
+    settings
+        .logging
+        .retention
+        .validate()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     std::fs::create_dir_all(config_dir)?;
     let path = local_settings_path(config_dir);
     let tmp = config_dir.join(format!(".local.toml.tmp-{}", uuid::Uuid::new_v4()));
@@ -223,8 +290,11 @@ pub fn resolve_from(
     televybackup_log: Option<&str>,
     rust_log: Option<&str>,
 ) -> ResolvedLogging {
-    let (settings, configuration_error) = load_or_default(config_dir);
+    let (settings, local_configuration_error) = load_or_default(config_dir);
     let configured_level = settings.logging.level;
+    let retention = settings.logging.retention;
+    let retention_prune_enabled = local_configuration_error.is_none();
+    let configuration_error = local_configuration_error;
 
     if let Some(value) = televybackup_log {
         return resolve_override(
@@ -233,6 +303,8 @@ pub fn resolve_from(
             "environment",
             "TELEVYBACKUP_LOG",
             configuration_error,
+            retention,
+            retention_prune_enabled,
         );
     }
     if let Some(value) = rust_log {
@@ -242,6 +314,8 @@ pub fn resolve_from(
             "environment",
             "RUST_LOG",
             configuration_error,
+            retention,
+            retention_prune_enabled,
         );
     }
 
@@ -254,6 +328,8 @@ pub fn resolve_from(
         } else {
             "default".to_owned()
         },
+        retention,
+        retention_prune_enabled,
         overridden_by: None,
         configuration_error,
     }
@@ -265,6 +341,8 @@ fn resolve_override(
     source: &str,
     variable: &str,
     mut configuration_error: Option<String>,
+    retention: LogRetentionSettings,
+    retention_prune_enabled: bool,
 ) -> ResolvedLogging {
     if EnvFilter::try_new(value).is_err() {
         configuration_error = Some(format!(
@@ -275,6 +353,8 @@ fn resolve_override(
             effective_level: LogLevel::Normal.to_string(),
             effective_filter: NORMAL_FILTER.to_owned(),
             source: source.to_owned(),
+            retention,
+            retention_prune_enabled,
             overridden_by: Some(variable.to_owned()),
             configuration_error,
         };
@@ -291,6 +371,8 @@ fn resolve_override(
         effective_level: effective_level.to_owned(),
         effective_filter: value.to_owned(),
         source: source.to_owned(),
+        retention,
+        retention_prune_enabled,
         overridden_by: Some(variable.to_owned()),
         configuration_error,
     }
@@ -342,7 +424,10 @@ mod tests {
         for level in [LogLevel::Normal, LogLevel::Verbose, LogLevel::Debug] {
             let settings = LocalSettings {
                 version: 1,
-                logging: LoggingSettings { level },
+                logging: LoggingSettings {
+                    level,
+                    ..Default::default()
+                },
             };
             save(temp.path(), &settings).unwrap();
             assert_eq!(load(temp.path()).unwrap(), settings);
@@ -359,6 +444,7 @@ mod tests {
                 version: 1,
                 logging: LoggingSettings {
                     level: LogLevel::Debug,
+                    ..Default::default()
                 },
             },
         )
@@ -371,5 +457,70 @@ mod tests {
         let invalid = resolve_from(temp.path(), Some("[invalid"), Some("debug"));
         assert_eq!(invalid.effective_level, "normal");
         assert_eq!(invalid.effective_filter, NORMAL_FILTER);
+    }
+
+    #[test]
+    fn legacy_logging_config_uses_default_retention() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            local_settings_path(temp.path()),
+            "version = 1\n[logging]\nlevel = 'verbose'\n",
+        )
+        .unwrap();
+
+        let settings = load(temp.path()).expect("legacy local settings load");
+        assert_eq!(settings.logging.level, LogLevel::Verbose);
+        assert_eq!(settings.logging.retention, LogRetentionSettings::default());
+        assert!(resolve_from(temp.path(), None, None).retention_prune_enabled);
+    }
+
+    #[test]
+    fn invalid_retention_fails_closed_for_pruning() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            local_settings_path(temp.path()),
+            "version = 1\n[logging]\nlevel = 'normal'\n[logging.retention]\nmax_total_gib = 0\nmax_age_days = 30\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_from(temp.path(), None, None);
+        assert!(!resolved.retention_prune_enabled);
+        assert!(resolved.configuration_error.is_some());
+    }
+
+    #[test]
+    fn retention_validation_enforces_supported_ranges() {
+        assert!(
+            LogRetentionSettings {
+                max_total_gib: 1,
+                max_age_days: 7,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            LogRetentionSettings {
+                max_total_gib: 100,
+                max_age_days: 365,
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            LogRetentionSettings {
+                max_total_gib: 0,
+                max_age_days: 30,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            LogRetentionSettings {
+                max_total_gib: 5,
+                max_age_days: 366,
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

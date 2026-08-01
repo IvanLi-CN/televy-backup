@@ -36,3 +36,14 @@ External CLI tasks now report their resolved logging state to daemon IPC for the
 duration of the task, so Diagnostics reflects the process that is actually
 writing the active run log. Settings diagnostics refreshes are sequenced to
 discard stale asynchronous completions.
+
+## 2026-08-01
+
+The operational contract now bounds completed run logs by both retention age
+and managed disk usage. Pruning is deliberately deferred until a later task
+finishes, excludes active and non-run files, and fails closed on malformed local
+retention settings.
+
+The same change establishes Normal-level performance intervals around the
+concurrent scan/upload pipeline. This replaces phase-boundary inference with
+actual upload RPC, queue, rate-limit, retry, and index-compression timing.

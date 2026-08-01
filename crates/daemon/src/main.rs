@@ -1744,11 +1744,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if *runtime_logging.read().await != logging {
                 *runtime_logging.write().await = logging.clone();
             }
-            let run_log = televy_backup_core::run_log::start_run_log(
+            let run_log = televy_backup_core::run_log::start_run_log_with_retention(
                 "backup",
                 &task_id,
                 &data_root,
                 &logging.effective_filter,
+                logging.retention_prune_enabled.then_some(logging.retention),
             )?;
 
             // Run summaries must appear even when the daemon is started with `RUST_LOG=warn`,

@@ -60,6 +60,7 @@ const SQLITE_BUSY_RETRY_DELAYS_MS: [u64; 5] = [100, 250, 500, 1000, 2000];
 const UPLOAD_OBJECT_MAX_ATTEMPTS: usize = 3;
 const UPLOAD_OBJECT_RETRY_BASE_MS: u64 = 1_000;
 const UPLOAD_OBJECT_RETRY_MAX_MS: u64 = 15_000;
+static INDEX_UPLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const CHUNK_OBJECT_CHECKPOINT_BATCH_SIZE: usize = 256;
 const INDEX_COMPACT_MIN_PAGE_COUNT: i64 = 131_072; // ~= 512 MiB @ 4 KiB pages
 const INDEX_COMPACT_MIN_FREE_PAGES: i64 = 16_384; // ~= 64 MiB @ 4 KiB pages
@@ -641,10 +642,11 @@ impl UploadRateLimiter {
         }
     }
 
-    async fn wait_turn(&self) {
+    async fn wait_turn(&self) -> Duration {
+        let started = Instant::now();
         let min_delay_ms = self.min_delay_ms();
         if min_delay_ms == 0 {
-            return;
+            return started.elapsed();
         }
         let min_delay = Duration::from_millis(min_delay_ms);
         let now = Instant::now();
@@ -657,6 +659,7 @@ impl UploadRateLimiter {
         if scheduled > now {
             sleep(scheduled - now).await;
         }
+        started.elapsed()
     }
 }
 
@@ -943,12 +946,16 @@ struct PackEntryRef {
 #[derive(Debug)]
 enum UploadJob {
     Direct {
+        sequence: u64,
+        queued_at: Instant,
         chunk_hash: String,
         blob: Vec<u8>,
         source_bytes: u64,
         _bytes_permit: OwnedSemaphorePermit,
     },
     Pack {
+        sequence: u64,
+        queued_at: Instant,
         entries: Vec<PackEntryRef>,
         pack_bytes: Vec<u8>,
         source_bytes: u64,
@@ -1003,6 +1010,27 @@ struct SourceBlob {
     source_bytes: u64,
 }
 
+#[derive(Debug, Default)]
+struct ScanPerformance {
+    walk_ms: u64,
+    metadata_ms: u64,
+    read_chunk_ms: u64,
+    encrypt_ms: u64,
+    sqlite_timed_ms: u64,
+    upload_queue_blocked_ms: u64,
+}
+
+impl ScanPerformance {
+    fn attributed_ms(&self) -> u64 {
+        self.walk_ms
+            .saturating_add(self.metadata_ms)
+            .saturating_add(self.read_chunk_ms)
+            .saturating_add(self.encrypt_ms)
+            .saturating_add(self.sqlite_timed_ms)
+            .saturating_add(self.upload_queue_blocked_ms)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct BaseFileSnapshotRow {
     file_id: String,
@@ -1027,6 +1055,8 @@ struct UploadQueue {
     pending_bytes: Arc<AtomicU64>,
     planned_upload_bytes: Arc<AtomicU64>,
     phase_started: Arc<AtomicBool>,
+    next_sequence: Arc<AtomicU64>,
+    scan_queue_blocked_ms: Arc<AtomicU64>,
     cancel: CancellationToken,
 }
 
@@ -1037,6 +1067,7 @@ impl UploadQueue {
         blob: Vec<u8>,
         source_bytes: u64,
     ) -> Result<()> {
+        let queue_started = Instant::now();
         let bytes = blob.len();
         let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
         self.pending_jobs.fetch_add(1, Ordering::Relaxed);
@@ -1045,6 +1076,8 @@ impl UploadQueue {
         self.planned_upload_bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
         let job = UploadJob::Direct {
+            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+            queued_at: queue_started,
             chunk_hash,
             blob,
             source_bytes,
@@ -1058,6 +1091,10 @@ impl UploadQueue {
                 message: "upload queue closed".to_string(),
             });
         }
+        self.scan_queue_blocked_ms.fetch_add(
+            queue_started.elapsed().as_millis() as u64,
+            Ordering::Relaxed,
+        );
         if self
             .phase_started
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
@@ -1069,6 +1106,7 @@ impl UploadQueue {
     }
 
     async fn enqueue_pack(&self, entries: Vec<PackEntryRef>, pack_bytes: Vec<u8>) -> Result<()> {
+        let queue_started = Instant::now();
         let bytes = pack_bytes.len();
         let source_bytes = entries
             .iter()
@@ -1080,6 +1118,8 @@ impl UploadQueue {
         self.planned_upload_bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
         let job = UploadJob::Pack {
+            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+            queued_at: queue_started,
             entries,
             pack_bytes,
             source_bytes,
@@ -1093,6 +1133,10 @@ impl UploadQueue {
                 message: "upload queue closed".to_string(),
             });
         }
+        self.scan_queue_blocked_ms.fetch_add(
+            queue_started.elapsed().as_millis() as u64,
+            Ordering::Relaxed,
+        );
         if self
             .phase_started
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
@@ -1136,6 +1180,7 @@ async fn acquire_bytes(
 async fn process_upload_job<S: Storage>(
     storage: &S,
     provider: &str,
+    worker_index: usize,
     limiter: &UploadRateLimiter,
     uploaded_bytes: &AtomicU64,
     uploaded_net_bytes: &AtomicU64,
@@ -1144,19 +1189,43 @@ async fn process_upload_job<S: Storage>(
 ) -> Result<UploadOutcome> {
     match job {
         UploadJob::Direct {
+            sequence,
+            queued_at,
             chunk_hash,
             blob,
             source_bytes,
             _bytes_permit,
         } => {
             let bytes_len = blob.len() as u64;
+            let queue_wait_ms = queued_at.elapsed().as_millis() as u64;
             for attempt in 1..=UPLOAD_OBJECT_MAX_ATTEMPTS {
-                limiter.wait_turn().await;
+                let rate_limit_wait_ms = limiter.wait_turn().await.as_millis() as u64;
+                info!(
+                    event = "performance.upload.rate_limit_wait",
+                    kind = "direct",
+                    upload_sequence = sequence,
+                    attempt,
+                    worker = worker_index,
+                    rate_limit_wait_ms,
+                    "performance.upload.rate_limit_wait"
+                );
                 let filename = telegram_camouflaged_filename();
                 let last_reported = Arc::new(AtomicU64::new(0));
                 let last_reported_net = Arc::new(AtomicU64::new(0));
                 let last_for_cb = Arc::clone(&last_reported);
                 let last_net_for_cb = Arc::clone(&last_reported_net);
+                info!(
+                    event = "performance.upload.start",
+                    kind = "direct",
+                    upload_sequence = sequence,
+                    attempt,
+                    worker = worker_index,
+                    payload_bytes = bytes_len,
+                    queue_wait_ms,
+                    rate_limit_wait_ms,
+                    "performance.upload.start"
+                );
+                let upload_started = Instant::now();
                 let upload_res = storage
                     .upload_document_with_progress(
                         &filename,
@@ -1178,6 +1247,21 @@ async fn process_upload_job<S: Storage>(
                         })),
                     )
                     .await;
+                info!(
+                    event = "performance.upload.finish",
+                    kind = "direct",
+                    upload_sequence = sequence,
+                    attempt,
+                    worker = worker_index,
+                    payload_bytes = bytes_len,
+                    rpc_duration_ms = upload_started.elapsed().as_millis() as u64,
+                    result = if upload_res.is_ok() {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    },
+                    "performance.upload.finish"
+                );
 
                 match upload_res {
                     Ok(object_id) => {
@@ -1216,7 +1300,17 @@ async fn process_upload_job<S: Storage>(
                                 error = %e,
                                 "io.telegram.upload_retry"
                             );
+                            let retry_wait_started = Instant::now();
                             sleep(backoff).await;
+                            info!(
+                                event = "performance.upload.retry_wait",
+                                kind = "direct",
+                                upload_sequence = sequence,
+                                attempt,
+                                worker = worker_index,
+                                retry_wait_ms = retry_wait_started.elapsed().as_millis() as u64,
+                                "performance.upload.retry_wait"
+                            );
                             continue;
                         }
 
@@ -1245,19 +1339,43 @@ async fn process_upload_job<S: Storage>(
             })
         }
         UploadJob::Pack {
+            sequence,
+            queued_at,
             entries,
             pack_bytes,
             source_bytes,
             _bytes_permit,
         } => {
             let bytes_len = pack_bytes.len() as u64;
+            let queue_wait_ms = queued_at.elapsed().as_millis() as u64;
             for attempt in 1..=UPLOAD_OBJECT_MAX_ATTEMPTS {
-                limiter.wait_turn().await;
+                let rate_limit_wait_ms = limiter.wait_turn().await.as_millis() as u64;
+                info!(
+                    event = "performance.upload.rate_limit_wait",
+                    kind = "pack",
+                    upload_sequence = sequence,
+                    attempt,
+                    worker = worker_index,
+                    rate_limit_wait_ms,
+                    "performance.upload.rate_limit_wait"
+                );
                 let filename = telegram_camouflaged_filename();
                 let last_reported = Arc::new(AtomicU64::new(0));
                 let last_reported_net = Arc::new(AtomicU64::new(0));
                 let last_for_cb = Arc::clone(&last_reported);
                 let last_net_for_cb = Arc::clone(&last_reported_net);
+                info!(
+                    event = "performance.upload.start",
+                    kind = "pack",
+                    upload_sequence = sequence,
+                    attempt,
+                    worker = worker_index,
+                    payload_bytes = bytes_len,
+                    queue_wait_ms,
+                    rate_limit_wait_ms,
+                    "performance.upload.start"
+                );
+                let upload_started = Instant::now();
                 let upload_res = storage
                     .upload_document_with_progress(
                         &filename,
@@ -1279,6 +1397,21 @@ async fn process_upload_job<S: Storage>(
                         })),
                     )
                     .await;
+                info!(
+                    event = "performance.upload.finish",
+                    kind = "pack",
+                    upload_sequence = sequence,
+                    attempt,
+                    worker = worker_index,
+                    payload_bytes = bytes_len,
+                    rpc_duration_ms = upload_started.elapsed().as_millis() as u64,
+                    result = if upload_res.is_ok() {
+                        "succeeded"
+                    } else {
+                        "failed"
+                    },
+                    "performance.upload.finish"
+                );
 
                 match upload_res {
                     Ok(pack_object_id) => {
@@ -1316,7 +1449,17 @@ async fn process_upload_job<S: Storage>(
                                 error = %e,
                                 "io.telegram.upload_retry"
                             );
+                            let retry_wait_started = Instant::now();
                             sleep(backoff).await;
+                            info!(
+                                event = "performance.upload.retry_wait",
+                                kind = "pack",
+                                upload_sequence = sequence,
+                                attempt,
+                                worker = worker_index,
+                                retry_wait_ms = retry_wait_started.elapsed().as_millis() as u64,
+                                "performance.upload.retry_wait"
+                            );
                             continue;
                         }
 
@@ -1423,6 +1566,8 @@ pub async fn run_backup_with<S: Storage>(
     let active_uploads = Arc::new(AtomicUsize::new(0));
     let pending_jobs = Arc::new(AtomicUsize::new(0));
     let pending_bytes = Arc::new(AtomicU64::new(0));
+    let upload_sequence = Arc::new(AtomicU64::new(1));
+    let scan_queue_blocked_ms = Arc::new(AtomicU64::new(0));
 
     let scan_source_path = config.source_path.clone();
     let snapshot_id = config
@@ -1455,12 +1600,14 @@ pub async fn run_backup_with<S: Storage>(
         pending_bytes: Arc::clone(&pending_bytes),
         planned_upload_bytes: Arc::clone(&upload_workload_total),
         phase_started: Arc::clone(&upload_phase_started),
+        next_sequence: Arc::clone(&upload_sequence),
+        scan_queue_blocked_ms: Arc::clone(&scan_queue_blocked_ms),
         cancel: upload_cancel.clone(),
     };
 
     let upload_rx = Arc::new(Mutex::new(upload_rx));
     let mut workers = FuturesUnordered::new();
-    for _ in 0..limits.worker_pool_size {
+    for worker_index in 0..limits.worker_pool_size {
         let rx = Arc::clone(&upload_rx);
         let tx = result_tx.clone();
         let limiter = rate_limiter.clone();
@@ -1516,6 +1663,7 @@ pub async fn run_backup_with<S: Storage>(
                 let outcome = process_upload_job(
                     storage,
                     &provider,
+                    worker_index,
                     &limiter,
                     uploaded_bytes.as_ref(),
                     uploaded_net_bytes.as_ref(),
@@ -1616,13 +1764,26 @@ pub async fn run_backup_with<S: Storage>(
         let scan_done = Arc::clone(&scan_done);
         let upload_phase_started = Arc::clone(&upload_phase_started);
         let active_uploads = Arc::clone(&active_uploads);
+        let scan_queue_blocked_ms = Arc::clone(&scan_queue_blocked_ms);
         async move {
+            let performance_scan_started = Instant::now();
+            let mut scan_performance = ScanPerformance::default();
+            info!(
+                event = "performance.scan.start",
+                phase = "scan",
+                "performance.scan.start"
+            );
             let res = async {
+                let sqlite_started = Instant::now();
                 let base_snapshot_id =
                     latest_snapshot_for_source(conn, &scan_source_path, provider).await?;
+                scan_performance.sqlite_timed_ms = scan_performance
+                    .sqlite_timed_ms
+                    .saturating_add(sqlite_started.elapsed().as_millis() as u64);
                 let snapshot_id = snapshot_id.clone();
                 let source_path_utf8 = path_to_utf8(&scan_source_path)?;
 
+                let sqlite_started = Instant::now();
                 execute_sqlite_with_busy_retry!(
                     "snapshots.insert",
                     sqlx::query(
@@ -1637,6 +1798,9 @@ pub async fn run_backup_with<S: Storage>(
                     .bind(&base_snapshot_id)
                     .execute(&mut **conn)
                 )?;
+                scan_performance.sqlite_timed_ms = scan_performance
+                    .sqlite_timed_ms
+                    .saturating_add(sqlite_started.elapsed().as_millis() as u64);
 
                 // Create per-snapshot filemap DB and seed the snapshot row. This DB is uploaded
                 // as the snapshot's "filemap index", while the endpoint DB remains small and only
@@ -1644,6 +1808,7 @@ pub async fn run_backup_with<S: Storage>(
                 let filemap_pool = open_index_db(&scan_filemap_db_path).await?;
                 let mut filemap_conn: DbConn = filemap_pool.acquire().await?;
                 drop(filemap_pool);
+                let sqlite_started = Instant::now();
                 execute_sqlite_with_busy_retry!(
                     "snapshots.insert.filemap",
                     sqlx::query(
@@ -1658,6 +1823,9 @@ pub async fn run_backup_with<S: Storage>(
                     .bind(&base_snapshot_id)
                     .execute(&mut *filemap_conn)
                 )?;
+                scan_performance.sqlite_timed_ms = scan_performance
+                    .sqlite_timed_ms
+                    .saturating_add(sqlite_started.elapsed().as_millis() as u64);
 
                 // If we have a base snapshot, attach its filemap DB as `base` so base-chunk-copy
                 // can copy `file_chunks` without re-chunking file contents.
@@ -1751,7 +1919,15 @@ pub async fn run_backup_with<S: Storage>(
                     });
                 }
 
-                for entry in build_source_walk(&scan_source_path) {
+                let mut source_walk = build_source_walk(&scan_source_path);
+                loop {
+                    let walk_started = Instant::now();
+                    let Some(entry) = source_walk.next() else {
+                        break;
+                    };
+                    scan_performance.walk_ms = scan_performance
+                        .walk_ms
+                        .saturating_add(walk_started.elapsed().as_millis() as u64);
                     if let Some(cancel) = options.cancel
                         && cancel.is_cancelled()
                     {
@@ -1805,7 +1981,12 @@ pub async fn run_backup_with<S: Storage>(
                     }
 
                     let path = entry.path();
-                    let metadata = match entry.metadata() {
+                    let metadata_started = Instant::now();
+                    let metadata_result = entry.metadata();
+                    scan_performance.metadata_ms = scan_performance
+                        .metadata_ms
+                        .saturating_add(metadata_started.elapsed().as_millis() as u64);
+                    let metadata = match metadata_result {
                         Ok(v) => v,
                         Err(e) => {
                             if ignore_error_is_not_found(&e) {
@@ -1878,6 +2059,7 @@ pub async fn run_backup_with<S: Storage>(
                     result.files_total += 1;
 
                     let file_id = format!("f_{}", uuid::Uuid::new_v4());
+                    let sqlite_started = Instant::now();
                     execute_sqlite_with_busy_retry!(
                         "files.insert",
                         sqlx::query(
@@ -1895,6 +2077,9 @@ pub async fn run_backup_with<S: Storage>(
                         .bind(kind)
                         .execute(&mut *filemap_conn)
                     )?;
+                    scan_performance.sqlite_timed_ms = scan_performance
+                        .sqlite_timed_ms
+                        .saturating_add(sqlite_started.elapsed().as_millis() as u64);
 
                     result.files_indexed += 1;
                     scan_files_indexed.store(result.files_indexed, Ordering::Relaxed);
@@ -1954,7 +2139,15 @@ pub async fn run_backup_with<S: Storage>(
                     let chunker = file_chunker(file, &scan_chunking);
                     let mut file_chunk_rows: Vec<FileChunkRow> = Vec::new();
 
-                    for (seq, chunk) in chunker.enumerate() {
+                    let mut chunks = chunker.enumerate();
+                    loop {
+                        let read_chunk_started = Instant::now();
+                        let Some((seq, chunk)) = chunks.next() else {
+                            break;
+                        };
+                        scan_performance.read_chunk_ms = scan_performance
+                            .read_chunk_ms
+                            .saturating_add(read_chunk_started.elapsed().as_millis() as u64);
                         if let Some(cancel) = options.cancel
                             && cancel.is_cancelled()
                         {
@@ -1969,10 +2162,15 @@ pub async fn run_backup_with<S: Storage>(
                         result.bytes_read += chunk.data.len() as u64;
                         scan_bytes_read.store(result.bytes_read, Ordering::Relaxed);
 
+                        let hash_started = Instant::now();
                         let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
+                        scan_performance.encrypt_ms = scan_performance
+                            .encrypt_ms
+                            .saturating_add(hash_started.elapsed().as_millis() as u64);
 
                         // `file_chunks` has a FK to `chunks`, so ensure the chunk row exists in
                         // the per-snapshot filemap DB regardless of whether the chunk is deduped.
+                        let sqlite_started = Instant::now();
                         execute_sqlite_with_busy_retry!(
                             "chunks.insert.filemap",
                             sqlx::query(
@@ -1985,6 +2183,9 @@ pub async fn run_backup_with<S: Storage>(
                             .bind(chunk.data.len() as i64)
                             .execute(&mut *filemap_conn)
                         )?;
+                        scan_performance.sqlite_timed_ms = scan_performance
+                            .sqlite_timed_ms
+                            .saturating_add(sqlite_started.elapsed().as_millis() as u64);
 
                         let exists = known_chunk_hashes.contains(&chunk_hash);
                         if exists {
@@ -1995,6 +2196,7 @@ pub async fn run_backup_with<S: Storage>(
                             scan_source_bytes_need_upload
                                 .fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
 
+                            let sqlite_started = Instant::now();
                             execute_sqlite_with_busy_retry!(
                                 "chunks.insert",
                                 sqlx::query(
@@ -2007,9 +2209,16 @@ pub async fn run_backup_with<S: Storage>(
                                 .bind(chunk.data.len() as i64)
                                 .execute(&mut **global_conn)
                             )?;
+                            scan_performance.sqlite_timed_ms = scan_performance
+                                .sqlite_timed_ms
+                                .saturating_add(sqlite_started.elapsed().as_millis() as u64);
 
+                            let encrypt_started = Instant::now();
                             let encrypted =
                                 encrypt_framed(&scan_master_key, chunk_hash.as_bytes(), &chunk.data)?;
+                            scan_performance.encrypt_ms = scan_performance
+                                .encrypt_ms
+                                .saturating_add(encrypt_started.elapsed().as_millis() as u64);
                             let blob = SourceBlob {
                                 chunk_hash: chunk_hash.clone(),
                                 blob: encrypted,
@@ -2063,8 +2272,12 @@ pub async fn run_backup_with<S: Storage>(
 
                     }
 
+                    let sqlite_started = Instant::now();
                     insert_file_chunks_batch(&mut filemap_conn, &file_id, &file_chunk_rows)
                         .await?;
+                    scan_performance.sqlite_timed_ms = scan_performance
+                        .sqlite_timed_ms
+                        .saturating_add(sqlite_started.elapsed().as_millis() as u64);
                 }
 
                 if !pending_base_chunk_copies.is_empty() {
@@ -2166,7 +2379,9 @@ pub async fn run_backup_with<S: Storage>(
                 }
                 drop(upload_tx);
 
-                Ok((snapshot_id, result, upload_started))
+                scan_performance.upload_queue_blocked_ms =
+                    scan_queue_blocked_ms.load(Ordering::Relaxed);
+                Ok((snapshot_id, result, upload_started, scan_performance))
             }
             .await;
 
@@ -2175,6 +2390,36 @@ pub async fn run_backup_with<S: Storage>(
                 drop(upload_tx_for_error);
             }
             scan_done.store(true, Ordering::Relaxed);
+            match &res {
+                Ok((_, result, _, performance)) => info!(
+                    event = "performance.scan.finish",
+                    phase = "scan",
+                    scan_duration_ms = performance_scan_started.elapsed().as_millis() as u64,
+                    walk_ms = performance.walk_ms,
+                    metadata_ms = performance.metadata_ms,
+                    read_chunk_ms = performance.read_chunk_ms,
+                    encrypt_ms = performance.encrypt_ms,
+                    sqlite_timed_ms = performance.sqlite_timed_ms,
+                    upload_queue_blocked_ms = performance.upload_queue_blocked_ms,
+                    unattributed_ms = performance_scan_started
+                        .elapsed()
+                        .as_millis()
+                        .saturating_sub(performance.attributed_ms() as u128)
+                        as u64,
+                    files_indexed = result.files_indexed,
+                    chunks_total = result.chunks_total,
+                    bytes_read = result.bytes_read,
+                    result = "succeeded",
+                    "performance.scan.finish"
+                ),
+                Err(_) => info!(
+                    event = "performance.scan.finish",
+                    phase = "scan",
+                    scan_duration_ms = performance_scan_started.elapsed().as_millis() as u64,
+                    result = "failed",
+                    "performance.scan.finish"
+                ),
+            }
             res
         }
     };
@@ -2725,7 +2970,7 @@ pub async fn run_backup_with<S: Storage>(
         progress_future,
         adaptive_future
     );
-    let (snapshot_id, mut result, upload_started) = scan_res?;
+    let (snapshot_id, mut result, upload_started, _) = scan_res?;
 
     let upload_stats = upload_stats?;
     let UploadStats {
@@ -4693,24 +4938,55 @@ async fn upload_index_sqlite_db<S: Storage>(
     bytes_deduped: u64,
 ) -> Result<UploadedIndex> {
     let provider = storage.provider();
+    let index_upload_sequence = INDEX_UPLOAD_SEQUENCE.fetch_add(1, Ordering::Relaxed);
 
     // Stream-compress the DB into a temp file. This avoids holding multi-GB index
     // databases in process memory.
-    let mut db_file = File::open(sqlite_db_path)?;
-    let mut compressed_file = tempfile::Builder::new()
-        .prefix("televy-index-upload-")
-        .tempfile_in(temp_parent)?;
-    {
-        let out = compressed_file.as_file_mut();
-        out.set_len(0)?;
-        out.seek(SeekFrom::Start(0))?;
-        let mut encoder = zstd::stream::Encoder::new(out, 0)?;
-        std::io::copy(&mut db_file, &mut encoder)?;
-        let out = encoder.finish()?;
-        out.flush()?;
-    }
-
-    let compressed_len = compressed_file.as_file().metadata()?.len();
+    let compression_started = Instant::now();
+    info!(
+        event = "performance.index.compression.start",
+        index_upload_sequence, "performance.index.compression.start"
+    );
+    let compression_result = (|| -> Result<(tempfile::NamedTempFile, u64)> {
+        let mut db_file = File::open(sqlite_db_path)?;
+        let mut compressed_file = tempfile::Builder::new()
+            .prefix("televy-index-upload-")
+            .tempfile_in(temp_parent)?;
+        {
+            let out = compressed_file.as_file_mut();
+            out.set_len(0)?;
+            out.seek(SeekFrom::Start(0))?;
+            let mut encoder = zstd::stream::Encoder::new(out, 0)?;
+            std::io::copy(&mut db_file, &mut encoder)?;
+            let out = encoder.finish()?;
+            out.flush()?;
+        }
+        let compressed_len = compressed_file.as_file().metadata()?.len();
+        Ok((compressed_file, compressed_len))
+    })();
+    let (compressed_file, compressed_len) = match compression_result {
+        Ok(result) => {
+            info!(
+                event = "performance.index.compression.finish",
+                index_upload_sequence,
+                duration_ms = compression_started.elapsed().as_millis() as u64,
+                compressed_bytes = result.1,
+                result = "succeeded",
+                "performance.index.compression.finish"
+            );
+            result
+        }
+        Err(error) => {
+            info!(
+                event = "performance.index.compression.finish",
+                index_upload_sequence,
+                duration_ms = compression_started.elapsed().as_millis() as u64,
+                result = "failed",
+                "performance.index.compression.finish"
+            );
+            return Err(error);
+        }
+    };
     let index_parts = if compressed_len == 0 {
         0
     } else {
@@ -4747,10 +5023,33 @@ async fn upload_index_sqlite_db<S: Storage>(
         let part_len_u64 = part_len as u64;
         let mut object_id: Option<String> = None;
         for attempt in 1..=UPLOAD_OBJECT_MAX_ATTEMPTS {
-            rate_limiter.wait_turn().await;
+            let rate_limit_wait_ms = rate_limiter.wait_turn().await.as_millis() as u64;
+            info!(
+                event = "performance.upload.rate_limit_wait",
+                kind = "index_part",
+                index_upload_sequence,
+                index_part_no = part_no,
+                attempt,
+                worker = "index",
+                rate_limit_wait_ms,
+                "performance.upload.rate_limit_wait"
+            );
             let filename = telegram_camouflaged_filename();
             let last_reported = AtomicU64::new(0);
             let last_reported_net = AtomicU64::new(0);
+            info!(
+                event = "performance.upload.start",
+                kind = "index_part",
+                index_upload_sequence,
+                index_part_no = part_no,
+                attempt,
+                worker = "index",
+                payload_bytes = part_len_u64,
+                queue_wait_ms = 0_u64,
+                rate_limit_wait_ms,
+                "performance.upload.start"
+            );
+            let upload_started = Instant::now();
             let upload_res = storage
                 .upload_document_with_progress(
                     &filename,
@@ -4806,6 +5105,22 @@ async fn upload_index_sqlite_db<S: Storage>(
                     })),
                 )
                 .await;
+            info!(
+                event = "performance.upload.finish",
+                kind = "index_part",
+                index_upload_sequence,
+                index_part_no = part_no,
+                attempt,
+                worker = "index",
+                payload_bytes = part_len_u64,
+                rpc_duration_ms = upload_started.elapsed().as_millis() as u64,
+                result = if upload_res.is_ok() {
+                    "succeeded"
+                } else {
+                    "failed"
+                },
+                "performance.upload.finish"
+            );
 
             match upload_res {
                 Ok(uploaded_object_id) => {
@@ -4841,7 +5156,18 @@ async fn upload_index_sqlite_db<S: Storage>(
                             error = %e,
                             "io.telegram.upload_retry"
                         );
+                        let retry_wait_started = Instant::now();
                         sleep(backoff).await;
+                        info!(
+                            event = "performance.upload.retry_wait",
+                            kind = "index_part",
+                            index_upload_sequence,
+                            index_part_no = part_no,
+                            attempt,
+                            worker = "index",
+                            retry_wait_ms = retry_wait_started.elapsed().as_millis() as u64,
+                            "performance.upload.retry_wait"
+                        );
                         continue;
                     }
 
@@ -4919,10 +5245,31 @@ async fn upload_index_sqlite_db<S: Storage>(
     upload_workload_total.fetch_add(manifest_bytes, Ordering::Relaxed);
     let mut manifest_object_id: Option<String> = None;
     for attempt in 1..=UPLOAD_OBJECT_MAX_ATTEMPTS {
-        rate_limiter.wait_turn().await;
+        let rate_limit_wait_ms = rate_limiter.wait_turn().await.as_millis() as u64;
+        info!(
+            event = "performance.upload.rate_limit_wait",
+            kind = "index_manifest",
+            index_upload_sequence,
+            attempt,
+            worker = "index",
+            rate_limit_wait_ms,
+            "performance.upload.rate_limit_wait"
+        );
         let manifest_filename = telegram_camouflaged_filename();
         let last_reported = AtomicU64::new(0);
         let last_reported_net = AtomicU64::new(0);
+        info!(
+            event = "performance.upload.start",
+            kind = "index_manifest",
+            index_upload_sequence,
+            attempt,
+            worker = "index",
+            payload_bytes = manifest_bytes,
+            queue_wait_ms = 0_u64,
+            rate_limit_wait_ms,
+            "performance.upload.start"
+        );
+        let upload_started = Instant::now();
         let upload_res = storage
             .upload_document_with_progress(
                 &manifest_filename,
@@ -4974,6 +5321,21 @@ async fn upload_index_sqlite_db<S: Storage>(
                 })),
             )
             .await;
+        info!(
+            event = "performance.upload.finish",
+            kind = "index_manifest",
+            index_upload_sequence,
+            attempt,
+            worker = "index",
+            payload_bytes = manifest_bytes,
+            rpc_duration_ms = upload_started.elapsed().as_millis() as u64,
+            result = if upload_res.is_ok() {
+                "succeeded"
+            } else {
+                "failed"
+            },
+            "performance.upload.finish"
+        );
 
         match upload_res {
             Ok(uploaded_manifest_object_id) => {
@@ -5008,7 +5370,17 @@ async fn upload_index_sqlite_db<S: Storage>(
                         error = %e,
                         "io.telegram.upload_retry"
                     );
+                    let retry_wait_started = Instant::now();
                     sleep(backoff).await;
+                    info!(
+                        event = "performance.upload.retry_wait",
+                        kind = "index_manifest",
+                        index_upload_sequence,
+                        attempt,
+                        worker = "index",
+                        retry_wait_ms = retry_wait_started.elapsed().as_millis() as u64,
+                        "performance.upload.retry_wait"
+                    );
                     continue;
                 }
 

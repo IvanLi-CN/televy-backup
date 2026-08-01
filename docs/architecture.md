@@ -78,6 +78,12 @@ machine-local Diagnostics preference, then the safe `Normal` default. The daemon
 keeps one filter for an active task and applies preference changes before the
 next task. `local.toml` is deliberately excluded from Backup Config.
 
+Completed run logs use a separate machine-local retention policy: the default
+is `5 GiB` or `30 days`, whichever is exceeded first. Pruning runs only after a
+backup, restore, or verify reaches a terminal state, and it only considers
+unlocked `sync-*.ndjson` files. The append-only `ui.log` and unknown files are
+outside this policy.
+
 The macOS GUI also writes an append-only UI log file `ui.log` into the same log directory (best effort; redacts `api.telegram.org` URL segments).
 
 ## Daemon lifecycle (auto-start expectation)
@@ -259,6 +265,9 @@ Key tables:
 
 - Deletes `snapshots`/`files`/`file_chunks`/`remote_index_*` for old snapshots.
 - Does not delete remote chunk objects (no remote GC in MVP).
+
+This snapshot retention is distinct from the machine-local run-log retention
+described above.
 
 ## Known limitations (MVP)
 
