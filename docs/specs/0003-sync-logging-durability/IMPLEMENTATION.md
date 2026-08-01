@@ -23,7 +23,7 @@
   are skipped.
 - Normal-level performance records separate scan-coroutine lifetime from a
   compressed, actual scan-resource trace. The trace records walk, metadata,
-  read-chunk, encryption, and SQLite usage in one-second buckets; queue,
+  read-chunk, hashing, encryption, and SQLite usage in one-second buckets; queue,
   direct/pack/index RPC, rate-limit/retry waits, and index compression retain
   their own correlatable intervals. Sub-millisecond measurements accumulate in
   microseconds before the scan-finish summary is rounded to milliseconds, so
@@ -47,7 +47,8 @@
   warning visibility for presets and debug-capable custom filters, plus
   retention decoding and logarithmic control mappings. Diagnostics reloads use
   sequence guards so stale asynchronous results cannot replace a newer save or
-  daemon-backed refresh.
+  daemon-backed refresh, and log-level/retention saves are mutually exclusive
+  to preserve both settings.
 - Backup pipeline tests verify that Normal NDJSON contains parseable measured
   scan-resource buckets as well as upload-queue, upload-attempt,
   rate-limit-wait, and index-compression event boundaries.

@@ -1018,6 +1018,7 @@ enum ScanWorkKind {
     Walk,
     Metadata,
     ReadChunk,
+    Hash,
     Encrypt,
     Sqlite,
 }
@@ -1032,6 +1033,8 @@ struct ScanTraceBucket {
     #[serde(skip_serializing_if = "is_zero")]
     read_chunk_us: u64,
     #[serde(skip_serializing_if = "is_zero")]
+    hash_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
     encrypt_us: u64,
     #[serde(skip_serializing_if = "is_zero")]
     sqlite_us: u64,
@@ -1043,6 +1046,7 @@ impl ScanTraceBucket {
             ScanWorkKind::Walk => &mut self.walk_us,
             ScanWorkKind::Metadata => &mut self.metadata_us,
             ScanWorkKind::ReadChunk => &mut self.read_chunk_us,
+            ScanWorkKind::Hash => &mut self.hash_us,
             ScanWorkKind::Encrypt => &mut self.encrypt_us,
             ScanWorkKind::Sqlite => &mut self.sqlite_us,
         };
@@ -1053,6 +1057,7 @@ impl ScanTraceBucket {
         self.walk_us = self.walk_us.saturating_add(other.walk_us);
         self.metadata_us = self.metadata_us.saturating_add(other.metadata_us);
         self.read_chunk_us = self.read_chunk_us.saturating_add(other.read_chunk_us);
+        self.hash_us = self.hash_us.saturating_add(other.hash_us);
         self.encrypt_us = self.encrypt_us.saturating_add(other.encrypt_us);
         self.sqlite_us = self.sqlite_us.saturating_add(other.sqlite_us);
     }
@@ -1145,6 +1150,7 @@ struct ScanPerformance {
     walk_us: u64,
     metadata_us: u64,
     read_chunk_us: u64,
+    hash_us: u64,
     encrypt_us: u64,
     sqlite_timed_us: u64,
     upload_queue_blocked_ms: u64,
@@ -1157,6 +1163,7 @@ impl ScanPerformance {
             walk_us: 0,
             metadata_us: 0,
             read_chunk_us: 0,
+            hash_us: 0,
             encrypt_us: 0,
             sqlite_timed_us: 0,
             upload_queue_blocked_ms: 0,
@@ -1170,6 +1177,7 @@ impl ScanPerformance {
             ScanWorkKind::Walk => &mut self.walk_us,
             ScanWorkKind::Metadata => &mut self.metadata_us,
             ScanWorkKind::ReadChunk => &mut self.read_chunk_us,
+            ScanWorkKind::Hash => &mut self.hash_us,
             ScanWorkKind::Encrypt => &mut self.encrypt_us,
             ScanWorkKind::Sqlite => &mut self.sqlite_timed_us,
         };
@@ -1180,6 +1188,7 @@ impl ScanPerformance {
         self.walk_us
             .saturating_add(self.metadata_us)
             .saturating_add(self.read_chunk_us)
+            .saturating_add(self.hash_us)
             .saturating_add(self.encrypt_us)
             .saturating_add(self.sqlite_timed_us)
             .saturating_add(self.upload_queue_blocked_ms.saturating_mul(1_000))
@@ -2417,7 +2426,7 @@ pub async fn run_backup_with<S: Storage>(
 
                         let hash_started = Instant::now();
                         let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
-                        scan_performance.record(ScanWorkKind::Encrypt, hash_started);
+                        scan_performance.record(ScanWorkKind::Hash, hash_started);
 
                         // `file_chunks` has a FK to `chunks`, so ensure the chunk row exists in
                         // the per-snapshot filemap DB regardless of whether the chunk is deduped.
@@ -2654,6 +2663,7 @@ pub async fn run_backup_with<S: Storage>(
                         walk_ms = performance.walk_us / 1_000,
                         metadata_ms = performance.metadata_us / 1_000,
                         read_chunk_ms = performance.read_chunk_us / 1_000,
+                        hash_ms = performance.hash_us / 1_000,
                         encrypt_ms = performance.encrypt_us / 1_000,
                         sqlite_timed_ms = performance.sqlite_timed_us / 1_000,
                         upload_queue_blocked_ms = performance.upload_queue_blocked_ms,

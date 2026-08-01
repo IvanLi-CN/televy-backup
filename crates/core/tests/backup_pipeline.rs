@@ -339,6 +339,12 @@ async fn backup_writes_normal_level_performance_intervals_to_run_log() {
     assert!(
         buckets
             .iter()
+            .any(|bucket| bucket["hash_us"].as_u64().unwrap_or(0) > 0),
+        "scan trace must expose hash time slices separately from encryption"
+    );
+    assert!(
+        buckets
+            .iter()
             .all(|bucket| bucket.get("unattributed_us").is_none()),
         "unmeasured time must stay visibly absent from the resource trace"
     );
@@ -350,6 +356,7 @@ async fn backup_writes_normal_level_performance_intervals_to_run_log() {
         ("walk_us", "walk_ms"),
         ("metadata_us", "metadata_ms"),
         ("read_chunk_us", "read_chunk_ms"),
+        ("hash_us", "hash_ms"),
         ("encrypt_us", "encrypt_ms"),
         ("sqlite_us", "sqlite_timed_ms"),
     ] {

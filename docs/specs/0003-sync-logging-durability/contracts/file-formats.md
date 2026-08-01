@@ -40,7 +40,8 @@ disclosing additional file-level data.
 resource occupancy. A successful scan also emits `performance.scan.trace` with
 a `trace_json` string. The inner JSON has `version`, `resolution_ms`, and
 `buckets`; each bucket has an `offset_ms` from scan start plus any measured
-`walk_us`, `metadata_us`, `read_chunk_us`, `encrypt_us`, or `sqlite_us` values.
+`walk_us`, `metadata_us`, `read_chunk_us`, `hash_us`, `encrypt_us`, or
+`sqlite_us` values.
 Normal runs use one-second buckets; long runs are coarsened to retain at most
 4,096 buckets, and `resolution_ms` is authoritative. Missing measurement fields
 are zero. Consumers must draw only reported measurement values and must not

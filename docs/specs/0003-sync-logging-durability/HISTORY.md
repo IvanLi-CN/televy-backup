@@ -63,3 +63,8 @@ silently falling back after the newer CLI writes a retention section. Completed
 run-log inspection also accepts a tail slice that begins inside a UTF-8
 character, so a valid terminal event continues to make the file eligible for
 usage reporting and pruning.
+
+Diagnostics serializes log-level and retention writes so the atomic local TOML
+replacement cannot discard a concurrent user change. Scan telemetry records
+content hashing separately from encryption, preserving an exact encryption
+interval for later resource timelines.

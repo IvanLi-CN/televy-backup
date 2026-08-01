@@ -690,7 +690,7 @@ struct SettingsWindowRootView: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .frame(width: 280)
-                .disabled((diagnostics?.pickerDisabled ?? true) || isSavingDiagnostics)
+                .disabled((diagnostics?.pickerDisabled ?? true) || isSavingLoggingSettings)
             }
 
             if let diagnostics {
@@ -809,7 +809,7 @@ struct SettingsWindowRootView: View {
                 Button("Apply") {
                     saveLogRetention()
                 }
-                .disabled(!retentionInputsValid || diagnostics == nil || isSavingLogRetention)
+                .disabled(!retentionInputsValid || diagnostics == nil || isSavingLoggingSettings)
             }
 
             Text("Cleanup runs after the next backup, restore, or verify finishes.")
@@ -840,6 +840,10 @@ struct SettingsWindowRootView: View {
 
     private var retentionInputsValid: Bool {
         (1...100).contains(retentionMaxTotalGiB) && (7...365).contains(retentionMaxAgeDays)
+    }
+
+    private var isSavingLoggingSettings: Bool {
+        isSavingDiagnostics || isSavingLogRetention
     }
 
     private var retentionPruneStatus: String {
@@ -994,7 +998,7 @@ struct SettingsWindowRootView: View {
     }
 
     private func saveLogLevel(_ level: AppLogLevel) {
-        guard diagnostics?.pickerDisabled == false, let cli = model.cliPath() else { return }
+        guard !isSavingLogRetention, diagnostics?.pickerDisabled == false, let cli = model.cliPath() else { return }
         isSavingDiagnostics = true
         diagnosticsReloadSeq += 1
         diagnosticsError = nil
@@ -1028,7 +1032,7 @@ struct SettingsWindowRootView: View {
     }
 
     private func saveLogRetention() {
-        guard retentionInputsValid, let cli = model.cliPath() else { return }
+        guard !isSavingDiagnostics, retentionInputsValid, let cli = model.cliPath() else { return }
         isSavingLogRetention = true
         diagnosticsReloadSeq += 1
         diagnosticsError = nil
