@@ -147,7 +147,9 @@ pub struct LoggingStatus {
     pub log_bytes: Option<u64>,
     pub managed_log_bytes: Option<u64>,
     pub managed_log_count: Option<u64>,
+    #[serde(default)]
     pub retention: LogRetentionSettings,
+    #[serde(default)]
     pub retention_prune_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub configuration_error: Option<String>,
@@ -472,6 +474,28 @@ mod tests {
         assert_eq!(settings.logging.level, LogLevel::Verbose);
         assert_eq!(settings.logging.retention, LogRetentionSettings::default());
         assert!(resolve_from(temp.path(), None, None).retention_prune_enabled);
+    }
+
+    #[test]
+    fn legacy_daemon_status_uses_default_retention_fields() {
+        let status: LoggingStatus = serde_json::from_value(serde_json::json!({
+            "configuredLevel": "normal",
+            "effectiveLevel": "normal",
+            "effectiveFilter": NORMAL_FILTER,
+            "source": "local.toml",
+            "overriddenBy": null,
+            "pendingLevel": null,
+            "logDirectory": "/tmp/logs",
+            "logBytes": 42,
+            "configurationError": null,
+            "daemonAvailable": true,
+        }))
+        .expect("legacy daemon status remains readable");
+
+        assert_eq!(status.retention, LogRetentionSettings::default());
+        assert!(!status.retention_prune_enabled);
+        assert_eq!(status.managed_log_bytes, None);
+        assert_eq!(status.managed_log_count, None);
     }
 
     #[test]

@@ -15,7 +15,8 @@
 - CLI diagnostics commands expose local/runtime state and best-effort disk use;
   before either logging mutation, they reject an older responsive daemon that
   lacks retention-status fields, requiring an app restart before it can parse
-  the new local configuration.
+  the new local configuration. Read-only legacy daemon status remains readable
+  with safe defaults for the additive retention fields.
 - Completed run logs are identified by their accepted filename and a terminal
   `run.finish` record, then retained by age and managed byte cap. The current
   log is fsynced before pruning; active shared locks and all unrecognised files
