@@ -649,118 +649,13 @@ struct SettingsWindowRootView: View {
 
     private var diagnosticsView: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 28) {
                 Text("Diagnostics")
                     .font(.system(size: 18, weight: .bold))
 
-                GroupBox("Logging") {
-                    VStack(alignment: .leading, spacing: 16) {
-                        HStack {
-                            Text("Log level")
-                                .font(.system(size: 13, weight: .semibold))
-                            Spacer()
-                            Picker("Log level", selection: Binding(
-                                get: { diagnostics?.configuredLevel ?? .normal },
-                                set: { saveLogLevel($0) }
-                            )) {
-                                ForEach(AppLogLevel.allCases) { level in
-                                    Text(level.title).tag(level)
-                                }
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.segmented)
-                            .frame(width: 280)
-                            .disabled((diagnostics?.pickerDisabled ?? true) || isSavingDiagnostics)
-                        }
+                diagnosticsLoggingSection
 
-                        if let diagnostics {
-                            LabeledContent("Effective level", value: diagnostics.effectiveLevel.capitalized)
-                            LabeledContent("Source", value: diagnostics.overriddenBy ?? diagnostics.source)
-                            if diagnostics.runtimeStatusUnavailable {
-                                Label("Daemon unavailable. The effective runtime level cannot be verified.", systemImage: "bolt.slash")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            }
-                            if let pending = diagnostics.pendingLevel {
-                                LabeledContent("Next task", value: pending.title)
-                            }
-                            if let override = diagnostics.overriddenBy {
-                                Label("Controlled by \(override). Remove the environment override to change this setting here.", systemImage: "lock.fill")
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            }
-                            if diagnostics.debugWarningVisible {
-                                Label {
-                                    Text("Debug includes detailed dependency logs and may use a large amount of disk space. It remains enabled until you turn it off.")
-                                } icon: {
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                }
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.orange)
-                                .padding(12)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
-                            }
-                        }
-                    }
-                    .padding(12)
-                }
-
-                GroupBox("Log storage") {
-                    VStack(alignment: .leading, spacing: 14) {
-                        LabeledContent("Directory", value: diagnostics?.logDirectory ?? "Unavailable")
-                        LabeledContent("All log files", value: formattedLogBytes)
-                        LabeledContent("Managed run logs", value: formattedManagedLogBytes)
-                        if let count = diagnostics?.managedLogCount {
-                            LabeledContent("Managed files", value: "\(count)")
-                        }
-
-                        Divider()
-
-                        HStack(alignment: .top, spacing: 20) {
-                            retentionControl(
-                                title: "Capacity",
-                                value: $retentionMaxTotalGiB,
-                                inputLabel: "GiB",
-                                suffix: "GiB",
-                                slider: capacitySliderBinding,
-                                ticks: LogRetentionControlMapping.capacityTicks,
-                                tickLabel: { "\($0) GiB" }
-                            )
-                            retentionControl(
-                                title: "Maximum age",
-                                value: $retentionMaxAgeDays,
-                                inputLabel: "Days",
-                                suffix: "days",
-                                slider: ageSliderBinding,
-                                ticks: LogRetentionControlMapping.ageTicks,
-                                tickLabel: { LogRetentionControlMapping.ageTickLabel(for: $0) }
-                            )
-                        }
-
-                        HStack {
-                            Button("Apply") {
-                                saveLogRetention()
-                            }
-                            .disabled(!retentionInputsValid || diagnostics == nil || isSavingLogRetention)
-                            Text(retentionPruneStatus)
-                                .font(.system(size: 12))
-                                .foregroundStyle(retentionInputsValid ? Color.secondary : Color.red)
-                            Spacer()
-                        }
-
-                        Text("Cleanup runs after the next backup, restore, or verify finishes.")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                        Button {
-                            openDiagnosticsLogDirectory()
-                        } label: {
-                            Label("Open in Finder", systemImage: "folder")
-                        }
-                        .disabled(diagnostics == nil)
-                    }
-                    .padding(12)
-                }
+                diagnosticsStorageSection
 
                 if let diagnosticsError {
                     Label(diagnosticsError, systemImage: "exclamationmark.circle")
@@ -772,6 +667,164 @@ struct SettingsWindowRootView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 22)
             .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private var diagnosticsLoggingSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Logging")
+                .font(.system(size: 13, weight: .semibold))
+
+            HStack {
+                Text("Log level")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Picker("Log level", selection: Binding(
+                    get: { diagnostics?.configuredLevel ?? .normal },
+                    set: { saveLogLevel($0) }
+                )) {
+                    ForEach(AppLogLevel.allCases) { level in
+                        Text(level.title).tag(level)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 280)
+                .disabled((diagnostics?.pickerDisabled ?? true) || isSavingDiagnostics)
+            }
+
+            if let diagnostics {
+                HStack(alignment: .top, spacing: 18) {
+                    diagnosticsFact("Effective level", value: diagnostics.effectiveLevel.capitalized)
+                    Divider()
+                        .frame(height: 28)
+                    diagnosticsFact("Source", value: diagnostics.overriddenBy ?? diagnostics.source)
+                    if let pending = diagnostics.pendingLevel {
+                        Divider()
+                            .frame(height: 28)
+                        diagnosticsFact("Next task", value: pending.title)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 2)
+
+                if diagnostics.runtimeStatusUnavailable {
+                    Label("Daemon unavailable. The effective runtime level cannot be verified.", systemImage: "bolt.slash")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                if let override = diagnostics.overriddenBy {
+                    Label("Controlled by \(override). Remove the environment override to change this setting here.", systemImage: "lock.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                if diagnostics.debugWarningVisible {
+                    Label {
+                        Text("Debug includes detailed dependency logs and may use a large amount of disk space. It remains enabled until you turn it off.")
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                }
+            }
+        }
+    }
+
+    private var diagnosticsStorageSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Log storage")
+                .font(.system(size: 13, weight: .semibold))
+
+            HStack(alignment: .center, spacing: 16) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Managed run logs")
+                        .font(.system(size: 13, weight: .semibold))
+                    HStack(spacing: 8) {
+                        Text(formattedManagedLogBytes)
+                            .font(.system(size: 17, weight: .semibold))
+                        if let count = diagnostics?.managedLogCount {
+                            Text("\(count) files")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                        Text("All logs: \(formattedLogBytes)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Button {
+                    openDiagnosticsLogDirectory()
+                } label: {
+                    Label("Open in Finder", systemImage: "folder")
+                }
+                .disabled(diagnostics == nil)
+            }
+
+            HStack(spacing: 8) {
+                Text("Directory")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Text(diagnostics?.logDirectory ?? "Unavailable")
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+
+            Divider()
+
+            HStack(alignment: .top, spacing: 20) {
+                retentionControl(
+                    title: "Capacity",
+                    value: $retentionMaxTotalGiB,
+                    inputLabel: "GiB",
+                    suffix: "GiB",
+                    slider: capacitySliderBinding,
+                    ticks: LogRetentionControlMapping.capacityTicks,
+                    tickLabel: { "\($0) GiB" }
+                )
+                Divider()
+                    .frame(height: 116)
+                retentionControl(
+                    title: "Maximum age",
+                    value: $retentionMaxAgeDays,
+                    inputLabel: "Days",
+                    suffix: "days",
+                    slider: ageSliderBinding,
+                    ticks: LogRetentionControlMapping.ageTicks,
+                    tickLabel: { LogRetentionControlMapping.ageTickLabel(for: $0) }
+                )
+            }
+
+            HStack(alignment: .firstTextBaseline) {
+                Text(retentionPruneStatus)
+                    .font(.system(size: 12))
+                    .foregroundStyle(retentionInputsValid ? Color.secondary : Color.red)
+                Spacer()
+                Button("Apply") {
+                    saveLogRetention()
+                }
+                .disabled(!retentionInputsValid || diagnostics == nil || isSavingLogRetention)
+            }
+
+            Text("Cleanup runs after the next backup, restore, or verify finishes.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func diagnosticsFact(_ label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 13, weight: .medium))
         }
     }
 
