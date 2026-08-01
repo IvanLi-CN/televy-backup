@@ -18,9 +18,12 @@
   `run.finish` record, then retained by age and managed byte cap. The current
   log is fsynced before pruning; active shared locks and all unrecognised files
   are skipped.
-- Normal-level performance records bound scan execution, direct/pack/index RPC
-  attempts, queue/rate-limit/retry waits, and index compression using opaque
-  sequence values rather than file or remote-object identifiers.
+- Normal-level performance records separate scan-coroutine lifetime from a
+  compressed, actual scan-resource trace. The trace records walk, metadata,
+  read-chunk, encryption, and SQLite usage in one-second buckets; queue,
+  direct/pack/index RPC, rate-limit/retry waits, and index compression retain
+  their own correlatable intervals. All identifiers are opaque and no file or
+  remote-object identifier is logged.
 - macOS Settings includes Diagnostics controls, override locking, persistent
   Debug warning, daemon-start refresh, a reliable Open in Finder action, and
   editable capacity/age retention controls with mock-only visual evidence.
@@ -37,8 +40,9 @@
   retention decoding and logarithmic control mappings. Diagnostics reloads use
   sequence guards so stale asynchronous results cannot replace a newer save or
   daemon-backed refresh.
-- Backup pipeline tests verify that Normal NDJSON contains actual scan,
-  upload-attempt, rate-limit-wait, and index-compression event boundaries.
+- Backup pipeline tests verify that Normal NDJSON contains parseable measured
+  scan-resource buckets as well as upload-queue, upload-attempt,
+  rate-limit-wait, and index-compression event boundaries.
 - The mock-only capture script permits an isolated second app instance and
   captures only the PID-owned Settings window without enabling the app's timer
   snapshot path or falling back to a full-screen capture. An exit trap reaps the

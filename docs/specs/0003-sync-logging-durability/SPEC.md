@@ -90,10 +90,22 @@ Invalid environment filters resolve to `Normal`, never global debug.
 
 ### Performance events
 
-- `performance.scan.start` and `performance.scan.finish` mark the actual scan
-  coroutine interval. The finish event includes accumulated walk, metadata,
-  timed SQLite, read-chunk, encryption, upload-queue-blocked, and
-  unattributed milliseconds.
+- `performance.scan.start` and `performance.scan.finish` mark the scan
+  coroutine lifecycle only. They must not be rendered as resource-occupancy
+  bars. The finish event includes accumulated walk, metadata, timed SQLite,
+  read-chunk, encryption, upload-queue-blocked, and unattributed milliseconds.
+- `performance.scan.trace` is emitted before a successful scan finish. Its
+  `trace_json` is a versioned JSON payload indexed from the scan start and
+  contains only measured `walk_us`, `metadata_us`, `read_chunk_us`,
+  `encrypt_us`, and `sqlite_us` activity. It uses one-second buckets for normal
+  runs and coarsens long runs while retaining at most 4,096 buckets; the actual
+  precision is declared by `resolution_ms`. Missing fields are zero. Gantt
+  charts render only these measured slices; gaps are unmeasured, not inferred
+  scan work or idle time.
+- Each upload-queue admission emits correlated
+  `performance.scan.queue_wait.start` and `.finish` events around the actual
+  byte-permit and channel wait. They contain an opaque queue-wait identifier,
+  object kind, duration, and result, without paths or payload content.
 - Every direct, pack, index-part, and index-manifest upload attempt emits
   `performance.upload.start` and `performance.upload.finish` around the actual
   storage RPC, correlated by a direct/pack sequence or an index-upload sequence
@@ -144,8 +156,9 @@ Invalid environment filters resolve to `Normal`, never global debug.
 - Retention only deletes completed `sync-{backup,restore,verify}-*.ndjson`
   files, never `ui.log`, unknown files, the current run, or active files owned
   by another process.
-- A deterministic backup records correlatable actual scan, upload, retry-wait,
-  and index-compression intervals under the Normal preset.
+- A deterministic backup records correlatable actual scan resource slices,
+  upload-queue waits, upload RPCs, retry waits, and index-compression intervals
+  under the Normal preset.
 
 ## Visual Evidence
 

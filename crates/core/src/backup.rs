@@ -68,6 +68,9 @@ const INDEX_COMPACT_MIN_FREE_RATIO: f64 = 0.20;
 const RETENTION_SNAPSHOT_BATCH_SIZE: usize = 8;
 const RETENTION_FILE_BATCH_SIZE: usize = 256;
 const TELEVYIGNORE_FILE_NAME: &str = ".televyignore";
+const SCAN_TRACE_BUCKET_MS: u64 = 1_000;
+const SCAN_TRACE_BUCKET_US: u64 = SCAN_TRACE_BUCKET_MS * 1_000;
+const SCAN_TRACE_MAX_BUCKETS: usize = 4_096;
 
 type CdcResult<T> = std::result::Result<T, CdcError>;
 type DbConn = PoolConnection<Sqlite>;
@@ -1010,7 +1013,134 @@ struct SourceBlob {
     source_bytes: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy)]
+enum ScanWorkKind {
+    Walk,
+    Metadata,
+    ReadChunk,
+    Encrypt,
+    Sqlite,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct ScanTraceBucket {
+    offset_ms: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    walk_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    metadata_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    read_chunk_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    encrypt_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    sqlite_us: u64,
+}
+
+impl ScanTraceBucket {
+    fn add(&mut self, kind: ScanWorkKind, elapsed_us: u64) {
+        let slot = match kind {
+            ScanWorkKind::Walk => &mut self.walk_us,
+            ScanWorkKind::Metadata => &mut self.metadata_us,
+            ScanWorkKind::ReadChunk => &mut self.read_chunk_us,
+            ScanWorkKind::Encrypt => &mut self.encrypt_us,
+            ScanWorkKind::Sqlite => &mut self.sqlite_us,
+        };
+        *slot = slot.saturating_add(elapsed_us);
+    }
+
+    fn merge_from(&mut self, other: &Self) {
+        self.walk_us = self.walk_us.saturating_add(other.walk_us);
+        self.metadata_us = self.metadata_us.saturating_add(other.metadata_us);
+        self.read_chunk_us = self.read_chunk_us.saturating_add(other.read_chunk_us);
+        self.encrypt_us = self.encrypt_us.saturating_add(other.encrypt_us);
+        self.sqlite_us = self.sqlite_us.saturating_add(other.sqlite_us);
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ScanTrace {
+    version: u8,
+    resolution_ms: u64,
+    buckets: Vec<ScanTraceBucket>,
+}
+
+#[derive(Debug)]
+struct ScanActivityTrace {
+    started: Instant,
+    buckets: Vec<ScanTraceBucket>,
+}
+
+impl ScanActivityTrace {
+    fn new(started: Instant) -> Self {
+        Self {
+            started,
+            buckets: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, kind: ScanWorkKind, operation_started: Instant) -> u64 {
+        let operation_finished = Instant::now();
+        let start_us = operation_started
+            .saturating_duration_since(self.started)
+            .as_micros() as u64;
+        let end_us = operation_finished
+            .saturating_duration_since(self.started)
+            .as_micros() as u64;
+        let mut cursor_us = start_us.min(end_us);
+
+        while cursor_us < end_us {
+            let bucket_index = (cursor_us / SCAN_TRACE_BUCKET_US) as usize;
+            let bucket_end_us = (bucket_index as u64 + 1).saturating_mul(SCAN_TRACE_BUCKET_US);
+            let segment_end_us = end_us.min(bucket_end_us);
+            if self.buckets.len() <= bucket_index {
+                self.buckets
+                    .resize_with(bucket_index + 1, || ScanTraceBucket {
+                        offset_ms: 0,
+                        ..ScanTraceBucket::default()
+                    });
+            }
+            let bucket = &mut self.buckets[bucket_index];
+            bucket.offset_ms = bucket_index as u64 * SCAN_TRACE_BUCKET_MS;
+            bucket.add(kind, segment_end_us.saturating_sub(cursor_us));
+            cursor_us = segment_end_us;
+        }
+
+        end_us.saturating_sub(start_us) / 1_000
+    }
+
+    fn to_json(&self) -> (String, u64) {
+        let bucket_factor = self.buckets.len().div_ceil(SCAN_TRACE_MAX_BUCKETS).max(1);
+        let resolution_ms = SCAN_TRACE_BUCKET_MS.saturating_mul(bucket_factor as u64);
+        let mut buckets = Vec::with_capacity(self.buckets.len().div_ceil(bucket_factor));
+        for (index, bucket) in self.buckets.iter().enumerate() {
+            let compacted_index = index / bucket_factor;
+            if buckets.len() <= compacted_index {
+                buckets.push(ScanTraceBucket::default());
+            }
+            buckets[compacted_index].merge_from(bucket);
+        }
+        for (index, bucket) in buckets.iter_mut().enumerate() {
+            bucket.offset_ms = index as u64 * resolution_ms;
+        }
+
+        let json = serde_json::to_string(&ScanTrace {
+            version: 1,
+            resolution_ms,
+            buckets,
+        })
+        .unwrap_or_else(|_| {
+            format!("{{\"version\":1,\"resolution_ms\":{resolution_ms},\"buckets\":[]}}")
+        });
+        (json, resolution_ms)
+    }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[derive(Debug)]
 struct ScanPerformance {
     walk_ms: u64,
     metadata_ms: u64,
@@ -1018,9 +1148,34 @@ struct ScanPerformance {
     encrypt_ms: u64,
     sqlite_timed_ms: u64,
     upload_queue_blocked_ms: u64,
+    trace: ScanActivityTrace,
 }
 
 impl ScanPerformance {
+    fn new(scan_started: Instant) -> Self {
+        Self {
+            walk_ms: 0,
+            metadata_ms: 0,
+            read_chunk_ms: 0,
+            encrypt_ms: 0,
+            sqlite_timed_ms: 0,
+            upload_queue_blocked_ms: 0,
+            trace: ScanActivityTrace::new(scan_started),
+        }
+    }
+
+    fn record(&mut self, kind: ScanWorkKind, operation_started: Instant) {
+        let elapsed_ms = self.trace.record(kind, operation_started);
+        let slot = match kind {
+            ScanWorkKind::Walk => &mut self.walk_ms,
+            ScanWorkKind::Metadata => &mut self.metadata_ms,
+            ScanWorkKind::ReadChunk => &mut self.read_chunk_ms,
+            ScanWorkKind::Encrypt => &mut self.encrypt_ms,
+            ScanWorkKind::Sqlite => &mut self.sqlite_timed_ms,
+        };
+        *slot = slot.saturating_add(elapsed_ms);
+    }
+
     fn attributed_ms(&self) -> u64 {
         self.walk_ms
             .saturating_add(self.metadata_ms)
@@ -1056,6 +1211,7 @@ struct UploadQueue {
     planned_upload_bytes: Arc<AtomicU64>,
     phase_started: Arc<AtomicBool>,
     next_sequence: Arc<AtomicU64>,
+    next_queue_wait_id: Arc<AtomicU64>,
     scan_queue_blocked_ms: Arc<AtomicU64>,
     cancel: CancellationToken,
 }
@@ -1068,8 +1224,31 @@ impl UploadQueue {
         source_bytes: u64,
     ) -> Result<()> {
         let queue_started = Instant::now();
+        let queue_wait_id = self.next_queue_wait_id.fetch_add(1, Ordering::Relaxed);
         let bytes = blob.len();
-        let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
+        info!(
+            event = "performance.scan.queue_wait.start",
+            phase = "scan",
+            queue_wait_id,
+            kind = "direct",
+            "performance.scan.queue_wait.start"
+        );
+        let permit =
+            match acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await {
+                Ok(permit) => permit,
+                Err(err) => {
+                    info!(
+                        event = "performance.scan.queue_wait.finish",
+                        phase = "scan",
+                        queue_wait_id,
+                        kind = "direct",
+                        queue_wait_ms = queue_started.elapsed().as_millis() as u64,
+                        result = "failed",
+                        "performance.scan.queue_wait.finish"
+                    );
+                    return Err(err);
+                }
+            };
         self.pending_jobs.fetch_add(1, Ordering::Relaxed);
         self.pending_bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
@@ -1087,13 +1266,30 @@ impl UploadQueue {
             saturating_sub_usize(self.pending_jobs.as_ref(), 1);
             saturating_sub_u64(self.pending_bytes.as_ref(), bytes as u64);
             saturating_sub_u64(self.planned_upload_bytes.as_ref(), bytes as u64);
+            info!(
+                event = "performance.scan.queue_wait.finish",
+                phase = "scan",
+                queue_wait_id,
+                kind = "direct",
+                queue_wait_ms = queue_started.elapsed().as_millis() as u64,
+                result = "failed",
+                "performance.scan.queue_wait.finish"
+            );
             return Err(Error::Telegram {
                 message: "upload queue closed".to_string(),
             });
         }
-        self.scan_queue_blocked_ms.fetch_add(
-            queue_started.elapsed().as_millis() as u64,
-            Ordering::Relaxed,
+        let queue_wait_ms = queue_started.elapsed().as_millis() as u64;
+        self.scan_queue_blocked_ms
+            .fetch_add(queue_wait_ms, Ordering::Relaxed);
+        info!(
+            event = "performance.scan.queue_wait.finish",
+            phase = "scan",
+            queue_wait_id,
+            kind = "direct",
+            queue_wait_ms,
+            result = "enqueued",
+            "performance.scan.queue_wait.finish"
         );
         if self
             .phase_started
@@ -1107,11 +1303,34 @@ impl UploadQueue {
 
     async fn enqueue_pack(&self, entries: Vec<PackEntryRef>, pack_bytes: Vec<u8>) -> Result<()> {
         let queue_started = Instant::now();
+        let queue_wait_id = self.next_queue_wait_id.fetch_add(1, Ordering::Relaxed);
         let bytes = pack_bytes.len();
         let source_bytes = entries
             .iter()
             .fold(0u64, |acc, entry| acc.saturating_add(entry.source_bytes));
-        let permit = acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await?;
+        info!(
+            event = "performance.scan.queue_wait.start",
+            phase = "scan",
+            queue_wait_id,
+            kind = "pack",
+            "performance.scan.queue_wait.start"
+        );
+        let permit =
+            match acquire_bytes(&self.bytes_sem, self.bytes_budget, bytes, &self.cancel).await {
+                Ok(permit) => permit,
+                Err(err) => {
+                    info!(
+                        event = "performance.scan.queue_wait.finish",
+                        phase = "scan",
+                        queue_wait_id,
+                        kind = "pack",
+                        queue_wait_ms = queue_started.elapsed().as_millis() as u64,
+                        result = "failed",
+                        "performance.scan.queue_wait.finish"
+                    );
+                    return Err(err);
+                }
+            };
         self.pending_jobs.fetch_add(1, Ordering::Relaxed);
         self.pending_bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
@@ -1129,13 +1348,30 @@ impl UploadQueue {
             saturating_sub_usize(self.pending_jobs.as_ref(), 1);
             saturating_sub_u64(self.pending_bytes.as_ref(), bytes as u64);
             saturating_sub_u64(self.planned_upload_bytes.as_ref(), bytes as u64);
+            info!(
+                event = "performance.scan.queue_wait.finish",
+                phase = "scan",
+                queue_wait_id,
+                kind = "pack",
+                queue_wait_ms = queue_started.elapsed().as_millis() as u64,
+                result = "failed",
+                "performance.scan.queue_wait.finish"
+            );
             return Err(Error::Telegram {
                 message: "upload queue closed".to_string(),
             });
         }
-        self.scan_queue_blocked_ms.fetch_add(
-            queue_started.elapsed().as_millis() as u64,
-            Ordering::Relaxed,
+        let queue_wait_ms = queue_started.elapsed().as_millis() as u64;
+        self.scan_queue_blocked_ms
+            .fetch_add(queue_wait_ms, Ordering::Relaxed);
+        info!(
+            event = "performance.scan.queue_wait.finish",
+            phase = "scan",
+            queue_wait_id,
+            kind = "pack",
+            queue_wait_ms,
+            result = "enqueued",
+            "performance.scan.queue_wait.finish"
         );
         if self
             .phase_started
@@ -1567,6 +1803,7 @@ pub async fn run_backup_with<S: Storage>(
     let pending_jobs = Arc::new(AtomicUsize::new(0));
     let pending_bytes = Arc::new(AtomicU64::new(0));
     let upload_sequence = Arc::new(AtomicU64::new(1));
+    let queue_wait_sequence = Arc::new(AtomicU64::new(1));
     let scan_queue_blocked_ms = Arc::new(AtomicU64::new(0));
 
     let scan_source_path = config.source_path.clone();
@@ -1601,6 +1838,7 @@ pub async fn run_backup_with<S: Storage>(
         planned_upload_bytes: Arc::clone(&upload_workload_total),
         phase_started: Arc::clone(&upload_phase_started),
         next_sequence: Arc::clone(&upload_sequence),
+        next_queue_wait_id: Arc::clone(&queue_wait_sequence),
         scan_queue_blocked_ms: Arc::clone(&scan_queue_blocked_ms),
         cancel: upload_cancel.clone(),
     };
@@ -1767,7 +2005,7 @@ pub async fn run_backup_with<S: Storage>(
         let scan_queue_blocked_ms = Arc::clone(&scan_queue_blocked_ms);
         async move {
             let performance_scan_started = Instant::now();
-            let mut scan_performance = ScanPerformance::default();
+            let mut scan_performance = ScanPerformance::new(performance_scan_started);
             info!(
                 event = "performance.scan.start",
                 phase = "scan",
@@ -1777,9 +2015,7 @@ pub async fn run_backup_with<S: Storage>(
                 let sqlite_started = Instant::now();
                 let base_snapshot_id =
                     latest_snapshot_for_source(conn, &scan_source_path, provider).await?;
-                scan_performance.sqlite_timed_ms = scan_performance
-                    .sqlite_timed_ms
-                    .saturating_add(sqlite_started.elapsed().as_millis() as u64);
+                scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
                 let snapshot_id = snapshot_id.clone();
                 let source_path_utf8 = path_to_utf8(&scan_source_path)?;
 
@@ -1798,9 +2034,7 @@ pub async fn run_backup_with<S: Storage>(
                     .bind(&base_snapshot_id)
                     .execute(&mut **conn)
                 )?;
-                scan_performance.sqlite_timed_ms = scan_performance
-                    .sqlite_timed_ms
-                    .saturating_add(sqlite_started.elapsed().as_millis() as u64);
+                scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
 
                 // Create per-snapshot filemap DB and seed the snapshot row. This DB is uploaded
                 // as the snapshot's "filemap index", while the endpoint DB remains small and only
@@ -1823,21 +2057,30 @@ pub async fn run_backup_with<S: Storage>(
                     .bind(&base_snapshot_id)
                     .execute(&mut *filemap_conn)
                 )?;
-                scan_performance.sqlite_timed_ms = scan_performance
-                    .sqlite_timed_ms
-                    .saturating_add(sqlite_started.elapsed().as_millis() as u64);
+                scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
 
                 // If we have a base snapshot, attach its filemap DB as `base` so base-chunk-copy
                 // can copy `file_chunks` without re-chunking file contents.
                 if let Some(base_snapshot_id) = base_snapshot_id.as_deref() {
                     let cached_path = scan_filemap_dir.join(format!("{base_snapshot_id}.sqlite"));
-                    let base_db_path = if cached_path.exists() {
+                    let cached_filemap_exists = cached_path.exists();
+                    let endpoint_filemap_exists = if cached_filemap_exists {
+                        false
+                    } else {
+                        let sqlite_started = Instant::now();
+                        let has_filemap =
+                            endpoint_db_has_snapshot_filemap(conn, base_snapshot_id).await?;
+                        scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
+                        has_filemap
+                    };
+                    let base_db_path = if cached_filemap_exists {
                         cached_path
-                    } else if endpoint_db_has_snapshot_filemap(conn, base_snapshot_id).await? {
+                    } else if endpoint_filemap_exists {
                         // Upgrade/legacy path: endpoint DB might still contain the base snapshot's
                         // filemap rows.
                         scan_endpoint_db_path.clone()
                     } else {
+                        let sqlite_started = Instant::now();
                         let manifest_object_id = lookup_remote_index_manifest_object_id(
                             conn,
                             base_snapshot_id,
@@ -1849,6 +2092,7 @@ pub async fn run_backup_with<S: Storage>(
                                 "base snapshot missing remote index pointer: base_snapshot_id={base_snapshot_id}"
                             ),
                         })?;
+                        scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
 
                         crate::remote_index_db::download_and_write_index_db_atomic(
                             storage,
@@ -1864,7 +2108,9 @@ pub async fn run_backup_with<S: Storage>(
                         cached_path
                     };
 
+                    let sqlite_started = Instant::now();
                     attach_db(&mut filemap_conn, "base", &base_db_path).await?;
+                    scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
                 }
 
                 let mut result = BackupResult {
@@ -1882,8 +2128,10 @@ pub async fn run_backup_with<S: Storage>(
                 } else {
                     conn
                 };
+                let sqlite_started = Instant::now();
                 let mut known_chunk_hashes =
                     load_chunk_hashes_for_storage(global_conn, storage, provider).await?;
+                scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
                 let mut pack_enabled = false;
                 let mut pending_bytes: usize = 0;
                 let mut pending_uploads: Vec<SourceBlob> = Vec::new();
@@ -1925,9 +2173,7 @@ pub async fn run_backup_with<S: Storage>(
                     let Some(entry) = source_walk.next() else {
                         break;
                     };
-                    scan_performance.walk_ms = scan_performance
-                        .walk_ms
-                        .saturating_add(walk_started.elapsed().as_millis() as u64);
+                    scan_performance.record(ScanWorkKind::Walk, walk_started);
                     if let Some(cancel) = options.cancel
                         && cancel.is_cancelled()
                     {
@@ -1983,9 +2229,7 @@ pub async fn run_backup_with<S: Storage>(
                     let path = entry.path();
                     let metadata_started = Instant::now();
                     let metadata_result = entry.metadata();
-                    scan_performance.metadata_ms = scan_performance
-                        .metadata_ms
-                        .saturating_add(metadata_started.elapsed().as_millis() as u64);
+                    scan_performance.record(ScanWorkKind::Metadata, metadata_started);
                     let metadata = match metadata_result {
                         Ok(v) => v,
                         Err(e) => {
@@ -2077,9 +2321,7 @@ pub async fn run_backup_with<S: Storage>(
                         .bind(kind)
                         .execute(&mut *filemap_conn)
                     )?;
-                    scan_performance.sqlite_timed_ms = scan_performance
-                        .sqlite_timed_ms
-                        .saturating_add(sqlite_started.elapsed().as_millis() as u64);
+                    scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
 
                     result.files_indexed += 1;
                     scan_files_indexed.store(result.files_indexed, Ordering::Relaxed);
@@ -2092,10 +2334,20 @@ pub async fn run_backup_with<S: Storage>(
                         continue;
                     }
 
-                    if let Some(base_snapshot_id) = base_snapshot_id.as_deref()
-                        && let Some(base_row) =
-                            lookup_base_file_snapshot_row(&mut filemap_conn, base_snapshot_id, &rel_path_str)
-                                .await?
+                    let base_row = if let Some(base_snapshot_id) = base_snapshot_id.as_deref() {
+                        let sqlite_started = Instant::now();
+                        let row = lookup_base_file_snapshot_row(
+                            &mut filemap_conn,
+                            base_snapshot_id,
+                            &rel_path_str,
+                        )
+                        .await?;
+                        scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
+                        row
+                    } else {
+                        None
+                    };
+                    if let Some(base_row) = base_row
                         && base_row.size == size
                         && base_row.mtime_ms == mtime_ms
                         && base_row.mode == mode
@@ -2106,9 +2358,11 @@ pub async fn run_backup_with<S: Storage>(
                             size: size.max(0) as u64,
                         });
                         if pending_base_chunk_copies.len() >= BASE_FILE_CHUNK_COPY_BATCH_SIZE {
+                            let sqlite_started = Instant::now();
                             let (copied_chunks, deduped_bytes) =
                                 flush_base_chunk_copy_batch(&mut filemap_conn, &mut pending_base_chunk_copies)
                                     .await?;
+                            scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
                             if copied_chunks > 0 {
                                 result.chunks_total =
                                     result.chunks_total.saturating_add(copied_chunks);
@@ -2145,9 +2399,7 @@ pub async fn run_backup_with<S: Storage>(
                         let Some((seq, chunk)) = chunks.next() else {
                             break;
                         };
-                        scan_performance.read_chunk_ms = scan_performance
-                            .read_chunk_ms
-                            .saturating_add(read_chunk_started.elapsed().as_millis() as u64);
+                        scan_performance.record(ScanWorkKind::ReadChunk, read_chunk_started);
                         if let Some(cancel) = options.cancel
                             && cancel.is_cancelled()
                         {
@@ -2164,9 +2416,7 @@ pub async fn run_backup_with<S: Storage>(
 
                         let hash_started = Instant::now();
                         let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
-                        scan_performance.encrypt_ms = scan_performance
-                            .encrypt_ms
-                            .saturating_add(hash_started.elapsed().as_millis() as u64);
+                        scan_performance.record(ScanWorkKind::Encrypt, hash_started);
 
                         // `file_chunks` has a FK to `chunks`, so ensure the chunk row exists in
                         // the per-snapshot filemap DB regardless of whether the chunk is deduped.
@@ -2183,9 +2433,7 @@ pub async fn run_backup_with<S: Storage>(
                             .bind(chunk.data.len() as i64)
                             .execute(&mut *filemap_conn)
                         )?;
-                        scan_performance.sqlite_timed_ms = scan_performance
-                            .sqlite_timed_ms
-                            .saturating_add(sqlite_started.elapsed().as_millis() as u64);
+                        scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
 
                         let exists = known_chunk_hashes.contains(&chunk_hash);
                         if exists {
@@ -2209,16 +2457,12 @@ pub async fn run_backup_with<S: Storage>(
                                 .bind(chunk.data.len() as i64)
                                 .execute(&mut **global_conn)
                             )?;
-                            scan_performance.sqlite_timed_ms = scan_performance
-                                .sqlite_timed_ms
-                                .saturating_add(sqlite_started.elapsed().as_millis() as u64);
+                            scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
 
                             let encrypt_started = Instant::now();
                             let encrypted =
                                 encrypt_framed(&scan_master_key, chunk_hash.as_bytes(), &chunk.data)?;
-                            scan_performance.encrypt_ms = scan_performance
-                                .encrypt_ms
-                                .saturating_add(encrypt_started.elapsed().as_millis() as u64);
+                            scan_performance.record(ScanWorkKind::Encrypt, encrypt_started);
                             let blob = SourceBlob {
                                 chunk_hash: chunk_hash.clone(),
                                 blob: encrypted,
@@ -2275,15 +2519,15 @@ pub async fn run_backup_with<S: Storage>(
                     let sqlite_started = Instant::now();
                     insert_file_chunks_batch(&mut filemap_conn, &file_id, &file_chunk_rows)
                         .await?;
-                    scan_performance.sqlite_timed_ms = scan_performance
-                        .sqlite_timed_ms
-                        .saturating_add(sqlite_started.elapsed().as_millis() as u64);
+                    scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
                 }
 
                 if !pending_base_chunk_copies.is_empty() {
+                    let sqlite_started = Instant::now();
                     let (copied_chunks, deduped_bytes) =
                         flush_base_chunk_copy_batch(&mut filemap_conn, &mut pending_base_chunk_copies)
                             .await?;
+                    scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
                     if copied_chunks > 0 {
                         result.chunks_total = result.chunks_total.saturating_add(copied_chunks);
                         scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
@@ -2391,27 +2635,38 @@ pub async fn run_backup_with<S: Storage>(
             }
             scan_done.store(true, Ordering::Relaxed);
             match &res {
-                Ok((_, result, _, performance)) => info!(
-                    event = "performance.scan.finish",
-                    phase = "scan",
-                    scan_duration_ms = performance_scan_started.elapsed().as_millis() as u64,
-                    walk_ms = performance.walk_ms,
-                    metadata_ms = performance.metadata_ms,
-                    read_chunk_ms = performance.read_chunk_ms,
-                    encrypt_ms = performance.encrypt_ms,
-                    sqlite_timed_ms = performance.sqlite_timed_ms,
-                    upload_queue_blocked_ms = performance.upload_queue_blocked_ms,
-                    unattributed_ms = performance_scan_started
-                        .elapsed()
-                        .as_millis()
-                        .saturating_sub(performance.attributed_ms() as u128)
-                        as u64,
-                    files_indexed = result.files_indexed,
-                    chunks_total = result.chunks_total,
-                    bytes_read = result.bytes_read,
-                    result = "succeeded",
-                    "performance.scan.finish"
-                ),
+                Ok((_, result, _, performance)) => {
+                    let scan_duration = performance_scan_started.elapsed();
+                    let (trace_json, trace_resolution_ms) = performance.trace.to_json();
+                    info!(
+                        event = "performance.scan.trace",
+                        phase = "scan",
+                        trace_version = 1_u8,
+                        resolution_ms = trace_resolution_ms,
+                        trace_json = %trace_json,
+                        "performance.scan.trace"
+                    );
+                    info!(
+                        event = "performance.scan.finish",
+                        phase = "scan",
+                        scan_duration_ms = scan_duration.as_millis() as u64,
+                        walk_ms = performance.walk_ms,
+                        metadata_ms = performance.metadata_ms,
+                        read_chunk_ms = performance.read_chunk_ms,
+                        encrypt_ms = performance.encrypt_ms,
+                        sqlite_timed_ms = performance.sqlite_timed_ms,
+                        upload_queue_blocked_ms = performance.upload_queue_blocked_ms,
+                        unattributed_ms = scan_duration
+                            .as_millis()
+                            .saturating_sub(performance.attributed_ms() as u128)
+                            as u64,
+                        files_indexed = result.files_indexed,
+                        chunks_total = result.chunks_total,
+                        bytes_read = result.bytes_read,
+                        result = "succeeded",
+                        "performance.scan.finish"
+                    );
+                }
                 Err(_) => info!(
                     event = "performance.scan.finish",
                     phase = "scan",

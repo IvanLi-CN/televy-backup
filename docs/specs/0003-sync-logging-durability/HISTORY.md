@@ -47,3 +47,8 @@ retention settings.
 The same change establishes Normal-level performance intervals around the
 concurrent scan/upload pipeline. This replaces phase-boundary inference with
 actual upload RPC, queue, rate-limit, retry, and index-compression timing.
+
+Scan coroutine lifetime proved insufficient for resource analysis because it
+overlaps the upload pipeline by design. Successful runs therefore preserve a
+compressed trace of measured scan work and retain gaps for unmeasured time,
+rather than presenting the scan lifecycle as a resource-occupancy interval.

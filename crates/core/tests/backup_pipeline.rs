@@ -275,16 +275,22 @@ async fn backup_writes_normal_level_performance_intervals_to_run_log() {
     assert!(result.data_objects_uploaded > 0);
     drop(run_log);
 
-    let events = std::fs::read_to_string(run_log_path)
+    let log_entries = std::fs::read_to_string(run_log_path)
         .expect("read run log")
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid NDJSON"))
+        .collect::<Vec<_>>();
+    let events = log_entries
+        .iter()
         .filter_map(|line| line["fields"]["event"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
 
     for expected in [
         "performance.scan.start",
+        "performance.scan.trace",
         "performance.scan.finish",
+        "performance.scan.queue_wait.start",
+        "performance.scan.queue_wait.finish",
         "performance.upload.rate_limit_wait",
         "performance.upload.start",
         "performance.upload.finish",
@@ -296,6 +302,58 @@ async fn backup_writes_normal_level_performance_intervals_to_run_log() {
             "missing performance event {expected}: {events:?}"
         );
     }
+
+    let scan_trace = log_entries
+        .iter()
+        .find(|line| line["fields"]["event"] == "performance.scan.trace")
+        .expect("scan resource trace performance event");
+    let trace: serde_json::Value = serde_json::from_str(
+        scan_trace["fields"]["trace_json"]
+            .as_str()
+            .expect("scan trace JSON string"),
+    )
+    .expect("valid scan trace JSON");
+    assert_eq!(trace["version"], 1);
+    assert_eq!(trace["resolution_ms"], 1_000);
+    assert_eq!(
+        scan_trace["fields"]["resolution_ms"],
+        trace["resolution_ms"]
+    );
+    let buckets = trace["buckets"].as_array().expect("scan trace buckets");
+    assert!(
+        !buckets.is_empty(),
+        "scan trace must contain actual time slices"
+    );
+    assert!(
+        buckets
+            .iter()
+            .any(|bucket| bucket["sqlite_us"].as_u64().unwrap_or(0) > 0),
+        "scan trace must expose SQLite time slices"
+    );
+    assert!(
+        buckets
+            .iter()
+            .any(|bucket| bucket["read_chunk_us"].as_u64().unwrap_or(0) > 0),
+        "scan trace must expose read-chunk time slices"
+    );
+    assert!(
+        buckets
+            .iter()
+            .all(|bucket| bucket.get("unattributed_us").is_none()),
+        "unmeasured time must stay visibly absent from the resource trace"
+    );
+
+    let queue_wait_starts = log_entries
+        .iter()
+        .filter(|line| line["fields"]["event"] == "performance.scan.queue_wait.start")
+        .map(|line| line["fields"]["queue_wait_id"].clone())
+        .collect::<Vec<_>>();
+    let queue_wait_finishes = log_entries
+        .iter()
+        .filter(|line| line["fields"]["event"] == "performance.scan.queue_wait.finish")
+        .map(|line| line["fields"]["queue_wait_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(queue_wait_starts, queue_wait_finishes);
 }
 
 #[tokio::test]

@@ -73,6 +73,13 @@ When env vars are not set, the GUI uses `~/Library/Application Support/TelevyBac
 
 Per-run logs are written to files as NDJSON and never mixed into stdout/stderr, so `televybackup --events` stdout remains NDJSON-only and stderr remains error-JSON-only.
 
+Performance logs distinguish the scan coroutine lifetime from measured scan
+resource slices. Successful scans write a compact trace of walk, metadata,
+read-chunk, encryption, and SQLite time at one-second resolution for normal
+runs, coarsened only for exceptionally long runs. Timeline tools must render
+only those slices and leave unmeasured gaps visible. Upload-queue waits and
+storage RPCs have their own actual interval records.
+
 Run-log filtering resolves in this order: `TELEVYBACKUP_LOG`, `RUST_LOG`, the
 machine-local Diagnostics preference, then the safe `Normal` default. The daemon
 keeps one filter for an active task and applies preference changes before the
