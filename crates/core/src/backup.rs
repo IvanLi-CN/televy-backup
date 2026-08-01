@@ -1073,6 +1073,7 @@ struct ScanTrace {
 #[derive(Debug)]
 struct ScanActivityTrace {
     started: Instant,
+    bucket_width_us: u64,
     buckets: Vec<ScanTraceBucket>,
 }
 
@@ -1080,6 +1081,7 @@ impl ScanActivityTrace {
     fn new(started: Instant) -> Self {
         Self {
             started,
+            bucket_width_us: SCAN_TRACE_BUCKET_US,
             buckets: Vec::new(),
         }
     }
@@ -1092,11 +1094,22 @@ impl ScanActivityTrace {
         let end_us = operation_finished
             .saturating_duration_since(self.started)
             .as_micros() as u64;
-        let mut cursor_us = start_us.min(end_us);
+        self.record_interval_us(kind, start_us.min(end_us), end_us);
+
+        end_us.saturating_sub(start_us)
+    }
+
+    fn record_interval_us(&mut self, kind: ScanWorkKind, start_us: u64, end_us: u64) {
+        if start_us >= end_us {
+            return;
+        }
+
+        self.coarsen_for(end_us);
+        let mut cursor_us = start_us;
 
         while cursor_us < end_us {
-            let bucket_index = (cursor_us / SCAN_TRACE_BUCKET_US) as usize;
-            let bucket_end_us = (bucket_index as u64 + 1).saturating_mul(SCAN_TRACE_BUCKET_US);
+            let bucket_index = (cursor_us / self.bucket_width_us) as usize;
+            let bucket_end_us = (bucket_index as u64 + 1).saturating_mul(self.bucket_width_us);
             let segment_end_us = end_us.min(bucket_end_us);
             if self.buckets.len() <= bucket_index {
                 self.buckets
@@ -1110,21 +1123,26 @@ impl ScanActivityTrace {
             bucket.add(kind, segment_end_us.saturating_sub(cursor_us));
             cursor_us = segment_end_us;
         }
+    }
 
-        end_us.saturating_sub(start_us)
+    fn coarsen_for(&mut self, end_us: u64) {
+        while end_us.saturating_sub(1) / self.bucket_width_us >= SCAN_TRACE_MAX_BUCKETS as u64 {
+            self.bucket_width_us = self.bucket_width_us.saturating_mul(2);
+            let mut buckets = Vec::with_capacity(self.buckets.len().div_ceil(2));
+            for (index, bucket) in self.buckets.drain(..).enumerate() {
+                let compacted_index = index / 2;
+                if buckets.len() <= compacted_index {
+                    buckets.push(ScanTraceBucket::default());
+                }
+                buckets[compacted_index].merge_from(&bucket);
+            }
+            self.buckets = buckets;
+        }
     }
 
     fn to_json(&self) -> (String, u64) {
-        let bucket_factor = self.buckets.len().div_ceil(SCAN_TRACE_MAX_BUCKETS).max(1);
-        let resolution_ms = SCAN_TRACE_BUCKET_MS.saturating_mul(bucket_factor as u64);
-        let mut buckets = Vec::with_capacity(self.buckets.len().div_ceil(bucket_factor));
-        for (index, bucket) in self.buckets.iter().enumerate() {
-            let compacted_index = index / bucket_factor;
-            if buckets.len() <= compacted_index {
-                buckets.push(ScanTraceBucket::default());
-            }
-            buckets[compacted_index].merge_from(bucket);
-        }
+        let resolution_ms = self.bucket_width_us / 1_000;
+        let mut buckets = self.buckets.clone();
         for (index, bucket) in buckets.iter_mut().enumerate() {
             bucket.offset_ms = index as u64 * resolution_ms;
         }
@@ -5774,10 +5792,36 @@ mod tests {
     use sqlx::Row;
 
     use super::{
+        SCAN_TRACE_BUCKET_US, SCAN_TRACE_MAX_BUCKETS, ScanActivityTrace, ScanWorkKind,
         error_has_flood_wait, export_endpoint_index_db_for_upload,
         ignore_error_is_non_root_not_found,
     };
     use crate::Error;
+
+    #[test]
+    fn scan_trace_coarsens_during_collection() {
+        let mut trace = ScanActivityTrace::new(std::time::Instant::now());
+        let start_us = SCAN_TRACE_BUCKET_US * SCAN_TRACE_MAX_BUCKETS as u64 * 10;
+        trace.record_interval_us(ScanWorkKind::Walk, start_us, start_us + 1_000);
+
+        assert!(
+            trace.buckets.len() <= SCAN_TRACE_MAX_BUCKETS,
+            "scan trace collection must remain bounded"
+        );
+
+        let (json, resolution_ms) = trace.to_json();
+        assert!(resolution_ms > 1_000);
+        let trace_json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let buckets = trace_json["buckets"].as_array().unwrap();
+        assert!(buckets.len() <= SCAN_TRACE_MAX_BUCKETS);
+        assert_eq!(
+            buckets
+                .iter()
+                .filter_map(|bucket| bucket["walk_us"].as_u64())
+                .sum::<u64>(),
+            1_000
+        );
+    }
 
     #[test]
     fn flood_wait_detection_matches_regular_and_premium() {

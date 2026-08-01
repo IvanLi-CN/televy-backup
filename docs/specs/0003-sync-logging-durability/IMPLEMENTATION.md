@@ -61,6 +61,9 @@
 - Failed scans retain their measured resource counters and partial trace in
   `performance.scan.finish` / `performance.scan.trace`, so interrupted runs
   remain analyzable without treating elapsed lifecycle time as work time.
+- Scan-trace coarsening occurs while collecting measurements, keeping the
+  in-memory trace capped at 4,096 buckets even when an operation follows a
+  long idle interval.
 
 ## Migration State
 

@@ -71,3 +71,7 @@ interval for later resource timelines.
 
 Failed scans retain their accumulated resource counters and partial trace so
 diagnostics can analyze work already performed before the failure.
+
+Scan-trace bucket coarsening now occurs during collection rather than only at
+serialization. This keeps the producer memory-bounded for multi-hour scans and
+long gaps while preserving accumulated measured work.

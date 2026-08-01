@@ -43,10 +43,11 @@ a `trace_json` string. The inner JSON has `version`, `resolution_ms`, and
 `buckets`; each bucket has an `offset_ms` from scan start plus any measured
 `walk_us`, `metadata_us`, `read_chunk_us`, `hash_us`, `encrypt_us`, or
 `sqlite_us` values.
-Normal runs use one-second buckets; long runs are coarsened to retain at most
-4,096 buckets, and `resolution_ms` is authoritative. Missing measurement fields
-are zero. Consumers must draw only reported measurement values and must not
-fill gaps from the scan lifecycle interval.
+Normal runs use one-second buckets; long runs are coarsened during collection
+to retain at most 4,096 buckets in memory and in the emitted event, and
+`resolution_ms` is authoritative. Missing measurement fields are zero. Consumers
+must draw only reported measurement values and must not fill gaps from the scan
+lifecycle interval.
 
 `performance.scan.queue_wait.start` and `.finish` use an opaque
 `queue_wait_id` to bound each actual upload-queue admission wait. Upload RPC
