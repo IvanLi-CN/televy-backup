@@ -91,6 +91,11 @@ backup, restore, or verify reaches a terminal state, and it only considers
 unlocked `sync-*.ndjson` files. The append-only `ui.log` and unknown files are
 outside this policy.
 
+Before modifying either logging setting, the CLI checks a responsive daemon for
+retention-status support. A daemon from before this contract must be restarted;
+the CLI refuses the write instead of leaving that daemon unable to parse the
+new local retention section.
+
 The macOS GUI also writes an append-only UI log file `ui.log` into the same log directory (best effort; redacts `api.telegram.org` URL segments).
 
 ## Daemon lifecycle (auto-start expectation)

@@ -87,6 +87,10 @@ Invalid environment filters resolve to `Normal`, never global debug.
   logs. Age pruning runs first, followed by oldest-first total-size pruning.
   The current log and any file with an active shared lock are skipped; a failed
   prune is reported but never changes the task outcome.
+- Before writing either local logging setting, the CLI checks a responsive
+  daemon's `logging.status` capability. A daemon that lacks the additive
+  retention fields is rejected as incompatible and must be restarted, avoiding
+  a silent fallback when it encounters the new local TOML section.
 
 ### Performance events
 

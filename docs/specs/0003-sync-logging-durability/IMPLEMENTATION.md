@@ -13,7 +13,9 @@
   filter stable and reports pending local changes and current validation errors
   over `logging.status`.
 - CLI diagnostics commands expose local/runtime state and best-effort disk use;
-  protocol skew with an older daemon is reported as requiring an app restart.
+  before either logging mutation, they reject an older responsive daemon that
+  lacks retention-status fields, requiring an app restart before it can parse
+  the new local configuration.
 - Completed run logs are identified by their accepted filename and a terminal
   `run.finish` record, then retained by age and managed byte cap. The current
   log is fsynced before pruning; active shared locks and all unrecognised files

@@ -24,6 +24,11 @@ accepts an integer from `7` through `365`. Missing retention fields resolve to
 `5 GiB` and `30 days`. An invalid local retention configuration disables run-log
 pruning until corrected; it never broadens deletion to other log files.
 
+Before writing either logging setting, the CLI checks a responsive daemon's
+`logging.status` response for its additive retention fields. If those fields
+are absent, it rejects the write as daemon-incompatible and requires an app
+restart. With no reachable daemon, the local setting is written normally.
+
 ## Environment
 
 - `TELEVYBACKUP_LOG`: tracing `EnvFilter` expression and highest precedence.

@@ -56,3 +56,10 @@ rather than presenting the scan lifecycle as a resource-occupancy interval.
 The scan-finish summary accumulates measurements before converting to
 milliseconds, preserving high-volume short SQLite and metadata operations that
 would otherwise disappear through per-operation rounding.
+
+Logging mutations now reject a responsive older daemon that does not advertise
+retention support. This prevents an older strict local-settings parser from
+silently falling back after the newer CLI writes a retention section. Completed
+run-log inspection also accepts a tail slice that begins inside a UTF-8
+character, so a valid terminal event continues to make the file eligible for
+usage reporting and pruning.
