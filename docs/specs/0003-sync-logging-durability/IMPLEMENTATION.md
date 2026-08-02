@@ -37,6 +37,8 @@
   evidence covers normal, Debug, environment-override, and retention states.
 - The CLI updates local logging preferences under a configuration-directory lock,
   preserving independently changed level and retention fields across processes.
+  It rejects malformed or unsupported local configuration rather than
+  overwriting it with defaults.
 
 ## Validation Coverage
 

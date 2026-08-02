@@ -21,7 +21,7 @@ struct MutateOnUpload {
     seen: Mutex<Vec<TaskProgress>>,
 }
 
-async fn run_log_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+async fn backup_pipeline_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
@@ -55,6 +55,7 @@ impl ProgressSink for MutateOnUpload {
 
 #[tokio::test]
 async fn backup_pipeline_dedupes_chunks_across_runs() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");
     std::fs::create_dir_all(&source).unwrap();
@@ -157,7 +158,7 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
 
 #[tokio::test]
 async fn failed_scan_keeps_accumulated_performance_metrics() {
-    let _run_log_lock = run_log_test_lock().await;
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("cancelled-source");
     std::fs::create_dir_all(&source).unwrap();
@@ -250,6 +251,7 @@ async fn failed_scan_keeps_accumulated_performance_metrics() {
 
 #[tokio::test]
 async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");
     std::fs::create_dir_all(&source).unwrap();
@@ -333,7 +335,7 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
 
 #[tokio::test]
 async fn backup_writes_normal_level_performance_intervals_to_run_log() {
-    let _run_log_lock = run_log_test_lock().await;
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");
     std::fs::create_dir_all(&source).unwrap();
@@ -490,6 +492,7 @@ async fn backup_writes_normal_level_performance_intervals_to_run_log() {
 
 #[tokio::test]
 async fn backup_compacts_local_index_db_after_success() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");
     std::fs::create_dir_all(&source).unwrap();

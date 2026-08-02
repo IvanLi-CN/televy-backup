@@ -19,6 +19,10 @@ max_age_days = 30
 configuration resolve to `normal`. Writes must be atomic. This file is local to
 the machine and is excluded from Backup Config export/import.
 
+Logging-setting mutations refuse malformed or unsupported local configuration
+instead of replacing it with defaults. This preserves any valid neighboring
+preference for an explicit manual correction.
+
 `max_total_gib` accepts an integer from `1` through `100`; `max_age_days`
 accepts an integer from `7` through `365`. Missing retention fields resolve to
 `5 GiB` and `30 days`. An invalid local retention configuration disables run-log

@@ -81,3 +81,7 @@ extra confirmation action for a machine-local, non-destructive preference.
 
 Logging preference mutations now hold a shared configuration-directory lock so
 concurrent level and retention saves do not overwrite each other.
+
+Malformed or unsupported local logging configuration remains intact when a
+preference mutation is attempted. The mutation fails rather than silently
+replacing valid neighboring fields with defaults.

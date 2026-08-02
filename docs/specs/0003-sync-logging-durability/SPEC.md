@@ -53,6 +53,8 @@ from the macOS app and see when an environment variable overrides that choice.
 - A missing or invalid local file resolves safely to `Normal` and reports the
   validation problem without enabling debug.
 - Writes are validated and atomic.
+- A logging-setting mutation never replaces malformed or unsupported local
+  configuration with defaults.
 - Backup Config serialization remains unchanged and excludes `local.toml`.
 - `[logging.retention]` stores `max_total_gib` (`1..100`, default `5`) and
   `max_age_days` (`7..365`, default `30`). Missing fields use those defaults;

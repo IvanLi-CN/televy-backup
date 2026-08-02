@@ -293,7 +293,11 @@ pub fn update(
         .open(lock_path)?;
     lock_exclusive(&lock)?;
 
-    let (mut settings, _) = load_or_default(config_dir);
+    let mut settings = match load(config_dir) {
+        Ok(settings) => settings,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => LocalSettings::default(),
+        Err(error) => return Err(error),
+    };
     mutate(&mut settings);
     save(config_dir, &settings)?;
     Ok(settings)
@@ -546,6 +550,25 @@ mod tests {
         let resolved = resolve_from(temp.path(), None, None);
         assert!(!resolved.retention_prune_enabled);
         assert!(resolved.configuration_error.is_some());
+    }
+
+    #[test]
+    fn update_refuses_to_overwrite_invalid_settings() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = local_settings_path(temp.path());
+        let original = "version = 1\n[logging]\nlevel = 'debug'\n[logging.retention]\nmax_total_gib = 0\nmax_age_days = 30\n";
+        std::fs::write(&path, original).unwrap();
+
+        let error = update(temp.path(), |settings| {
+            settings.logging.retention = LogRetentionSettings {
+                max_total_gib: 17,
+                max_age_days: 45,
+            };
+        })
+        .expect_err("invalid settings must not be overwritten");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
     }
 
     #[test]
