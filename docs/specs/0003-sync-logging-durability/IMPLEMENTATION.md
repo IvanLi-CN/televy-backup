@@ -35,6 +35,8 @@
   the selected level and its effective state first, then makes managed run-log
   usage primary before the retention limits, which save automatically. Mock-only visual
   evidence covers normal, Debug, environment-override, and retention states.
+- The CLI updates local logging preferences under a configuration-directory lock,
+  preserving independently changed level and retention fields across processes.
 
 ## Validation Coverage
 

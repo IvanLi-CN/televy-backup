@@ -894,10 +894,10 @@ fn diagnostics_set_log_level(
         .parse()
         .map_err(|error: String| CliError::new("diagnostics.invalid", error))?;
     ensure_daemon_supports_log_retention(data_dir)?;
-    let (mut settings, _) = televy_backup_core::local_settings::load_or_default(config_dir);
-    settings.logging.level = level;
-    televy_backup_core::local_settings::save(config_dir, &settings)
-        .map_err(|error| CliError::new("diagnostics.save_failed", error.to_string()))?;
+    televy_backup_core::local_settings::update(config_dir, |settings| {
+        settings.logging.level = level;
+    })
+    .map_err(|error| CliError::new("diagnostics.save_failed", error.to_string()))?;
 
     diagnostics_get(config_dir, data_dir, json)
 }
@@ -917,10 +917,10 @@ fn diagnostics_set_log_retention(
         .validate()
         .map_err(|error| CliError::new("diagnostics.invalid", error))?;
     ensure_daemon_supports_log_retention(data_dir)?;
-    let (mut settings, _) = televy_backup_core::local_settings::load_or_default(config_dir);
-    settings.logging.retention = retention;
-    televy_backup_core::local_settings::save(config_dir, &settings)
-        .map_err(|error| CliError::new("diagnostics.save_failed", error.to_string()))?;
+    televy_backup_core::local_settings::update(config_dir, |settings| {
+        settings.logging.retention = retention;
+    })
+    .map_err(|error| CliError::new("diagnostics.save_failed", error.to_string()))?;
 
     diagnostics_get(config_dir, data_dir, json)
 }

@@ -136,6 +136,8 @@ Invalid environment filters resolve to `Normal`, never global debug.
 - Settings also exposes log-retention capacity and age inputs with a non-linear
   slider. Valid changes save automatically after a short debounce; the level
   picker may be environment locked, but retention remains editable.
+- Concurrent local logging-setting updates are serialized so changing the level
+  or retention limits never replaces the other setting with a stale value.
 - When an environment variable overrides the preference, the picker is disabled
   and the variable name is visible.
 - Effective Debug displays a persistent disk-usage warning without a

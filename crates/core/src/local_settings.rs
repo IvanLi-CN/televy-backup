@@ -279,6 +279,41 @@ pub fn save(config_dir: &Path, settings: &LocalSettings) -> io::Result<()> {
     result
 }
 
+pub fn update(
+    config_dir: &Path,
+    mutate: impl FnOnce(&mut LocalSettings),
+) -> io::Result<LocalSettings> {
+    std::fs::create_dir_all(config_dir)?;
+    let lock_path = config_dir.join(".local.toml.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    lock_exclusive(&lock)?;
+
+    let (mut settings, _) = load_or_default(config_dir);
+    mutate(&mut settings);
+    save(config_dir, &settings)?;
+    Ok(settings)
+}
+
+#[cfg(unix)]
+fn lock_exclusive(file: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_exclusive(_file: &std::fs::File) -> io::Result<()> {
+    Ok(())
+}
+
 pub fn resolve(config_dir: &Path) -> ResolvedLogging {
     resolve_from(
         config_dir,
@@ -545,6 +580,51 @@ mod tests {
             }
             .validate()
             .is_err()
+        );
+    }
+
+    #[test]
+    fn concurrent_updates_preserve_all_logging_settings() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = Arc::new(temp.path().to_path_buf());
+        let start = Arc::new(Barrier::new(2));
+
+        let level_dir = Arc::clone(&config_dir);
+        let level_start = Arc::clone(&start);
+        let level_update = std::thread::spawn(move || {
+            level_start.wait();
+            update(&level_dir, |settings| {
+                settings.logging.level = LogLevel::Debug
+            })
+            .unwrap();
+        });
+
+        let retention_dir = Arc::clone(&config_dir);
+        let retention_start = Arc::clone(&start);
+        let retention_update = std::thread::spawn(move || {
+            retention_start.wait();
+            update(&retention_dir, |settings| {
+                settings.logging.retention = LogRetentionSettings {
+                    max_total_gib: 17,
+                    max_age_days: 45,
+                };
+            })
+            .unwrap();
+        });
+
+        level_update.join().unwrap();
+        retention_update.join().unwrap();
+
+        let settings = load(&config_dir).unwrap();
+        assert_eq!(settings.logging.level, LogLevel::Debug);
+        assert_eq!(
+            settings.logging.retention,
+            LogRetentionSettings {
+                max_total_gib: 17,
+                max_age_days: 45,
+            }
         );
     }
 }

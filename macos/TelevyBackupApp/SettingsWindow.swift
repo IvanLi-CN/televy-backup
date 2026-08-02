@@ -1090,6 +1090,8 @@ struct SettingsWindowRootView: View {
     }
 
     private func queueLogRetentionAutoSave() {
+        retentionSavePending?.cancel()
+        retentionSavePending = nil
         guard !isRetentionControlLocked,
               LogRetentionAutoSavePolicy.shouldSave(
                   maxTotalGiB: retentionMaxTotalGiB,
@@ -1100,7 +1102,6 @@ struct SettingsWindowRootView: View {
             return
         }
 
-        retentionSavePending?.cancel()
         let work = DispatchWorkItem {
             retentionSavePending = nil
             saveLogRetention()
