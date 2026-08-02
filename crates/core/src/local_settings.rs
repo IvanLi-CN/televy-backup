@@ -287,6 +287,7 @@ pub fn update(
     let lock_path = config_dir.join(".local.toml.lock");
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)?;
