@@ -36,3 +36,52 @@ External CLI tasks now report their resolved logging state to daemon IPC for the
 duration of the task, so Diagnostics reflects the process that is actually
 writing the active run log. Settings diagnostics refreshes are sequenced to
 discard stale asynchronous completions.
+
+## 2026-08-01
+
+The operational contract now bounds completed run logs by both retention age
+and managed disk usage. Pruning is deliberately deferred until a later task
+finishes, excludes active and non-run files, and fails closed on malformed local
+retention settings.
+
+The same change establishes Normal-level performance intervals around the
+concurrent scan/upload pipeline. This replaces phase-boundary inference with
+actual upload RPC, queue, rate-limit, retry, and index-compression timing.
+
+Scan coroutine lifetime proved insufficient for resource analysis because it
+overlaps the upload pipeline by design. Successful runs therefore preserve a
+compressed trace of measured scan work and retain gaps for unmeasured time,
+rather than presenting the scan lifecycle as a resource-occupancy interval.
+
+The scan-finish summary accumulates measurements before converting to
+milliseconds, preserving high-volume short SQLite and metadata operations that
+would otherwise disappear through per-operation rounding.
+
+Logging mutations now reject a responsive older daemon that does not advertise
+retention support. This prevents an older strict local-settings parser from
+silently falling back after the newer CLI writes a retention section. Completed
+run-log inspection also accepts a tail slice that begins inside a UTF-8
+character, so a valid terminal event continues to make the file eligible for
+usage reporting and pruning.
+
+Diagnostics serializes log-level and retention writes so the atomic local TOML
+replacement cannot discard a concurrent user change. Scan telemetry records
+content hashing separately from encryption, preserving an exact encryption
+interval for later resource timelines.
+
+Failed scans retain their accumulated resource counters and partial trace so
+diagnostics can analyze work already performed before the failure.
+
+Scan-trace bucket coarsening now occurs during collection rather than only at
+serialization. This keeps the producer memory-bounded for multi-hour scans and
+long gaps while preserving accumulated measured work.
+
+Retention limits now save automatically after a short debounce, eliminating the
+extra confirmation action for a machine-local, non-destructive preference.
+
+Logging preference mutations now hold a shared configuration-directory lock so
+concurrent level and retention saves do not overwrite each other.
+
+Malformed or unsupported local logging configuration remains intact when a
+preference mutation is attempted. The mutation fails rather than silently
+replacing valid neighboring fields with defaults.

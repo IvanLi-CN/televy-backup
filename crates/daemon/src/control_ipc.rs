@@ -18,6 +18,7 @@ struct LoggingStatusContext<'a> {
     runtime: &'a televy_backup_core::local_settings::ResolvedLogging,
     data_root: &'a std::path::Path,
     log_bytes: Option<u64>,
+    managed_log_usage: Option<televy_backup_core::run_log::ManagedLogUsage>,
 }
 
 #[derive(Clone)]
@@ -248,16 +249,19 @@ async fn handle_control_ipc_client(
         }
     };
 
-    let log_bytes = if req.method == "logging.status" {
+    let (log_bytes, managed_log_usage) = if req.method == "logging.status" {
         let log_dir = televy_backup_core::run_log::resolve_log_dir(&context.data_root);
         tokio::task::spawn_blocking(move || {
-            televy_backup_core::local_settings::directory_bytes(&log_dir).ok()
+            (
+                televy_backup_core::local_settings::directory_bytes(&log_dir).ok(),
+                televy_backup_core::run_log::managed_log_usage(&log_dir).ok(),
+            )
         })
         .await
         .ok()
-        .flatten()
+        .unwrap_or((None, None))
     } else {
-        None
+        (None, None)
     };
 
     let runtime_logging = context.runtime_logging.read().await;
@@ -273,6 +277,7 @@ async fn handle_control_ipc_client(
                 runtime: &runtime_logging,
                 data_root: &context.data_root,
                 log_bytes,
+                managed_log_usage,
             },
         )
     };
@@ -324,14 +329,17 @@ fn handle_request(
             let pending_level = (has_running
                 && configured.configured_level != effective.configured_level)
                 .then_some(configured.configured_level);
-            let mut status = televy_backup_core::local_settings::status_with_log_bytes(
+            let mut status = televy_backup_core::local_settings::status_with_log_usage(
                 effective,
                 pending_level,
                 logging.data_root,
                 true,
                 logging.log_bytes,
+                logging.managed_log_usage,
             );
             status.configured_level = configured.configured_level;
+            status.retention = configured.retention;
+            status.retention_prune_enabled = configured.retention_prune_enabled;
             status.configuration_error = configured.configuration_error;
             ControlResponse::ok(
                 req.id.clone(),
@@ -907,6 +915,7 @@ mod tests {
                 runtime: &runtime_logging,
                 data_root: std::path::Path::new("/tmp"),
                 log_bytes: None,
+                managed_log_usage: None,
             },
         );
 
@@ -927,6 +936,7 @@ mod tests {
                 version: 1,
                 logging: televy_backup_core::local_settings::LoggingSettings {
                     level: televy_backup_core::local_settings::LogLevel::Debug,
+                    ..Default::default()
                 },
             },
         )
@@ -946,6 +956,7 @@ mod tests {
                 runtime: &runtime_logging,
                 data_root: &data_root,
                 log_bytes: Some(0),
+                managed_log_usage: None,
             },
         );
 
@@ -979,6 +990,7 @@ mod tests {
                 runtime: &runtime_logging,
                 data_root: &data_root,
                 log_bytes: Some(0),
+                managed_log_usage: None,
             },
         );
         let status: televy_backup_core::local_settings::LoggingStatus =
@@ -1006,6 +1018,7 @@ mod tests {
                 runtime: &runtime_logging,
                 data_root: &data_root,
                 log_bytes: Some(0),
+                managed_log_usage: None,
             },
         );
         let status: televy_backup_core::local_settings::LoggingStatus =

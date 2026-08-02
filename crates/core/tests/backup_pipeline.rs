@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use sqlx::Row;
 use televy_backup_core::{
@@ -19,6 +19,13 @@ struct MutateOnUpload {
     bytes: Vec<u8>,
     fired: AtomicBool,
     seen: Mutex<Vec<TaskProgress>>,
+}
+
+async fn backup_pipeline_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
 }
 
 impl MutateOnUpload {
@@ -48,6 +55,7 @@ impl ProgressSink for MutateOnUpload {
 
 #[tokio::test]
 async fn backup_pipeline_dedupes_chunks_across_runs() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");
     std::fs::create_dir_all(&source).unwrap();
@@ -149,7 +157,101 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
 }
 
 #[tokio::test]
+async fn failed_scan_keeps_accumulated_performance_metrics() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("cancelled-source");
+    std::fs::create_dir_all(&source).unwrap();
+    write_file(source.join("file.bin"), &[5u8; 4096]);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "backup",
+        "failed-performance-test",
+        temp.path(),
+        televy_backup_core::local_settings::NORMAL_FILTER,
+    )
+    .expect("start run log");
+    let run_log_path = run_log.path().to_path_buf();
+    let result = run_backup_with(
+        &InMemoryStorage::new(),
+        BackupConfig {
+            endpoint_db_path: temp.path().join("index.sqlite"),
+            filemap_dir: temp.path().join("filemaps"),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
+            source_path: source,
+            label: "failed-performance".to_string(),
+            chunking: ChunkingConfig {
+                min_bytes: 4096,
+                avg_bytes: 4096,
+                max_bytes: 4096,
+            },
+            rate_limit: Default::default(),
+            master_key: [5u8; 32],
+            snapshot_id: None,
+            keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
+        },
+        BackupOptions {
+            cancel: Some(&cancel),
+            progress: None,
+            source_quick_stats: None,
+        },
+    )
+    .await;
+    assert!(result.is_err(), "cancelled source scan must fail");
+    drop(run_log);
+
+    let log_entries = std::fs::read_to_string(run_log_path)
+        .expect("read run log")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid NDJSON"))
+        .collect::<Vec<_>>();
+    let scan_trace = log_entries
+        .iter()
+        .find(|line| line["fields"]["event"] == "performance.scan.trace")
+        .expect("failed scan trace performance event");
+    let trace: serde_json::Value = serde_json::from_str(
+        scan_trace["fields"]["trace_json"]
+            .as_str()
+            .expect("failed scan trace JSON string"),
+    )
+    .expect("valid failed scan trace JSON");
+    assert!(
+        trace["buckets"]
+            .as_array()
+            .expect("failed scan trace buckets")
+            .iter()
+            .any(|bucket| bucket["walk_us"].as_u64().unwrap_or(0) > 0),
+        "failed scans must keep their measured walk slice"
+    );
+    let scan_finish = log_entries
+        .iter()
+        .find(|line| line["fields"]["event"] == "performance.scan.finish")
+        .expect("failed scan finish performance event");
+    assert_eq!(scan_finish["fields"]["result"], "failed");
+    for field in [
+        "walk_ms",
+        "metadata_ms",
+        "read_chunk_ms",
+        "hash_ms",
+        "encrypt_ms",
+        "sqlite_timed_ms",
+        "upload_queue_blocked_ms",
+        "unattributed_ms",
+    ] {
+        assert!(
+            scan_finish["fields"].get(field).is_some(),
+            "failed scan finish must include {field}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");
     std::fs::create_dir_all(&source).unwrap();
@@ -232,7 +334,165 @@ async fn backup_uploads_while_scanning_when_source_changes_mid_run() {
 }
 
 #[tokio::test]
+async fn backup_writes_normal_level_performance_intervals_to_run_log() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    for i in 0..11 {
+        write_file(source.join(format!("f{i}.bin")), &[i as u8; 4096]);
+    }
+
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "backup",
+        "performance-test",
+        temp.path(),
+        televy_backup_core::local_settings::NORMAL_FILTER,
+    )
+    .expect("start run log");
+    let run_log_path = run_log.path().to_path_buf();
+    let storage = InMemoryStorage::new();
+    let result = run_backup(
+        &storage,
+        BackupConfig {
+            endpoint_db_path: temp.path().join("index.sqlite"),
+            filemap_dir: temp.path().join("filemaps"),
+            dedupe_db_path: temp.path().join("dedupe.sqlite"),
+            dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
+            source_path: source,
+            label: "performance".to_string(),
+            chunking: ChunkingConfig {
+                min_bytes: 4096,
+                avg_bytes: 4096,
+                max_bytes: 4096,
+            },
+            rate_limit: Default::default(),
+            master_key: [4u8; 32],
+            snapshot_id: None,
+            keep_last_snapshots: 10,
+            remote_dedupe: RemoteDedupeMode::Disabled,
+        },
+    )
+    .await
+    .expect("backup succeeds");
+    assert!(result.data_objects_uploaded > 0);
+    drop(run_log);
+
+    let log_entries = std::fs::read_to_string(run_log_path)
+        .expect("read run log")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid NDJSON"))
+        .collect::<Vec<_>>();
+    let events = log_entries
+        .iter()
+        .filter_map(|line| line["fields"]["event"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+
+    for expected in [
+        "performance.scan.start",
+        "performance.scan.trace",
+        "performance.scan.finish",
+        "performance.scan.queue_wait.start",
+        "performance.scan.queue_wait.finish",
+        "performance.upload.rate_limit_wait",
+        "performance.upload.start",
+        "performance.upload.finish",
+        "performance.index.compression.start",
+        "performance.index.compression.finish",
+    ] {
+        assert!(
+            events.iter().any(|event| event == expected),
+            "missing performance event {expected}: {events:?}"
+        );
+    }
+
+    let scan_trace = log_entries
+        .iter()
+        .find(|line| line["fields"]["event"] == "performance.scan.trace")
+        .expect("scan resource trace performance event");
+    let trace: serde_json::Value = serde_json::from_str(
+        scan_trace["fields"]["trace_json"]
+            .as_str()
+            .expect("scan trace JSON string"),
+    )
+    .expect("valid scan trace JSON");
+    assert_eq!(trace["version"], 1);
+    assert_eq!(trace["resolution_ms"], 1_000);
+    assert_eq!(
+        scan_trace["fields"]["resolution_ms"],
+        trace["resolution_ms"]
+    );
+    let buckets = trace["buckets"].as_array().expect("scan trace buckets");
+    assert!(
+        !buckets.is_empty(),
+        "scan trace must contain actual time slices"
+    );
+    assert!(
+        buckets
+            .iter()
+            .any(|bucket| bucket["sqlite_us"].as_u64().unwrap_or(0) > 0),
+        "scan trace must expose SQLite time slices"
+    );
+    assert!(
+        buckets
+            .iter()
+            .any(|bucket| bucket["read_chunk_us"].as_u64().unwrap_or(0) > 0),
+        "scan trace must expose read-chunk time slices"
+    );
+    assert!(
+        buckets
+            .iter()
+            .any(|bucket| bucket["hash_us"].as_u64().unwrap_or(0) > 0),
+        "scan trace must expose hash time slices separately from encryption"
+    );
+    assert!(
+        buckets
+            .iter()
+            .all(|bucket| bucket.get("unattributed_us").is_none()),
+        "unmeasured time must stay visibly absent from the resource trace"
+    );
+    let scan_finish = log_entries
+        .iter()
+        .find(|line| line["fields"]["event"] == "performance.scan.finish")
+        .expect("scan finish performance event");
+    for (trace_field, summary_field) in [
+        ("walk_us", "walk_ms"),
+        ("metadata_us", "metadata_ms"),
+        ("read_chunk_us", "read_chunk_ms"),
+        ("hash_us", "hash_ms"),
+        ("encrypt_us", "encrypt_ms"),
+        ("sqlite_us", "sqlite_timed_ms"),
+    ] {
+        let trace_ms = buckets
+            .iter()
+            .map(|bucket| bucket[trace_field].as_u64().unwrap_or(0))
+            .sum::<u64>()
+            / 1_000;
+        assert_eq!(
+            scan_finish["fields"][summary_field].as_u64(),
+            Some(trace_ms),
+            "scan finish {summary_field} must agree with the measured trace"
+        );
+    }
+
+    let mut queue_wait_starts = log_entries
+        .iter()
+        .filter(|line| line["fields"]["event"] == "performance.scan.queue_wait.start")
+        .map(|line| line["fields"]["queue_wait_id"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    let mut queue_wait_finishes = log_entries
+        .iter()
+        .filter(|line| line["fields"]["event"] == "performance.scan.queue_wait.finish")
+        .map(|line| line["fields"]["queue_wait_id"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    queue_wait_starts.sort_unstable();
+    queue_wait_finishes.sort_unstable();
+    assert_eq!(queue_wait_starts, queue_wait_finishes);
+}
+
+#[tokio::test]
 async fn backup_compacts_local_index_db_after_success() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("src");
     std::fs::create_dir_all(&source).unwrap();

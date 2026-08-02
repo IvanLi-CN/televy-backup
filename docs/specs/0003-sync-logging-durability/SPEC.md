@@ -19,12 +19,17 @@ from the macOS app and see when an environment variable overrides that choice.
 - Apply a changed preference to the next run without restarting the daemon.
 - Preserve advanced environment-filter overrides and expose their effective
   source in the app.
+- Bound retained completed run logs by both age and managed disk usage without
+  touching active runs or non-run files.
+- Emit compact, normal-level performance events that distinguish actual scan,
+  upload, wait, and index work for post-run timeline analysis.
 - Keep secrets and machine-readable CLI output out of run logs.
 
 ## Non-goals
 
-- Log rotation, retention, compression, per-file caps, or total-size caps.
-- Automatic deletion of existing logs.
+- Compression or rotation of run logs, or any policy for `ui.log` and unknown
+  files in the log directory.
+- Immediate deletion when a retention setting is changed.
 - Remote log collection or a general metrics/tracing platform.
 - Including the local logging preference in Backup Config export/import.
 
@@ -48,7 +53,12 @@ from the macOS app and see when an environment variable overrides that choice.
 - A missing or invalid local file resolves safely to `Normal` and reports the
   validation problem without enabling debug.
 - Writes are validated and atomic.
+- A logging-setting mutation never replaces malformed or unsupported local
+  configuration with defaults.
 - Backup Config serialization remains unchanged and excludes `local.toml`.
+- `[logging.retention]` stores `max_total_gib` (`1..100`, default `5`) and
+  `max_age_days` (`7..365`, default `30`). Missing fields use those defaults;
+  invalid local retention disables pruning until the file is corrected.
 
 ### Filter resolution
 
@@ -74,17 +84,62 @@ Invalid environment filters resolve to `Normal`, never global debug.
   applied once the daemon is idle, before the next run starts.
 - CLI one-shot runs resolve the same preference and environment precedence
   before creating their run log.
+- After each `backup`, `restore`, or `verify` reaches a terminal `run.finish`,
+  the process fsyncs its current log then prunes only eligible completed run
+  logs. Age pruning runs first, followed by oldest-first total-size pruning.
+  The current log and any file with an active shared lock are skipped; a failed
+  prune is reported but never changes the task outcome.
+- Before writing either local logging setting, the CLI checks a responsive
+  daemon's `logging.status` capability. A daemon that lacks the additive
+  retention fields is rejected as incompatible and must be restarted, avoiding
+  a silent fallback when it encounters the new local TOML section.
+
+### Performance events
+
+- `performance.scan.start` and `performance.scan.finish` mark the scan
+  coroutine lifecycle only. They must not be rendered as resource-occupancy
+  bars. The finish event includes accumulated walk, metadata, timed SQLite,
+  read-chunk, hashing, encryption, upload-queue-blocked, and unattributed
+  milliseconds.
+- `performance.scan.trace` is emitted before every scan finish, including a
+  failed scan. Its
+  `trace_json` is a versioned JSON payload indexed from the scan start and
+  contains only measured `walk_us`, `metadata_us`, `read_chunk_us`, `hash_us`,
+  `encrypt_us`, and `sqlite_us` activity. It uses one-second buckets for normal
+  runs and coarsens long runs while retaining at most 4,096 buckets; the actual
+  precision is declared by `resolution_ms`. Missing fields are zero. Gantt
+  charts render only these measured slices; gaps are unmeasured, not inferred
+  scan work or idle time.
+- Each upload-queue admission emits correlated
+  `performance.scan.queue_wait.start` and `.finish` events around the actual
+  byte-permit and channel wait. They contain an opaque queue-wait identifier,
+  object kind, duration, and result, without paths or payload content.
+- Every direct, pack, index-part, and index-manifest upload attempt emits
+  `performance.upload.start` and `performance.upload.finish` around the actual
+  storage RPC, correlated by a direct/pack sequence or an index-upload sequence
+  plus attempt number.
+  Queue wait, rate-limit wait, retry backoff, payload bytes, worker, and result
+  are recorded without paths, chunk hashes, object IDs, or progress ticks.
+- `performance.index.compression.start` and `.finish` bound actual SQLite index
+  compression. These events are logged at TelevyBackup `info` so `Normal`
+  captures them without enabling dependency debug output.
 
 ### Diagnostics interfaces
 
 - JSON CLI commands expose `diagnostics get` and
-  `diagnostics set-log-level --level <normal|verbose|debug>`.
+  `diagnostics set-log-level --level <normal|verbose|debug>`, plus
+  `diagnostics set-log-retention --max-total-gib <1..100> --max-age-days <7..365>`.
 - Diagnostic status includes configured and effective levels, the effective
   filter and source, the overriding variable when present, a pending level,
   log directory, and best-effort log byte count.
 - Daemon control IPC exposes its actual runtime logging status.
 - The macOS Settings window includes a `Diagnostics` section with the preset
   picker, actual effective state, log directory/size, and an Open Logs action.
+- Settings also exposes log-retention capacity and age inputs with a non-linear
+  slider. Valid changes save automatically after a short debounce; the level
+  picker may be environment locked, but retention remains editable.
+- Concurrent local logging-setting updates are serialized so changing the level
+  or retention limits never replaces the other setting with a stale value.
 - When an environment variable overrides the preference, the picker is disabled
   and the variable name is visible.
 - Effective Debug displays a persistent disk-usage warning without a
@@ -108,6 +163,12 @@ Invalid environment filters resolve to `Normal`, never global debug.
 - Backup Config export contains no local logging preference.
 - All generated run-log lines remain valid NDJSON and run summaries remain
   visible under restrictive filters.
+- Retention only deletes completed `sync-{backup,restore,verify}-*.ndjson`
+  files, never `ui.log`, unknown files, the current run, or active files owned
+  by another process.
+- A deterministic backup records correlatable actual scan resource slices,
+  upload-queue waits, upload RPCs, retry waits, and index-compression intervals
+  under the Normal preset.
 
 ## Visual Evidence
 
@@ -119,6 +180,9 @@ PR: include
 
 PR: include
 ![Diagnostics environment override](./assets/diagnostics-override.png)
+
+PR: include
+![Diagnostics log retention](./assets/diagnostics-retention.png)
 
 The images come from deterministic, mock-only Settings `ui_demo` scenes and are
 limited to the Settings window launched for the capture.
