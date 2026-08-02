@@ -689,7 +689,7 @@ struct SettingsWindowRootView: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: 280)
+                .frame(width: 280, alignment: .trailing)
                 .disabled((diagnostics?.pickerDisabled ?? true) || isSavingLoggingSettings)
             }
 
