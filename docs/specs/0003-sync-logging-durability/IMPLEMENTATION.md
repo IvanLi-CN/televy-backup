@@ -33,7 +33,7 @@
   Debug warning, daemon-start refresh, a reliable Open in Finder action, and
   editable capacity/age retention controls. Its unframed section layout puts
   the selected level and its effective state first, then makes managed run-log
-  usage primary before the retention limits and apply action. Mock-only visual
+  usage primary before the retention limits, which save automatically. Mock-only visual
   evidence covers normal, Debug, environment-override, and retention states.
 
 ## Validation Coverage

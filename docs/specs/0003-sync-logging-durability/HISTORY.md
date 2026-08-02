@@ -75,3 +75,6 @@ diagnostics can analyze work already performed before the failure.
 Scan-trace bucket coarsening now occurs during collection rather than only at
 serialization. This keeps the producer memory-bounded for multi-hour scans and
 long gaps while preserving accumulated measured work.
+
+Retention limits now save automatically after a short debounce, eliminating the
+extra confirmation action for a machine-local, non-destructive preference.

@@ -79,6 +79,24 @@ enum LogRetentionControlMapping {
     }
 }
 
+enum LogRetentionAutoSavePolicy {
+    static let debounceSeconds = 0.5
+
+    static func shouldSave(
+        maxTotalGiB: Int,
+        maxAgeDays: Int,
+        configured: CliLogRetention?
+    ) -> Bool {
+        guard (1...100).contains(maxTotalGiB), (7...365).contains(maxAgeDays),
+              let configured
+        else {
+            return false
+        }
+        return maxTotalGiB != Int(configured.maxTotalGiB)
+            || maxAgeDays != Int(configured.maxAgeDays)
+    }
+}
+
 struct CliDiagnosticsStatus: Decodable, Equatable {
     let configuredLevel: AppLogLevel
     let effectiveLevel: String
@@ -540,6 +558,7 @@ struct SettingsWindowRootView: View {
     @State private var diagnosticsReloadSeq: Int = 0
     @State private var retentionMaxTotalGiB = 5
     @State private var retentionMaxAgeDays = 30
+    @State private var retentionSavePending: DispatchWorkItem?
 
     @State private var selectedTargetId: String?
     @State private var selectedEndpointId: String?
@@ -668,6 +687,12 @@ struct SettingsWindowRootView: View {
             .padding(.vertical, 22)
             .frame(maxWidth: .infinity, alignment: .center)
         }
+        .onChange(of: retentionMaxTotalGiB) { _, _ in
+            queueLogRetentionAutoSave()
+        }
+        .onChange(of: retentionMaxAgeDays) { _, _ in
+            queueLogRetentionAutoSave()
+        }
     }
 
     private var diagnosticsLoggingSection: some View {
@@ -690,7 +715,7 @@ struct SettingsWindowRootView: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .frame(width: 280, alignment: .trailing)
-                .disabled((diagnostics?.pickerDisabled ?? true) || isSavingLoggingSettings)
+                .disabled((diagnostics?.pickerDisabled ?? true) || isLogLevelControlLocked)
             }
 
             if let diagnostics {
@@ -800,17 +825,11 @@ struct SettingsWindowRootView: View {
                     tickLabel: { LogRetentionControlMapping.ageTickLabel(for: $0) }
                 )
             }
+            .disabled(diagnostics == nil || isRetentionControlLocked)
 
-            HStack(alignment: .firstTextBaseline) {
-                Text(retentionPruneStatus)
-                    .font(.system(size: 12))
-                    .foregroundStyle(retentionInputsValid ? Color.secondary : Color.red)
-                Spacer()
-                Button("Apply") {
-                    saveLogRetention()
-                }
-                .disabled(!retentionInputsValid || diagnostics == nil || isSavingLoggingSettings)
-            }
+            Text(retentionPruneStatus)
+                .font(.system(size: 12))
+                .foregroundStyle(retentionInputsValid ? Color.secondary : Color.red)
 
             Text("Cleanup runs after the next backup, restore, or verify finishes.")
                 .font(.system(size: 12))
@@ -842,16 +861,23 @@ struct SettingsWindowRootView: View {
         (1...100).contains(retentionMaxTotalGiB) && (7...365).contains(retentionMaxAgeDays)
     }
 
-    private var isSavingLoggingSettings: Bool {
+    private var isLogLevelControlLocked: Bool {
+        isSavingDiagnostics || isSavingLogRetention || retentionSavePending != nil
+    }
+
+    private var isRetentionControlLocked: Bool {
         isSavingDiagnostics || isSavingLogRetention
     }
 
     private var retentionPruneStatus: String {
+        if isSavingLogRetention {
+            return "Saving changes…"
+        }
         guard retentionInputsValid else { return "Capacity: 1-100 GiB. Age: 7-365 days." }
         if diagnostics?.retentionPruneEnabled == false {
             return "Fix the local logging configuration before cleanup can run."
         }
-        return "Keep up to \(retentionMaxTotalGiB) GiB for \(retentionMaxAgeDays) days."
+        return "Changes save automatically."
     }
 
     private var capacitySliderBinding: Binding<Double> {
@@ -1061,6 +1087,29 @@ struct SettingsWindowRootView: View {
                 }
             }
         }
+    }
+
+    private func queueLogRetentionAutoSave() {
+        guard !isRetentionControlLocked,
+              LogRetentionAutoSavePolicy.shouldSave(
+                  maxTotalGiB: retentionMaxTotalGiB,
+                  maxAgeDays: retentionMaxAgeDays,
+                  configured: diagnostics?.retention
+              )
+        else {
+            return
+        }
+
+        retentionSavePending?.cancel()
+        let work = DispatchWorkItem {
+            retentionSavePending = nil
+            saveLogRetention()
+        }
+        retentionSavePending = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + LogRetentionAutoSavePolicy.debounceSeconds,
+            execute: work
+        )
     }
 
     private var targetsView: some View {

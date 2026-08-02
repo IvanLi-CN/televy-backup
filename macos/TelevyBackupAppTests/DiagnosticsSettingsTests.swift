@@ -55,6 +55,35 @@ private func runDiagnosticsSettingsTests() {
     expect(LogRetentionControlMapping.ageTickLabel(for: 180) == "6 months", "180-day tick should show six months")
     expect(LogRetentionControlMapping.ageTickLabel(for: 365) == "1 year", "365-day tick should show one year")
 
+    expect(
+        !LogRetentionAutoSavePolicy.shouldSave(
+            maxTotalGiB: 17,
+            maxAgeDays: 45,
+            configured: CliLogRetention(maxTotalGiB: 17, maxAgeDays: 45)
+        ),
+        "unchanged retention should not queue an auto-save"
+    )
+    expect(
+        LogRetentionAutoSavePolicy.shouldSave(
+            maxTotalGiB: 20,
+            maxAgeDays: 45,
+            configured: CliLogRetention(maxTotalGiB: 17, maxAgeDays: 45)
+        ),
+        "changed retention should queue an auto-save"
+    )
+    expect(
+        !LogRetentionAutoSavePolicy.shouldSave(
+            maxTotalGiB: 0,
+            maxAgeDays: 45,
+            configured: CliLogRetention(maxTotalGiB: 17, maxAgeDays: 45)
+        ),
+        "invalid retention should never queue an auto-save"
+    )
+    expect(
+        !LogRetentionAutoSavePolicy.shouldSave(maxTotalGiB: 17, maxAgeDays: 45, configured: nil),
+        "missing diagnostics status should not queue an auto-save"
+    )
+
     print("OK: DiagnosticsSettingsTests")
 }
 

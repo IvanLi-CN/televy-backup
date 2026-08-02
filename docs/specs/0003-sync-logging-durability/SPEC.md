@@ -134,8 +134,8 @@ Invalid environment filters resolve to `Normal`, never global debug.
 - The macOS Settings window includes a `Diagnostics` section with the preset
   picker, actual effective state, log directory/size, and an Open Logs action.
 - Settings also exposes log-retention capacity and age inputs with a non-linear
-  slider and an explicit Apply action. The level picker may be environment
-  locked, but retention remains editable.
+  slider. Valid changes save automatically after a short debounce; the level
+  picker may be environment locked, but retention remains editable.
 - When an environment variable overrides the preference, the picker is disabled
   and the variable name is visible.
 - Effective Debug displays a persistent disk-usage warning without a
