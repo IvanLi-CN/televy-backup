@@ -53,6 +53,19 @@ impl ProgressSink for MutateOnUpload {
     }
 }
 
+struct CancelOnScanUpload {
+    cancel: tokio_util::sync::CancellationToken,
+    fired: AtomicBool,
+}
+
+impl ProgressSink for CancelOnScanUpload {
+    fn on_progress(&self, progress: TaskProgress) {
+        if progress.phase == "scan_upload" && !self.fired.swap(true, Ordering::SeqCst) {
+            self.cancel.cancel();
+        }
+    }
+}
+
 #[tokio::test]
 async fn backup_pipeline_dedupes_chunks_across_runs() {
     let _backup_pipeline_lock = backup_pipeline_test_lock().await;
@@ -157,6 +170,144 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
 }
 
 #[tokio::test]
+async fn backup_batches_file_rows_and_base_lookup_across_512_entries() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    for index in 0..513 {
+        write_file(source.join(format!("file-{index:04}.bin")), &[index as u8]);
+    }
+
+    let cfg = BackupConfig {
+        endpoint_db_path: temp.path().join("index.sqlite"),
+        filemap_dir: temp.path().join("filemaps"),
+        dedupe_db_path: temp.path().join("dedupe.sqlite"),
+        dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
+        source_path: source.clone(),
+        label: "scan-batches".to_string(),
+        chunking: ChunkingConfig {
+            min_bytes: 64,
+            avg_bytes: 256,
+            max_bytes: 1024,
+        },
+        rate_limit: Default::default(),
+        master_key: [9u8; 32],
+        snapshot_id: None,
+        keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
+    };
+    let storage = InMemoryStorage::new();
+    let first = run_backup(&storage, cfg.clone()).await.unwrap();
+    assert_eq!(first.files_indexed, 513);
+
+    let run_log = televy_backup_core::run_log::start_run_log(
+        "backup",
+        "scan-batch-boundary",
+        temp.path(),
+        televy_backup_core::local_settings::NORMAL_FILTER,
+    )
+    .expect("start run log");
+    let run_log_path = run_log.path().to_path_buf();
+    let second = run_backup(&storage, cfg.clone()).await.unwrap();
+    assert_eq!(second.files_indexed, 513);
+    assert_eq!(second.chunks_uploaded, 0);
+    assert_eq!(second.bytes_read, 0);
+    drop(run_log);
+
+    let trace = std::fs::read_to_string(run_log_path)
+        .expect("read run log")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid NDJSON"))
+        .find_map(|line| (line["fields"]["event"] == "performance.scan.trace").then_some(line))
+        .expect("scan trace");
+    let trace: serde_json::Value = serde_json::from_str(
+        trace["fields"]["trace_json"]
+            .as_str()
+            .expect("trace JSON string"),
+    )
+    .expect("valid trace JSON");
+
+    assert_eq!(trace["version"], 2);
+    assert_eq!(trace["sqlite_ops_count"]["files.insert"], 2);
+    assert_eq!(trace["sqlite_ops_count"]["base.files.lookup"], 2);
+    assert_eq!(trace["sqlite_ops_count"]["base_copy"], 5);
+    for operation in ["files.insert", "base.files.lookup", "base_copy"] {
+        assert!(
+            trace["sqlite_ops_ms"].get(operation).is_some(),
+            "missing SQLite duration for {operation}"
+        );
+    }
+
+    write_file(source.join("file-0001.bin"), &[0xA5; 257]);
+    std::fs::remove_file(source.join("file-0512.bin")).unwrap();
+    let third = run_backup(&storage, cfg).await.unwrap();
+    assert_eq!(third.files_indexed, 512);
+    assert!(
+        third.bytes_read > 0,
+        "a size change must bypass base-chunk-copy and be read again"
+    );
+}
+
+#[tokio::test]
+async fn backup_honors_cancellation_after_collecting_a_scan_batch() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    for index in 0..512 {
+        write_file(source.join(format!("file-{index:04}.bin")), &[index as u8]);
+    }
+
+    let cfg = BackupConfig {
+        endpoint_db_path: temp.path().join("index.sqlite"),
+        filemap_dir: temp.path().join("filemaps"),
+        dedupe_db_path: temp.path().join("dedupe.sqlite"),
+        dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
+        source_path: source.clone(),
+        label: "cancel-after-batch".to_string(),
+        chunking: ChunkingConfig {
+            min_bytes: 64,
+            avg_bytes: 256,
+            max_bytes: 1024,
+        },
+        rate_limit: Default::default(),
+        master_key: [11u8; 32],
+        snapshot_id: None,
+        keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
+    };
+    let storage = InMemoryStorage::new();
+    run_backup(&storage, cfg.clone()).await.unwrap();
+    for index in 0..12 {
+        write_file(
+            source.join(format!("file-{index:04}.bin")),
+            &vec![0xC0 + index as u8; 1024],
+        );
+    }
+
+    let cancel_on_upload = CancelOnScanUpload {
+        cancel: tokio_util::sync::CancellationToken::new(),
+        fired: AtomicBool::new(false),
+    };
+    let result = run_backup_with(
+        &storage,
+        cfg,
+        BackupOptions {
+            cancel: Some(&cancel_on_upload.cancel),
+            progress: Some(&cancel_on_upload),
+            source_quick_stats: None,
+        },
+    )
+    .await;
+    assert!(cancel_on_upload.fired.load(Ordering::SeqCst));
+    assert!(
+        matches!(result, Err(televy_backup_core::Error::Cancelled)),
+        "cancellation after a collected batch must interrupt scanning"
+    );
+}
+
+#[tokio::test]
 async fn failed_scan_keeps_accumulated_performance_metrics() {
     let _backup_pipeline_lock = backup_pipeline_test_lock().await;
     let temp = TempDir::new().unwrap();
@@ -239,6 +390,7 @@ async fn failed_scan_keeps_accumulated_performance_metrics() {
         "hash_ms",
         "encrypt_ms",
         "sqlite_timed_ms",
+        "sqlite_retry_wait_ms",
         "upload_queue_blocked_ms",
         "unattributed_ms",
     ] {
@@ -416,7 +568,7 @@ async fn backup_writes_normal_level_performance_intervals_to_run_log() {
             .expect("scan trace JSON string"),
     )
     .expect("valid scan trace JSON");
-    assert_eq!(trace["version"], 1);
+    assert_eq!(trace["version"], 2);
     assert_eq!(trace["resolution_ms"], 1_000);
     assert_eq!(
         scan_trace["fields"]["resolution_ms"],
@@ -433,6 +585,12 @@ async fn backup_writes_normal_level_performance_intervals_to_run_log() {
             .any(|bucket| bucket["sqlite_us"].as_u64().unwrap_or(0) > 0),
         "scan trace must expose SQLite time slices"
     );
+    assert_eq!(trace["sqlite_ops_count"]["files.insert"], 1);
+    assert!(
+        trace["sqlite_ops_ms"].get("files.insert").is_some(),
+        "scan trace must break out batched file-row insertion time"
+    );
+    assert_eq!(trace["sqlite_ops_count"]["file_chunks.insert"], 11);
     assert!(
         buckets
             .iter()
@@ -462,6 +620,7 @@ async fn backup_writes_normal_level_performance_intervals_to_run_log() {
         ("hash_us", "hash_ms"),
         ("encrypt_us", "encrypt_ms"),
         ("sqlite_us", "sqlite_timed_ms"),
+        ("sqlite_retry_wait_us", "sqlite_retry_wait_ms"),
     ] {
         let trace_ms = buckets
             .iter()

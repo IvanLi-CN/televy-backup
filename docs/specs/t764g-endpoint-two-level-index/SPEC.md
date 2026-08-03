@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 已完成
+- Status: 部分完成（8/9）
 - Created: 2026-03-02
-- Last: 2026-03-02
+- Last: 2026-08-03
 
 ## 背景 / 问题陈述
 
@@ -144,3 +144,23 @@
 - [x] M5: backup pipeline 改造（scan 写二级 DB；base-chunk-copy 读 base filemap DB）
 - [x] M6: restore/verify 改造（ATTACH 两级 DB；旧格式兼容）
 - [x] M7: strict 门禁：去掉 best-effort continue；bootstrap update 失败 => run failed；全量测试回归
+- [x] M8: filemap scan 使用 512 条 SQLite 写入事务和单次基线集合查询；trace 记录各类 SQLite 累计开销
+- [ ] M9: snapshot filemap 演进为 full + delta manifest；首次与压实写 full，v1 保持双读；链深达到 20 或累计压缩 delta 达最近 full 的 25% 时压实，无变化备份 filemap payload 不超过 1 MiB
+
+## Filemap scan performance
+
+- 每个 snapshot filemap 的 `files` 行最多以 512 条为一批提交，避免逐文件隐式 SQLite
+  事务。
+- 同批普通文件以一次 `base.files` 集合查询匹配 size、mtime 与 mode，保持原有
+  base-chunk-copy、瞬态文件跳过、取消和 scan/upload 流水线语义。
+- `performance.scan.trace` 提供无路径、无哈希的 SQLite 操作累计时间和批次计数。后续
+  full + delta filemap 仍须保留这一口径，以便区分索引生成成本和上传成本。
+
+## Filemap manifest evolution
+
+- 新备份使用版本化 manifest：`full` 保存完整 filemap，`delta` 保存 parent manifest
+  与本轮变更分片。首次备份和压实必须写 `full`；历史 v1 full manifest 继续可读。
+- restore 和 verify 递归物化 parent + delta。delta 深度达到 20，或累计压缩 delta 大小达到
+  最近 full 的 25% 时，下一次备份压实为新的 full。
+- 无变化备份只写轻量 manifest，filemap payload 不超过 1 MiB。被保留 snapshot 引用的
+  parent manifest 与本地元数据必须保持可达；Telegram 远端对象删除不属于此范围。

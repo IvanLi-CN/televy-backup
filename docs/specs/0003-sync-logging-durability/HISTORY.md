@@ -85,3 +85,14 @@ concurrent level and retention saves do not overwrite each other.
 Malformed or unsupported local logging configuration remains intact when a
 preference mutation is attempted. The mutation fails rather than silently
 replacing valid neighboring fields with defaults.
+
+## 2026-08-03
+
+Scan telemetry advanced to version 2 and now reports cumulative SQLite time and
+batch counts for file-row writes, base-file lookup, base chunk copy, and file
+chunk insertion. File metadata writes and unchanged-file baseline reads are
+batched at 512 entries, retaining cancellation and the existing scan/upload
+pipeline while removing the prior per-file SQLite commit and lookup pattern.
+Files are revalidated before base-copy so a transient file cannot inherit old
+chunks after a batch lookup. SQLite busy/locked retry sleep is represented as a
+separate wait slice rather than as database work.

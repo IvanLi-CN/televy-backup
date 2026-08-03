@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 已完成
+- Status: 部分完成（6/7）
 - Created: 2026-02-28
-- Last: 2026-03-02
+- Last: 2026-08-03
 - Delivery: PR #49（追加修复：并行 helper uploads + helper 进程间 session 隔离）
 
 ## 背景 / 问题陈述
@@ -41,6 +41,9 @@
 - core：把 `FLOOD_PREMIUM_WAIT` 视为 transient/可重试错误；并纳入 flood-wait 检测（用于降档/退避）。
 - core：实现 MTProto helper pool：由 `max_concurrent_uploads` 控制 helper 进程池大小，使并发上传 job 不再被单 helper stdin/stdout 串行化。
 - core：多 helper 并行时做 session 隔离：仅 primary helper 复用/更新持久化 session，其余 helper 使用独立 session（通过 bot token 重新鉴权），避免并发共享 session 导致卡死或异常。
+- core：direct、pack、index-part 使用同一个有界上传调度器，使
+  `max_concurrent_uploads` 成为所有实际 RPC 的全局上限；index manifest 必须等待
+  parts 完成后上传，并受同一限速与重试约束。
 - macOS UI：Endpoint Settings 增加 “Rate limit (advanced)” 编辑控件：
   - `max_concurrent_uploads`（1..8）
   - `min_delay_ms`（0..500）
@@ -126,6 +129,9 @@
 - Given `max_concurrent_uploads > 1`
   When MTProto backend 上传一批对象（多个 upload job 并发排队）
   Then core 应通过 helper pool 实现并行上传，且不会因多 helper session 冲突导致永久卡死（progress 应持续推进）。
+- Given `max_concurrent_uploads = 2`
+  When direct、pack 和 index-part 同时具备上传工作
+  Then 实测 RPC 最大并发为 2，data 与 index-part 均可观察到重叠，且限速与重试等待保持独立可见。
 - Given CI
   When PR 触发 GitHub Actions
   Then helper tests 会被执行且全绿。
@@ -154,6 +160,7 @@
 - [x] M4: macOS UI 增加 “Rate limit (advanced)” 控件并通过 swift 单测（如适用）
 - [x] M5: CI 增加 helper tests 步骤并全绿
 - [x] M6: core 引入 helper pool 并实现多 helper session 隔离（仅 primary helper 更新持久化 session）
+- [ ] M7: 将 direct、pack、index-part 置于一个共享的非阻塞有界调度器，并验证实际 RPC 并发
 
 ## 方案概述（Approach, high-level）
 
@@ -168,7 +175,9 @@
 - 风险：
   - 过激并发/低延迟参数可能触发更频繁 FloodWait，导致抖动或更慢；需要通过默认安全值 + UI 提示缓解。
   - 等待阶段若缺少 progress 心跳，core 可能在 45s 后重启 helper，造成任务失败或重复工作。
-  - 多 helper 并行若错误地共享同一份 session/auth key 状态，可能出现卡死或请求异常；需要确保 session 隔离策略正确实现与覆盖测试。
+- 多 helper 并行若错误地共享同一份 session/auth key 状态，可能出现卡死或请求异常；需要确保 session 隔离策略正确实现与覆盖测试。
+  - 现有 worker 驱动中的同步 RPC 边界可能让配置的并发数退化为交替执行；M7 以实际
+    RPC 重叠和全局上限作为验收，而非仅检查 worker 数量。
 - 假设：
   - 主要瓶颈来自分片大小 + 节流（而非 scan/CPU）；以一次真实备份 run 的吞吐与日志确认。
 
