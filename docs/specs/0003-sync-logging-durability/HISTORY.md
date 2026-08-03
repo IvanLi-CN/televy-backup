@@ -102,3 +102,12 @@ file chunks, and newly read chunk rows. Unchanged-file chunk rows are seeded onc
 from the base snapshot and materialized through a set-based mapping query. Because
 the temporary filemap has one writer, its WAL auto-checkpoint and scan-time sync
 are deferred; FULL sync and an explicit WAL checkpoint run before index upload.
+
+## 2026-08-04
+
+The scan filemap now keeps bounded 512-row statements inside one transaction and
+commits once after successful scan materialization. This removes the durable
+commit cost from every metadata batch while preserving cancellation rollback and
+the existing base lookup, transient-file, and chunk-copy semantics. Snapshot
+filemaps also drop the endpoint-only file-kind index because their primary and
+unique indexes cover restore and verify lookups.
