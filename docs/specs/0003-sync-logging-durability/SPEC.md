@@ -105,11 +105,15 @@ Invalid environment filters resolve to `Normal`, never global debug.
   failed scan. Its
   `trace_json` is a versioned JSON payload indexed from the scan start and
   contains only measured `walk_us`, `metadata_us`, `read_chunk_us`, `hash_us`,
-  `encrypt_us`, and `sqlite_us` activity. It uses one-second buckets for normal
-  runs and coarsens long runs while retaining at most 4,096 buckets; the actual
-  precision is declared by `resolution_ms`. Missing fields are zero. Gantt
-  charts render only these measured slices; gaps are unmeasured, not inferred
-  scan work or idle time.
+  `encrypt_us`, and `sqlite_us` activity. Version 2 additionally contains
+  `sqlite_ops_ms` and `sqlite_ops_count` maps for bounded `files.insert`
+  commits, `base.files.lookup` batch reads, `base_copy`, and
+  `file_chunks.insert`. `sqlite_retry_wait_us` is a separate measured wait
+  slice, so busy/locked retry backoff is never rendered as SQLite work. It uses
+  one-second buckets for normal runs and coarsens long runs while retaining at
+  most 4,096 buckets; the actual precision is declared by `resolution_ms`.
+  Missing fields are zero. Gantt charts render only these measured slices; gaps
+  are unmeasured, not inferred scan work or idle time.
 - Each upload-queue admission emits correlated
   `performance.scan.queue_wait.start` and `.finish` events around the actual
   byte-permit and channel wait. They contain an opaque queue-wait identifier,
@@ -169,6 +173,9 @@ Invalid environment filters resolve to `Normal`, never global debug.
 - A deterministic backup records correlatable actual scan resource slices,
   upload-queue waits, upload RPCs, retry waits, and index-compression intervals
   under the Normal preset.
+- A source with more than 512 unchanged files records multiple bounded
+  `files.insert` and `base.files.lookup` batches, preserves base-chunk-copy
+  behavior, and does not reread source bytes.
 
 ## Visual Evidence
 

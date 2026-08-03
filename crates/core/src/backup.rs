@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -44,6 +44,7 @@ const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
 const RONOMON_READ_CHUNK_BYTES: usize = 1024 * 1024;
 const PACK_MAX_STAGING_AGE_SECS: u64 = 3;
 const BASE_FILE_CHUNK_COPY_BATCH_SIZE: usize = 128;
+const SCAN_FILE_METADATA_BATCH_SIZE: usize = 512;
 const ADAPTIVE_MIN_CONCURRENCY: usize = 1;
 const ADAPTIVE_MAX_CONCURRENCY: usize = 8;
 const ADAPTIVE_MAX_DELAY_MS: u64 = 500;
@@ -910,6 +911,41 @@ fn is_sqlite_busy_or_locked(error: &sqlx::Error) -> bool {
         || msg.contains("sqlite_locked")
 }
 
+#[derive(Debug)]
+struct ScanSqliteRetryWait {
+    started: Instant,
+    finished: Instant,
+}
+
+async fn wait_for_scan_sqlite_busy_retry(
+    operation: &str,
+    retry_idx: &mut usize,
+    error: &sqlx::Error,
+    retry_waits: &mut Vec<ScanSqliteRetryWait>,
+) -> bool {
+    if !is_sqlite_busy_or_locked(error) || *retry_idx >= SQLITE_BUSY_RETRY_DELAYS_MS.len() {
+        return false;
+    }
+
+    let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[*retry_idx];
+    *retry_idx += 1;
+    debug!(
+        event = "sqlite.busy_retry",
+        operation,
+        retry = *retry_idx,
+        wait_ms,
+        error = %error,
+        "sqlite.busy_retry"
+    );
+    let started = Instant::now();
+    sleep(Duration::from_millis(wait_ms)).await;
+    retry_waits.push(ScanSqliteRetryWait {
+        started,
+        finished: Instant::now(),
+    });
+    true
+}
+
 macro_rules! execute_sqlite_with_busy_retry {
     ($op_name:expr, $query:expr) => {{
         let mut retry_idx = 0usize;
@@ -933,6 +969,31 @@ macro_rules! execute_sqlite_with_busy_retry {
                     sleep(Duration::from_millis(wait_ms)).await;
                 }
                 Err(e) => break Err(Error::Sqlite(e)),
+            }
+        }
+    }};
+}
+
+macro_rules! execute_scan_sqlite_with_busy_retry {
+    ($op_name:expr, $query:expr) => {{
+        let mut retry_idx = 0usize;
+        let mut retry_waits = Vec::new();
+        loop {
+            match $query.await {
+                Ok(value) => break Ok((value, retry_waits)),
+                Err(error) => {
+                    if wait_for_scan_sqlite_busy_retry(
+                        $op_name,
+                        &mut retry_idx,
+                        &error,
+                        &mut retry_waits,
+                    )
+                    .await
+                    {
+                        continue;
+                    }
+                    break Err(Error::Sqlite(error));
+                }
             }
         }
     }};
@@ -1021,6 +1082,7 @@ enum ScanWorkKind {
     Hash,
     Encrypt,
     Sqlite,
+    SqliteRetryWait,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1038,6 +1100,8 @@ struct ScanTraceBucket {
     encrypt_us: u64,
     #[serde(skip_serializing_if = "is_zero")]
     sqlite_us: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    sqlite_retry_wait_us: u64,
 }
 
 impl ScanTraceBucket {
@@ -1049,6 +1113,7 @@ impl ScanTraceBucket {
             ScanWorkKind::Hash => &mut self.hash_us,
             ScanWorkKind::Encrypt => &mut self.encrypt_us,
             ScanWorkKind::Sqlite => &mut self.sqlite_us,
+            ScanWorkKind::SqliteRetryWait => &mut self.sqlite_retry_wait_us,
         };
         *slot = slot.saturating_add(elapsed_us);
     }
@@ -1060,6 +1125,9 @@ impl ScanTraceBucket {
         self.hash_us = self.hash_us.saturating_add(other.hash_us);
         self.encrypt_us = self.encrypt_us.saturating_add(other.encrypt_us);
         self.sqlite_us = self.sqlite_us.saturating_add(other.sqlite_us);
+        self.sqlite_retry_wait_us = self
+            .sqlite_retry_wait_us
+            .saturating_add(other.sqlite_retry_wait_us);
     }
 }
 
@@ -1067,6 +1135,10 @@ impl ScanTraceBucket {
 struct ScanTrace {
     version: u8,
     resolution_ms: u64,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    sqlite_ops_ms: BTreeMap<String, u64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    sqlite_ops_count: BTreeMap<String, u64>,
     buckets: Vec<ScanTraceBucket>,
 }
 
@@ -1087,7 +1159,15 @@ impl ScanActivityTrace {
     }
 
     fn record(&mut self, kind: ScanWorkKind, operation_started: Instant) -> u64 {
-        let operation_finished = Instant::now();
+        self.record_between(kind, operation_started, Instant::now())
+    }
+
+    fn record_between(
+        &mut self,
+        kind: ScanWorkKind,
+        operation_started: Instant,
+        operation_finished: Instant,
+    ) -> u64 {
         let start_us = operation_started
             .saturating_duration_since(self.started)
             .as_micros() as u64;
@@ -1140,7 +1220,11 @@ impl ScanActivityTrace {
         }
     }
 
-    fn to_json(&self) -> (String, u64) {
+    fn to_json(
+        &self,
+        sqlite_ops_ms: BTreeMap<String, u64>,
+        sqlite_ops_count: BTreeMap<String, u64>,
+    ) -> (String, u64) {
         let resolution_ms = self.bucket_width_us / 1_000;
         let mut buckets = self.buckets.clone();
         for (index, bucket) in buckets.iter_mut().enumerate() {
@@ -1148,12 +1232,14 @@ impl ScanActivityTrace {
         }
 
         let json = serde_json::to_string(&ScanTrace {
-            version: 1,
+            version: 2,
             resolution_ms,
+            sqlite_ops_ms,
+            sqlite_ops_count,
             buckets,
         })
         .unwrap_or_else(|_| {
-            format!("{{\"version\":1,\"resolution_ms\":{resolution_ms},\"buckets\":[]}}")
+            format!("{{\"version\":2,\"resolution_ms\":{resolution_ms},\"buckets\":[]}}")
         });
         (json, resolution_ms)
     }
@@ -1171,6 +1257,9 @@ struct ScanPerformance {
     hash_us: u64,
     encrypt_us: u64,
     sqlite_timed_us: u64,
+    sqlite_retry_wait_us: u64,
+    sqlite_ops_us: BTreeMap<&'static str, u64>,
+    sqlite_ops_count: BTreeMap<&'static str, u64>,
     upload_queue_blocked_ms: u64,
     trace: ScanActivityTrace,
 }
@@ -1184,6 +1273,9 @@ impl ScanPerformance {
             hash_us: 0,
             encrypt_us: 0,
             sqlite_timed_us: 0,
+            sqlite_retry_wait_us: 0,
+            sqlite_ops_us: BTreeMap::new(),
+            sqlite_ops_count: BTreeMap::new(),
             upload_queue_blocked_ms: 0,
             trace: ScanActivityTrace::new(scan_started),
         }
@@ -1198,8 +1290,60 @@ impl ScanPerformance {
             ScanWorkKind::Hash => &mut self.hash_us,
             ScanWorkKind::Encrypt => &mut self.encrypt_us,
             ScanWorkKind::Sqlite => &mut self.sqlite_timed_us,
+            ScanWorkKind::SqliteRetryWait => &mut self.sqlite_retry_wait_us,
         };
         *slot = slot.saturating_add(elapsed_us);
+    }
+
+    fn record_sqlite(
+        &mut self,
+        operation: &'static str,
+        operation_started: Instant,
+        retry_waits: &[ScanSqliteRetryWait],
+    ) {
+        let operation_finished = Instant::now();
+        let mut active_started = operation_started;
+        for retry_wait in retry_waits {
+            self.record_sqlite_active(operation, active_started, retry_wait.started);
+            let wait_us = self.trace.record_between(
+                ScanWorkKind::SqliteRetryWait,
+                retry_wait.started,
+                retry_wait.finished,
+            );
+            self.sqlite_retry_wait_us = self.sqlite_retry_wait_us.saturating_add(wait_us);
+            active_started = retry_wait.finished;
+        }
+        self.record_sqlite_active(operation, active_started, operation_finished);
+        let op_count = self.sqlite_ops_count.entry(operation).or_default();
+        *op_count = op_count.saturating_add(1);
+    }
+
+    fn record_sqlite_active(
+        &mut self,
+        operation: &'static str,
+        operation_started: Instant,
+        operation_finished: Instant,
+    ) {
+        let elapsed_us =
+            self.trace
+                .record_between(ScanWorkKind::Sqlite, operation_started, operation_finished);
+        self.sqlite_timed_us = self.sqlite_timed_us.saturating_add(elapsed_us);
+        let op_duration = self.sqlite_ops_us.entry(operation).or_default();
+        *op_duration = op_duration.saturating_add(elapsed_us);
+    }
+
+    fn trace_json(&self) -> (String, u64) {
+        let sqlite_ops_ms = self
+            .sqlite_ops_us
+            .iter()
+            .map(|(operation, elapsed_us)| (operation.to_string(), elapsed_us / 1_000))
+            .collect();
+        let sqlite_ops_count = self
+            .sqlite_ops_count
+            .iter()
+            .map(|(operation, count)| (operation.to_string(), *count))
+            .collect();
+        self.trace.to_json(sqlite_ops_ms, sqlite_ops_count)
     }
 
     fn attributed_us(&self) -> u64 {
@@ -1209,6 +1353,7 @@ impl ScanPerformance {
             .saturating_add(self.hash_us)
             .saturating_add(self.encrypt_us)
             .saturating_add(self.sqlite_timed_us)
+            .saturating_add(self.sqlite_retry_wait_us)
             .saturating_add(self.upload_queue_blocked_ms.saturating_mul(1_000))
     }
 }
@@ -1219,6 +1364,17 @@ struct BaseFileSnapshotRow {
     size: i64,
     mtime_ms: i64,
     mode: i64,
+}
+
+#[derive(Debug)]
+struct PendingScanEntry {
+    path: PathBuf,
+    rel_path: String,
+    kind: &'static str,
+    size: i64,
+    mtime_ms: i64,
+    mode: i64,
+    file_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2048,7 +2204,7 @@ pub async fn run_backup_with<S: Storage>(
                 let source_path_utf8 = path_to_utf8(&scan_source_path)?;
 
                 let sqlite_started = Instant::now();
-                execute_sqlite_with_busy_retry!(
+                let (_, retry_waits) = execute_scan_sqlite_with_busy_retry!(
                     "snapshots.insert",
                     sqlx::query(
                         r#"
@@ -2062,7 +2218,7 @@ pub async fn run_backup_with<S: Storage>(
                     .bind(&base_snapshot_id)
                     .execute(&mut **conn)
                 )?;
-                scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
+                scan_performance.record_sqlite("snapshots.insert", sqlite_started, &retry_waits);
 
                 // Create per-snapshot filemap DB and seed the snapshot row. This DB is uploaded
                 // as the snapshot's "filemap index", while the endpoint DB remains small and only
@@ -2071,7 +2227,7 @@ pub async fn run_backup_with<S: Storage>(
                 let mut filemap_conn: DbConn = filemap_pool.acquire().await?;
                 drop(filemap_pool);
                 let sqlite_started = Instant::now();
-                execute_sqlite_with_busy_retry!(
+                let (_, retry_waits) = execute_scan_sqlite_with_busy_retry!(
                     "snapshots.insert.filemap",
                     sqlx::query(
                         r#"
@@ -2085,7 +2241,11 @@ pub async fn run_backup_with<S: Storage>(
                     .bind(&base_snapshot_id)
                     .execute(&mut *filemap_conn)
                 )?;
-                scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
+                scan_performance.record_sqlite(
+                    "snapshots.insert.filemap",
+                    sqlite_started,
+                    &retry_waits,
+                );
 
                 // If we have a base snapshot, attach its filemap DB as `base` so base-chunk-copy
                 // can copy `file_chunks` without re-chunking file contents.
@@ -2197,284 +2357,375 @@ pub async fn run_backup_with<S: Storage>(
 
                 let mut source_walk = build_source_walk(&scan_source_path);
                 loop {
-                    let walk_started = Instant::now();
-                    let Some(entry) = source_walk.next() else {
-                        break;
-                    };
-                    scan_performance.record(ScanWorkKind::Walk, walk_started);
-                    if let Some(cancel) = options.cancel
-                        && cancel.is_cancelled()
-                    {
-                        return Err(Error::Cancelled);
-                    }
-
-                    let entry = match entry {
-                        Ok(v) => v,
-                        Err(e) => {
-                            if ignore_error_is_rule_parse_only(&e) {
-                                warn_invalid_televyignore_rule_once(
-                                    &mut warned_ignore_errors,
-                                    &e,
-                                    &scan_source_path,
-                                    "scan",
-                                );
-                                continue;
-                            }
-                            if ignore_error_is_non_root_not_found(&e, &scan_source_path) {
-                                debug!(
-                                    event = "scan.walkdir.not_found",
-                                    error = %e,
-                                    "scan.walkdir.not_found"
-                                );
-                                continue;
-                            }
-                            return Err(map_ignore_error(e, &scan_source_path));
-                        }
-                    };
-
-                    if let Some(err) = entry.error() {
-                        if ignore_error_is_rule_parse_only(err) {
-                            warn_invalid_televyignore_rule_once(
-                                &mut warned_ignore_errors,
-                                err,
-                                &scan_source_path,
-                                "scan",
-                            );
-                        } else if ignore_error_is_not_found(err) && entry.path() != scan_source_path
-                        {
-                            debug!(
-                                event = "scan.walkdir.not_found",
-                                path = %entry.path().display(),
-                                error = %err,
-                                "scan.walkdir.not_found"
-                            );
-                            continue;
-                        } else {
-                            return Err(map_ignore_error(err.clone(), &scan_source_path));
-                        }
-                    }
-
-                    let path = entry.path();
-                    let metadata_started = Instant::now();
-                    let metadata_result = entry.metadata();
-                    scan_performance.record(ScanWorkKind::Metadata, metadata_started);
-                    let metadata = match metadata_result {
-                        Ok(v) => v,
-                        Err(e) => {
-                            if ignore_error_is_not_found(&e) {
-                                debug!(
-                                    event = "scan.entry_not_found",
-                                    path = %path.display(),
-                                    error = %e,
-                                    "scan.entry_not_found"
-                                );
-                                continue;
-                            }
-                            return Err(map_ignore_error(e, &scan_source_path));
-                        }
-                    };
-
-                    if metadata.is_dir() {
-                        ignore_rule_files = ignore_rule_files.saturating_add(
-                            count_ignore_file_for_dir(&mut seen_ignore_files, path),
-                        );
-                    }
-
-                    if metadata.is_file()
-                        && path.file_name() == Some(OsStr::new(TELEVYIGNORE_FILE_NAME))
-                        && seen_ignore_files.insert(path.to_path_buf())
-                    {
-                        ignore_rule_files = ignore_rule_files.saturating_add(1);
-                    }
-
-                    if path == scan_source_path {
-                        continue;
-                    }
-
-                    let rel_path =
-                        path.strip_prefix(&scan_source_path)
-                            .map_err(|_| Error::InvalidConfig {
-                                message: "path strip_prefix failed".to_string(),
-                            })?;
-                    let rel_path_str = path_to_utf8(rel_path)?;
-
-                    let kind = if metadata.is_dir() {
-                        "dir"
-                    } else if metadata.is_file() {
-                        "file"
-                    } else if metadata.is_symlink() {
-                        "symlink"
-                    } else {
-                        continue;
-                    };
-
-                    let (size, mtime_ms, mode) = if kind == "file" {
-                        let size = metadata.len() as i64;
-                        let mtime_ms = metadata
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_millis() as i64)
-                            .unwrap_or(0);
-                        #[cfg(unix)]
-                        let mode = {
-                            use std::os::unix::fs::MetadataExt;
-                            metadata.mode() as i64
-                        };
-                        #[cfg(not(unix))]
-                        let mode = 0i64;
-                        (size, mtime_ms, mode)
-                    } else {
-                        (0i64, 0i64, 0i64)
-                    };
-
-                    result.files_total += 1;
-
-                    let file_id = format!("f_{}", uuid::Uuid::new_v4());
-                    let sqlite_started = Instant::now();
-                    execute_sqlite_with_busy_retry!(
-                        "files.insert",
-                        sqlx::query(
-                            r#"
-                            INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                            "#,
-                        )
-                        .bind(&file_id)
-                        .bind(&snapshot_id)
-                        .bind(&rel_path_str)
-                        .bind(size)
-                        .bind(mtime_ms)
-                        .bind(mode)
-                        .bind(kind)
-                        .execute(&mut *filemap_conn)
-                    )?;
-                    scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
-
-                    result.files_indexed += 1;
-                    scan_files_indexed.store(result.files_indexed, Ordering::Relaxed);
-
-                    if kind == "file" {
-                        scan_source_files_done.fetch_add(1, Ordering::Relaxed);
-                    }
-
-                    if kind != "file" {
-                        continue;
-                    }
-
-                    let base_row = if let Some(base_snapshot_id) = base_snapshot_id.as_deref() {
-                        let sqlite_started = Instant::now();
-                        let row = lookup_base_file_snapshot_row(
-                            &mut filemap_conn,
-                            base_snapshot_id,
-                            &rel_path_str,
-                        )
-                        .await?;
-                        scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
-                        row
-                    } else {
-                        None
-                    };
-                    if let Some(base_row) = base_row
-                        && base_row.size == size
-                        && base_row.mtime_ms == mtime_ms
-                        && base_row.mode == mode
-                    {
-                        pending_base_chunk_copies.push(BaseFileChunkCopyRow {
-                            file_id: file_id.clone(),
-                            base_file_id: base_row.file_id,
-                            size: size.max(0) as u64,
-                        });
-                        if pending_base_chunk_copies.len() >= BASE_FILE_CHUNK_COPY_BATCH_SIZE {
-                            let sqlite_started = Instant::now();
-                            let (copied_chunks, deduped_bytes) =
-                                flush_base_chunk_copy_batch(&mut filemap_conn, &mut pending_base_chunk_copies)
-                                    .await?;
-                            scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
-                            if copied_chunks > 0 {
-                                result.chunks_total =
-                                    result.chunks_total.saturating_add(copied_chunks);
-                                scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
-                            }
-                            if deduped_bytes > 0 {
-                                result.bytes_deduped =
-                                    result.bytes_deduped.saturating_add(deduped_bytes);
-                                scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
-                            }
-                        }
-                        continue;
-                    }
-
-                    let file = match File::open(path) {
-                        Ok(f) => f,
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            debug!(
-                                event = "scan.file_not_found",
-                                path = %path.display(),
-                                error = %e,
-                                "scan.file_not_found"
-                            );
-                            continue;
-                        }
-                        Err(e) => return Err(e.into()),
-                    };
-                    let chunker = file_chunker(file, &scan_chunking);
-                    let mut file_chunk_rows: Vec<FileChunkRow> = Vec::new();
-
-                    let mut chunks = chunker.enumerate();
-                    loop {
-                        let read_chunk_started = Instant::now();
-                        let Some((seq, chunk)) = chunks.next() else {
+                    let mut pending_scan_entries =
+                        Vec::with_capacity(SCAN_FILE_METADATA_BATCH_SIZE);
+                    while pending_scan_entries.len() < SCAN_FILE_METADATA_BATCH_SIZE {
+                        let walk_started = Instant::now();
+                        let Some(entry) = source_walk.next() else {
                             break;
                         };
-                        scan_performance.record(ScanWorkKind::ReadChunk, read_chunk_started);
+                        scan_performance.record(ScanWorkKind::Walk, walk_started);
                         if let Some(cancel) = options.cancel
                             && cancel.is_cancelled()
                         {
                             return Err(Error::Cancelled);
                         }
 
-                        let chunk = chunk.map_err(|_| Error::InvalidConfig {
-                            message: "chunking failed".to_string(),
+                        let entry = match entry {
+                            Ok(v) => v,
+                            Err(e) => {
+                                if ignore_error_is_rule_parse_only(&e) {
+                                    warn_invalid_televyignore_rule_once(
+                                        &mut warned_ignore_errors,
+                                        &e,
+                                        &scan_source_path,
+                                        "scan",
+                                    );
+                                    continue;
+                                }
+                                if ignore_error_is_non_root_not_found(&e, &scan_source_path) {
+                                    debug!(
+                                        event = "scan.walkdir.not_found",
+                                        error = %e,
+                                        "scan.walkdir.not_found"
+                                    );
+                                    continue;
+                                }
+                                return Err(map_ignore_error(e, &scan_source_path));
+                            }
+                        };
+
+                        if let Some(err) = entry.error() {
+                            if ignore_error_is_rule_parse_only(err) {
+                                warn_invalid_televyignore_rule_once(
+                                    &mut warned_ignore_errors,
+                                    err,
+                                    &scan_source_path,
+                                    "scan",
+                                );
+                            } else if ignore_error_is_not_found(err)
+                                && entry.path() != scan_source_path
+                            {
+                                debug!(
+                                    event = "scan.walkdir.not_found",
+                                    path = %entry.path().display(),
+                                    error = %err,
+                                    "scan.walkdir.not_found"
+                                );
+                                continue;
+                            } else {
+                                return Err(map_ignore_error(err.clone(), &scan_source_path));
+                            }
+                        }
+
+                        let path = entry.path();
+                        let metadata_started = Instant::now();
+                        let metadata_result = entry.metadata();
+                        scan_performance.record(ScanWorkKind::Metadata, metadata_started);
+                        let metadata = match metadata_result {
+                            Ok(v) => v,
+                            Err(e) => {
+                                if ignore_error_is_not_found(&e) {
+                                    debug!(
+                                        event = "scan.entry_not_found",
+                                        path = %path.display(),
+                                        error = %e,
+                                        "scan.entry_not_found"
+                                    );
+                                    continue;
+                                }
+                                return Err(map_ignore_error(e, &scan_source_path));
+                            }
+                        };
+
+                        if metadata.is_dir() {
+                            ignore_rule_files = ignore_rule_files.saturating_add(
+                                count_ignore_file_for_dir(&mut seen_ignore_files, path),
+                            );
+                        }
+
+                        if metadata.is_file()
+                            && path.file_name() == Some(OsStr::new(TELEVYIGNORE_FILE_NAME))
+                            && seen_ignore_files.insert(path.to_path_buf())
+                        {
+                            ignore_rule_files = ignore_rule_files.saturating_add(1);
+                        }
+
+                        if path == scan_source_path {
+                            continue;
+                        }
+
+                        let rel_path = path.strip_prefix(&scan_source_path).map_err(|_| {
+                            Error::InvalidConfig {
+                                message: "path strip_prefix failed".to_string(),
+                            }
                         })?;
-                        result.chunks_total += 1;
-                        scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
-                        result.bytes_read += chunk.data.len() as u64;
-                        scan_bytes_read.store(result.bytes_read, Ordering::Relaxed);
+                        let rel_path = path_to_utf8(rel_path)?;
 
-                        let hash_started = Instant::now();
-                        let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
-                        scan_performance.record(ScanWorkKind::Hash, hash_started);
-
-                        // `file_chunks` has a FK to `chunks`, so ensure the chunk row exists in
-                        // the per-snapshot filemap DB regardless of whether the chunk is deduped.
-                        let sqlite_started = Instant::now();
-                        execute_sqlite_with_busy_retry!(
-                            "chunks.insert.filemap",
-                            sqlx::query(
-                                r#"
-                                INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
-                                VALUES (?, ?, 'blake3', 'xchacha20poly1305', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-                                "#,
-                            )
-                            .bind(&chunk_hash)
-                            .bind(chunk.data.len() as i64)
-                            .execute(&mut *filemap_conn)
-                        )?;
-                        scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
-
-                        let exists = known_chunk_hashes.contains(&chunk_hash);
-                        if exists {
-                            result.bytes_deduped += chunk.data.len() as u64;
-                            scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
+                        let kind = if metadata.is_dir() {
+                            "dir"
+                        } else if metadata.is_file() {
+                            "file"
+                        } else if metadata.is_symlink() {
+                            "symlink"
                         } else {
-                            known_chunk_hashes.insert(chunk_hash.clone());
-                            scan_source_bytes_need_upload
-                                .fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
+                            continue;
+                        };
 
+                        let (size, mtime_ms, mode) = if kind == "file" {
+                            let size = metadata.len() as i64;
+                            let mtime_ms = metadata
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_millis() as i64)
+                                .unwrap_or(0);
+                            #[cfg(unix)]
+                            let mode = {
+                                use std::os::unix::fs::MetadataExt;
+                                metadata.mode() as i64
+                            };
+                            #[cfg(not(unix))]
+                            let mode = 0i64;
+                            (size, mtime_ms, mode)
+                        } else {
+                            (0i64, 0i64, 0i64)
+                        };
+
+                        pending_scan_entries.push(PendingScanEntry {
+                            path: path.to_path_buf(),
+                            rel_path,
+                            kind,
+                            size,
+                            mtime_ms,
+                            mode,
+                            file_id: format!("f_{}", uuid::Uuid::new_v4()),
+                        });
+                    }
+
+                    if pending_scan_entries.is_empty() {
+                        break;
+                    }
+
+                    let sqlite_started = Instant::now();
+                    let retry_waits = insert_scan_file_rows_batch(
+                        &mut filemap_conn,
+                        &snapshot_id,
+                        &pending_scan_entries,
+                    )
+                    .await?;
+                    scan_performance.record_sqlite("files.insert", sqlite_started, &retry_waits);
+
+                    let mut base_rows = if let Some(base_snapshot_id) = base_snapshot_id.as_deref()
+                        && pending_scan_entries.iter().any(|entry| entry.kind == "file")
+                    {
+                        let sqlite_started = Instant::now();
+                        let (rows, retry_waits) = lookup_base_file_snapshot_rows(
+                            &mut filemap_conn,
+                            base_snapshot_id,
+                            &pending_scan_entries,
+                        )
+                        .await?;
+                        scan_performance.record_sqlite(
+                            "base.files.lookup",
+                            sqlite_started,
+                            &retry_waits,
+                        );
+                        rows
+                    } else {
+                        HashMap::new()
+                    };
+
+                    for PendingScanEntry {
+                        path,
+                        rel_path,
+                        kind,
+                        size,
+                        mtime_ms,
+                        mode,
+                        file_id,
+                    } in pending_scan_entries
+                    {
+                        if let Some(cancel) = options.cancel
+                            && cancel.is_cancelled()
+                        {
+                            return Err(Error::Cancelled);
+                        }
+
+                        result.files_total += 1;
+                        result.files_indexed += 1;
+                        scan_files_indexed.store(result.files_indexed, Ordering::Relaxed);
+
+                        if kind == "file" {
+                            scan_source_files_done.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            continue;
+                        }
+
+                        let mut copied_from_base = false;
+                        let base_row = base_rows.remove(&rel_path);
+                        if let Some(base_row) = base_row
+                            && base_row.size == size
+                            && base_row.mtime_ms == mtime_ms
+                            && base_row.mode == mode
+                        {
+                            // Metadata was collected before the batch transaction and base lookup.
+                            // Revalidate before copying old chunks so a transient or changed file
+                            // is handled by the existing changed-file path instead.
+                            let metadata_started = Instant::now();
+                            let revalidation =
+                                revalidate_file_for_base_copy(&path, size, mtime_ms, mode);
+                            scan_performance.record(ScanWorkKind::Metadata, metadata_started);
+                            match revalidation? {
+                                BaseCopyRevalidation::NotFound => {
+                                    let sqlite_started = Instant::now();
+                                    let retry_waits =
+                                        delete_transient_scan_file(&mut filemap_conn, &file_id)
+                                            .await?;
+                                    scan_performance.record_sqlite(
+                                        "files.transient_delete",
+                                        sqlite_started,
+                                        &retry_waits,
+                                    );
+                                    debug!(
+                                        event = "scan.file_not_found",
+                                        path = %path.display(),
+                                        "scan.file_not_found"
+                                    );
+                                    continue;
+                                }
+                                BaseCopyRevalidation::Match => {
+                                    pending_base_chunk_copies.push(BaseFileChunkCopyRow {
+                                        file_id: file_id.clone(),
+                                        base_file_id: base_row.file_id,
+                                        size: size.max(0) as u64,
+                                    });
+                                    copied_from_base = true;
+                                }
+                                BaseCopyRevalidation::Changed {
+                                    size,
+                                    mtime_ms,
+                                    mode,
+                                } => {
+                                    let sqlite_started = Instant::now();
+                                    let retry_waits = update_scan_file_metadata(
+                                        &mut filemap_conn,
+                                        &file_id,
+                                        size,
+                                        mtime_ms,
+                                        mode,
+                                    )
+                                    .await?;
+                                    scan_performance.record_sqlite(
+                                        "files.metadata_update",
+                                        sqlite_started,
+                                        &retry_waits,
+                                    );
+                                }
+                                BaseCopyRevalidation::NotFile => {
+                                    let sqlite_started = Instant::now();
+                                    let retry_waits =
+                                        delete_transient_scan_file(&mut filemap_conn, &file_id)
+                                            .await?;
+                                    scan_performance.record_sqlite(
+                                        "files.transient_delete",
+                                        sqlite_started,
+                                        &retry_waits,
+                                    );
+                                    debug!(
+                                        event = "scan.file_type_changed",
+                                        path = %path.display(),
+                                        "scan.file_type_changed"
+                                    );
+                                    continue;
+                                }
+                            }
+                            if copied_from_base
+                                && pending_base_chunk_copies.len() >= BASE_FILE_CHUNK_COPY_BATCH_SIZE
+                            {
+                                let sqlite_started = Instant::now();
+                                let (copied_chunks, deduped_bytes, retry_waits) =
+                                    flush_base_chunk_copy_batch(
+                                        &mut filemap_conn,
+                                        &mut pending_base_chunk_copies,
+                                    )
+                                    .await?;
+                                scan_performance.record_sqlite(
+                                    "base_copy",
+                                    sqlite_started,
+                                    &retry_waits,
+                                );
+                                if copied_chunks > 0 {
+                                    result.chunks_total =
+                                        result.chunks_total.saturating_add(copied_chunks);
+                                    scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
+                                }
+                                if deduped_bytes > 0 {
+                                    result.bytes_deduped =
+                                        result.bytes_deduped.saturating_add(deduped_bytes);
+                                    scan_bytes_deduped
+                                        .store(result.bytes_deduped, Ordering::Relaxed);
+                                }
+                            }
+                            if copied_from_base {
+                                continue;
+                            }
+                        }
+
+                        let file = match File::open(&path) {
+                            Ok(f) => f,
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                let sqlite_started = Instant::now();
+                                let retry_waits =
+                                    delete_transient_scan_file(&mut filemap_conn, &file_id).await?;
+                                scan_performance.record_sqlite(
+                                    "files.transient_delete",
+                                    sqlite_started,
+                                    &retry_waits,
+                                );
+                                debug!(
+                                    event = "scan.file_not_found",
+                                    path = %path.display(),
+                                    error = %e,
+                                    "scan.file_not_found"
+                                );
+                                continue;
+                            }
+                            Err(e) => return Err(e.into()),
+                        };
+                        let chunker = file_chunker(file, &scan_chunking);
+                        let mut file_chunk_rows: Vec<FileChunkRow> = Vec::new();
+
+                        let mut chunks = chunker.enumerate();
+                        loop {
+                            let read_chunk_started = Instant::now();
+                            let Some((seq, chunk)) = chunks.next() else {
+                                break;
+                            };
+                            scan_performance.record(ScanWorkKind::ReadChunk, read_chunk_started);
+                            if let Some(cancel) = options.cancel
+                                && cancel.is_cancelled()
+                            {
+                                return Err(Error::Cancelled);
+                            }
+
+                            let chunk = chunk.map_err(|_| Error::InvalidConfig {
+                                message: "chunking failed".to_string(),
+                            })?;
+                            result.chunks_total += 1;
+                            scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
+                            result.bytes_read += chunk.data.len() as u64;
+                            scan_bytes_read.store(result.bytes_read, Ordering::Relaxed);
+
+                            let hash_started = Instant::now();
+                            let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
+                            scan_performance.record(ScanWorkKind::Hash, hash_started);
+
+                            // `file_chunks` has a FK to `chunks`, so ensure the chunk row exists in
+                            // the per-snapshot filemap DB regardless of whether the chunk is deduped.
                             let sqlite_started = Instant::now();
-                            execute_sqlite_with_busy_retry!(
-                                "chunks.insert",
+                            let (_, retry_waits) = execute_scan_sqlite_with_busy_retry!(
+                                "chunks.insert.filemap",
                                 sqlx::query(
                                     r#"
                                     INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
@@ -2483,79 +2734,128 @@ pub async fn run_backup_with<S: Storage>(
                                 )
                                 .bind(&chunk_hash)
                                 .bind(chunk.data.len() as i64)
-                                .execute(&mut **global_conn)
+                                .execute(&mut *filemap_conn)
                             )?;
-                            scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
+                            scan_performance.record_sqlite(
+                                "chunks.insert.filemap",
+                                sqlite_started,
+                                &retry_waits,
+                            );
 
-                            let encrypt_started = Instant::now();
-                            let encrypted =
-                                encrypt_framed(&scan_master_key, chunk_hash.as_bytes(), &chunk.data)?;
-                            scan_performance.record(ScanWorkKind::Encrypt, encrypt_started);
-                            let blob = SourceBlob {
-                                chunk_hash: chunk_hash.clone(),
-                                blob: encrypted,
-                                source_bytes: chunk.data.len() as u64,
-                            };
-                            if !pack_enabled {
-                                pending_bytes = pending_bytes.saturating_add(blob.blob.len());
-                                pending_uploads.push(blob);
-                                if pending_uploads.len() > PACK_ENABLE_MIN_OBJECTS
-                                    || pending_bytes > PACK_TARGET_BYTES
-                                {
-                                    pack_enabled = true;
-                                    for b in pending_uploads.drain(..) {
-                                        schedule_pack_or_direct_upload(
-                                            &uploader,
-                                            &scan_master_key,
-                                            &mut pack_state,
-                                            b,
-                                        )
-                                        .await?;
-                                    }
-                                    pending_bytes = 0;
-                                }
+                            let exists = known_chunk_hashes.contains(&chunk_hash);
+                            if exists {
+                                result.bytes_deduped += chunk.data.len() as u64;
+                                scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
                             } else {
-                                schedule_pack_or_direct_upload(
-                                    &uploader,
-                                    &scan_master_key,
-                                    &mut pack_state,
-                                    blob,
-                                )
-                                .await?;
-                            }
+                                known_chunk_hashes.insert(chunk_hash.clone());
+                                scan_source_bytes_need_upload
+                                    .fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
 
-                            if pack_enabled {
-                                let should_flush_for_progress =
-                                    active_uploads.load(Ordering::Relaxed) == 0
-                                        && pack_state.packer.entries_len() >= PACK_ENABLE_MIN_OBJECTS;
-                                if should_flush_for_progress || pack_state.should_flush_due_to_age() {
-                                    flush_packer(&uploader, &scan_master_key, &mut pack_state)
-                                        .await?;
+                                let sqlite_started = Instant::now();
+                                let (_, retry_waits) = execute_scan_sqlite_with_busy_retry!(
+                                    "chunks.insert",
+                                    sqlx::query(
+                                        r#"
+                                        INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+                                        VALUES (?, ?, 'blake3', 'xchacha20poly1305', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                                        "#,
+                                    )
+                                    .bind(&chunk_hash)
+                                    .bind(chunk.data.len() as i64)
+                                    .execute(&mut **global_conn)
+                                )?;
+                                scan_performance.record_sqlite(
+                                    "chunks.insert",
+                                    sqlite_started,
+                                    &retry_waits,
+                                );
+
+                                let encrypt_started = Instant::now();
+                                let encrypted = encrypt_framed(
+                                    &scan_master_key,
+                                    chunk_hash.as_bytes(),
+                                    &chunk.data,
+                                )?;
+                                scan_performance.record(ScanWorkKind::Encrypt, encrypt_started);
+                                let blob = SourceBlob {
+                                    chunk_hash: chunk_hash.clone(),
+                                    blob: encrypted,
+                                    source_bytes: chunk.data.len() as u64,
+                                };
+                                if !pack_enabled {
+                                    pending_bytes = pending_bytes.saturating_add(blob.blob.len());
+                                    pending_uploads.push(blob);
+                                    if pending_uploads.len() > PACK_ENABLE_MIN_OBJECTS
+                                        || pending_bytes > PACK_TARGET_BYTES
+                                    {
+                                        pack_enabled = true;
+                                        for b in pending_uploads.drain(..) {
+                                            schedule_pack_or_direct_upload(
+                                                &uploader,
+                                                &scan_master_key,
+                                                &mut pack_state,
+                                                b,
+                                            )
+                                            .await?;
+                                        }
+                                        pending_bytes = 0;
+                                    }
+                                } else {
+                                    schedule_pack_or_direct_upload(
+                                        &uploader,
+                                        &scan_master_key,
+                                        &mut pack_state,
+                                        blob,
+                                    )
+                                    .await?;
+                                }
+
+                                if pack_enabled {
+                                    let should_flush_for_progress =
+                                        active_uploads.load(Ordering::Relaxed) == 0
+                                            && pack_state.packer.entries_len()
+                                                >= PACK_ENABLE_MIN_OBJECTS;
+                                    if should_flush_for_progress
+                                        || pack_state.should_flush_due_to_age()
+                                    {
+                                        flush_packer(&uploader, &scan_master_key, &mut pack_state)
+                                            .await?;
+                                    }
                                 }
                             }
+
+                            file_chunk_rows.push(FileChunkRow {
+                                seq: seq as i64,
+                                chunk_hash,
+                                offset: chunk.offset as i64,
+                                len: chunk.length as i64,
+                            });
                         }
 
-                        file_chunk_rows.push(FileChunkRow {
-                            seq: seq as i64,
-                            chunk_hash,
-                            offset: chunk.offset as i64,
-                            len: chunk.length as i64,
-                        });
-
+                        if !file_chunk_rows.is_empty() {
+                            let sqlite_started = Instant::now();
+                            let retry_waits =
+                                insert_file_chunks_batch(&mut filemap_conn, &file_id, &file_chunk_rows)
+                                    .await?;
+                            scan_performance.record_sqlite(
+                                "file_chunks.insert",
+                                sqlite_started,
+                                &retry_waits,
+                            );
+                        }
                     }
-
-                    let sqlite_started = Instant::now();
-                    insert_file_chunks_batch(&mut filemap_conn, &file_id, &file_chunk_rows)
-                        .await?;
-                    scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
                 }
 
                 if !pending_base_chunk_copies.is_empty() {
                     let sqlite_started = Instant::now();
-                    let (copied_chunks, deduped_bytes) =
+                    let (copied_chunks, deduped_bytes, retry_waits) =
                         flush_base_chunk_copy_batch(&mut filemap_conn, &mut pending_base_chunk_copies)
                             .await?;
-                    scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
+                    scan_performance.record_sqlite(
+                        "base_copy",
+                        sqlite_started,
+                        &retry_waits,
+                    );
                     if copied_chunks > 0 {
                         result.chunks_total = result.chunks_total.saturating_add(copied_chunks);
                         scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
@@ -2663,11 +2963,11 @@ pub async fn run_backup_with<S: Storage>(
             scan_performance.upload_queue_blocked_ms =
                 scan_queue_blocked_ms.load(Ordering::Relaxed);
             let scan_duration = performance_scan_started.elapsed();
-            let (trace_json, trace_resolution_ms) = scan_performance.trace.to_json();
+            let (trace_json, trace_resolution_ms) = scan_performance.trace_json();
             info!(
                 event = "performance.scan.trace",
                 phase = "scan",
-                trace_version = 1_u8,
+                trace_version = 2_u8,
                 resolution_ms = trace_resolution_ms,
                 trace_json = %trace_json,
                 "performance.scan.trace"
@@ -2684,6 +2984,7 @@ pub async fn run_backup_with<S: Storage>(
                         hash_ms = scan_performance.hash_us / 1_000,
                         encrypt_ms = scan_performance.encrypt_us / 1_000,
                         sqlite_timed_ms = scan_performance.sqlite_timed_us / 1_000,
+                        sqlite_retry_wait_ms = scan_performance.sqlite_retry_wait_us / 1_000,
                         upload_queue_blocked_ms = scan_performance.upload_queue_blocked_ms,
                         unattributed_ms = (scan_duration.as_micros() as u64)
                             .saturating_sub(scan_performance.attributed_us())
@@ -2706,6 +3007,7 @@ pub async fn run_backup_with<S: Storage>(
                         hash_ms = scan_performance.hash_us / 1_000,
                         encrypt_ms = scan_performance.encrypt_us / 1_000,
                         sqlite_timed_ms = scan_performance.sqlite_timed_us / 1_000,
+                        sqlite_retry_wait_ms = scan_performance.sqlite_retry_wait_us / 1_000,
                         upload_queue_blocked_ms = scan_performance.upload_queue_blocked_ms,
                         unattributed_ms = (scan_duration.as_micros() as u64)
                             .saturating_sub(scan_performance.attributed_us())
@@ -3668,12 +3970,13 @@ async fn insert_file_chunks_batch(
     conn: &mut DbConn,
     file_id: &str,
     rows: &[FileChunkRow],
-) -> Result<()> {
+) -> Result<Vec<ScanSqliteRetryWait>> {
     if rows.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let mut retry_idx = 0usize;
+    let mut retry_waits = Vec::new();
     'retry: loop {
         let mut tx = conn.begin().await.map_err(Error::from)?;
 
@@ -3693,17 +3996,14 @@ async fn insert_file_chunks_batch(
             .await
             {
                 let _ = tx.rollback().await;
-                if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
-                    let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
-                    retry_idx += 1;
-                    debug!(
-                        event = "sqlite.busy_retry",
-                        op = "file_chunks.insert.batch",
-                        retry = retry_idx,
-                        wait_ms,
-                        "sqlite.busy_retry"
-                    );
-                    sleep(Duration::from_millis(wait_ms)).await;
+                if wait_for_scan_sqlite_busy_retry(
+                    "file_chunks.insert.batch",
+                    &mut retry_idx,
+                    &e,
+                    &mut retry_waits,
+                )
+                .await
+                {
                     continue 'retry;
                 }
                 return Err(Error::from(e));
@@ -3711,22 +4011,162 @@ async fn insert_file_chunks_batch(
         }
 
         if let Err(e) = tx.commit().await {
-            if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
-                let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
-                retry_idx += 1;
-                debug!(
-                    event = "sqlite.busy_retry",
-                    op = "file_chunks.insert.batch",
-                    retry = retry_idx,
-                    wait_ms,
-                    "sqlite.busy_retry"
-                );
-                sleep(Duration::from_millis(wait_ms)).await;
+            if wait_for_scan_sqlite_busy_retry(
+                "file_chunks.insert.batch",
+                &mut retry_idx,
+                &e,
+                &mut retry_waits,
+            )
+            .await
+            {
                 continue 'retry;
             }
             return Err(Error::from(e));
         }
-        return Ok(());
+        return Ok(retry_waits);
+    }
+}
+
+async fn insert_scan_file_rows_batch(
+    conn: &mut DbConn,
+    snapshot_id: &str,
+    rows: &[PendingScanEntry],
+) -> Result<Vec<ScanSqliteRetryWait>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut retry_idx = 0usize;
+    let mut retry_waits = Vec::new();
+    'retry: loop {
+        let mut tx = conn.begin().await.map_err(Error::from)?;
+        for row in rows {
+            if let Err(e) = sqlx::query(
+                r#"
+                INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(&row.file_id)
+            .bind(snapshot_id)
+            .bind(&row.rel_path)
+            .bind(row.size)
+            .bind(row.mtime_ms)
+            .bind(row.mode)
+            .bind(row.kind)
+            .execute(&mut *tx)
+            .await
+            {
+                let _ = tx.rollback().await;
+                if wait_for_scan_sqlite_busy_retry(
+                    "files.insert.batch",
+                    &mut retry_idx,
+                    &e,
+                    &mut retry_waits,
+                )
+                .await
+                {
+                    continue 'retry;
+                }
+                return Err(Error::from(e));
+            }
+        }
+
+        if let Err(e) = tx.commit().await {
+            if wait_for_scan_sqlite_busy_retry(
+                "files.insert.batch",
+                &mut retry_idx,
+                &e,
+                &mut retry_waits,
+            )
+            .await
+            {
+                continue 'retry;
+            }
+            return Err(Error::from(e));
+        }
+        return Ok(retry_waits);
+    }
+}
+
+async fn update_scan_file_metadata(
+    conn: &mut DbConn,
+    file_id: &str,
+    size: i64,
+    mtime_ms: i64,
+    mode: i64,
+) -> Result<Vec<ScanSqliteRetryWait>> {
+    let mut retry_idx = 0usize;
+    let mut retry_waits = Vec::new();
+    loop {
+        match sqlx::query("UPDATE files SET size = ?, mtime_ms = ?, mode = ? WHERE file_id = ?")
+            .bind(size)
+            .bind(mtime_ms)
+            .bind(mode)
+            .bind(file_id)
+            .execute(&mut **conn)
+            .await
+        {
+            Ok(_) => return Ok(retry_waits),
+            Err(error) => {
+                if wait_for_scan_sqlite_busy_retry(
+                    "files.metadata_update",
+                    &mut retry_idx,
+                    &error,
+                    &mut retry_waits,
+                )
+                .await
+                {
+                    continue;
+                }
+                return Err(Error::from(error));
+            }
+        }
+    }
+}
+
+async fn delete_transient_scan_file(
+    conn: &mut DbConn,
+    file_id: &str,
+) -> Result<Vec<ScanSqliteRetryWait>> {
+    let mut retry_idx = 0usize;
+    let mut retry_waits = Vec::new();
+    'retry: loop {
+        let mut tx = conn.begin().await.map_err(Error::from)?;
+        for statement in [
+            "DELETE FROM file_chunks WHERE file_id = ?",
+            "DELETE FROM files WHERE file_id = ?",
+        ] {
+            if let Err(error) = sqlx::query(statement).bind(file_id).execute(&mut *tx).await {
+                let _ = tx.rollback().await;
+                if wait_for_scan_sqlite_busy_retry(
+                    "files.transient_delete",
+                    &mut retry_idx,
+                    &error,
+                    &mut retry_waits,
+                )
+                .await
+                {
+                    continue 'retry;
+                }
+                return Err(Error::from(error));
+            }
+        }
+
+        if let Err(error) = tx.commit().await {
+            if wait_for_scan_sqlite_busy_retry(
+                "files.transient_delete",
+                &mut retry_idx,
+                &error,
+                &mut retry_waits,
+            )
+            .await
+            {
+                continue 'retry;
+            }
+            return Err(Error::from(error));
+        }
+        return Ok(retry_waits);
     }
 }
 
@@ -4418,43 +4858,84 @@ async fn lookup_remote_index_manifest_object_id(
     }
 }
 
-async fn lookup_base_file_snapshot_row(
+async fn lookup_base_file_snapshot_rows(
     conn: &mut DbConn,
     base_snapshot_id: &str,
-    rel_path: &str,
-) -> Result<Option<BaseFileSnapshotRow>> {
-    let row = execute_sqlite_with_busy_retry!(
-        "files.lookup_base_snapshot_row",
-        sqlx::query(
-            r#"
-            SELECT file_id, size, mtime_ms, mode
-            FROM base.files
-            WHERE snapshot_id = ? AND path = ? AND kind = 'file'
-            LIMIT 1
-            "#,
-        )
-        .bind(base_snapshot_id)
-        .bind(rel_path)
-        .fetch_optional(&mut **conn)
-    )?;
+    entries: &[PendingScanEntry],
+) -> Result<(
+    HashMap<String, BaseFileSnapshotRow>,
+    Vec<ScanSqliteRetryWait>,
+)> {
+    let file_paths: Vec<&str> = entries
+        .iter()
+        .filter(|entry| entry.kind == "file")
+        .map(|entry| entry.rel_path.as_str())
+        .collect();
+    if file_paths.is_empty() {
+        return Ok((HashMap::new(), Vec::new()));
+    }
 
-    Ok(row.map(|r| BaseFileSnapshotRow {
-        file_id: r.get::<String, _>("file_id"),
-        size: r.get::<i64, _>("size"),
-        mtime_ms: r.get::<i64, _>("mtime_ms"),
-        mode: r.get::<i64, _>("mode"),
-    }))
+    let mut retry_idx = 0usize;
+    let mut retry_waits = Vec::new();
+    let rows = loop {
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT file_id, path, size, mtime_ms, mode FROM base.files WHERE snapshot_id = ",
+        );
+        query.push_bind(base_snapshot_id);
+        query.push(" AND kind = 'file' AND path IN (");
+        {
+            let mut separated = query.separated(", ");
+            for path in &file_paths {
+                separated.push_bind(*path);
+            }
+        }
+        query.push(")");
+
+        match query.build().fetch_all(&mut **conn).await {
+            Ok(rows) => break rows,
+            Err(error) => {
+                if wait_for_scan_sqlite_busy_retry(
+                    "base.files.lookup.batch",
+                    &mut retry_idx,
+                    &error,
+                    &mut retry_waits,
+                )
+                .await
+                {
+                    continue;
+                }
+                return Err(Error::from(error));
+            }
+        }
+    };
+    Ok((
+        rows.into_iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("path"),
+                    BaseFileSnapshotRow {
+                        file_id: row.get::<String, _>("file_id"),
+                        size: row.get::<i64, _>("size"),
+                        mtime_ms: row.get::<i64, _>("mtime_ms"),
+                        mode: row.get::<i64, _>("mode"),
+                    },
+                )
+            })
+            .collect(),
+        retry_waits,
+    ))
 }
 
 async fn flush_base_chunk_copy_batch(
     conn: &mut DbConn,
     rows: &mut Vec<BaseFileChunkCopyRow>,
-) -> Result<(u64, u64)> {
+) -> Result<(u64, u64, Vec<ScanSqliteRetryWait>)> {
     if rows.is_empty() {
-        return Ok((0, 0));
+        return Ok((0, 0, Vec::new()));
     }
 
     let mut retry_idx = 0usize;
+    let mut retry_waits = Vec::new();
     'retry: loop {
         let mut tx = conn.begin().await.map_err(Error::from)?;
         let mut copied_chunks = 0u64;
@@ -4483,17 +4964,14 @@ async fn flush_base_chunk_copy_batch(
             .await
             {
                 let _ = tx.rollback().await;
-                if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
-                    let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
-                    retry_idx += 1;
-                    debug!(
-                        event = "sqlite.busy_retry",
-                        op = "chunks.copy_from_base.batch",
-                        retry = retry_idx,
-                        wait_ms,
-                        "sqlite.busy_retry"
-                    );
-                    sleep(Duration::from_millis(wait_ms)).await;
+                if wait_for_scan_sqlite_busy_retry(
+                    "chunks.copy_from_base.batch",
+                    &mut retry_idx,
+                    &e,
+                    &mut retry_waits,
+                )
+                .await
+                {
                     continue 'retry;
                 }
                 return Err(Error::from(e));
@@ -4516,18 +4994,14 @@ async fn flush_base_chunk_copy_batch(
                 Ok(v) => v.rows_affected(),
                 Err(e) => {
                     let _ = tx.rollback().await;
-                    if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len()
+                    if wait_for_scan_sqlite_busy_retry(
+                        "file_chunks.copy_from_base.batch",
+                        &mut retry_idx,
+                        &e,
+                        &mut retry_waits,
+                    )
+                    .await
                     {
-                        let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
-                        retry_idx += 1;
-                        debug!(
-                            event = "sqlite.busy_retry",
-                            op = "file_chunks.copy_from_base.batch",
-                            retry = retry_idx,
-                            wait_ms,
-                            "sqlite.busy_retry"
-                        );
-                        sleep(Duration::from_millis(wait_ms)).await;
                         continue 'retry;
                     }
                     return Err(Error::from(e));
@@ -4537,17 +5011,14 @@ async fn flush_base_chunk_copy_batch(
         }
 
         if let Err(e) = tx.commit().await {
-            if is_sqlite_busy_or_locked(&e) && retry_idx < SQLITE_BUSY_RETRY_DELAYS_MS.len() {
-                let wait_ms = SQLITE_BUSY_RETRY_DELAYS_MS[retry_idx];
-                retry_idx += 1;
-                debug!(
-                    event = "sqlite.busy_retry",
-                    op = "file_chunks.copy_from_base.batch",
-                    retry = retry_idx,
-                    wait_ms,
-                    "sqlite.busy_retry"
-                );
-                sleep(Duration::from_millis(wait_ms)).await;
+            if wait_for_scan_sqlite_busy_retry(
+                "file_chunks.copy_from_base.batch",
+                &mut retry_idx,
+                &e,
+                &mut retry_waits,
+            )
+            .await
+            {
                 continue 'retry;
             }
             return Err(Error::from(e));
@@ -4557,7 +5028,7 @@ async fn flush_base_chunk_copy_batch(
             .iter()
             .fold(0u64, |acc, row| acc.saturating_add(row.size));
         rows.clear();
-        return Ok((copied_chunks, deduped_bytes));
+        return Ok((copied_chunks, deduped_bytes, retry_waits));
     }
 }
 
@@ -5784,17 +6255,72 @@ fn path_to_utf8(path: &Path) -> Result<String> {
         })
 }
 
+fn file_metadata_values(metadata: &std::fs::Metadata) -> (i64, i64, i64) {
+    let size = metadata.len() as i64;
+    let mtime_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode() as i64
+    };
+    #[cfg(not(unix))]
+    let mode = 0i64;
+    (size, mtime_ms, mode)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BaseCopyRevalidation {
+    Match,
+    Changed { size: i64, mtime_ms: i64, mode: i64 },
+    NotFound,
+    NotFile,
+}
+
+fn revalidate_file_for_base_copy(
+    path: &Path,
+    expected_size: i64,
+    expected_mtime_ms: i64,
+    expected_mode: i64,
+) -> std::io::Result<BaseCopyRevalidation> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {
+            let (size, mtime_ms, mode) = file_metadata_values(&metadata);
+            if (size, mtime_ms, mode) == (expected_size, expected_mtime_ms, expected_mode) {
+                Ok(BaseCopyRevalidation::Match)
+            } else {
+                Ok(BaseCopyRevalidation::Changed {
+                    size,
+                    mtime_ms,
+                    mode,
+                })
+            }
+        }
+        Ok(_) => Ok(BaseCopyRevalidation::NotFile),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(BaseCopyRevalidation::NotFound)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::io;
 
     use ignore::Error as IgnoreError;
     use sqlx::Row;
 
     use super::{
-        SCAN_TRACE_BUCKET_US, SCAN_TRACE_MAX_BUCKETS, ScanActivityTrace, ScanWorkKind,
-        error_has_flood_wait, export_endpoint_index_db_for_upload,
-        ignore_error_is_non_root_not_found,
+        BaseCopyRevalidation, SCAN_TRACE_BUCKET_US, SCAN_TRACE_MAX_BUCKETS, ScanActivityTrace,
+        ScanPerformance, ScanSqliteRetryWait, ScanWorkKind, delete_transient_scan_file,
+        error_has_flood_wait, export_endpoint_index_db_for_upload, file_metadata_values,
+        ignore_error_is_non_root_not_found, revalidate_file_for_base_copy,
     };
     use crate::Error;
 
@@ -5809,7 +6335,7 @@ mod tests {
             "scan trace collection must remain bounded"
         );
 
-        let (json, resolution_ms) = trace.to_json();
+        let (json, resolution_ms) = trace.to_json(BTreeMap::new(), BTreeMap::new());
         assert!(resolution_ms > 1_000);
         let trace_json: serde_json::Value = serde_json::from_str(&json).unwrap();
         let buckets = trace_json["buckets"].as_array().unwrap();
@@ -5821,6 +6347,80 @@ mod tests {
                 .sum::<u64>(),
             1_000
         );
+    }
+
+    #[test]
+    fn base_copy_revalidation_rejects_a_file_removed_after_collection() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("transient.txt");
+        std::fs::write(&path, b"before collection").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let (size, mtime_ms, mode) = file_metadata_values(&metadata);
+
+        std::fs::remove_file(&path).unwrap();
+
+        assert_eq!(
+            revalidate_file_for_base_copy(&path, size, mtime_ms, mode).unwrap(),
+            BaseCopyRevalidation::NotFound
+        );
+    }
+
+    #[test]
+    fn base_copy_revalidation_rejects_a_file_that_becomes_a_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("changed-type");
+        std::fs::create_dir(&path).unwrap();
+
+        assert_eq!(
+            revalidate_file_for_base_copy(&path, 1, 0, 0).unwrap(),
+            BaseCopyRevalidation::NotFile
+        );
+    }
+
+    #[test]
+    fn scan_trace_counts_a_retried_sqlite_operation_once() {
+        let scan_started = std::time::Instant::now();
+        let mut performance = ScanPerformance::new(scan_started);
+        let retry_started = std::time::Instant::now();
+        let retry_waits = [ScanSqliteRetryWait {
+            started: retry_started,
+            finished: std::time::Instant::now(),
+        }];
+
+        performance.record_sqlite("files.insert", scan_started, &retry_waits);
+
+        let (trace_json, _) = performance.trace_json();
+        let trace: serde_json::Value = serde_json::from_str(&trace_json).unwrap();
+        assert_eq!(trace["sqlite_ops_count"]["files.insert"], 1);
+    }
+
+    #[tokio::test]
+    async fn transient_scan_file_cleanup_removes_the_filemap_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("filemap.sqlite");
+        let pool = crate::index_db::open_index_db(&db_path).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('s1', '2026-01-01T00:00:00Z', '/source', 'test', NULL)",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES ('f1', 's1', 'transient.txt', 1, 0, 0, 'file')",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+
+        delete_transient_scan_file(&mut conn, "f1").await.unwrap();
+
+        let rows: i64 = sqlx::query("SELECT COUNT(*) AS n FROM files WHERE file_id = 'f1'")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(rows, 0);
     }
 
     #[test]

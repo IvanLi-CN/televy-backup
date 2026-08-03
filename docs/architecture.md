@@ -6,7 +6,7 @@
   - Provides Settings UI and task controls (backup/restore/verify).
   - Spawns the local `televybackup` CLI for long-running operations and streams progress from stdout.
 - **Core library**: `televy_backup_core` (`crates/core/`).
-  - Implements scan → CDC chunking → hash → encrypt framing → enqueue uploads → worker uploads → SQLite index.
+  - Implements scan → CDC chunking → hash → encrypt framing → enqueue uploads → worker uploads → SQLite index. File metadata commits in bounded 512-entry batches, and unchanged-file baseline metadata is resolved once per batch.
   - Backup pipeline is phase-split (scan/upload/index); scan enqueues jobs into a bounded queue and upload workers honor endpoint rate limits.
   - Implements restore/verify using remote index manifest + chunk downloads.
 - **Daemon**: `televybackupd` (`crates/daemon/`).
@@ -76,9 +76,12 @@ Per-run logs are written to files as NDJSON and never mixed into stdout/stderr, 
 Performance logs distinguish the scan coroutine lifetime from measured scan
 resource slices. Successful scans write a compact trace of walk, metadata,
 read-chunk, encryption, and SQLite time at one-second resolution for normal
-runs, coarsened only for exceptionally long runs. Timeline tools must render
-only those slices and leave unmeasured gaps visible. Upload-queue waits and
-storage RPCs have their own actual interval records.
+runs, coarsened only for exceptionally long runs. Trace version 2 also reports
+cumulative milliseconds and batch counts for file-row insertion, base-file
+lookup, base chunk copy, and file chunk insertion. Timeline tools must render
+only measured slices and leave unmeasured gaps visible. SQLite busy/locked
+retry sleep is a separate wait slice, not SQLite resource time. Upload-queue
+waits and storage RPCs have their own actual interval records.
 
 Run-log filtering resolves in this order: `TELEVYBACKUP_LOG`, `RUST_LOG`, the
 machine-local Diagnostics preference, then the safe `Normal` default. The daemon

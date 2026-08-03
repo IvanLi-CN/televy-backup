@@ -235,6 +235,10 @@ Backup progress semantics for UI/events:
 - Need-upload metrics are phase-scoped:
   - `Need Upload (Disc.)` / `Remaining (Disc.)` during `scan` / `scan_upload`.
   - `Need Upload (Final)` / `Remaining (Final)` during `upload` / `index`.
+- Snapshot filemap scans commit file metadata in bounded batches of 512 and
+  match unchanged files against the base snapshot in one query per batch. This
+  keeps incremental scans compatible with base-chunk-copy while avoiding a
+  SQLite commit and baseline lookup for every file.
 
 ## Daemon (scheduled backups)
 

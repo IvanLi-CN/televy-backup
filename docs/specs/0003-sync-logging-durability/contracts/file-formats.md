@@ -42,7 +42,12 @@ resource occupancy. Every scan finish, including a failed scan, is preceded by
 a `trace_json` string. The inner JSON has `version`, `resolution_ms`, and
 `buckets`; each bucket has an `offset_ms` from scan start plus any measured
 `walk_us`, `metadata_us`, `read_chunk_us`, `hash_us`, `encrypt_us`, or
-`sqlite_us` values.
+`sqlite_us` values. Version 2 also has `sqlite_ops_ms` and `sqlite_ops_count`
+maps keyed by stable operation names. The scan writer records
+`files.insert`, `base.files.lookup`, `base_copy`, and `file_chunks.insert` as
+batched operations without paths, file IDs, or hashes.
+`sqlite_retry_wait_us` records actual SQLite busy/locked retry sleep separately
+from `sqlite_us`; consumers must render it as waiting rather than database work.
 Normal runs use one-second buckets; long runs are coarsened during collection
 to retain at most 4,096 buckets in memory and in the emitted event, and
 `resolution_ms` is authoritative. Missing measurement fields are zero. Consumers
