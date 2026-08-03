@@ -2,17 +2,17 @@
 
 ## 状态
 
-- Status: 部分完成（6/7）
+- Status: 实现完成，待 PR 合并、Release 与真机验收
 - Created: 2026-02-28
 - Last: 2026-08-03
-- Delivery: PR #49（追加修复：并行 helper uploads + helper 进程间 session 隔离）
+- Delivery: PR #49（既有传输优化）；P1 PR 待创建
 
 ## 背景 / 问题陈述
 
 - 现象：MTProto 备份阶段“带宽吃不满”，整体传输慢，尤其在默认配置 `min_delay_ms=250` 时更明显。
 - 根因（当前已确认）：
   - helper 端上传/下载默认按 **128KiB** 分片；在存在 `min_delay_ms` 节流时，请求频率被限制，导致吞吐上限偏低。
-  - 早期 core 虽有并发上传 worker pool，但 mtproto backend 通过单 helper 进程的 stdin/stdout 协议交互会被串行化（同一时刻只能有一个 request/response 对）；需要通过 helper pool 让并发上传 job 真正落到多个 helper 进程上。
+  - core 已有 helper pool，但 MTProto Storage 的 async future 在首次 poll 内同步等待 helper stdin/stdout；同一个 `FuturesUnordered` 无法继续 poll 其他 worker，故配置为 2 时实际 document upload 仍会交替执行。
 - 风险：在提升并发/降低延迟时，Telegram 服务端可能返回 `FLOOD_WAIT_X` / `FLOOD_PREMIUM_WAIT_X`，若处理不当会导致更严重的限速或抖动。
 
 ## 目标 / 非目标
@@ -42,8 +42,9 @@
 - core：实现 MTProto helper pool：由 `max_concurrent_uploads` 控制 helper 进程池大小，使并发上传 job 不再被单 helper stdin/stdout 串行化。
 - core：多 helper 并行时做 session 隔离：仅 primary helper 复用/更新持久化 session，其余 helper 使用独立 session（通过 bot token 重新鉴权），避免并发共享 session 导致卡死或异常。
 - core：direct、pack、index-part 使用同一个有界上传调度器，使
-  `max_concurrent_uploads` 成为所有实际 RPC 的全局上限；index manifest 必须等待
+  `max_concurrent_uploads` 成为所有 core 可观测 document RPC 的全局上限；index manifest 必须等待
   parts 完成后上传，并受同一限速与重试约束。
+- core：MTProto helper IPC 必须运行于 Tokio blocking pool，progress 通过异步通道回送原 upload future，避免同步 poll 边界重新串行化 upload worker。
 - macOS UI：Endpoint Settings 增加 “Rate limit (advanced)” 编辑控件：
   - `max_concurrent_uploads`（1..8）
   - `min_delay_ms`（0..500）
@@ -74,6 +75,7 @@
 ### SHOULD
 
 - 在默认配置（例如 `min_delay_ms=250`）不变的情况下，仅通过 part size 提升，吞吐应有可观提升（预期同频率请求下接近 4x 数据量）。
+- `max_concurrent_uploads` 是 direct、pack、index-part 与 index-manifest 合计的 Telegram file-part RPC 上限；core 使用同数 helper，且每个 document 只使用一个 file-part worker。
 - UI 对非法范围做 clamped/blocked，并明确告知风险与回滚方式（恢复默认或下调并发/增大延迟）。
 - 对 FloodWait parser、core 的 transient 分类与 flood-wait 检测补齐单测覆盖。
 
@@ -87,8 +89,9 @@
 
 - 默认 part size：512KiB。
 - 并发（两层）：
-  - core：通过 helper pool 让并发 upload job 分配到不同 helper 进程；pool size 由 `max_concurrent_uploads` 控制。
-  - helper：单次 upload 内部并发上传 file parts；worker 数由 `max_concurrent_uploads` 控制，并共享同一个全局限流器/冷却状态。
+  - core：通过共享自适应 slot、限速器与 helper pool，让 direct、pack、index-part upload job 分配到不同 helper 进程；slot id 是 run log 中的实际 worker 标识，在飞 document upload attempt 总数不超过 `max_concurrent_uploads`。
+  - helper：每个 document 使用一个 file-part worker；core 同时调度至多 `max_concurrent_uploads` 个 document，使合计 file-part RPC 不超过该上限。
+- index：分片在受限集合中并发上传；manifest 只在所有分片成功后进入相同的 slot 与限速器。
 - 节流：每次 invoke 前遵循：
   1) 计算并等待 `next_allowed`（全局冷却/限流）。
   2) 发送请求。
@@ -130,8 +133,8 @@
   When MTProto backend 上传一批对象（多个 upload job 并发排队）
   Then core 应通过 helper pool 实现并行上传，且不会因多 helper session 冲突导致永久卡死（progress 应持续推进）。
 - Given `max_concurrent_uploads = 2`
-  When direct、pack 和 index-part 同时具备上传工作
-  Then 实测 RPC 最大并发为 2，data 与 index-part 均可观察到重叠，且限速与重试等待保持独立可见。
+  When direct、pack 或多个 index-part 具备上传工作
+  Then `performance.upload` 所定义的 document RPC 最大并发为 2，data 与 index-part 均可观察到重叠，且限速与重试等待保持独立可见；每个 index attempt 记录实际 slot worker 与等待时长。
 - Given CI
   When PR 触发 GitHub Actions
   Then helper tests 会被执行且全绿。
@@ -160,7 +163,7 @@
 - [x] M4: macOS UI 增加 “Rate limit (advanced)” 控件并通过 swift 单测（如适用）
 - [x] M5: CI 增加 helper tests 步骤并全绿
 - [x] M6: core 引入 helper pool 并实现多 helper session 隔离（仅 primary helper 更新持久化 session）
-- [ ] M7: 将 direct、pack、index-part 置于一个共享的非阻塞有界调度器，并验证实际 RPC 并发
+- [ ] M7: 将 direct、pack、index-part 置于一个共享的非阻塞有界调度器；发布后以同机 Projects NDJSON 甘特图验证实际 file-part RPC 并发与全局上限
 
 ## 方案概述（Approach, high-level）
 

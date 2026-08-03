@@ -124,6 +124,10 @@ Invalid environment filters resolve to `Normal`, never global debug.
   plus attempt number.
   Queue wait, rate-limit wait, retry backoff, payload bytes, worker, and result
   are recorded without paths, chunk hashes, object IDs, or progress ticks.
+  `worker` is the shared upload-slot identifier, so direct, pack, index-part,
+  and index-manifest events can be rendered on the same worker lanes. The
+  `queue_wait_ms` on index attempts measures actual admission to that shared
+  slot rather than a synthetic phase duration.
 - `performance.index.compression.start` and `.finish` bound actual SQLite index
   compression. These events are logged at TelevyBackup `info` so `Normal`
   captures them without enabling dependency debug output.

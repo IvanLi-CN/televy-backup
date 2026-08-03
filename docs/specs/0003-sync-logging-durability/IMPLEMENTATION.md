@@ -65,6 +65,10 @@
 - Backup pipeline tests verify that Normal NDJSON contains parseable measured
   scan-resource buckets as well as upload-queue, upload-attempt,
   rate-limit-wait, and index-compression event boundaries.
+- Upload attempts use a shared slot identifier across data and index work. The
+  MTProto adapter relays progress from a blocking helper task back to its async
+  future, so concurrent attempt intervals remain observable instead of being
+  serialized by a synchronous poll.
 - The mock-only capture script permits an isolated second app instance and
   captures only the PID-owned Settings window without enabling the app's timer
   snapshot path or falling back to a full-screen capture. An exit trap reaps the

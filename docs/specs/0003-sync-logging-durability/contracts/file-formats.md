@@ -57,3 +57,6 @@ lifecycle interval.
 `performance.scan.queue_wait.start` and `.finish` use an opaque
 `queue_wait_id` to bound each actual upload-queue admission wait. Upload RPC
 events continue to use their upload sequence and attempt identifiers.
+For direct, pack, index-part, and index-manifest attempts, `worker` is the
+shared upload-slot number. `queue_wait_ms` is the measured wait to acquire that
+slot; index uploads no longer use a fixed worker label or a synthetic zero wait.
