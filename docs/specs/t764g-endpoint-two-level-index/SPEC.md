@@ -146,15 +146,17 @@
 - [x] M5: backup pipeline 改造（scan 写二级 DB；base-chunk-copy 读 base filemap DB）
 - [x] M6: restore/verify 改造（ATTACH 两级 DB；旧格式兼容）
 - [x] M7: strict 门禁：去掉 best-effort continue；bootstrap update 失败 => run failed；全量测试回归
-- [x] M8: filemap scan 使用 512 条 SQLite 写入事务和单次基线集合查询；trace 记录各类 SQLite 累计开销
+- [x] M8: filemap scan 使用 512 条收集/事务边界、128 条多值写入和单次基线集合查询；查询计划固定为请求路径 probe，trace 记录各类 SQLite 累计开销
 - [ ] M9: snapshot filemap 演进为 full + delta manifest；首次与压实写 full，v1 保持双读；链深达到 20 或累计压缩 delta 达最近 full 的 25% 时压实，无变化备份 filemap payload 不超过 1 MiB
 
 ## Filemap scan performance
 
-- 每个 snapshot filemap 的 `files` 行最多以 512 条为一批提交，避免逐文件隐式 SQLite
-  事务。
-- 同批普通文件以一次 `base.files` 集合查询匹配 size、mtime 与 mode，保持原有
-  base-chunk-copy、瞬态文件跳过、取消和 scan/upload 流水线语义。
+- 每个 snapshot filemap 的 `files` 行以 512 条为收集与事务边界，并拆为最多 128
+  条的多值写入语句，避免逐文件 SQLite 调用。
+- 同批普通文件以请求路径 CTE 的 `CROSS JOIN` 匹配 size、mtime 与 mode，固定对既有
+  `(snapshot_id, path)` 唯一索引的路径 probe；不得让优化器重排为基线全表扫描。基线
+  chunks/file_chunks 以 128 条映射 CTE 的两条集合 SQL 复制，保持原有 base-chunk-copy、
+  瞬态文件跳过、取消和 scan/upload 流水线语义。
 - `performance.scan.trace` 提供无路径、无哈希的 SQLite 操作累计时间和批次计数。后续
   full + delta filemap 仍须保留这一口径，以便区分索引生成成本和上传成本。
 

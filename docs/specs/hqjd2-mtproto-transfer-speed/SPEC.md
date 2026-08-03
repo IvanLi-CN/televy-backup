@@ -2,10 +2,10 @@
 
 ## 状态
 
-- Status: 实现完成，待 PR 合并、Release 与真机验收
+- Status: 实现完成，P1 已发布并完成真机验收
 - Created: 2026-02-28
 - Last: 2026-08-03
-- Delivery: PR #49（既有传输优化）；P1 PR 待创建
+- Delivery: PR #49（既有传输优化）；PR #65（P1 共享非阻塞上传调度器，Release v0.6.2）
 
 ## 背景 / 问题陈述
 
@@ -163,7 +163,7 @@
 - [x] M4: macOS UI 增加 “Rate limit (advanced)” 控件并通过 swift 单测（如适用）
 - [x] M5: CI 增加 helper tests 步骤并全绿
 - [x] M6: core 引入 helper pool 并实现多 helper session 隔离（仅 primary helper 更新持久化 session）
-- [ ] M7: 将 direct、pack、index-part 置于一个共享的非阻塞有界调度器；发布后以同机 Projects NDJSON 甘特图验证实际 file-part RPC 并发与全局上限
+- [x] M7: 将 direct、pack、index-part 置于一个共享的非阻塞有界调度器；同机 Projects NDJSON 验证实际 file-part RPC 最大并发为 2，data 与 index-part 均有重叠，且不超过全局上限
 
 ## 方案概述（Approach, high-level）
 

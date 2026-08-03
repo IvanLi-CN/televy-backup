@@ -14,6 +14,40 @@ fn write_file(path: PathBuf, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
 }
 
+async fn load_snapshot_file_chunks(
+    filemap_dir: &Path,
+    snapshot_id: &str,
+) -> Vec<(String, i64, String, i64, i64)> {
+    let filemap_path = filemap_dir.join(format!("{snapshot_id}.sqlite"));
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", filemap_path.display()))
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        SELECT f.path, fc.seq, fc.chunk_hash, fc.offset, fc.len
+        FROM files f
+        JOIN file_chunks fc ON fc.file_id = f.file_id
+        WHERE f.snapshot_id = ?
+        ORDER BY f.path, fc.seq
+        "#,
+    )
+    .bind(snapshot_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| {
+        (
+            row.get::<String, _>("path"),
+            row.get::<i64, _>("seq"),
+            row.get::<String, _>("chunk_hash"),
+            row.get::<i64, _>("offset"),
+            row.get::<i64, _>("len"),
+        )
+    })
+    .collect()
+}
+
 struct MutateOnUpload {
     file_path: PathBuf,
     bytes: Vec<u8>,
@@ -239,6 +273,60 @@ async fn backup_batches_file_rows_and_base_lookup_across_512_entries() {
         );
     }
 
+    // The requested-path CTE must remain the outer loop. If SQLite is allowed to
+    // reorder this into the snapshot/kind/file_id index, every 512-entry scan
+    // batch scans the entire base filemap before filtering requested paths.
+    let second_filemap = cfg
+        .filemap_dir
+        .join(format!("{}.sqlite", second.snapshot_id));
+    let first_filemap = cfg
+        .filemap_dir
+        .join(format!("{}.sqlite", first.snapshot_id));
+    let filemap_pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", second_filemap.display()))
+        .await
+        .unwrap();
+    let mut filemap_conn = filemap_pool.acquire().await.unwrap();
+    let attach_base = format!(
+        "ATTACH DATABASE '{}' AS base",
+        first_filemap.display().to_string().replace('\'', "''")
+    );
+    sqlx::query(&attach_base)
+        .execute(&mut *filemap_conn)
+        .await
+        .unwrap();
+    let plan = sqlx::query(
+        r#"
+        EXPLAIN QUERY PLAN
+        WITH requested(path) AS (VALUES (?), (?))
+        SELECT f.file_id
+        FROM requested r
+        CROSS JOIN base.files f
+        WHERE f.snapshot_id = ? AND f.path = r.path AND f.kind = 'file'
+        "#,
+    )
+    .bind("file-0000.bin")
+    .bind("file-0512.bin")
+    .bind(&first.snapshot_id)
+    .fetch_all(&mut *filemap_conn)
+    .await
+    .unwrap();
+    let plan_details = plan
+        .iter()
+        .map(|row| row.get::<String, _>("detail"))
+        .collect::<Vec<_>>();
+    assert!(
+        plan_details
+            .iter()
+            .any(|detail| detail.contains("snapshot_id=? AND path=?")),
+        "base lookup must probe the snapshot/path index: {plan_details:?}"
+    );
+    assert!(
+        plan_details
+            .iter()
+            .all(|detail| !detail.contains("idx_files_snapshot_kind_file")),
+        "base lookup must not scan the snapshot/kind/file_id index: {plan_details:?}"
+    );
+
     write_file(source.join("file-0001.bin"), &[0xA5; 257]);
     std::fs::remove_file(source.join("file-0512.bin")).unwrap();
     let third = run_backup(&storage, cfg).await.unwrap();
@@ -246,6 +334,55 @@ async fn backup_batches_file_rows_and_base_lookup_across_512_entries() {
     assert!(
         third.bytes_read > 0,
         "a size change must bypass base-chunk-copy and be read again"
+    );
+}
+
+#[tokio::test]
+async fn backup_base_copy_batch_preserves_multiple_chunks_per_file() {
+    let _backup_pipeline_lock = backup_pipeline_test_lock().await;
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("src");
+    std::fs::create_dir_all(&source).unwrap();
+    for index in 0..129 {
+        write_file(
+            source.join(format!("file-{index:04}.bin")),
+            &vec![index as u8; 4 * 1024],
+        );
+    }
+
+    let cfg = BackupConfig {
+        endpoint_db_path: temp.path().join("index.sqlite"),
+        filemap_dir: temp.path().join("filemaps"),
+        dedupe_db_path: temp.path().join("dedupe.sqlite"),
+        dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
+        source_path: source,
+        label: "base-copy-multi-chunk".to_string(),
+        chunking: ChunkingConfig {
+            min_bytes: 64,
+            avg_bytes: 256,
+            max_bytes: 1024,
+        },
+        rate_limit: Default::default(),
+        master_key: [10u8; 32],
+        snapshot_id: None,
+        keep_last_snapshots: 10,
+        remote_dedupe: RemoteDedupeMode::Disabled,
+    };
+    let storage = InMemoryStorage::new();
+    let first = run_backup(&storage, cfg.clone()).await.unwrap();
+    let second = run_backup(&storage, cfg.clone()).await.unwrap();
+
+    assert_eq!(second.bytes_read, 0);
+    assert_eq!(second.chunks_uploaded, 0);
+    assert!(
+        second.chunks_total > 129,
+        "fixture must copy multiple chunks/file"
+    );
+
+    assert_eq!(
+        load_snapshot_file_chunks(&cfg.filemap_dir, &first.snapshot_id).await,
+        load_snapshot_file_chunks(&cfg.filemap_dir, &second.snapshot_id).await,
+        "set-based base copy must retain every file-chunk mapping"
     );
 }
 

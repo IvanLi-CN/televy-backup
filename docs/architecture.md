@@ -6,7 +6,7 @@
   - Provides Settings UI and task controls (backup/restore/verify).
   - Spawns the local `televybackup` CLI for long-running operations and streams progress from stdout.
 - **Core library**: `televy_backup_core` (`crates/core/`).
-  - Implements scan → CDC chunking → hash → encrypt framing → enqueue uploads → worker uploads → SQLite index. File metadata commits in bounded 512-entry batches, and unchanged-file baseline metadata is resolved once per batch.
+  - Implements scan → CDC chunking → hash → encrypt framing → enqueue uploads → worker uploads → SQLite index. File metadata keeps 512-entry transaction boundaries but uses 128-row multi-value statements; unchanged-file baseline metadata is resolved with a requested-path `CROSS JOIN` that probes the base `(snapshot_id, path)` index, and unchanged chunks are copied through set-based mappings.
   - Backup pipeline is phase-split (scan/upload/index); scan enqueues jobs into a bounded queue. Direct chunks, packs, index parts, and manifests share adaptive upload slots and endpoint rate limits.
   - Implements restore/verify using remote index manifest + chunk downloads.
 - **Daemon**: `televybackupd` (`crates/daemon/`).
