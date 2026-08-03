@@ -32,8 +32,11 @@
 - File-row inserts commit in bounded batches of 512 and base file metadata is
   looked up once per batch. Scan trace version 2 exposes the cumulative time
   and count of `files.insert`, `base.files.lookup`, `base_copy`, and
-  `file_chunks.insert`, so a run can identify whether SQLite write, base lookup,
-  or chunk-copy work dominates without logging file-level data.
+  `chunks.insert.filemap` and `file_chunks.insert`, so a run can identify
+  whether SQLite write, base lookup, or chunk-copy work dominates without
+  logging file-level data. The temporary snapshot filemap uses a single-writer
+  WAL with scan-time auto-checkpoint and sync disabled; it restores FULL sync
+  and checkpoints before the SQLite file is uploaded.
 - SQLite busy/locked retry sleep is a separate `sqlite_retry_wait_us` trace
   slice and scan-finish summary value. It is excluded from `sqlite_us` and from
   per-operation SQLite timing, preserving the distinction between database

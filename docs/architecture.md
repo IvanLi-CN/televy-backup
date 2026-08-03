@@ -7,7 +7,7 @@
   - Spawns the local `televybackup` CLI for long-running operations and streams progress from stdout.
 - **Core library**: `televy_backup_core` (`crates/core/`).
   - Implements scan → CDC chunking → hash → encrypt framing → enqueue uploads → worker uploads → SQLite index. File metadata commits in bounded 512-entry batches, and unchanged-file baseline metadata is resolved once per batch.
-  - Backup pipeline is phase-split (scan/upload/index); scan enqueues jobs into a bounded queue. Direct chunks, packs, index parts, and manifests share adaptive upload slots and endpoint rate limits.
+  - Backup pipeline is phase-split (scan/upload/index); scan enqueues jobs into a bounded queue and upload workers honor endpoint rate limits.
   - Implements restore/verify using remote index manifest + chunk downloads.
 - **Daemon**: `televybackupd` (`crates/daemon/`).
   - Runs scheduled backups (hourly/daily) and applies retention policy.
@@ -215,7 +215,6 @@ The storage provider is **MTProto-only**:
 ### MTProto (`telegram.mtproto`)
 
 - Each encrypted chunk/index/manifest is uploaded as a Telegram `document` via MTProto.
-- `max_concurrent_uploads` caps concurrent core document attempts, with stable shared slot ids exposed in performance logs. Helper stdin/stdout exchanges run on Tokio's blocking pool and relay progress back to the async upload future, allowing the configured slots to run concurrently.
 - `object_id` is versioned: `tgmtproto:v1:<base64url(json)>` (peer/msgId/docId/accessHash; does not store `file_reference`).
 - Downloads refresh `file_reference` by fetching the message by `peer+msgId` and are chunked/resumable via `TELEVYBACKUP_DATA_DIR/cache/mtproto/`.
 - Engineered upload limit (to cap memory peaks and failure surface): `MTProtoEngineeredUploadMaxBytes = 128MiB`.
@@ -261,7 +260,14 @@ Backup runtime progress model:
 Index publish memory model:
 
 - During `index` phase, SQLite is compressed with streaming zstd into a temporary file and then uploaded in fixed-size encrypted parts.
-- Index parts are submitted through the same bounded upload slots as data work; their manifest is submitted only after every part succeeds.
+- Index parts are submitted through the same bounded upload slots as data work;
+  their manifest is submitted only after every part succeeds.
+
+The per-snapshot filemap is assembled in a single-writer WAL connection. File
+metadata and chunk rows use bounded multi-row writes, and unchanged base chunks
+are seeded once before set-based `file_chunks` mapping. Scan-time sync and WAL
+auto-checkpoint are deferred; FULL sync and an explicit checkpoint complete before
+the filemap is uploaded.
 - The process does **not** use whole-file `fs::read + encode_all` for index publish, to keep daemon memory bounded on large index databases.
 
 ## SQLite index

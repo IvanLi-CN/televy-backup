@@ -96,3 +96,9 @@ pipeline while removing the prior per-file SQLite commit and lookup pattern.
 Files are revalidated before base-copy so a transient file cannot inherit old
 chunks after a batch lookup. SQLite busy/locked retry sleep is represented as a
 separate wait slice rather than as database work.
+
+The snapshot filemap writer now uses bounded multi-row inserts for file metadata,
+file chunks, and newly read chunk rows. Unchanged-file chunk rows are seeded once
+from the base snapshot and materialized through a set-based mapping query. Because
+the temporary filemap has one writer, its WAL auto-checkpoint and scan-time sync
+are deferred; FULL sync and an explicit WAL checkpoint run before index upload.
