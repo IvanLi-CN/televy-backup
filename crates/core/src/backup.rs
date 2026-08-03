@@ -689,6 +689,7 @@ struct AdaptiveUploadController {
     max_concurrency: usize,
     target_concurrency: AtomicUsize,
     slots_in_use: AtomicUsize,
+    worker_slots: AtomicUsize,
     window_attempts: AtomicU64,
     window_failures: AtomicU64,
     consecutive_failures: AtomicUsize,
@@ -698,10 +699,14 @@ struct AdaptiveUploadController {
 
 struct AdaptiveUploadSlot {
     controller: Arc<AdaptiveUploadController>,
+    worker_index: usize,
 }
 
 impl Drop for AdaptiveUploadSlot {
     fn drop(&mut self) {
+        self.controller
+            .worker_slots
+            .fetch_and(!(1usize << self.worker_index), Ordering::Relaxed);
         saturating_sub_usize(&self.controller.slots_in_use, 1);
         self.controller.notify.notify_waiters();
     }
@@ -723,6 +728,7 @@ impl AdaptiveUploadController {
                 initial_concurrency.clamp(min_concurrency, max_concurrency),
             ),
             slots_in_use: AtomicUsize::new(0),
+            worker_slots: AtomicUsize::new(0),
             window_attempts: AtomicU64::new(0),
             window_failures: AtomicU64::new(0),
             consecutive_failures: AtomicUsize::new(0),
@@ -756,9 +762,13 @@ impl AdaptiveUploadController {
                     .compare_exchange(in_use, in_use + 1, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
                 {
-                    return Ok(AdaptiveUploadSlot {
-                        controller: Arc::clone(self),
-                    });
+                    if let Some(worker_index) = self.try_acquire_worker_index() {
+                        return Ok(AdaptiveUploadSlot {
+                            controller: Arc::clone(self),
+                            worker_index,
+                        });
+                    }
+                    saturating_sub_usize(&self.slots_in_use, 1);
                 }
                 continue;
             }
@@ -766,6 +776,34 @@ impl AdaptiveUploadController {
             tokio::select! {
                 _ = self.notify.notified() => {},
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
+            }
+        }
+    }
+
+    fn try_acquire_worker_index(&self) -> Option<usize> {
+        loop {
+            let occupied = self.worker_slots.load(Ordering::Relaxed);
+            for worker_index in 0..self.max_concurrency {
+                let mask = 1usize << worker_index;
+                if occupied & mask != 0 {
+                    continue;
+                }
+                if self
+                    .worker_slots
+                    .compare_exchange(
+                        occupied,
+                        occupied | mask,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+                {
+                    return Some(worker_index);
+                }
+                break;
+            }
+            if occupied.count_ones() as usize >= self.max_concurrency {
+                return None;
             }
         }
     }
@@ -2029,7 +2067,7 @@ pub async fn run_backup_with<S: Storage>(
 
     let upload_rx = Arc::new(Mutex::new(upload_rx));
     let mut workers = FuturesUnordered::new();
-    for worker_index in 0..limits.worker_pool_size {
+    for _ in 0..limits.worker_pool_size {
         let rx = Arc::clone(&upload_rx);
         let tx = result_tx.clone();
         let limiter = rate_limiter.clone();
@@ -2051,19 +2089,6 @@ pub async fn run_backup_with<S: Storage>(
             }
 
             loop {
-                let slot = tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    slot = adaptive.acquire_slot(&cancel) => slot,
-                };
-                let _slot = match slot {
-                    Ok(v) => v,
-                    Err(Error::Cancelled) => break,
-                    Err(e) => {
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
-                };
-
                 let job = tokio::select! {
                     _ = cancel.cancelled() => break,
                     job = async {
@@ -2079,13 +2104,25 @@ pub async fn run_backup_with<S: Storage>(
                 if cancel.is_cancelled() {
                     break;
                 }
+                let slot = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    slot = adaptive.acquire_slot(&cancel) => slot,
+                };
+                let _slot = match slot {
+                    Ok(v) => v,
+                    Err(Error::Cancelled) => break,
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
+                };
                 active_uploads.fetch_add(1, Ordering::Relaxed);
                 let _token = ActiveUploadToken(active_uploads.as_ref());
                 adaptive.on_attempt();
                 let outcome = process_upload_job(
                     storage,
                     &provider,
-                    worker_index,
+                    _slot.worker_index,
                     &limiter,
                     uploaded_bytes.as_ref(),
                     uploaded_net_bytes.as_ref(),
@@ -3685,6 +3722,8 @@ pub async fn run_backup_with<S: Storage>(
         &snapshot_id,
         &filemap_db_path,
         &filemap_temp_parent,
+        &adaptive_controller,
+        &upload_cancel,
         &rate_limiter,
         uploaded_bytes.as_ref(),
         uploaded_net_bytes.as_ref(),
@@ -3743,6 +3782,8 @@ pub async fn run_backup_with<S: Storage>(
         &endpoint_index_id,
         exported_endpoint_db.path(),
         &endpoint_temp_parent,
+        &adaptive_controller,
+        &upload_cancel,
         &rate_limiter,
         uploaded_bytes.as_ref(),
         uploaded_net_bytes.as_ref(),
@@ -3786,6 +3827,8 @@ pub async fn run_backup_with<S: Storage>(
             storage,
             &config,
             dedupe_conn,
+            &adaptive_controller,
+            &upload_cancel,
             &rate_limiter,
             uploaded_bytes.as_ref(),
             uploaded_net_bytes.as_ref(),
@@ -5228,6 +5271,8 @@ async fn publish_remote_dedupe_if_needed<S: Storage>(
     storage: &S,
     config: &BackupConfig,
     dedupe_conn: &mut DbConn,
+    adaptive_controller: &Arc<AdaptiveUploadController>,
+    cancel: &CancellationToken,
     rate_limiter: &UploadRateLimiter,
     uploaded_bytes: &AtomicU64,
     uploaded_net_bytes: &AtomicU64,
@@ -5262,6 +5307,8 @@ async fn publish_remote_dedupe_if_needed<S: Storage>(
                 &base_id,
                 exported_base.path(),
                 &dedupe_temp_parent,
+                adaptive_controller,
+                cancel,
                 rate_limiter,
                 uploaded_bytes,
                 uploaded_net_bytes,
@@ -5378,6 +5425,8 @@ async fn publish_remote_dedupe_if_needed<S: Storage>(
                     &base_id,
                     exported_base.path(),
                     &dedupe_temp_parent,
+                    adaptive_controller,
+                    cancel,
                     rate_limiter,
                     uploaded_bytes,
                     uploaded_net_bytes,
@@ -5449,6 +5498,8 @@ async fn publish_remote_dedupe_if_needed<S: Storage>(
                     &delta_id,
                     exported_delta.path(),
                     &dedupe_temp_parent,
+                    adaptive_controller,
+                    cancel,
                     rate_limiter,
                     uploaded_bytes,
                     uploaded_net_bytes,
@@ -5680,6 +5731,242 @@ struct UploadedIndex {
     manifest_object_id: String,
 }
 
+struct PendingIndexPart {
+    no: u32,
+    encrypted: Vec<u8>,
+    hash: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_index_part<S: Storage>(
+    storage: &S,
+    provider: &str,
+    index_id: &str,
+    index_upload_sequence: u64,
+    part: PendingIndexPart,
+    adaptive: &Arc<AdaptiveUploadController>,
+    cancel: &CancellationToken,
+    rate_limiter: &UploadRateLimiter,
+    uploaded_bytes: &AtomicU64,
+    uploaded_net_bytes: &AtomicU64,
+    have_uploaded_net_bytes: &AtomicBool,
+    upload_workload_total: &AtomicU64,
+    upload_confirmed_bytes: &AtomicU64,
+    progress: Option<&dyn ProgressSink>,
+    source_files_total: Option<u64>,
+    source_bytes_total: Option<u64>,
+    files_indexed: u64,
+    chunks_total: u64,
+    bytes_read: u64,
+    bytes_uploaded_source: u64,
+    source_bytes_need_upload_total: u64,
+    bytes_deduped: u64,
+) -> Result<IndexManifestPart> {
+    let queue_started = Instant::now();
+    // Keep the shared admission slot until this part has completed all attempts.
+    let _slot = adaptive.acquire_slot(cancel).await?;
+    let worker_index = _slot.worker_index;
+    let queue_wait_ms = queue_started.elapsed().as_millis() as u64;
+    let part_len_u64 = part.encrypted.len() as u64;
+    adaptive.on_attempt();
+
+    for attempt in 1..=UPLOAD_OBJECT_MAX_ATTEMPTS {
+        let rate_limit_wait_ms = rate_limiter.wait_turn().await.as_millis() as u64;
+        info!(
+            event = "performance.upload.rate_limit_wait",
+            kind = "index_part",
+            index_upload_sequence,
+            index_part_no = part.no,
+            attempt,
+            worker = worker_index,
+            rate_limit_wait_ms,
+            "performance.upload.rate_limit_wait"
+        );
+        let filename = telegram_camouflaged_filename();
+        let last_reported = AtomicU64::new(0);
+        let last_reported_net = AtomicU64::new(0);
+        info!(
+            event = "performance.upload.start",
+            kind = "index_part",
+            index_upload_sequence,
+            index_part_no = part.no,
+            attempt,
+            worker = worker_index,
+            payload_bytes = part_len_u64,
+            queue_wait_ms,
+            rate_limit_wait_ms,
+            "performance.upload.start"
+        );
+        let upload_started = Instant::now();
+        let upload_res = storage
+            .upload_document_with_progress(
+                &filename,
+                part.encrypted.clone(),
+                Some(Box::new(|p| {
+                    let mut progressed = false;
+
+                    let n = p.bytes;
+                    let prev = last_reported.swap(n, Ordering::Relaxed);
+                    if n > prev {
+                        progressed = true;
+                        uploaded_bytes.fetch_add(n - prev, Ordering::Relaxed);
+                    }
+
+                    if let Some(net) = p.net_bytes {
+                        have_uploaded_net_bytes.store(true, Ordering::Relaxed);
+                        let prev_net = last_reported_net.swap(net, Ordering::Relaxed);
+                        if net > prev_net {
+                            progressed = true;
+                            uploaded_net_bytes.fetch_add(net - prev_net, Ordering::Relaxed);
+                        }
+                    }
+
+                    if progressed && let Some(sink) = progress {
+                        sink.on_progress(TaskProgress {
+                            phase: "index".to_string(),
+                            files_total: None,
+                            files_done: Some(files_indexed),
+                            source_files_total,
+                            source_bytes_total,
+                            source_bytes_need_upload_total: Some(source_bytes_need_upload_total),
+                            chunks_total: Some(chunks_total),
+                            chunks_done: Some(chunks_total),
+                            bytes_read: Some(bytes_read),
+                            upload_bytes_total: Some(upload_workload_total.load(Ordering::Relaxed)),
+                            bytes_uploaded_confirmed: Some(
+                                upload_confirmed_bytes.load(Ordering::Relaxed),
+                            ),
+                            bytes_uploaded_source: Some(bytes_uploaded_source),
+                            bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                            net_bytes_uploaded: have_uploaded_net_bytes
+                                .load(Ordering::Relaxed)
+                                .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+                            bytes_downloaded: None,
+                            net_bytes_downloaded: None,
+                            bytes_deduped: Some(bytes_deduped),
+                        });
+                    }
+                })),
+            )
+            .await;
+        info!(
+            event = "performance.upload.finish",
+            kind = "index_part",
+            index_upload_sequence,
+            index_part_no = part.no,
+            attempt,
+            worker = worker_index,
+            payload_bytes = part_len_u64,
+            rpc_duration_ms = upload_started.elapsed().as_millis() as u64,
+            result = if upload_res.is_ok() {
+                "succeeded"
+            } else {
+                "failed"
+            },
+            "performance.upload.finish"
+        );
+
+        match upload_res {
+            Ok(object_id) => {
+                let reported = last_reported.load(Ordering::Relaxed);
+                if reported < part_len_u64 {
+                    uploaded_bytes.fetch_add(part_len_u64 - reported, Ordering::Relaxed);
+                }
+                upload_confirmed_bytes.fetch_add(part_len_u64, Ordering::Relaxed);
+                if let Some(sink) = progress {
+                    sink.on_progress(TaskProgress {
+                        phase: "index".to_string(),
+                        files_total: None,
+                        files_done: Some(files_indexed),
+                        source_files_total,
+                        source_bytes_total,
+                        source_bytes_need_upload_total: Some(source_bytes_need_upload_total),
+                        chunks_total: Some(chunks_total),
+                        chunks_done: Some(chunks_total),
+                        bytes_read: Some(bytes_read),
+                        upload_bytes_total: Some(upload_workload_total.load(Ordering::Relaxed)),
+                        bytes_uploaded_confirmed: Some(
+                            upload_confirmed_bytes.load(Ordering::Relaxed),
+                        ),
+                        bytes_uploaded_source: Some(bytes_uploaded_source),
+                        bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
+                        net_bytes_uploaded: have_uploaded_net_bytes
+                            .load(Ordering::Relaxed)
+                            .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
+                        bytes_downloaded: None,
+                        net_bytes_downloaded: None,
+                        bytes_deduped: Some(bytes_deduped),
+                    });
+                }
+                adaptive.on_success();
+                return Ok(IndexManifestPart {
+                    no: part.no,
+                    size: part.encrypted.len(),
+                    hash: part.hash,
+                    object_id,
+                });
+            }
+            Err(error) => {
+                let reported = last_reported.load(Ordering::Relaxed).min(part_len_u64);
+                if reported > 0 {
+                    saturating_sub_u64(uploaded_bytes, reported);
+                }
+                let reported_net = last_reported_net.load(Ordering::Relaxed);
+                if reported_net > 0 {
+                    saturating_sub_u64(uploaded_net_bytes, reported_net);
+                }
+
+                if attempt < UPLOAD_OBJECT_MAX_ATTEMPTS && is_retryable_upload_error(&error) {
+                    let backoff = upload_object_retry_backoff(attempt);
+                    warn!(
+                        event = "io.telegram.upload_retry",
+                        provider,
+                        kind = "index_part",
+                        snapshot_id = index_id,
+                        part_no = part.no,
+                        blob_bytes = part_len_u64,
+                        attempt,
+                        max_attempts = UPLOAD_OBJECT_MAX_ATTEMPTS,
+                        backoff_ms = backoff.as_millis() as u64,
+                        error = %error,
+                        "io.telegram.upload_retry"
+                    );
+                    let retry_wait_started = Instant::now();
+                    sleep(backoff).await;
+                    info!(
+                        event = "performance.upload.retry_wait",
+                        kind = "index_part",
+                        index_upload_sequence,
+                        index_part_no = part.no,
+                        attempt,
+                        worker = worker_index,
+                        retry_wait_ms = retry_wait_started.elapsed().as_millis() as u64,
+                        "performance.upload.retry_wait"
+                    );
+                    continue;
+                }
+
+                adaptive.on_failure(&error);
+                return Err(Error::Telegram {
+                    message: format!(
+                        "upload failed: kind=index_part snapshot_id={index_id} part_no={} bytes={part_len_u64}; {error}",
+                        part.no
+                    ),
+                });
+            }
+        }
+    }
+
+    let error = Error::Telegram {
+        message: format!(
+            "upload failed: kind=index_part snapshot_id={index_id} part_no={} bytes={part_len_u64}; retry loop exhausted",
+            part.no
+        ),
+    };
+    adaptive.on_failure(&error);
+    Err(error)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn upload_index_sqlite_db<S: Storage>(
     storage: &S,
@@ -5687,6 +5974,8 @@ async fn upload_index_sqlite_db<S: Storage>(
     index_id: &str,
     sqlite_db_path: &Path,
     temp_parent: &Path,
+    adaptive_controller: &Arc<AdaptiveUploadController>,
+    cancel: &CancellationToken,
     rate_limiter: &UploadRateLimiter,
     uploaded_bytes: &AtomicU64,
     uploaded_net_bytes: &AtomicU64,
@@ -5764,7 +6053,13 @@ async fn upload_index_sqlite_db<S: Storage>(
         upload_workload_total.fetch_add(index_parts_payload_total, Ordering::Relaxed);
     }
 
+    let max_parallel_parts = config
+        .rate_limit
+        .max_concurrent_uploads
+        .clamp(1, ADAPTIVE_MAX_CONCURRENCY as u32) as usize;
     let mut parts = Vec::new();
+    let mut uploads = FuturesUnordered::new();
+    let mut first_upload_error = None;
     let mut part_buf = vec![0u8; INDEX_PART_BYTES];
     let mut reader = compressed_file.reopen()?;
     reader.seek(SeekFrom::Start(0))?;
@@ -5781,218 +6076,61 @@ async fn upload_index_sqlite_db<S: Storage>(
         if filled == 0 {
             break;
         }
-        let part_plain = &part_buf[..filled];
+
         let aad = index_part_aad(index_id, part_no);
-        let part_enc = encrypt_framed(&config.master_key, aad.as_bytes(), part_plain)?;
-        let part_hash = blake3::hash(&part_enc).to_hex().to_string();
-        let part_len = part_enc.len();
-        let part_len_u64 = part_len as u64;
-        let mut object_id: Option<String> = None;
-        for attempt in 1..=UPLOAD_OBJECT_MAX_ATTEMPTS {
-            let rate_limit_wait_ms = rate_limiter.wait_turn().await.as_millis() as u64;
-            info!(
-                event = "performance.upload.rate_limit_wait",
-                kind = "index_part",
-                index_upload_sequence,
-                index_part_no = part_no,
-                attempt,
-                worker = "index",
-                rate_limit_wait_ms,
-                "performance.upload.rate_limit_wait"
-            );
-            let filename = telegram_camouflaged_filename();
-            let last_reported = AtomicU64::new(0);
-            let last_reported_net = AtomicU64::new(0);
-            info!(
-                event = "performance.upload.start",
-                kind = "index_part",
-                index_upload_sequence,
-                index_part_no = part_no,
-                attempt,
-                worker = "index",
-                payload_bytes = part_len_u64,
-                queue_wait_ms = 0_u64,
-                rate_limit_wait_ms,
-                "performance.upload.start"
-            );
-            let upload_started = Instant::now();
-            let upload_res = storage
-                .upload_document_with_progress(
-                    &filename,
-                    part_enc.clone(),
-                    Some(Box::new(|p| {
-                        let mut progressed = false;
+        let encrypted = encrypt_framed(&config.master_key, aad.as_bytes(), &part_buf[..filled])?;
+        let part = PendingIndexPart {
+            no: part_no,
+            hash: blake3::hash(&encrypted).to_hex().to_string(),
+            encrypted,
+        };
+        uploads.push(upload_index_part(
+            storage,
+            provider,
+            index_id,
+            index_upload_sequence,
+            part,
+            adaptive_controller,
+            cancel,
+            rate_limiter,
+            uploaded_bytes,
+            uploaded_net_bytes,
+            have_uploaded_net_bytes,
+            upload_workload_total,
+            upload_confirmed_bytes,
+            progress,
+            source_files_total,
+            source_bytes_total,
+            files_indexed,
+            chunks_total,
+            bytes_read,
+            bytes_uploaded_source,
+            source_bytes_need_upload_total,
+            bytes_deduped,
+        ));
+        part_no = part_no.saturating_add(1);
 
-                        let n = p.bytes;
-                        let prev = last_reported.swap(n, Ordering::Relaxed);
-                        if n > prev {
-                            progressed = true;
-                            uploaded_bytes.fetch_add(n - prev, Ordering::Relaxed);
-                        }
-
-                        if let Some(net) = p.net_bytes {
-                            have_uploaded_net_bytes.store(true, Ordering::Relaxed);
-                            let prev_net = last_reported_net.swap(net, Ordering::Relaxed);
-                            if net > prev_net {
-                                progressed = true;
-                                uploaded_net_bytes.fetch_add(net - prev_net, Ordering::Relaxed);
-                            }
-                        }
-
-                        if progressed && let Some(sink) = progress {
-                            sink.on_progress(TaskProgress {
-                                phase: "index".to_string(),
-                                files_total: None,
-                                files_done: Some(files_indexed),
-                                source_files_total,
-                                source_bytes_total,
-                                source_bytes_need_upload_total: Some(
-                                    source_bytes_need_upload_total,
-                                ),
-                                chunks_total: Some(chunks_total),
-                                chunks_done: Some(chunks_total),
-                                bytes_read: Some(bytes_read),
-                                upload_bytes_total: Some(
-                                    upload_workload_total.load(Ordering::Relaxed),
-                                ),
-                                bytes_uploaded_confirmed: Some(
-                                    upload_confirmed_bytes.load(Ordering::Relaxed),
-                                ),
-                                bytes_uploaded_source: Some(bytes_uploaded_source),
-                                bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-                                net_bytes_uploaded: have_uploaded_net_bytes
-                                    .load(Ordering::Relaxed)
-                                    .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
-                                bytes_downloaded: None,
-                                net_bytes_downloaded: None,
-                                bytes_deduped: Some(bytes_deduped),
-                            });
-                        }
-                    })),
-                )
-                .await;
-            info!(
-                event = "performance.upload.finish",
-                kind = "index_part",
-                index_upload_sequence,
-                index_part_no = part_no,
-                attempt,
-                worker = "index",
-                payload_bytes = part_len_u64,
-                rpc_duration_ms = upload_started.elapsed().as_millis() as u64,
-                result = if upload_res.is_ok() {
-                    "succeeded"
-                } else {
-                    "failed"
-                },
-                "performance.upload.finish"
-            );
-
-            match upload_res {
-                Ok(uploaded_object_id) => {
-                    let reported = last_reported.load(Ordering::Relaxed);
-                    if reported < part_len_u64 {
-                        uploaded_bytes.fetch_add(part_len_u64 - reported, Ordering::Relaxed);
-                    }
-                    object_id = Some(uploaded_object_id);
+        if uploads.len() >= max_parallel_parts {
+            match uploads.next().await.expect("index upload future exists") {
+                Ok(part) => parts.push(part),
+                Err(error) => {
+                    first_upload_error = Some(error);
                     break;
-                }
-                Err(e) => {
-                    let reported = last_reported.load(Ordering::Relaxed).min(part_len_u64);
-                    if reported > 0 {
-                        saturating_sub_u64(uploaded_bytes, reported);
-                    }
-                    let reported_net = last_reported_net.load(Ordering::Relaxed);
-                    if reported_net > 0 {
-                        saturating_sub_u64(uploaded_net_bytes, reported_net);
-                    }
-
-                    if attempt < UPLOAD_OBJECT_MAX_ATTEMPTS && is_retryable_upload_error(&e) {
-                        let backoff = upload_object_retry_backoff(attempt);
-                        warn!(
-                            event = "io.telegram.upload_retry",
-                            provider,
-                            kind = "index_part",
-                            snapshot_id = index_id,
-                            part_no,
-                            blob_bytes = part_len_u64,
-                            attempt,
-                            max_attempts = UPLOAD_OBJECT_MAX_ATTEMPTS,
-                            backoff_ms = backoff.as_millis() as u64,
-                            error = %e,
-                            "io.telegram.upload_retry"
-                        );
-                        let retry_wait_started = Instant::now();
-                        sleep(backoff).await;
-                        info!(
-                            event = "performance.upload.retry_wait",
-                            kind = "index_part",
-                            index_upload_sequence,
-                            index_part_no = part_no,
-                            attempt,
-                            worker = "index",
-                            retry_wait_ms = retry_wait_started.elapsed().as_millis() as u64,
-                            "performance.upload.retry_wait"
-                        );
-                        continue;
-                    }
-
-                    error!(
-                        event = "io.telegram.upload_failed",
-                        provider,
-                        snapshot_id = index_id,
-                        part_no,
-                        blob_bytes = part_len_u64,
-                        attempts = attempt,
-                        error = %e,
-                        "io.telegram.upload_failed"
-                    );
-                    return Err(Error::Telegram {
-                        message: format!(
-                            "upload failed: kind=index_part snapshot_id={index_id} part_no={part_no} bytes={part_len_u64}; {e}"
-                        ),
-                    });
                 }
             }
         }
-        let object_id = object_id.ok_or_else(|| Error::Telegram {
-            message: format!(
-                "upload failed: kind=index_part snapshot_id={index_id} part_no={part_no} bytes={part_len_u64}; retry loop exhausted"
-            ),
-        })?;
-        upload_confirmed_bytes.fetch_add(part_len_u64, Ordering::Relaxed);
-        if let Some(sink) = progress {
-            sink.on_progress(TaskProgress {
-                phase: "index".to_string(),
-                files_total: None,
-                files_done: Some(files_indexed),
-                source_files_total,
-                source_bytes_total,
-                source_bytes_need_upload_total: Some(source_bytes_need_upload_total),
-                chunks_total: Some(chunks_total),
-                chunks_done: Some(chunks_total),
-                bytes_read: Some(bytes_read),
-                upload_bytes_total: Some(upload_workload_total.load(Ordering::Relaxed)),
-                bytes_uploaded_confirmed: Some(upload_confirmed_bytes.load(Ordering::Relaxed)),
-                bytes_uploaded_source: Some(bytes_uploaded_source),
-                bytes_uploaded: Some(uploaded_bytes.load(Ordering::Relaxed)),
-                net_bytes_uploaded: have_uploaded_net_bytes
-                    .load(Ordering::Relaxed)
-                    .then_some(uploaded_net_bytes.load(Ordering::Relaxed)),
-                bytes_downloaded: None,
-                net_bytes_downloaded: None,
-                bytes_deduped: Some(bytes_deduped),
-            });
-        }
-
-        parts.push(IndexManifestPart {
-            no: part_no,
-            size: part_len,
-            hash: part_hash,
-            object_id,
-        });
-        part_no = part_no.saturating_add(1);
     }
+    while let Some(part) = uploads.next().await {
+        match part {
+            Ok(part) => parts.push(part),
+            Err(error) if first_upload_error.is_none() => first_upload_error = Some(error),
+            Err(_) => {}
+        }
+    }
+    if let Some(error) = first_upload_error {
+        return Err(error);
+    }
+    parts.sort_by_key(|part| part.no);
 
     let manifest = IndexManifest {
         version: 1,
@@ -6009,6 +6147,12 @@ async fn upload_index_sqlite_db<S: Storage>(
     let manifest_enc = encrypt_framed(&config.master_key, index_id.as_bytes(), &manifest_json)?;
     let manifest_bytes = manifest_enc.len() as u64;
     upload_workload_total.fetch_add(manifest_bytes, Ordering::Relaxed);
+    let manifest_queue_started = Instant::now();
+    // The manifest shares the same admission cap as data and index parts.
+    let _manifest_slot = adaptive_controller.acquire_slot(cancel).await?;
+    let manifest_worker = _manifest_slot.worker_index;
+    let manifest_queue_wait_ms = manifest_queue_started.elapsed().as_millis() as u64;
+    adaptive_controller.on_attempt();
     let mut manifest_object_id: Option<String> = None;
     for attempt in 1..=UPLOAD_OBJECT_MAX_ATTEMPTS {
         let rate_limit_wait_ms = rate_limiter.wait_turn().await.as_millis() as u64;
@@ -6017,7 +6161,7 @@ async fn upload_index_sqlite_db<S: Storage>(
             kind = "index_manifest",
             index_upload_sequence,
             attempt,
-            worker = "index",
+            worker = manifest_worker,
             rate_limit_wait_ms,
             "performance.upload.rate_limit_wait"
         );
@@ -6029,9 +6173,9 @@ async fn upload_index_sqlite_db<S: Storage>(
             kind = "index_manifest",
             index_upload_sequence,
             attempt,
-            worker = "index",
+            worker = manifest_worker,
             payload_bytes = manifest_bytes,
-            queue_wait_ms = 0_u64,
+            queue_wait_ms = manifest_queue_wait_ms,
             rate_limit_wait_ms,
             "performance.upload.start"
         );
@@ -6092,7 +6236,7 @@ async fn upload_index_sqlite_db<S: Storage>(
             kind = "index_manifest",
             index_upload_sequence,
             attempt,
-            worker = "index",
+            worker = manifest_worker,
             payload_bytes = manifest_bytes,
             rpc_duration_ms = upload_started.elapsed().as_millis() as u64,
             result = if upload_res.is_ok() {
@@ -6109,6 +6253,7 @@ async fn upload_index_sqlite_db<S: Storage>(
                 if reported < manifest_bytes {
                     uploaded_bytes.fetch_add(manifest_bytes - reported, Ordering::Relaxed);
                 }
+                adaptive_controller.on_success();
                 manifest_object_id = Some(uploaded_manifest_object_id);
                 break;
             }
@@ -6143,7 +6288,7 @@ async fn upload_index_sqlite_db<S: Storage>(
                         kind = "index_manifest",
                         index_upload_sequence,
                         attempt,
-                        worker = "index",
+                        worker = manifest_worker,
                         retry_wait_ms = retry_wait_started.elapsed().as_millis() as u64,
                         "performance.upload.retry_wait"
                     );
@@ -6160,11 +6305,13 @@ async fn upload_index_sqlite_db<S: Storage>(
                     error = %e,
                     "io.telegram.upload_failed"
                 );
-                return Err(Error::Telegram {
+                let error = Error::Telegram {
                     message: format!(
                         "upload failed: kind=index_manifest snapshot_id={index_id} bytes={manifest_bytes}; {e}"
                     ),
-                });
+                };
+                adaptive_controller.on_failure(&error);
+                return Err(error);
             }
         }
     }
@@ -6172,7 +6319,14 @@ async fn upload_index_sqlite_db<S: Storage>(
         message: format!(
             "upload failed: kind=index_manifest snapshot_id={index_id} bytes={manifest_bytes}; retry loop exhausted"
         ),
-    })?;
+    });
+    let manifest_object_id = match manifest_object_id {
+        Ok(object_id) => object_id,
+        Err(error) => {
+            adaptive_controller.on_failure(&error);
+            return Err(error);
+        }
+    };
 
     upload_confirmed_bytes.fetch_add(manifest_bytes, Ordering::Relaxed);
     if let Some(sink) = progress {

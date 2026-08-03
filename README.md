@@ -239,6 +239,10 @@ Backup progress semantics for UI/events:
   match unchanged files against the base snapshot in one query per batch. This
   keeps incremental scans compatible with base-chunk-copy while avoiding a
   SQLite commit and baseline lookup for every file.
+- `max_concurrent_uploads` bounds concurrent core document upload attempts
+  across direct chunks, packs, index parts, and manifests. MTProto helper IPC
+  runs off the async polling path, so the configured value is effective rather
+  than merely a worker-pool size.
 
 ## Daemon (scheduled backups)
 

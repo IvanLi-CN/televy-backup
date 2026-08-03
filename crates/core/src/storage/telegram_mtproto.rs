@@ -3,11 +3,12 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc as tokio_mpsc;
 
 use super::{Storage, StorageProgress};
 use crate::{Error, Result};
@@ -134,9 +135,14 @@ pub struct TelegramMtProtoStorageConfig {
 pub struct TelegramMtProtoStorage {
     provider: String,
     chat_id: String,
+    manager: Arc<MtProtoHelperManager>,
+}
+
+struct MtProtoHelperManager {
     api_id: i32,
     api_hash: String,
     bot_token: String,
+    chat_id: String,
     cache_dir: PathBuf,
     min_delay_ms: Option<u64>,
     max_concurrent_uploads: Option<usize>,
@@ -185,7 +191,9 @@ impl TelegramMtProtoStorage {
                 },
                 cache_dir: cache_dir.clone(),
                 min_delay_ms,
-                max_concurrent_uploads,
+                // Core distributes this cap across helpers. One file-part worker per document
+                // keeps combined Telegram RPC concurrency within the configured global limit.
+                max_concurrent_uploads: Some(1),
             })?;
             if is_primary {
                 primary_session_bytes = helper.session_bytes();
@@ -195,20 +203,108 @@ impl TelegramMtProtoStorage {
 
         Ok(Self {
             provider: config.provider,
-            chat_id,
-            api_id,
-            api_hash,
-            bot_token,
-            cache_dir,
-            min_delay_ms,
-            max_concurrent_uploads,
-            helper_path,
-            session: Mutex::new(primary_session_bytes),
-            helper_pool: MtProtoHelperPool::new(helpers),
+            chat_id: chat_id.clone(),
+            manager: Arc::new(MtProtoHelperManager {
+                api_id,
+                api_hash,
+                bot_token,
+                chat_id,
+                cache_dir,
+                min_delay_ms,
+                max_concurrent_uploads: Some(1),
+                helper_path,
+                session: Mutex::new(primary_session_bytes),
+                helper_pool: MtProtoHelperPool::new(helpers),
+            }),
         })
     }
 
     pub fn session_bytes(&self) -> Option<Vec<u8>> {
+        self.manager.session_bytes()
+    }
+
+    fn with_helper<T>(&self, f: impl FnOnce(&mut MtProtoHelper) -> Result<T>) -> Result<T> {
+        maybe_block_in_place(|| self.manager.with_helper_blocking(f))
+    }
+
+    async fn upload_async<'a>(
+        &self,
+        request: UploadRequest,
+        mut progress: Option<Box<dyn FnMut(StorageProgress) + Send + 'a>>,
+    ) -> Result<String> {
+        let (progress_tx, mut progress_rx) = tokio_mpsc::unbounded_channel();
+        let manager = Arc::clone(&self.manager);
+        let forward_progress = progress.is_some();
+        let mut task = tokio::task::spawn_blocking(move || {
+            manager.with_helper_blocking(|helper| {
+                if forward_progress {
+                    let mut relay = |update: StorageProgress| {
+                        let _ = progress_tx.send(update);
+                    };
+                    helper.upload_with_progress(request, Some(&mut relay))
+                } else {
+                    helper.upload(request)
+                }
+            })
+        });
+        let mut progress_open = forward_progress;
+
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut task => {
+                    let result = result.map_err(|error| Error::Telegram {
+                        message: format!("mtproto helper upload task failed: {error}"),
+                    })?;
+                    while let Ok(update) = progress_rx.try_recv() {
+                        if let Some(callback) = progress.as_mut() {
+                            callback(update);
+                        }
+                    }
+                    return result;
+                }
+                update = progress_rx.recv(), if progress_open => {
+                    match update {
+                        Some(update) => {
+                            if let Some(callback) = progress.as_mut() {
+                                callback(update);
+                            }
+                        }
+                        None => progress_open = false,
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn pinned_object_id(&self) -> Result<Option<String>> {
+        self.with_helper(|helper| helper.get_pinned())
+    }
+
+    pub fn pin_message_id(&self, msg_id: i32) -> Result<()> {
+        self.with_helper(|helper| helper.pin(msg_id))?;
+        Ok(())
+    }
+
+    pub fn list_dialogs(
+        &self,
+        limit: usize,
+        include_users: bool,
+    ) -> Result<Vec<TelegramDialogInfo>> {
+        self.with_helper(|helper| helper.list_dialogs(limit, include_users))
+    }
+
+    pub fn wait_for_chat(
+        &self,
+        timeout_secs: u64,
+        include_users: bool,
+    ) -> Result<TelegramDialogInfo> {
+        self.with_helper(|helper| helper.wait_for_chat(timeout_secs, include_users))
+    }
+}
+
+impl MtProtoHelperManager {
+    fn session_bytes(&self) -> Option<Vec<u8>> {
         self.session.lock().ok().and_then(|guard| guard.clone())
     }
 
@@ -266,73 +362,48 @@ impl TelegramMtProtoStorage {
         Ok(())
     }
 
-    fn with_helper<T>(&self, f: impl FnOnce(&mut MtProtoHelper) -> Result<T>) -> Result<T> {
-        maybe_block_in_place(|| {
-            // Check out a helper from the pool (block the current blocking thread until one is
-            // available). This is what makes `max_concurrent_uploads` actually enable parallel
-            // upload *jobs* for the MTProto backend.
-            let mut pooled = self.helper_pool.checkout()?;
-            let helper = &mut pooled.helper;
+    fn with_helper_blocking<T>(
+        &self,
+        f: impl FnOnce(&mut MtProtoHelper) -> Result<T>,
+    ) -> Result<T> {
+        // This runs on Tokio's blocking pool for document uploads. Synchronous control-plane
+        // operations still enter through `TelegramMtProtoStorage::with_helper`.
+        let mut pooled = self.helper_pool.checkout()?;
+        let helper = &mut pooled.helper;
 
-            // Always make sure we don't keep using a dead helper between runs.
-            if let Err(e) = self.ensure_helper_running_locked(helper, pooled.is_primary) {
-                self.helper_pool.checkin(pooled);
-                return Err(e);
-            }
-
-            // Ensure the helper is returned to the pool even if the caller panics (should be rare,
-            // but better than permanently reducing pool capacity).
-            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(helper)));
-
-            // Only the primary helper is allowed to update the persisted session; secondary helpers
-            // run with independent sessions to avoid MTProto seqno/message_id divergence across
-            // processes.
-            if pooled.is_primary {
-                *self.session.lock().map_err(|_| Error::Telegram {
-                    message: "mtproto helper session lock poisoned".to_string(),
-                })? = helper.session_bytes();
-            }
-
-            // If the helper process itself is unhealthy, respawn it so the next run can proceed
-            // without needing a full app/daemon restart.
-            if let Ok(Err(ref e)) = res
-                && Self::should_respawn_helper_after(e)
-            {
-                let _ = self.replace_helper_locked(helper, pooled.is_primary);
-            }
-
+        // Always make sure we don't keep using a dead helper between runs.
+        if let Err(e) = self.ensure_helper_running_locked(helper, pooled.is_primary) {
             self.helper_pool.checkin(pooled);
+            return Err(e);
+        }
 
-            match res {
-                Ok(v) => v,
-                Err(panic) => std::panic::resume_unwind(panic),
-            }
-        })
-    }
+        // Ensure the helper is returned to the pool even if the caller panics (should be rare,
+        // but better than permanently reducing pool capacity).
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(helper)));
 
-    pub fn pinned_object_id(&self) -> Result<Option<String>> {
-        self.with_helper(|helper| helper.get_pinned())
-    }
+        // Only the primary helper is allowed to update the persisted session; secondary helpers
+        // run with independent sessions to avoid MTProto seqno/message_id divergence across
+        // processes.
+        if pooled.is_primary {
+            *self.session.lock().map_err(|_| Error::Telegram {
+                message: "mtproto helper session lock poisoned".to_string(),
+            })? = helper.session_bytes();
+        }
 
-    pub fn pin_message_id(&self, msg_id: i32) -> Result<()> {
-        self.with_helper(|helper| helper.pin(msg_id))?;
-        Ok(())
-    }
+        // If the helper process itself is unhealthy, respawn it so the next run can proceed
+        // without needing a full app/daemon restart.
+        if let Ok(Err(ref e)) = res
+            && Self::should_respawn_helper_after(e)
+        {
+            let _ = self.replace_helper_locked(helper, pooled.is_primary);
+        }
 
-    pub fn list_dialogs(
-        &self,
-        limit: usize,
-        include_users: bool,
-    ) -> Result<Vec<TelegramDialogInfo>> {
-        self.with_helper(|helper| helper.list_dialogs(limit, include_users))
-    }
+        self.helper_pool.checkin(pooled);
 
-    pub fn wait_for_chat(
-        &self,
-        timeout_secs: u64,
-        include_users: bool,
-    ) -> Result<TelegramDialogInfo> {
-        self.with_helper(|helper| helper.wait_for_chat(timeout_secs, include_users))
+        match res {
+            Ok(v) => v,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 }
 
@@ -410,13 +481,14 @@ impl Storage for TelegramMtProtoStorage {
         bytes: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
-            let resp = self.with_helper(|helper| {
-                helper.upload(UploadRequest {
+            self.upload_async(
+                UploadRequest {
                     filename: filename.to_string(),
                     bytes,
-                })
-            })?;
-            Ok(resp)
+                },
+                None,
+            )
+            .await
         })
     }
 
@@ -424,22 +496,17 @@ impl Storage for TelegramMtProtoStorage {
         &'a self,
         filename: &'a str,
         bytes: Vec<u8>,
-        mut progress: Option<Box<dyn FnMut(StorageProgress) + Send + 'a>>,
+        progress: Option<Box<dyn FnMut(StorageProgress) + Send + 'a>>,
     ) -> Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
-            let resp = self.with_helper(|helper| {
-                let progress = progress
-                    .as_deref_mut()
-                    .map(|cb| cb as &mut dyn FnMut(StorageProgress));
-                helper.upload_with_progress(
-                    UploadRequest {
-                        filename: filename.to_string(),
-                        bytes,
-                    },
-                    progress,
-                )
-            })?;
-            Ok(resp)
+            self.upload_async(
+                UploadRequest {
+                    filename: filename.to_string(),
+                    bytes,
+                },
+                progress,
+            )
+            .await
         })
     }
 
@@ -576,6 +643,7 @@ mod tests {
     enum FakeHelperMode {
         Graceful,
         HangAfterShutdownAck,
+        DelayedUploads,
     }
 
     #[cfg(unix)]
@@ -627,6 +695,7 @@ mod tests {
         let mode = match mode {
             FakeHelperMode::Graceful => "graceful",
             FakeHelperMode::HangAfterShutdownAck => "hang_after_ack",
+            FakeHelperMode::DelayedUploads => "delayed_uploads",
         };
         let script = format!(
             r#"#!/bin/sh
@@ -653,6 +722,16 @@ while IFS= read -r line; do
         done
       fi
       exit 0
+      ;;
+    *'"cmd":"upload"'*)
+      size=$(printf '%s\n' "$line" | sed -n 's/.*"size":\([0-9][0-9]*\).*/\1/p')
+      dd bs=1 count="$size" of=/dev/null 2>/dev/null
+      printf 'upload_start\n' >> "$EVENTS"
+      printf '%s\n' '{{"ok":true,"event":"upload_progress","bytesUploaded":1}}'
+      if [ "$MODE" = "delayed_uploads" ]; then
+        sleep 0.3
+      fi
+      printf '%s\n' '{{"ok":true,"objectId":"fake-object"}}'
       ;;
     *)
       printf 'unexpected:%s\n' "$line" >> "$EVENTS"
@@ -763,7 +842,7 @@ printf 'eof\n' >> "$EVENTS"
         assert_eq!(storage.session_bytes(), Some(b"session".to_vec()));
 
         let pid = {
-            let guard = storage.helper_pool.inner.lock().unwrap();
+            let guard = storage.manager.helper_pool.inner.lock().unwrap();
             guard[0].helper.child.id()
         };
 
@@ -809,8 +888,89 @@ printf 'eof\n' >> "$EVENTS"
                 .count(),
             1
         );
+        assert!(
+            init_lines
+                .iter()
+                .all(|line| line.contains(r#""maxConcurrentUploads":1"#))
+        );
 
         drop(storage);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mtproto_storage_uploads_use_independent_blocking_tasks() {
+        let fake = write_fake_helper(FakeHelperMode::DelayedUploads);
+        let cache_dir = fake
+            .script_path
+            .parent()
+            .unwrap()
+            .join("cache-upload-concurrency");
+        let storage = connect_fake_storage(&fake.script_path, &cache_dir, None, Some(2)).await;
+        let progress_a = std::sync::atomic::AtomicUsize::new(0);
+        let progress_b = std::sync::atomic::AtomicUsize::new(0);
+        let started = Instant::now();
+
+        let (first, second) = tokio::join!(
+            storage.upload_document_with_progress(
+                "first.bin",
+                vec![1],
+                Some(Box::new(|_| {
+                    progress_a.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                })),
+            ),
+            storage.upload_document_with_progress(
+                "second.bin",
+                vec![2],
+                Some(Box::new(|_| {
+                    progress_b.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                })),
+            ),
+        );
+
+        assert_eq!(first.unwrap(), "fake-object");
+        assert_eq!(second.unwrap(), "fake-object");
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "uploads should overlap instead of serializing on the first future poll"
+        );
+        assert_eq!(progress_a.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(progress_b.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let events = fs::read_to_string(&fake.events_path).unwrap();
+        assert_eq!(
+            events
+                .lines()
+                .filter(|line| *line == "upload_start")
+                .count(),
+            2
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn mtproto_storage_forwards_progress_queued_with_completion() {
+        let fake = write_fake_helper(FakeHelperMode::Graceful);
+        let cache_dir = fake
+            .script_path
+            .parent()
+            .unwrap()
+            .join("cache-upload-progress");
+        let storage = connect_fake_storage(&fake.script_path, &cache_dir, None, Some(1)).await;
+        let progress = std::sync::atomic::AtomicUsize::new(0);
+
+        let object_id = storage
+            .upload_document_with_progress(
+                "progress.bin",
+                vec![1],
+                Some(Box::new(|_| {
+                    progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                })),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(object_id, "fake-object");
+        assert_eq!(progress.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[cfg(unix)]

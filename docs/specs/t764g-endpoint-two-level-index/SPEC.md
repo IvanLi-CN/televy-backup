@@ -93,9 +93,11 @@
 
 - 上传二级 filemap DB：
   - 生成 IndexManifest v1（`snapshot_id = <snapshot_id>`），分片加密上传
+  - 分片使用与 data upload 相同的有界 slot、限速与重试调度；manifest 等所有分片成功后才上传
   - 将 manifest/parts 写入 endpoint DB 的 `remote_indexes/remote_index_parts`（key=snapshot_id）
 - 导出并上传一级 endpoint DB（不含 files/file_chunks）：
   - 生成 IndexManifest v1（`snapshot_id = <endpointIndexId>`），分片加密上传
+  - 分片同样受共享 upload slot 上限约束，并在 run log 中记录实际 worker 与 slot 等待
 - 更新 pinned bootstrap catalog（一次保存）：
   - `endpointLatest = { endpointIndexId, manifestObjectId }`
   - `targets[].latest = { snapshot_id, manifest_object_id = <filemap manifest> }`
