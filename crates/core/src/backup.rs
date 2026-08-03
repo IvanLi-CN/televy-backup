@@ -24,7 +24,7 @@ use crate::dedupe_catalog::{
     dedupe_base_id_for_storage, dedupe_delta_id_from_scope, load_remote_dedupe_catalog,
     save_remote_dedupe_catalog,
 };
-use crate::index_db::{open_existing_index_db, open_index_db};
+use crate::index_db::{open_existing_index_db, open_index_db, open_snapshot_filemap_db};
 use crate::index_manifest::{IndexManifest, IndexManifestPart, index_part_aad};
 use crate::pack::{
     PACK_MAX_BYTES, PACK_MAX_ENTRIES_PER_PACK, PACK_TARGET_BYTES, PACK_TARGET_JITTER_BYTES,
@@ -43,8 +43,15 @@ const PACK_ENABLE_MIN_OBJECTS: usize = 10;
 const SINGLE_BLOB_PACK_OVERHEAD_BUDGET_BYTES: usize = 4096;
 const RONOMON_READ_CHUNK_BYTES: usize = 1024 * 1024;
 const PACK_MAX_STAGING_AGE_SECS: u64 = 3;
-const BASE_FILE_CHUNK_COPY_BATCH_SIZE: usize = 128;
+// Two bound columns per mapping keep 480 rows below SQLite's usual 999 bind limit.
+const BASE_FILE_CHUNK_COPY_BATCH_SIZE: usize = 480;
 const SCAN_FILE_METADATA_BATCH_SIZE: usize = 512;
+// The bundled SQLite build supports thousands of bind variables; keep every
+// statement bounded by the scan batch size so memory and cancellation behavior
+// remain predictable.
+const SCAN_FILE_INSERT_ROWS_PER_STATEMENT: usize = 512;
+const FILE_CHUNK_INSERT_ROWS_PER_STATEMENT: usize = 512;
+const FILEMAP_CHUNK_INSERT_ROWS_PER_STATEMENT: usize = 512;
 const ADAPTIVE_MIN_CONCURRENCY: usize = 1;
 const ADAPTIVE_MAX_CONCURRENCY: usize = 8;
 const ADAPTIVE_MAX_DELAY_MS: u64 = 500;
@@ -1103,6 +1110,12 @@ struct FileChunkRow {
     chunk_hash: String,
     offset: i64,
     len: i64,
+}
+
+#[derive(Debug, Clone)]
+struct FilemapChunkRow {
+    chunk_hash: String,
+    size: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -2260,7 +2273,7 @@ pub async fn run_backup_with<S: Storage>(
                 // Create per-snapshot filemap DB and seed the snapshot row. This DB is uploaded
                 // as the snapshot's "filemap index", while the endpoint DB remains small and only
                 // stores global/dedupe state.
-                let filemap_pool = open_index_db(&scan_filemap_db_path).await?;
+                let filemap_pool = open_snapshot_filemap_db(&scan_filemap_db_path).await?;
                 let mut filemap_conn: DbConn = filemap_pool.acquire().await?;
                 drop(filemap_pool);
                 let sqlite_started = Instant::now();
@@ -2362,6 +2375,7 @@ pub async fn run_backup_with<S: Storage>(
                 let mut pending_uploads: Vec<SourceBlob> = Vec::new();
                 let mut pack_state = PackState::new(provider, &snapshot_id);
                 let mut pending_base_chunk_copies: Vec<BaseFileChunkCopyRow> = Vec::new();
+                let mut base_chunks_seeded = false;
                 let mut warned_ignore_errors = HashSet::<String>::new();
                 let mut seen_ignore_files = HashSet::<PathBuf>::new();
                 let mut ignore_rule_files = 0u64;
@@ -2632,6 +2646,25 @@ pub async fn run_backup_with<S: Storage>(
                                     continue;
                                 }
                                 BaseCopyRevalidation::Match => {
+                                    if !base_chunks_seeded {
+                                        if let Some(cancel) = options.cancel
+                                            && cancel.is_cancelled()
+                                        {
+                                            return Err(Error::Cancelled);
+                                        }
+                                        let sqlite_started = Instant::now();
+                                        let retry_waits = seed_base_snapshot_chunks(
+                                            &mut filemap_conn,
+                                            base_snapshot_id.as_deref().unwrap_or_default(),
+                                        )
+                                        .await?;
+                                        scan_performance.record_sqlite(
+                                            "base_copy",
+                                            sqlite_started,
+                                            &retry_waits,
+                                        );
+                                        base_chunks_seeded = true;
+                                    }
                                     pending_base_chunk_copies.push(BaseFileChunkCopyRow {
                                         file_id: file_id.clone(),
                                         base_file_id: base_row.file_id,
@@ -2732,6 +2765,7 @@ pub async fn run_backup_with<S: Storage>(
                         };
                         let chunker = file_chunker(file, &scan_chunking);
                         let mut file_chunk_rows: Vec<FileChunkRow> = Vec::new();
+                        let mut filemap_chunk_rows: Vec<FilemapChunkRow> = Vec::new();
 
                         let mut chunks = chunker.enumerate();
                         loop {
@@ -2758,26 +2792,13 @@ pub async fn run_backup_with<S: Storage>(
                             let chunk_hash = blake3::hash(&chunk.data).to_hex().to_string();
                             scan_performance.record(ScanWorkKind::Hash, hash_started);
 
-                            // `file_chunks` has a FK to `chunks`, so ensure the chunk row exists in
-                            // the per-snapshot filemap DB regardless of whether the chunk is deduped.
-                            let sqlite_started = Instant::now();
-                            let (_, retry_waits) = execute_scan_sqlite_with_busy_retry!(
-                                "chunks.insert.filemap",
-                                sqlx::query(
-                                    r#"
-                                    INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
-                                    VALUES (?, ?, 'blake3', 'xchacha20poly1305', strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-                                    "#,
-                                )
-                                .bind(&chunk_hash)
-                                .bind(chunk.data.len() as i64)
-                                .execute(&mut *filemap_conn)
-                            )?;
-                            scan_performance.record_sqlite(
-                                "chunks.insert.filemap",
-                                sqlite_started,
-                                &retry_waits,
-                            );
+                            // `file_chunks` has a FK to `chunks`; defer the filemap chunk-row
+                            // insert until this file is fully chunked, then write bounded multi-row
+                            // statements before materializing its file_chunks rows.
+                            filemap_chunk_rows.push(FilemapChunkRow {
+                                chunk_hash: chunk_hash.clone(),
+                                size: chunk.data.len() as i64,
+                            });
 
                             let exists = known_chunk_hashes.contains(&chunk_hash);
                             if exists {
@@ -2869,6 +2890,20 @@ pub async fn run_backup_with<S: Storage>(
                             });
                         }
 
+                        if !filemap_chunk_rows.is_empty() {
+                            let sqlite_started = Instant::now();
+                            let retry_waits = insert_filemap_chunks_batch(
+                                &mut filemap_conn,
+                                &filemap_chunk_rows,
+                            )
+                            .await?;
+                            scan_performance.record_sqlite(
+                                "chunks.insert.filemap",
+                                sqlite_started,
+                                &retry_waits,
+                            );
+                        }
+
                         if !file_chunk_rows.is_empty() {
                             let sqlite_started = Instant::now();
                             let retry_waits =
@@ -2910,6 +2945,32 @@ pub async fn run_backup_with<S: Storage>(
                         uploader
                             .enqueue_direct(blob.chunk_hash, blob.blob, blob.source_bytes)
                             .await?;
+                    }
+                }
+
+                let filemap_checkpoint_started = Instant::now();
+                match checkpoint_snapshot_filemap_wal(&mut filemap_conn).await {
+                    Ok((wal_log_frames, wal_checkpointed_frames)) => {
+                        info!(
+                            event = "performance.index.filemap_checkpoint",
+                            phase = "scan",
+                            duration_ms = filemap_checkpoint_started.elapsed().as_millis() as u64,
+                            result = "succeeded",
+                            wal_log_frames,
+                            wal_checkpointed_frames,
+                            "performance.index.filemap_checkpoint"
+                        );
+                    }
+                    Err(error) => {
+                        error!(
+                            event = "performance.index.filemap_checkpoint",
+                            phase = "scan",
+                            duration_ms = filemap_checkpoint_started.elapsed().as_millis() as u64,
+                            result = "failed",
+                            error = %error,
+                            "performance.index.filemap_checkpoint"
+                        );
+                        return Err(error);
                     }
                 }
 
@@ -4023,21 +4084,19 @@ async fn insert_file_chunks_batch(
     'retry: loop {
         let mut tx = conn.begin().await.map_err(Error::from)?;
 
-        for row in rows {
-            if let Err(e) = sqlx::query(
-                r#"
-                INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
-                VALUES (?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(file_id)
-            .bind(row.seq)
-            .bind(&row.chunk_hash)
-            .bind(row.offset)
-            .bind(row.len)
-            .execute(&mut *tx)
-            .await
-            {
+        for statement_rows in rows.chunks(FILE_CHUNK_INSERT_ROWS_PER_STATEMENT) {
+            let mut query = QueryBuilder::<Sqlite>::new(
+                "INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len) ",
+            );
+            query.push_values(statement_rows, |mut values, row| {
+                values
+                    .push_bind(file_id)
+                    .push_bind(row.seq)
+                    .push_bind(&row.chunk_hash)
+                    .push_bind(row.offset)
+                    .push_bind(row.len);
+            });
+            if let Err(e) = query.build().execute(&mut *tx).await {
                 let _ = tx.rollback().await;
                 if wait_for_scan_sqlite_busy_retry(
                     "file_chunks.insert.batch",
@@ -4070,6 +4129,64 @@ async fn insert_file_chunks_batch(
     }
 }
 
+async fn insert_filemap_chunks_batch(
+    conn: &mut DbConn,
+    rows: &[FilemapChunkRow],
+) -> Result<Vec<ScanSqliteRetryWait>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut retry_idx = 0usize;
+    let mut retry_waits = Vec::new();
+    'retry: loop {
+        let mut tx = conn.begin().await.map_err(Error::from)?;
+
+        for statement_rows in rows.chunks(FILEMAP_CHUNK_INSERT_ROWS_PER_STATEMENT) {
+            let mut query = QueryBuilder::<Sqlite>::new(
+                "INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) ",
+            );
+            query.push_values(statement_rows, |mut values, row| {
+                values
+                    .push_bind(&row.chunk_hash)
+                    .push_bind(row.size)
+                    .push_bind("blake3")
+                    .push_bind("xchacha20poly1305")
+                    .push("strftime('%Y-%m-%dT%H:%M:%fZ','now')");
+            });
+            if let Err(error) = query.build().execute(&mut *tx).await {
+                let _ = tx.rollback().await;
+                if wait_for_scan_sqlite_busy_retry(
+                    "chunks.insert.filemap.batch",
+                    &mut retry_idx,
+                    &error,
+                    &mut retry_waits,
+                )
+                .await
+                {
+                    continue 'retry;
+                }
+                return Err(Error::from(error));
+            }
+        }
+
+        if let Err(error) = tx.commit().await {
+            if wait_for_scan_sqlite_busy_retry(
+                "chunks.insert.filemap.batch",
+                &mut retry_idx,
+                &error,
+                &mut retry_waits,
+            )
+            .await
+            {
+                continue 'retry;
+            }
+            return Err(Error::from(error));
+        }
+        return Ok(retry_waits);
+    }
+}
+
 async fn insert_scan_file_rows_batch(
     conn: &mut DbConn,
     snapshot_id: &str,
@@ -4083,23 +4200,21 @@ async fn insert_scan_file_rows_batch(
     let mut retry_waits = Vec::new();
     'retry: loop {
         let mut tx = conn.begin().await.map_err(Error::from)?;
-        for row in rows {
-            if let Err(e) = sqlx::query(
-                r#"
-                INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(&row.file_id)
-            .bind(snapshot_id)
-            .bind(&row.rel_path)
-            .bind(row.size)
-            .bind(row.mtime_ms)
-            .bind(row.mode)
-            .bind(row.kind)
-            .execute(&mut *tx)
-            .await
-            {
+        for statement_rows in rows.chunks(SCAN_FILE_INSERT_ROWS_PER_STATEMENT) {
+            let mut query = QueryBuilder::<Sqlite>::new(
+                "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) ",
+            );
+            query.push_values(statement_rows, |mut values, row| {
+                values
+                    .push_bind(&row.file_id)
+                    .push_bind(snapshot_id)
+                    .push_bind(&row.rel_path)
+                    .push_bind(row.size)
+                    .push_bind(row.mtime_ms)
+                    .push_bind(row.mode)
+                    .push_bind(row.kind);
+            });
+            if let Err(e) = query.build().execute(&mut *tx).await {
                 let _ = tx.rollback().await;
                 if wait_for_scan_sqlite_busy_retry(
                     "files.insert.batch",
@@ -4921,18 +5036,20 @@ async fn lookup_base_file_snapshot_rows(
     let mut retry_idx = 0usize;
     let mut retry_waits = Vec::new();
     let rows = loop {
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT file_id, path, size, mtime_ms, mode FROM base.files WHERE snapshot_id = ",
+        // Keep the requested paths as the outer relation so SQLite probes the
+        // base UNIQUE(snapshot_id, path) index once per path instead of choosing
+        // a scan-heavy plan for a large `IN (...)` list.
+        let mut query = QueryBuilder::<Sqlite>::new("WITH requested(path) AS (");
+        query.push_values(file_paths.iter(), |mut values, path| {
+            values.push_bind(*path);
+        });
+        query.push(
+            ") SELECT f.file_id, f.path, f.size, f.mtime_ms, f.mode \
+             FROM requested r \
+             CROSS JOIN base.files f WHERE f.snapshot_id = ",
         );
         query.push_bind(base_snapshot_id);
-        query.push(" AND kind = 'file' AND path IN (");
-        {
-            let mut separated = query.separated(", ");
-            for path in &file_paths {
-                separated.push_bind(*path);
-            }
-        }
-        query.push(")");
+        query.push(" AND f.path = r.path AND f.kind = 'file'");
 
         match query.build().fetch_all(&mut **conn).await {
             Ok(rows) => break rows,
@@ -4981,34 +5098,29 @@ async fn flush_base_chunk_copy_batch(
     let mut retry_waits = Vec::new();
     'retry: loop {
         let mut tx = conn.begin().await.map_err(Error::from)?;
-        let mut copied_chunks = 0u64;
-
-        for row in rows.iter() {
-            // `file_chunks` has a FK to `chunks`. When we base-copy file_chunks, we must also
-            // seed the referenced chunk rows in the destination filemap DB, otherwise SQLite
-            // will reject the insert with a FK violation.
-            //
-            // Note: base snapshot DB might be either the cached filemap DB, or the legacy
-            // endpoint DB (upgrade path).
-            if let Err(e) = sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
-                SELECT c.chunk_hash, c.size, c.hash_alg, c.enc_alg, c.created_at
-                FROM base.chunks c
-                WHERE c.chunk_hash IN (
-                    SELECT DISTINCT chunk_hash
-                    FROM base.file_chunks
-                    WHERE file_id = ?
-                )
-                "#,
-            )
-            .bind(&row.base_file_id)
-            .execute(&mut *tx)
-            .await
-            {
+        // The referenced chunk rows are seeded once per base snapshot before this
+        // batch path. Each batch therefore only has to materialize its file-chunk
+        // mapping, avoiding a repeated per-file DISTINCT query over the base DB.
+        let mut file_chunks_query =
+            QueryBuilder::<Sqlite>::new("WITH copy_map(file_id, base_file_id) AS (");
+        file_chunks_query.push_values(rows.iter(), |mut values, row| {
+            values.push_bind(&row.file_id).push_bind(&row.base_file_id);
+        });
+        file_chunks_query.push(
+            r#")
+            INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
+            SELECT m.file_id, fc.seq, fc.chunk_hash, fc.offset, fc.len
+            FROM copy_map m
+            JOIN base.file_chunks fc ON fc.file_id = m.base_file_id
+            ORDER BY m.file_id, fc.seq
+            "#,
+        );
+        let copied_chunks = match file_chunks_query.build().execute(&mut *tx).await {
+            Ok(v) => v.rows_affected(),
+            Err(e) => {
                 let _ = tx.rollback().await;
                 if wait_for_scan_sqlite_busy_retry(
-                    "chunks.copy_from_base.batch",
+                    "file_chunks.copy_from_base.batch",
                     &mut retry_idx,
                     &e,
                     &mut retry_waits,
@@ -5019,39 +5131,7 @@ async fn flush_base_chunk_copy_batch(
                 }
                 return Err(Error::from(e));
             }
-
-            let copied = match sqlx::query(
-                r#"
-                INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
-                SELECT ?, seq, chunk_hash, offset, len
-                FROM base.file_chunks
-                WHERE file_id = ?
-                ORDER BY seq
-                "#,
-            )
-            .bind(&row.file_id)
-            .bind(&row.base_file_id)
-            .execute(&mut *tx)
-            .await
-            {
-                Ok(v) => v.rows_affected(),
-                Err(e) => {
-                    let _ = tx.rollback().await;
-                    if wait_for_scan_sqlite_busy_retry(
-                        "file_chunks.copy_from_base.batch",
-                        &mut retry_idx,
-                        &e,
-                        &mut retry_waits,
-                    )
-                    .await
-                    {
-                        continue 'retry;
-                    }
-                    return Err(Error::from(e));
-                }
-            };
-            copied_chunks = copied_chunks.saturating_add(copied);
-        }
+        };
 
         if let Err(e) = tx.commit().await {
             if wait_for_scan_sqlite_busy_retry(
@@ -5073,6 +5153,83 @@ async fn flush_base_chunk_copy_batch(
         rows.clear();
         return Ok((copied_chunks, deduped_bytes, retry_waits));
     }
+}
+
+async fn seed_base_snapshot_chunks(
+    conn: &mut DbConn,
+    base_snapshot_id: &str,
+) -> Result<Vec<ScanSqliteRetryWait>> {
+    let mut retry_idx = 0usize;
+    let mut retry_waits = Vec::new();
+    loop {
+        let mut tx = conn.begin().await.map_err(Error::from)?;
+        let result = sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+            SELECT c.chunk_hash, c.size, c.hash_alg, c.enc_alg, c.created_at
+            FROM base.files f
+            JOIN base.file_chunks fc ON fc.file_id = f.file_id
+            JOIN base.chunks c ON c.chunk_hash = fc.chunk_hash
+            WHERE f.snapshot_id = ? AND f.kind = 'file'
+            "#,
+        )
+        .bind(base_snapshot_id)
+        .execute(&mut *tx)
+        .await;
+
+        match result {
+            Ok(_) => {
+                if let Err(error) = tx.commit().await {
+                    if wait_for_scan_sqlite_busy_retry(
+                        "chunks.copy_from_base.snapshot",
+                        &mut retry_idx,
+                        &error,
+                        &mut retry_waits,
+                    )
+                    .await
+                    {
+                        continue;
+                    }
+                    return Err(Error::from(error));
+                }
+                return Ok(retry_waits);
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                if wait_for_scan_sqlite_busy_retry(
+                    "chunks.copy_from_base.snapshot",
+                    &mut retry_idx,
+                    &error,
+                    &mut retry_waits,
+                )
+                .await
+                {
+                    continue;
+                }
+                return Err(Error::from(error));
+            }
+        }
+    }
+}
+
+async fn checkpoint_snapshot_filemap_wal(conn: &mut DbConn) -> Result<(i64, i64)> {
+    // Scan-time sync is intentionally disabled for this temporary DB. Restore
+    // durable sync before folding the WAL into the uploaded main database.
+    sqlx::query("PRAGMA synchronous = FULL")
+        .execute(&mut **conn)
+        .await?;
+    let row = sqlx::query("PRAGMA main.wal_checkpoint(TRUNCATE)")
+        .fetch_one(&mut **conn)
+        .await?;
+    let busy = row.get::<i64, _>(0);
+    let wal_log_frames = row.get::<i64, _>(1);
+    let wal_checkpointed_frames = row.get::<i64, _>(2);
+    if busy != 0 {
+        return Err(Error::Integrity {
+            message: "snapshot filemap WAL checkpoint remained busy".to_string(),
+        });
+    }
+    Ok((wal_log_frames, wal_checkpointed_frames))
 }
 
 fn telegram_camouflaged_filename() -> String {
@@ -6471,10 +6628,11 @@ mod tests {
     use sqlx::Row;
 
     use super::{
-        BaseCopyRevalidation, SCAN_TRACE_BUCKET_US, SCAN_TRACE_MAX_BUCKETS, ScanActivityTrace,
-        ScanPerformance, ScanSqliteRetryWait, ScanWorkKind, delete_transient_scan_file,
-        error_has_flood_wait, export_endpoint_index_db_for_upload, file_metadata_values,
-        ignore_error_is_non_root_not_found, revalidate_file_for_base_copy,
+        BaseCopyRevalidation, BaseFileChunkCopyRow, SCAN_TRACE_BUCKET_US, SCAN_TRACE_MAX_BUCKETS,
+        ScanActivityTrace, ScanPerformance, ScanSqliteRetryWait, ScanWorkKind, attach_db,
+        delete_transient_scan_file, error_has_flood_wait, export_endpoint_index_db_for_upload,
+        file_metadata_values, flush_base_chunk_copy_batch, ignore_error_is_non_root_not_found,
+        insert_filemap_chunks_batch, revalidate_file_for_base_copy, seed_base_snapshot_chunks,
     };
     use crate::Error;
 
@@ -6575,6 +6733,145 @@ mod tests {
             .unwrap()
             .get("n");
         assert_eq!(rows, 0);
+    }
+
+    #[tokio::test]
+    async fn filemap_chunk_batch_writes_deduplicated_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = crate::index_db::open_index_db(&temp.path().join("filemap.sqlite"))
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let rows = vec![
+            super::FilemapChunkRow {
+                chunk_hash: "chunk-1".to_string(),
+                size: 10,
+            },
+            super::FilemapChunkRow {
+                chunk_hash: "chunk-1".to_string(),
+                size: 10,
+            },
+            super::FilemapChunkRow {
+                chunk_hash: "chunk-2".to_string(),
+                size: 20,
+            },
+        ];
+
+        let retry_waits = insert_filemap_chunks_batch(&mut conn, &rows).await.unwrap();
+        assert!(retry_waits.is_empty());
+        let count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM chunks")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn base_copy_seeds_chunks_once_and_batches_file_chunk_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_path = temp.path().join("base.sqlite");
+        let filemap_path = temp.path().join("filemap.sqlite");
+
+        let base_pool = crate::index_db::open_index_db(&base_path).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('base', '2026-01-01T00:00:00Z', '/source', 'base', NULL)",
+        )
+        .execute(&base_pool)
+        .await
+        .unwrap();
+        for (file_id, path) in [("base-file-1", "one"), ("base-file-2", "two")] {
+            sqlx::query(
+                "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, 'base', ?, 1, 0, 0, 'file')",
+            )
+            .bind(file_id)
+            .bind(path)
+            .execute(&base_pool)
+            .await
+            .unwrap();
+        }
+        for (hash, file_id, seq) in [
+            ("chunk-1", "base-file-1", 0i64),
+            ("chunk-2", "base-file-1", 1),
+            ("chunk-2", "base-file-2", 0),
+        ] {
+            sqlx::query(
+                "INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES (?, 1, 'blake3', 'xchacha20poly1305', '2026-01-01T00:00:00Z')",
+            )
+            .bind(hash)
+            .execute(&base_pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len) VALUES (?, ?, ?, ?, 1)",
+            )
+            .bind(file_id)
+            .bind(seq)
+            .bind(hash)
+            .bind(seq)
+            .execute(&base_pool)
+            .await
+            .unwrap();
+        }
+        drop(base_pool);
+
+        let filemap_pool = crate::index_db::open_index_db(&filemap_path).await.unwrap();
+        let mut filemap_conn = filemap_pool.acquire().await.unwrap();
+        attach_db(&mut filemap_conn, "base", &base_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('current', '2026-01-02T00:00:00Z', '/source', 'current', 'base')",
+        )
+        .execute(&mut *filemap_conn)
+        .await
+        .unwrap();
+        for (file_id, path) in [("current-file-1", "one"), ("current-file-2", "two")] {
+            sqlx::query(
+                "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, 'current', ?, 1, 0, 0, 'file')",
+            )
+            .bind(file_id)
+            .bind(path)
+            .execute(&mut *filemap_conn)
+            .await
+            .unwrap();
+        }
+
+        seed_base_snapshot_chunks(&mut filemap_conn, "base")
+            .await
+            .unwrap();
+        let mut rows = vec![
+            BaseFileChunkCopyRow {
+                file_id: "current-file-1".to_string(),
+                base_file_id: "base-file-1".to_string(),
+                size: 1,
+            },
+            BaseFileChunkCopyRow {
+                file_id: "current-file-2".to_string(),
+                base_file_id: "base-file-2".to_string(),
+                size: 1,
+            },
+        ];
+        let (copied_chunks, _, retry_waits) =
+            flush_base_chunk_copy_batch(&mut filemap_conn, &mut rows)
+                .await
+                .unwrap();
+        assert_eq!(copied_chunks, 3);
+        assert!(retry_waits.is_empty());
+        assert!(rows.is_empty());
+
+        let chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM chunks")
+            .fetch_one(&mut *filemap_conn)
+            .await
+            .unwrap()
+            .get("n");
+        let file_chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM file_chunks")
+            .fetch_one(&mut *filemap_conn)
+            .await
+            .unwrap()
+            .get("n");
+        assert_eq!(chunks, 2);
+        assert_eq!(file_chunks, 3);
     }
 
     #[test]

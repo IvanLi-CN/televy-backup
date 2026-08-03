@@ -44,8 +44,8 @@ a `trace_json` string. The inner JSON has `version`, `resolution_ms`, and
 `walk_us`, `metadata_us`, `read_chunk_us`, `hash_us`, `encrypt_us`, or
 `sqlite_us` values. Version 2 also has `sqlite_ops_ms` and `sqlite_ops_count`
 maps keyed by stable operation names. The scan writer records
-`files.insert`, `base.files.lookup`, `base_copy`, and `file_chunks.insert` as
-batched operations without paths, file IDs, or hashes.
+`files.insert`, `base.files.lookup`, `base_copy`, `chunks.insert.filemap`, and
+`file_chunks.insert` as batched operations without paths, file IDs, or hashes.
 `sqlite_retry_wait_us` records actual SQLite busy/locked retry sleep separately
 from `sqlite_us`; consumers must render it as waiting rather than database work.
 Normal runs use one-second buckets; long runs are coarsened during collection

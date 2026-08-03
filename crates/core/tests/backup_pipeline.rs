@@ -231,7 +231,8 @@ async fn backup_batches_file_rows_and_base_lookup_across_512_entries() {
     assert_eq!(trace["version"], 2);
     assert_eq!(trace["sqlite_ops_count"]["files.insert"], 2);
     assert_eq!(trace["sqlite_ops_count"]["base.files.lookup"], 2);
-    assert_eq!(trace["sqlite_ops_count"]["base_copy"], 5);
+    // One snapshot-wide chunk seed plus two bounded file-chunk mapping batches.
+    assert_eq!(trace["sqlite_ops_count"]["base_copy"], 3);
     for operation in ["files.insert", "base.files.lookup", "base_copy"] {
         assert!(
             trace["sqlite_ops_ms"].get(operation).is_some(),
