@@ -235,10 +235,12 @@ Backup progress semantics for UI/events:
 - Need-upload metrics are phase-scoped:
   - `Need Upload (Disc.)` / `Remaining (Disc.)` during `scan` / `scan_upload`.
   - `Need Upload (Final)` / `Remaining (Final)` during `upload` / `index`.
-- Snapshot filemap scans commit file metadata in bounded batches of 512 and
-  match unchanged files against the base snapshot in one query per batch. This
-  keeps incremental scans compatible with base-chunk-copy while avoiding a
-  SQLite commit and baseline lookup for every file.
+- Snapshot filemap scans use 512-entry transaction boundaries with 128-row
+  multi-value inserts. Unchanged files are matched through a requested-path
+  `CROSS JOIN` that probes the base snapshot's `(snapshot_id, path)` index, and
+  base chunk copies use set-based mappings. This preserves incremental-scan
+  semantics without per-file file-row writes, base-metadata probes, base-copy
+  statements, or base-filemap scans.
 - `max_concurrent_uploads` bounds concurrent core document upload attempts
   across direct chunks, packs, index parts, and manifests. MTProto helper IPC
   runs off the async polling path, so the configured value is effective rather

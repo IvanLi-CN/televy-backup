@@ -29,11 +29,16 @@
   microseconds before the scan-finish summary is rounded to milliseconds, so
   high-volume short operations retain their full measured time. All identifiers
   are opaque and no file or remote-object identifier is logged.
-- File-row inserts commit in bounded batches of 512 and base file metadata is
-  looked up once per batch. Scan trace version 2 exposes the cumulative time
-  and count of `files.insert`, `base.files.lookup`, `base_copy`, and
-  `file_chunks.insert`, so a run can identify whether SQLite write, base lookup,
-  or chunk-copy work dominates without logging file-level data.
+- File rows are collected in bounded 512-entry transactions and inserted as
+  128-row multi-value statements. Base metadata lookup uses a requested-path
+  CTE with a `CROSS JOIN`, pinning path probes against the existing
+  `(snapshot_id, path)` unique index rather than allowing SQLite to scan the
+  complete base filemap. Base chunk-copy uses a 128-entry mapping CTE to seed
+  chunks and copy file chunks with two set-based statements. Scan trace version
+  2 exposes the cumulative time and count of `files.insert`,
+  `base.files.lookup`, `base_copy`, and `file_chunks.insert`, so a run can
+  identify whether SQLite write, base lookup, or chunk-copy work dominates
+  without logging file-level data.
 - SQLite busy/locked retry sleep is a separate `sqlite_retry_wait_us` trace
   slice and scan-finish summary value. It is excluded from `sqlite_us` and from
   per-operation SQLite timing, preserving the distinction between database
@@ -81,6 +86,9 @@
 - Scan-trace coarsening occurs while collecting measurements, keeping the
   in-memory trace capped at 4,096 buckets even when an operation follows a
   long idle interval.
+- The 513-file scan regression verifies the `CROSS JOIN` query plan probes by
+  `snapshot_id` and `path` and does not use the broad
+  `idx_files_snapshot_kind_file` scan path.
 
 ## Migration State
 

@@ -37,12 +37,12 @@
 | 2e73n | Popover Targets 高度实时自适应与误滚动修复 | 已完成 | `2e73n-popover-targets-live-height/SPEC.md` | 2026-02-25 | PR #48 已创建并更新；CI run #251 通过；review-loop 无阻塞问题 |
 | dmts3 | backup 主流水线并行化（scan+upload）与进度语义修复 | 部分完成（4/5） | `dmts3-streaming-backup-pipeline/SPEC.md` | 2026-02-28 | 主循环并行 + retention 优化已落地；新增 index 流式压缩上传以压低 daemon 内存 footprint，待完成 UI 真机截图验收 |
 | z324m | 统一进度条规范（含 Prepare 并行）与四处 UI 对齐 | 已完成 | `z324m-unified-backup-progress-prepare/SPEC.md` | 2026-02-28 | 已同步为单条多层进度规范（NeedUploadConfirmed/UploadingCurrent/BackedUp/Scanned）并保留 Need Upload(Disc./Final) 口径 |
-| hqjd2 | MTProto 备份传输提速（更大分片 + FloodWait 处理 + 可调节流） | 部分完成（6/7） | `hqjd2-mtproto-transfer-speed/SPEC.md` | 2026-08-03 | 待实现 direct/pack/index-part 共享上传调度器与实际 RPC 并发验收 |
+| hqjd2 | MTProto 备份传输提速（更大分片 + FloodWait 处理 + 可调节流） | 已完成 | `hqjd2-mtproto-transfer-speed/SPEC.md` | 2026-08-03 | PR #65 / Release v0.6.2；同机 Projects 运行确认 data 与 index part 的真实 RPC 最大并发为 2 |
 | dyu56 | 索引分级：Remote Index 仅保留每个 Source 最新文件映射 | 部分完成（3/4） | `dyu56-index-tiered-filemaps/SPEC.md` | 2026-03-02 | 已实现 remote export + 本地自动 compact + 单测；待真机验证 index 上传耗时与体积收益 |
-| t764g | 端点索引二级拆分：Endpoint DB（一级）+ Snapshot Filemap DB（二级）+ 严格远端门禁（Fail Fast） | 部分完成（8/9） | `t764g-endpoint-two-level-index/SPEC.md` | 2026-08-03 | filemap scan 已批量化；待实现 full + delta filemap 与压实 |
+| t764g | 端点索引二级拆分：Endpoint DB（一级）+ Snapshot Filemap DB（二级）+ 严格远端门禁（Fail Fast） | 部分完成（8/9） | `t764g-endpoint-two-level-index/SPEC.md` | 2026-08-03 | filemap scan 使用路径 probe、multi-value insert 与 set-based base-copy；待实现 full + delta filemap 与压实 |
 | 3z7rj | Endpoint 去重索引增量化：Remote Delta + 本地物化库 + 周期性 Compaction | 已完成 | `3z7rj-endpoint-dedupe-delta-index/SPEC.md` | 2026-03-02 | Remote dedupe 由 Base+Delta+Catalog 组成；endpoint meta DB 不再上传 chunks/chunk_objects；restore/verify 优先使用 dedupe DB |
 | g7gt3 | 支持 `.televyignore` 的文件/目录忽略能力 | 已完成 | `g7gt3-televyignore-target-ignore/SPEC.md` | 2026-03-19 | core 扫描/quick stats 已支持 `.televyignore`；run.finish 输出 ignore 汇总字段；macOS 主界面显示 ignore 状态；发行版补齐 bundled daemon/helper 启动路径稳定性修复 |
 | cac6x | MTProto 空闲 Helper 退出治理 | 已完成 | `cac6x-mtproto-helper-idle-shutdown/SPEC.md` | 2026-03-22 | internal lifecycle 修复：graceful shutdown + kill fallback，解决 idle orphan helper 高 CPU；macOS 历史页改为磁盘回填 + 大日志头尾索引 |
 | fdwoo | macOS 明暗主题支持与系统自动切换 | 已完成 | `fdwoo-macos-light-dark-theme/SPEC.md` | 2026-04-10 | 主题实现已完成；已修复 Settings 左侧 sidebar 暗色纯黑回归；UI demo / snapshot 路径现已隔离 config/data，避免污染真实 Application Support 数据 |
 | k7d2v | Daemon 生命周期与可控退出 | 部分完成（3/4） | `k7d2v-daemon-lifecycle/SPEC.md` | 2026-07-12 | daemon 停止 IPC、CLI 管理命令、App 退出与 LaunchAgent 完全退出治理 |
-| 0003 | Sync Logging Durability and Local Diagnostics | 部分完成（1/5） | `0003-sync-logging-durability/SPEC.md` | 2026-07-31 | 已迁移 legacy spec；待实现安全默认、日志偏好、Diagnostics UI 与视觉证据 |
+| 0003 | Sync Logging Durability and Local Diagnostics | 已完成 | `0003-sync-logging-durability/SPEC.md` | 2026-08-03 | 安全日志默认、自动保留、Diagnostics UI、真实性能轨迹与视觉证据均已交付 |

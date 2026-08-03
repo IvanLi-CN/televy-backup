@@ -45,6 +45,8 @@ const RONOMON_READ_CHUNK_BYTES: usize = 1024 * 1024;
 const PACK_MAX_STAGING_AGE_SECS: u64 = 3;
 const BASE_FILE_CHUNK_COPY_BATCH_SIZE: usize = 128;
 const SCAN_FILE_METADATA_BATCH_SIZE: usize = 512;
+// Seven bound values per file row stays below SQLite's portable 999-parameter limit.
+const SCAN_FILE_INSERT_ROWS_PER_STATEMENT: usize = 128;
 const ADAPTIVE_MIN_CONCURRENCY: usize = 1;
 const ADAPTIVE_MAX_CONCURRENCY: usize = 8;
 const ADAPTIVE_MAX_DELAY_MS: u64 = 500;
@@ -4083,23 +4085,21 @@ async fn insert_scan_file_rows_batch(
     let mut retry_waits = Vec::new();
     'retry: loop {
         let mut tx = conn.begin().await.map_err(Error::from)?;
-        for row in rows {
-            if let Err(e) = sqlx::query(
-                r#"
-                INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(&row.file_id)
-            .bind(snapshot_id)
-            .bind(&row.rel_path)
-            .bind(row.size)
-            .bind(row.mtime_ms)
-            .bind(row.mode)
-            .bind(row.kind)
-            .execute(&mut *tx)
-            .await
-            {
+        for statement_rows in rows.chunks(SCAN_FILE_INSERT_ROWS_PER_STATEMENT) {
+            let mut query = QueryBuilder::<Sqlite>::new(
+                "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) ",
+            );
+            query.push_values(statement_rows, |mut values, row| {
+                values
+                    .push_bind(&row.file_id)
+                    .push_bind(snapshot_id)
+                    .push_bind(&row.rel_path)
+                    .push_bind(row.size)
+                    .push_bind(row.mtime_ms)
+                    .push_bind(row.mode)
+                    .push_bind(row.kind);
+            });
+            if let Err(e) = query.build().execute(&mut *tx).await {
                 let _ = tx.rollback().await;
                 if wait_for_scan_sqlite_busy_retry(
                     "files.insert.batch",
@@ -4921,18 +4921,20 @@ async fn lookup_base_file_snapshot_rows(
     let mut retry_idx = 0usize;
     let mut retry_waits = Vec::new();
     let rows = loop {
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT file_id, path, size, mtime_ms, mode FROM base.files WHERE snapshot_id = ",
+        // The CROSS JOIN pins requested paths as the outer loop, so SQLite probes
+        // the existing UNIQUE(snapshot_id, path) index once per path. A regular
+        // JOIN may be reordered into a scan of every base file for each batch.
+        let mut query = QueryBuilder::<Sqlite>::new("WITH requested(path) AS (");
+        query.push_values(file_paths.iter(), |mut values, path| {
+            values.push_bind(*path);
+        });
+        query.push(
+            ") SELECT f.file_id, f.path, f.size, f.mtime_ms, f.mode \
+             FROM requested r \
+             CROSS JOIN base.files f WHERE f.snapshot_id = ",
         );
         query.push_bind(base_snapshot_id);
-        query.push(" AND kind = 'file' AND path IN (");
-        {
-            let mut separated = query.separated(", ");
-            for path in &file_paths {
-                separated.push_bind(*path);
-            }
-        }
-        query.push(")");
+        query.push(" AND f.path = r.path AND f.kind = 'file'");
 
         match query.build().fetch_all(&mut **conn).await {
             Ok(rows) => break rows,
@@ -4981,34 +4983,58 @@ async fn flush_base_chunk_copy_batch(
     let mut retry_waits = Vec::new();
     'retry: loop {
         let mut tx = conn.begin().await.map_err(Error::from)?;
-        let mut copied_chunks = 0u64;
-
-        for row in rows.iter() {
-            // `file_chunks` has a FK to `chunks`. When we base-copy file_chunks, we must also
-            // seed the referenced chunk rows in the destination filemap DB, otherwise SQLite
-            // will reject the insert with a FK violation.
-            //
-            // Note: base snapshot DB might be either the cached filemap DB, or the legacy
-            // endpoint DB (upgrade path).
-            if let Err(e) = sqlx::query(
-                r#"
-                INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
-                SELECT c.chunk_hash, c.size, c.hash_alg, c.enc_alg, c.created_at
-                FROM base.chunks c
-                WHERE c.chunk_hash IN (
-                    SELECT DISTINCT chunk_hash
-                    FROM base.file_chunks
-                    WHERE file_id = ?
-                )
-                "#,
+        // `file_chunks` has a FK to `chunks`, so seed all referenced chunks before
+        // inserting the corresponding file-chunk rows. The mapping CTE retains the
+        // prior per-file behavior with two statements for the entire copy batch.
+        let mut chunks_query =
+            QueryBuilder::<Sqlite>::new("WITH copy_map(file_id, base_file_id) AS (");
+        chunks_query.push_values(rows.iter(), |mut values, row| {
+            values.push_bind(&row.file_id).push_bind(&row.base_file_id);
+        });
+        chunks_query.push(
+            r#")
+            INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at)
+            SELECT DISTINCT c.chunk_hash, c.size, c.hash_alg, c.enc_alg, c.created_at
+            FROM copy_map m
+            JOIN base.file_chunks fc ON fc.file_id = m.base_file_id
+            JOIN base.chunks c ON c.chunk_hash = fc.chunk_hash
+            "#,
+        );
+        if let Err(e) = chunks_query.build().execute(&mut *tx).await {
+            let _ = tx.rollback().await;
+            if wait_for_scan_sqlite_busy_retry(
+                "chunks.copy_from_base.batch",
+                &mut retry_idx,
+                &e,
+                &mut retry_waits,
             )
-            .bind(&row.base_file_id)
-            .execute(&mut *tx)
             .await
             {
+                continue 'retry;
+            }
+            return Err(Error::from(e));
+        }
+
+        let mut file_chunks_query =
+            QueryBuilder::<Sqlite>::new("WITH copy_map(file_id, base_file_id) AS (");
+        file_chunks_query.push_values(rows.iter(), |mut values, row| {
+            values.push_bind(&row.file_id).push_bind(&row.base_file_id);
+        });
+        file_chunks_query.push(
+            r#")
+            INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
+            SELECT m.file_id, fc.seq, fc.chunk_hash, fc.offset, fc.len
+            FROM copy_map m
+            JOIN base.file_chunks fc ON fc.file_id = m.base_file_id
+            ORDER BY m.file_id, fc.seq
+            "#,
+        );
+        let copied_chunks = match file_chunks_query.build().execute(&mut *tx).await {
+            Ok(v) => v.rows_affected(),
+            Err(e) => {
                 let _ = tx.rollback().await;
                 if wait_for_scan_sqlite_busy_retry(
-                    "chunks.copy_from_base.batch",
+                    "file_chunks.copy_from_base.batch",
                     &mut retry_idx,
                     &e,
                     &mut retry_waits,
@@ -5019,39 +5045,7 @@ async fn flush_base_chunk_copy_batch(
                 }
                 return Err(Error::from(e));
             }
-
-            let copied = match sqlx::query(
-                r#"
-                INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len)
-                SELECT ?, seq, chunk_hash, offset, len
-                FROM base.file_chunks
-                WHERE file_id = ?
-                ORDER BY seq
-                "#,
-            )
-            .bind(&row.file_id)
-            .bind(&row.base_file_id)
-            .execute(&mut *tx)
-            .await
-            {
-                Ok(v) => v.rows_affected(),
-                Err(e) => {
-                    let _ = tx.rollback().await;
-                    if wait_for_scan_sqlite_busy_retry(
-                        "file_chunks.copy_from_base.batch",
-                        &mut retry_idx,
-                        &e,
-                        &mut retry_waits,
-                    )
-                    .await
-                    {
-                        continue 'retry;
-                    }
-                    return Err(Error::from(e));
-                }
-            };
-            copied_chunks = copied_chunks.saturating_add(copied);
-        }
+        };
 
         if let Err(e) = tx.commit().await {
             if wait_for_scan_sqlite_busy_retry(

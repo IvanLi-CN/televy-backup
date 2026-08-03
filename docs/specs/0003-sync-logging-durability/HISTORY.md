@@ -96,3 +96,11 @@ pipeline while removing the prior per-file SQLite commit and lookup pattern.
 Files are revalidated before base-copy so a transient file cannot inherit old
 chunks after a batch lookup. SQLite busy/locked retry sleep is represented as a
 separate wait slice rather than as database work.
+
+Production Projects telemetry exposed that transaction batching alone was not
+sufficient: `path IN (...)` let SQLite scan the complete base filemap for each
+512-entry request, while file insertion and base-copy still issued statements
+per file inside their transactions. The scan path now pins requested paths as
+the outer CTE loop, inserts file rows with bounded multi-value statements, and
+copies baseline chunks through a set-based mapping CTE. The plan-level
+regression test protects the required snapshot/path probe behavior.
