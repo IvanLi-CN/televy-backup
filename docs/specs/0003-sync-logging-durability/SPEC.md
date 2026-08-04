@@ -107,8 +107,9 @@ Invalid environment filters resolve to `Normal`, never global debug.
   contains only measured `walk_us`, `metadata_us`, `read_chunk_us`, `hash_us`,
   `encrypt_us`, and `sqlite_us` activity. Version 2 additionally contains
   `sqlite_ops_ms` and `sqlite_ops_count` maps for bounded `files.insert`
-  commits, `base.files.lookup` batch reads, `base_copy`, and
-  `file_chunks.insert`. `sqlite_retry_wait_us` is a separate measured wait
+  statements within the scan transaction, `base.files.lookup` batch reads,
+  `base_copy`, `file_chunks.insert`, and the one-time `filemap.commit`.
+  `sqlite_retry_wait_us` is a separate measured wait
   slice, so busy/locked retry backoff is never rendered as SQLite work. It uses
   one-second buckets for normal runs and coarsens long runs while retaining at
   most 4,096 buckets; the actual precision is declared by `resolution_ms`.

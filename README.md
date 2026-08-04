@@ -235,10 +235,11 @@ Backup progress semantics for UI/events:
 - Need-upload metrics are phase-scoped:
   - `Need Upload (Disc.)` / `Remaining (Disc.)` during `scan` / `scan_upload`.
   - `Need Upload (Final)` / `Remaining (Final)` during `upload` / `index`.
-- Snapshot filemap scans commit file metadata in bounded batches of 512 and
-  match unchanged files against the base snapshot in one query per batch. This
-  keeps incremental scans compatible with base-chunk-copy while avoiding a
-  SQLite commit and baseline lookup for every file.
+- Snapshot filemap scans keep each multi-row statement bounded to 512 entries,
+  match unchanged files against the base snapshot in one query per batch, and
+  commit the scan transaction once. This keeps incremental scans compatible
+  with base-chunk-copy while avoiding a SQLite commit and baseline lookup for
+  every file.
 - The temporary snapshot filemap is a single-writer WAL database: file metadata,
   file chunks, and newly read chunk rows use bounded multi-row writes; unchanged
   base chunks are seeded once and mapped in set-based batches. Full sync and an

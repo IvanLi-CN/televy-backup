@@ -81,8 +81,9 @@ pub async fn open_index_db(path: &Path) -> Result<SqlitePool> {
 /// Opens the short-lived SQLite database assembled for one snapshot filemap.
 ///
 /// The scan owns the only connection, so WAL avoids rollback-journal churn while
-/// bounded batches are committed. Durability is restored at the upload boundary
-/// before the WAL is checkpointed into the uploaded main database.
+/// bounded multi-row statements run inside one scan transaction. Durability is
+/// restored at the upload boundary before the WAL is checkpointed into the
+/// uploaded main database.
 pub async fn open_snapshot_filemap_db(path: &Path) -> Result<SqlitePool> {
     debug!(
         event = "sqlite.open",
@@ -186,6 +187,23 @@ pub async fn open_snapshot_filemap_db(path: &Path) -> Result<SqlitePool> {
         );
         e
     })?;
+    // Snapshot filemaps contain one snapshot and are written once. The endpoint
+    // query index is redundant here, while maintaining it for every file row
+    // materially increases scan-time write cost. Restore and verify retain the
+    // primary/unique indexes for their lookups and ordering.
+    sqlx::query("DROP INDEX IF EXISTS idx_files_snapshot_kind_file")
+        .execute(&pool)
+        .await
+        .map_err(|e| {
+            error!(
+                event = "io.sqlite.index_cleanup_failed",
+                db_path = %path.display(),
+                index = "idx_files_snapshot_kind_file",
+                error = %e,
+                "io.sqlite.index_cleanup_failed"
+            );
+            e
+        })?;
     Ok(pool)
 }
 
@@ -272,10 +290,20 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
+        let file_indexes: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_index_list('files') ORDER BY name")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
 
         assert_eq!(journal_mode, "wal");
         assert_eq!(synchronous, 0);
         assert_eq!(wal_autocheckpoint, 0);
         assert_eq!(cache_size, -65_536);
+        assert!(
+            !file_indexes
+                .iter()
+                .any(|name| name == "idx_files_snapshot_kind_file")
+        );
     }
 }

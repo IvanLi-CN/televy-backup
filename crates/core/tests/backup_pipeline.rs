@@ -231,9 +231,15 @@ async fn backup_batches_file_rows_and_base_lookup_across_512_entries() {
     assert_eq!(trace["version"], 2);
     assert_eq!(trace["sqlite_ops_count"]["files.insert"], 2);
     assert_eq!(trace["sqlite_ops_count"]["base.files.lookup"], 2);
-    // One snapshot-wide chunk seed plus two bounded file-chunk mapping batches.
-    assert_eq!(trace["sqlite_ops_count"]["base_copy"], 3);
-    for operation in ["files.insert", "base.files.lookup", "base_copy"] {
+    // One chunk seed, map initialization, two bounded map stages, and one
+    // snapshot-wide file-chunk materialization.
+    assert_eq!(trace["sqlite_ops_count"]["base_copy"], 5);
+    for operation in [
+        "files.insert",
+        "base.files.lookup",
+        "base_copy",
+        "filemap.commit",
+    ] {
         assert!(
             trace["sqlite_ops_ms"].get(operation).is_some(),
             "missing SQLite duration for {operation}"
@@ -279,6 +285,8 @@ async fn backup_honors_cancellation_after_collecting_a_scan_batch() {
         remote_dedupe: RemoteDedupeMode::Disabled,
     };
     let storage = InMemoryStorage::new();
+    let endpoint_db_path = cfg.endpoint_db_path.clone();
+    let filemap_dir = cfg.filemap_dir.clone();
     run_backup(&storage, cfg.clone()).await.unwrap();
     for index in 0..12 {
         write_file(
@@ -306,6 +314,28 @@ async fn backup_honors_cancellation_after_collecting_a_scan_batch() {
         matches!(result, Err(televy_backup_core::Error::Cancelled)),
         "cancellation after a collected batch must interrupt scanning"
     );
+
+    let endpoint_pool =
+        sqlx::SqlitePool::connect(&format!("sqlite:{}", endpoint_db_path.display()))
+            .await
+            .unwrap();
+    let cancelled_snapshot: String =
+        sqlx::query_scalar("SELECT snapshot_id FROM snapshots ORDER BY created_at DESC LIMIT 1")
+            .fetch_one(&endpoint_pool)
+            .await
+            .unwrap();
+    let cancelled_filemap = filemap_dir.join(format!("{cancelled_snapshot}.sqlite"));
+    if cancelled_filemap.exists() {
+        let filemap_pool =
+            sqlx::SqlitePool::connect(&format!("sqlite:{}", cancelled_filemap.display()))
+                .await
+                .unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM files")
+            .fetch_one(&filemap_pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "cancelled scan must roll back filemap rows");
+    }
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@
   - Provides Settings UI and task controls (backup/restore/verify).
   - Spawns the local `televybackup` CLI for long-running operations and streams progress from stdout.
 - **Core library**: `televy_backup_core` (`crates/core/`).
-  - Implements scan → CDC chunking → hash → encrypt framing → enqueue uploads → worker uploads → SQLite index. File metadata commits in bounded 512-entry batches, and unchanged-file baseline metadata is resolved once per batch.
+  - Implements scan → CDC chunking → hash → encrypt framing → enqueue uploads → worker uploads → SQLite index. Filemap statements are bounded to 512 entries and the scan transaction commits once; unchanged-file baseline metadata is resolved once per batch.
   - Backup pipeline is phase-split (scan/upload/index); scan enqueues jobs into a bounded queue and upload workers honor endpoint rate limits.
   - Implements restore/verify using remote index manifest + chunk downloads.
 - **Daemon**: `televybackupd` (`crates/daemon/`).
@@ -264,10 +264,10 @@ Index publish memory model:
   their manifest is submitted only after every part succeeds.
 
 The per-snapshot filemap is assembled in a single-writer WAL connection. File
-metadata and chunk rows use bounded multi-row writes, and unchanged base chunks
-are seeded once before set-based `file_chunks` mapping. Scan-time sync and WAL
-auto-checkpoint are deferred; FULL sync and an explicit checkpoint complete before
-the filemap is uploaded.
+metadata and chunk rows use bounded multi-row writes inside one scan transaction,
+and unchanged base chunks are seeded once before set-based `file_chunks` mapping.
+Scan-time sync and WAL auto-checkpoint are deferred; FULL sync and an explicit
+checkpoint complete before the filemap is uploaded.
 - The process does **not** use whole-file `fs::read + encode_all` for index publish, to keep daemon memory bounded on large index databases.
 
 ## SQLite index
