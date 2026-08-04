@@ -2382,7 +2382,6 @@ pub async fn run_backup_with<S: Storage>(
                 let mut pending_base_chunk_copies: Vec<BaseFileChunkCopyRow> = Vec::new();
                 let mut base_chunks_seeded = false;
                 let mut base_copy_map_initialized = false;
-                let mut base_copy_deduped_bytes = 0u64;
                 let mut warned_ignore_errors = HashSet::<String>::new();
                 let mut seen_ignore_files = HashSet::<PathBuf>::new();
                 let mut ignore_rule_files = 0u64;
@@ -2739,8 +2738,8 @@ pub async fn run_backup_with<S: Storage>(
                             if copied_from_base
                                 && pending_base_chunk_copies.len() >= BASE_FILE_CHUNK_COPY_BATCH_SIZE
                             {
-                                base_copy_deduped_bytes = base_copy_deduped_bytes
-                                    .saturating_add(base_copy_rows_bytes(&pending_base_chunk_copies));
+                                let deduped_bytes =
+                                    base_copy_rows_bytes(&pending_base_chunk_copies);
                                 let sqlite_started = Instant::now();
                                 let retry_waits = stage_base_chunk_copy_batch_in_tx(
                                     &mut filemap_scan_tx,
@@ -2752,6 +2751,9 @@ pub async fn run_backup_with<S: Storage>(
                                     sqlite_started,
                                     &retry_waits,
                                 );
+                                result.bytes_deduped =
+                                    result.bytes_deduped.saturating_add(deduped_bytes);
+                                scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
                             }
                             if copied_from_base {
                                 continue;
@@ -2948,8 +2950,7 @@ pub async fn run_backup_with<S: Storage>(
                     return Err(Error::Cancelled);
                 }
                 if !pending_base_chunk_copies.is_empty() {
-                    base_copy_deduped_bytes = base_copy_deduped_bytes
-                        .saturating_add(base_copy_rows_bytes(&pending_base_chunk_copies));
+                    let deduped_bytes = base_copy_rows_bytes(&pending_base_chunk_copies);
                     let sqlite_started = Instant::now();
                     let retry_waits = stage_base_chunk_copy_batch_in_tx(
                         &mut filemap_scan_tx,
@@ -2961,6 +2962,8 @@ pub async fn run_backup_with<S: Storage>(
                         sqlite_started,
                         &retry_waits,
                     );
+                    result.bytes_deduped = result.bytes_deduped.saturating_add(deduped_bytes);
+                    scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
                 }
                 if base_copy_map_initialized {
                     let sqlite_started = Instant::now();
@@ -2975,14 +2978,12 @@ pub async fn run_backup_with<S: Storage>(
                         result.chunks_total = result.chunks_total.saturating_add(copied_chunks);
                         scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
                     }
-                    if base_copy_deduped_bytes > 0 {
-                        result.bytes_deduped =
-                            result.bytes_deduped.saturating_add(base_copy_deduped_bytes);
-                        scan_bytes_deduped.store(result.bytes_deduped, Ordering::Relaxed);
-                    }
                 }
 
-                filemap_scan_tx.commit().await.map_err(Error::from)?;
+                let sqlite_started = Instant::now();
+                let commit_result = filemap_scan_tx.commit().await;
+                scan_performance.record_sqlite("filemap.commit", sqlite_started, &[]);
+                commit_result.map_err(Error::from)?;
 
                 if pack_enabled {
                     flush_packer(&uploader, &scan_master_key, &mut pack_state).await?;

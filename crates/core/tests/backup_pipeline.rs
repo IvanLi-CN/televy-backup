@@ -234,7 +234,12 @@ async fn backup_batches_file_rows_and_base_lookup_across_512_entries() {
     // One chunk seed, map initialization, two bounded map stages, and one
     // snapshot-wide file-chunk materialization.
     assert_eq!(trace["sqlite_ops_count"]["base_copy"], 5);
-    for operation in ["files.insert", "base.files.lookup", "base_copy"] {
+    for operation in [
+        "files.insert",
+        "base.files.lookup",
+        "base_copy",
+        "filemap.commit",
+    ] {
         assert!(
             trace["sqlite_ops_ms"].get(operation).is_some(),
             "missing SQLite duration for {operation}"

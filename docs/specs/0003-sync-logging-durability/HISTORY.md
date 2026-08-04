@@ -111,3 +111,7 @@ commit cost from every metadata batch while preserving cancellation rollback and
 the existing base lookup, transient-file, and chunk-copy semantics. Snapshot
 filemaps also drop the endpoint-only file-kind index because their primary and
 unique indexes cover restore and verify lookups.
+
+The one-time filemap transaction commit is included in the SQLite performance map,
+and base-copy deduplicated bytes are published as each staged batch is accounted
+for instead of waiting for the end of the scan.
