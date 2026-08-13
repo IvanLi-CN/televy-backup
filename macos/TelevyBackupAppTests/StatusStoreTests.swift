@@ -3,6 +3,13 @@ import Foundation
 
 @main
 struct StatusStoreTests {
+    private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+        guard condition() else {
+            fputs("FAIL: \(message)\n", stderr)
+            exit(1)
+        }
+    }
+
     @MainActor
     static func main() async {
         await idleHeartbeatDoesNotPublish()
@@ -19,8 +26,8 @@ struct StatusStoreTests {
         let token = store.objectWillChange.sink { publishes += 1 }
         store.ingest(snapshot(generatedAt: 1_000, state: "idle"), receivedAt: Date(timeIntervalSince1970: 1))
         store.ingest(snapshot(generatedAt: 2_000, state: "idle"), receivedAt: Date(timeIntervalSince1970: 2))
-        precondition(publishes == 1, "equivalent idle heartbeat published \(publishes) times")
-        precondition(store.latestReceivedAt == Date(timeIntervalSince1970: 2))
+        expect(publishes == 1, "equivalent idle heartbeat published \(publishes) times")
+        expect(store.latestReceivedAt == Date(timeIntervalSince1970: 2), "latest idle heartbeat was not recorded")
         _ = token
     }
 
@@ -35,7 +42,7 @@ struct StatusStoreTests {
         store.refreshConnectionPhase(now: received.addingTimeInterval(7))
         store.refreshConnectionPhase(now: received.addingTimeInterval(61))
         store.refreshConnectionPhase(now: received.addingTimeInterval(62))
-        precondition(publishes == 3, "connection phases published \(publishes) times")
+        expect(publishes == 3, "connection phases published \(publishes) times")
         _ = token
     }
 
@@ -49,10 +56,10 @@ struct StatusStoreTests {
         store.ingest(snapshot(generatedAt: 2, state: "running", uploaded: 2), receivedAt: start.addingTimeInterval(0.01))
         store.ingest(snapshot(generatedAt: 3, state: "running", uploaded: 3), receivedAt: start.addingTimeInterval(0.02))
         try? await Task.sleep(nanoseconds: 80_000_000)
-        precondition(publishes == 2, "running burst published \(publishes) times")
-        precondition(store.state.snapshot?.targets.first?.progress?.bytesUploaded == 3)
+        expect(publishes == 2, "running burst published \(publishes) times")
+        expect(store.state.snapshot?.targets.first?.progress?.bytesUploaded == 3, "coalesced running snapshot was not published")
         store.ingest(snapshot(generatedAt: 4, state: "idle", uploaded: 4), receivedAt: Date())
-        precondition(store.state.snapshot?.targets.first?.state == "idle", "final idle snapshot was lost")
+        expect(store.state.snapshot?.targets.first?.state == "idle", "final idle snapshot was lost")
         _ = token
     }
 
@@ -86,14 +93,14 @@ struct StatusStoreTests {
             clock.advance(by: 0.1)
         }
         clock.advance(by: 0.3)
-        precondition(publishTimes.count == 3, "expected initial plus two coalesced publishes, got \(publishTimes.count)")
+        expect(publishTimes.count == 3, "expected initial plus two coalesced publishes, got \(publishTimes.count)")
         for pair in zip(publishTimes, publishTimes.dropFirst()) {
-            precondition(pair.1.timeIntervalSince(pair.0) >= 0.5, "running publish cadence exceeded 2Hz")
+            expect(pair.1.timeIntervalSince(pair.0) >= 0.5, "running publish cadence exceeded 2Hz")
         }
 
         store.ingest(snapshot(generatedAt: 20, state: "running", uploaded: 20), receivedAt: Date())
         store.ingest(snapshot(generatedAt: 21, state: "idle", uploaded: 21), receivedAt: Date())
-        precondition(store.state.snapshot?.targets.first?.state == "idle", "pending running snapshot delayed final idle commit")
+        expect(store.state.snapshot?.targets.first?.state == "idle", "pending running snapshot delayed final idle commit")
         _ = token
     }
 
