@@ -28,6 +28,19 @@ bin_progress="$out_dir/backup-progress-projection-tests"
   "$root_dir/macos/TelevyBackupAppTests/BackupProgressProjectionTests.swift"
 "$bin_progress"
 
+bin_status_store="$out_dir/status-store-tests"
+"$swiftc" \
+  -sdk "$sdk_path" \
+  -O \
+  -framework Combine \
+  -o "$bin_status_store" \
+  "$root_dir/macos/TelevyBackupApp/StatusModels.swift" \
+  "$root_dir/macos/TelevyBackupApp/StatusStore.swift" \
+  "$root_dir/macos/TelevyBackupAppTests/StatusStoreTests.swift"
+"$bin_status_store"
+
+"$root_dir/scripts/macos/ui-store-static-check.sh"
+
 bin_popover="$out_dir/popover-layout-size-tests"
 "$swiftc" \
   -sdk "$sdk_path" \

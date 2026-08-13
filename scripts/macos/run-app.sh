@@ -85,6 +85,9 @@ if [ "$disable_keychain" = "1" ]; then
   if [ "${TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH:-0}" = "1" ]; then
     args+=(--open-settings)
   fi
+  if [ "${TELEVYBACKUP_OPEN_MAIN_WINDOW_ON_LAUNCH:-0}" = "1" ]; then
+    args+=(--open-main-window)
+  fi
   open -n "$app" --args "${args[@]}"
 else
   args=()
@@ -94,6 +97,9 @@ else
   fi
   if [ "${TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH:-0}" = "1" ]; then
     args+=(--open-settings)
+  fi
+  if [ "${TELEVYBACKUP_OPEN_MAIN_WINDOW_ON_LAUNCH:-0}" = "1" ]; then
+    args+=(--open-main-window)
   fi
   if [ "${#args[@]}" -gt 0 ]; then
     open -n "$app" --args "${args[@]}"

@@ -2,7 +2,9 @@ import Foundation
 import SwiftUI
 
 struct TargetDiagnosticsView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var statusStore: StatusStore
+    @EnvironmentObject var diagnosticsStore: DiagnosticsStore
     let target: StatusTarget
 
     @State private var activityFilter: String = ""
@@ -27,11 +29,11 @@ struct TargetDiagnosticsView: View {
     private var globalCard: some View {
         GlassCard(title: "GLOBAL") {
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
-            let snap = model.statusSnapshot
+            let snap = statusStore.snapshot
 
             keyValue("schemaVersion", snap.map { String($0.schemaVersion) } ?? "—")
             keyValue("generatedAt", snap.map { isoFromMs($0.generatedAt) } ?? "—")
-            keyValue("receivedAt", isoFromDate(model.statusSnapshotReceivedAt) ?? "—")
+            keyValue("receivedAt", isoFromDate(statusStore.receivedAt) ?? "—")
             keyValue("source", sourceText(snap))
             keyValue("freshness", freshnessText(snap: snap, nowMs: nowMs))
 

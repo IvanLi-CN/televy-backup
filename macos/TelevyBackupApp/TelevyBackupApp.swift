@@ -4,12 +4,6 @@ import Darwin
 import Foundation
 import SwiftUI
 
-enum StatusFreshness {
-    static let staleMs: Int64 = 5_000
-    static let disconnectedMs: Int64 = 60_000
-    static let toastMaxAgeSeconds: Int = 15
-}
-
 // Popover size is driven by real SwiftUI fitting height (sizeThatFits) and then clamped.
 // Keep these constants centralized so AppDelegate + tests agree on the exact behavior.
 enum PopoverAutoSize {
@@ -59,62 +53,82 @@ final class ModelStore {
     static let shared = AppModel()
 }
 
-final class AppModel: ObservableObject {
+private struct AppRuntimeKey: EnvironmentKey {
+    static let defaultValue = ModelStore.shared
+}
+
+extension EnvironmentValues {
+    var appRuntime: AppModel {
+        get { self[AppRuntimeKey.self] }
+        set { self[AppRuntimeKey.self] = newValue }
+    }
+}
+
+final class AppModel {
+    let statusStore = StatusStore()
+    let settingsStore = SettingsStore()
+    let runHistoryStore = RunHistoryStore()
+    let taskPresentationStore = TaskPresentationStore()
+    let diagnosticsStore = DiagnosticsStore()
     enum ShutdownPresentation {
         case stopping
         case failed(String)
     }
 
-    @Published var sourcePath: String = ""
-    @Published var label: String = "manual"
-    @Published var chatId: String = ""
-    @Published var botTokenDraft: String = ""
-    @Published var botTokenDraftIsMasked: Bool = false
-    @Published var mtprotoApiId: String = ""
-    @Published var mtprotoApiHashDraft: String = ""
-    @Published var mtprotoApiHashDraftIsMasked: Bool = false
-    @Published var scheduleEnabled: Bool = false
-    @Published var scheduleKind: String = "hourly"
+    var sourcePath: String { get { settingsStore.sourcePath } set { settingsStore.sourcePath = newValue } }
+    var label: String { get { settingsStore.label } set { settingsStore.label = newValue } }
+    var chatId: String { get { settingsStore.chatId } set { settingsStore.chatId = newValue } }
+    var botTokenDraft: String { get { settingsStore.botTokenDraft } set { settingsStore.botTokenDraft = newValue } }
+    var botTokenDraftIsMasked: Bool { get { settingsStore.botTokenDraftIsMasked } set { settingsStore.botTokenDraftIsMasked = newValue } }
+    var mtprotoApiId: String { get { settingsStore.mtprotoApiId } set { settingsStore.mtprotoApiId = newValue } }
+    var mtprotoApiHashDraft: String { get { settingsStore.mtprotoApiHashDraft } set { settingsStore.mtprotoApiHashDraft = newValue } }
+    var mtprotoApiHashDraftIsMasked: Bool { get { settingsStore.mtprotoApiHashDraftIsMasked } set { settingsStore.mtprotoApiHashDraftIsMasked = newValue } }
+    var scheduleEnabled: Bool { get { settingsStore.scheduleEnabled } set { settingsStore.scheduleEnabled = newValue } }
+    var scheduleKind: String { get { settingsStore.scheduleKind } set { settingsStore.scheduleKind = newValue } }
+    var telegramOk: Bool { get { settingsStore.telegramOk } set { settingsStore.telegramOk = newValue } }
+    var telegramStatusText: String { get { settingsStore.telegramStatusText } set { settingsStore.telegramStatusText = newValue } }
+    var botTokenPresent: Bool { get { settingsStore.botTokenPresent } set { settingsStore.botTokenPresent = newValue } }
+    var masterKeyPresent: Bool { get { settingsStore.masterKeyPresent } set { settingsStore.masterKeyPresent = newValue } }
+    var mtprotoApiHashPresent: Bool { get { settingsStore.mtprotoApiHashPresent } set { settingsStore.mtprotoApiHashPresent = newValue } }
+    var mtprotoSessionPresent: Bool { get { settingsStore.mtprotoSessionPresent } set { settingsStore.mtprotoSessionPresent = newValue } }
+    var secretPresenceKnown: Bool { get { settingsStore.secretPresenceKnown } set { settingsStore.secretPresenceKnown = newValue } }
+    var secretPresenceFetchInFlight: Bool { get { settingsStore.secretPresenceFetchInFlight } set { settingsStore.secretPresenceFetchInFlight = newValue } }
+    var telegramValidateOk: Bool? { get { settingsStore.telegramValidateOk } set { settingsStore.telegramValidateOk = newValue } }
+    var telegramValidateText: String { get { settingsStore.telegramValidateText } set { settingsStore.telegramValidateText = newValue } }
+    var refreshInFlight: Bool { get { settingsStore.refreshInFlight } set { settingsStore.refreshInFlight = newValue } }
 
-    @Published var telegramOk: Bool = false
-    @Published var telegramStatusText: String = "Telegram Storage • Offline"
-    @Published var botTokenPresent: Bool = false
-    @Published var masterKeyPresent: Bool = false
-    @Published var mtprotoApiHashPresent: Bool = false
-    @Published var mtprotoSessionPresent: Bool = false
-    @Published var secretPresenceKnown: Bool = false
-    @Published var secretPresenceFetchInFlight: Bool = false
-    @Published var telegramValidateOk: Bool? = nil
-    @Published var telegramValidateText: String = "Not validated"
-    @Published var refreshInFlight: Bool = false
+    var toastText: String? { get { taskPresentationStore.toastText } set { taskPresentationStore.toastText = newValue } }
+    var toastIsError: Bool { get { taskPresentationStore.toastIsError } set { taskPresentationStore.toastIsError = newValue } }
+    var shutdownPresentation: ShutdownPresentation? { get { taskPresentationStore.shutdownPresentation } set { taskPresentationStore.shutdownPresentation = newValue } }
 
-    @Published var toastText: String? = nil
-    @Published var toastIsError: Bool = false
-    @Published var shutdownPresentation: ShutdownPresentation? = nil
+    var lastRunOk: Bool? = nil
+    var lastRunErrorCode: String? = nil
 
-    @Published var lastRunOk: Bool? = nil
-    @Published var lastRunErrorCode: String? = nil
+    var isRunning: Bool { get { taskPresentationStore.isRunning } set { taskPresentationStore.isRunning = newValue } }
+    var phase: String { get { taskPresentationStore.phase } set { taskPresentationStore.phase = newValue } }
+    var activeTask: ActiveTask? { get { taskPresentationStore.activeTask } set { taskPresentationStore.activeTask = newValue } }
 
-    @Published var isRunning: Bool = false
-    @Published var phase: String = "idle"
-    @Published var activeTask: ActiveTask? = nil
+    var lastBytesUploaded: Int64 = 0
+    var lastBytesDeduped: Int64 = 0
+    var lastDurationSeconds: Double = 0
+    var lastRunAt: Date?
 
-    @Published var lastBytesUploaded: Int64 = 0
-    @Published var lastBytesDeduped: Int64 = 0
-    @Published var lastDurationSeconds: Double = 0
-    @Published var lastRunAt: Date?
+    var currentBytesUploaded: Int64 = 0
+    var currentBytesDeduped: Int64 = 0
+    var taskStartedAt: Date?
 
-    @Published var currentBytesUploaded: Int64 = 0
-    @Published var currentBytesDeduped: Int64 = 0
-    @Published var taskStartedAt: Date?
-
-    @Published var statusSnapshot: StatusSnapshot? = nil
-    @Published var statusSnapshotReceivedAt: Date? = nil
+    var statusSnapshot: StatusSnapshot? {
+        get { statusStore.snapshot }
+        set {
+            if let newValue { statusStore.ingest(newValue) }
+        }
+    }
+    var statusSnapshotReceivedAt: Date? { statusStore.receivedAt }
     // UI -> AppKit invalidation signal. AppDelegate recomputes popover height using sizeThatFits.
-    @Published var popoverResizeToken: Int = 0
-    @Published var runHistory: [RunLogSummary] = []
-    @Published var runHistoryRefreshInFlight: Bool = false
-    @Published var targetRateEstimates: [String: TargetRateEstimate] = [:]
+    var popoverResizeToken: Int { get { taskPresentationStore.popoverResizeToken } set { taskPresentationStore.popoverResizeToken = newValue } }
+    var runHistory: [RunLogSummary] { get { runHistoryStore.runs } set { runHistoryStore.runs = newValue } }
+    var runHistoryRefreshInFlight: Bool { get { runHistoryStore.refreshInFlight } set { runHistoryStore.refreshInFlight = newValue } }
+    var targetRateEstimates: [String: TargetRateEstimate] { get { taskPresentationStore.targetRateEstimates } set { taskPresentationStore.targetRateEstimates = newValue } }
 
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
@@ -166,7 +180,10 @@ final class AppModel: ObservableObject {
         var error: ActiveTaskError?
     }
 
-    @Published var statusActivity: [StatusActivityItem] = []
+    var statusActivity: [StatusActivityItem] {
+        get { diagnosticsStore.statusActivity }
+        set { diagnosticsStore.statusActivity = newValue }
+    }
     private var statusStaleLevel: Int = 0
     private var statusStaleTimer: DispatchSourceTimer? = nil
     private var statusPollTimer: DispatchSourceTimer? = nil
@@ -329,6 +346,9 @@ final class AppModel: ObservableObject {
     }
 
     init() {
+        statusStore.onPublish = { [weak self] snapshot in
+            self?.handlePublishedStatusSnapshot(snapshot)
+        }
         startStatusStaleTimer()
         installUIDemoDataIfNeeded()
         if UIDemo.enabled, UIDemo.scene == "shutdown-waiting" {
@@ -426,7 +446,7 @@ final class AppModel: ObservableObject {
                     ),
                 ]
             )
-            statusSnapshotReceivedAt = now
+            statusStore.ingest(statusSnapshot!, receivedAt: now)
         }
 
         if runHistory.isEmpty {
@@ -522,6 +542,7 @@ final class AppModel: ObservableObject {
         var dataDir: String? = nil
         var configDir: String? = nil
         var openSettingsOnLaunch: Bool = false
+        var openMainWindowOnLaunch: Bool = false
 
         static func parse(_ args: [String]) -> LaunchOverrides {
             var out = LaunchOverrides()
@@ -534,6 +555,8 @@ final class AppModel: ObservableObject {
                     out.enableKeychain = true
                 case "--open-settings":
                     out.openSettingsOnLaunch = true
+                case "--open-main-window":
+                    out.openMainWindowOnLaunch = true
                 case "--data-dir":
                     if i + 1 < args.count { out.dataDir = args[i + 1]; i += 1 }
                 case "--config-dir":
@@ -549,6 +572,10 @@ final class AppModel: ObservableObject {
 
     func openSettingsOnLaunchOverrideEnabled() -> Bool {
         launchOverrides.openSettingsOnLaunch
+    }
+
+    func openMainWindowOnLaunchOverrideEnabled() -> Bool {
+        launchOverrides.openMainWindowOnLaunch
     }
 
     func defaultConfigDir() -> URL {
@@ -1136,10 +1163,9 @@ final class AppModel: ObservableObject {
         t.schedule(deadline: .now() + 0.3, repeating: 0.5)
         t.setEventHandler { [weak self] in
             guard let self else { return }
-            guard let snap = self.statusSnapshot else { return }
-            let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
-            let age = max(0, nowMs - snap.generatedAt)
-            let level: Int = (age > StatusFreshness.disconnectedMs) ? 2 : ((age > StatusFreshness.staleMs) ? 1 : 0)
+            guard self.statusStore.latestSnapshot != nil else { return }
+            self.statusStore.refreshConnectionPhase()
+            let level = self.statusStore.connectionPhase.rawValue
             if level != self.statusStaleLevel {
                 self.statusStaleLevel = level
                 if level == 1 {
@@ -1195,8 +1221,10 @@ final class AppModel: ObservableObject {
     }
 
     private func applyStatusSnapshot(_ snap: StatusSnapshot) {
-        statusSnapshot = snap
-        statusSnapshotReceivedAt = Date()
+        statusStore.ingest(snap)
+    }
+
+    private func handlePublishedStatusSnapshot(_ snap: StatusSnapshot) {
         appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
 
         // UI-only rate estimates based on monotonic progress counters. These are used to derive
@@ -2141,7 +2169,10 @@ final class AppModel: ObservableObject {
 	                window = existing
 	            } else {
                 let root = SettingsWindowRootView()
-                    .environmentObject(self)
+                    .environment(\.appRuntime, self)
+                    .environmentObject(self.settingsStore)
+                    .environmentObject(self.taskPresentationStore)
+                    .environmentObject(self.diagnosticsStore)
                     .appAppearanceOverride(self.appearanceOverride)
                 let controller = NSHostingController(rootView: root)
                 controller.view.wantsLayer = true
@@ -2214,7 +2245,11 @@ final class AppModel: ObservableObject {
 	                window = existing
 	            } else {
                 let root = MainWindowRootView()
-                    .environmentObject(self)
+                    .environment(\.appRuntime, self)
+                    .environmentObject(self.statusStore)
+                    .environmentObject(self.runHistoryStore)
+                    .environmentObject(self.taskPresentationStore)
+                    .environmentObject(self.diagnosticsStore)
                     .appAppearanceOverride(self.appearanceOverride)
                 let controller = NSHostingController(rootView: root)
                 controller.view.wantsLayer = true
@@ -3012,12 +3047,12 @@ struct GlassCard<Content: View>: View {
 }
 
 private struct ShutdownControl: View {
-    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var taskStore: TaskPresentationStore
     let theme: PopoverTheme
 
     var body: some View {
         Group {
-            if let presentation = model.shutdownPresentation, case .stopping = presentation {
+            if let presentation = taskStore.shutdownPresentation, case .stopping = presentation {
                 ProgressView()
                     .controlSize(.small)
                     .frame(width: 22, height: 22)
@@ -3049,18 +3084,20 @@ private struct ShutdownControl: View {
 }
 
 struct PopoverRootView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var taskStore: TaskPresentationStore
+    @EnvironmentObject var statusStore: StatusStore
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-                .disabled(model.shutdownPresentation != nil)
-            if let shutdownPresentation = model.shutdownPresentation {
+                .disabled(taskStore.shutdownPresentation != nil)
+            if let shutdownPresentation = taskStore.shutdownPresentation {
                 shutdownNotice(shutdownPresentation)
             }
             OverviewView()
-                .disabled(model.shutdownPresentation != nil)
+                .disabled(taskStore.shutdownPresentation != nil)
         }
         .padding(16)
         .frame(width: PopoverAutoSize.width, alignment: .topLeading)
@@ -3082,8 +3119,8 @@ struct PopoverRootView: View {
             .ignoresSafeArea()
         }
         .overlay(alignment: .bottom) {
-            if let toast = model.toastText {
-                ToastPill(text: toast, isError: model.toastIsError)
+            if let toast = taskStore.toastText {
+                ToastPill(text: toast, isError: taskStore.toastIsError)
                     .padding(12)
                     .allowsHitTesting(false)
                     .transition(.opacity)
@@ -3093,7 +3130,7 @@ struct PopoverRootView: View {
 
     private var header: some View {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
-        let snap = model.statusSnapshot
+        let snap = statusStore.snapshot
         let ageMs = snap == nil ? Int64.max : max(0, nowMs - (snap?.generatedAt ?? 0))
         let isDaemon = (snap?.source.kind == "daemon")
         let statusText: String = {
@@ -3210,7 +3247,7 @@ struct PopoverRootView: View {
                 }
                 Spacer(minLength: 0)
                 Button("Keep Open") {
-                    model.shutdownPresentation = nil
+                    taskStore.shutdownPresentation = nil
                 }
                 .buttonStyle(.borderless)
                 .font(.system(size: 11, weight: .semibold))
@@ -3255,12 +3292,13 @@ struct PopoverRootView: View {
 }
 
 struct OverviewView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var statusStore: StatusStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var measuredTargetsContentHeight: CGFloat = 0
 
     var body: some View {
-        let snap = model.statusSnapshot
+        let snap = statusStore.snapshot
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000.0)
         let targetIds = snap?.targets.map(\.id) ?? []
 
@@ -3524,7 +3562,8 @@ private extension View {
 }
 
 private struct TargetsListView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var taskStore: TaskPresentationStore
     @Environment(\.colorScheme) private var colorScheme
     let targets: [StatusTarget]
     let snapshotGeneratedAtMs: Int64
@@ -3647,7 +3686,8 @@ private struct TargetsListView: View {
 }
 
 private struct TargetRowView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var taskStore: TaskPresentationStore
     @Environment(\.colorScheme) private var colorScheme
     let target: StatusTarget
     let snapshotGeneratedAtMs: Int64
@@ -3659,7 +3699,7 @@ private struct TargetRowView: View {
         let isDaemon = (snapshotSourceKind == "daemon")
         let disconnected = isDaemon && staleAgeMs > StatusFreshness.disconnectedMs
 
-        let cliRunning = (model.activeTask?.state == "running") && (model.activeTask?.targetId == target.targetId)
+        let cliRunning = (taskStore.activeTask?.state == "running") && (taskStore.activeTask?.targetId == target.targetId)
         let daemonRunning =
             (target.state == "running") && !disconnected && (isDaemon && staleAgeMs <= StatusFreshness.disconnectedMs)
         let running = cliRunning || daemonRunning
@@ -3692,7 +3732,7 @@ private struct TargetRowView: View {
 
     private func stateBadge(staleAgeMs: Int64, isDaemon: Bool) -> some View {
         let (text, c): (String, Color) = {
-            if (model.activeTask?.state == "running") && (model.activeTask?.targetId == target.targetId) {
+            if (taskStore.activeTask?.state == "running") && (taskStore.activeTask?.targetId == target.targetId) {
                 return ("Running", .blue)
             }
             if !isDaemon || staleAgeMs > StatusFreshness.staleMs { return ("Stale", .orange) }
@@ -3848,7 +3888,7 @@ private struct TargetRowView: View {
     private func runningSummary(nowMs: Int64) -> String {
         let p = effectiveProgress()
 
-        if let t = model.activeTask,
+        if let t = taskStore.activeTask,
            t.state == "running",
            t.targetId == target.targetId
         {
@@ -3903,7 +3943,7 @@ private struct TargetRowView: View {
     }
 
     private func effectiveProgress() -> StatusProgress? {
-        if let t = model.activeTask,
+        if let t = taskStore.activeTask,
            t.state == "running",
            t.targetId == target.targetId
         {
@@ -3916,7 +3956,7 @@ private struct TargetRowView: View {
     }
 
     private func elapsedText(nowMs: Int64) -> String {
-        if let t = model.activeTask,
+        if let t = taskStore.activeTask,
            t.state == "running",
            t.targetId == target.targetId
         {
@@ -3982,7 +4022,9 @@ private struct TargetRowView: View {
 }
 
 struct SettingsView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var settingsStore: SettingsStore
+    @EnvironmentObject var taskStore: TaskPresentationStore
     @FocusState private var tokenFocused: Bool
     @FocusState private var apiHashFocused: Bool
 
@@ -3994,12 +4036,12 @@ struct SettingsView: View {
                         Text("Secrets")
                             .font(.system(size: 13, weight: .semibold))
                         Spacer()
-                        Text(model.secretPresenceFetchInFlight ? "Checking…" : (model.secretPresenceKnown ? "Checked" : "Not checked"))
+                        Text(settingsStore.secretPresenceFetchInFlight ? "Checking…" : (settingsStore.secretPresenceKnown ? "Checked" : "Not checked"))
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                         Button("Check") { model.refreshSecretsPresence(force: true) }
                             .buttonStyle(.bordered)
-                            .disabled(model.secretPresenceFetchInFlight)
+                            .disabled(settingsStore.secretPresenceFetchInFlight)
                     }
                     Divider().opacity(0.4)
 
@@ -4007,9 +4049,9 @@ struct SettingsView: View {
                         Text("Bot Token")
                             .font(.system(size: 13, weight: .semibold))
                         Spacer()
-                        Text(model.secretPresenceKnown ? (model.botTokenPresent ? "Saved (encrypted)" : "Not set") : "Not checked")
+                        Text(settingsStore.secretPresenceKnown ? (settingsStore.botTokenPresent ? "Saved (encrypted)" : "Not set") : "Not checked")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(model.secretPresenceKnown && model.botTokenPresent ? Color.green : Color.secondary)
+                            .foregroundStyle(settingsStore.secretPresenceKnown && settingsStore.botTokenPresent ? Color.green : Color.secondary)
                     }
                     Divider().opacity(0.4)
 
@@ -4017,13 +4059,13 @@ struct SettingsView: View {
                         Text("Chat ID")
                             .font(.system(size: 13, weight: .semibold))
                         Spacer()
-                        TextField("-100123…", text: $model.chatId)
+                        TextField("-100123…", text: $settingsStore.chatId)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 170)
                     }
 
                     HStack {
-                        SecureField("Paste new bot token", text: $model.botTokenDraft)
+                        SecureField("Paste new bot token", text: $settingsStore.botTokenDraft)
                             .focused($tokenFocused)
                         Button("Save token") { model.setBotToken() }
                             .buttonStyle(.bordered)
@@ -4035,7 +4077,7 @@ struct SettingsView: View {
                         Text("API ID")
                             .font(.system(size: 13, weight: .semibold))
                         Spacer()
-                        TextField("123456", text: $model.mtprotoApiId)
+                        TextField("123456", text: $settingsStore.mtprotoApiId)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 170)
                     }
@@ -4044,13 +4086,13 @@ struct SettingsView: View {
                         Text("API hash")
                             .font(.system(size: 13, weight: .semibold))
                         Spacer()
-                        Text(model.secretPresenceKnown ? (model.mtprotoApiHashPresent ? "Saved (encrypted)" : "Not set") : "Not checked")
+                        Text(settingsStore.secretPresenceKnown ? (settingsStore.mtprotoApiHashPresent ? "Saved (encrypted)" : "Not set") : "Not checked")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(model.secretPresenceKnown && model.mtprotoApiHashPresent ? Color.green : Color.secondary)
+                            .foregroundStyle(settingsStore.secretPresenceKnown && settingsStore.mtprotoApiHashPresent ? Color.green : Color.secondary)
                     }
 
                     HStack(spacing: 8) {
-                        SecureField("Paste api_hash", text: $model.mtprotoApiHashDraft)
+                        SecureField("Paste api_hash", text: $settingsStore.mtprotoApiHashDraft)
                             .focused($apiHashFocused)
                         Button("Save api_hash") { model.setMtprotoApiHash() }
                             .buttonStyle(.bordered)
@@ -4060,7 +4102,7 @@ struct SettingsView: View {
                         Button("Clear session") { model.clearMtprotoSession() }
                             .buttonStyle(.bordered)
                         Spacer()
-                        Text(model.secretPresenceKnown ? (model.mtprotoSessionPresent ? "Session: saved" : "Session: none") : "Session: not checked")
+                        Text(settingsStore.secretPresenceKnown ? (settingsStore.mtprotoSessionPresent ? "Session: saved" : "Session: none") : "Session: not checked")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
@@ -4077,18 +4119,18 @@ struct SettingsView: View {
                         Button("Ensure master key") { model.initMasterKey() }
                             .buttonStyle(.bordered)
                         Spacer()
-                        Text(model.secretPresenceKnown ? (model.masterKeyPresent ? "Master key: ready" : "Master key: missing") : "Master key: not checked")
+                        Text(settingsStore.secretPresenceKnown ? (settingsStore.masterKeyPresent ? "Master key: ready" : "Master key: missing") : "Master key: not checked")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(model.secretPresenceKnown ? (model.masterKeyPresent ? Color.secondary : Color.red) : Color.secondary)
+                            .foregroundStyle(settingsStore.secretPresenceKnown ? (settingsStore.masterKeyPresent ? Color.secondary : Color.red) : Color.secondary)
                     }
                 }
 
                 GlassCard(title: "SCHEDULE") {
-                    Toggle("Enable", isOn: $model.scheduleEnabled)
+                    Toggle("Enable", isOn: $settingsStore.scheduleEnabled)
                     HStack {
                         Text("Frequency")
                         Spacer()
-                        Picker("", selection: $model.scheduleKind) {
+                        Picker("", selection: $settingsStore.scheduleKind) {
                             Text("Hourly").tag("hourly")
                             Text("Daily").tag("daily")
                         }
@@ -4108,15 +4150,15 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onChange(of: tokenFocused) { _, isFocused in
-            if isFocused, model.botTokenDraftIsMasked {
-                model.botTokenDraft = ""
-                model.botTokenDraftIsMasked = false
+            if isFocused, settingsStore.botTokenDraftIsMasked {
+                settingsStore.botTokenDraft = ""
+                settingsStore.botTokenDraftIsMasked = false
             }
         }
         .onChange(of: apiHashFocused) { _, isFocused in
-            if isFocused, model.mtprotoApiHashDraftIsMasked {
-                model.mtprotoApiHashDraft = ""
-                model.mtprotoApiHashDraftIsMasked = false
+            if isFocused, settingsStore.mtprotoApiHashDraftIsMasked {
+                settingsStore.mtprotoApiHashDraft = ""
+                settingsStore.mtprotoApiHashDraftIsMasked = false
             }
         }
     }
@@ -4265,7 +4307,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let host = NSHostingController(
             rootView: AnyView(
                 PopoverRootView()
-                    .environmentObject(ModelStore.shared)
+                    .environment(\.appRuntime, ModelStore.shared)
+                    .environmentObject(ModelStore.shared.statusStore)
+                    .environmentObject(ModelStore.shared.taskPresentationStore)
                     .appAppearanceOverride(appearanceOverride)
             )
         )
@@ -4284,7 +4328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ModelStore.shared.ensureStatusStreamRunning()
         }
 
-        ModelStore.shared.$popoverResizeToken
+        ModelStore.shared.taskPresentationStore.$popoverResizeToken
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
@@ -4304,6 +4348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let shouldOpenSettings = env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1"
             || ModelStore.shared.openSettingsOnLaunchOverrideEnabled()
         let shouldOpenMainWindow = env["TELEVYBACKUP_OPEN_MAIN_WINDOW_ON_LAUNCH"] == "1"
+            || ModelStore.shared.openMainWindowOnLaunchOverrideEnabled()
 
         if shouldOpenMainWindow {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -4494,7 +4539,9 @@ extension AppDelegate {
         let host = NSHostingController(
             rootView: AnyView(
                 PopoverRootView()
-                    .environmentObject(model)
+                    .environment(\.appRuntime, model)
+                    .environmentObject(model.statusStore)
+                    .environmentObject(model.taskPresentationStore)
                     .appAppearanceOverride(appearanceOverride)
             )
         )
@@ -4502,7 +4549,7 @@ extension AppDelegate {
         popover.contentViewController = host
         popoverHost = host
 
-        model.$popoverResizeToken
+        model.taskPresentationStore.$popoverResizeToken
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.schedulePopoverResize()
@@ -4523,7 +4570,7 @@ extension AppDelegate {
 @main
 struct TelevyBackupApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = ModelStore.shared
+    private let model = ModelStore.shared
 
     var body: some Scene {
         Settings {
