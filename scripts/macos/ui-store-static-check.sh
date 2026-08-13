@@ -4,18 +4,27 @@ set -euo pipefail
 root_dir="$(git rev-parse --show-toplevel)"
 ui_dir="$root_dir/macos/TelevyBackupApp"
 
-if rg -n '@EnvironmentObject[^\n]*AppModel|environmentObject\((self|model|ModelStore\.shared)\)' "$ui_dir" --glob '*.swift'; then
+search_swift() {
+  local pattern="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -n "$pattern" "$ui_dir" --glob '*.swift'
+  else
+    /usr/bin/grep -REn --include='*.swift' "$pattern" "$ui_dir"
+  fi
+}
+
+if search_swift '@EnvironmentObject.*AppModel|environmentObject\((self|model|ModelStore\.shared)\)'; then
   echo "ERROR: root AppModel must not be injected or observed by SwiftUI" >&2
   exit 1
 fi
 
-if rg -n 'final class AppModel: ObservableObject|@Published' "$ui_dir/TelevyBackupApp.swift"; then
+if /usr/bin/grep -En 'final class AppModel: ObservableObject|@Published' "$ui_dir/TelevyBackupApp.swift"; then
   echo "ERROR: AppModel must remain a non-observable runtime coordinator" >&2
   exit 1
 fi
 
 for store in StatusStore RunHistoryStore SettingsStore TaskPresentationStore; do
-  rg -q "final class $store: ObservableObject" "$ui_dir" --glob '*.swift' || {
+  search_swift "final class $store: ObservableObject" >/dev/null || {
     echo "ERROR: missing domain store: $store" >&2
     exit 1
   }
