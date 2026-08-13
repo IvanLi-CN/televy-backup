@@ -35,9 +35,19 @@ final class StatusStore: ObservableObject {
     private var pendingRunningReceivedAt: Date?
     private var pendingWorkItem: DispatchWorkItem?
     private let publishInterval: TimeInterval
+    private let now: () -> Date
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Void
 
-    init(publishInterval: TimeInterval = 0.5) {
+    init(
+        publishInterval: TimeInterval = 0.5,
+        now: @escaping () -> Date = Date.init,
+        schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, action in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+        }
+    ) {
         self.publishInterval = publishInterval
+        self.now = now
+        self.schedule = schedule
     }
 
     deinit {
@@ -84,7 +94,7 @@ final class StatusStore: ObservableObject {
             return shouldPublish
         }
 
-        let elapsed = Date().timeIntervalSince(lastPublishedAt ?? .distantPast)
+        let elapsed = now().timeIntervalSince(lastPublishedAt ?? .distantPast)
         if elapsed >= publishInterval {
             publish(snapshot, receivedAt: receivedAt, fingerprint: fingerprint, phase: .fresh)
             return true
@@ -109,7 +119,7 @@ final class StatusStore: ObservableObject {
             )
         }
         pendingWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, publishInterval - elapsed), execute: work)
+        schedule(max(0, publishInterval - elapsed)) { work.perform() }
         return false
     }
 
@@ -134,7 +144,7 @@ final class StatusStore: ObservableObject {
         phase: StatusConnectionPhase
     ) {
         publishedFingerprint = fingerprint
-        lastPublishedAt = Date()
+        lastPublishedAt = now()
         state = ViewState(snapshot: snapshot, receivedAt: receivedAt, connectionPhase: phase)
         onPublish?(snapshot)
     }

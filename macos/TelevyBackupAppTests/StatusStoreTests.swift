@@ -58,21 +58,37 @@ struct StatusStoreTests {
 
     @MainActor
     private static func runningPublishCadenceIsAtMostTwoHertz() async {
-        let store = StatusStore()
+        final class TestClock {
+            var now = Date(timeIntervalSince1970: 1_000)
+            var scheduled: [(deadline: Date, action: () -> Void)] = []
+
+            func advance(by interval: TimeInterval) {
+                now = now.addingTimeInterval(interval)
+                let ready = scheduled.filter { $0.deadline <= now }
+                scheduled.removeAll { $0.deadline <= now }
+                ready.forEach { $0.action() }
+            }
+        }
+        let clock = TestClock()
+        let store = StatusStore(
+            now: { clock.now },
+            schedule: { delay, action in
+                clock.scheduled.append((clock.now.addingTimeInterval(delay), action))
+            }
+        )
         var publishTimes: [Date] = []
-        let token = store.objectWillChange.sink { publishTimes.append(Date()) }
-        let start = Date()
+        let token = store.objectWillChange.sink { publishTimes.append(clock.now) }
         for index in 0..<8 {
             store.ingest(
                 snapshot(generatedAt: Int64(index + 1), state: "running", uploaded: Int64(index + 1)),
-                receivedAt: start.addingTimeInterval(Double(index) * 0.1)
+                receivedAt: clock.now
             )
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            clock.advance(by: 0.1)
         }
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        clock.advance(by: 0.3)
         precondition(publishTimes.count == 3, "expected initial plus two coalesced publishes, got \(publishTimes.count)")
         for pair in zip(publishTimes, publishTimes.dropFirst()) {
-            precondition(pair.1.timeIntervalSince(pair.0) >= 0.45, "running publish cadence exceeded 2Hz")
+            precondition(pair.1.timeIntervalSince(pair.0) >= 0.5, "running publish cadence exceeded 2Hz")
         }
 
         store.ingest(snapshot(generatedAt: 20, state: "running", uploaded: 20), receivedAt: Date())
