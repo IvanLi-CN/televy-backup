@@ -215,6 +215,13 @@ enum StatusCmd {
 
 #[derive(Subcommand)]
 enum BackupCmd {
+    Enqueue {
+        #[arg(long, conflicts_with = "target_id")]
+        all_enabled: bool,
+        #[arg(long = "target-id")]
+        target_id: Vec<String>,
+    },
+    Stop,
     Run {
         #[arg(long)]
         target_id: Option<String>,
@@ -748,6 +755,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             StatusCmd::Stream => status_stream(&config_dir, &data_dir, cli.json).await,
         },
         Command::Backup { cmd } => match cmd {
+            BackupCmd::Enqueue {
+                all_enabled,
+                target_id,
+            } => backup_enqueue(&data_dir, all_enabled, target_id, cli.json),
+            BackupCmd::Stop => backup_stop(&data_dir, cli.json),
             BackupCmd::Run {
                 target_id,
                 source,
@@ -827,6 +839,70 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             DaemonCmd::Stop => daemon_stop(&data_dir, cli.json).await,
         },
     }
+}
+
+fn backup_enqueue(
+    data_dir: &Path,
+    all_enabled: bool,
+    target_ids: Vec<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let params = if all_enabled {
+        serde_json::json!({ "scope": "allEnabled" })
+    } else if !target_ids.is_empty() {
+        serde_json::json!({ "scope": "targets", "targetIds": target_ids })
+    } else {
+        return Err(CliError::new(
+            "backup.invalid_scope",
+            "choose --all-enabled or at least one --target-id",
+        ));
+    };
+
+    let response = control_ipc_call_with_timeouts(
+        data_dir,
+        "backup.enqueue",
+        params,
+        Duration::from_secs(180),
+        Duration::from_secs(10),
+    )?;
+    let result = response
+        .result
+        .ok_or_else(|| CliError::new("control.failed", "daemon returned no backup batch"))?;
+
+    if json {
+        println!("{result}");
+    } else {
+        let batch_id = result
+            .get("batchId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let disposition = result
+            .get("disposition")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("accepted");
+        println!("backup {disposition}: {batch_id}");
+    }
+    Ok(())
+}
+
+fn backup_stop(data_dir: &Path, json: bool) -> Result<(), CliError> {
+    let response = control_ipc_call_with_timeouts(
+        data_dir,
+        "backup.stop",
+        serde_json::json!({}),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+    )?;
+    let result = response
+        .result
+        .ok_or_else(|| CliError::new("control.failed", "daemon returned no backup stop result"))?;
+
+    if json {
+        println!("{result}");
+    } else {
+        println!("backup stop requested");
+    }
+    Ok(())
 }
 
 fn diagnostics_get(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
@@ -7063,6 +7139,7 @@ fn control_ipc_call(
 mod control_ipc_tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
+    use std::sync::{Arc, Mutex};
     use std::thread;
 
     use super::*;
@@ -7230,6 +7307,94 @@ mod control_ipc_tests {
         );
 
         server.join().unwrap();
+    }
+
+    #[test]
+    fn backup_enqueue_all_enabled_uses_structured_control_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let ipc_dir = dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+        let captured = Arc::new(Mutex::new(None));
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            let captured = Arc::clone(&captured);
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                let (mut stream, _addr) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let req: televy_backup_core::control::ControlRequest =
+                    serde_json::from_str(line.trim_end()).unwrap();
+                *captured.lock().unwrap() = Some(req.clone());
+                let resp = televy_backup_core::control::ControlResponse::ok(
+                    req.id,
+                    serde_json::json!({
+                        "batchId": "bch_test",
+                        "disposition": "accepted",
+                        "targetIds": ["target-a", "target-b"]
+                    }),
+                );
+                let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
+                stream.write_all(resp_line.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        backup_enqueue(dir.path(), true, Vec::new(), true).unwrap();
+        server.join().unwrap();
+
+        let request = captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(request.method, "backup.enqueue");
+        assert_eq!(request.params["scope"], "allEnabled");
+        assert!(request.params.get("targetIds").is_none());
+    }
+
+    #[test]
+    fn backup_stop_uses_structured_control_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let ipc_dir = dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+        let captured = Arc::new(Mutex::new(None));
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            let captured = Arc::clone(&captured);
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                let (mut stream, _addr) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let req: televy_backup_core::control::ControlRequest =
+                    serde_json::from_str(line.trim_end()).unwrap();
+                *captured.lock().unwrap() = Some(req.clone());
+                let resp = televy_backup_core::control::ControlResponse::ok(
+                    req.id,
+                    serde_json::json!({
+                        "cancellationRequested": true,
+                        "clearedTargetIds": ["target-a"]
+                    }),
+                );
+                let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
+                stream.write_all(resp_line.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        backup_stop(dir.path(), true).unwrap();
+        server.join().unwrap();
+
+        let request = captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(request.method, "backup.stop");
+        assert_eq!(request.params, serde_json::json!({}));
     }
 }
 
@@ -7571,6 +7736,7 @@ mod tests {
                     bytes_deduped: None,
                 }),
                 last_run: None,
+                backup_queue: None,
                 extra: Default::default(),
             }],
             extra: Default::default(),
@@ -7655,6 +7821,7 @@ mod tests {
                         bytes_deduped: None,
                     }),
                     last_run: None,
+                    backup_queue: None,
                     extra: Default::default(),
                 },
                 televy_backup_core::status::TargetState {
@@ -7687,6 +7854,7 @@ mod tests {
                         bytes_deduped: None,
                     }),
                     last_run: None,
+                    backup_queue: None,
                     extra: Default::default(),
                 },
             ],

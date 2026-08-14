@@ -37,6 +37,8 @@ final class TaskPresentationStore: ObservableObject {
     @Published var isRunning = false
     @Published var phase = "idle"
     @Published var activeTask: AppModel.ActiveTask?
+    @Published var backupRequest: BackupRequestPresentation?
+    @Published var backupStopRequest: BackupStopPresentation?
     @Published var popoverResizeToken = 0
     @Published var targetRateEstimates: [String: TargetRateEstimate] = [:]
 }

@@ -47,3 +47,9 @@
 | k7d2v | Daemon 生命周期与可控退出 | 部分完成（3/4） | `k7d2v-daemon-lifecycle/SPEC.md` | 2026-07-12 | daemon 停止 IPC、CLI 管理命令、App 退出与 LaunchAgent 完全退出治理 |
 | 0003 | Sync Logging Durability and Local Diagnostics | 部分完成（1/5） | `0003-sync-logging-durability/SPEC.md` | 2026-07-31 | 已迁移 legacy spec；待实现安全默认、日志偏好、Diagnostics UI 与视觉证据 |
 | macos-ui-state-isolation | macOS UI 状态隔离与空闲 CPU 治理 | 已完成 | `macos-ui-state-isolation/SPEC.md` | 2026-08-14 | 领域 Store 与有界发布已落地；隔离 Dev 主窗口 30 秒 CPU 平均 0.04%、峰值 0.30% |
+
+## Topic Catalog (slug-only)
+
+| Topic | Lifecycle | Implementation | Spec | Successor |
+| --- | --- | --- | --- | --- |
+| 备份请求队列与前置阶段可观测性 | active | 进行中 | `backup-request-queue-observability/SPEC.md` | - |

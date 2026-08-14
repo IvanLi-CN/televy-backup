@@ -15,6 +15,7 @@ struct StatusStoreTests {
         await idleHeartbeatDoesNotPublish()
         await connectionTransitionsPublishOnce()
         await runningUpdatesAreCoalescedAndFinalIsPreserved()
+        await queuedUpdatesUseActiveWorkCadence()
         await runningPublishCadenceIsAtMostTwoHertz()
         print("StatusStoreTests: PASS")
     }
@@ -64,6 +65,24 @@ struct StatusStoreTests {
     }
 
     @MainActor
+    private static func queuedUpdatesUseActiveWorkCadence() async {
+        let store = StatusStore(publishInterval: 0.05)
+        var publishes = 0
+        let token = store.objectWillChange.sink { publishes += 1 }
+        let start = Date()
+        let queue = StatusBackupQueue(activeBatchId: "bch_active", pendingBatchId: nil)
+        store.ingest(snapshot(generatedAt: 1, state: "idle", uploaded: 1, backupQueue: queue), receivedAt: start)
+        store.ingest(snapshot(generatedAt: 2, state: "idle", uploaded: 2, backupQueue: queue), receivedAt: start.addingTimeInterval(0.01))
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        expect(publishes == 2, "queued work should use the active update cadence")
+        expect(
+            store.state.snapshot?.targets.first?.backupQueue?.activeBatchId == "bch_active",
+            "queued membership was not preserved"
+        )
+        _ = token
+    }
+
+    @MainActor
     private static func runningPublishCadenceIsAtMostTwoHertz() async {
         final class TestClock {
             var now = Date(timeIntervalSince1970: 1_000)
@@ -104,7 +123,12 @@ struct StatusStoreTests {
         _ = token
     }
 
-    private static func snapshot(generatedAt: Int64, state: String, uploaded: Int64? = nil) -> StatusSnapshot {
+    private static func snapshot(
+        generatedAt: Int64,
+        state: String,
+        uploaded: Int64? = nil,
+        backupQueue: StatusBackupQueue? = nil
+    ) -> StatusSnapshot {
         StatusSnapshot(
             type: "status",
             schemaVersion: 1,
@@ -142,7 +166,8 @@ struct StatusStoreTests {
                         bytesDeduped: nil
                     )
                 },
-                lastRun: nil
+                lastRun: nil,
+                backupQueue: backupQueue
             )]
         )
     }

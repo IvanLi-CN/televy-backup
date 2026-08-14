@@ -107,6 +107,14 @@ final class AppModel {
     var isRunning: Bool { get { taskPresentationStore.isRunning } set { taskPresentationStore.isRunning = newValue } }
     var phase: String { get { taskPresentationStore.phase } set { taskPresentationStore.phase = newValue } }
     var activeTask: ActiveTask? { get { taskPresentationStore.activeTask } set { taskPresentationStore.activeTask = newValue } }
+    var backupRequest: BackupRequestPresentation? {
+        get { taskPresentationStore.backupRequest }
+        set { taskPresentationStore.backupRequest = newValue }
+    }
+    var backupStopRequest: BackupStopPresentation? {
+        get { taskPresentationStore.backupStopRequest }
+        set { taskPresentationStore.backupStopRequest = newValue }
+    }
 
     var lastBytesUploaded: Int64 = 0
     var lastBytesDeduped: Int64 = 0
@@ -178,6 +186,22 @@ final class AppModel {
         var startedAt: Date
         var updatedAt: Date
         var error: ActiveTaskError?
+    }
+
+    private struct BackupEnqueueResponse: Decodable {
+        var batchId: String
+        var disposition: String
+        var targetIds: [String]
+    }
+
+    private struct BackupStopResponse: Decodable {
+        var cancellationRequested: Bool
+        var clearedTargetIds: [String]
+    }
+
+    private struct CommandErrorEnvelope: Decodable {
+        var code: String?
+        var message: String?
     }
 
     var statusActivity: [StatusActivityItem] {
@@ -361,6 +385,10 @@ final class AppModel {
         if statusSnapshot == nil {
             let now = Date()
             let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
+            let activeBatchId = "bch_demo_active"
+            let pendingBatchId = "bch_demo_pending"
+            let connectingQueued = UIDemo.scene == "main-window-target-connecting-queued"
+            let runningNextQueued = UIDemo.scene == "main-window-target-running-next-queued"
 
             statusSnapshot = StatusSnapshot(
                 type: "status.snapshot",
@@ -388,17 +416,17 @@ final class AppModel {
                         up: StatusRate(bytesPerSecond: 3_200_000),
                         upTotal: StatusCounter(bytes: 1_234_567_890),
                         progress: StatusProgress(
-                            phase: "upload",
-                            sourceFilesTotal: 10_000,
-                            sourceBytesTotal: 5_120_000_000,
-                            filesTotal: 10_000,
-                            filesDone: 3_210,
+                            phase: connectingQueued ? "connecting" : "upload",
+                            sourceFilesTotal: connectingQueued ? nil : 10_000,
+                            sourceBytesTotal: connectingQueued ? nil : 5_120_000_000,
+                            filesTotal: connectingQueued ? nil : 10_000,
+                            filesDone: connectingQueued ? nil : 3_210,
                             chunksTotal: nil,
                             chunksDone: nil,
-                            bytesRead: 2_432_000_000,
-                            bytesUploaded: 1_700_000_000,
+                            bytesRead: connectingQueued ? nil : 2_432_000_000,
+                            bytesUploaded: connectingQueued ? nil : 1_700_000_000,
                             bytesDownloaded: nil,
-                            bytesDeduped: 11_800_000
+                            bytesDeduped: connectingQueued ? nil : 11_800_000
                         ),
                         lastRun: StatusTargetRunSummary(
                             finishedAt: "2026-02-01T06:12:00Z",
@@ -408,6 +436,10 @@ final class AppModel {
                             filesIndexed: 12_345,
                             bytesUploaded: 1_835_239_424,
                             bytesDeduped: 12_345_678
+                        ),
+                        backupQueue: StatusBackupQueue(
+                            activeBatchId: activeBatchId,
+                            pendingBatchId: runningNextQueued ? pendingBatchId : nil
                         )
                     ),
                     StatusTarget(
@@ -429,6 +461,10 @@ final class AppModel {
                             filesIndexed: 234,
                             bytesUploaded: 0,
                             bytesDeduped: 0
+                        ),
+                        backupQueue: StatusBackupQueue(
+                            activeBatchId: activeBatchId,
+                            pendingBatchId: nil
                         )
                     ),
                     StatusTarget(
@@ -447,6 +483,15 @@ final class AppModel {
                 ]
             )
             statusStore.ingest(statusSnapshot!, receivedAt: now)
+
+            if UIDemo.scene == "main-window-target-starting" {
+                backupRequest = BackupRequestPresentation(
+                    targetIds: ["t_demo_a", "t_demo_b"],
+                    batchId: nil,
+                    phase: .starting,
+                    startedAt: now
+                )
+            }
         }
 
         if runHistory.isEmpty {
@@ -879,10 +924,11 @@ final class AppModel {
         t.activate()
     }
 
-    func ensureDaemonRunning() {
+    @discardableResult
+    func ensureDaemonRunning() -> Bool {
         let now = Date()
         if let last = lastDaemonStartAttemptAt, now.timeIntervalSince(last) < 3 {
-            return
+            return waitForDaemonIpcReady(timeoutSeconds: 2.0)
         }
         lastDaemonStartAttemptAt = now
 
@@ -891,7 +937,7 @@ final class AppModel {
         // If IPC is already ready in our configured data dir, we are done (regardless of other
         // televybackupd processes that might exist on the system).
         if waitForDaemonIpcReady(timeoutSeconds: 0.05) {
-            return
+            return true
         }
 
         // If we are running in a dev/automation environment (custom dirs and/or keychain disabled),
@@ -900,7 +946,7 @@ final class AppModel {
         if !preferBundled {
             if isDaemonRunning() {
                 if waitForDaemonIpcReady(timeoutSeconds: 1.5) {
-                    return
+                    return true
                 }
             }
 
@@ -908,11 +954,11 @@ final class AppModel {
             if kickstartLaunchAgent(label: "homebrew.mxcl.televybackupd") {
                 appendStatusActivity("Daemon kickstarted via launchd (homebrew.mxcl.televybackupd)")
                 if waitForDaemonIpcReady(timeoutSeconds: 2.0) {
-                    return
+                    return true
                 }
                 appendStatusActivity("Daemon starting (IPC not ready yet)")
                 scheduleDaemonIpcRetry()
-                return
+                return false
             }
         }
 
@@ -920,11 +966,11 @@ final class AppModel {
         guard let daemon = daemonPath() else {
             appendLog("WARN: televybackupd not found (daemon auto-start unavailable)")
             showToast("Daemon not found (install televybackupd)", isError: true)
-            return
+            return false
         }
 
         if daemonTask?.isRunning == true {
-            return
+            return waitForDaemonIpcReady(timeoutSeconds: 2.0)
         }
 
         let task = Process()
@@ -955,10 +1001,11 @@ final class AppModel {
             try task.run()
             daemonTask = task
             appendStatusActivity("Daemon spawned (\(daemon))")
-            _ = waitForDaemonIpcReady(timeoutSeconds: 2.0)
+            return waitForDaemonIpcReady(timeoutSeconds: 2.0)
         } catch {
             appendLog("ERROR: failed to start daemon: \(error)")
             showToast("Failed to start daemon (see ui.log)", isError: true)
+            return false
         }
     }
 
@@ -1225,6 +1272,8 @@ final class AppModel {
     }
 
     private func handlePublishedStatusSnapshot(_ snap: StatusSnapshot) {
+        reconcileBackupRequest(with: snap)
+        reconcileBackupStopRequest(with: snap)
         appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
 
         // UI-only rate estimates based on monotonic progress counters. These are used to derive
@@ -1595,42 +1644,8 @@ final class AppModel {
         )
     }
 
-    func runBackupNow() {
-        guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
-            return
-        }
-        guard !sourcePath.isEmpty else {
-            appendLog("ERROR: source path is empty")
-            showToast("Choose a source folder first", isError: true)
-            return
-        }
-        runProcess(exe: cli, args: ["--events", "backup", "run", "--source", sourcePath, "--label", label])
-    }
-
     func backupRun(targetId: String) {
-        guard let cli = cliPath() else {
-            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
-            return
-        }
-        ensureDaemonRunning()
-        showToast("Starting backup…", isError: false)
-        runProcess(
-            exe: cli,
-            args: [
-                "--events",
-                "backup",
-                "run",
-                "--target-id",
-                targetId,
-                "--label",
-                "manual",
-            ],
-            timeoutSeconds: nil,
-            onExit: { _ in
-                self.refreshRunHistory()
-            }
-        )
+        enqueueBackup(targetIds: [targetId], allEnabled: false)
     }
 
     func promptRestoreLatest(targetId: String) {
@@ -2910,68 +2925,193 @@ final class AppModel {
         }
     }
 
-    private func controlDirURL() -> URL {
-        effectiveDataDirURL().appendingPathComponent("control")
+    func triggerBackupNowAllEnabled() {
+        enqueueBackup(targetIds: [], allEnabled: true)
     }
 
-    func triggerBackupNowAllEnabled() {
-        ensureDaemonRunning()
-        let anyRunning = statusSnapshot?.targets.contains(where: { $0.state == "running" }) ?? false
+    func triggerBackupPrimaryAction() {
+        switch backupButtonState() {
+        case .idle:
+            triggerBackupNowAllEnabled()
+        case .stop:
+            stopBackup()
+        case .starting, .stopping:
+            break
+        }
+    }
+
+    func backupButtonState() -> BackupRequestButtonState {
+        TargetPresentation.backupButtonState(
+            snap: statusStore.snapshot,
+            backupRequest: backupRequest,
+            backupStopRequest: backupStopRequest
+        )
+    }
+
+    func canEnqueueBackup() -> Bool {
+        backupButtonState() == .idle
+    }
+
+    private func enqueueBackup(targetIds: [String], allEnabled: Bool) {
+        guard canEnqueueBackup() else { return }
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            showToast("Backup could not start", isError: true)
+            return
+        }
+
+        let requestedTargetIds: Set<String> = allEnabled
+            ? Set((statusStore.snapshot?.targets ?? []).filter(\.enabled).map(\.targetId))
+            : Set(targetIds)
+        backupRequest = BackupRequestPresentation(
+            targetIds: requestedTargetIds,
+            batchId: nil,
+            phase: .starting,
+            startedAt: Date()
+        )
+        guard ensureDaemonRunning() else {
+            backupRequest = nil
+            appendLog("ERROR: backup enqueue failed: daemon IPC was not ready")
+            appendStatusActivity("Backup enqueue failed")
+            showToast("Backup could not start: daemon unavailable", isError: true)
+            return
+        }
 
         DispatchQueue.global(qos: .utility).async {
-            // Proactively unlock the vault so the daemon can consume the manual trigger immediately.
-            // This may trigger a Keychain prompt on first access; only proceed if it succeeds.
-            if let cli = self.cliPath() {
-                let res = self.runCommandCapture(
-                    exe: cli,
-                    args: ["--json", "vault", "ensure"],
-                    timeoutSeconds: 180.0
-                )
-                if res.status != 0 {
-                    DispatchQueue.main.async {
-                        self.appendLog("ERROR: vault ensure failed: exit=\(res.status) reason=\(res.reason.rawValue)")
-                        if !res.stderr.isEmpty {
-                            self.appendLog("stderr: \(res.stderr.prefix(2000))")
-                        }
-                        self.appendStatusActivity("Vault unavailable (Keychain locked?)")
-                        self.showToast("Vault unavailable (unlock Keychain, see ui.log)", isError: true)
-                    }
-                    return
+            var args = ["--json", "backup", "enqueue"]
+            if allEnabled {
+                args.append("--all-enabled")
+            } else {
+                for targetId in targetIds {
+                    args.append(contentsOf: ["--target-id", targetId])
                 }
             }
+            let result = self.runCommandCapture(exe: cli, args: args, timeoutSeconds: 180.0)
 
-            let dir = self.controlDirURL()
-            let path = dir.appendingPathComponent("backup-now")
-            do {
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            DispatchQueue.main.async {
+                guard self.backupRequest?.phase == .starting else { return }
+                guard result.status == 0,
+                      let data = result.stdout.data(using: .utf8),
+                      let response = try? JSONDecoder().decode(BackupEnqueueResponse.self, from: data)
+                else {
+                    let error = self.backupEnqueueErrorMessage(stderr: result.stderr)
+                    self.appendLog("ERROR: backup enqueue failed: exit=\(result.status) reason=\(result.reason.rawValue) \(result.stderr.prefix(2000))")
+                    self.appendStatusActivity("Backup enqueue failed")
+                    self.backupRequest = nil
+                    self.showToast(error, isError: true)
+                    return
+                }
 
-                let tmp = dir.appendingPathComponent("backup-now.tmp.\(getpid())")
-                let payload = "manual backup trigger at \(ISO8601DateFormatter().string(from: Date()))\n"
-                if let data = payload.data(using: .utf8) {
-                    try data.write(to: tmp, options: .atomic)
+                self.backupRequest = BackupRequestPresentation(
+                    targetIds: Set(response.targetIds),
+                    batchId: response.batchId,
+                    phase: .awaitingDaemonSnapshot,
+                    startedAt: Date()
+                )
+                self.appendStatusActivity("Backup batch \(response.disposition): \(response.batchId)")
+                self.showToast(response.disposition == "coalesced" ? "Backup request merged" : "Backup queued", isError: false)
+                if self.backupRequest?.isObserved(in: self.statusStore.snapshot) == true {
+                    self.backupRequest = nil
                 } else {
-                    throw NSError(domain: "TelevyBackup", code: 1, userInfo: [
-                        NSLocalizedDescriptionKey: "failed to encode trigger payload",
-                    ])
-                }
-                if FileManager.default.fileExists(atPath: path.path) {
-                    try? FileManager.default.removeItem(at: path)
-                }
-                try FileManager.default.moveItem(at: tmp, to: path)
-
-                let finalPath = path.path
-                DispatchQueue.main.async {
-                    self.appendLog("Manual backup trigger written: \(finalPath)")
-                    self.appendStatusActivity("Manual backup trigger written (all enabled targets)")
-                    self.showToast(anyRunning ? "Queued backup…" : "Starting backup…", isError: false)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.appendLog("ERROR: failed to write manual backup trigger: \(error)")
-                    self.showToast("Failed to start backup (see ui.log)", isError: true)
+                    self.expireUnobservedBackupRequest(batchId: response.batchId)
                 }
             }
         }
+    }
+
+    private func stopBackup() {
+        guard backupButtonState() == .stop else { return }
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            showToast("Backup could not stop", isError: true)
+            return
+        }
+
+        backupStopRequest = BackupStopPresentation(startedAt: Date())
+        DispatchQueue.global(qos: .utility).async {
+            let result = self.runCommandCapture(
+                exe: cli,
+                args: ["--json", "backup", "stop"],
+                timeoutSeconds: 15.0
+            )
+
+            DispatchQueue.main.async {
+                guard self.backupStopRequest != nil else { return }
+                guard result.status == 0,
+                      let data = result.stdout.data(using: .utf8),
+                      let response = try? JSONDecoder().decode(BackupStopResponse.self, from: data)
+                else {
+                    self.backupStopRequest = nil
+                    self.appendLog("ERROR: backup stop failed: exit=\(result.status) reason=\(result.reason.rawValue) \(result.stderr.prefix(2000))")
+                    self.appendStatusActivity("Backup stop failed")
+                    self.showToast(self.backupControlErrorMessage(stderr: result.stderr, fallback: "Backup could not stop"), isError: true)
+                    return
+                }
+
+                self.backupRequest = nil
+                self.appendStatusActivity(
+                    "Backup stop requested (active=\(response.cancellationRequested), queued=\(response.clearedTargetIds.count))"
+                )
+                if let snapshot = self.statusStore.snapshot,
+                   !TargetPresentation.hasBackupInProgress(snap: snapshot)
+                {
+                    self.backupStopRequest = nil
+                    self.showToast("Backup stopped", isError: false)
+                } else {
+                    self.showToast("Stopping backup", isError: false)
+                    self.expireBackupStopRequest()
+                }
+            }
+        }
+    }
+
+    private func reconcileBackupRequest(with snapshot: StatusSnapshot) {
+        guard let request = backupRequest, request.batchId != nil else { return }
+        if request.isObserved(in: snapshot) {
+            backupRequest = nil
+        }
+    }
+
+    private func reconcileBackupStopRequest(with snapshot: StatusSnapshot) {
+        guard backupStopRequest != nil, !TargetPresentation.hasBackupInProgress(snap: snapshot) else {
+            return
+        }
+        backupStopRequest = nil
+        showToast("Backup stopped", isError: false)
+    }
+
+    private func expireUnobservedBackupRequest(batchId: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) {
+            guard self.backupRequest?.batchId == batchId else { return }
+            self.backupRequest = nil
+            self.appendLog("ERROR: backup batch \(batchId) was not observed in daemon status")
+            self.showToast("Backup request was not confirmed", isError: true)
+        }
+    }
+
+    private func expireBackupStopRequest() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15.0) {
+            guard self.backupStopRequest != nil else { return }
+            self.backupStopRequest = nil
+            self.appendLog("WARN: backup stop has not completed after 15 seconds")
+            self.showToast("Backup is still stopping", isError: true)
+        }
+    }
+
+    private func backupEnqueueErrorMessage(stderr: String) -> String {
+        backupControlErrorMessage(stderr: stderr, fallback: "Backup could not start")
+    }
+
+    private func backupControlErrorMessage(stderr: String, fallback: String) -> String {
+        let lines = stderr.split(separator: "\n", omittingEmptySubsequences: true)
+        for line in lines.reversed() {
+            if let data = String(line).data(using: .utf8),
+               let error = try? JSONDecoder().decode(CommandErrorEnvelope.self, from: data)
+            {
+                return error.message ?? fallback
+            }
+        }
+        return fallback
     }
 }
 
@@ -3147,6 +3287,7 @@ struct PopoverRootView: View {
             if ageMs > StatusFreshness.staleMs { return .orange }
             return .green
         }()
+        let backupButtonState = model.backupButtonState()
 
         return VStack(spacing: 0) {
             HStack(alignment: .center, spacing: 10) {
@@ -3176,10 +3317,23 @@ struct PopoverRootView: View {
                 Spacer()
 
                 Button {
-                    model.triggerBackupNowAllEnabled()
+                    model.triggerBackupPrimaryAction()
                 } label: {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 11, weight: .heavy))
+                    Group {
+                        switch backupButtonState {
+                        case .starting:
+                            ProgressView()
+                                .controlSize(.small)
+                        case .idle:
+                            Image(systemName: "play.fill")
+                        case .stop:
+                            Image(systemName: "stop.fill")
+                        case .stopping:
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+                    .font(.system(size: 11, weight: .heavy))
                         .frame(width: 22, height: 22)
                         .background(theme.actionButtonBackground, in: RoundedRectangle(cornerRadius: 10))
                         .overlay(
@@ -3188,7 +3342,9 @@ struct PopoverRootView: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .help("Backup now (all enabled targets)")
+                .disabled(backupButtonState.isDisabled)
+                .accessibilityLabel(backupButtonState.accessibilityLabel)
+                .help(backupButtonState.accessibilityLabel)
 
                 StatusLED(color: statusColor)
 
@@ -3732,11 +3888,17 @@ private struct TargetRowView: View {
 
     private func stateBadge(staleAgeMs: Int64, isDaemon: Bool) -> some View {
         let (text, c): (String, Color) = {
+            if taskStore.backupRequest?.includes(targetId: target.targetId) == true {
+                return ("Starting", .blue)
+            }
             if (taskStore.activeTask?.state == "running") && (taskStore.activeTask?.targetId == target.targetId) {
                 return ("Running", .blue)
             }
             if !isDaemon || staleAgeMs > StatusFreshness.staleMs { return ("Stale", .orange) }
             if target.state == "running" { return ("Running", .blue) }
+            if target.backupQueue?.activeBatchId != nil || target.backupQueue?.pendingBatchId != nil {
+                return ("Queued", TargetUserStatus.queued.tint)
+            }
             if target.state == "failed" || target.lastRun?.status == "failed" { return ("Failed", .red) }
             if target.state == "stale" { return ("Stale", .orange) }
             return ("Idle", .secondary)
@@ -3784,7 +3946,12 @@ private struct TargetRowView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
 
-            progressBar
+            runningActivity
+            if TargetPresentation.hasNextQueuedBackup(target: target) {
+                Text("Next queued")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(TargetUserStatus.queued.tint.opacity(0.92))
+            }
         }
     }
 
@@ -3828,15 +3995,31 @@ private struct TargetRowView: View {
         return .system(size: 11.5, weight: .heavy, design: .monospaced)
     }
 
-    private var progressBar: some View {
-        BackupUnifiedProgressBar(
-            visual: TargetPresentation.backupProgressVisual(effectiveProgress()),
-            tint: .blue
-        )
+    @ViewBuilder
+    private var runningActivity: some View {
+        let phase = effectiveProgress()?.phase
+        if TargetPresentation.isConnectingPhase(phase) {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Connecting")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Color.secondary.opacity(0.92))
+            }
+        } else {
+            BackupUnifiedProgressBar(
+                visual: TargetPresentation.backupProgressVisual(effectiveProgress()),
+                tint: .blue
+            )
+        }
     }
 
     private func rightTopText(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, disconnected: Bool) -> String {
         if disconnected { return "—" }
+        if taskStore.backupRequest?.includes(targetId: target.targetId) == true { return "Starting" }
+        if target.backupQueue?.activeBatchId != nil || target.backupQueue?.pendingBatchId != nil {
+            return "Queued"
+        }
         if target.state == "failed" || target.lastRun?.status == "failed" {
             return target.lastRun?.errorCode ?? "failed"
         }
@@ -3851,6 +4034,12 @@ private struct TargetRowView: View {
     }
 
     private func rightBottomText(nowMs: Int64, staleAgeMs: Int64, isDaemon: Bool, showStale: Bool, failed: Bool) -> String {
+        if taskStore.backupRequest?.includes(targetId: target.targetId) == true {
+            return "Contacting daemon"
+        }
+        if target.backupQueue?.activeBatchId != nil || target.backupQueue?.pendingBatchId != nil {
+            return "Waiting for serial backup"
+        }
         if failed {
             if let finishedAt = target.lastRun?.finishedAt, let date = parseIso(finishedAt) {
                 let age = Int(nowMs / 1000) - Int(date.timeIntervalSince1970)

@@ -5,6 +5,7 @@ use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -12,9 +13,9 @@ use base64::Engine;
 use chrono::{Datelike, Timelike};
 use sqlx::Row;
 use televy_backup_core::status::{
-    Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource, StatusWriteOptions,
-    TargetRunSummary, TargetState, now_unix_ms, status_ipc_socket_path, status_json_path,
-    write_status_snapshot_json_atomic_with_options,
+    BackupQueueMembership, Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource,
+    StatusWriteOptions, TargetRunSummary, TargetState, now_unix_ms, status_ipc_socket_path,
+    status_json_path, write_status_snapshot_json_atomic_with_options,
 };
 use televy_backup_core::{
     BackupConfig, BackupOptions, ChunkingConfig, SourceQuickStats, TelegramMtProtoStorage,
@@ -22,7 +23,7 @@ use televy_backup_core::{
 };
 use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -66,6 +67,20 @@ impl DaemonLifecycle {
         }
     }
 
+    pub(crate) fn request_backup_stop(&self) -> bool {
+        let active_task = self
+            .active_task
+            .lock()
+            .expect("daemon lifecycle lock poisoned")
+            .clone();
+        if let Some(task) = active_task {
+            task.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
     fn is_shutdown_requested(&self) -> bool {
         self.shutdown.is_cancelled()
     }
@@ -89,6 +104,227 @@ enum ScheduleSlot {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct BackupBatch {
+    id: String,
+    target_ids: VecDeque<String>,
+    started: bool,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BackupQueue {
+    active: Option<BackupBatch>,
+    pending: Option<BackupBatch>,
+}
+
+impl BackupQueue {
+    pub(crate) fn enqueue(
+        &mut self,
+        target_ids: Vec<String>,
+        target_order: &[String],
+    ) -> (String, &'static str, Vec<String>) {
+        if self.active.is_none() {
+            let id = format!("bch_{}", Uuid::new_v4());
+            self.active = Some(BackupBatch {
+                id: id.clone(),
+                target_ids: target_ids.into(),
+                started: false,
+            });
+            Self::sort_targets_in_config_order(
+                self.active.as_mut().expect("active batch was just created"),
+                target_order,
+            );
+            let target_ids = self
+                .active
+                .as_ref()
+                .expect("active batch was just created")
+                .target_ids
+                .iter()
+                .cloned()
+                .collect();
+            return (id, "accepted", target_ids);
+        }
+
+        let (batch, disposition) = if self.active.as_ref().is_some_and(|batch| !batch.started) {
+            (
+                self.active.as_mut().expect("active batch checked above"),
+                "coalesced",
+            )
+        } else if self.pending.is_some() {
+            (
+                self.pending.as_mut().expect("pending batch checked above"),
+                "coalesced",
+            )
+        } else {
+            let id = format!("bch_{}", Uuid::new_v4());
+            self.pending = Some(BackupBatch {
+                id,
+                target_ids: VecDeque::new(),
+                started: false,
+            });
+            (
+                self.pending
+                    .as_mut()
+                    .expect("pending batch was just created"),
+                "accepted",
+            )
+        };
+
+        for target_id in target_ids {
+            if !batch
+                .target_ids
+                .iter()
+                .any(|existing| existing == &target_id)
+            {
+                batch.target_ids.push_back(target_id);
+            }
+        }
+        Self::sort_targets_in_config_order(batch, target_order);
+
+        (
+            batch.id.clone(),
+            disposition,
+            batch.target_ids.iter().cloned().collect(),
+        )
+    }
+
+    fn sort_targets_in_config_order(batch: &mut BackupBatch, target_order: &[String]) {
+        batch.target_ids.make_contiguous().sort_by_key(|target_id| {
+            target_order
+                .iter()
+                .position(|configured_id| configured_id == target_id)
+                .unwrap_or(usize::MAX)
+        });
+    }
+
+    pub(crate) fn start_next_target(&mut self) -> Option<String> {
+        let batch = self.active.as_mut()?;
+        batch.started = true;
+        batch.target_ids.front().cloned()
+    }
+
+    pub(crate) fn complete_active_target(&mut self, target_id: &str) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if active
+            .target_ids
+            .front()
+            .is_some_and(|current| current == target_id)
+        {
+            active.target_ids.pop_front();
+        }
+        if active.target_ids.is_empty() {
+            self.active = self.pending.take();
+        }
+    }
+
+    pub(crate) fn clear(&mut self) -> Vec<String> {
+        let mut target_ids = Vec::new();
+        for batch in [&self.active, &self.pending].into_iter().flatten() {
+            for target_id in &batch.target_ids {
+                if !target_ids.contains(target_id) {
+                    target_ids.push(target_id.clone());
+                }
+            }
+        }
+        self.active = None;
+        self.pending = None;
+        target_ids
+    }
+
+    fn active_target_matches(&self, target_id: &str) -> bool {
+        self.active
+            .as_ref()
+            .and_then(|batch| batch.target_ids.front())
+            .is_some_and(|current| current == target_id)
+    }
+
+    pub(crate) fn has_work(&self) -> bool {
+        self.active.is_some() || self.pending.is_some()
+    }
+
+    fn memberships(&self) -> HashMap<String, BackupQueueMembership> {
+        let mut memberships = HashMap::new();
+        if let Some(active) = &self.active {
+            for target_id in &active.target_ids {
+                memberships
+                    .entry(target_id.clone())
+                    .or_insert_with(BackupQueueMembership::default)
+                    .active_batch_id = Some(active.id.clone());
+            }
+        }
+        if let Some(pending) = &self.pending {
+            for target_id in &pending.target_ids {
+                memberships
+                    .entry(target_id.clone())
+                    .or_insert_with(BackupQueueMembership::default)
+                    .pending_batch_id = Some(pending.id.clone());
+            }
+        }
+        memberships
+    }
+}
+
+pub(crate) fn sync_backup_queue_memberships(
+    queue: &Arc<Mutex<BackupQueue>>,
+    status_state: &Arc<Mutex<StatusRuntimeState>>,
+) {
+    let memberships = queue
+        .lock()
+        .map(|queue| queue.memberships())
+        .unwrap_or_default();
+    if let Ok(mut status) = status_state.lock() {
+        status.set_backup_queue_memberships(&memberships);
+    }
+}
+
+fn start_next_queued_target(
+    queue: &Arc<Mutex<BackupQueue>>,
+    settings_reload_requested: &AtomicBool,
+) -> Option<String> {
+    queue.lock().ok().and_then(|mut queue| {
+        // Enqueue sets this flag before it acquires the queue lock. Checking it while
+        // holding the same lock keeps a just-admitted target from running against stale settings.
+        (!settings_reload_requested.load(Ordering::Acquire))
+            .then(|| queue.start_next_target())
+            .flatten()
+    })
+}
+
+fn complete_backup_queue_target(
+    queue: &Arc<Mutex<BackupQueue>>,
+    status_state: &Arc<Mutex<StatusRuntimeState>>,
+    target_id: &str,
+) {
+    if let Ok(mut queue) = queue.lock() {
+        queue.complete_active_target(target_id);
+    }
+    sync_backup_queue_memberships(queue, status_state);
+}
+
+fn fail_backup_queue_target(
+    queue: &Arc<Mutex<BackupQueue>>,
+    status_state: &Arc<Mutex<StatusRuntimeState>>,
+    target_id: &str,
+    error_code: &str,
+) {
+    if let Ok(mut status) = status_state.lock() {
+        status.mark_run_finish_failure(target_id, 0.0, error_code.to_string());
+    }
+    complete_backup_queue_target(queue, status_state, target_id);
+}
+
+fn backup_task_cancelled(
+    status_state: &Arc<Mutex<StatusRuntimeState>>,
+    target_id: &str,
+    duration_seconds: f64,
+) {
+    if let Ok(mut status) = status_state.lock() {
+        status.mark_run_finish_cancelled(target_id, duration_seconds);
+    }
+}
+
+#[derive(Debug, Clone)]
 struct TargetRuntime {
     target_id: String,
     label: Option<String>,
@@ -100,6 +336,7 @@ struct TargetRuntime {
     running_since: Option<u64>,
     progress: Option<Progress>,
     last_run: Option<TargetRunSummary>,
+    backup_queue: Option<BackupQueueMembership>,
 
     // When a CLI-run task reports progress to the daemon for UI status purposes, we keep the
     // current task id here so stale updates don't clobber newer runs.
@@ -143,6 +380,7 @@ impl StatusRuntimeState {
                     running_since: None,
                     progress: None,
                     last_run: None,
+                    backup_queue: None,
                     external_task_id: None,
                     external_logging: None,
                     up_bps: None,
@@ -177,6 +415,7 @@ impl StatusRuntimeState {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                backup_queue: None,
                 external_task_id: None,
                 external_logging: None,
                 up_bps: None,
@@ -203,7 +442,51 @@ impl StatusRuntimeState {
         self.targets = targets;
     }
 
+    pub(crate) fn add_missing_targets(&mut self, settings: &settings_config::SettingsV2) {
+        for t in &settings.targets {
+            if self.targets.contains_key(&t.id) {
+                continue;
+            }
+            self.target_order.push(t.id.clone());
+            self.targets.insert(
+                t.id.clone(),
+                TargetRuntime {
+                    target_id: t.id.clone(),
+                    label: if t.label.trim().is_empty() {
+                        None
+                    } else {
+                        Some(t.label.clone())
+                    },
+                    source_path: t.source_path.clone(),
+                    endpoint_id: t.endpoint_id.clone(),
+                    enabled: t.enabled,
+                    state: "idle".to_string(),
+                    running_since: None,
+                    progress: None,
+                    last_run: None,
+                    backup_queue: None,
+                    external_task_id: None,
+                    external_logging: None,
+                    up_bps: None,
+                    up_total_bytes: None,
+                    up_rate: ByteRateWindow::default(),
+                    down_bps: None,
+                    down_total_bytes: None,
+                    down_rate: ByteRateWindow::default(),
+                },
+            );
+        }
+    }
+
     fn mark_run_start(&mut self, target_id: &str) {
+        self.mark_run_start_with_phase(target_id, "running");
+    }
+
+    fn mark_backup_run_start(&mut self, target_id: &str) {
+        self.mark_run_start_with_phase(target_id, "connecting");
+    }
+
+    fn mark_run_start_with_phase(&mut self, target_id: &str, phase: &str) {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
@@ -212,7 +495,7 @@ impl StatusRuntimeState {
         let now = now_unix_ms();
         t.running_since = Some(now);
         t.progress = Some(Progress {
-            phase: "running".to_string(),
+            phase: phase.to_string(),
             files_total: None,
             files_done: None,
             source_files_total: None,
@@ -464,8 +747,51 @@ impl StatusRuntimeState {
         });
     }
 
+    fn mark_run_finish_cancelled(&mut self, target_id: &str, duration_seconds: f64) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+        t.state = "idle".to_string();
+        t.running_since = None;
+        t.progress = None;
+        t.up_bps = None;
+        t.up_total_bytes = None;
+        t.up_rate = ByteRateWindow::default();
+        t.down_bps = None;
+        t.down_total_bytes = None;
+        t.down_rate = ByteRateWindow::default();
+        t.last_run = Some(TargetRunSummary {
+            finished_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+            duration_seconds: Some(duration_seconds),
+            status: Some("cancelled".to_string()),
+            error_code: None,
+            files_indexed: None,
+            bytes_uploaded: None,
+            bytes_deduped: None,
+        });
+    }
+
     fn has_running(&self) -> bool {
         self.targets.values().any(|t| t.state == "running")
+    }
+
+    fn has_active_work(&self) -> bool {
+        self.has_running()
+            || self
+                .targets
+                .values()
+                .any(|target| target.backup_queue.is_some())
+    }
+
+    fn set_backup_queue_memberships(
+        &mut self,
+        memberships: &HashMap<String, BackupQueueMembership>,
+    ) {
+        for (target_id, target) in &mut self.targets {
+            target.backup_queue = memberships.get(target_id).cloned();
+        }
     }
 
     fn active_external_logging(
@@ -549,6 +875,7 @@ impl StatusRuntimeState {
                 },
                 progress: t.progress.clone(),
                 last_run: t.last_run.clone(),
+                backup_queue: t.backup_queue.clone(),
                 extra: Default::default(),
             });
         }
@@ -733,43 +1060,216 @@ mod tests {
     }
 
     #[test]
-    fn manual_trigger_file_is_consumed_by_remove() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("backup-now");
+    fn backup_queue_coalesces_idle_requests_into_one_active_batch() {
+        let mut queue = BackupQueue::default();
+        let target_order = vec!["t1".to_string(), "t2".to_string(), "t3".to_string()];
+        let (batch_id, disposition, targets) =
+            queue.enqueue(vec!["t1".to_string(), "t2".to_string()], &target_order);
+        assert_eq!(disposition, "accepted");
+        assert_eq!(targets, vec!["t1", "t2"]);
 
-        std::fs::write(&path, b"manual").unwrap();
-        assert!(try_consume_manual_trigger_file(&path).unwrap());
-        assert!(!path.exists());
-
-        // Second consumption should be a no-op.
-        assert!(!try_consume_manual_trigger_file(&path).unwrap());
+        let (coalesced_id, disposition, targets) =
+            queue.enqueue(vec!["t3".to_string(), "t2".to_string()], &target_order);
+        assert_eq!(coalesced_id, batch_id);
+        assert_eq!(disposition, "coalesced");
+        assert_eq!(targets, vec!["t1", "t2", "t3"]);
     }
 
     #[test]
-    fn manual_trigger_file_is_not_consumed_until_ready() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("backup-now");
+    fn backup_queue_runs_one_target_and_promotes_the_pending_batch() {
+        let mut queue = BackupQueue::default();
+        let target_order = vec!["t1".to_string(), "t2".to_string(), "t3".to_string()];
+        let (active_id, _, _) =
+            queue.enqueue(vec!["t1".to_string(), "t2".to_string()], &target_order);
+        assert_eq!(queue.start_next_target().as_deref(), Some("t1"));
 
-        std::fs::write(&path, b"manual").unwrap();
+        let (pending_id, disposition, pending_targets) =
+            queue.enqueue(vec!["t3".to_string()], &target_order);
+        assert_eq!(disposition, "accepted");
+        assert_ne!(pending_id, active_id);
+        assert_eq!(pending_targets, vec!["t3"]);
 
-        // Not ready: do not consume (file must stay).
-        assert!(!maybe_consume_manual_trigger_file(&path, false).unwrap());
-        assert!(path.exists());
+        let (coalesced_id, disposition, pending_targets) =
+            queue.enqueue(vec!["t2".to_string(), "t1".to_string()], &target_order);
+        assert_eq!(disposition, "coalesced");
+        assert_eq!(coalesced_id, pending_id);
+        assert_eq!(pending_targets, vec!["t1", "t2", "t3"]);
 
-        // Ready: consume by remove.
-        assert!(maybe_consume_manual_trigger_file(&path, true).unwrap());
-        assert!(!path.exists());
+        let memberships = queue.memberships();
+        assert_eq!(
+            memberships["t1"].active_batch_id.as_deref(),
+            Some(active_id.as_str())
+        );
+        assert_eq!(
+            memberships["t1"].pending_batch_id.as_deref(),
+            Some(pending_id.as_str())
+        );
+        assert_eq!(
+            memberships["t2"].active_batch_id.as_deref(),
+            Some(active_id.as_str())
+        );
+
+        queue.complete_active_target("t1");
+        assert_eq!(queue.start_next_target().as_deref(), Some("t2"));
+        queue.complete_active_target("t2");
+        assert_eq!(queue.start_next_target().as_deref(), Some("t1"));
+        queue.complete_active_target("t1");
+        assert_eq!(queue.start_next_target().as_deref(), Some("t2"));
+        queue.complete_active_target("t2");
+        assert_eq!(queue.start_next_target().as_deref(), Some("t3"));
+        queue.complete_active_target("t3");
+        assert!(!queue.has_work());
     }
 
     #[test]
-    fn stale_manual_trigger_is_dropped_on_startup() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("backup-now");
+    fn backup_queue_target_failure_records_the_failure_and_continues() {
+        let queue = Arc::new(Mutex::new(BackupQueue::default()));
+        let status = Arc::new(Mutex::new(state_one_target()));
+        let target_order = vec!["t1".to_string(), "t2".to_string()];
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(vec!["t1".to_string(), "t2".to_string()], &target_order);
+        assert_eq!(
+            queue.lock().unwrap().start_next_target().as_deref(),
+            Some("t1")
+        );
 
-        std::fs::write(&path, b"manual").unwrap();
-        let after = drop_stale_manual_trigger_file_on_startup(&path);
-        assert!(after.is_none());
-        assert!(!path.exists());
+        fail_backup_queue_target(&queue, &status, "t1", "target.not_found");
+
+        let target = status.lock().unwrap().targets.get("t1").unwrap().clone();
+        assert_eq!(target.state, "failed");
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.error_code.as_deref()),
+            Some("target.not_found")
+        );
+        assert_eq!(
+            queue.lock().unwrap().start_next_target().as_deref(),
+            Some("t2")
+        );
+    }
+
+    #[test]
+    fn backup_queue_memberships_apply_to_targets_added_during_settings_reload() {
+        let mut old_settings = settings_config::SettingsV2::default();
+        old_settings.targets.push(settings_config::Target {
+            id: "existing".to_string(),
+            source_path: "/tmp/existing".to_string(),
+            label: "Existing".to_string(),
+            endpoint_id: "ep1".to_string(),
+            enabled: true,
+            schedule: None,
+        });
+        let status = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&old_settings)));
+        let queue = Arc::new(Mutex::new(BackupQueue::default()));
+
+        let target_order = vec!["existing".to_string(), "imported".to_string()];
+        let batch_id = queue
+            .lock()
+            .unwrap()
+            .enqueue(vec!["imported".to_string()], &target_order)
+            .0;
+        sync_backup_queue_memberships(&queue, &status);
+
+        let mut reloaded_settings = old_settings;
+        reloaded_settings.targets.push(settings_config::Target {
+            id: "imported".to_string(),
+            source_path: "/tmp/imported".to_string(),
+            label: "Imported".to_string(),
+            endpoint_id: "ep1".to_string(),
+            enabled: true,
+            schedule: None,
+        });
+        status.lock().unwrap().apply_settings(&reloaded_settings);
+        sync_backup_queue_memberships(&queue, &status);
+
+        let membership = status
+            .lock()
+            .unwrap()
+            .targets
+            .get("imported")
+            .and_then(|target| target.backup_queue.as_ref())
+            .cloned()
+            .expect("reloaded target should retain its queue membership");
+        assert_eq!(
+            membership.active_batch_id.as_deref(),
+            Some(batch_id.as_str())
+        );
+    }
+
+    #[test]
+    fn backup_queue_waits_for_requested_settings_reload_before_starting() {
+        let queue = Arc::new(Mutex::new(BackupQueue::default()));
+        let reload_requested = AtomicBool::new(true);
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(vec!["imported".to_string()], &["imported".to_string()]);
+
+        assert_eq!(
+            start_next_queued_target(&queue, &reload_requested),
+            None,
+            "the queued target must wait until its settings are applied"
+        );
+
+        reload_requested.store(false, Ordering::Release);
+        assert_eq!(
+            start_next_queued_target(&queue, &reload_requested).as_deref(),
+            Some("imported")
+        );
+    }
+
+    #[test]
+    fn queue_membership_projects_to_targets_added_while_another_target_runs() {
+        let mut old_settings = settings_config::SettingsV2::default();
+        old_settings.targets.push(settings_config::Target {
+            id: "running".to_string(),
+            source_path: "/tmp/running".to_string(),
+            label: "Running".to_string(),
+            endpoint_id: "ep1".to_string(),
+            enabled: true,
+            schedule: None,
+        });
+        let status = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&old_settings)));
+        status.lock().unwrap().mark_backup_run_start("running");
+        let queue = Arc::new(Mutex::new(BackupQueue::default()));
+
+        let mut imported_settings = old_settings;
+        imported_settings.targets.push(settings_config::Target {
+            id: "imported".to_string(),
+            source_path: "/tmp/imported".to_string(),
+            label: "Imported".to_string(),
+            endpoint_id: "ep1".to_string(),
+            enabled: true,
+            schedule: None,
+        });
+        let batch_id = queue
+            .lock()
+            .unwrap()
+            .enqueue(
+                vec!["imported".to_string()],
+                &["running".to_string(), "imported".to_string()],
+            )
+            .0;
+
+        status
+            .lock()
+            .unwrap()
+            .add_missing_targets(&imported_settings);
+        sync_backup_queue_memberships(&queue, &status);
+
+        let status = status.lock().unwrap();
+        assert_eq!(status.targets["running"].state, "running");
+        assert_eq!(
+            status.targets["imported"]
+                .backup_queue
+                .as_ref()
+                .and_then(|membership| membership.active_batch_id.as_deref()),
+            Some(batch_id.as_str())
+        );
     }
 
     fn state_one_target() -> StatusRuntimeState {
@@ -789,6 +1289,7 @@ mod tests {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                backup_queue: None,
                 external_task_id: None,
                 external_logging: None,
                 up_bps: None,
@@ -912,14 +1413,14 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
         .unwrap_or_else(Instant::now);
 
     loop {
-        let has_running = state
+        let has_active_work = state
             .lock()
             .ok()
-            .map(|st| st.has_running())
+            .map(|st| st.has_active_work())
             .unwrap_or(false);
 
         let now = Instant::now();
-        let min_interval = if has_running {
+        let min_interval = if has_active_work {
             Duration::from_millis(200)
         } else {
             Duration::from_secs(1)
@@ -981,7 +1482,7 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
             last_write = Instant::now();
         }
 
-        let tick = if has_running {
+        let tick = if has_active_work {
             Duration::from_millis(50)
         } else {
             Duration::from_millis(200)
@@ -1083,7 +1584,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings_config::validate_settings_schema_v2(&settings)?;
     let mut last_config_mtime = file_mtime(&config_path);
 
+    // The development vault backend creates its first master key automatically. Do that before
+    // control IPC becomes reachable so a first backup request cannot observe an empty store.
+    initialize_dev_master_key_if_missing(&config_root)?;
+
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
+    let backup_queue = Arc::new(Mutex::new(BackupQueue::default()));
+    let backup_queue_notify = Arc::new(Notify::new());
+    let settings_reload_requested = Arc::new(AtomicBool::new(false));
     let lifecycle = Arc::new(DaemonLifecycle::default());
     let runtime_logging = Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
         &config_root,
@@ -1099,7 +1607,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let now_ms = now_unix_ms();
             match ipc_state.lock() {
                 Ok(mut st) => {
-                    let has_running = st.has_running();
+                    let has_running = st.has_active_work();
                     // The GUI primarily reads status via IPC; keep rate sampling ticking even if
                     // progress callbacks pause so the UI doesn't get stuck on stale rates.
                     st.tick_rates_at(Instant::now());
@@ -1176,12 +1684,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let control_socket_path = televy_backup_core::control::control_ipc_socket_path(&data_root);
     let _control_ipc_server = match control_ipc::spawn_control_ipc_server(
         control_socket_path.clone(),
-        config_root.clone(),
-        control_ipc_settings.clone(),
-        status_state.clone(),
-        lifecycle.clone(),
-        runtime_logging.clone(),
-        data_root.clone(),
+        control_ipc::ControlContext {
+            config_root: config_root.clone(),
+            settings: control_ipc_settings.clone(),
+            status_state: status_state.clone(),
+            backup_queue: backup_queue.clone(),
+            backup_queue_notify: backup_queue_notify.clone(),
+            settings_reload_requested: settings_reload_requested.clone(),
+            lifecycle: lifecycle.clone(),
+            runtime_logging: runtime_logging.clone(),
+            data_root: data_root.clone(),
+        },
     ) {
         Ok(h) => Some(h),
         Err(e) => {
@@ -1213,12 +1726,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut secrets_file_exists = secrets_path.exists();
     let mut last_secrets_mtime = file_mtime(&secrets_path);
     let mut last_secrets_crypto_error_mtime: Option<SystemTime> = None;
-    let manual_trigger_path = data_root.join("control").join("backup-now");
-    let mut manual_trigger_last_attempted_mtime: Option<SystemTime> = None;
-    let initial_manual_trigger_mtime = file_mtime(&manual_trigger_path);
 
     // Vault key (Keychain on macOS) can block on user auth/permission. Load it in the background
-    // so the daemon can still run its main loop (consume manual triggers, serve status IPC, etc).
+    // so the daemon can still serve status and control IPC while waiting.
     let mut vault_key: Option<[u8; 32]> = get_cached_vault_key();
     let mut vault_key_loader: Option<tokio::task::JoinHandle<Result<[u8; 32], VaultKeyLoadError>>> =
         None;
@@ -1228,11 +1738,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut secrets_store: Option<televy_backup_core::secrets::SecretsStore> = None;
     let mut master_key: Option<[u8; 32]> = None;
     let mut api_hash: Option<String> = None;
-
-    if initial_manual_trigger_mtime.is_some() {
-        manual_trigger_last_attempted_mtime =
-            drop_stale_manual_trigger_file_on_startup(&manual_trigger_path);
-    }
 
     // Do not eagerly retry Keychain access. We'll do a single best-effort warm-up attempt so
     // scheduled runs can work when Keychain is already unlocked, but avoid pestering the user
@@ -1263,7 +1768,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let config_mtime = file_mtime(&config_path);
             let secrets_mtime = file_mtime(&secrets_path);
-            let config_changed = config_mtime.is_some() && config_mtime != last_config_mtime;
+            let config_changed = settings_reload_requested.swap(false, Ordering::AcqRel)
+                || (config_mtime.is_some() && config_mtime != last_config_mtime);
             let secrets_changed = secrets_mtime.is_some() && secrets_mtime != last_secrets_mtime;
 
             if config_changed || secrets_changed {
@@ -1294,6 +1800,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Ok(mut st) = status_state.lock() {
                                     st.apply_settings(&settings);
                                 }
+                                sync_backup_queue_memberships(&backup_queue, &status_state);
                                 tracing::info!(
                                     event = "config.reloaded",
                                     path = %config_path.display(),
@@ -1332,13 +1839,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Manual backups are triggered by the UI via a control file under the configured data dir.
-        //
-        // We'll also use the trigger file's mtime as a coarse "user intent" signal: if Keychain
-        // access was cancelled, do not keep retrying (and re-prompting) unless the user clicks Start
-        // again (which rewrites the file, changing its mtime).
-        let manual_trigger_mtime = file_mtime(&manual_trigger_path);
-
         // Poll vault key loader (Keychain can block; never block the main loop).
         //
         // IMPORTANT: the vault IPC server may populate `VAULT_KEY_CACHE` independently; refresh
@@ -1354,8 +1854,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if vault_key.is_none() {
-            let manual_trigger_is_new = manual_trigger_mtime.is_some()
-                && manual_trigger_mtime != manual_trigger_last_attempted_mtime;
             let last_keychain_error = vault_key_last_error
                 .as_ref()
                 .is_some_and(|e| e.is_keychain_error());
@@ -1364,13 +1862,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 && vault_key_last_attempt
                     .map(|t| t.elapsed() >= Duration::from_secs(5))
                     .unwrap_or(true)
-                && (!last_keychain_error || manual_trigger_is_new);
+                && !last_keychain_error;
             if should_retry {
                 vault_key_last_attempt = Some(Instant::now());
                 vault_key_last_error = None;
-                if manual_trigger_mtime.is_some() {
-                    manual_trigger_last_attempted_mtime = manual_trigger_mtime;
-                }
                 vault_key_loader = Some(tokio::task::spawn_blocking(|| {
                     load_or_create_vault_key_uncached()
                         .map_err(|e| vault_key_load_error(e.as_ref()))
@@ -1478,45 +1973,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            if api_hash.is_none() && has_enabled_targets {
+            if api_hash.is_none() {
                 api_hash = get_secret_from_store(store, &settings.telegram.mtproto.api_hash_key);
             }
         }
 
-        // Only consume the trigger when we are able to attempt a run; otherwise keep it on disk so
-        // the user's click is not "lost" while waiting for Keychain/secrets to become available.
-        let manual_trigger_present = manual_trigger_mtime.is_some();
-        let can_attempt_run = has_enabled_targets
+        let has_queued_batch = backup_queue
+            .lock()
+            .map(|queue| queue.has_work())
+            .unwrap_or(false);
+        let needs_credentials = has_enabled_targets || has_queued_batch;
+        let can_attempt_run = needs_credentials
             && vault_key.is_some()
             && secrets_store.is_some()
             && master_key.is_some()
             && api_hash.is_some();
-
-        let manual_triggered = match maybe_consume_manual_trigger_file(
-            &manual_trigger_path,
-            manual_trigger_present && can_attempt_run,
-        ) {
-            Ok(true) => {
-                tracing::info!(
-                    event = "manual.trigger",
-                    kind = "backup",
-                    path = %manual_trigger_path.display(),
-                    "manual backup trigger consumed"
-                );
-                true
-            }
-            Ok(false) => false,
-            Err(e) => {
-                tracing::warn!(
-                    event = "manual.trigger_remove_failed",
-                    kind = "backup",
-                    path = %manual_trigger_path.display(),
-                    error = %e,
-                    "failed to consume manual trigger"
-                );
-                false
-            }
-        };
 
         if settings.telegram.mtproto.api_id <= 0
             || settings.telegram.mtproto.api_hash_key.trim().is_empty()
@@ -1528,27 +1999,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        // Skip starting runs until secrets are ready. (Do not consume manual trigger; it stays pending.)
-        if has_enabled_targets && !can_attempt_run {
-            if manual_trigger_present {
-                let code = vault_key_last_error
-                    .as_ref()
-                    .map(|e| {
-                        e.code
-                            .map(|c| format!("{c}"))
-                            .unwrap_or_else(|| e.message.clone())
-                    })
-                    .unwrap_or_else(|| "pending".to_string());
-                tracing::warn!(
-                    event = "run.skip",
-                    kind = "backup",
-                    reason = "secrets_unavailable",
-                    detail = %code,
-                    "run.skip"
-                );
-            }
+        if needs_credentials && !can_attempt_run {
+            let code = vault_key_last_error
+                .as_ref()
+                .map(|e| {
+                    e.code
+                        .map(|c| format!("{c}"))
+                        .unwrap_or_else(|| e.message.clone())
+                })
+                .unwrap_or_else(|| "pending".to_string());
+            tracing::warn!(
+                event = "run.skip",
+                kind = "backup",
+                reason = "secrets_unavailable",
+                detail = %code,
+                "run.skip"
+            );
             clear_mtproto_storage_cache(&mut storage_by_endpoint, "secrets_unavailable").await;
             sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
+        if !needs_credentials {
+            let shutdown_token = lifecycle.shutdown_token();
+            tokio::select! {
+                _ = sleep(Duration::from_secs(1)) => {}
+                _ = backup_queue_notify.notified() => {}
+                _ = shutdown_token.cancelled() => break,
+            }
             continue;
         }
 
@@ -1560,8 +2038,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .clone()
             .expect("api_hash must be available when starting runs");
 
+        let queued_target_id =
+            start_next_queued_target(&backup_queue, settings_reload_requested.as_ref());
+        if queued_target_id.is_none() && settings_reload_requested.load(Ordering::Acquire) {
+            continue;
+        }
+        if let Some(target_id) = queued_target_id.as_deref()
+            && !settings.targets.iter().any(|target| target.id == target_id)
+        {
+            let task_id = format!("tsk_{}", Uuid::new_v4());
+            let logging = televy_backup_core::local_settings::resolve(&config_root);
+            let run_log = televy_backup_core::run_log::start_run_log_with_retention(
+                "backup",
+                &task_id,
+                &data_root,
+                &logging.effective_filter,
+                logging.retention_prune_enabled.then_some(logging.retention),
+            )?;
+            tracing::warn!(
+                event = "run.start",
+                kind = "backup",
+                run_id = %task_id,
+                task_id = %task_id,
+                target_id,
+                "run.start"
+            );
+            tracing::error!(
+                event = "run.finish",
+                kind = "backup",
+                run_id = %task_id,
+                task_id = %task_id,
+                status = "failed",
+                error_code = "target.not_found",
+                target_id,
+                "queued target no longer exists"
+            );
+            drop(run_log);
+            fail_backup_queue_target(&backup_queue, &status_state, target_id, "target.not_found");
+            continue;
+        }
+
         for target in &settings.targets {
-            if !target.enabled {
+            let is_queued_target = queued_target_id.as_deref() == Some(target.id.as_str());
+            if queued_target_id.is_some() && !is_queued_target {
+                continue;
+            }
+            if queued_target_id.is_none() && !target.enabled {
                 continue;
             }
 
@@ -1569,7 +2091,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .entry(target.id.clone())
                 .or_default();
 
-            let scheduled_slot = if manual_triggered {
+            let scheduled_slot = if is_queued_target {
                 Some(ScheduleSlot::Manual)
             } else {
                 let eff = settings_config::effective_schedule(
@@ -1616,6 +2138,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             };
 
+            if is_queued_target && let Ok(mut st) = status_state.lock() {
+                st.mark_backup_run_start(&target.id);
+            }
+
+            let task_id = format!("tsk_{}", Uuid::new_v4());
+            let logging = televy_backup_core::local_settings::resolve(&config_root);
+            if *runtime_logging.read().await != logging {
+                *runtime_logging.write().await = logging.clone();
+            }
+            let run_log = televy_backup_core::run_log::start_run_log_with_retention(
+                "backup",
+                &task_id,
+                &data_root,
+                &logging.effective_filter,
+                logging.retention_prune_enabled.then_some(logging.retention),
+            )?;
+            let started = Instant::now();
+
+            // Record the run before endpoint resolution and Telegram connection so the
+            // externally visible connecting phase has a matching task/run identity.
+            tracing::warn!(
+                event = "run.start",
+                kind = "backup",
+                run_id = %task_id,
+                task_id = %task_id,
+                target_id = %target.id,
+                endpoint_id = %target.endpoint_id,
+                source_path = %target.source_path,
+                log_path = %run_log.path().display(),
+                "run.start"
+            );
+
+            let task_cancel = if is_queued_target {
+                let Ok(queue) = backup_queue.lock() else {
+                    continue;
+                };
+                if !queue.active_target_matches(&target.id) {
+                    tracing::warn!(
+                        event = "run.finish",
+                        kind = "backup",
+                        run_id = %task_id,
+                        task_id = %task_id,
+                        status = "cancelled",
+                        target_id = %target.id,
+                        "run.finish"
+                    );
+                    backup_task_cancelled(&status_state, &target.id, 0.0);
+                    continue;
+                }
+                lifecycle.begin_task()
+            } else {
+                lifecycle.begin_task()
+            };
+
+            if task_cancel.is_cancelled() {
+                tracing::warn!(
+                    event = "run.finish",
+                    kind = "backup",
+                    run_id = %task_id,
+                    task_id = %task_id,
+                    status = "cancelled",
+                    target_id = %target.id,
+                    "run.finish"
+                );
+                backup_task_cancelled(&status_state, &target.id, 0.0);
+                lifecycle.finish_task();
+                if is_queued_target {
+                    complete_backup_queue_target(&backup_queue, &status_state, &target.id);
+                }
+                continue;
+            }
+
             let Some(ep) = settings
                 .telegram_endpoints
                 .iter()
@@ -1624,6 +2218,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::error!(
                     event = "run.finish",
                     kind = "backup",
+                    run_id = %task_id,
+                    task_id = %task_id,
                     status = "failed",
                     error_code = "config.invalid",
                     error_message = "target references unknown endpoint_id",
@@ -1631,6 +2227,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     endpoint_id = %target.endpoint_id,
                     "run.finish"
                 );
+                if is_queued_target {
+                    fail_backup_queue_target(
+                        &backup_queue,
+                        &status_state,
+                        &target.id,
+                        "config.invalid",
+                    );
+                }
+                lifecycle.finish_task();
                 continue;
             };
 
@@ -1638,6 +2243,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::error!(
                     event = "run.finish",
                     kind = "backup",
+                    run_id = %task_id,
+                    task_id = %task_id,
                     status = "failed",
                     error_code = "config.invalid",
                     error_message = "endpoint chat_id is empty",
@@ -1645,6 +2252,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     endpoint_id = %ep.id,
                     "run.finish"
                 );
+                if is_queued_target {
+                    fail_backup_queue_target(
+                        &backup_queue,
+                        &status_state,
+                        &target.id,
+                        "config.invalid",
+                    );
+                }
+                lifecycle.finish_task();
                 continue;
             }
 
@@ -1655,6 +2271,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tracing::error!(
                     event = "run.finish",
                     kind = "backup",
+                    run_id = %task_id,
+                    task_id = %task_id,
                     status = "failed",
                     error_code = "telegram.unauthorized",
                     error_message = "bot token missing",
@@ -1662,6 +2280,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     endpoint_id = %ep.id,
                     "run.finish"
                 );
+                if is_queued_target {
+                    fail_backup_queue_target(
+                        &backup_queue,
+                        &status_state,
+                        &target.id,
+                        "telegram.unauthorized",
+                    );
+                }
+                lifecycle.finish_task();
                 continue;
             };
 
@@ -1671,35 +2298,141 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .and_then(|s| get_secret_from_store(s, &ep.mtproto.session_key))
                 {
                     Some(b64) if !b64.trim().is_empty() => {
-                        Some(base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())?)
+                        match base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) {
+                            Ok(session) => Some(session),
+                            Err(error) => {
+                                tracing::error!(
+                                    event = "run.finish",
+                                    kind = "backup",
+                                    run_id = %task_id,
+                                    task_id = %task_id,
+                                    status = "failed",
+                                    error_code = "telegram.mtproto.session_invalid",
+                                    error_message = %error,
+                                    target_id = %target.id,
+                                    "run.finish"
+                                );
+                                if is_queued_target {
+                                    fail_backup_queue_target(
+                                        &backup_queue,
+                                        &status_state,
+                                        &target.id,
+                                        "telegram.mtproto.session_invalid",
+                                    );
+                                }
+                                lifecycle.finish_task();
+                                continue;
+                            }
+                        }
                     }
                     _ => None,
                 };
 
                 let cache_dir = data_root.join("cache").join("mtproto").join(&ep.id);
-                std::fs::create_dir_all(&cache_dir)?;
+                if let Err(error) = std::fs::create_dir_all(&cache_dir) {
+                    tracing::error!(
+                        event = "run.finish",
+                        kind = "backup",
+                        run_id = %task_id,
+                        task_id = %task_id,
+                        status = "failed",
+                        error_code = "config.write_failed",
+                        error_message = %error,
+                        target_id = %target.id,
+                        "run.finish"
+                    );
+                    if is_queued_target {
+                        fail_backup_queue_target(
+                            &backup_queue,
+                            &status_state,
+                            &target.id,
+                            "config.write_failed",
+                        );
+                    }
+                    lifecycle.finish_task();
+                    continue;
+                }
                 let provider = settings_config::endpoint_provider(&ep.id);
 
-                let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
-                    provider,
-                    api_id: settings.telegram.mtproto.api_id,
-                    api_hash: api_hash.clone(),
-                    bot_token: bot_token.clone(),
-                    chat_id: ep.chat_id.clone(),
-                    session,
-                    cache_dir,
-                    min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
-                    max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
-                    helper_path: None,
-                })
-                .await?;
+                let storage = tokio::select! {
+                    _ = task_cancel.cancelled() => Err(televy_backup_core::Error::Cancelled),
+                    result = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+                        provider,
+                        api_id: settings.telegram.mtproto.api_id,
+                        api_hash: api_hash.clone(),
+                        bot_token: bot_token.clone(),
+                        chat_id: ep.chat_id.clone(),
+                        session,
+                        cache_dir,
+                        min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+                        max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
+                        helper_path: None,
+                    }) => result,
+                };
+
+                let storage = match storage {
+                    Ok(storage) => storage,
+                    Err(error) => {
+                        let cancelled = matches!(&error, televy_backup_core::Error::Cancelled);
+                        tracing::error!(
+                            event = "run.finish",
+                            kind = "backup",
+                            run_id = %task_id,
+                            task_id = %task_id,
+                            status = if cancelled { "cancelled" } else { "failed" },
+                            error_code = if cancelled { "task.cancelled" } else { error.code() },
+                            error_message = %error,
+                            target_id = %target.id,
+                            endpoint_id = %ep.id,
+                            "run.finish"
+                        );
+                        if cancelled {
+                            backup_task_cancelled(
+                                &status_state,
+                                &target.id,
+                                started.elapsed().as_secs_f64(),
+                            );
+                        } else if is_queued_target {
+                            fail_backup_queue_target(
+                                &backup_queue,
+                                &status_state,
+                                &target.id,
+                                error.code(),
+                            );
+                        }
+                        lifecycle.finish_task();
+                        continue;
+                    }
+                };
 
                 storage_by_endpoint.insert(ep.id.clone(), storage);
             }
 
             let storage = match storage_by_endpoint.get(&ep.id) {
                 Some(s) => s,
-                None => continue,
+                None => {
+                    tracing::error!(
+                        event = "run.finish",
+                        kind = "backup",
+                        run_id = %task_id,
+                        task_id = %task_id,
+                        status = "failed",
+                        error_code = "telegram.storage_unavailable",
+                        target_id = %target.id,
+                        endpoint_id = %ep.id,
+                        "run.finish"
+                    );
+                    if is_queued_target {
+                        fail_backup_queue_target(
+                            &backup_queue,
+                            &status_state,
+                            &target.id,
+                            "telegram.storage_unavailable",
+                        );
+                    }
+                    lifecycle.finish_task();
+                    continue;
+                }
             };
 
             // Only consume the schedule slot once all required config/secrets are available
@@ -1708,8 +2441,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ScheduleSlot::Hourly(key) => state.last_hourly = Some(key),
                 ScheduleSlot::Daily(key) => state.last_daily = Some(key),
                 ScheduleSlot::Manual => {
-                    // If a manual trigger happens to coincide with a scheduled slot, consume that slot too
-                    // to avoid an immediate second run within the same minute.
+                    // A queued manual batch consumes an overlapping schedule slot too, avoiding an
+                    // immediate duplicate scheduled run within the same minute.
                     let eff = settings_config::effective_schedule(
                         &settings.schedule,
                         target.schedule.as_ref(),
@@ -1737,36 +2470,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            let task_id = format!("tsk_{}", Uuid::new_v4());
-            // A previous target may have finished after local.toml changed. Resolve again at the
-            // run boundary so each target gets the level configured for its own next task.
-            let logging = televy_backup_core::local_settings::resolve(&config_root);
-            if *runtime_logging.read().await != logging {
-                *runtime_logging.write().await = logging.clone();
-            }
-            let run_log = televy_backup_core::run_log::start_run_log_with_retention(
-                "backup",
-                &task_id,
-                &data_root,
-                &logging.effective_filter,
-                logging.retention_prune_enabled.then_some(logging.retention),
-            )?;
-
-            // Run summaries must appear even when the daemon is started with `RUST_LOG=warn`,
-            // otherwise successful runs create empty NDJSON files and the UI shows no history.
-            tracing::warn!(
-                event = "run.start",
-                kind = "backup",
-                run_id = %task_id,
-                task_id = %task_id,
-                target_id = %target.id,
-                endpoint_id = %ep.id,
-                source_path = %target.source_path,
-                log_path = %run_log.path().display(),
-                "run.start"
-            );
-
-            let started = Instant::now();
             let label = match scheduled_slot {
                 ScheduleSlot::Manual => "manual".to_string(),
                 _ => {
@@ -1787,7 +2490,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .join("dedupe")
                 .join(format!("pending.{}.sqlite", ep.id));
 
-            if let Ok(mut st) = status_state.lock() {
+            if !is_queued_target && let Ok(mut st) = status_state.lock() {
                 st.mark_run_start(&target.id);
             }
 
@@ -1796,7 +2499,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state: status_state.clone(),
             };
             let progress_sink = Some(&sink as &dyn ProgressSink);
-            let task_cancel = lifecycle.begin_task();
             let quick_stats_cancel = task_cancel.clone();
             let quick_stats_cancel_for_task = quick_stats_cancel.clone();
             let prepare_res = tokio::try_join!(
@@ -1989,54 +2691,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Err(e) => {
-                            tracing::error!(
-                                event = "bootstrap.update_failed",
-                                target_id = %target.id,
-                                endpoint_id = %ep.id,
-                                error_code = e.code(),
-                                error_message = %e,
-                                "bootstrap.update_failed"
-                            );
-                            tracing::error!(
-                                event = "run.finish",
-                                kind = "backup",
-                                run_id = %task_id,
-                                task_id = %task_id,
-                                status = "failed",
-                                duration_seconds,
-                                error_code = e.code(),
-                                error_message = %e,
-                                "run.finish"
-                            );
-                            if let Ok(mut st) = status_state.lock() {
-                                st.mark_run_finish_failure(
-                                    &target.id,
+                            if matches!(&e, televy_backup_core::Error::Cancelled) {
+                                tracing::warn!(
+                                    event = "run.finish",
+                                    kind = "backup",
+                                    run_id = %task_id,
+                                    task_id = %task_id,
+                                    status = "cancelled",
                                     duration_seconds,
-                                    e.code().to_string(),
+                                    target_id = %target.id,
+                                    "run.finish"
                                 );
+                                backup_task_cancelled(&status_state, &target.id, duration_seconds);
+                            } else {
+                                tracing::error!(
+                                    event = "bootstrap.update_failed",
+                                    target_id = %target.id,
+                                    endpoint_id = %ep.id,
+                                    error_code = e.code(),
+                                    error_message = %e,
+                                    "bootstrap.update_failed"
+                                );
+                                tracing::error!(
+                                    event = "run.finish",
+                                    kind = "backup",
+                                    run_id = %task_id,
+                                    task_id = %task_id,
+                                    status = "failed",
+                                    duration_seconds,
+                                    error_code = e.code(),
+                                    error_message = %e,
+                                    "run.finish"
+                                );
+                                if let Ok(mut st) = status_state.lock() {
+                                    st.mark_run_finish_failure(
+                                        &target.id,
+                                        duration_seconds,
+                                        e.code().to_string(),
+                                    );
+                                }
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
-                        event = "run.finish",
-                        kind = "backup",
-                        run_id = %task_id,
-                        task_id = %task_id,
-                        status = "failed",
-                        duration_seconds,
-                        error_code = e.code(),
-                        error_message = %e,
-                        "run.finish"
-                    );
-
-                    if let Ok(mut st) = status_state.lock() {
-                        st.mark_run_finish_failure(
-                            &target.id,
+                    if matches!(&e, televy_backup_core::Error::Cancelled) {
+                        tracing::warn!(
+                            event = "run.finish",
+                            kind = "backup",
+                            run_id = %task_id,
+                            task_id = %task_id,
+                            status = "cancelled",
                             duration_seconds,
-                            e.code().to_string(),
+                            target_id = %target.id,
+                            "run.finish"
                         );
+                        backup_task_cancelled(&status_state, &target.id, duration_seconds);
+                    } else {
+                        tracing::error!(
+                            event = "run.finish",
+                            kind = "backup",
+                            run_id = %task_id,
+                            task_id = %task_id,
+                            status = "failed",
+                            duration_seconds,
+                            error_code = e.code(),
+                            error_message = %e,
+                            "run.finish"
+                        );
+
+                        if let Ok(mut st) = status_state.lock() {
+                            st.mark_run_finish_failure(
+                                &target.id,
+                                duration_seconds,
+                                e.code().to_string(),
+                            );
+                        }
                     }
                 }
             }
@@ -2065,15 +2795,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             lifecycle.finish_task();
 
+            if is_queued_target {
+                complete_backup_queue_target(&backup_queue, &status_state, &target.id);
+            }
+
             if lifecycle.is_shutdown_requested() {
                 break;
             }
         }
 
         clear_mtproto_storage_cache(&mut storage_by_endpoint, "idle_loop_end").await;
+        if backup_queue
+            .lock()
+            .map(|queue| queue.has_work())
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let shutdown_token = lifecycle.shutdown_token();
         tokio::select! {
             _ = sleep(Duration::from_secs(1)) => {}
+            _ = backup_queue_notify.notified() => {}
             _ = shutdown_token.cancelled() => break,
         }
     }
@@ -2103,47 +2845,6 @@ async fn clear_mtproto_storage_cache(
 
     let drained = std::mem::take(storage_by_endpoint);
     let _ = tokio::task::spawn_blocking(move || drop(drained)).await;
-}
-
-fn try_consume_manual_trigger_file(path: &Path) -> std::io::Result<bool> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
-    }
-}
-
-fn maybe_consume_manual_trigger_file(path: &Path, can_attempt_run: bool) -> std::io::Result<bool> {
-    if !can_attempt_run {
-        return Ok(false);
-    }
-    try_consume_manual_trigger_file(path)
-}
-
-fn drop_stale_manual_trigger_file_on_startup(path: &Path) -> Option<SystemTime> {
-    // Treat pre-existing trigger files as stale leftovers from previous app sessions.
-    // A manual "Backup Now" action should only fire when the user clicks it in this session.
-    if file_mtime(path).is_some() {
-        match try_consume_manual_trigger_file(path) {
-            Ok(true) => {
-                tracing::info!(
-                    event = "manual.trigger_stale_dropped",
-                    path = %path.display(),
-                    "dropped stale manual backup trigger on daemon startup"
-                );
-            }
-            Ok(false) => {}
-            Err(e) => {
-                tracing::warn!(
-                    event = "manual.trigger_stale_drop_failed",
-                    path = %path.display(),
-                    error = %e,
-                    "failed to drop stale manual backup trigger on daemon startup"
-                );
-            }
-        }
-    }
-    file_mtime(path)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2494,6 +3195,36 @@ fn decode_base64_32(b64: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     Ok(arr)
 }
 
+fn initialize_dev_master_key_if_missing(
+    config_root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !keychain_disabled() {
+        return Ok(());
+    }
+
+    let secrets_path = televy_backup_core::secrets::secrets_path(config_root);
+    if secrets_path.exists() {
+        return Ok(());
+    }
+
+    let vault_key = load_or_create_vault_key_uncached()?;
+    let mut store = televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
+    if store.contains_key(MASTER_KEY_KEY) {
+        return Ok(());
+    }
+
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
+    store.set(
+        MASTER_KEY_KEY,
+        televy_backup_core::secrets::vault_key_to_base64(&bytes),
+    );
+    televy_backup_core::secrets::save_secrets_store(&secrets_path, &vault_key, &store)?;
+    set_cached_vault_key(vault_key);
+    Ok(())
+}
+
 fn keychain_disabled() -> bool {
     matches!(
         std::env::var("TELEVYBACKUP_DISABLE_KEYCHAIN").as_deref(),
@@ -2571,7 +3302,7 @@ fn is_keychain_not_found(e: &security_framework::base::Error) -> bool {
 
 pub(crate) fn load_or_create_vault_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
     // IMPORTANT: Keychain access can block (e.g. waiting for user authentication / permission).
-    // Never do that on the main async flow, otherwise the daemon can't consume manual triggers.
+    // Never do that on the main async flow, otherwise the daemon can't serve status and control IPC.
     //
     // We only return a cached key here. A background loader (spawned from `main`) is responsible
     // for eventually populating `VAULT_KEY_CACHE` when Keychain is available.

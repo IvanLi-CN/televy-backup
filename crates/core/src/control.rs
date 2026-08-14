@@ -156,6 +156,33 @@ pub struct SecretsClearTelegramMtprotoSessionParams {
     pub endpoint_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BackupEnqueueParams {
+    pub scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupEnqueueResult {
+    pub batch_id: String,
+    pub disposition: String,
+    pub target_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BackupStopParams {}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupStopResult {
+    pub cancellation_requested: bool,
+    pub cleared_target_ids: Vec<String>,
+}
+
 // Best-effort status reporting from CLI -> daemon for UI status surfaces.
 // These calls must not be required for correctness; they only improve observability.
 

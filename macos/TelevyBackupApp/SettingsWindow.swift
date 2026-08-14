@@ -3300,9 +3300,9 @@ private struct ImportConfigBundleSheet: View {
                 ))
             case .merge_local_to_remote:
                 post.append(PostAction(
-                    status: "Backing up local folder (\(id))…",
-                    args: ["backup", "run", "--target-id", id, "--label", "import-merge"],
-                    timeoutSeconds: 3600
+                    status: "Queueing local folder backup (\(id))…",
+                    args: ["backup", "enqueue", "--target-id", id],
+                    timeoutSeconds: 15
                 ))
             case .keep_local, .undecided:
                 break
@@ -3310,13 +3310,23 @@ private struct ImportConfigBundleSheet: View {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            func ensureDaemonRunningOnMain() {
+            func ensureDaemonRunningOnMain() -> Bool {
                 DispatchQueue.main.sync {
                     model.ensureDaemonRunning()
                 }
             }
 
-            ensureDaemonRunningOnMain()
+            func failForDaemonUnavailable() {
+                DispatchQueue.main.async {
+                    applyError = "Daemon is unavailable"
+                    applying = false
+                }
+            }
+
+            guard ensureDaemonRunningOnMain() else {
+                failForDaemonUnavailable()
+                return
+            }
             let res = model.runCommandCapture(
                 exe: cli,
                 args: ["--json", "settings", "import-bundle", "--apply"],
@@ -3356,7 +3366,10 @@ private struct ImportConfigBundleSheet: View {
 
             for a in post {
                 DispatchQueue.main.async { postApplyStatus = a.status }
-                ensureDaemonRunningOnMain()
+                guard ensureDaemonRunningOnMain() else {
+                    failForDaemonUnavailable()
+                    return
+                }
                 let res = model.runCommandCapture(
                     exe: cli,
                     args: a.args,

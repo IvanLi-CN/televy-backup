@@ -39,6 +39,18 @@ bin_status_store="$out_dir/status-store-tests"
   "$root_dir/macos/TelevyBackupAppTests/StatusStoreTests.swift"
 "$bin_status_store"
 
+bin_target_presentation="$out_dir/target-presentation-tests"
+"$swiftc" \
+  -sdk "$sdk_path" \
+  -O \
+  -D TELEVYBACKUP_TESTING \
+  -framework SwiftUI \
+  -framework AppKit \
+  -o "$bin_target_presentation" \
+  "$root_dir/macos/TelevyBackupApp"/*.swift \
+  "$root_dir/macos/TelevyBackupAppTests/TargetPresentationTests.swift"
+"$bin_target_presentation"
+
 "$root_dir/scripts/macos/ui-store-static-check.sh"
 
 bin_popover="$out_dir/popover-layout-size-tests"

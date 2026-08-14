@@ -6,7 +6,7 @@ out="${2:-}"
 
 if [[ -z "$scene" || -z "$out" ]]; then
   echo "Usage: $0 <scene> <out.png>" >&2
-  echo "Scenes: main-window-targets | main-window-target-detail" >&2
+  echo "Scenes: main-window-targets | main-window-target-detail | main-window-target-connecting-queued | main-window-target-running-next-queued | main-window-target-starting" >&2
   exit 2
 fi
 
@@ -19,8 +19,7 @@ config_dir="$demo_root/config"
 mkdir -p "$(dirname "$out")"
 mkdir -p "$data_dir" "$config_dir"
 
-pkill -x TelevyBackup >/dev/null 2>&1 || true
-
+export TELEVYBACKUP_ALLOW_MULTI_INSTANCE=1
 TELEVYBACKUP_UI_DEMO=1 \
 TELEVYBACKUP_UI_DEMO_SCENE="$scene" \
 TELEVYBACKUP_DISABLE_KEYCHAIN=1 \
@@ -31,6 +30,15 @@ TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH=0 \
 TELEVYBACKUP_OPEN_MAIN_WINDOW_ON_LAUNCH=1 \
 "$app_bin" >/dev/null 2>&1 &
 app_pid=$!
+workdir="$(mktemp -d)"
+cleanup() {
+  if kill -0 "$app_pid" >/dev/null 2>&1; then
+    kill "$app_pid" >/dev/null 2>&1 || true
+    wait "$app_pid" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$workdir"
+}
+trap cleanup EXIT
 
 # Give SwiftUI time to render the main window.
 sleep 1.4
@@ -57,10 +65,13 @@ if !app.activate(options: [.activateIgnoringOtherApps]) {
 ' "$app_pid" >/dev/null 2>&1 || true
 sleep 0.2
 
-workdir="$(mktemp -d)"
 cat > "$workdir/find_window.swift" <<'SWIFT'
 import Foundation
 import CoreGraphics
+
+guard CommandLine.arguments.count > 1, let targetPid = Int32(CommandLine.arguments[1]) else {
+    exit(1)
+}
 
 let targetOwner = "TelevyBackup"
 let targetName = "TelevyBackup"
@@ -74,6 +85,8 @@ var bestArea: Double = 0
 for case let w as NSDictionary in windowInfoAny {
     guard let owner = w[kCGWindowOwnerName as String] as? String else { continue }
     guard owner == targetOwner else { continue }
+    guard let ownerPid = w[kCGWindowOwnerPID as String] as? NSNumber,
+          ownerPid.int32Value == targetPid else { continue }
 
     let name = (w[kCGWindowName as String] as? String) ?? ""
     let windowNumber = w[kCGWindowNumber as String] as? Int
@@ -116,15 +129,10 @@ exit(1)
 SWIFT
 
 swiftc "$workdir/find_window.swift" -o "$workdir/find_window" >/dev/null 2>&1
-wid="$($workdir/find_window 2>/dev/null || true)"
+wid="$($workdir/find_window "$app_pid" 2>/dev/null || true)"
 
-if [[ -n "$wid" ]]; then
-  screencapture -x -l "$wid" "$out"
-else
-  echo "WARN: Main window not found; capturing full screen" >&2
-  screencapture -x "$out"
+if [[ -z "$wid" ]]; then
+  echo "ERROR: main window for demo PID $app_pid was not found; refusing an unscoped capture" >&2
+  exit 1
 fi
-
-osascript -e 'tell application "TelevyBackup" to quit' >/dev/null 2>&1 || true
-
-rm -rf "$workdir"
+screencapture -x -l "$wid" "$out"
