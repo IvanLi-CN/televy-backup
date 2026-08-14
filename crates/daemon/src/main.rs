@@ -243,6 +243,19 @@ pub(crate) fn sync_backup_queue_memberships(
     }
 }
 
+fn start_next_queued_target(
+    queue: &Arc<Mutex<BackupQueue>>,
+    settings_reload_requested: &AtomicBool,
+) -> Option<String> {
+    queue.lock().ok().and_then(|mut queue| {
+        // Enqueue sets this flag before it acquires the queue lock. Checking it while
+        // holding the same lock keeps a just-admitted target from running against stale settings.
+        (!settings_reload_requested.load(Ordering::Acquire))
+            .then(|| queue.start_next_target())
+            .flatten()
+    })
+}
+
 fn complete_backup_queue_target(
     queue: &Arc<Mutex<BackupQueue>>,
     status_state: &Arc<Mutex<StatusRuntimeState>>,
@@ -1080,6 +1093,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn backup_queue_waits_for_requested_settings_reload_before_starting() {
+        let queue = Arc::new(Mutex::new(BackupQueue::default()));
+        let reload_requested = AtomicBool::new(true);
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(vec!["imported".to_string()], &["imported".to_string()]);
+
+        assert_eq!(
+            start_next_queued_target(&queue, &reload_requested),
+            None,
+            "the queued target must wait until its settings are applied"
+        );
+
+        reload_requested.store(false, Ordering::Release);
+        assert_eq!(
+            start_next_queued_target(&queue, &reload_requested).as_deref(),
+            Some("imported")
+        );
+    }
+
     fn state_one_target() -> StatusRuntimeState {
         let mut st = StatusRuntimeState {
             target_order: vec!["t1".to_string()],
@@ -1846,10 +1881,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .clone()
             .expect("api_hash must be available when starting runs");
 
-        let queued_target_id = backup_queue
-            .lock()
-            .ok()
-            .and_then(|mut queue| queue.start_next_target());
+        let queued_target_id =
+            start_next_queued_target(&backup_queue, settings_reload_requested.as_ref());
+        if queued_target_id.is_none() && settings_reload_requested.load(Ordering::Acquire) {
+            continue;
+        }
         if let Some(target_id) = queued_target_id.as_deref()
             && !settings.targets.iter().any(|target| target.id == target_id)
         {

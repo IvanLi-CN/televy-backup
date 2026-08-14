@@ -1216,6 +1216,47 @@ mod tests {
     }
 
     #[test]
+    fn backup_enqueue_rejects_unknown_params_before_admission_checks() {
+        let lifecycle = Arc::new(crate::DaemonLifecycle::default());
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let runtime_logging =
+            televy_backup_core::local_settings::resolve(std::path::Path::new("/tmp"));
+        let context = test_context(
+            std::path::Path::new("/tmp"),
+            status_state,
+            Arc::new(Mutex::new(crate::BackupQueue::default())),
+            Arc::new(Notify::new()),
+            lifecycle,
+        );
+        let response = handle_request(
+            &ControlRequest::new(
+                "1",
+                "backup.enqueue",
+                serde_json::json!({
+                    "scope": "allEnabled",
+                    "unexpected": true
+                }),
+            ),
+            &context,
+            &settings(),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: std::path::Path::new("/tmp"),
+                log_bytes: None,
+                managed_log_usage: None,
+            },
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("control.invalid_request")
+        );
+    }
+
+    #[test]
     fn backup_enqueue_rejects_empty_target_ids_for_all_enabled_scope() {
         let lifecycle = Arc::new(crate::DaemonLifecycle::default());
         let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(

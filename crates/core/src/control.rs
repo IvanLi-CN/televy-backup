@@ -157,7 +157,7 @@ pub struct SecretsClearTelegramMtprotoSessionParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BackupEnqueueParams {
     pub scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
