@@ -122,8 +122,17 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 PR: include
 
 ![Light Popover: Connecting and Queued](./assets/light-connecting-queued-popover.png)
+
+PR: include
+
 ![Light Main Window: Connecting and Queued](./assets/light-connecting-queued-main-window.png)
+
+PR: include
+
 ![Dark Popover: Running and Next queued](./assets/dark-running-next-queued-popover.png)
+
+PR: include
+
 ![Dark Main Window: Running and Next queued](./assets/dark-running-next-queued-main-window.png)
 
 这些图片由 `scripts/macos/capture-backup-queue-ui.sh` 的独立 demo 实例生成，范围仅为 Popover 与 Main Window；主窗口捕获按 launch PID 绑定并拒绝全屏回退。
