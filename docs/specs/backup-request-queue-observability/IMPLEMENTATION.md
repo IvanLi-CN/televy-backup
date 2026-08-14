@@ -10,7 +10,7 @@
 
 ## Coverage / rollout summary
 
-- `backup.enqueue` 是 App 的全量、单目标和导入后合并本地目录入口；CLI 仅负责将 scope 传给 control IPC，`backup run` 保持独立直跑语义。
+- `backup.enqueue` 是 App 的全量、单目标和导入后合并本地目录入口；接收时会读取已原子写入的最新 settings 并请求主循环在当前目标结束后采纳它。CLI 仅负责将 scope 传给 control IPC，`backup run` 保持独立直跑语义。
 - daemon 实现活动批次与唯一后续批次，按 settings 顺序去重并投影 `backupQueue.activeBatchId` / `pendingBatchId`。
 - 既有 `z324m` Prepare 和确定性进度语义保持不变；本主题只增加连接前与队列成员投影。
 - Popover 和 Main Window 共用 `TargetPresentation`：`Starting` 为本地桥接，`Queued` 来自 daemon membership，Connecting 使用 inline spinner。

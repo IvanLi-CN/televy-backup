@@ -5,6 +5,7 @@ use std::io::{ErrorKind, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
@@ -1350,6 +1351,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
     let backup_queue = Arc::new(Mutex::new(BackupQueue::default()));
     let backup_queue_notify = Arc::new(Notify::new());
+    let settings_reload_requested = Arc::new(AtomicBool::new(false));
     let lifecycle = Arc::new(DaemonLifecycle::default());
     let runtime_logging = Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
         &config_root,
@@ -1448,6 +1450,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             status_state: status_state.clone(),
             backup_queue: backup_queue.clone(),
             backup_queue_notify: backup_queue_notify.clone(),
+            settings_reload_requested: settings_reload_requested.clone(),
             lifecycle: lifecycle.clone(),
             runtime_logging: runtime_logging.clone(),
             data_root: data_root.clone(),
@@ -1525,7 +1528,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let config_mtime = file_mtime(&config_path);
             let secrets_mtime = file_mtime(&secrets_path);
-            let config_changed = config_mtime.is_some() && config_mtime != last_config_mtime;
+            let config_changed = settings_reload_requested.swap(false, Ordering::AcqRel)
+                || (config_mtime.is_some() && config_mtime != last_config_mtime);
             let secrets_changed = secrets_mtime.is_some() && secrets_mtime != last_secrets_mtime;
 
             if config_changed || secrets_changed {

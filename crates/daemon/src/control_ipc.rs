@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -29,6 +30,7 @@ pub(crate) struct ControlContext {
     pub(crate) status_state: Arc<Mutex<crate::StatusRuntimeState>>,
     pub(crate) backup_queue: Arc<Mutex<crate::BackupQueue>>,
     pub(crate) backup_queue_notify: Arc<Notify>,
+    pub(crate) settings_reload_requested: Arc<AtomicBool>,
     pub(crate) lifecycle: Arc<crate::DaemonLifecycle>,
     pub(crate) runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
     pub(crate) data_root: PathBuf,
@@ -253,6 +255,13 @@ async fn handle_control_ipc_client(
         (None, None)
     };
 
+    if req.method == "backup.enqueue"
+        && let Err(error) = refresh_control_settings_for_backup_enqueue(&context).await
+    {
+        write_json_line(&mut w, &ControlResponse::err(req.id.clone(), error)).await?;
+        return Ok(());
+    }
+
     let runtime_logging = context.runtime_logging.read().await;
     let resp = {
         let settings = context.settings.read().await;
@@ -269,6 +278,36 @@ async fn handle_control_ipc_client(
         )
     };
     write_json_line(&mut w, &resp).await?;
+    Ok(())
+}
+
+async fn refresh_control_settings_for_backup_enqueue(
+    context: &ControlContext,
+) -> Result<(), ControlError> {
+    let config_root = context.config_root.clone();
+    let settings = tokio::task::spawn_blocking(move || {
+        let settings = televy_backup_core::config::load_settings_v2(&config_root)?;
+        televy_backup_core::config::validate_settings_schema_v2(&settings)?;
+        Ok::<_, televy_backup_core::Error>(settings)
+    })
+    .await
+    .map_err(|error| {
+        ControlError::unavailable(
+            "settings reload task failed",
+            serde_json::json!({ "error": error.to_string() }),
+        )
+    })?
+    .map_err(|error| ControlError {
+        code: "config.invalid".to_string(),
+        message: error.to_string(),
+        retryable: false,
+        details: serde_json::json!({}),
+    })?;
+
+    *context.settings.write().await = settings;
+    context
+        .settings_reload_requested
+        .store(true, Ordering::Release);
     Ok(())
 }
 
@@ -548,6 +587,7 @@ fn backup_enqueue(
     backup_queue_notify: &Arc<Notify>,
     raw_params: serde_json::Value,
 ) -> Result<BackupEnqueueResult, ControlError> {
+    let target_ids_present = raw_params.get("targetIds").is_some();
     let params: BackupEnqueueParams = serde_json::from_value(raw_params).map_err(|error| {
         ControlError::invalid_request(
             "invalid params",
@@ -557,7 +597,7 @@ fn backup_enqueue(
 
     let target_ids = match params.scope.as_str() {
         "allEnabled" => {
-            if params.target_ids.is_some() {
+            if target_ids_present {
                 return Err(ControlError::invalid_request(
                     "allEnabled must not include targetIds",
                     serde_json::json!({}),
@@ -1007,12 +1047,50 @@ mod tests {
             status_state,
             backup_queue,
             backup_queue_notify,
+            settings_reload_requested: Arc::new(AtomicBool::new(false)),
             lifecycle,
             runtime_logging: Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
                 config_root,
             ))),
             data_root: config_root.to_path_buf(),
         }
+    }
+
+    #[tokio::test]
+    async fn backup_enqueue_refreshes_control_settings_and_requests_daemon_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_root = dir.path().join("config");
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let backup_queue = Arc::new(Mutex::new(crate::BackupQueue::default()));
+        let backup_queue_notify = Arc::new(Notify::new());
+        let lifecycle = Arc::new(crate::DaemonLifecycle::default());
+        let context = test_context(
+            &config_root,
+            status_state,
+            backup_queue,
+            backup_queue_notify,
+            lifecycle,
+        );
+
+        let mut imported = settings();
+        imported.targets[0].id = "imported-target".to_string();
+        imported.telegram_endpoints[0].mtproto.session_key =
+            "telegram.mtproto.session.ep1".to_string();
+        televy_backup_core::config::save_settings_v2(&config_root, &imported).unwrap();
+
+        refresh_control_settings_for_backup_enqueue(&context)
+            .await
+            .unwrap();
+
+        let current = context.settings.read().await;
+        assert_eq!(current.targets[0].id, "imported-target");
+        assert!(
+            context
+                .settings_reload_requested
+                .swap(false, Ordering::AcqRel)
+        );
     }
 
     #[tokio::test]
@@ -1036,6 +1114,7 @@ mod tests {
                 status_state,
                 backup_queue: Arc::new(Mutex::new(crate::BackupQueue::default())),
                 backup_queue_notify: Arc::new(Notify::new()),
+                settings_reload_requested: Arc::new(AtomicBool::new(false)),
                 lifecycle: Arc::new(crate::DaemonLifecycle::default()),
                 runtime_logging,
                 data_root: dir.path().join("data"),
@@ -1172,6 +1251,30 @@ mod tests {
             },
         );
 
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("control.invalid_request")
+        );
+
+        let response = handle_request(
+            &ControlRequest::new(
+                "2",
+                "backup.enqueue",
+                serde_json::json!({
+                    "scope": "allEnabled",
+                    "targetIds": null
+                }),
+            ),
+            &context,
+            &settings(),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: std::path::Path::new("/tmp"),
+                log_bytes: None,
+                managed_log_usage: None,
+            },
+        );
         assert!(!response.ok);
         assert_eq!(
             response.error.as_ref().map(|error| error.code.as_str()),
