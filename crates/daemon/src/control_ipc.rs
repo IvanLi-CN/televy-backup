@@ -557,7 +557,7 @@ fn backup_enqueue(
 
     let target_ids = match params.scope.as_str() {
         "allEnabled" => {
-            if !params.target_ids.is_empty() {
+            if params.target_ids.is_some() {
                 return Err(ControlError::invalid_request(
                     "allEnabled must not include targetIds",
                     serde_json::json!({}),
@@ -571,20 +571,20 @@ fn backup_enqueue(
                 .collect::<Vec<_>>()
         }
         "targets" => {
-            if params.target_ids.is_empty()
-                || params.target_ids.iter().any(|id| id.trim().is_empty())
-            {
+            let target_ids = params.target_ids.ok_or_else(|| {
+                ControlError::invalid_request(
+                    "targets requires at least one non-empty targetId",
+                    serde_json::json!({}),
+                )
+            })?;
+            if target_ids.is_empty() || target_ids.iter().any(|id| id.trim().is_empty()) {
                 return Err(ControlError::invalid_request(
                     "targets requires at least one non-empty targetId",
                     serde_json::json!({}),
                 ));
             }
-            let requested = params
-                .target_ids
-                .iter()
-                .collect::<std::collections::HashSet<_>>();
-            let unknown = params
-                .target_ids
+            let requested = target_ids.iter().collect::<std::collections::HashSet<_>>();
+            let unknown = target_ids
                 .iter()
                 .filter(|id| !settings.targets.iter().any(|target| target.id == **id))
                 .cloned()
@@ -1134,6 +1134,49 @@ mod tests {
         let error = response.error.expect("structured backup enqueue error");
         assert_eq!(error.code, "control.invalid_request");
         assert!(error.message.contains("must not include targetIds"));
+    }
+
+    #[test]
+    fn backup_enqueue_rejects_empty_target_ids_for_all_enabled_scope() {
+        let lifecycle = Arc::new(crate::DaemonLifecycle::default());
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let runtime_logging =
+            televy_backup_core::local_settings::resolve(std::path::Path::new("/tmp"));
+        let backup_queue = Arc::new(Mutex::new(crate::BackupQueue::default()));
+        let backup_queue_notify = Arc::new(Notify::new());
+        let context = test_context(
+            std::path::Path::new("/tmp"),
+            status_state,
+            backup_queue,
+            backup_queue_notify,
+            lifecycle,
+        );
+        let response = handle_request(
+            &ControlRequest::new(
+                "1",
+                "backup.enqueue",
+                serde_json::json!({
+                    "scope": "allEnabled",
+                    "targetIds": []
+                }),
+            ),
+            &context,
+            &settings(),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: std::path::Path::new("/tmp"),
+                log_bytes: None,
+                managed_log_usage: None,
+            },
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code.as_str()),
+            Some("control.invalid_request")
+        );
     }
 
     #[test]

@@ -160,8 +160,8 @@ pub struct SecretsClearTelegramMtprotoSessionParams {
 #[serde(rename_all = "camelCase")]
 pub struct BackupEnqueueParams {
     pub scope: String,
-    #[serde(default)]
-    pub target_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -134,12 +134,27 @@ private func testRunningWithoutPendingCanQueueNextBatch() {
     expect(TargetPresentation.stageText(running.progress?.phase) == "Preparing", "prepare wording stays aligned with z324m")
 }
 
+private func testBatchAcknowledgementUsesLatestSnapshot() {
+    let request = BackupRequestPresentation(
+        targetIds: ["target-a"],
+        batchId: "batch-active",
+        phase: .awaitingDaemonSnapshot,
+        startedAt: Date()
+    )
+    let acknowledged = target(activeBatchId: "batch-active")
+    expect(
+        request.isObserved(in: snapshot([acknowledged])),
+        "a snapshot received before the enqueue response should still acknowledge the batch"
+    )
+}
+
 @main
 enum TargetPresentationTestsMain {
     static func main() {
         testStartingOverlayPrecedesDaemonSnapshot()
         testQueuedAndRunningNextQueuedProjection()
         testRunningWithoutPendingCanQueueNextBatch()
+        testBatchAcknowledgementUsesLatestSnapshot()
         print("OK: TargetPresentationTests")
     }
 }

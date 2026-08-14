@@ -915,10 +915,11 @@ final class AppModel {
         t.activate()
     }
 
-    func ensureDaemonRunning() {
+    @discardableResult
+    func ensureDaemonRunning() -> Bool {
         let now = Date()
         if let last = lastDaemonStartAttemptAt, now.timeIntervalSince(last) < 3 {
-            return
+            return waitForDaemonIpcReady(timeoutSeconds: 2.0)
         }
         lastDaemonStartAttemptAt = now
 
@@ -927,7 +928,7 @@ final class AppModel {
         // If IPC is already ready in our configured data dir, we are done (regardless of other
         // televybackupd processes that might exist on the system).
         if waitForDaemonIpcReady(timeoutSeconds: 0.05) {
-            return
+            return true
         }
 
         // If we are running in a dev/automation environment (custom dirs and/or keychain disabled),
@@ -936,7 +937,7 @@ final class AppModel {
         if !preferBundled {
             if isDaemonRunning() {
                 if waitForDaemonIpcReady(timeoutSeconds: 1.5) {
-                    return
+                    return true
                 }
             }
 
@@ -944,11 +945,11 @@ final class AppModel {
             if kickstartLaunchAgent(label: "homebrew.mxcl.televybackupd") {
                 appendStatusActivity("Daemon kickstarted via launchd (homebrew.mxcl.televybackupd)")
                 if waitForDaemonIpcReady(timeoutSeconds: 2.0) {
-                    return
+                    return true
                 }
                 appendStatusActivity("Daemon starting (IPC not ready yet)")
                 scheduleDaemonIpcRetry()
-                return
+                return false
             }
         }
 
@@ -956,11 +957,11 @@ final class AppModel {
         guard let daemon = daemonPath() else {
             appendLog("WARN: televybackupd not found (daemon auto-start unavailable)")
             showToast("Daemon not found (install televybackupd)", isError: true)
-            return
+            return false
         }
 
         if daemonTask?.isRunning == true {
-            return
+            return waitForDaemonIpcReady(timeoutSeconds: 2.0)
         }
 
         let task = Process()
@@ -991,10 +992,11 @@ final class AppModel {
             try task.run()
             daemonTask = task
             appendStatusActivity("Daemon spawned (\(daemon))")
-            _ = waitForDaemonIpcReady(timeoutSeconds: 2.0)
+            return waitForDaemonIpcReady(timeoutSeconds: 2.0)
         } catch {
             appendLog("ERROR: failed to start daemon: \(error)")
             showToast("Failed to start daemon (see ui.log)", isError: true)
+            return false
         }
     }
 
@@ -2945,7 +2947,13 @@ final class AppModel {
             phase: .starting,
             startedAt: Date()
         )
-        ensureDaemonRunning()
+        guard ensureDaemonRunning() else {
+            backupRequest = nil
+            appendLog("ERROR: backup enqueue failed: daemon IPC was not ready")
+            appendStatusActivity("Backup enqueue failed")
+            showToast("Backup could not start: daemon unavailable", isError: true)
+            return
+        }
 
         DispatchQueue.global(qos: .utility).async {
             var args = ["--json", "backup", "enqueue"]
@@ -2980,19 +2988,18 @@ final class AppModel {
                 )
                 self.appendStatusActivity("Backup batch \(response.disposition): \(response.batchId)")
                 self.showToast(response.disposition == "coalesced" ? "Backup request merged" : "Backup queued", isError: false)
-                self.expireUnobservedBackupRequest(batchId: response.batchId)
+                if self.backupRequest?.isObserved(in: self.statusStore.snapshot) == true {
+                    self.backupRequest = nil
+                } else {
+                    self.expireUnobservedBackupRequest(batchId: response.batchId)
+                }
             }
         }
     }
 
     private func reconcileBackupRequest(with snapshot: StatusSnapshot) {
-        guard let request = backupRequest,
-              let batchId = request.batchId
-        else { return }
-        let observed = snapshot.targets.contains {
-            $0.backupQueue?.activeBatchId == batchId || $0.backupQueue?.pendingBatchId == batchId
-        }
-        if observed {
+        guard let request = backupRequest, request.batchId != nil else { return }
+        if request.isObserved(in: snapshot) {
             backupRequest = nil
         }
     }

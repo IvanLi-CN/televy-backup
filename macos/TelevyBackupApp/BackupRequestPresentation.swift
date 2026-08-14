@@ -14,6 +14,13 @@ struct BackupRequestPresentation: Equatable {
     func includes(targetId: String) -> Bool {
         targetIds.contains(targetId)
     }
+
+    func isObserved(in snapshot: StatusSnapshot?) -> Bool {
+        guard let batchId, let snapshot else { return false }
+        return snapshot.targets.contains {
+            $0.backupQueue?.activeBatchId == batchId || $0.backupQueue?.pendingBatchId == batchId
+        }
+    }
 }
 
 enum BackupRequestButtonState: Equatable {

@@ -1000,6 +1000,37 @@ mod tests {
         assert!(!queue.has_work());
     }
 
+    #[test]
+    fn backup_queue_target_failure_records_the_failure_and_continues() {
+        let queue = Arc::new(Mutex::new(BackupQueue::default()));
+        let status = Arc::new(Mutex::new(state_one_target()));
+        let target_order = vec!["t1".to_string(), "t2".to_string()];
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(vec!["t1".to_string(), "t2".to_string()], &target_order);
+        assert_eq!(
+            queue.lock().unwrap().start_next_target().as_deref(),
+            Some("t1")
+        );
+
+        fail_backup_queue_target(&queue, &status, "t1", "target.not_found");
+
+        let target = status.lock().unwrap().targets.get("t1").unwrap().clone();
+        assert_eq!(target.state, "failed");
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.error_code.as_deref()),
+            Some("target.not_found")
+        );
+        assert_eq!(
+            queue.lock().unwrap().start_next_target().as_deref(),
+            Some("t2")
+        );
+    }
+
     fn state_one_target() -> StatusRuntimeState {
         let mut st = StatusRuntimeState {
             target_order: vec!["t1".to_string()],
@@ -1311,6 +1342,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = CONFIG_ROOT_CACHE.set(config_root.clone());
     settings_config::validate_settings_schema_v2(&settings)?;
     let mut last_config_mtime = file_mtime(&config_path);
+
+    // The development vault backend creates its first master key automatically. Do that before
+    // control IPC becomes reachable so a first backup request cannot observe an empty store.
+    initialize_dev_master_key_if_missing(&config_root)?;
 
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
     let backup_queue = Arc::new(Mutex::new(BackupQueue::default()));
@@ -1765,15 +1800,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(target_id) = queued_target_id.as_deref()
             && !settings.targets.iter().any(|target| target.id == target_id)
         {
+            let task_id = format!("tsk_{}", Uuid::new_v4());
+            let logging = televy_backup_core::local_settings::resolve(&config_root);
+            let run_log = televy_backup_core::run_log::start_run_log_with_retention(
+                "backup",
+                &task_id,
+                &data_root,
+                &logging.effective_filter,
+                logging.retention_prune_enabled.then_some(logging.retention),
+            )?;
+            tracing::warn!(
+                event = "run.start",
+                kind = "backup",
+                run_id = %task_id,
+                task_id = %task_id,
+                target_id,
+                "run.start"
+            );
             tracing::error!(
                 event = "run.finish",
                 kind = "backup",
+                run_id = %task_id,
+                task_id = %task_id,
                 status = "failed",
                 error_code = "target.not_found",
                 target_id,
                 "queued target no longer exists"
             );
-            complete_backup_queue_target(&backup_queue, &status_state, target_id);
+            drop(run_log);
+            fail_backup_queue_target(&backup_queue, &status_state, target_id, "target.not_found");
             continue;
         }
 
@@ -2809,6 +2864,36 @@ fn decode_base64_32(b64: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())?;
     let arr: [u8; 32] = bytes.try_into().map_err(|_| "invalid key length")?;
     Ok(arr)
+}
+
+fn initialize_dev_master_key_if_missing(
+    config_root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !keychain_disabled() {
+        return Ok(());
+    }
+
+    let secrets_path = televy_backup_core::secrets::secrets_path(config_root);
+    if secrets_path.exists() {
+        return Ok(());
+    }
+
+    let vault_key = load_or_create_vault_key_uncached()?;
+    let mut store = televy_backup_core::secrets::load_secrets_store(&secrets_path, &vault_key)?;
+    if store.contains_key(MASTER_KEY_KEY) {
+        return Ok(());
+    }
+
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes)
+        .map_err(|e| std::io::Error::other(format!("getrandom failed: {e}")))?;
+    store.set(
+        MASTER_KEY_KEY,
+        televy_backup_core::secrets::vault_key_to_base64(&bytes),
+    );
+    televy_backup_core::secrets::save_secrets_store(&secrets_path, &vault_key, &store)?;
+    set_cached_vault_key(vault_key);
+    Ok(())
 }
 
 fn keychain_disabled() -> bool {

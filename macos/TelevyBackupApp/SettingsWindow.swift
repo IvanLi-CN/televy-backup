@@ -3275,6 +3275,7 @@ private struct ImportConfigBundleSheet: View {
             let status: String
             let args: [String]
             let timeoutSeconds: Double
+            let waitsForDaemonConfigReload: Bool
         }
 
         // Pre-compute actions on the main thread so the background worker doesn't access SwiftUI
@@ -3296,13 +3297,15 @@ private struct ImportConfigBundleSheet: View {
                 post.append(PostAction(
                     status: "Restoring remote latest (\(id))…",
                     args: ["restore", "latest", "--target-id", id, "--target", path],
-                    timeoutSeconds: 3600
+                    timeoutSeconds: 3600,
+                    waitsForDaemonConfigReload: false
                 ))
             case .merge_local_to_remote:
                 post.append(PostAction(
-                    status: "Backing up local folder (\(id))…",
-                    args: ["backup", "run", "--target-id", id, "--label", "import-merge"],
-                    timeoutSeconds: 3600
+                    status: "Queueing local folder backup (\(id))…",
+                    args: ["backup", "enqueue", "--target-id", id],
+                    timeoutSeconds: 15,
+                    waitsForDaemonConfigReload: true
                 ))
             case .keep_local, .undecided:
                 break
@@ -3357,6 +3360,11 @@ private struct ImportConfigBundleSheet: View {
             for a in post {
                 DispatchQueue.main.async { postApplyStatus = a.status }
                 ensureDaemonRunningOnMain()
+                if a.waitsForDaemonConfigReload {
+                    // Import updates config atomically. Wait for the daemon's idle reload pass
+                    // before asking it to resolve the imported target in its own queue.
+                    Thread.sleep(forTimeInterval: 1.1)
+                }
                 let res = model.runCommandCapture(
                     exe: cli,
                     args: a.args,
