@@ -30,7 +30,11 @@ struct RunLogSummary: Identifiable {
 }
 
 struct MainWindowRootView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var runHistoryStore: RunHistoryStore
+    @EnvironmentObject var taskStore: TaskPresentationStore
+    @EnvironmentObject var diagnosticsStore: DiagnosticsStore
+    @EnvironmentObject var statusStore: StatusStore
     @State private var selection: String?
 
     private enum Selection {
@@ -53,7 +57,7 @@ struct MainWindowRootView: View {
         .onAppear {
             if MainWindowUIDemo.enabled {
                 if selection == nil {
-                    selection = MainWindowUIDemo.initialSelection(targets: model.statusSnapshot?.targets ?? [])
+                    selection = MainWindowUIDemo.initialSelection(targets: statusStore.snapshot?.targets ?? [])
                 }
             } else {
                 model.refreshRunHistory()
@@ -77,16 +81,16 @@ struct MainWindowRootView: View {
 
                 if let selection,
                    selection != Selection.unknownTarget,
-                   let target = (model.statusSnapshot?.targets ?? []).first(where: { $0.targetId == selection })
+                   let target = (statusStore.snapshot?.targets ?? []).first(where: { $0.targetId == selection })
                 {
                     Menu {
                         Button("Backup now") { model.backupRun(targetId: target.targetId) }
-                            .disabled(model.isRunning)
+                            .disabled(taskStore.isRunning)
                         Divider()
                         Button("Restore…") { model.promptRestoreLatest(targetId: target.targetId) }
-                            .disabled(model.isRunning)
+                            .disabled(taskStore.isRunning)
                         Button("Verify") { model.verifyLatest(targetId: target.targetId) }
-                            .disabled(model.isRunning)
+                            .disabled(taskStore.isRunning)
                     } label: {
                         Label("Actions", systemImage: "ellipsis.circle")
                     }
@@ -113,11 +117,11 @@ struct MainWindowRootView: View {
     }
 
     private var sidebar: some View {
-        let targets = model.statusSnapshot?.targets ?? []
-        let unknownCount = model.runHistory.filter { $0.targetId == nil }.count
+        let targets = statusStore.snapshot?.targets ?? []
+        let unknownCount = runHistoryStore.runs.filter { $0.targetId == nil }.count
         let now = Date()
         let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
-        let snap = model.statusSnapshot
+        let snap = statusStore.snapshot
         let snapshotOffline = TargetPresentation.snapshotIsOffline(snap: snap, nowMs: nowMs)
 
         let sidebarStatusLine1: String? = {
@@ -153,7 +157,7 @@ struct MainWindowRootView: View {
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundStyle(.secondary)
                     Spacer()
-                    if model.runHistoryRefreshInFlight {
+                    if runHistoryStore.refreshInFlight {
                         ProgressView()
                             .controlSize(.small)
                     }
@@ -184,7 +188,7 @@ struct MainWindowRootView: View {
                     TargetListRow(
                         target: target,
                         isSelected: selection == target.targetId,
-                        isBusy: model.isRunning,
+                        isBusy: taskStore.isRunning,
                         onBackup: {
                             model.backupRun(targetId: target.targetId)
                         },
@@ -217,7 +221,7 @@ struct MainWindowRootView: View {
 
     @ViewBuilder
     private var detail: some View {
-        let targets = model.statusSnapshot?.targets ?? []
+        let targets = statusStore.snapshot?.targets ?? []
         if selection == Selection.unknownTarget {
             UnknownTargetDetailView()
         } else if let selection,
@@ -263,7 +267,10 @@ private enum MainWindowUIDemo {
 }
 
 private struct TargetListRow: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var statusStore: StatusStore
+    @EnvironmentObject var runHistoryStore: RunHistoryStore
+    @EnvironmentObject var taskStore: TaskPresentationStore
     let target: StatusTarget
     let isSelected: Bool
     let isBusy: Bool
@@ -273,7 +280,7 @@ private struct TargetListRow: View {
     let onSelect: () -> Void
 
     private var runs: [RunLogSummary] {
-        model.runHistory
+        runHistoryStore.runs
             .filter { run in run.targetId == target.targetId }
             .sorted {
                 let a = $0.finishedAt ?? $0.startedAt ?? .distantPast
@@ -291,7 +298,7 @@ private struct TargetListRow: View {
     }
 
     private var activeForTarget: AppModel.ActiveTask? {
-        guard let t = model.activeTask else { return nil }
+        guard let t = taskStore.activeTask else { return nil }
         if t.state == "running" && t.targetId == target.targetId { return t }
         return nil
     }
@@ -333,10 +340,10 @@ private struct TargetListRow: View {
     var body: some View {
         let now = Date()
         let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
-        let snap = model.statusSnapshot
+        let snap = statusStore.snapshot
         let status = TargetPresentation.userStatus(
             target: target,
-            activeTask: model.activeTask,
+            activeTask: taskStore.activeTask,
             hasInProgressRunLog: hasInProgressRunLog,
             snap: snap,
             nowMs: nowMs
@@ -354,7 +361,7 @@ private struct TargetListRow: View {
         let uploadBps: Int64? = {
             guard status == .running else { return nil }
             let fallback: Int64? = {
-                guard let estimate = model.targetRateEstimates[target.targetId] else { return nil }
+                guard let estimate = taskStore.targetRateEstimates[target.targetId] else { return nil }
                 guard now.timeIntervalSince(estimate.updatedAt) <= rateEstimateFreshnessSeconds else {
                     return nil
                 }
@@ -369,7 +376,7 @@ private struct TargetListRow: View {
 
         let downloadBps: Int64? = {
             guard status == .running else { return nil }
-            guard let estimate = model.targetRateEstimates[target.targetId] else { return nil }
+            guard let estimate = taskStore.targetRateEstimates[target.targetId] else { return nil }
             guard now.timeIntervalSince(estimate.updatedAt) <= rateEstimateFreshnessSeconds else {
                 return nil
             }
@@ -479,7 +486,10 @@ private struct TargetListRow: View {
 }
 
 private struct TargetDetailView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var runHistoryStore: RunHistoryStore
+    @EnvironmentObject var taskStore: TaskPresentationStore
+    @EnvironmentObject var statusStore: StatusStore
     let target: StatusTarget
 
     private struct OverviewMetricItem: Identifiable {
@@ -507,7 +517,7 @@ private struct TargetDetailView: View {
     }()
 
     private var runs: [RunLogSummary] {
-        model.runHistory
+        runHistoryStore.runs
             .filter { run in run.targetId == target.targetId }
             .sorted {
                 let a = $0.finishedAt ?? $0.startedAt ?? .distantPast
@@ -525,7 +535,7 @@ private struct TargetDetailView: View {
     }
 
     private var activeForTarget: AppModel.ActiveTask? {
-        guard let t = model.activeTask else { return nil }
+        guard let t = taskStore.activeTask else { return nil }
         if t.state == "running" && t.targetId == target.targetId { return t }
         return nil
     }
@@ -576,7 +586,7 @@ private struct TargetDetailView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .disabled(model.statusSnapshot == nil)
+                .disabled(statusStore.snapshot == nil)
 
                 Button {
                     model.revealStatusSourceInFinder()
@@ -592,10 +602,10 @@ private struct TargetDetailView: View {
     private var header: some View {
         let now = Date()
         let nowMs = Int64(now.timeIntervalSince1970 * 1000.0)
-        let snap = model.statusSnapshot
+        let snap = statusStore.snapshot
         let status = TargetPresentation.userStatus(
             target: target,
-            activeTask: model.activeTask,
+            activeTask: taskStore.activeTask,
             hasInProgressRunLog: hasInProgressRunLog,
             snap: snap,
             nowMs: nowMs
@@ -734,7 +744,7 @@ private struct TargetDetailView: View {
             switch kind {
             case .backup:
                 let fallback: Int64? = {
-                    guard let estimate = model.targetRateEstimates[target.targetId] else { return nil }
+                    guard let estimate = taskStore.targetRateEstimates[target.targetId] else { return nil }
                     guard now.timeIntervalSince(estimate.updatedAt) <= rateEstimateFreshnessSeconds else {
                         return nil
                     }
@@ -746,7 +756,7 @@ private struct TargetDetailView: View {
                 if let bps, bps > 0 { return "Upload \(formatBytes(bps))/s" }
                 return nil
             case .restore:
-                if let estimate = model.targetRateEstimates[target.targetId],
+                if let estimate = taskStore.targetRateEstimates[target.targetId],
                    now.timeIntervalSince(estimate.updatedAt) <= rateEstimateFreshnessSeconds,
                    let bps = estimate.downloadBytesPerSecond, bps > 0
                 {
@@ -932,7 +942,7 @@ private struct TargetDetailView: View {
 
     @ViewBuilder
     private var history: some View {
-        if model.runHistoryRefreshInFlight && runs.isEmpty {
+        if runHistoryStore.refreshInFlight && runs.isEmpty {
             historyLoadingState
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else if runs.isEmpty {
@@ -1139,10 +1149,11 @@ private struct UnknownTargetListRow: View {
 }
 
 private struct UnknownTargetDetailView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var runHistoryStore: RunHistoryStore
 
     private var runs: [RunLogSummary] {
-        model.runHistory
+        runHistoryStore.runs
             .filter { $0.targetId == nil }
             .sorted { ($0.finishedAt ?? .distantPast) > ($1.finishedAt ?? .distantPast) }
     }

@@ -544,7 +544,9 @@ private enum SettingsUIDemo {
 }
 
 struct SettingsWindowRootView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
+    @EnvironmentObject var settingsStore: SettingsStore
+    @EnvironmentObject var taskStore: TaskPresentationStore
     @State private var section: SettingsSection = .targets
 
     @State private var settings: SettingsV2?
@@ -598,8 +600,8 @@ struct SettingsWindowRootView: View {
         }
         .frame(minWidth: 820, minHeight: 560)
         .overlay(alignment: .bottomTrailing) {
-            if let toast = model.toastText {
-                ToastPill(text: toast, isError: model.toastIsError)
+            if let toast = taskStore.toastText {
+                ToastPill(text: toast, isError: taskStore.toastIsError)
                     .padding(12)
                     .allowsHitTesting(false)
                     .transition(.opacity)
@@ -1401,7 +1403,7 @@ struct SettingsWindowRootView: View {
                 initialFileUrl: req.fileUrl,
                 onApplied: { reload() }
             )
-            .environmentObject(model)
+            .environment(\.appRuntime, model)
         }
     }
 
@@ -1640,12 +1642,12 @@ struct SettingsWindowRootView: View {
 
     private func showToast(_ text: String, isError: Bool) {
         DispatchQueue.main.async {
-            model.toastText = text
-            model.toastIsError = isError
+            taskStore.toastText = text
+            taskStore.toastIsError = isError
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) {
-            if model.toastText == text {
-                model.toastText = nil
+            if taskStore.toastText == text {
+                taskStore.toastText = nil
             }
         }
     }
@@ -2473,7 +2475,7 @@ private final class OpenPanelNewFolderAccessory: NSObject {
 
 private struct ImportConfigBundleSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
 
     let initialFileUrl: URL?
     let onApplied: () -> Void
@@ -4161,7 +4163,7 @@ private struct ImportConfigBundleSheet: View {
 }
 
 struct TargetEditor: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
     @Binding var settings: SettingsV2
     let secrets: CliSecretsPresence?
     let targetIndex: Int
@@ -4457,7 +4459,7 @@ struct TargetEditor: View {
 }
 
 struct EndpointEditor: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appRuntime) private var model
     @Binding var settings: SettingsV2
     let secrets: CliSecretsPresence?
     let endpointId: String

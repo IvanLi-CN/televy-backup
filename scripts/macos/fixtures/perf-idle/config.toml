@@ -1,0 +1,38 @@
+version = 2
+
+[schedule]
+enabled = false
+kind = "hourly"
+hourly_minute = 0
+daily_at = "02:00"
+timezone = "local"
+
+[telegram]
+mode = "mtproto"
+
+[telegram.mtproto]
+api_id = 0
+api_hash_key = "fixture.unused.api_hash"
+
+[[telegram_endpoints]]
+id = "fixture"
+mode = "mtproto"
+chat_id = "fixture-disabled"
+bot_token_key = "fixture.unused.bot_token"
+
+[telegram_endpoints.mtproto]
+session_key = "fixture.unused.session"
+
+[[targets]]
+id = "fixture-a"
+label = "Fixture A"
+source_path = "__FIXTURE_A__"
+endpoint_id = "fixture"
+enabled = false
+
+[[targets]]
+id = "fixture-b"
+label = "Fixture B"
+source_path = "__FIXTURE_B__"
+endpoint_id = "fixture"
+enabled = false
