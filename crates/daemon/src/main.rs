@@ -1032,6 +1032,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn backup_queue_memberships_apply_to_targets_added_during_settings_reload() {
+        let mut old_settings = settings_config::SettingsV2::default();
+        old_settings.targets.push(settings_config::Target {
+            id: "existing".to_string(),
+            source_path: "/tmp/existing".to_string(),
+            label: "Existing".to_string(),
+            endpoint_id: "ep1".to_string(),
+            enabled: true,
+            schedule: None,
+        });
+        let status = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&old_settings)));
+        let queue = Arc::new(Mutex::new(BackupQueue::default()));
+
+        let target_order = vec!["existing".to_string(), "imported".to_string()];
+        let batch_id = queue
+            .lock()
+            .unwrap()
+            .enqueue(vec!["imported".to_string()], &target_order)
+            .0;
+        sync_backup_queue_memberships(&queue, &status);
+
+        let mut reloaded_settings = old_settings;
+        reloaded_settings.targets.push(settings_config::Target {
+            id: "imported".to_string(),
+            source_path: "/tmp/imported".to_string(),
+            label: "Imported".to_string(),
+            endpoint_id: "ep1".to_string(),
+            enabled: true,
+            schedule: None,
+        });
+        status.lock().unwrap().apply_settings(&reloaded_settings);
+        sync_backup_queue_memberships(&queue, &status);
+
+        let membership = status
+            .lock()
+            .unwrap()
+            .targets
+            .get("imported")
+            .and_then(|target| target.backup_queue.as_ref())
+            .cloned()
+            .expect("reloaded target should retain its queue membership");
+        assert_eq!(
+            membership.active_batch_id.as_deref(),
+            Some(batch_id.as_str())
+        );
+    }
+
     fn state_one_target() -> StatusRuntimeState {
         let mut st = StatusRuntimeState {
             target_order: vec!["t1".to_string()],
@@ -1560,6 +1608,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Ok(mut st) = status_state.lock() {
                                     st.apply_settings(&settings);
                                 }
+                                sync_backup_queue_memberships(&backup_queue, &status_state);
                                 tracing::info!(
                                     event = "config.reloaded",
                                     path = %config_path.display(),
