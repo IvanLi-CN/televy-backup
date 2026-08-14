@@ -9,6 +9,7 @@
 - 固定严格目标串行：不在本主题引入并发连接、预扫描或上传竞争。
 - 在 Telegram connect 前发布 `connecting`：把原本约十秒的无状态前置等待变为真实可观察的运行阶段。
 - Main Window 和 Popover 对 Connecting 统一为 inline spinner；Prepare 继续沿用既有 indeterminate backup bar，避免把连接等待伪装成传输进度。
+- 移除主操作中的“再排一批”图标：它没有可靠的通用含义。运行或排队时主操作统一为 Stop backup，并通过 `backup.stop` 取消当前 daemon 任务和清空手动队列，而不是停止 daemon。
 
 ## Key Reasons / Replacements
 

@@ -111,6 +111,10 @@ final class AppModel {
         get { taskPresentationStore.backupRequest }
         set { taskPresentationStore.backupRequest = newValue }
     }
+    var backupStopRequest: BackupStopPresentation? {
+        get { taskPresentationStore.backupStopRequest }
+        set { taskPresentationStore.backupStopRequest = newValue }
+    }
 
     var lastBytesUploaded: Int64 = 0
     var lastBytesDeduped: Int64 = 0
@@ -188,6 +192,11 @@ final class AppModel {
         var batchId: String
         var disposition: String
         var targetIds: [String]
+    }
+
+    private struct BackupStopResponse: Decodable {
+        var cancellationRequested: Bool
+        var clearedTargetIds: [String]
     }
 
     private struct CommandErrorEnvelope: Decodable {
@@ -1264,6 +1273,7 @@ final class AppModel {
 
     private func handlePublishedStatusSnapshot(_ snap: StatusSnapshot) {
         reconcileBackupRequest(with: snap)
+        reconcileBackupStopRequest(with: snap)
         appendStatusActivity("Snapshot received (schema=\(snap.schemaVersion), targets=\(snap.targets.count))")
 
         // UI-only rate estimates based on monotonic progress counters. These are used to derive
@@ -2919,15 +2929,27 @@ final class AppModel {
         enqueueBackup(targetIds: [], allEnabled: true)
     }
 
+    func triggerBackupPrimaryAction() {
+        switch backupButtonState() {
+        case .idle:
+            triggerBackupNowAllEnabled()
+        case .stop:
+            stopBackup()
+        case .starting, .stopping:
+            break
+        }
+    }
+
     func backupButtonState() -> BackupRequestButtonState {
         TargetPresentation.backupButtonState(
             snap: statusStore.snapshot,
-            backupRequest: backupRequest
+            backupRequest: backupRequest,
+            backupStopRequest: backupStopRequest
         )
     }
 
     func canEnqueueBackup() -> Bool {
-        !backupButtonState().isDisabled
+        backupButtonState() == .idle
     }
 
     private func enqueueBackup(targetIds: [String], allEnabled: Bool) {
@@ -2997,11 +3019,65 @@ final class AppModel {
         }
     }
 
+    private func stopBackup() {
+        guard backupButtonState() == .stop else { return }
+        guard let cli = cliPath() else {
+            appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
+            showToast("Backup could not stop", isError: true)
+            return
+        }
+
+        backupStopRequest = BackupStopPresentation(startedAt: Date())
+        DispatchQueue.global(qos: .utility).async {
+            let result = self.runCommandCapture(
+                exe: cli,
+                args: ["--json", "backup", "stop"],
+                timeoutSeconds: 15.0
+            )
+
+            DispatchQueue.main.async {
+                guard self.backupStopRequest != nil else { return }
+                guard result.status == 0,
+                      let data = result.stdout.data(using: .utf8),
+                      let response = try? JSONDecoder().decode(BackupStopResponse.self, from: data)
+                else {
+                    self.backupStopRequest = nil
+                    self.appendLog("ERROR: backup stop failed: exit=\(result.status) reason=\(result.reason.rawValue) \(result.stderr.prefix(2000))")
+                    self.appendStatusActivity("Backup stop failed")
+                    self.showToast(self.backupControlErrorMessage(stderr: result.stderr, fallback: "Backup could not stop"), isError: true)
+                    return
+                }
+
+                self.backupRequest = nil
+                self.appendStatusActivity(
+                    "Backup stop requested (active=\(response.cancellationRequested), queued=\(response.clearedTargetIds.count))"
+                )
+                if let snapshot = self.statusStore.snapshot,
+                   !TargetPresentation.hasBackupInProgress(snap: snapshot)
+                {
+                    self.backupStopRequest = nil
+                    self.showToast("Backup stopped", isError: false)
+                } else {
+                    self.showToast("Stopping backup", isError: false)
+                    self.expireBackupStopRequest()
+                }
+            }
+        }
+    }
+
     private func reconcileBackupRequest(with snapshot: StatusSnapshot) {
         guard let request = backupRequest, request.batchId != nil else { return }
         if request.isObserved(in: snapshot) {
             backupRequest = nil
         }
+    }
+
+    private func reconcileBackupStopRequest(with snapshot: StatusSnapshot) {
+        guard backupStopRequest != nil, !TargetPresentation.hasBackupInProgress(snap: snapshot) else {
+            return
+        }
+        backupStopRequest = nil
+        showToast("Backup stopped", isError: false)
     }
 
     private func expireUnobservedBackupRequest(batchId: String) {
@@ -3013,16 +3089,29 @@ final class AppModel {
         }
     }
 
+    private func expireBackupStopRequest() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15.0) {
+            guard self.backupStopRequest != nil else { return }
+            self.backupStopRequest = nil
+            self.appendLog("WARN: backup stop has not completed after 15 seconds")
+            self.showToast("Backup is still stopping", isError: true)
+        }
+    }
+
     private func backupEnqueueErrorMessage(stderr: String) -> String {
+        backupControlErrorMessage(stderr: stderr, fallback: "Backup could not start")
+    }
+
+    private func backupControlErrorMessage(stderr: String, fallback: String) -> String {
         let lines = stderr.split(separator: "\n", omittingEmptySubsequences: true)
         for line in lines.reversed() {
             if let data = String(line).data(using: .utf8),
                let error = try? JSONDecoder().decode(CommandErrorEnvelope.self, from: data)
             {
-                return error.message ?? "Backup could not start"
+                return error.message ?? fallback
             }
         }
-        return "Backup could not start"
+        return fallback
     }
 }
 
@@ -3228,7 +3317,7 @@ struct PopoverRootView: View {
                 Spacer()
 
                 Button {
-                    model.triggerBackupNowAllEnabled()
+                    model.triggerBackupPrimaryAction()
                 } label: {
                     Group {
                         switch backupButtonState {
@@ -3237,10 +3326,11 @@ struct PopoverRootView: View {
                                 .controlSize(.small)
                         case .idle:
                             Image(systemName: "play.fill")
-                        case .enqueueNext:
-                            Image(systemName: "plus")
-                        case .queued:
-                            Image(systemName: "clock")
+                        case .stop:
+                            Image(systemName: "stop.fill")
+                        case .stopping:
+                            ProgressView()
+                                .controlSize(.small)
                         }
                     }
                     .font(.system(size: 11, weight: .heavy))

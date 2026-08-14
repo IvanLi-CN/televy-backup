@@ -13,6 +13,7 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 ### Goals
 
 - 提供可确认、可合并的 `backup.enqueue` control RPC，作为所有 App 备份入口的唯一请求通道。
+- 提供明确的 `backup.stop` control RPC，让 App 的主操作只表达开始或停止备份。
 - 严格串行执行目标，并且最多保留活动批次和一个后续批次。
 - 让队列成员、连接、准备和既有确定性进度阶段立即反映在 status snapshot 与 macOS UI。
 - 保持 `z324m-unified-backup-progress-prepare` 的 Prepare 与 scan/upload/index 进度口径不变。
@@ -20,7 +21,7 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 ### Non-goals
 
 - 不并行备份、预扫描后续目标、显示位置或 ETA，也不引入优先级。
-- 不支持取消、多个累计后续批次或 daemon 重启后的队列恢复。
+- 不支持多个累计后续批次或 daemon 重启后的队列恢复。
 - 不改变 CLI `backup run` 的独立直跑语义、备份算法、限速、索引、restore 或 verify 语义。
 - 不保留文件触发或混版本 App/daemon 兼容路径。
 
@@ -28,7 +29,7 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 
 ### In scope
 
-- core control/status 协议、daemon 队列协调与 CLI enqueue 薄封装。
+- core control/status 协议、daemon 队列协调与 CLI enqueue/stop 薄封装。
 - Popover 和 Main Window 的 `Starting` 本地桥接、队列/阶段投影和状态按钮。
 - 确定性 UI demo 场景、Swift/Rust 自动化测试和亮暗色视觉证据。
 
@@ -47,6 +48,8 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 - 目标在连接 Telegram 前就必须建立 run/task 并发布 `state=running, phase=connecting`；连接后进入 `Preparing`，其余进度沿用 `z324m`。
 - status snapshot 在不改变 `TargetState.state` 既有值集合的前提下，additive 暴露目标的活动/后续批次成员关系。
 - App 点击即将受影响目标投影为 `Starting`；RPC 成功后等待带相同 batch id 的 daemon snapshot 接管，RPC 失败或超时立即撤销并显示可恢复错误。
+- 主操作按钮仅使用开始或停止语义：空闲显示 Start backup，队列或运行中显示 Stop backup，短暂请求期间显示对应的 progress indicator 并禁用。
+- `backup.stop` 必须取消当前 daemon 备份任务并清空活动/后续手动批次，但不得停止 daemon 或改变定时备份设置。
 - 等待成员显示 `Queued`；运行目标若同时属于后续批次，显示 `Next queued`。不得显示位置或 ETA。
 
 ### SHOULD
@@ -68,6 +71,7 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 3. daemon 取出活动批次的下一个目标；在 Telegram connect 前创建运行状态并发布 `connecting`。
 4. 目标完成或失败后移除其活动成员关系，继续同一批次的下一个目标；批次结束后原子提升唯一后续批次。
 5. UI 由匹配 batch id 的 snapshot 接管本地桥接。运行成员展示 Connecting、Preparing 或既有 progress；其他成员展示 Queued。
+6. App 在队列或运行中请求 `backup.stop`；daemon 取消当前任务、清空手动队列，并在取消完成后让 UI 回到 Start backup。
 
 ### Edge cases / errors
 
@@ -83,8 +87,10 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `backup.enqueue` | control RPC | internal | New | `./contracts/control-status-ipc.md` | daemon | CLI, macOS App | single writer queue admission |
+| `backup.stop` | control RPC | internal | New | `./contracts/control-status-ipc.md` | daemon | CLI, macOS App | cancel current daemon task and clear manual batches |
 | `backupQueue` | status snapshot | internal | Modify | `./contracts/control-status-ipc.md` | daemon/core | CLI, macOS App | additive target membership |
 | `backup enqueue` | CLI command | internal | New | `./contracts/control-status-ipc.md` | CLI | macOS App | thin control IPC client |
+| `backup stop` | CLI command | internal | New | `./contracts/control-status-ipc.md` | CLI | macOS App | thin control IPC client |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -96,6 +102,7 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 - Given active batch, When 再次请求，Then 新成员按配置顺序合并到尚未开始活动批次或唯一后续批次。
 - Given a target needs Telegram connection, When batch starts it, Then status 先呈现 `connecting`，后续目标呈现 `Queued`。
 - Given queue and UI request bridge, When RPC succeeds or fails, Then UI 分别由同 batch daemon snapshot 接管或立即移除 Starting。
+- Given a queued or running daemon backup, When the primary action is pressed, Then it shows Stop backup, requests `backup.stop`, and returns to Start backup after cancellation rather than queuing another batch.
 - Given dark/light demo scenes, When capture Popover and Main Window, Then Connecting/Queued and Running/Next queued are清晰、无重叠且按钮状态可辨。
 
 ## 验收清单（Acceptance checklist）
@@ -109,8 +116,8 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 
 ### Testing
 
-- Rust：`backup.enqueue` 契约、批次合并/串行/失败推进、文件路径移除。
-- Swift：TargetPresentation、StatusStore、BackupRequestPresentation 的桥接和按钮状态。
+- Rust：`backup.enqueue` / `backup.stop` 契约、批次合并/串行/失败推进、文件路径移除。
+- Swift：TargetPresentation、StatusStore、BackupRequestPresentation 的桥接和开始/停止按钮状态。
 - Full: `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-features`, `scripts/macos/swift-unit-tests.sh`, `scripts/macos/build-app.sh`。
 
 ### UI / Storybook (if applicable)

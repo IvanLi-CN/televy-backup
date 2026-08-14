@@ -67,6 +67,20 @@ impl DaemonLifecycle {
         }
     }
 
+    pub(crate) fn request_backup_stop(&self) -> bool {
+        let active_task = self
+            .active_task
+            .lock()
+            .expect("daemon lifecycle lock poisoned")
+            .clone();
+        if let Some(task) = active_task {
+            task.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
     fn is_shutdown_requested(&self) -> bool {
         self.shutdown.is_cancelled()
     }
@@ -204,6 +218,27 @@ impl BackupQueue {
         }
     }
 
+    pub(crate) fn clear(&mut self) -> Vec<String> {
+        let mut target_ids = Vec::new();
+        for batch in [&self.active, &self.pending].into_iter().flatten() {
+            for target_id in &batch.target_ids {
+                if !target_ids.contains(target_id) {
+                    target_ids.push(target_id.clone());
+                }
+            }
+        }
+        self.active = None;
+        self.pending = None;
+        target_ids
+    }
+
+    fn active_target_matches(&self, target_id: &str) -> bool {
+        self.active
+            .as_ref()
+            .and_then(|batch| batch.target_ids.front())
+            .is_some_and(|current| current == target_id)
+    }
+
     pub(crate) fn has_work(&self) -> bool {
         self.active.is_some() || self.pending.is_some()
     }
@@ -277,6 +312,16 @@ fn fail_backup_queue_target(
         status.mark_run_finish_failure(target_id, 0.0, error_code.to_string());
     }
     complete_backup_queue_target(queue, status_state, target_id);
+}
+
+fn backup_task_cancelled(
+    status_state: &Arc<Mutex<StatusRuntimeState>>,
+    target_id: &str,
+    duration_seconds: f64,
+) {
+    if let Ok(mut status) = status_state.lock() {
+        status.mark_run_finish_cancelled(target_id, duration_seconds);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -696,6 +741,32 @@ impl StatusRuntimeState {
             duration_seconds: Some(duration_seconds),
             status: Some("failed".to_string()),
             error_code: Some(error_code),
+            files_indexed: None,
+            bytes_uploaded: None,
+            bytes_deduped: None,
+        });
+    }
+
+    fn mark_run_finish_cancelled(&mut self, target_id: &str, duration_seconds: f64) {
+        let Some(t) = self.targets.get_mut(target_id) else {
+            return;
+        };
+        t.state = "idle".to_string();
+        t.running_since = None;
+        t.progress = None;
+        t.up_bps = None;
+        t.up_total_bytes = None;
+        t.up_rate = ByteRateWindow::default();
+        t.down_bps = None;
+        t.down_total_bytes = None;
+        t.down_rate = ByteRateWindow::default();
+        t.last_run = Some(TargetRunSummary {
+            finished_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+            duration_seconds: Some(duration_seconds),
+            status: Some("cancelled".to_string()),
+            error_code: None,
             files_indexed: None,
             bytes_uploaded: None,
             bytes_deduped: None,
@@ -2099,6 +2170,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "run.start"
             );
 
+            let task_cancel = if is_queued_target {
+                let Ok(queue) = backup_queue.lock() else {
+                    continue;
+                };
+                if !queue.active_target_matches(&target.id) {
+                    tracing::warn!(
+                        event = "run.finish",
+                        kind = "backup",
+                        run_id = %task_id,
+                        task_id = %task_id,
+                        status = "cancelled",
+                        target_id = %target.id,
+                        "run.finish"
+                    );
+                    backup_task_cancelled(&status_state, &target.id, 0.0);
+                    continue;
+                }
+                lifecycle.begin_task()
+            } else {
+                lifecycle.begin_task()
+            };
+
+            if task_cancel.is_cancelled() {
+                tracing::warn!(
+                    event = "run.finish",
+                    kind = "backup",
+                    run_id = %task_id,
+                    task_id = %task_id,
+                    status = "cancelled",
+                    target_id = %target.id,
+                    "run.finish"
+                );
+                backup_task_cancelled(&status_state, &target.id, 0.0);
+                lifecycle.finish_task();
+                if is_queued_target {
+                    complete_backup_queue_target(&backup_queue, &status_state, &target.id);
+                }
+                continue;
+            }
+
             let Some(ep) = settings
                 .telegram_endpoints
                 .iter()
@@ -2124,6 +2235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "config.invalid",
                     );
                 }
+                lifecycle.finish_task();
                 continue;
             };
 
@@ -2148,6 +2260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "config.invalid",
                     );
                 }
+                lifecycle.finish_task();
                 continue;
             }
 
@@ -2175,6 +2288,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "telegram.unauthorized",
                     );
                 }
+                lifecycle.finish_task();
                 continue;
             };
 
@@ -2206,6 +2320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "telegram.mtproto.session_invalid",
                                     );
                                 }
+                                lifecycle.finish_task();
                                 continue;
                             }
                         }
@@ -2234,40 +2349,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "config.write_failed",
                         );
                     }
+                    lifecycle.finish_task();
                     continue;
                 }
                 let provider = settings_config::endpoint_provider(&ep.id);
 
-                let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
-                    provider,
-                    api_id: settings.telegram.mtproto.api_id,
-                    api_hash: api_hash.clone(),
-                    bot_token: bot_token.clone(),
-                    chat_id: ep.chat_id.clone(),
-                    session,
-                    cache_dir,
-                    min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
-                    max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
-                    helper_path: None,
-                })
-                .await;
+                let storage = tokio::select! {
+                    _ = task_cancel.cancelled() => Err(televy_backup_core::Error::Cancelled),
+                    result = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+                        provider,
+                        api_id: settings.telegram.mtproto.api_id,
+                        api_hash: api_hash.clone(),
+                        bot_token: bot_token.clone(),
+                        chat_id: ep.chat_id.clone(),
+                        session,
+                        cache_dir,
+                        min_delay_ms: Some(ep.rate_limit.min_delay_ms as u64),
+                        max_concurrent_uploads: Some(ep.rate_limit.max_concurrent_uploads as usize),
+                        helper_path: None,
+                    }) => result,
+                };
 
                 let storage = match storage {
                     Ok(storage) => storage,
                     Err(error) => {
+                        let cancelled = matches!(&error, televy_backup_core::Error::Cancelled);
                         tracing::error!(
                             event = "run.finish",
                             kind = "backup",
                             run_id = %task_id,
                             task_id = %task_id,
-                            status = "failed",
-                            error_code = error.code(),
+                            status = if cancelled { "cancelled" } else { "failed" },
+                            error_code = if cancelled { "task.cancelled" } else { error.code() },
                             error_message = %error,
                             target_id = %target.id,
                             endpoint_id = %ep.id,
                             "run.finish"
                         );
-                        if is_queued_target {
+                        if cancelled {
+                            backup_task_cancelled(
+                                &status_state,
+                                &target.id,
+                                started.elapsed().as_secs_f64(),
+                            );
+                        } else if is_queued_target {
                             fail_backup_queue_target(
                                 &backup_queue,
                                 &status_state,
@@ -2275,6 +2400,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 error.code(),
                             );
                         }
+                        lifecycle.finish_task();
                         continue;
                     }
                 };
@@ -2304,6 +2430,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "telegram.storage_unavailable",
                         );
                     }
+                    lifecycle.finish_task();
                     continue;
                 }
             };
@@ -2372,7 +2499,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state: status_state.clone(),
             };
             let progress_sink = Some(&sink as &dyn ProgressSink);
-            let task_cancel = lifecycle.begin_task();
             let quick_stats_cancel = task_cancel.clone();
             let quick_stats_cancel_for_task = quick_stats_cancel.clone();
             let prepare_res = tokio::try_join!(
@@ -2565,54 +2691,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Err(e) => {
-                            tracing::error!(
-                                event = "bootstrap.update_failed",
-                                target_id = %target.id,
-                                endpoint_id = %ep.id,
-                                error_code = e.code(),
-                                error_message = %e,
-                                "bootstrap.update_failed"
-                            );
-                            tracing::error!(
-                                event = "run.finish",
-                                kind = "backup",
-                                run_id = %task_id,
-                                task_id = %task_id,
-                                status = "failed",
-                                duration_seconds,
-                                error_code = e.code(),
-                                error_message = %e,
-                                "run.finish"
-                            );
-                            if let Ok(mut st) = status_state.lock() {
-                                st.mark_run_finish_failure(
-                                    &target.id,
+                            if matches!(&e, televy_backup_core::Error::Cancelled) {
+                                tracing::warn!(
+                                    event = "run.finish",
+                                    kind = "backup",
+                                    run_id = %task_id,
+                                    task_id = %task_id,
+                                    status = "cancelled",
                                     duration_seconds,
-                                    e.code().to_string(),
+                                    target_id = %target.id,
+                                    "run.finish"
                                 );
+                                backup_task_cancelled(&status_state, &target.id, duration_seconds);
+                            } else {
+                                tracing::error!(
+                                    event = "bootstrap.update_failed",
+                                    target_id = %target.id,
+                                    endpoint_id = %ep.id,
+                                    error_code = e.code(),
+                                    error_message = %e,
+                                    "bootstrap.update_failed"
+                                );
+                                tracing::error!(
+                                    event = "run.finish",
+                                    kind = "backup",
+                                    run_id = %task_id,
+                                    task_id = %task_id,
+                                    status = "failed",
+                                    duration_seconds,
+                                    error_code = e.code(),
+                                    error_message = %e,
+                                    "run.finish"
+                                );
+                                if let Ok(mut st) = status_state.lock() {
+                                    st.mark_run_finish_failure(
+                                        &target.id,
+                                        duration_seconds,
+                                        e.code().to_string(),
+                                    );
+                                }
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
-                        event = "run.finish",
-                        kind = "backup",
-                        run_id = %task_id,
-                        task_id = %task_id,
-                        status = "failed",
-                        duration_seconds,
-                        error_code = e.code(),
-                        error_message = %e,
-                        "run.finish"
-                    );
-
-                    if let Ok(mut st) = status_state.lock() {
-                        st.mark_run_finish_failure(
-                            &target.id,
+                    if matches!(&e, televy_backup_core::Error::Cancelled) {
+                        tracing::warn!(
+                            event = "run.finish",
+                            kind = "backup",
+                            run_id = %task_id,
+                            task_id = %task_id,
+                            status = "cancelled",
                             duration_seconds,
-                            e.code().to_string(),
+                            target_id = %target.id,
+                            "run.finish"
                         );
+                        backup_task_cancelled(&status_state, &target.id, duration_seconds);
+                    } else {
+                        tracing::error!(
+                            event = "run.finish",
+                            kind = "backup",
+                            run_id = %task_id,
+                            task_id = %task_id,
+                            status = "failed",
+                            duration_seconds,
+                            error_code = e.code(),
+                            error_message = %e,
+                            "run.finish"
+                        );
+
+                        if let Ok(mut st) = status_state.lock() {
+                            st.mark_run_finish_failure(
+                                &target.id,
+                                duration_seconds,
+                                e.code().to_string(),
+                            );
+                        }
                     }
                 }
             }

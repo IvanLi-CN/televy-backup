@@ -23,16 +23,20 @@ struct BackupRequestPresentation: Equatable {
     }
 }
 
+struct BackupStopPresentation: Equatable {
+    var startedAt: Date
+}
+
 enum BackupRequestButtonState: Equatable {
     case idle
     case starting
-    case enqueueNext
-    case queued
+    case stop
+    case stopping
 
     var isDisabled: Bool {
         switch self {
-        case .idle, .enqueueNext: return false
-        case .starting, .queued: return true
+        case .idle, .stop: return false
+        case .starting, .stopping: return true
         }
     }
 
@@ -40,8 +44,8 @@ enum BackupRequestButtonState: Equatable {
         switch self {
         case .idle: return "Start backup"
         case .starting: return "Starting backup"
-        case .enqueueNext: return "Queue another backup"
-        case .queued: return "Backup already queued"
+        case .stop: return "Stop backup"
+        case .stopping: return "Stopping backup"
         }
     }
 }

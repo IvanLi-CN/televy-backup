@@ -26,6 +26,27 @@
 
 `disposition` 为 `accepted` 表示创建新的活动或后续批次；`coalesced` 表示请求合并到已有批次。所有响应 target ids 都是最终、去重且按配置排序的集合。
 
+## `backup.stop`
+
+请求为现有 control envelope 的 `method: "backup.stop"`，`params` 必须为空对象：
+
+```json
+{}
+```
+
+成功 result：
+
+```json
+{
+  "cancellationRequested": true,
+  "clearedTargetIds": ["target-a", "target-b"]
+}
+```
+
+- `cancellationRequested` 表示 daemon 已向当前备份任务发出取消请求。
+- `clearedTargetIds` 是已从活动/后续手动批次移除的目标集合。
+- 该调用不停止 daemon，也不修改定时备份设置；取消完成后，运行目标回到 `idle` 并以 `lastRun.status="cancelled"` 记录结果。
+
 ## `status.snapshot.targets[].backupQueue`
 
 `backupQueue` 为 additive optional 字段：

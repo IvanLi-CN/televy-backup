@@ -147,20 +147,21 @@ enum TargetPresentation {
 
     static func backupButtonState(
         snap: StatusSnapshot?,
-        backupRequest: BackupRequestPresentation?
+        backupRequest: BackupRequestPresentation?,
+        backupStopRequest: BackupStopPresentation?
     ) -> BackupRequestButtonState {
         if backupRequest != nil { return .starting }
+        if backupStopRequest != nil { return .stopping }
+        return hasBackupInProgress(snap: snap) ? .stop : .idle
+    }
+
+    static func hasBackupInProgress(snap: StatusSnapshot?) -> Bool {
         let targets = snap?.targets ?? []
-        if targets.contains(where: { $0.backupQueue?.pendingBatchId != nil }) {
-            return .queued
+        return targets.contains {
+            $0.state == "running"
+                || $0.backupQueue?.activeBatchId != nil
+                || $0.backupQueue?.pendingBatchId != nil
         }
-        if targets.contains(where: { $0.state == "running" }) {
-            return .enqueueNext
-        }
-        if targets.contains(where: { $0.backupQueue?.activeBatchId != nil }) {
-            return .queued
-        }
-        return .idle
     }
 
     static func progressFraction(_ p: StatusProgress?) -> Double? {

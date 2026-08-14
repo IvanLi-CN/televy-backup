@@ -80,7 +80,11 @@ private func testStartingOverlayPrecedesDaemonSnapshot() {
     )
     expect(status == .starting, "local request should render Starting before daemon acknowledgement")
     expect(
-        TargetPresentation.backupButtonState(snap: snapshot([value]), backupRequest: request) == .starting,
+        TargetPresentation.backupButtonState(
+            snap: snapshot([value]),
+            backupRequest: request,
+            backupStopRequest: nil
+        ) == .starting,
         "Starting request should disable the button"
     )
 }
@@ -120,18 +124,34 @@ private func testQueuedAndRunningNextQueuedProjection() {
     expect(TargetPresentation.stageText(running.progress?.phase) == "Connecting", "connecting stage text should be explicit")
     expect(TargetPresentation.isConnectingPhase(running.progress?.phase), "connecting stage should use inline activity")
     expect(
-        TargetPresentation.backupButtonState(snap: snapshot([running]), backupRequest: nil) == .queued,
-        "pending batch should disable the all-target button"
+        TargetPresentation.backupButtonState(snap: snapshot([running]), backupRequest: nil, backupStopRequest: nil) == .stop,
+        "an active or pending backup should expose the stop action"
     )
 }
 
 private func testRunningWithoutPendingCanQueueNextBatch() {
     let running = target(state: "running", phase: "prepare", activeBatchId: "batch-active")
     expect(
-        TargetPresentation.backupButtonState(snap: snapshot([running]), backupRequest: nil) == .enqueueNext,
-        "a running batch without a pending batch should allow one next request"
+        TargetPresentation.backupButtonState(snap: snapshot([running]), backupRequest: nil, backupStopRequest: nil) == .stop,
+        "a running backup should expose the stop action"
     )
     expect(TargetPresentation.stageText(running.progress?.phase) == "Preparing", "prepare wording stays aligned with z324m")
+}
+
+private func testBackupButtonUsesOnlyStartOrStopSemantics() {
+    let idle = target()
+    expect(
+        TargetPresentation.backupButtonState(snap: snapshot([idle]), backupRequest: nil, backupStopRequest: nil) == .idle,
+        "idle state should expose Start backup"
+    )
+    expect(
+        TargetPresentation.backupButtonState(
+            snap: snapshot([idle]),
+            backupRequest: nil,
+            backupStopRequest: BackupStopPresentation(startedAt: Date())
+        ) == .stopping,
+        "a stop request should disable the action while stopping"
+    )
 }
 
 private func testBatchAcknowledgementUsesLatestSnapshot() {
@@ -155,6 +175,7 @@ enum TargetPresentationTestsMain {
         testQueuedAndRunningNextQueuedProjection()
         testRunningWithoutPendingCanQueueNextBatch()
         testBatchAcknowledgementUsesLatestSnapshot()
+        testBackupButtonUsesOnlyStartOrStopSemantics()
         print("OK: TargetPresentationTests")
     }
 }

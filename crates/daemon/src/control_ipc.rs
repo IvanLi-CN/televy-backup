@@ -8,10 +8,10 @@ use tokio::sync::{Notify, RwLock, broadcast, oneshot};
 
 use televy_backup_core::TaskProgress;
 use televy_backup_core::control::{
-    BackupEnqueueParams, BackupEnqueueResult, ControlError, ControlRequest, ControlResponse,
-    SecretsClearTelegramMtprotoSessionParams, SecretsPresenceParams,
-    SecretsSetTelegramApiHashParams, SecretsSetTelegramBotTokenParams, StatusTaskFinishParams,
-    StatusTaskProgressParams, StatusTaskStartParams, VaultStatusResult,
+    BackupEnqueueParams, BackupEnqueueResult, BackupStopParams, BackupStopResult, ControlError,
+    ControlRequest, ControlResponse, SecretsClearTelegramMtprotoSessionParams,
+    SecretsPresenceParams, SecretsSetTelegramApiHashParams, SecretsSetTelegramBotTokenParams,
+    StatusTaskFinishParams, StatusTaskProgressParams, StatusTaskStartParams, VaultStatusResult,
 };
 
 type Settings = televy_backup_core::config::SettingsV2;
@@ -410,6 +410,19 @@ fn handle_request(
             ),
             Err(error) => ControlResponse::err(req.id.clone(), error),
         },
+        "backup.stop" => match backup_stop(
+            status_state,
+            backup_queue,
+            backup_queue_notify,
+            lifecycle,
+            req.params.clone(),
+        ) {
+            Ok(result) => ControlResponse::ok(
+                req.id.clone(),
+                serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+            ),
+            Err(error) => ControlResponse::err(req.id.clone(), error),
+        },
         "secrets.presence" => {
             let params: SecretsPresenceParams = match serde_json::from_value(req.params.clone()) {
                 Ok(p) => p,
@@ -715,6 +728,36 @@ fn backup_enqueue(
         batch_id,
         disposition: disposition.to_string(),
         target_ids,
+    })
+}
+
+fn backup_stop(
+    status_state: &Arc<Mutex<crate::StatusRuntimeState>>,
+    backup_queue: &Arc<Mutex<crate::BackupQueue>>,
+    backup_queue_notify: &Arc<Notify>,
+    lifecycle: &Arc<crate::DaemonLifecycle>,
+    raw_params: serde_json::Value,
+) -> Result<BackupStopResult, ControlError> {
+    let _: BackupStopParams = serde_json::from_value(raw_params).map_err(|error| {
+        ControlError::invalid_request(
+            "invalid params",
+            serde_json::json!({ "error": error.to_string() }),
+        )
+    })?;
+
+    // The queue lock is acquired before lifecycle cancellation, matching the run-start handoff
+    // in the main loop. A stop therefore cannot race a dequeued target into execution.
+    let cleared_target_ids = backup_queue
+        .lock()
+        .map_err(|_| ControlError::unavailable("backup queue unavailable", serde_json::json!({})))?
+        .clear();
+    let cancellation_requested = lifecycle.request_backup_stop();
+    crate::sync_backup_queue_memberships(backup_queue, status_state);
+    backup_queue_notify.notify_one();
+
+    Ok(BackupStopResult {
+        cancellation_requested,
+        cleared_target_ids,
     })
 }
 
@@ -1174,6 +1217,56 @@ mod tests {
 
         assert!(response.ok);
         assert!(lifecycle.is_shutdown_requested());
+    }
+
+    #[test]
+    fn backup_stop_cancels_active_task_and_clears_manual_queue() {
+        let lifecycle = Arc::new(crate::DaemonLifecycle::default());
+        let active_task = lifecycle.begin_task();
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let runtime_logging =
+            televy_backup_core::local_settings::resolve(std::path::Path::new("/tmp"));
+        let backup_queue = Arc::new(Mutex::new(crate::BackupQueue::default()));
+        let backup_queue_notify = Arc::new(Notify::new());
+        backup_queue
+            .lock()
+            .unwrap()
+            .enqueue(vec!["t1".to_string()], &["t1".to_string()]);
+        backup_queue.lock().unwrap().start_next_target();
+        crate::sync_backup_queue_memberships(&backup_queue, &status_state);
+
+        let context = test_context(
+            std::path::Path::new("/tmp"),
+            status_state.clone(),
+            backup_queue.clone(),
+            backup_queue_notify,
+            lifecycle,
+        );
+        let response = handle_request(
+            &ControlRequest::new("1", "backup.stop", serde_json::json!({})),
+            &context,
+            &settings(),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: std::path::Path::new("/tmp"),
+                log_bytes: None,
+                managed_log_usage: None,
+            },
+        );
+
+        assert!(response.ok);
+        let result: BackupStopResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(result.cancellation_requested);
+        assert_eq!(result.cleared_target_ids, vec!["t1"]);
+        assert!(active_task.is_cancelled());
+        assert!(!backup_queue.lock().unwrap().has_work());
+        assert!(
+            status_state.lock().unwrap().targets["t1"]
+                .backup_queue
+                .is_none()
+        );
     }
 
     #[test]
