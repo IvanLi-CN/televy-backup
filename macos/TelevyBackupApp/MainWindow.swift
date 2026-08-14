@@ -85,7 +85,7 @@ struct MainWindowRootView: View {
                 {
                     Menu {
                         Button("Backup now") { model.backupRun(targetId: target.targetId) }
-                            .disabled(taskStore.isRunning)
+                            .disabled(!model.canEnqueueBackup())
                         Divider()
                         Button("Restore…") { model.promptRestoreLatest(targetId: target.targetId) }
                             .disabled(taskStore.isRunning)
@@ -344,6 +344,7 @@ private struct TargetListRow: View {
         let status = TargetPresentation.userStatus(
             target: target,
             activeTask: taskStore.activeTask,
+            backupRequest: taskStore.backupRequest,
             hasInProgressRunLog: hasInProgressRunLog,
             snap: snap,
             nowMs: nowMs
@@ -387,10 +388,15 @@ private struct TargetListRow: View {
 
         let rowSecondaryLeft: String = {
             switch status {
+            case .starting:
+                return "Requesting backup…"
+            case .queued:
+                return "Queued"
             case .running:
                 var parts: [String] = []
                 if let stage { parts.append(stage) }
                 if let fp = filesProgressText(effectiveProgress) { parts.append(fp) }
+                if TargetPresentation.hasNextQueuedBackup(target: target) { parts.append("Next queued") }
                 return parts.isEmpty ? "Working…" : parts.joined(separator: " · ")
             case .idle:
                 return lastRunCompactText(now: now) ?? "No recent runs."
@@ -465,7 +471,15 @@ private struct TargetListRow: View {
                 }
             }
 
-            if status == .running {
+            if status == .running, TargetPresentation.isConnectingPhase(effectiveProgress?.phase) {
+                HStack(spacing: 5) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("Connecting")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+            } else if status == .running {
                 BackupUnifiedProgressBar(visual: progressVisual, tint: status.tint)
             }
         }
@@ -473,7 +487,7 @@ private struct TargetListRow: View {
         .onTapGesture { onSelect() }
         .contextMenu {
             Button("Backup now") { onBackup() }
-                .disabled(isBusy)
+                .disabled(!model.canEnqueueBackup())
             Divider()
             Button("Restore…") { onRestore() }
                 .disabled(isBusy)
@@ -606,6 +620,7 @@ private struct TargetDetailView: View {
         let status = TargetPresentation.userStatus(
             target: target,
             activeTask: taskStore.activeTask,
+            backupRequest: taskStore.backupRequest,
             hasInProgressRunLog: hasInProgressRunLog,
             snap: snap,
             nowMs: nowMs
@@ -648,6 +663,9 @@ private struct TargetDetailView: View {
             var parts: [String] = [stageText]
             if let elapsedText, !elapsedText.isEmpty {
                 parts.append(elapsedText)
+            }
+            if TargetPresentation.hasNextQueuedBackup(target: target) {
+                parts.append("Next queued")
             }
             return parts.joined(separator: " · ")
         }()
@@ -718,7 +736,15 @@ private struct TargetDetailView: View {
         if status != .running {
             return AnyView(
                 VStack(alignment: .leading, spacing: 8) {
-                    if let lastSummary {
+                    if status == .starting {
+                        Text("Requesting backup from the daemon.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    } else if status == .queued {
+                        Text("Queued for the next serial backup slot.")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    } else if let lastSummary {
                         Text(lastSummary)
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
@@ -735,6 +761,19 @@ private struct TargetDetailView: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.secondary)
                     }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            )
+        }
+
+        if TargetPresentation.isConnectingPhase(p?.phase) {
+            return AnyView(
+                HStack(spacing: 7) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Connecting to Telegram…")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             )

@@ -20,6 +20,8 @@ struct TargetRateEstimate: Equatable {
 }
 
 enum TargetUserStatus: String {
+    case starting
+    case queued
     case running
     case idle
     case failed
@@ -27,6 +29,8 @@ enum TargetUserStatus: String {
 
     var title: String {
         switch self {
+        case .starting: return "Starting"
+        case .queued: return "Queued"
         case .running: return "Running"
         case .idle: return "Idle"
         case .failed: return "Failed"
@@ -36,6 +40,8 @@ enum TargetUserStatus: String {
 
     var tint: Color {
         switch self {
+        case .starting: return .blue
+        case .queued: return .indigo
         case .running: return .blue
         case .idle: return .gray
         case .failed: return .red
@@ -60,12 +66,17 @@ enum TargetPresentation {
         return preparePhases.contains(normalized)
     }
 
+    static func isConnectingPhase(_ phase: String?) -> Bool {
+        phase?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "connecting"
+    }
+
     static func stageText(_ phase: String?) -> String? {
         guard let phase else { return nil }
         let p = phase.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalized = p.lowercased()
         if p.isEmpty { return nil }
         switch normalized {
+        case "connecting": return "Connecting"
         case "preflight", "prepare", "index_sync": return "Preparing"
         case "scan": return "Scanning"
         case "scan_upload": return "Scanning + Uploading"
@@ -101,10 +112,14 @@ enum TargetPresentation {
     static func userStatus(
         target: StatusTarget,
         activeTask: AppModel.ActiveTask?,
+        backupRequest: BackupRequestPresentation?,
         hasInProgressRunLog: Bool,
         snap: StatusSnapshot?,
         nowMs: Int64
     ) -> TargetUserStatus {
+        if backupRequest?.includes(targetId: target.targetId) == true {
+            return .starting
+        }
         let activeRunning = (activeTask?.state == "running") && (activeTask?.targetId == target.targetId)
         if activeRunning { return .running }
         // Do not treat run-history "running" rows as authoritative runtime state.
@@ -116,9 +131,35 @@ enum TargetPresentation {
 
         if target.state == "running" { return .running }
 
+        if target.backupQueue?.activeBatchId != nil || target.backupQueue?.pendingBatchId != nil {
+            return .queued
+        }
+
         if target.state == "failed" || target.lastRun?.status == "failed" { return .failed }
         if target.state == "stale" { return .offline }
 
+        return .idle
+    }
+
+    static func hasNextQueuedBackup(target: StatusTarget) -> Bool {
+        target.backupQueue?.pendingBatchId != nil
+    }
+
+    static func backupButtonState(
+        snap: StatusSnapshot?,
+        backupRequest: BackupRequestPresentation?
+    ) -> BackupRequestButtonState {
+        if backupRequest != nil { return .starting }
+        let targets = snap?.targets ?? []
+        if targets.contains(where: { $0.backupQueue?.pendingBatchId != nil }) {
+            return .queued
+        }
+        if targets.contains(where: { $0.state == "running" }) {
+            return .enqueueNext
+        }
+        if targets.contains(where: { $0.backupQueue?.activeBatchId != nil }) {
+            return .queued
+        }
         return .idle
     }
 

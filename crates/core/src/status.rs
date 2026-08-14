@@ -77,6 +77,13 @@ pub struct TargetRunSummary {
     pub bytes_deduped: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupQueueMembership {
+    pub active_batch_id: Option<String>,
+    pub pending_batch_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusSource {
@@ -112,6 +119,9 @@ pub struct TargetState {
 
     pub progress: Option<Progress>,
     pub last_run: Option<TargetRunSummary>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_queue: Option<BackupQueueMembership>,
 
     #[serde(default)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -242,6 +252,7 @@ mod tests {
                 up_total: Counter { bytes: None },
                 progress: None,
                 last_run: None,
+                backup_queue: None,
                 extra: Default::default(),
             }],
             extra: Default::default(),

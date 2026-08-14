@@ -36,6 +36,11 @@ struct StatusTargetRunSummary: Codable {
     var bytesDeduped: Int64?
 }
 
+struct StatusBackupQueue: Codable, Equatable {
+    var activeBatchId: String?
+    var pendingBatchId: String?
+}
+
 struct StatusSource: Codable {
     var kind: String
     var detail: String?
@@ -61,6 +66,7 @@ struct StatusTarget: Codable, Identifiable {
     var upTotal: StatusCounter
     var progress: StatusProgress?
     var lastRun: StatusTargetRunSummary?
+    var backupQueue: StatusBackupQueue? = nil
 
     var id: String { targetId }
 }

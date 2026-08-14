@@ -3,13 +3,14 @@ use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{RwLock, broadcast, oneshot};
+use tokio::sync::{Notify, RwLock, broadcast, oneshot};
 
 use televy_backup_core::TaskProgress;
 use televy_backup_core::control::{
-    ControlError, ControlRequest, ControlResponse, SecretsClearTelegramMtprotoSessionParams,
-    SecretsPresenceParams, SecretsSetTelegramApiHashParams, SecretsSetTelegramBotTokenParams,
-    StatusTaskFinishParams, StatusTaskProgressParams, StatusTaskStartParams, VaultStatusResult,
+    BackupEnqueueParams, BackupEnqueueResult, ControlError, ControlRequest, ControlResponse,
+    SecretsClearTelegramMtprotoSessionParams, SecretsPresenceParams,
+    SecretsSetTelegramApiHashParams, SecretsSetTelegramBotTokenParams, StatusTaskFinishParams,
+    StatusTaskProgressParams, StatusTaskStartParams, VaultStatusResult,
 };
 
 type Settings = televy_backup_core::config::SettingsV2;
@@ -22,13 +23,15 @@ struct LoggingStatusContext<'a> {
 }
 
 #[derive(Clone)]
-struct ControlContext {
-    config_root: PathBuf,
-    settings: Arc<RwLock<Settings>>,
-    status_state: Arc<Mutex<crate::StatusRuntimeState>>,
-    lifecycle: Arc<crate::DaemonLifecycle>,
-    runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
-    data_root: PathBuf,
+pub(crate) struct ControlContext {
+    pub(crate) config_root: PathBuf,
+    pub(crate) settings: Arc<RwLock<Settings>>,
+    pub(crate) status_state: Arc<Mutex<crate::StatusRuntimeState>>,
+    pub(crate) backup_queue: Arc<Mutex<crate::BackupQueue>>,
+    pub(crate) backup_queue_notify: Arc<Notify>,
+    pub(crate) lifecycle: Arc<crate::DaemonLifecycle>,
+    pub(crate) runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
+    pub(crate) data_root: PathBuf,
 }
 
 pub struct ControlIpcServerHandle {
@@ -63,14 +66,9 @@ impl Drop for ControlIpcServerHandle {
     }
 }
 
-pub fn spawn_control_ipc_server(
+pub(crate) fn spawn_control_ipc_server(
     socket_path: PathBuf,
-    config_root: PathBuf,
-    settings: Arc<RwLock<Settings>>,
-    status_state: Arc<Mutex<crate::StatusRuntimeState>>,
-    lifecycle: Arc<crate::DaemonLifecycle>,
-    runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
-    data_root: PathBuf,
+    context: ControlContext,
 ) -> std::io::Result<ControlIpcServerHandle> {
     if let Some(parent) = socket_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -118,15 +116,6 @@ pub fn spawn_control_ipc_server(
     let handle_socket_path = socket_path.clone();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     let (shutdown_broadcast, _) = broadcast::channel::<()>(8);
-    let context = ControlContext {
-        config_root,
-        settings,
-        status_state,
-        lifecycle,
-        runtime_logging,
-        data_root,
-    };
-
     let task = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -269,10 +258,8 @@ async fn handle_control_ipc_client(
         let settings = context.settings.read().await;
         handle_request(
             &req,
-            &context.config_root,
+            &context,
             &settings,
-            &context.status_state,
-            &context.lifecycle,
             &LoggingStatusContext {
                 runtime: &runtime_logging,
                 data_root: &context.data_root,
@@ -287,12 +274,15 @@ async fn handle_control_ipc_client(
 
 fn handle_request(
     req: &ControlRequest,
-    config_root: &std::path::Path,
+    context: &ControlContext,
     settings: &Settings,
-    status_state: &Arc<Mutex<crate::StatusRuntimeState>>,
-    lifecycle: &Arc<crate::DaemonLifecycle>,
     logging: &LoggingStatusContext<'_>,
 ) -> ControlResponse {
+    let config_root = &context.config_root;
+    let status_state = &context.status_state;
+    let backup_queue = &context.backup_queue;
+    let backup_queue_notify = &context.backup_queue_notify;
+    let lifecycle = &context.lifecycle;
     if req.type_ != "control.request" || req.id.trim().is_empty() || req.method.trim().is_empty() {
         return ControlResponse::err(
             req.id.clone(),
@@ -366,6 +356,20 @@ fn handle_request(
                 serde_json::to_value(s).unwrap_or(serde_json::json!({})),
             ),
             Err(e) => ControlResponse::err(req.id.clone(), e),
+        },
+        "backup.enqueue" => match backup_enqueue(
+            config_root,
+            settings,
+            status_state,
+            backup_queue,
+            backup_queue_notify,
+            req.params.clone(),
+        ) {
+            Ok(result) => ControlResponse::ok(
+                req.id.clone(),
+                serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+            ),
+            Err(error) => ControlResponse::err(req.id.clone(), error),
         },
         "secrets.presence" => {
             let params: SecretsPresenceParams = match serde_json::from_value(req.params.clone()) {
@@ -534,6 +538,141 @@ fn handle_request(
             ),
         ),
     }
+}
+
+fn backup_enqueue(
+    config_root: &std::path::Path,
+    settings: &Settings,
+    status_state: &Arc<Mutex<crate::StatusRuntimeState>>,
+    backup_queue: &Arc<Mutex<crate::BackupQueue>>,
+    backup_queue_notify: &Arc<Notify>,
+    raw_params: serde_json::Value,
+) -> Result<BackupEnqueueResult, ControlError> {
+    let params: BackupEnqueueParams = serde_json::from_value(raw_params).map_err(|error| {
+        ControlError::invalid_request(
+            "invalid params",
+            serde_json::json!({ "error": error.to_string() }),
+        )
+    })?;
+
+    let target_ids = match params.scope.as_str() {
+        "allEnabled" => {
+            if !params.target_ids.is_empty() {
+                return Err(ControlError::invalid_request(
+                    "allEnabled must not include targetIds",
+                    serde_json::json!({}),
+                ));
+            }
+            settings
+                .targets
+                .iter()
+                .filter(|target| target.enabled)
+                .map(|target| target.id.clone())
+                .collect::<Vec<_>>()
+        }
+        "targets" => {
+            if params.target_ids.is_empty()
+                || params.target_ids.iter().any(|id| id.trim().is_empty())
+            {
+                return Err(ControlError::invalid_request(
+                    "targets requires at least one non-empty targetId",
+                    serde_json::json!({}),
+                ));
+            }
+            let requested = params
+                .target_ids
+                .iter()
+                .collect::<std::collections::HashSet<_>>();
+            let unknown = params
+                .target_ids
+                .iter()
+                .filter(|id| !settings.targets.iter().any(|target| target.id == **id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !unknown.is_empty() {
+                return Err(ControlError::invalid_request(
+                    "unknown targetId",
+                    serde_json::json!({ "targetIds": unknown }),
+                ));
+            }
+            settings
+                .targets
+                .iter()
+                .filter(|target| requested.contains(&target.id))
+                .map(|target| target.id.clone())
+                .collect::<Vec<_>>()
+        }
+        _ => {
+            return Err(ControlError::invalid_request(
+                "scope must be allEnabled or targets",
+                serde_json::json!({ "scope": params.scope }),
+            ));
+        }
+    };
+
+    if target_ids.is_empty() {
+        return Err(ControlError {
+            code: "backup.no_runnable_targets".to_string(),
+            message: "no targets are available for backup".to_string(),
+            retryable: false,
+            details: serde_json::json!({}),
+        });
+    }
+
+    vault_ensure(config_root)?;
+    if settings.telegram.mtproto.api_id <= 0
+        || settings.telegram.mtproto.api_hash_key.trim().is_empty()
+    {
+        return Err(ControlError {
+            code: "backup.telegram_api_unavailable".to_string(),
+            message: "Telegram MTProto API credentials are unavailable".to_string(),
+            retryable: false,
+            details: serde_json::json!({}),
+        });
+    }
+    let presence = secrets_presence(config_root, settings, None)?;
+    if !presence
+        .get("masterKeyPresent")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(ControlError {
+            code: "backup.master_key_unavailable".to_string(),
+            message: "backup master key is unavailable".to_string(),
+            retryable: false,
+            details: serde_json::json!({}),
+        });
+    }
+    if !presence
+        .get("telegramMtprotoApiHashPresent")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(ControlError {
+            code: "backup.telegram_api_unavailable".to_string(),
+            message: "Telegram MTProto API credentials are unavailable".to_string(),
+            retryable: false,
+            details: serde_json::json!({}),
+        });
+    }
+
+    let target_order = settings
+        .targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect::<Vec<_>>();
+    let (batch_id, disposition, target_ids) = backup_queue
+        .lock()
+        .map_err(|_| ControlError::unavailable("backup queue unavailable", serde_json::json!({})))?
+        .enqueue(target_ids, &target_order);
+    crate::sync_backup_queue_memberships(backup_queue, status_state);
+    backup_queue_notify.notify_one();
+
+    Ok(BackupEnqueueResult {
+        batch_id,
+        disposition: disposition.to_string(),
+        target_ids,
+    })
 }
 
 fn vault_status(config_root: &std::path::Path) -> Result<VaultStatusResult, ControlError> {
@@ -855,6 +994,27 @@ mod tests {
         s
     }
 
+    fn test_context(
+        config_root: &std::path::Path,
+        status_state: Arc<Mutex<crate::StatusRuntimeState>>,
+        backup_queue: Arc<Mutex<crate::BackupQueue>>,
+        backup_queue_notify: Arc<Notify>,
+        lifecycle: Arc<crate::DaemonLifecycle>,
+    ) -> ControlContext {
+        ControlContext {
+            config_root: config_root.to_path_buf(),
+            settings: Arc::new(RwLock::new(settings())),
+            status_state,
+            backup_queue,
+            backup_queue_notify,
+            lifecycle,
+            runtime_logging: Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
+                config_root,
+            ))),
+            data_root: config_root.to_path_buf(),
+        }
+    }
+
     #[tokio::test]
     async fn unknown_method_returns_method_not_found() {
         let dir = tempfile::tempdir().unwrap();
@@ -870,12 +1030,16 @@ mod tests {
         )));
         let _server = spawn_control_ipc_server(
             socket_path.clone(),
-            cfg_root.clone(),
-            Arc::new(RwLock::new(settings())),
-            status_state,
-            Arc::new(crate::DaemonLifecycle::default()),
-            runtime_logging,
-            dir.path().join("data"),
+            ControlContext {
+                config_root: cfg_root,
+                settings: Arc::new(RwLock::new(settings())),
+                status_state,
+                backup_queue: Arc::new(Mutex::new(crate::BackupQueue::default())),
+                backup_queue_notify: Arc::new(Notify::new()),
+                lifecycle: Arc::new(crate::DaemonLifecycle::default()),
+                runtime_logging,
+                data_root: dir.path().join("data"),
+            },
         )
         .unwrap();
 
@@ -905,12 +1069,19 @@ mod tests {
         )));
         let runtime_logging =
             televy_backup_core::local_settings::resolve(std::path::Path::new("/tmp"));
+        let backup_queue = Arc::new(Mutex::new(crate::BackupQueue::default()));
+        let backup_queue_notify = Arc::new(Notify::new());
+        let context = test_context(
+            std::path::Path::new("/tmp"),
+            status_state.clone(),
+            backup_queue.clone(),
+            backup_queue_notify.clone(),
+            lifecycle.clone(),
+        );
         let response = handle_request(
             &ControlRequest::new("1", "daemon.stop", serde_json::json!({})),
-            std::path::Path::new("/tmp"),
+            &context,
             &settings(),
-            &status_state,
-            &lifecycle,
             &LoggingStatusContext {
                 runtime: &runtime_logging,
                 data_root: std::path::Path::new("/tmp"),
@@ -921,6 +1092,48 @@ mod tests {
 
         assert!(response.ok);
         assert!(lifecycle.is_shutdown_requested());
+    }
+
+    #[test]
+    fn backup_enqueue_rejects_mixed_scope_before_admission_checks() {
+        let lifecycle = Arc::new(crate::DaemonLifecycle::default());
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let runtime_logging =
+            televy_backup_core::local_settings::resolve(std::path::Path::new("/tmp"));
+        let backup_queue = Arc::new(Mutex::new(crate::BackupQueue::default()));
+        let backup_queue_notify = Arc::new(Notify::new());
+        let context = test_context(
+            std::path::Path::new("/tmp"),
+            status_state.clone(),
+            backup_queue.clone(),
+            backup_queue_notify.clone(),
+            lifecycle.clone(),
+        );
+        let response = handle_request(
+            &ControlRequest::new(
+                "1",
+                "backup.enqueue",
+                serde_json::json!({
+                    "scope": "allEnabled",
+                    "targetIds": ["t1"]
+                }),
+            ),
+            &context,
+            &settings(),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: std::path::Path::new("/tmp"),
+                log_bytes: None,
+                managed_log_usage: None,
+            },
+        );
+
+        assert!(!response.ok);
+        let error = response.error.expect("structured backup enqueue error");
+        assert_eq!(error.code, "control.invalid_request");
+        assert!(error.message.contains("must not include targetIds"));
     }
 
     #[test]
@@ -945,13 +1158,21 @@ mod tests {
         let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
             &settings(),
         )));
+        let backup_queue = Arc::new(Mutex::new(crate::BackupQueue::default()));
+        let backup_queue_notify = Arc::new(Notify::new());
+        let lifecycle = Arc::new(crate::DaemonLifecycle::default());
+        let context = test_context(
+            &config_root,
+            status_state.clone(),
+            backup_queue.clone(),
+            backup_queue_notify.clone(),
+            lifecycle,
+        );
         status_state.lock().unwrap().mark_run_start("t1");
         let response = handle_request(
             &ControlRequest::new("1", "logging.status", serde_json::json!({})),
-            &config_root,
+            &context,
             &settings(),
-            &status_state,
-            &Arc::new(crate::DaemonLifecycle::default()),
             &LoggingStatusContext {
                 runtime: &runtime_logging,
                 data_root: &data_root,
@@ -982,10 +1203,8 @@ mod tests {
         );
         let response = handle_request(
             &ControlRequest::new("external", "logging.status", serde_json::json!({})),
-            &config_root,
+            &context,
             &settings(),
-            &status_state,
-            &Arc::new(crate::DaemonLifecycle::default()),
             &LoggingStatusContext {
                 runtime: &runtime_logging,
                 data_root: &data_root,
@@ -1010,10 +1229,8 @@ mod tests {
         .unwrap();
         let response = handle_request(
             &ControlRequest::new("2", "logging.status", serde_json::json!({})),
-            &config_root,
+            &context,
             &settings(),
-            &status_state,
-            &Arc::new(crate::DaemonLifecycle::default()),
             &LoggingStatusContext {
                 runtime: &runtime_logging,
                 data_root: &data_root,

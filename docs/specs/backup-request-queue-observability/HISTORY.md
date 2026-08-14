@@ -8,6 +8,7 @@
 - 固定“活动批次 + 至多一个后续批次”：满足重复点击的可预期反馈，同时避免无边界队列与持久化需求。
 - 固定严格目标串行：不在本主题引入并发连接、预扫描或上传竞争。
 - 在 Telegram connect 前发布 `connecting`：把原本约十秒的无状态前置等待变为真实可观察的运行阶段。
+- Main Window 和 Popover 对 Connecting 统一为 inline spinner；Prepare 继续沿用既有 indeterminate backup bar，避免把连接等待伪装成传输进度。
 
 ## Key Reasons / Replacements
 

@@ -35,8 +35,8 @@ pub use restore::{
     restore_snapshot, restore_snapshot_with, verify_snapshot, verify_snapshot_with,
 };
 pub use status::{
-    Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource, TargetRunSummary,
-    TargetState, now_unix_ms, read_status_snapshot_json, status_json_path,
+    BackupQueueMembership, Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource,
+    TargetRunSummary, TargetState, now_unix_ms, read_status_snapshot_json, status_json_path,
     write_status_snapshot_json_atomic,
 };
 pub use storage::{

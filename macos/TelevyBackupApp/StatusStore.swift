@@ -72,9 +72,13 @@ final class StatusStore: ObservableObject {
 
         let fingerprint = Self.semanticFingerprint(snapshot)
         let semanticChange = fingerprint != publishedFingerprint
-        let running = snapshot.targets.contains { $0.state == "running" }
+        let hasActiveWork = snapshot.targets.contains {
+            $0.state == "running"
+                || $0.backupQueue?.activeBatchId != nil
+                || $0.backupQueue?.pendingBatchId != nil
+        }
 
-        guard running else {
+        guard hasActiveWork else {
             pendingWorkItem?.cancel()
             pendingWorkItem = nil
             pendingRunningSnapshot = nil
