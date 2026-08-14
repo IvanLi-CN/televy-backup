@@ -51,6 +51,7 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 - 主操作按钮仅使用开始或停止语义：空闲显示 Start backup，队列或运行中显示 Stop backup，短暂请求期间显示对应的 progress indicator 并禁用。
 - `backup.stop` 必须取消当前 daemon 备份任务并清空活动/后续手动批次，但不得停止 daemon 或改变定时备份设置。
 - 等待成员显示 `Queued`；运行目标若同时属于后续批次，显示 `Next queued`。不得显示位置或 ETA。
+- 状态颜色必须服从统一语义：`Starting`/`Running` 使用蓝色 active，`Queued`/`Next queued` 使用琥珀色 waiting，`Idle` 使用中性灰，`Failed` 使用红色，`Offline`/`Stale` 使用橙色警示；颜色不表达队列优先级。
 
 ### SHOULD
 

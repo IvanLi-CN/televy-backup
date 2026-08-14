@@ -10,6 +10,7 @@
 - 在 Telegram connect 前发布 `connecting`：把原本约十秒的无状态前置等待变为真实可观察的运行阶段。
 - Main Window 和 Popover 对 Connecting 统一为 inline spinner；Prepare 继续沿用既有 indeterminate backup bar，避免把连接等待伪装成传输进度。
 - 移除主操作中的“再排一批”图标：它没有可靠的通用含义。运行或排队时主操作统一为 Stop backup，并通过 `backup.stop` 取消当前 daemon 任务和清空手动队列，而不是停止 daemon。
+- 统一队列状态颜色：`Queued` 与 `Next queued` 使用琥珀色 waiting 角色，运行进度保留蓝色 active；避免靛紫与蓝色同时表达同一批次关系。
 
 ## Key Reasons / Replacements
 

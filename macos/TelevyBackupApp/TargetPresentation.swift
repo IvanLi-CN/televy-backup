@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -11,6 +12,33 @@ enum TargetWorkKind: String {
 enum BackupProgressVisual {
     case indeterminate
     case determinate(uploadWork: Double, uploadCurrent: Double, backedUp: Double, scanned: Double)
+}
+
+enum TargetStatusColorRole: Equatable {
+    case active
+    case queued
+    case neutral
+    case warning
+    case error
+
+    var tint: Color {
+        switch self {
+        case .active: return .blue
+        case .queued: return Self.queuedTint
+        case .neutral: return .gray
+        case .warning: return .orange
+        case .error: return .red
+        }
+    }
+
+    private static let queuedTint = Color(
+        nsColor: NSColor(name: "TelevyBackupQueuedStatus", dynamicProvider: { appearance in
+            if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+                return NSColor(srgbRed: 1.0, green: 0.62, blue: 0.04, alpha: 1.0)
+            }
+            return NSColor(srgbRed: 0.58, green: 0.26, blue: 0.0, alpha: 1.0)
+        })
+    )
 }
 
 struct TargetRateEstimate: Equatable {
@@ -39,13 +67,16 @@ enum TargetUserStatus: String {
     }
 
     var tint: Color {
+        colorRole.tint
+    }
+
+    var colorRole: TargetStatusColorRole {
         switch self {
-        case .starting: return .blue
-        case .queued: return .indigo
-        case .running: return .blue
-        case .idle: return .gray
-        case .failed: return .red
-        case .offline: return .orange
+        case .starting, .running: return .active
+        case .queued: return .queued
+        case .idle: return .neutral
+        case .failed: return .error
+        case .offline: return .warning
         }
     }
 }

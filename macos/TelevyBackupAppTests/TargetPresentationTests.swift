@@ -154,6 +154,15 @@ private func testBackupButtonUsesOnlyStartOrStopSemantics() {
     )
 }
 
+private func testStatusColorsFollowStateSemantics() {
+    expect(TargetUserStatus.starting.colorRole == .active, "Starting should use the active color role")
+    expect(TargetUserStatus.running.colorRole == .active, "Running should use the active color role")
+    expect(TargetUserStatus.queued.colorRole == .queued, "Queued should use the waiting color role")
+    expect(TargetUserStatus.idle.colorRole == .neutral, "Idle should use the neutral color role")
+    expect(TargetUserStatus.failed.colorRole == .error, "Failed should use the error color role")
+    expect(TargetUserStatus.offline.colorRole == .warning, "Offline should use the warning color role")
+}
+
 private func testBatchAcknowledgementUsesLatestSnapshot() {
     let request = BackupRequestPresentation(
         targetIds: ["target-a"],
@@ -176,6 +185,7 @@ enum TargetPresentationTestsMain {
         testRunningWithoutPendingCanQueueNextBatch()
         testBatchAcknowledgementUsesLatestSnapshot()
         testBackupButtonUsesOnlyStartOrStopSemantics()
+        testStatusColorsFollowStateSemantics()
         print("OK: TargetPresentationTests")
     }
 }

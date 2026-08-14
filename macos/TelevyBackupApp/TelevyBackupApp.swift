@@ -3897,7 +3897,7 @@ private struct TargetRowView: View {
             if !isDaemon || staleAgeMs > StatusFreshness.staleMs { return ("Stale", .orange) }
             if target.state == "running" { return ("Running", .blue) }
             if target.backupQueue?.activeBatchId != nil || target.backupQueue?.pendingBatchId != nil {
-                return ("Queued", .indigo)
+                return ("Queued", TargetUserStatus.queued.tint)
             }
             if target.state == "failed" || target.lastRun?.status == "failed" { return ("Failed", .red) }
             if target.state == "stale" { return ("Stale", .orange) }
@@ -3950,7 +3950,7 @@ private struct TargetRowView: View {
             if TargetPresentation.hasNextQueuedBackup(target: target) {
                 Text("Next queued")
                     .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(Color.indigo.opacity(0.92))
+                    .foregroundStyle(TargetUserStatus.queued.tint.opacity(0.92))
             }
         }
     }
