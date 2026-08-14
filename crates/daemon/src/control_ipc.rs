@@ -701,6 +701,9 @@ fn backup_enqueue(
         .iter()
         .map(|target| target.id.clone())
         .collect::<Vec<_>>();
+    if let Ok(mut status) = status_state.lock() {
+        status.add_missing_targets(settings);
+    }
     let (batch_id, disposition, target_ids) = backup_queue
         .lock()
         .map_err(|_| ControlError::unavailable("backup queue unavailable", serde_json::json!({})))?

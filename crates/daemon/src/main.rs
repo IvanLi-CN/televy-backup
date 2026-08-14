@@ -397,6 +397,42 @@ impl StatusRuntimeState {
         self.targets = targets;
     }
 
+    pub(crate) fn add_missing_targets(&mut self, settings: &settings_config::SettingsV2) {
+        for t in &settings.targets {
+            if self.targets.contains_key(&t.id) {
+                continue;
+            }
+            self.target_order.push(t.id.clone());
+            self.targets.insert(
+                t.id.clone(),
+                TargetRuntime {
+                    target_id: t.id.clone(),
+                    label: if t.label.trim().is_empty() {
+                        None
+                    } else {
+                        Some(t.label.clone())
+                    },
+                    source_path: t.source_path.clone(),
+                    endpoint_id: t.endpoint_id.clone(),
+                    enabled: t.enabled,
+                    state: "idle".to_string(),
+                    running_since: None,
+                    progress: None,
+                    last_run: None,
+                    backup_queue: None,
+                    external_task_id: None,
+                    external_logging: None,
+                    up_bps: None,
+                    up_total_bytes: None,
+                    up_rate: ByteRateWindow::default(),
+                    down_bps: None,
+                    down_total_bytes: None,
+                    down_rate: ByteRateWindow::default(),
+                },
+            );
+        }
+    }
+
     fn mark_run_start(&mut self, target_id: &str) {
         self.mark_run_start_with_phase(target_id, "running");
     }
@@ -1112,6 +1148,56 @@ mod tests {
         assert_eq!(
             start_next_queued_target(&queue, &reload_requested).as_deref(),
             Some("imported")
+        );
+    }
+
+    #[test]
+    fn queue_membership_projects_to_targets_added_while_another_target_runs() {
+        let mut old_settings = settings_config::SettingsV2::default();
+        old_settings.targets.push(settings_config::Target {
+            id: "running".to_string(),
+            source_path: "/tmp/running".to_string(),
+            label: "Running".to_string(),
+            endpoint_id: "ep1".to_string(),
+            enabled: true,
+            schedule: None,
+        });
+        let status = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&old_settings)));
+        status.lock().unwrap().mark_backup_run_start("running");
+        let queue = Arc::new(Mutex::new(BackupQueue::default()));
+
+        let mut imported_settings = old_settings;
+        imported_settings.targets.push(settings_config::Target {
+            id: "imported".to_string(),
+            source_path: "/tmp/imported".to_string(),
+            label: "Imported".to_string(),
+            endpoint_id: "ep1".to_string(),
+            enabled: true,
+            schedule: None,
+        });
+        let batch_id = queue
+            .lock()
+            .unwrap()
+            .enqueue(
+                vec!["imported".to_string()],
+                &["running".to_string(), "imported".to_string()],
+            )
+            .0;
+
+        status
+            .lock()
+            .unwrap()
+            .add_missing_targets(&imported_settings);
+        sync_backup_queue_memberships(&queue, &status);
+
+        let status = status.lock().unwrap();
+        assert_eq!(status.targets["running"].state, "running");
+        assert_eq!(
+            status.targets["imported"]
+                .backup_queue
+                .as_ref()
+                .and_then(|membership| membership.active_batch_id.as_deref()),
+            Some(batch_id.as_str())
         );
     }
 
