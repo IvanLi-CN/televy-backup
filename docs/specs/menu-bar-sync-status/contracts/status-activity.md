@@ -24,14 +24,13 @@ type TargetState = {
 
 ## Control IPC
 
-`status.taskStart` 参数新增可选 `directions`：
+`status.taskStart` 指定任务类型；方向由 daemon 规范化生成：
 
 ```ts
 type StatusTaskStartParams = {
   taskId: string;
   kind: "backup" | "restore" | "verify" | "sync";
   targetId: string;
-  directions?: ActivityDirection[];
   logging?: ResolvedLogging;
 };
 ```

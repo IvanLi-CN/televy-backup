@@ -519,8 +519,36 @@ fn handle_request(
                 }
             };
 
+            if televy_backup_core::status::ActiveTask::for_kind(&params.kind).is_none() {
+                return ControlResponse::err(
+                    req.id.clone(),
+                    ControlError::invalid_request(
+                        "unsupported task kind",
+                        serde_json::json!({ "kind": params.kind }),
+                    ),
+                );
+            }
+
             if let Ok(mut st) = status_state.lock() {
-                st.mark_external_run_start(&params.target_id, &params.task_id, params.logging);
+                if let Err(active_kind) = st.mark_external_run_start(
+                    &params.target_id,
+                    &params.task_id,
+                    &params.kind,
+                    params.logging,
+                ) {
+                    return ControlResponse::err(
+                        req.id.clone(),
+                        ControlError {
+                            code: "target_busy".to_string(),
+                            message: "target already has an active task".to_string(),
+                            retryable: true,
+                            details: serde_json::json!({
+                                "targetId": params.target_id,
+                                "activeKind": active_kind,
+                            }),
+                        },
+                    );
+                }
             }
             ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
         }
@@ -559,7 +587,7 @@ fn handle_request(
                     net_bytes_downloaded: None,
                     bytes_deduped: params.progress.bytes_deduped,
                 };
-                st.on_external_progress(&params.target_id, &params.task_id, p);
+                st.on_external_progress(&params.target_id, &params.task_id, &params.kind, p);
             }
             ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
         }
@@ -578,7 +606,12 @@ fn handle_request(
             };
 
             if let Ok(mut st) = status_state.lock() {
-                st.mark_external_run_finish(&params.target_id, &params.task_id);
+                st.mark_external_run_finish(
+                    &params.target_id,
+                    &params.task_id,
+                    &params.state,
+                    params.error_code,
+                );
             }
             ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
         }
@@ -1270,6 +1303,136 @@ mod tests {
     }
 
     #[test]
+    fn status_task_start_returns_target_busy_without_replacing_activity() {
+        let config_root = std::path::Path::new("/tmp");
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let context = test_context(
+            config_root,
+            status_state.clone(),
+            Arc::new(Mutex::new(crate::BackupQueue::default())),
+            Arc::new(Notify::new()),
+            Arc::new(crate::DaemonLifecycle::default()),
+        );
+        let runtime_logging = televy_backup_core::local_settings::resolve(config_root);
+        let logging = LoggingStatusContext {
+            runtime: &runtime_logging,
+            data_root: config_root,
+            log_bytes: None,
+            managed_log_usage: None,
+        };
+
+        let started = handle_request(
+            &ControlRequest::new(
+                "restore",
+                "status.taskStart",
+                serde_json::json!({
+                    "taskId": "restore-1",
+                    "kind": "restore",
+                    "targetId": "t1"
+                }),
+            ),
+            &context,
+            &settings(),
+            &logging,
+        );
+        assert!(started.ok);
+
+        let rejected = handle_request(
+            &ControlRequest::new(
+                "verify",
+                "status.taskStart",
+                serde_json::json!({
+                    "taskId": "verify-2",
+                    "kind": "verify",
+                    "targetId": "t1"
+                }),
+            ),
+            &context,
+            &settings(),
+            &logging,
+        );
+        let error = rejected.error.expect("target busy error");
+        assert_eq!(error.code, "target_busy");
+        assert!(error.retryable);
+        assert_eq!(error.details["activeKind"], "restore");
+        assert_eq!(
+            status_state.lock().unwrap().targets["t1"]
+                .active_task
+                .as_ref()
+                .map(|task| task.kind.as_str()),
+            Some("restore")
+        );
+    }
+
+    #[test]
+    fn status_task_finish_preserves_external_failure_code() {
+        let config_root = std::path::Path::new("/tmp");
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let context = test_context(
+            config_root,
+            status_state.clone(),
+            Arc::new(Mutex::new(crate::BackupQueue::default())),
+            Arc::new(Notify::new()),
+            Arc::new(crate::DaemonLifecycle::default()),
+        );
+        let runtime_logging = televy_backup_core::local_settings::resolve(config_root);
+        let logging = LoggingStatusContext {
+            runtime: &runtime_logging,
+            data_root: config_root,
+            log_bytes: None,
+            managed_log_usage: None,
+        };
+
+        let started = handle_request(
+            &ControlRequest::new(
+                "restore",
+                "status.taskStart",
+                serde_json::json!({
+                    "taskId": "restore-1",
+                    "kind": "restore",
+                    "targetId": "t1"
+                }),
+            ),
+            &context,
+            &settings(),
+            &logging,
+        );
+        assert!(started.ok);
+
+        let finished = handle_request(
+            &ControlRequest::new(
+                "restore-finish",
+                "status.taskFinish",
+                serde_json::json!({
+                    "taskId": "restore-1",
+                    "kind": "restore",
+                    "targetId": "t1",
+                    "state": "failed",
+                    "errorCode": "restore.network_failed"
+                }),
+            ),
+            &context,
+            &settings(),
+            &logging,
+        );
+        assert!(finished.ok);
+        let target = &status_state.lock().unwrap().targets["t1"];
+        assert_eq!(target.state, "failed");
+        assert!(target.active_task.is_none());
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.error_code.as_deref()),
+            Some("restore.network_failed")
+        );
+    }
+
+    #[test]
     fn backup_enqueue_rejects_mixed_scope_before_admission_checks() {
         let lifecycle = Arc::new(crate::DaemonLifecycle::default());
         let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
@@ -1479,11 +1642,13 @@ mod tests {
 
         let external_logging =
             televy_backup_core::local_settings::resolve_from(&config_root, Some("debug"), None);
-        status_state.lock().unwrap().mark_external_run_start(
-            "t1",
-            "cli-task",
-            Some(external_logging),
-        );
+        {
+            let mut status = status_state.lock().unwrap();
+            status.mark_run_finish_success("t1", 0.0, 0, 0, 0);
+            status
+                .mark_external_run_start("t1", "cli-task", "restore", Some(external_logging))
+                .unwrap();
+        }
         let response = handle_request(
             &ControlRequest::new("external", "logging.status", serde_json::json!({})),
             &context,
@@ -1502,7 +1667,7 @@ mod tests {
         status_state
             .lock()
             .unwrap()
-            .mark_external_run_finish("t1", "cli-task");
+            .mark_external_run_finish("t1", "cli-task", "succeeded", None);
         status_state.lock().unwrap().mark_run_start("t1");
 
         std::fs::write(

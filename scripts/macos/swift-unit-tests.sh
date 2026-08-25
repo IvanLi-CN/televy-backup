@@ -51,6 +51,18 @@ bin_target_presentation="$out_dir/target-presentation-tests"
   "$root_dir/macos/TelevyBackupAppTests/TargetPresentationTests.swift"
 "$bin_target_presentation"
 
+bin_menu_bar="$out_dir/menu-bar-presentation-tests"
+"$swiftc" \
+  -sdk "$sdk_path" \
+  -O \
+  -D TELEVYBACKUP_TESTING \
+  -framework SwiftUI \
+  -framework AppKit \
+  -o "$bin_menu_bar" \
+  "$root_dir/macos/TelevyBackupApp"/*.swift \
+  "$root_dir/macos/TelevyBackupAppTests/MenuBarPresentationTests.swift"
+"$bin_menu_bar"
+
 "$root_dir/scripts/macos/ui-store-static-check.sh"
 
 bin_popover="$out_dir/popover-layout-size-tests"

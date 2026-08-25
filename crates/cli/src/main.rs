@@ -4582,6 +4582,29 @@ async fn backup_run(
         "run.start"
     );
 
+    if let Err(e) = admit_status_task(
+        events,
+        config_dir,
+        data_dir,
+        &task_id,
+        "backup",
+        ctx_target_id.as_str(),
+    ) {
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "backup",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(ctx_target_id.as_str()),
+                endpoint_id: Some(ctx_endpoint_id.as_str()),
+                source_path: Some(ctx_source_path.as_str()),
+                snapshot_id: None,
+            },
+            e,
+        );
+    }
     emit_task_state_running(
         events,
         &task_id,
@@ -4590,15 +4613,6 @@ async fn backup_run(
         None,
     );
     emit_task_progress_preflight(events, &task_id);
-    if events {
-        daemon_control_status_task_start(
-            config_dir,
-            data_dir,
-            &task_id,
-            "backup",
-            ctx_target_id.as_str(),
-        );
-    }
 
     let result: Result<televy_backup_core::BackupResult, CliError> = async {
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
@@ -4898,6 +4912,7 @@ async fn backup_run(
                     "backup",
                     ctx_target_id.as_str(),
                     "succeeded",
+                    None,
                 );
                 return Ok(());
             }
@@ -4955,6 +4970,7 @@ async fn backup_run(
                     "backup",
                     ctx_target_id.as_str(),
                     "failed",
+                    Some(e.code),
                 );
             }
             Err(e)
@@ -5816,6 +5832,29 @@ async fn restore_latest(
         "run.start"
     );
 
+    if let Err(e) = admit_status_task(
+        events,
+        config_dir,
+        data_dir,
+        &task_id,
+        "restore",
+        t.id.as_str(),
+    ) {
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "restore",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(t.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(t.source_path.as_str()),
+                snapshot_id: Some("latest"),
+            },
+            e,
+        );
+    }
     emit_task_state_running(
         events,
         &task_id,
@@ -5824,9 +5863,6 @@ async fn restore_latest(
         Some("latest"),
     );
     emit_task_progress_preflight(events, &task_id);
-    if events {
-        daemon_control_status_task_start(config_dir, data_dir, &task_id, "restore", t.id.as_str());
-    }
 
     let result: Result<(String, televy_backup_core::RestoreResult), CliError> = async {
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
@@ -6011,6 +6047,7 @@ async fn restore_latest(
                     "restore",
                     t.id.as_str(),
                     "succeeded",
+                    None,
                 );
                 return Ok(());
             }
@@ -6058,6 +6095,7 @@ async fn restore_latest(
                     "restore",
                     t.id.as_str(),
                     "failed",
+                    Some(e.code),
                 );
             }
             Err(e)
@@ -6247,6 +6285,29 @@ async fn verify_latest(
         "run.start"
     );
 
+    if let Err(e) = admit_status_task(
+        events,
+        config_dir,
+        data_dir,
+        &task_id,
+        "verify",
+        t.id.as_str(),
+    ) {
+        return emit_preflight_failed(
+            events,
+            &task_id,
+            "verify",
+            run_log.path(),
+            started,
+            RunCtx {
+                target_id: Some(t.id.as_str()),
+                endpoint_id: Some(ep.id.as_str()),
+                source_path: Some(t.source_path.as_str()),
+                snapshot_id: Some("latest"),
+            },
+            e,
+        );
+    }
     emit_task_state_running(
         events,
         &task_id,
@@ -6255,9 +6316,6 @@ async fn verify_latest(
         Some("latest"),
     );
     emit_task_progress_preflight(events, &task_id);
-    if events {
-        daemon_control_status_task_start(config_dir, data_dir, &task_id, "verify", t.id.as_str());
-    }
 
     let result: Result<(String, televy_backup_core::VerifyResult), CliError> = async {
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
@@ -6439,6 +6497,7 @@ async fn verify_latest(
                     "verify",
                     t.id.as_str(),
                     "succeeded",
+                    None,
                 );
                 return Ok(());
             }
@@ -6486,6 +6545,7 @@ async fn verify_latest(
                     "verify",
                     t.id.as_str(),
                     "failed",
+                    Some(e.code),
                 );
             }
             Err(e)
@@ -7076,6 +7136,7 @@ fn control_ipc_call_with_timeouts(
             "control.timeout" => ("control.timeout", err.details),
             "control.invalid_request" => ("control.invalid_request", err.details),
             "control.method_not_found" => ("control.method_not_found", err.details),
+            "target_busy" => ("target_busy", err.details),
             _ => (
                 "control.failed",
                 serde_json::json!({
@@ -7443,7 +7504,7 @@ fn daemon_control_status_task_start(
     task_id: &str,
     kind: &str,
     target_id: &str,
-) {
+) -> Result<(), CliError> {
     let params = televy_backup_core::control::StatusTaskStartParams {
         task_id: task_id.to_string(),
         kind: kind.to_string(),
@@ -7451,13 +7512,48 @@ fn daemon_control_status_task_start(
         logging: Some(televy_backup_core::local_settings::resolve(config_dir)),
     };
     let params = serde_json::to_value(params).unwrap_or_else(|_| serde_json::json!({}));
-    let _ = control_ipc_call_with_timeouts(
+    control_ipc_call_with_timeouts(
         data_dir,
         "status.taskStart",
         params,
         Duration::from_millis(150),
         Duration::from_millis(150),
-    );
+    )?;
+    Ok(())
+}
+
+fn admit_status_task(
+    events: bool,
+    config_dir: &Path,
+    data_dir: &Path,
+    task_id: &str,
+    kind: &str,
+    target_id: &str,
+) -> Result<(), CliError> {
+    guard_events(events, || {
+        daemon_control_status_task_start(config_dir, data_dir, task_id, kind, target_id)
+    })
+}
+
+fn guard_events(
+    events: bool,
+    action: impl FnOnce() -> Result<(), CliError>,
+) -> Result<(), CliError> {
+    if !events {
+        return Ok(());
+    }
+    match action() {
+        Ok(()) => Ok(()),
+        Err(error) if error.code == "target_busy" => Err(error),
+        Err(error) => {
+            tracing::warn!(
+                error_code = error.code,
+                error_message = %error.message,
+                "status task reporting unavailable; continuing without daemon activity"
+            );
+            Ok(())
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -7467,7 +7563,8 @@ fn daemon_control_status_task_start(
     _task_id: &str,
     _kind: &str,
     _target_id: &str,
-) {
+) -> Result<(), CliError> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -7528,12 +7625,14 @@ fn daemon_control_status_task_finish(
     kind: &str,
     target_id: &str,
     state: &str,
+    error_code: Option<&str>,
 ) {
     let params = televy_backup_core::control::StatusTaskFinishParams {
         task_id: task_id.to_string(),
         kind: kind.to_string(),
         target_id: target_id.to_string(),
         state: state.to_string(),
+        error_code: error_code.map(str::to_string),
     };
     let params = serde_json::to_value(params).unwrap_or_else(|_| serde_json::json!({}));
     let _ = control_ipc_call_with_timeouts(
@@ -7552,6 +7651,7 @@ fn daemon_control_status_task_finish(
     _kind: &str,
     _target_id: &str,
     _state: &str,
+    _error_code: Option<&str>,
 ) {
 }
 
@@ -7736,6 +7836,7 @@ mod tests {
                     bytes_deduped: None,
                 }),
                 last_run: None,
+                active_task: None,
                 backup_queue: None,
                 extra: Default::default(),
             }],
@@ -7821,6 +7922,7 @@ mod tests {
                         bytes_deduped: None,
                     }),
                     last_run: None,
+                    active_task: None,
                     backup_queue: None,
                     extra: Default::default(),
                 },
@@ -7854,6 +7956,7 @@ mod tests {
                         bytes_deduped: None,
                     }),
                     last_run: None,
+                    active_task: None,
                     backup_queue: None,
                     extra: Default::default(),
                 },

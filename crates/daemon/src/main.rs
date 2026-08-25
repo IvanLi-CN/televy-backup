@@ -13,9 +13,9 @@ use base64::Engine;
 use chrono::{Datelike, Timelike};
 use sqlx::Row;
 use televy_backup_core::status::{
-    BackupQueueMembership, Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource,
-    StatusWriteOptions, TargetRunSummary, TargetState, now_unix_ms, status_ipc_socket_path,
-    status_json_path, write_status_snapshot_json_atomic_with_options,
+    ActiveTask, BackupQueueMembership, Counter, GlobalStatus, Progress, Rate, StatusSnapshot,
+    StatusSource, StatusWriteOptions, TargetRunSummary, TargetState, now_unix_ms,
+    status_ipc_socket_path, status_json_path, write_status_snapshot_json_atomic_with_options,
 };
 use televy_backup_core::{
     BackupConfig, BackupOptions, ChunkingConfig, SourceQuickStats, TelegramMtProtoStorage,
@@ -336,6 +336,7 @@ struct TargetRuntime {
     running_since: Option<u64>,
     progress: Option<Progress>,
     last_run: Option<TargetRunSummary>,
+    active_task: Option<ActiveTask>,
     backup_queue: Option<BackupQueueMembership>,
 
     // When a CLI-run task reports progress to the daemon for UI status purposes, we keep the
@@ -380,6 +381,7 @@ impl StatusRuntimeState {
                     running_since: None,
                     progress: None,
                     last_run: None,
+                    active_task: None,
                     backup_queue: None,
                     external_task_id: None,
                     external_logging: None,
@@ -415,6 +417,7 @@ impl StatusRuntimeState {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                active_task: None,
                 backup_queue: None,
                 external_task_id: None,
                 external_logging: None,
@@ -464,6 +467,7 @@ impl StatusRuntimeState {
                     running_since: None,
                     progress: None,
                     last_run: None,
+                    active_task: None,
                     backup_queue: None,
                     external_task_id: None,
                     external_logging: None,
@@ -486,11 +490,21 @@ impl StatusRuntimeState {
         self.mark_run_start_with_phase(target_id, "connecting");
     }
 
+    fn try_mark_backup_run_start(&mut self, target_id: &str, phase: &str) -> bool {
+        if self.target_is_busy(target_id) {
+            return false;
+        }
+        self.mark_run_start_with_phase(target_id, phase);
+        true
+    }
+
     fn mark_run_start_with_phase(&mut self, target_id: &str, phase: &str) {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
         t.external_task_id = None;
+        t.external_logging = None;
+        t.active_task = ActiveTask::for_kind("backup");
         t.state = "running".to_string();
         let now = now_unix_ms();
         t.running_since = Some(now);
@@ -524,15 +538,30 @@ impl StatusRuntimeState {
         &mut self,
         target_id: &str,
         task_id: &str,
+        kind: &str,
         logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
-    ) {
+    ) -> Result<(), String> {
+        let activity = ActiveTask::for_kind(kind)
+            .ok_or_else(|| format!("unsupported external task kind: {kind}"))?;
         let Some(t) = self.targets.get_mut(target_id) else {
-            return;
+            return Ok(());
         };
+
+        if t.external_task_id.as_deref() == Some(task_id) {
+            return Ok(());
+        }
+        if t.active_task.is_some() || t.state == "running" {
+            return Err(t
+                .active_task
+                .as_ref()
+                .map(|active| active.kind.clone())
+                .unwrap_or_else(|| "unknown".to_string()));
+        }
 
         let now = now_unix_ms();
         t.external_task_id = Some(task_id.to_string());
         t.external_logging = logging;
+        t.active_task = Some(activity);
         t.state = "running".to_string();
         t.running_since = Some(now);
         t.progress = Some(Progress {
@@ -561,9 +590,16 @@ impl StatusRuntimeState {
         t.down_total_bytes = Some(0);
         t.down_bps = Some(0);
         t.down_rate.reset(Instant::now(), 0);
+        Ok(())
     }
 
-    fn on_external_progress(&mut self, target_id: &str, task_id: &str, p: TaskProgress) {
+    fn on_external_progress(
+        &mut self,
+        target_id: &str,
+        task_id: &str,
+        kind: &str,
+        p: TaskProgress,
+    ) {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
@@ -571,7 +607,14 @@ impl StatusRuntimeState {
         // Ignore stale updates from an earlier task.
         match t.external_task_id.as_deref() {
             Some(active) if active != task_id => return,
-            None => t.external_task_id = Some(task_id.to_string()),
+            None if t.active_task.is_some() => return,
+            None => {
+                let Some(activity) = ActiveTask::for_kind(kind) else {
+                    return;
+                };
+                t.external_task_id = Some(task_id.to_string());
+                t.active_task = Some(activity);
+            }
             _ => {}
         }
 
@@ -620,7 +663,13 @@ impl StatusRuntimeState {
         }
     }
 
-    fn mark_external_run_finish(&mut self, target_id: &str, task_id: &str) {
+    fn mark_external_run_finish(
+        &mut self,
+        target_id: &str,
+        task_id: &str,
+        state: &str,
+        error_code: Option<String>,
+    ) {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
@@ -630,7 +679,17 @@ impl StatusRuntimeState {
 
         t.external_task_id = None;
         t.external_logging = None;
-        t.state = "idle".to_string();
+        t.active_task = None;
+        let failed = state == "failed";
+        t.state = if failed { "failed" } else { "idle" }.to_string();
+        let duration_seconds = t
+            .running_since
+            .map(|started| now_unix_ms().saturating_sub(started) as f64 / 1000.0);
+        let (bytes_uploaded, bytes_deduped) = t
+            .progress
+            .as_ref()
+            .map(|progress| (progress.bytes_uploaded, progress.bytes_deduped))
+            .unwrap_or((None, None));
         t.running_since = None;
         t.progress = None;
         t.up_bps = None;
@@ -640,6 +699,17 @@ impl StatusRuntimeState {
         t.down_bps = None;
         t.down_total_bytes = None;
         t.down_rate.reset(Instant::now(), 0);
+        t.last_run = Some(TargetRunSummary {
+            finished_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+            duration_seconds,
+            status: Some(if failed { "failed" } else { "succeeded" }.to_string()),
+            error_code: failed.then(|| error_code.unwrap_or_else(|| "task.failed".to_string())),
+            files_indexed: None,
+            bytes_uploaded,
+            bytes_deduped,
+        });
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -695,6 +765,7 @@ impl StatusRuntimeState {
             return;
         };
         t.state = "idle".to_string();
+        t.active_task = None;
         t.running_since = None;
         t.progress = None;
         t.up_bps = None;
@@ -726,6 +797,7 @@ impl StatusRuntimeState {
             return;
         };
         t.state = "failed".to_string();
+        t.active_task = None;
         t.running_since = None;
         t.progress = None;
         t.up_bps = None;
@@ -752,6 +824,7 @@ impl StatusRuntimeState {
             return;
         };
         t.state = "idle".to_string();
+        t.active_task = None;
         t.running_since = None;
         t.progress = None;
         t.up_bps = None;
@@ -775,6 +848,12 @@ impl StatusRuntimeState {
 
     fn has_running(&self) -> bool {
         self.targets.values().any(|t| t.state == "running")
+    }
+
+    fn target_is_busy(&self, target_id: &str) -> bool {
+        self.targets
+            .get(target_id)
+            .is_some_and(|target| target.active_task.is_some() || target.state == "running")
     }
 
     fn has_active_work(&self) -> bool {
@@ -875,6 +954,7 @@ impl StatusRuntimeState {
                 },
                 progress: t.progress.clone(),
                 last_run: t.last_run.clone(),
+                active_task: t.active_task.clone(),
                 backup_queue: t.backup_queue.clone(),
                 extra: Default::default(),
             });
@@ -1289,6 +1369,7 @@ mod tests {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                active_task: None,
                 backup_queue: None,
                 external_task_id: None,
                 external_logging: None,
@@ -1331,6 +1412,78 @@ mod tests {
         st.mark_run_start("t1");
         st.on_progress("t1", progress(123));
         assert_eq!(st.targets.get("t1").unwrap().up_total_bytes, Some(123));
+    }
+
+    #[test]
+    fn external_task_activity_and_failure_are_live_only() {
+        let mut st = state_one_target();
+        st.mark_external_run_start("t1", "restore-1", "restore", None)
+            .expect("restore should start");
+
+        let active = st.targets["t1"].active_task.as_ref().expect("active task");
+        assert_eq!(active.kind, "restore");
+        assert_eq!(active.directions, vec!["down"]);
+
+        assert_eq!(
+            st.mark_external_run_start("t1", "verify-2", "verify", None)
+                .expect_err("a second task on the same target must be rejected"),
+            "restore"
+        );
+
+        st.mark_external_run_finish(
+            "t1",
+            "restore-1",
+            "failed",
+            Some("restore.network_failed".to_string()),
+        );
+        let target = &st.targets["t1"];
+        assert!(target.active_task.is_none());
+        assert_eq!(target.state, "failed");
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.error_code.as_deref()),
+            Some("restore.network_failed")
+        );
+    }
+
+    #[test]
+    fn external_tasks_can_run_on_different_targets() {
+        let mut st = state_one_target();
+        let mut second = st.targets["t1"].clone();
+        second.target_id = "t2".to_string();
+        st.target_order.push("t2".to_string());
+        st.targets.insert("t2".to_string(), second);
+
+        st.mark_external_run_start("t1", "restore-1", "restore", None)
+            .expect("restore should start");
+        st.mark_external_run_start("t2", "backup-1", "backup", None)
+            .expect("backup should start on another target");
+
+        let snapshot = st.build_snapshot(1_000);
+        assert_eq!(
+            snapshot.targets[0].active_task.as_ref().unwrap().kind,
+            "restore"
+        );
+        assert_eq!(
+            snapshot.targets[1].active_task.as_ref().unwrap().kind,
+            "backup"
+        );
+    }
+
+    #[test]
+    fn snapshots_publish_explicit_backup_activity() {
+        let mut st = state_one_target();
+        st.mark_backup_run_start("t1");
+
+        let snapshot = st.build_snapshot(1_000);
+        let active = snapshot.targets[0]
+            .active_task
+            .as_ref()
+            .expect("backup activity");
+        assert_eq!(active.kind, "backup");
+        assert_eq!(active.directions, vec!["up"]);
     }
 
     #[test]
@@ -2138,8 +2291,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             };
 
-            if is_queued_target && let Ok(mut st) = status_state.lock() {
-                st.mark_backup_run_start(&target.id);
+            if is_queued_target {
+                let started = status_state
+                    .lock()
+                    .map(|mut status| status.try_mark_backup_run_start(&target.id, "connecting"))
+                    .unwrap_or(false);
+                if !started {
+                    tracing::info!(
+                        event = "backup.queue_target_delayed",
+                        target_id = %target.id,
+                        reason = "target_busy",
+                        "backup.queue_target_delayed"
+                    );
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            } else if status_state
+                .lock()
+                .map(|status| status.target_is_busy(&target.id))
+                .unwrap_or(false)
+            {
+                tracing::info!(
+                    event = "backup.scheduled_target_delayed",
+                    target_id = %target.id,
+                    reason = "target_busy",
+                    "backup.scheduled_target_delayed"
+                );
+                continue;
             }
 
             let task_id = format!("tsk_{}", Uuid::new_v4());
@@ -2490,8 +2668,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .join("dedupe")
                 .join(format!("pending.{}.sqlite", ep.id));
 
-            if !is_queued_target && let Ok(mut st) = status_state.lock() {
-                st.mark_run_start(&target.id);
+            if !is_queued_target {
+                let started = status_state
+                    .lock()
+                    .map(|mut status| status.try_mark_backup_run_start(&target.id, "running"))
+                    .unwrap_or(false);
+                if !started {
+                    // The slot was tentatively claimed after storage setup. Release it so a
+                    // later scheduler tick can retry once the other task finishes.
+                    match scheduled_slot {
+                        ScheduleSlot::Hourly(key) if state.last_hourly == Some(key) => {
+                            state.last_hourly = None;
+                        }
+                        ScheduleSlot::Daily(key) if state.last_daily == Some(key) => {
+                            state.last_daily = None;
+                        }
+                        ScheduleSlot::Manual | ScheduleSlot::Hourly(_) | ScheduleSlot::Daily(_) => {
+                        }
+                    }
+                    tracing::info!(
+                        event = "backup.scheduled_target_delayed",
+                        target_id = %target.id,
+                        reason = "target_busy",
+                        "backup.scheduled_target_delayed"
+                    );
+                    continue;
+                }
             }
 
             let sink = StatusProgressSink {

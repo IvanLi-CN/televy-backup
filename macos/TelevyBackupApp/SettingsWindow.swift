@@ -303,6 +303,7 @@ struct TargetScheduleOverrideV2: Codable {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
+    case general = "General"
     case targets = "Targets"
     case endpoints = "Endpoints"
     case recoveryKey = "Backup Config"
@@ -548,6 +549,7 @@ struct SettingsWindowRootView: View {
     @EnvironmentObject var settingsStore: SettingsStore
     @EnvironmentObject var taskStore: TaskPresentationStore
     @State private var section: SettingsSection = .targets
+    @AppStorage(MenuBarPreferences.showTransferRatesKey) private var showsMenuBarTransferRates = false
 
     @State private var settings: SettingsV2?
     @State private var secrets: CliSecretsPresence?
@@ -615,7 +617,7 @@ struct SettingsWindowRootView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 500)
+                .frame(width: 600)
             }
             ToolbarItemGroup(placement: .automatic) {
                 Button {
@@ -655,6 +657,8 @@ struct SettingsWindowRootView: View {
     @ViewBuilder
     private var content: some View {
         switch section {
+        case .general:
+            generalView
         case .targets:
             targetsView
         case .endpoints:
@@ -666,6 +670,22 @@ struct SettingsWindowRootView: View {
         case .diagnostics:
             diagnosticsView
         }
+    }
+
+    private var generalView: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Menu Bar")
+                .font(.system(size: 18, weight: .bold))
+
+            Toggle("Show transfer rates in menu bar", isOn: $showsMenuBarTransferRates)
+                .toggleStyle(.switch)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: 700, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 22)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     private var diagnosticsView: some View {

@@ -4389,6 +4389,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let popover = NSPopover()
     private var statusItem: NSStatusItem?
     private var cancellables: Set<AnyCancellable> = []
+    private let menuBarFailureLatch = MenuBarFailureLatch()
+    private var menuBarFailureExpiryWork: DispatchWorkItem?
+    private var appliedMenuBarPresentation: MenuBarPresentation?
     private var popoverHost: NSHostingController<AnyView>? = nil
     private var popoverResizeScheduled: Bool = false
     private let appearanceOverride = ModelStore.shared.appearanceOverride
@@ -4426,53 +4429,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func makeDevStatusItemImage() -> NSImage? {
-        let base = NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "TelevyBackup Dev")
-        let size = NSSize(width: 18, height: 18)
-        let image = NSImage(size: size, flipped: false) { rect in
-            base?.draw(
-                in: rect,
-                from: .zero,
-                operation: .sourceOver,
-                fraction: 1.0,
-                respectFlipped: false,
-                hints: nil
-            )
+    private func makeStatusItemImage(for activity: MenuBarActivityState) -> NSImage? {
+        MenuBarStatusItemIcon.image(for: activity, isDev: isDevAppVariant())
+    }
 
-            let badgeWidth: CGFloat = 14
-            let badgeHeight: CGFloat = 7
-            let inset: CGFloat = 1
-            let badgeRect = NSRect(
-                x: rect.maxX - badgeWidth - inset,
-                y: inset,
-                width: badgeWidth,
-                height: badgeHeight
-            )
+    private func localMenuBarTask() -> MenuBarLocalTask? {
+        guard let task = ModelStore.shared.taskPresentationStore.activeTask else { return nil }
+        return MenuBarLocalTask(id: task.id, kind: task.kind, state: task.state)
+    }
 
-            let badgePath = NSBezierPath(roundedRect: badgeRect, xRadius: 2, yRadius: 2)
-            NSColor.black.setFill()
-            badgePath.fill()
-
-            guard let ctx = NSGraphicsContext.current else { return true }
-            NSGraphicsContext.saveGraphicsState()
-            ctx.compositingOperation = .destinationOut
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.monospacedSystemFont(ofSize: 6, weight: .bold),
-                .foregroundColor: NSColor.black,
-            ]
-            let text = NSAttributedString(string: "DEV", attributes: attrs)
-            let textSize = text.size()
-            let textPoint = NSPoint(
-                x: badgeRect.midX - textSize.width / 2.0,
-                y: badgeRect.midY - textSize.height / 2.0 - 0.5
-            )
-            text.draw(at: textPoint)
-            NSGraphicsContext.restoreGraphicsState()
-
-            return true
+    private func refreshMenuBarPresentation() {
+        guard let button = statusItem?.button else { return }
+        let status = ModelStore.shared.statusStore.state
+        let presentation = MenuBarPresentation.make(
+            snapshot: status.snapshot,
+            connectionPhase: status.connectionPhase,
+            localTask: localMenuBarTask(),
+            hasLiveFailure: menuBarFailureLatch.isActive(),
+            showsTransferRates: MenuBarPreferences.showsTransferRates()
+        )
+        if appliedMenuBarPresentation?.activity != presentation.activity {
+            button.image = makeStatusItemImage(for: presentation.activity)
+            button.toolTip = "TelevyBackup: \(presentation.activity.accessibilityDescription)"
         }
-        image.isTemplate = true
-        return image
+        if appliedMenuBarPresentation?.title != presentation.title {
+            button.title = presentation.title
+        }
+        appliedMenuBarPresentation = presentation
+        scheduleMenuBarFailureExpiry()
+    }
+
+    private func scheduleMenuBarFailureExpiry() {
+        menuBarFailureExpiryWork?.cancel()
+        guard let expiry = menuBarFailureLatch.failureExpiresAt else { return }
+        let delay = max(0, expiry.timeIntervalSinceNow)
+        let work = DispatchWorkItem { [weak self] in
+            self?.refreshMenuBarPresentation()
+        }
+        menuBarFailureExpiryWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func bindMenuBarPresentation() {
+        ModelStore.shared.statusStore.$state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                self?.menuBarFailureLatch.observeStatus(
+                    snapshot: state.snapshot,
+                    connectionPhase: state.connectionPhase
+                )
+                self?.refreshMenuBarPresentation()
+            }
+            .store(in: &cancellables)
+
+        ModelStore.shared.taskPresentationStore.$activeTask
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] task in
+                let local = task.map { MenuBarLocalTask(id: $0.id, kind: $0.kind, state: $0.state) }
+                self?.menuBarFailureLatch.observeLocalTask(local)
+                self?.refreshMenuBarPresentation()
+            }
+            .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification, object: UserDefaults.standard)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshMenuBarPresentation() }
+            .store(in: &cancellables)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -4481,13 +4503,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = status.button {
-            button.image = isDevAppVariant()
-                ? makeDevStatusItemImage()
-                : NSImage(systemSymbolName: "externaldrive", accessibilityDescription: "TelevyBackup")
+            button.image = makeStatusItemImage(for: .idle)
             button.action = #selector(togglePopover(_:))
             button.target = self
         }
         statusItem = status
+        bindMenuBarPresentation()
+        refreshMenuBarPresentation()
 
         popover.behavior = .transient
         popover.animates = true

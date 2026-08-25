@@ -178,6 +178,7 @@ mod tests {
                 up_total: Counter { bytes: None },
                 progress: None,
                 last_run: None,
+                active_task: None,
                 backup_queue: None,
                 extra: Default::default(),
             }],
