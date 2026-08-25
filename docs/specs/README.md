@@ -53,3 +53,4 @@
 | Topic | Lifecycle | Implementation | Spec | Successor |
 | --- | --- | --- | --- | --- |
 | 备份请求队列与前置阶段可观测性 | active | 进行中 | `backup-request-queue-observability/SPEC.md` | - |
+| macOS 菜单栏同步状态与传输速率 | active | 进行中 | `menu-bar-sync-status/SPEC.md` | - |
