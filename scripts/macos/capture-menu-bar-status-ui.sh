@@ -19,6 +19,7 @@ xcrun swiftc \
   -O \
   -framework AppKit \
   -o "$bin_path" \
+  "$root_dir/macos/TelevyBackupApp/MenuBarActivityState.swift" \
   "$root_dir/macos/TelevyBackupApp/MenuBarStatusItemIcon.swift" \
   "$root_dir/macos/TelevyBackupAppTests/MenuBarStatusItemIconPreview.swift"
 

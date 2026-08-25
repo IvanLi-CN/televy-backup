@@ -31,12 +31,14 @@ type StatusTaskStartParams = {
   taskId: string;
   kind: "backup" | "restore" | "verify" | "sync";
   targetId: string;
+  processId?: number;
   logging?: ResolvedLogging;
 };
 ```
 
 - daemon 为 backup、restore、verify 填入其规范方向；sync 使用其双向规范方向。
 - 若目标已经有任何活动任务，daemon 返回 `ControlError { code: "target_busy", retryable: true, details: { targetId, activeKind } }`。CLI 必须保留该 code，而不是将其泛化为 `control.failed`。
+- 新版 CLI 发送自身 `processId`；daemon 发现该进程退出时以 `task.reporter_lost` 结束外部任务并释放目标。旧客户端缺少该字段时，daemon 在保守的报告超时后执行同样的清理。
 
 `status.taskFinish` 参数新增可选 `errorCode`：
 

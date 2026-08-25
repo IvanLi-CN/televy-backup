@@ -14,6 +14,7 @@ enum StatusConnectionPhase: Int, Equatable {
 }
 
 final class StatusStore: ObservableObject {
+    var onIngress: ((StatusSnapshot) -> Void)?
     var onPublish: ((StatusSnapshot) -> Void)?
     struct ViewState {
         var snapshot: StatusSnapshot?
@@ -69,6 +70,7 @@ final class StatusStore: ObservableObject {
     func ingest(_ snapshot: StatusSnapshot, receivedAt: Date = Date()) -> Bool {
         latestSnapshot = snapshot
         latestReceivedAt = receivedAt
+        onIngress?(snapshot)
 
         let fingerprint = Self.semanticFingerprint(snapshot)
         let semanticChange = fingerprint != publishedFingerprint

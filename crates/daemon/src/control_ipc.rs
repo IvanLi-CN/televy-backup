@@ -534,6 +534,7 @@ fn handle_request(
                     &params.target_id,
                     &params.task_id,
                     &params.kind,
+                    params.process_id,
                     params.logging,
                 ) {
                     return ControlResponse::err(
@@ -1646,7 +1647,7 @@ mod tests {
             let mut status = status_state.lock().unwrap();
             status.mark_run_finish_success("t1", 0.0, 0, 0, 0);
             status
-                .mark_external_run_start("t1", "cli-task", "restore", Some(external_logging))
+                .mark_external_run_start("t1", "cli-task", "restore", None, Some(external_logging))
                 .unwrap();
         }
         let response = handle_request(

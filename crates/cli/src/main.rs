@@ -7509,6 +7509,7 @@ fn daemon_control_status_task_start(
         task_id: task_id.to_string(),
         kind: kind.to_string(),
         target_id: target_id.to_string(),
+        process_id: Some(std::process::id()),
         logging: Some(televy_backup_core::local_settings::resolve(config_dir)),
     };
     let params = serde_json::to_value(params).unwrap_or_else(|_| serde_json::json!({}));

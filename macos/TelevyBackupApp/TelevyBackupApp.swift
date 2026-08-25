@@ -4471,6 +4471,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func bindMenuBarPresentation() {
+        ModelStore.shared.statusStore.onIngress = { [weak self] snapshot in
+            let observe = {
+                self?.menuBarFailureLatch.observeStatus(
+                    snapshot: snapshot,
+                    connectionPhase: .fresh
+                )
+                self?.refreshMenuBarPresentation()
+            }
+            if Thread.isMainThread {
+                observe()
+            } else {
+                DispatchQueue.main.async(execute: observe)
+            }
+        }
+
         ModelStore.shared.statusStore.$state
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in

@@ -342,6 +342,8 @@ struct TargetRuntime {
     // When a CLI-run task reports progress to the daemon for UI status purposes, we keep the
     // current task id here so stale updates don't clobber newer runs.
     external_task_id: Option<String>,
+    external_process_id: Option<u32>,
+    external_last_report_at: Option<Instant>,
     external_logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
 
     up_bps: Option<u64>,
@@ -357,6 +359,24 @@ struct TargetRuntime {
 struct StatusRuntimeState {
     target_order: Vec<String>,
     targets: HashMap<String, TargetRuntime>,
+}
+
+const EXTERNAL_TASK_REPORT_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    true
 }
 
 impl StatusRuntimeState {
@@ -384,6 +404,8 @@ impl StatusRuntimeState {
                     active_task: None,
                     backup_queue: None,
                     external_task_id: None,
+                    external_process_id: None,
+                    external_last_report_at: None,
                     external_logging: None,
                     up_bps: None,
                     up_total_bytes: None,
@@ -420,6 +442,8 @@ impl StatusRuntimeState {
                 active_task: None,
                 backup_queue: None,
                 external_task_id: None,
+                external_process_id: None,
+                external_last_report_at: None,
                 external_logging: None,
                 up_bps: None,
                 up_total_bytes: None,
@@ -470,6 +494,8 @@ impl StatusRuntimeState {
                     active_task: None,
                     backup_queue: None,
                     external_task_id: None,
+                    external_process_id: None,
+                    external_last_report_at: None,
                     external_logging: None,
                     up_bps: None,
                     up_total_bytes: None,
@@ -503,6 +529,8 @@ impl StatusRuntimeState {
             return;
         };
         t.external_task_id = None;
+        t.external_process_id = None;
+        t.external_last_report_at = None;
         t.external_logging = None;
         t.active_task = ActiveTask::for_kind("backup");
         t.state = "running".to_string();
@@ -539,6 +567,7 @@ impl StatusRuntimeState {
         target_id: &str,
         task_id: &str,
         kind: &str,
+        process_id: Option<u32>,
         logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
     ) -> Result<(), String> {
         let activity = ActiveTask::for_kind(kind)
@@ -560,6 +589,8 @@ impl StatusRuntimeState {
 
         let now = now_unix_ms();
         t.external_task_id = Some(task_id.to_string());
+        t.external_process_id = process_id.filter(|pid| *pid > 0);
+        t.external_last_report_at = Some(Instant::now());
         t.external_logging = logging;
         t.active_task = Some(activity);
         t.state = "running".to_string();
@@ -617,6 +648,8 @@ impl StatusRuntimeState {
             }
             _ => {}
         }
+
+        t.external_last_report_at = Some(Instant::now());
 
         if t.state != "running" {
             t.state = "running".to_string();
@@ -678,6 +711,8 @@ impl StatusRuntimeState {
         }
 
         t.external_task_id = None;
+        t.external_process_id = None;
+        t.external_last_report_at = None;
         t.external_logging = None;
         t.active_task = None;
         let failed = state == "failed";
@@ -854,6 +889,40 @@ impl StatusRuntimeState {
         self.targets
             .get(target_id)
             .is_some_and(|target| target.active_task.is_some() || target.state == "running")
+    }
+
+    fn reap_finished_external_tasks(&mut self, now: Instant) {
+        self.reap_finished_external_tasks_at(now, is_process_alive);
+    }
+
+    fn reap_finished_external_tasks_at(
+        &mut self,
+        now: Instant,
+        process_is_alive: impl Fn(u32) -> bool,
+    ) {
+        let reporters_lost: Vec<(String, String)> = self
+            .targets
+            .iter()
+            .filter_map(|(target_id, target)| {
+                let task_id = target.external_task_id.as_ref()?;
+                let is_live = match target.external_process_id {
+                    Some(pid) => process_is_alive(pid),
+                    None => target.external_last_report_at.is_some_and(|last_report| {
+                        now.saturating_duration_since(last_report) <= EXTERNAL_TASK_REPORT_TIMEOUT
+                    }),
+                };
+                (!is_live).then(|| (target_id.clone(), task_id.clone()))
+            })
+            .collect();
+
+        for (target_id, task_id) in reporters_lost {
+            self.mark_external_run_finish(
+                &target_id,
+                &task_id,
+                "failed",
+                Some("task.reporter_lost".to_string()),
+            );
+        }
     }
 
     fn has_active_work(&self) -> bool {
@@ -1372,6 +1441,8 @@ mod tests {
                 active_task: None,
                 backup_queue: None,
                 external_task_id: None,
+                external_process_id: None,
+                external_last_report_at: None,
                 external_logging: None,
                 up_bps: None,
                 up_total_bytes: None,
@@ -1417,7 +1488,7 @@ mod tests {
     #[test]
     fn external_task_activity_and_failure_are_live_only() {
         let mut st = state_one_target();
-        st.mark_external_run_start("t1", "restore-1", "restore", None)
+        st.mark_external_run_start("t1", "restore-1", "restore", None, None)
             .expect("restore should start");
 
         let active = st.targets["t1"].active_task.as_ref().expect("active task");
@@ -1425,7 +1496,7 @@ mod tests {
         assert_eq!(active.directions, vec!["down"]);
 
         assert_eq!(
-            st.mark_external_run_start("t1", "verify-2", "verify", None)
+            st.mark_external_run_start("t1", "verify-2", "verify", None, None)
                 .expect_err("a second task on the same target must be rejected"),
             "restore"
         );
@@ -1456,9 +1527,9 @@ mod tests {
         st.target_order.push("t2".to_string());
         st.targets.insert("t2".to_string(), second);
 
-        st.mark_external_run_start("t1", "restore-1", "restore", None)
+        st.mark_external_run_start("t1", "restore-1", "restore", None, None)
             .expect("restore should start");
-        st.mark_external_run_start("t2", "backup-1", "backup", None)
+        st.mark_external_run_start("t2", "backup-1", "backup", None, None)
             .expect("backup should start on another target");
 
         let snapshot = st.build_snapshot(1_000);
@@ -1469,6 +1540,27 @@ mod tests {
         assert_eq!(
             snapshot.targets[1].active_task.as_ref().unwrap().kind,
             "backup"
+        );
+    }
+
+    #[test]
+    fn missing_external_reporter_releases_target() {
+        let mut st = state_one_target();
+        st.mark_external_run_start("t1", "restore-1", "restore", Some(42), None)
+            .expect("restore should start");
+
+        st.reap_finished_external_tasks_at(Instant::now(), |_| false);
+
+        let target = &st.targets["t1"];
+        assert!(!st.target_is_busy("t1"));
+        assert_eq!(target.state, "failed");
+        assert!(target.active_task.is_none());
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.error_code.as_deref()),
+            Some("task.reporter_lost")
         );
     }
 
@@ -1566,13 +1658,16 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
         .unwrap_or_else(Instant::now);
 
     loop {
+        let now = Instant::now();
         let has_active_work = state
             .lock()
             .ok()
-            .map(|st| st.has_active_work())
+            .map(|mut st| {
+                st.reap_finished_external_tasks(now);
+                st.has_active_work()
+            })
             .unwrap_or(false);
 
-        let now = Instant::now();
         let min_interval = if has_active_work {
             Duration::from_millis(200)
         } else {
@@ -1583,6 +1678,7 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
             let snapshot_opt = {
                 match state.lock() {
                     Ok(mut st) => {
+                        st.reap_finished_external_tasks(now);
                         st.tick_rates_at(now);
                         Some(st.build_snapshot(now_unix_ms()))
                     }
@@ -1760,6 +1856,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let now_ms = now_unix_ms();
             match ipc_state.lock() {
                 Ok(mut st) => {
+                    st.reap_finished_external_tasks(Instant::now());
                     let has_running = st.has_active_work();
                     // The GUI primarily reads status via IPC; keep rate sampling ticking even if
                     // progress callbacks pause so the UI doesn't get stuck on stale rates.

@@ -15,6 +15,7 @@ struct StatusStoreTests {
         await idleHeartbeatDoesNotPublish()
         await connectionTransitionsPublishOnce()
         await runningUpdatesAreCoalescedAndFinalIsPreserved()
+        await ingressSeesShortLivedActivityBeforeFinalPublish()
         await queuedUpdatesUseActiveWorkCadence()
         await runningPublishCadenceIsAtMostTwoHertz()
         print("StatusStoreTests: PASS")
@@ -62,6 +63,25 @@ struct StatusStoreTests {
         store.ingest(snapshot(generatedAt: 4, state: "idle", uploaded: 4), receivedAt: Date())
         expect(store.state.snapshot?.targets.first?.state == "idle", "final idle snapshot was lost")
         _ = token
+    }
+
+    @MainActor
+    private static func ingressSeesShortLivedActivityBeforeFinalPublish() async {
+        let store = StatusStore(publishInterval: 60)
+        var ingressStates: [String] = []
+        store.onIngress = { snapshot in
+            ingressStates.append(snapshot.targets.first?.state ?? "missing")
+        }
+        let start = Date()
+        store.ingest(snapshot(generatedAt: 1, state: "idle"), receivedAt: start)
+        store.ingest(snapshot(generatedAt: 2, state: "running"), receivedAt: start.addingTimeInterval(0.01))
+        store.ingest(snapshot(generatedAt: 3, state: "failed"), receivedAt: start.addingTimeInterval(0.02))
+
+        expect(
+            ingressStates == ["idle", "running", "failed"],
+            "ingress callback lost a short-lived running state: \(ingressStates)"
+        )
+        expect(store.state.snapshot?.targets.first?.state == "failed", "final failed snapshot was not published")
     }
 
     @MainActor
