@@ -14,6 +14,12 @@ enum BackupProgressVisual {
     case determinate(uploadWork: Double, uploadCurrent: Double, backedUp: Double, scanned: Double)
 }
 
+enum MenuBackupControlState: Equatable {
+    case backupAvailable
+    case stopAvailable
+    case disabled
+}
+
 enum TargetStatusColorRole: Equatable {
     case active
     case queued
@@ -189,10 +195,40 @@ enum TargetPresentation {
     static func hasBackupInProgress(snap: StatusSnapshot?) -> Bool {
         let targets = snap?.targets ?? []
         return targets.contains {
-            $0.state == "running"
+            ($0.activeTask?.kind == "backup" && $0.activeTask?.isSupported == true)
                 || $0.backupQueue?.activeBatchId != nil
                 || $0.backupQueue?.pendingBatchId != nil
         }
+    }
+
+    static func menuBackupControlState(
+        snap: StatusSnapshot?,
+        backupRequest: BackupRequestPresentation?,
+        backupStopRequest: BackupStopPresentation?,
+        lifecycleBusy: Bool,
+        nowMs: Int64
+    ) -> MenuBackupControlState {
+        if lifecycleBusy || backupRequest != nil || backupStopRequest != nil {
+            return .disabled
+        }
+        guard let snap else { return .backupAvailable }
+        if snapshotIsOffline(snap: snap, nowMs: nowMs) {
+            return .disabled
+        }
+        if hasBackupInProgress(snap: snap) {
+            return .stopAvailable
+        }
+        if snap.targets.contains(where: {
+            $0.state == "running"
+                && $0.activeTask == nil
+                && $0.backupQueue?.activeBatchId == nil
+                && $0.backupQueue?.pendingBatchId == nil
+        }) {
+            // Old or incomplete daemon snapshots cannot prove that the running task is safe to
+            // overlap, so do not turn a missing activeTask field into a duplicate backup request.
+            return .disabled
+        }
+        return snap.targets.contains(where: \.enabled) ? .backupAvailable : .disabled
     }
 
     static func progressFraction(_ p: StatusProgress?) -> Double? {

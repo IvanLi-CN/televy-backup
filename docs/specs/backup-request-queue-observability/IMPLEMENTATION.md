@@ -14,6 +14,7 @@
 - daemon 实现活动批次与唯一后续批次，按 settings 顺序去重并投影 `backupQueue.activeBatchId` / `pendingBatchId`。
 - 既有 `z324m` Prepare 和确定性进度语义保持不变；本主题只增加连接前与队列成员投影。
 - Popover 和 Main Window 共用 `TargetPresentation`：`Starting` 为本地桥接，`Queued` 来自 daemon membership，Connecting 使用 inline spinner。Popover 主操作只显示 Start backup 或 Stop backup；Starting/Stopping 是禁用的短暂 progress indicator。
+- 菜单栏右键 quick actions 复用同一 backup/queue 投影：Backup submits `allEnabled`; Stop Backup is enabled only for backup activity or manual queue membership, never for restore or verify.
 - 状态色由 `TargetStatusColorRole` 统一投影：active 蓝色、queued 琥珀色、neutral 灰色、warning 橙色、error 红色。Popover 的 `Queued`/`Next queued` 和 Main Window 的队列 badge 均引用 queued 角色，颜色不承载优先级信息。
 - 开发模式首次启动会在 control IPC 可达前完成既有的自动主密钥初始化；App 仅在 control 与 vault IPC 均可连接后提交 enqueue，并用当前快照立即确认已返回的 batch，避免冷启动和状态去重造成的假失败。
 - 队列只存活于 daemon 进程内，daemon 重启后不恢复未开始请求。

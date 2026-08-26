@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -7,8 +7,16 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
+#[cfg(unix)]
+use std::fs::{self, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream as StdUnixStream;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use televy_backup_core::snapshot_inspection::{
@@ -100,6 +108,10 @@ enum Command {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
+    Gui {
+        #[command(subcommand)]
+        cmd: GuiCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -107,6 +119,12 @@ enum DaemonCmd {
     Start,
     Status,
     Stop,
+}
+
+#[derive(Subcommand)]
+enum GuiCmd {
+    /// Request an orderly GUI-only exit for this data directory.
+    Quit,
 }
 
 #[derive(Subcommand)]
@@ -649,6 +667,10 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
+    // GUI control deliberately does not inherit TELEVYBACKUP_DATA_DIR. A bare
+    // `gui quit` is the Release-default handoff path; Dev/custom instances must
+    // be selected explicitly with --data-dir.
+    let gui_data_dir = gui_data_dir(cli.data_dir.clone());
     let config_dir = cli
         .config_dir
         .or_else(|| {
@@ -885,7 +907,258 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             DaemonCmd::Status => daemon_status(&data_dir, cli.json),
             DaemonCmd::Stop => daemon_stop(&data_dir, cli.json).await,
         },
+        Command::Gui { cmd } => match cmd {
+            GuiCmd::Quit => gui_quit(&gui_data_dir, cli.json),
+        },
     }
+}
+
+fn gui_data_dir(explicit_data_dir: Option<PathBuf>) -> PathBuf {
+    explicit_data_dir.unwrap_or_else(default_data_dir)
+}
+
+#[cfg(unix)]
+const GUI_CONTROL_PROTOCOL_VERSION: u32 = 1;
+
+#[cfg(unix)]
+struct GuiControlPaths {
+    ipc_dir: PathBuf,
+    socket: PathBuf,
+    state: PathBuf,
+    lock: PathBuf,
+}
+
+#[cfg(unix)]
+impl GuiControlPaths {
+    fn for_data_dir(data_dir: &Path) -> Self {
+        let ipc_dir = data_dir.join("ipc");
+        Self {
+            socket: ipc_dir.join("gui.sock"),
+            state: ipc_dir.join("gui.state.json"),
+            lock: ipc_dir.join("gui.lock"),
+            ipc_dir,
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GuiControlLease {
+    version: u32,
+    instance_id: String,
+    pid: i32,
+    bundle_id: String,
+    state: String,
+}
+
+#[cfg(unix)]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuiQuitRequest<'a> {
+    version: u32,
+    method: &'a str,
+    request_id: String,
+}
+
+#[cfg(unix)]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GuiQuitResponse {
+    version: u32,
+    request_id: String,
+    accepted: bool,
+    code: Option<String>,
+    message: Option<String>,
+}
+
+#[cfg(unix)]
+fn gui_control_error(message: impl Into<String>) -> CliError {
+    CliError::retryable("gui.unavailable", message)
+}
+
+#[cfg(unix)]
+fn check_gui_private_dir(paths: &GuiControlPaths) -> Result<(), CliError> {
+    let metadata = fs::symlink_metadata(&paths.ipc_dir)
+        .map_err(|e| gui_control_error(format!("GUI control directory unavailable: {e}")))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(gui_control_error(
+            "GUI control directory is not a private directory",
+        ));
+    }
+    if metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(gui_control_error(
+            "GUI control directory permissions are unsafe",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn check_gui_private_file(path: &Path, expect_socket: bool) -> Result<(), CliError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| gui_control_error(format!("GUI control file unavailable: {e}")))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink()
+        || (expect_socket && !file_type.is_socket())
+        || (!expect_socket && !file_type.is_file())
+    {
+        return Err(gui_control_error(
+            "GUI control path has an unsafe file type",
+        ));
+    }
+    if metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(gui_control_error("GUI control file permissions are unsafe"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_gui_control_lease(paths: &GuiControlPaths) -> Result<GuiControlLease, CliError> {
+    check_gui_private_file(&paths.state, false)?;
+    let raw = fs::read_to_string(&paths.state)
+        .map_err(|e| gui_control_error(format!("GUI control state unavailable: {e}")))?;
+    let lease: GuiControlLease = serde_json::from_str(&raw)
+        .map_err(|_| gui_control_error("GUI control state is invalid"))?;
+    if lease.version != GUI_CONTROL_PROTOCOL_VERSION
+        || lease.instance_id.is_empty()
+        || lease.pid <= 0
+        || lease.bundle_id.is_empty()
+        || !matches!(lease.state.as_str(), "running" | "stopped")
+    {
+        return Err(gui_control_error("GUI control state is incompatible"));
+    }
+    Ok(lease)
+}
+
+#[cfg(unix)]
+fn gui_lifecycle_lock_is_free(paths: &GuiControlPaths) -> Result<bool, CliError> {
+    check_gui_private_file(&paths.lock, false)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&paths.lock)
+        .map_err(|e| gui_control_error(format!("GUI lifecycle lock unavailable: {e}")))?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if matches!(error.raw_os_error(), Some(libc::EWOULDBLOCK)) {
+        return Ok(false);
+    }
+    Err(gui_control_error(format!(
+        "GUI lifecycle lock check failed: {error}"
+    )))
+}
+
+#[cfg(unix)]
+fn emit_gui_quit_result(json: bool, already_not_running: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "exited": !already_not_running,
+                "alreadyNotRunning": already_not_running,
+            })
+        );
+    } else if already_not_running {
+        println!("GUI already not running");
+    } else {
+        println!("GUI exited");
+    }
+}
+
+#[cfg(unix)]
+fn gui_quit(data_dir: &Path, json: bool) -> Result<(), CliError> {
+    let paths = GuiControlPaths::for_data_dir(data_dir);
+    check_gui_private_dir(&paths)?;
+    let lease = read_gui_control_lease(&paths)?;
+    if lease.state == "stopped" {
+        if gui_lifecycle_lock_is_free(&paths)? {
+            tracing::info!(event = "gui.quit", result = "already_not_running", pid = lease.pid, bundle_id = %lease.bundle_id);
+            emit_gui_quit_result(json, true);
+            return Ok(());
+        }
+        return Err(CliError::retryable(
+            "gui.busy",
+            "GUI is still completing its previous lifecycle operation",
+        ));
+    }
+
+    check_gui_private_file(&paths.socket, true)?;
+    let mut stream = StdUnixStream::connect(&paths.socket)
+        .map_err(|e| gui_control_error(format!("GUI listener unavailable: {e}")))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| gui_control_error(format!("GUI listener timeout setup failed: {e}")))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| gui_control_error(format!("GUI listener timeout setup failed: {e}")))?;
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let request = GuiQuitRequest {
+        version: GUI_CONTROL_PROTOCOL_VERSION,
+        method: "gui.quit",
+        request_id: request_id.clone(),
+    };
+    let line = serde_json::to_string(&request)
+        .map_err(|e| gui_control_error(format!("GUI request encoding failed: {e}")))?;
+    stream
+        .write_all(format!("{line}\n").as_bytes())
+        .map_err(|e| gui_control_error(format!("GUI request failed: {e}")))?;
+    stream
+        .flush()
+        .map_err(|e| gui_control_error(format!("GUI request flush failed: {e}")))?;
+
+    let mut response_line = String::new();
+    std::io::BufReader::new(&stream)
+        .read_line(&mut response_line)
+        .map_err(|e| gui_control_error(format!("GUI response unavailable: {e}")))?;
+    let response: GuiQuitResponse = serde_json::from_str(response_line.trim())
+        .map_err(|_| gui_control_error("GUI response is invalid"))?;
+    if response.version != GUI_CONTROL_PROTOCOL_VERSION || response.request_id != request_id {
+        return Err(gui_control_error("GUI response does not match the request"));
+    }
+    if !response.accepted {
+        let message = response
+            .message
+            .unwrap_or_else(|| "GUI rejected the quit request".to_owned());
+        return Err(match response.code.as_deref() {
+            Some("gui.busy") => CliError::retryable("gui.busy", message),
+            _ => gui_control_error(message),
+        });
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let Ok(current) = read_gui_control_lease(&paths) {
+            if current.state == "stopped" && gui_lifecycle_lock_is_free(&paths)? {
+                tracing::info!(event = "gui.quit", result = "exited", pid = current.pid, bundle_id = %current.bundle_id);
+                emit_gui_quit_result(json, false);
+                return Ok(());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(CliError::retryable(
+        "gui.timeout",
+        "GUI did not exit within 10s after accepting the request",
+    ))
+}
+
+#[cfg(not(unix))]
+fn gui_quit(_data_dir: &Path, _json: bool) -> Result<(), CliError> {
+    Err(CliError::new(
+        "gui.unavailable",
+        "GUI control is only available on Unix platforms",
+    ))
 }
 
 fn backup_enqueue(
@@ -8857,6 +9130,40 @@ fn emit_error(e: &CliError) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gui_control_data_dir_uses_explicit_or_release_default() {
+        let explicit = PathBuf::from("/tmp/televybackup-gui-control-test");
+        assert_eq!(gui_data_dir(Some(explicit.clone())), explicit);
+        assert_eq!(gui_data_dir(None), default_data_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gui_control_lease_requires_private_state_and_free_lifecycle_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = GuiControlPaths::for_data_dir(temp.path());
+        fs::create_dir_all(&paths.ipc_dir).unwrap();
+        fs::set_permissions(&paths.ipc_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            &paths.state,
+            r#"{"version":1,"instanceId":"test","pid":42,"bundleId":"com.example.test","state":"stopped"}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&paths.state, fs::Permissions::from_mode(0o600)).unwrap();
+        fs::write(&paths.lock, "").unwrap();
+        fs::set_permissions(&paths.lock, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let lease = read_gui_control_lease(&paths).unwrap();
+        assert_eq!(lease.state, "stopped");
+        assert!(gui_lifecycle_lock_is_free(&paths).unwrap());
+
+        fs::set_permissions(&paths.state, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            read_gui_control_lease(&paths).unwrap_err().code,
+            "gui.unavailable"
+        );
+    }
 
     #[test]
     fn progress_throttle_emits_first_event_phase_changes_and_rate_limits() {

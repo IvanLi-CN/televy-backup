@@ -49,6 +49,7 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 - status snapshot 在不改变 `TargetState.state` 既有值集合的前提下，additive 暴露目标的活动/后续批次成员关系。
 - App 点击即将受影响目标投影为 `Starting`；RPC 成功后等待带相同 batch id 的 daemon snapshot 接管，RPC 失败或超时立即撤销并显示可恢复错误。
 - 主操作按钮仅使用开始或停止语义：空闲显示 Start backup，队列或运行中显示 Stop backup，短暂请求期间显示对应的 progress indicator 并禁用。
+- 菜单栏右键 Backup 必须请求 `allEnabled`；Stop Backup 必须请求全局 `backup.stop`。只有 backup `activeTask` 或手工 backup queue 允许 Stop Backup；restore、verify、旧/不完整 running snapshot、无 enabled target、stale 状态或进行中的请求必须禁用不安全动作。
 - `backup.stop` 必须取消当前 daemon 备份任务并清空活动/后续手动批次，但不得停止 daemon 或改变定时备份设置。
 - 等待成员显示 `Queued`；运行目标若同时属于后续批次，显示 `Next queued`。不得显示位置或 ETA。
 - 状态颜色必须服从统一语义：`Starting`/`Running` 使用蓝色 active，`Queued`/`Next queued` 使用琥珀色 waiting，`Idle` 使用中性灰，`Failed` 使用红色，`Offline`/`Stale` 使用橙色警示；颜色不表达队列优先级。
@@ -104,6 +105,7 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 - Given a target needs Telegram connection, When batch starts it, Then status 先呈现 `connecting`，后续目标呈现 `Queued`。
 - Given queue and UI request bridge, When RPC succeeds or fails, Then UI 分别由同 batch daemon snapshot 接管或立即移除 Starting。
 - Given a queued or running daemon backup, When the primary action is pressed, Then it shows Stop backup, requests `backup.stop`, and returns to Start backup after cancellation rather than queuing another batch.
+- Given a menu-bar quick action, When current status proves a backup or manual queue exists, Then Stop Backup calls `backup.stop`; restore and verify do not appear as cancellable backups, and a stale or incomplete status snapshot cannot enqueue another backup.
 - Given dark/light demo scenes, When capture Popover and Main Window, Then Connecting/Queued and Running/Next queued are清晰、无重叠且按钮状态可辨。
 
 ## 验收清单（Acceptance checklist）

@@ -13,14 +13,16 @@ private func target(
     state: String = "idle",
     phase: String? = nil,
     activeBatchId: String? = nil,
-    pendingBatchId: String? = nil
+    pendingBatchId: String? = nil,
+    activeTask: StatusActiveTask? = nil,
+    enabled: Bool = true
 ) -> StatusTarget {
     StatusTarget(
         targetId: "target-a",
         label: "Target A",
         sourcePath: "/tmp/target-a",
         endpointId: "endpoint-a",
-        enabled: true,
+        enabled: enabled,
         state: state,
         runningSince: state == "running" ? 1_000 : nil,
         up: StatusRate(bytesPerSecond: nil),
@@ -41,7 +43,8 @@ private func target(
             )
         },
         lastRun: nil,
-        backupQueue: StatusBackupQueue(activeBatchId: activeBatchId, pendingBatchId: pendingBatchId)
+        backupQueue: StatusBackupQueue(activeBatchId: activeBatchId, pendingBatchId: pendingBatchId),
+        activeTask: activeTask
     )
 }
 
@@ -130,12 +133,88 @@ private func testQueuedAndRunningNextQueuedProjection() {
 }
 
 private func testRunningWithoutPendingCanQueueNextBatch() {
-    let running = target(state: "running", phase: "prepare", activeBatchId: "batch-active")
+    let running = target(
+        state: "running",
+        phase: "prepare",
+        activeBatchId: "batch-active",
+        activeTask: StatusActiveTask(kind: "backup", directions: ["up"])
+    )
     expect(
         TargetPresentation.backupButtonState(snap: snapshot([running]), backupRequest: nil, backupStopRequest: nil) == .stop,
         "a running backup should expose the stop action"
     )
     expect(TargetPresentation.stageText(running.progress?.phase) == "Preparing", "prepare wording stays aligned with z324m")
+}
+
+private func testMenuBackupControlDistinguishesTaskKinds() {
+    let restore = target(
+        state: "running",
+        activeTask: StatusActiveTask(kind: "restore", directions: ["down"])
+    )
+    let verify = target(
+        state: "running",
+        activeTask: StatusActiveTask(kind: "verify", directions: [])
+    )
+    expect(
+        !TargetPresentation.hasBackupInProgress(snap: snapshot([restore, verify])),
+        "restore and verify must not be treated as backup work"
+    )
+    expect(
+        TargetPresentation.menuBackupControlState(
+            snap: snapshot([restore, verify]),
+            backupRequest: nil,
+            backupStopRequest: nil,
+            lifecycleBusy: false,
+            nowMs: 1_000
+        ) == .backupAvailable,
+        "restore and verify should leave the global backup action available"
+    )
+
+    let ambiguousRunning = target(state: "running")
+    expect(
+        TargetPresentation.menuBackupControlState(
+            snap: snapshot([ambiguousRunning]),
+            backupRequest: nil,
+            backupStopRequest: nil,
+            lifecycleBusy: false,
+            nowMs: 1_000
+        ) == .disabled,
+        "an old running snapshot without activeTask must fail closed"
+    )
+
+    let disabled = target(enabled: false)
+    expect(
+        TargetPresentation.menuBackupControlState(
+            snap: snapshot([disabled]),
+            backupRequest: nil,
+            backupStopRequest: nil,
+            lifecycleBusy: false,
+            nowMs: 1_000
+        ) == .disabled,
+        "backup must be disabled when no target is enabled"
+    )
+    expect(
+        TargetPresentation.menuBackupControlState(
+            snap: nil,
+            backupRequest: nil,
+            backupStopRequest: nil,
+            lifecycleBusy: false,
+            nowMs: 1_000
+        ) == .backupAvailable,
+        "without a snapshot the menu may start the daemon before enqueueing backup"
+    )
+
+    let stale = snapshot([target()])
+    expect(
+        TargetPresentation.menuBackupControlState(
+            snap: stale,
+            backupRequest: nil,
+            backupStopRequest: nil,
+            lifecycleBusy: false,
+            nowMs: stale.generatedAt + StatusFreshness.staleMs + 1
+        ) == .disabled,
+        "stale snapshots must not start a backup"
+    )
 }
 
 private func testBackupButtonUsesOnlyStartOrStopSemantics() {
@@ -183,6 +262,7 @@ enum TargetPresentationTestsMain {
         testStartingOverlayPrecedesDaemonSnapshot()
         testQueuedAndRunningNextQueuedProjection()
         testRunningWithoutPendingCanQueueNextBatch()
+        testMenuBackupControlDistinguishesTaskKinds()
         testBatchAcknowledgementUsesLatestSnapshot()
         testBackupButtonUsesOnlyStartOrStopSemantics()
         testStatusColorsFollowStateSemantics()
