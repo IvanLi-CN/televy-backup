@@ -6,7 +6,7 @@ out="${2:-}"
 
 if [[ -z "$scene" || -z "$out" ]]; then
   echo "Usage: $0 <scene> <out.png>" >&2
-  echo "Scenes: main-window-targets | main-window-target-detail | main-window-target-connecting-queued | main-window-target-running-next-queued | main-window-target-starting" >&2
+  echo "Scenes: main-window-targets | main-window-target-detail | main-window-target-connecting-queued | main-window-target-running-next-queued | main-window-target-starting | main-window-snapshot-changes | main-window-snapshot-baseline-unavailable | main-window-snapshot-failed-unavailable" >&2
   exit 2
 fi
 

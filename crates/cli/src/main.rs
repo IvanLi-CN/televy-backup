@@ -11,6 +11,10 @@ use serde::Serialize;
 use sqlx::Row;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use televy_backup_core::snapshot_inspection::{
+    BlockInspectionRequest, FileInspectionRequest, FilePresentation, FileScope,
+    SnapshotInspectionError, SnapshotInspector,
+};
 use televy_backup_core::{
     APP_NAME, BackupConfig, BackupOptions, ChunkingConfig, ProgressSink, RestoreConfig,
     RestoreOptions, Storage, TelegramMtProtoStorage, TelegramMtProtoStorageConfig, VerifyConfig,
@@ -195,6 +199,44 @@ enum SnapshotsCmd {
     List {
         #[arg(long, default_value_t = 20)]
         limit: u32,
+    },
+    Inspect {
+        #[command(subcommand)]
+        cmd: SnapshotInspectCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotInspectCmd {
+    Summary {
+        #[arg(long)]
+        snapshot_id: String,
+    },
+    Files {
+        #[arg(long)]
+        snapshot_id: String,
+        #[arg(long, value_parser = ["tree", "list"])]
+        presentation: String,
+        #[arg(long, value_parser = ["all", "changes"])]
+        scope: String,
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
+    },
+    Blocks {
+        #[arg(long)]
+        snapshot_id: String,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
     },
 }
 
@@ -745,6 +787,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         },
         Command::Snapshots { cmd } => match cmd {
             SnapshotsCmd::List { limit } => snapshots_list(&data_dir, limit, cli.json).await,
+            SnapshotsCmd::Inspect { cmd } => {
+                snapshots_inspect(&config_dir, &data_dir, cmd, cli.json).await
+            }
         },
         Command::Stats { cmd } => match cmd {
             StatsCmd::Get => stats_get(&data_dir, cli.json).await,
@@ -4180,6 +4225,387 @@ async fn snapshots_list(data_dir: &Path, limit: u32, json: bool) -> Result<(), C
         }
     }
     Ok(())
+}
+
+async fn snapshots_inspect(
+    config_dir: &Path,
+    data_dir: &Path,
+    cmd: SnapshotInspectCmd,
+    json: bool,
+) -> Result<(), CliError> {
+    if !json {
+        return Err(CliError::new(
+            "snapshot.inspect.invalid_argument",
+            "snapshot inspection is available only with --json",
+        ));
+    }
+
+    let snapshot_id = match &cmd {
+        SnapshotInspectCmd::Summary { snapshot_id }
+        | SnapshotInspectCmd::Files { snapshot_id, .. }
+        | SnapshotInspectCmd::Blocks { snapshot_id, .. } => snapshot_id,
+    };
+    let inspector = snapshot_inspector_for(config_dir, data_dir, snapshot_id).await?;
+    let output = match cmd {
+        SnapshotInspectCmd::Summary { snapshot_id } => serde_json::to_value(
+            inspector
+                .summary(&snapshot_id)
+                .await
+                .map_err(map_snapshot_inspection_err)?,
+        ),
+        SnapshotInspectCmd::Files {
+            snapshot_id,
+            presentation,
+            scope,
+            parent,
+            query,
+            cursor,
+            limit,
+        } => {
+            let presentation = match presentation.as_str() {
+                "tree" => FilePresentation::Tree,
+                "list" => FilePresentation::List,
+                _ => {
+                    return Err(CliError::new(
+                        "snapshot.inspect.invalid_argument",
+                        "presentation must be tree or list",
+                    ));
+                }
+            };
+            let scope = match scope.as_str() {
+                "all" => FileScope::All,
+                "changes" => FileScope::Changes,
+                _ => {
+                    return Err(CliError::new(
+                        "snapshot.inspect.invalid_argument",
+                        "scope must be all or changes",
+                    ));
+                }
+            };
+            serde_json::to_value(
+                inspector
+                    .files(FileInspectionRequest {
+                        snapshot_id,
+                        presentation,
+                        scope,
+                        parent,
+                        query,
+                        cursor,
+                        limit,
+                    })
+                    .await
+                    .map_err(map_snapshot_inspection_err)?,
+            )
+        }
+        SnapshotInspectCmd::Blocks {
+            snapshot_id,
+            query,
+            cursor,
+            limit,
+        } => serde_json::to_value(
+            inspector
+                .blocks(BlockInspectionRequest {
+                    snapshot_id,
+                    query,
+                    cursor,
+                    limit,
+                })
+                .await
+                .map_err(map_snapshot_inspection_err)?,
+        ),
+    }
+    .map_err(|e| CliError::new("snapshot.inspect.invalid_argument", e.to_string()))?;
+    println!(
+        "{}",
+        serde_json::to_string(&output)
+            .map_err(|e| CliError::new("snapshot.inspect.invalid_argument", e.to_string()))?
+    );
+    Ok(())
+}
+
+async fn snapshot_inspector_for(
+    config_dir: &Path,
+    data_dir: &Path,
+    snapshot_id: &str,
+) -> Result<SnapshotInspector, CliError> {
+    let endpoint_db_path = find_snapshot_endpoint_db(data_dir, snapshot_id).await?;
+    let mut filemap_dir = endpoint_filemap_dir_for_db(data_dir, &endpoint_db_path);
+    let provider = snapshot_provider_for(&endpoint_db_path, snapshot_id).await?;
+    if let Some(endpoint_id) = endpoint_id_from_provider(provider.as_deref())? {
+        filemap_dir = endpoint_filemap_dir(data_dir, endpoint_id);
+    }
+
+    ensure_snapshot_filemap(
+        config_dir,
+        data_dir,
+        &endpoint_db_path,
+        &filemap_dir,
+        snapshot_id,
+        provider.as_deref(),
+    )
+    .await?;
+
+    let endpoint_pool = televy_backup_core::index_db::open_existing_index_db(&endpoint_db_path)
+        .await
+        .map_err(map_core_err)?;
+    let base_snapshot_id =
+        sqlx::query("SELECT base_snapshot_id FROM snapshots WHERE snapshot_id = ? LIMIT 1")
+            .bind(snapshot_id)
+            .fetch_one(&endpoint_pool)
+            .await
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?
+            .get::<Option<String>, _>("base_snapshot_id");
+    if let Some(base_snapshot_id) = base_snapshot_id {
+        let base_retained = sqlx::query("SELECT 1 FROM snapshots WHERE snapshot_id = ? LIMIT 1")
+            .bind(&base_snapshot_id)
+            .fetch_optional(&endpoint_pool)
+            .await
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?
+            .is_some();
+        if base_retained {
+            let base_provider = snapshot_provider_for(&endpoint_db_path, &base_snapshot_id).await?;
+            ensure_snapshot_filemap(
+                config_dir,
+                data_dir,
+                &endpoint_db_path,
+                &filemap_dir,
+                &base_snapshot_id,
+                base_provider.as_deref(),
+            )
+            .await?;
+        }
+    }
+
+    Ok(SnapshotInspector::new(endpoint_db_path, filemap_dir))
+}
+
+async fn find_snapshot_endpoint_db(
+    data_dir: &Path,
+    snapshot_id: &str,
+) -> Result<PathBuf, CliError> {
+    for db_path in list_index_db_paths_for_read(data_dir)? {
+        let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
+            .await
+            .map_err(map_core_err)?;
+        let exists = sqlx::query("SELECT 1 FROM snapshots WHERE snapshot_id = ? LIMIT 1")
+            .bind(snapshot_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|e| CliError::new("db.failed", e.to_string()))?
+            .is_some();
+        if exists {
+            return Ok(db_path);
+        }
+    }
+    Err(CliError::new(
+        "snapshot.not_found",
+        format!("snapshot is not retained locally: {snapshot_id}"),
+    ))
+}
+
+fn endpoint_filemap_dir_for_db(data_dir: &Path, db_path: &Path) -> PathBuf {
+    let endpoint_id = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("index."))
+        .and_then(|name| name.strip_suffix(".sqlite"));
+    endpoint_id
+        .map(|id| endpoint_filemap_dir(data_dir, id))
+        .unwrap_or_else(|| data_dir.join("index").join("filemaps"))
+}
+
+async fn snapshot_provider_for(
+    endpoint_db_path: &Path,
+    snapshot_id: &str,
+) -> Result<Option<String>, CliError> {
+    let pool = televy_backup_core::index_db::open_existing_index_db(endpoint_db_path)
+        .await
+        .map_err(map_core_err)?;
+    sqlx::query("SELECT provider FROM remote_indexes WHERE snapshot_id = ? LIMIT 1")
+        .bind(snapshot_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| CliError::new("db.failed", e.to_string()))
+        .map(|row| row.map(|row| row.get("provider")))
+}
+
+fn endpoint_id_from_provider(provider: Option<&str>) -> Result<Option<&str>, CliError> {
+    match provider {
+        None | Some("telegram.mtproto") => Ok(None),
+        Some(provider) => provider
+            .strip_prefix("telegram.mtproto/")
+            .map(Some)
+            .ok_or_else(|| {
+                CliError::new(
+                    "snapshot.filemap_unavailable",
+                    format!("unsupported snapshot provider: {provider}"),
+                )
+            }),
+    }
+}
+
+async fn ensure_snapshot_filemap(
+    config_dir: &Path,
+    data_dir: &Path,
+    endpoint_db_path: &Path,
+    filemap_dir: &Path,
+    snapshot_id: &str,
+    provider_hint: Option<&str>,
+) -> Result<(), CliError> {
+    let cached_filemap = filemap_dir.join(format!("{snapshot_id}.sqlite"));
+    if cached_filemap.is_file()
+        || is_legacy_global_index_db(endpoint_db_path)
+        || endpoint_has_snapshot_files(endpoint_db_path, snapshot_id).await?
+    {
+        return Ok(());
+    }
+
+    let pool = televy_backup_core::index_db::open_existing_index_db(endpoint_db_path)
+        .await
+        .map_err(map_core_err)?;
+    let remote_index = sqlx::query(
+        "SELECT provider, manifest_object_id FROM remote_indexes WHERE snapshot_id = ? LIMIT 1",
+    )
+    .bind(snapshot_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| CliError::new("db.failed", e.to_string()))?
+    .ok_or_else(|| {
+        CliError::new(
+            "snapshot.filemap_unavailable",
+            format!("retained snapshot has no filemap index pointer: {snapshot_id}"),
+        )
+    })?;
+    let provider: String = remote_index.get("provider");
+    let manifest_object_id: String = remote_index.get("manifest_object_id");
+    let endpoint_id = endpoint_id_from_provider(provider_hint.or(Some(provider.as_str())))?;
+    let settings = load_settings(config_dir)?;
+    let endpoint = select_endpoint(&settings, endpoint_id)?;
+    if settings.telegram.mtproto.api_id <= 0 {
+        return Err(CliError::new(
+            "config.invalid",
+            "telegram.mtproto.api_id must be > 0",
+        ));
+    }
+    let bot_token = get_secret(config_dir, data_dir, &endpoint.bot_token_key)?
+        .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
+    let api_hash = get_secret(
+        config_dir,
+        data_dir,
+        &settings.telegram.mtproto.api_hash_key,
+    )?
+    .ok_or_else(|| {
+        CliError::new(
+            "telegram.mtproto.missing_api_hash",
+            "mtproto api_hash missing",
+        )
+    })?;
+    let session = load_optional_base64_secret_bytes(
+        config_dir,
+        data_dir,
+        &endpoint.mtproto.session_key,
+        "telegram.mtproto.session_invalid",
+        "invalid mtproto session (try: `televybackup secrets clear-telegram-mtproto-session`)",
+    )?;
+    let master_key = load_master_key(config_dir, data_dir)?;
+    std::fs::create_dir_all(filemap_dir)
+        .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+    let cache_dir = data_dir.join("cache").join("mtproto");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| CliError::new("config.write_failed", e.to_string()))?;
+    let storage = TelegramMtProtoStorage::connect(TelegramMtProtoStorageConfig {
+        provider: provider.clone(),
+        api_id: settings.telegram.mtproto.api_id,
+        api_hash,
+        bot_token,
+        chat_id: endpoint.chat_id.clone(),
+        session,
+        cache_dir,
+        min_delay_ms: Some(endpoint.rate_limit.min_delay_ms as u64),
+        max_concurrent_uploads: Some(endpoint.rate_limit.max_concurrent_uploads as usize),
+        helper_path: None,
+    })
+    .await
+    .map_err(map_snapshot_filemap_core_err)?;
+    televy_backup_core::remote_index_db::download_and_write_index_db_atomic(
+        &storage,
+        snapshot_id,
+        &manifest_object_id,
+        &master_key,
+        &cached_filemap,
+        None,
+        Some(&provider),
+        None,
+    )
+    .await
+    .map_err(map_snapshot_filemap_core_err)?;
+    if let Some(bytes) = storage.session_bytes() {
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        if let Err(error) = set_secret(config_dir, data_dir, &endpoint.mtproto.session_key, &b64) {
+            tracing::warn!(
+                event = "snapshot_inspect.session_persist_failed",
+                error_code = error.code,
+                error_message = %error.message,
+                "snapshot_inspect.session_persist_failed"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_legacy_global_index_db(endpoint_db_path: &Path) -> bool {
+    endpoint_db_path.file_name().and_then(|name| name.to_str()) == Some("index.sqlite")
+}
+
+async fn endpoint_has_snapshot_files(
+    endpoint_db_path: &Path,
+    snapshot_id: &str,
+) -> Result<bool, CliError> {
+    let pool = televy_backup_core::index_db::open_existing_index_db(endpoint_db_path)
+        .await
+        .map_err(map_core_err)?;
+    sqlx::query("SELECT 1 FROM files WHERE snapshot_id = ? LIMIT 1")
+        .bind(snapshot_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|e| CliError::new("db.failed", e.to_string()))
+        .map(|row| row.is_some())
+}
+
+fn map_snapshot_filemap_core_err(error: televy_backup_core::Error) -> CliError {
+    match error {
+        televy_backup_core::Error::Telegram { message } => {
+            CliError::retryable("snapshot.filemap_unavailable", message)
+        }
+        other => CliError::new("snapshot.filemap_unavailable", other.to_string()),
+    }
+}
+
+fn map_snapshot_inspection_err(error: SnapshotInspectionError) -> CliError {
+    match error {
+        SnapshotInspectionError::SnapshotNotFound { snapshot_id } => CliError::new(
+            "snapshot.not_found",
+            format!("snapshot was not found: {snapshot_id}"),
+        ),
+        SnapshotInspectionError::SnapshotNotRetained { snapshot_id } => CliError::new(
+            "snapshot.not_retained",
+            format!("snapshot is no longer retained: {snapshot_id}"),
+        ),
+        SnapshotInspectionError::FilemapUnavailable { message, .. } => {
+            CliError::retryable("snapshot.filemap_unavailable", message)
+        }
+        SnapshotInspectionError::BaselineUnavailable { snapshot_id } => CliError::new(
+            "snapshot.baseline_unavailable",
+            format!("the direct baseline is unavailable: {snapshot_id}"),
+        ),
+        SnapshotInspectionError::InvalidCursor { message } => {
+            CliError::new("snapshot.inspect.invalid_cursor", message)
+        }
+        SnapshotInspectionError::InvalidArgument { message } => {
+            CliError::new("snapshot.inspect.invalid_argument", message)
+        }
+        SnapshotInspectionError::Core(error) => map_snapshot_filemap_core_err(error),
+    }
 }
 
 async fn stats_get(data_dir: &Path, json: bool) -> Result<(), CliError> {

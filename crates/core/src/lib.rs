@@ -19,6 +19,7 @@ pub mod remote_index_db;
 mod restore;
 pub mod run_log;
 pub mod secrets;
+pub mod snapshot_inspection;
 pub mod status;
 mod storage;
 

@@ -4,26 +4,28 @@
 
 ## Current Status
 
-- Implementation: not started
+- Implementation: complete pending visual evidence and PR convergence
 - Lifecycle: active
-- Catalog note: planned
+- Catalog note: implemented
 
-## Planned Coverage
+## Delivered Coverage
 
-- Core resolves retained snapshot filemaps and computes bounded summary, file, difference, and logical-block pages.
-- CLI exposes the read-only JSON inspector contract; the macOS App consumes it on background work queues.
-- Main Window replaces a selected history row with a native run-detail route and virtualized Files/Blocks surfaces.
-- Unit, contract, Swift UI-state, and deterministic visual evidence cover success, failure, retention, and large-list behavior.
+- `SnapshotInspector` resolves current snapshot filemaps, current two-level index caches, and legacy single-index snapshots. It calculates direct-baseline changes and distinct logical block pages with request-bound, versioned cursors.
+- `televybackup --json snapshots inspect summary|files|blocks` materializes a retained filemap only when absent locally, then exposes the stable JSON contract to the App.
+- Activating a history row opens an inline run detail route. Successful backup runs load Summary, Files, and Blocks; unsuccessful or missing-snapshot runs remain summary-only.
+- Files use a native `NSOutlineView` for lazy tree expansion and `NSTableView` for list/block pages. New, deleted, and changed states have SF Symbol icons and text labels.
+- Rust covers current/legacy, first, direct-baseline-unavailable, empty legacy, logical block aggregation, cursor binding, and retention's preserved direct-baseline reference. Swift covers history eligibility and the app's existing UI isolation checks.
 
 ## Implementation Boundaries
 
 - The App does not query SQLite directly.
-- The implementation does not alter backup storage or retention behavior.
+- The implementation does not expand the retention window or retain independent file history. It preserves a pruned direct `base_snapshot_id` solely so retained descendants can report `baselineUnavailable` instead of becoming indistinguishable from first snapshots.
 - The direct baseline remains the only comparison authority.
 
 ## Remaining Gaps
 
-- All implementation and validation work remains open.
+- Deterministic light and dark Main Window captures remain required before the feature can be declared visually complete.
+- Fast-track PR creation, CI/review convergence, and final implementation status update remain required.
 
 ## References
 
