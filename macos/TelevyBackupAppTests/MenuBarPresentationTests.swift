@@ -215,6 +215,17 @@ private func testFailureLatchLifecycle() {
         "a new daemon session must not retain the prior daemon failure latch"
     )
 
+    let localFailureLatch = MenuBarFailureLatch()
+    localFailureLatch.observeLocalTask(
+        MenuBarLocalTask(id: "local-restore", kind: "restore", state: "failed"),
+        now: now
+    )
+    localFailureLatch.resetStatusSession()
+    expectMenuBar(
+        localFailureLatch.isActive(now: now.addingTimeInterval(1)),
+        "a status session reset must retain the current local failure latch"
+    )
+
     let reconnectLatch = MenuBarFailureLatch()
     reconnectLatch.observeStatus(snapshot: running, connectionPhase: .fresh, now: now)
     reconnectLatch.resetStatusSession()

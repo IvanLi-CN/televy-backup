@@ -7232,6 +7232,20 @@ fn control_ipc_call_with_timeouts(
                 }))
         })?;
 
+    if resp.type_ != "control.response" || resp.id != req.id {
+        return Err(CliError::retryable(
+            "control.unavailable",
+            "invalid control IPC response envelope",
+        )
+        .with_details(serde_json::json!({
+            "socketPath": socket_path.display().to_string(),
+            "expectedType": "control.response",
+            "actualType": resp.type_,
+            "expectedId": req.id,
+            "actualId": resp.id,
+        })));
+    }
+
     if resp.ok {
         Ok(resp)
     } else {
@@ -7594,6 +7608,124 @@ mod control_ipc_tests {
                 .iter()
                 .all(|request| request.method == "status.taskFinish")
         );
+        assert_eq!(
+            requests[0].params, requests[1].params,
+            "the retry must replay the exact terminal transition"
+        );
+    }
+
+    #[test]
+    fn status_task_finish_retries_after_an_invalid_response_envelope() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let ipc_dir = data_dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            let captured = Arc::clone(&captured);
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                for attempt in 0..2 {
+                    let (mut stream, _addr) = listener.accept().unwrap();
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let req: televy_backup_core::control::ControlRequest =
+                        serde_json::from_str(line.trim_end()).unwrap();
+                    captured.lock().unwrap().push(req.clone());
+
+                    let mut resp = televy_backup_core::control::ControlResponse::ok(
+                        req.id,
+                        serde_json::json!({
+                            "ok": true,
+                            "acknowledged": true,
+                            "replayed": true,
+                        }),
+                    );
+                    if attempt == 0 {
+                        resp.type_ = "control.request".to_string();
+                        resp.id = "unrelated-request-id".to_string();
+                    }
+                    let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
+                    stream.write_all(resp_line.as_bytes()).unwrap();
+                    stream.flush().unwrap();
+                }
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        daemon_control_status_task_finish(
+            data_dir.path(),
+            "task-1",
+            "restore",
+            "t1",
+            "succeeded",
+            None,
+        )
+        .expect("an invalid response envelope should be retried until acknowledged");
+        server.join().unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].params, requests[1].params,
+            "the retry must replay the exact terminal transition"
+        );
+    }
+
+    #[test]
+    fn status_task_finish_retries_after_a_missing_acknowledgement() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let ipc_dir = data_dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            let captured = Arc::clone(&captured);
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                for attempt in 0..2 {
+                    let (mut stream, _addr) = listener.accept().unwrap();
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let req: televy_backup_core::control::ControlRequest =
+                        serde_json::from_str(line.trim_end()).unwrap();
+                    captured.lock().unwrap().push(req.clone());
+
+                    let result = if attempt == 0 {
+                        serde_json::json!({ "ok": true })
+                    } else {
+                        serde_json::json!({ "ok": true, "acknowledged": true, "replayed": true })
+                    };
+                    let resp = televy_backup_core::control::ControlResponse::ok(req.id, result);
+                    let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
+                    stream.write_all(resp_line.as_bytes()).unwrap();
+                    stream.flush().unwrap();
+                }
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        daemon_control_status_task_finish(
+            data_dir.path(),
+            "task-1",
+            "restore",
+            "t1",
+            "succeeded",
+            None,
+        )
+        .expect("a missing acknowledgement should be retried until acknowledged");
+        server.join().unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2);
         assert_eq!(
             requests[0].params, requests[1].params,
             "the retry must replay the exact terminal transition"
@@ -7992,34 +8124,41 @@ fn daemon_control_status_task_finish(
     const ATTEMPTS: usize = 3;
 
     for attempt in 0..ATTEMPTS {
-        match control_ipc_call_with_timeouts(
+        let response = match control_ipc_call_with_timeouts(
             data_dir,
             "status.taskFinish",
             params.clone(),
             Duration::from_millis(500),
             Duration::from_millis(500),
         ) {
-            Ok(response) => {
-                let acknowledged = response
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("acknowledged"))
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true);
-                if acknowledged {
-                    return Ok(());
-                }
-                return Err(CliError::new(
-                    "control.failed",
-                    "daemon did not acknowledge terminal status transition",
-                )
-                .with_details(serde_json::json!({ "result": response.result })));
-            }
+            Ok(response) => response,
             Err(error) if error.retryable && attempt + 1 < ATTEMPTS => {
                 std::thread::sleep(Duration::from_millis(50));
+                continue;
             }
             Err(error) => return Err(error),
+        };
+
+        let acknowledged = response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("acknowledged"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        if acknowledged {
+            return Ok(());
         }
+
+        let error = CliError::retryable(
+            "control.unavailable",
+            "daemon did not acknowledge terminal status transition",
+        )
+        .with_details(serde_json::json!({ "result": response.result }));
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        return Err(error);
     }
 
     unreachable!("terminal status retry loop always returns")
