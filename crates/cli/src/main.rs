@@ -4061,12 +4061,9 @@ fn list_index_db_paths_for_read(data_dir: &Path) -> Result<Vec<PathBuf>, CliErro
 
     match std::fs::read_dir(&index_dir) {
         Ok(entries) => {
-            for entry in entries.flatten() {
+            for entry in entries {
+                let entry = entry.map_err(|e| CliError::new("db.failed", e.to_string()))?;
                 let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-
                 let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
                     continue;
                 };
@@ -4076,6 +4073,12 @@ fn list_index_db_paths_for_read(data_dir: &Path) -> Result<Vec<PathBuf>, CliErro
                     continue;
                 }
                 if !name.starts_with("index.") || !name.ends_with(".sqlite") {
+                    continue;
+                }
+
+                let metadata = std::fs::metadata(&path)
+                    .map_err(|e| CliError::new("db.failed", e.to_string()))?;
+                if !metadata.is_file() {
                     continue;
                 }
 
