@@ -6966,44 +6966,37 @@ async fn lookup_manifest_meta_any(
     data_dir: &Path,
     snapshot_id: &str,
 ) -> Result<SnapshotManifestMeta, CliError> {
-    let global = legacy_global_index_db_path(data_dir);
-    if global.exists()
-        && let Ok(found) = lookup_manifest_meta(&global, snapshot_id).await
-    {
-        return Ok(found);
-    }
+    let db_paths = list_index_db_paths_for_read(data_dir)?;
+    let mut matches = Vec::new();
 
-    let index_dir = data_dir.join("index");
-    let entries = std::fs::read_dir(&index_dir)
-        .map_err(|e| CliError::new("snapshot.not_found", e.to_string()))?;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if name == "index.sqlite" {
-            continue;
-        }
-        if !name.starts_with("index.") || !name.ends_with(".sqlite") {
-            continue;
-        }
-
+    for path in db_paths {
         match lookup_manifest_meta(&path, snapshot_id).await {
-            Ok(found) => return Ok(found),
+            Ok(found) => matches.push((path, found)),
             Err(e) if e.code == "snapshot.not_found" => continue,
             Err(_) => continue,
         }
     }
 
-    Err(CliError::new(
-        "snapshot.not_found",
-        "manifest not found in local db",
-    ))
+    match matches.len() {
+        0 => Err(CliError::new(
+            "snapshot.not_found",
+            "manifest not found in local db",
+        )),
+        1 => Ok(matches.pop().expect("matches length checked").1),
+        _ => {
+            let databases = matches
+                .iter()
+                .map(|(path, _)| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(CliError::new(
+                "config.invalid",
+                format!(
+                    "snapshot_id={snapshot_id} is ambiguous across local index databases: {databases}"
+                ),
+            ))
+        }
+    }
 }
 
 const MASTER_KEY_KEY: &str = "televybackup.master_key";
@@ -8486,18 +8479,39 @@ mod tests {
     }
 
     async fn seed_snapshot_without_matching_target(data_dir: &Path, snapshot_id: &str) {
+        seed_snapshot_in_endpoint_index(
+            data_dir,
+            "ep1",
+            snapshot_id,
+            "/unowned/source",
+            "telegram.mtproto/ep1",
+            "manifest-unowned",
+        )
+        .await;
+    }
+
+    async fn seed_snapshot_in_endpoint_index(
+        data_dir: &Path,
+        endpoint_id: &str,
+        snapshot_id: &str,
+        source_path: &str,
+        provider: &str,
+        manifest_object_id: &str,
+    ) {
         let index_dir = data_dir.join("index");
         std::fs::create_dir_all(&index_dir).unwrap();
-        let pool = televy_backup_core::index_db::open_index_db(&index_dir.join("index.ep1.sqlite"))
-            .await
-            .unwrap();
+        let pool = televy_backup_core::index_db::open_index_db(
+            &index_dir.join(format!("index.{endpoint_id}.sqlite")),
+        )
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
         )
         .bind(snapshot_id)
         .bind("2026-08-26T00:00:00Z")
-        .bind("/unowned/source")
-        .bind("Unowned")
+        .bind(source_path)
+        .bind("Seeded")
         .execute(&pool)
         .await
         .unwrap();
@@ -8505,8 +8519,8 @@ mod tests {
             "INSERT INTO remote_indexes (snapshot_id, provider, manifest_object_id, created_at) VALUES (?, ?, ?, ?)",
         )
         .bind(snapshot_id)
-        .bind("telegram.mtproto/ep1")
-        .bind("manifest-unowned")
+        .bind(provider)
+        .bind(manifest_object_id)
         .bind("2026-08-26T00:00:00Z")
         .execute(&pool)
         .await
@@ -8571,6 +8585,35 @@ endpoint_id = "ep1"
             !restore_target.exists(),
             "an unowned restore must not create its destination"
         );
+    }
+
+    #[tokio::test]
+    async fn lookup_manifest_meta_any_rejects_ambiguous_snapshots() {
+        let data_dir = tempfile::tempdir().unwrap();
+        seed_snapshot_in_endpoint_index(
+            data_dir.path(),
+            "ep1",
+            "snap-ambiguous",
+            "/source/one",
+            "telegram.mtproto/ep1",
+            "manifest-ep1",
+        )
+        .await;
+        seed_snapshot_in_endpoint_index(
+            data_dir.path(),
+            "ep2",
+            "snap-ambiguous",
+            "/source/two",
+            "telegram.mtproto/ep2",
+            "manifest-ep2",
+        )
+        .await;
+
+        let lookup = lookup_manifest_meta_any(data_dir.path(), "snap-ambiguous")
+            .await
+            .expect_err("duplicate snapshot ids must fail closed");
+        assert_eq!(lookup.code, "config.invalid");
+        assert!(lookup.message.contains("ambiguous"));
     }
 
     fn status_snapshot_one_target(
