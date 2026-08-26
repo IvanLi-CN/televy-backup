@@ -4487,7 +4487,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func localMenuBarTask() -> MenuBarLocalTask? {
         guard let task = ModelStore.shared.taskPresentationStore.activeTask else { return nil }
-        return MenuBarLocalTask(id: task.id, kind: task.kind, state: task.state)
+        return MenuBarLocalTask(id: task.id, kind: task.kind, state: task.state, targetId: task.targetId)
     }
 
     private func refreshMenuBarPresentation() {
@@ -4566,7 +4566,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ModelStore.shared.taskPresentationStore.$activeTask
             .receive(on: DispatchQueue.main)
             .sink { [weak self] task in
-                let local = task.map { MenuBarLocalTask(id: $0.id, kind: $0.kind, state: $0.state) }
+                let local = task.map {
+                    MenuBarLocalTask(id: $0.id, kind: $0.kind, state: $0.state, targetId: $0.targetId)
+                }
                 self?.menuBarFailureLatch.observeLocalTask(local)
                 self?.refreshMenuBarPresentation()
             }

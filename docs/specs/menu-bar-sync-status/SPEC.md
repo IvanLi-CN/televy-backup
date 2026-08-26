@@ -46,8 +46,10 @@
 - `activeTask` 必须是 `StatusSnapshot` 的可选 additive 字段；旧快照在 Rust 与 Swift 解码后仍可用。
 - `activeTask.kind` 只能是 `backup`、`restore`、`verify` 或 `sync`，`directions` 只能包含去重的 `up` 与 `down`。backup、restore、verify 的声明方向分别为 `["up"]`、`["down"]`、`[]`；sync 声明双向。
 - 菜单栏状态优先级固定为：当前 live 失败锁存、双向同步、备份、恢复、验证、空闲。备份队列成员等同于备份活动。
-- 失败锁存只可由当前 live 会话触发，并在 10 秒后失效：fresh 状态连接中已观察到的活动任务转为失败时触发；App 在当前进程中发起的本地任务收到 `state=failed` 时也触发，包含入场或预检失败。`lastRun`、初次收到的 snapshot `state=failed`、App 重启和 daemon 重启都不得触发它。
+- 失败锁存只可由当前 live 会话触发，并在 10 秒后失效：fresh 状态连接中已观察到的活动任务转为失败时触发；App 在当前进程中发起的本地任务收到 `state=failed` 时也触发，包含入场或预检失败。相同 live 任务的本地事件与 daemon 转变必须共享同一锁存期限；不同任务即使在同一目标上失败，也各自获得完整 10 秒。`lastRun`、初次收到的 snapshot `state=failed`、App 重启和 daemon 重启都不得触发它。
 - 同一目标已有活动任务时，外部 `status.taskStart` 必须以稳定的 `target_busy` 错误拒绝；它不得启动恢复或验证的数据面工作。已在同目标运行外部任务时，排队备份必须保持等待，直至可获得该目标。
+- 所有恢复和验证数据面入口必须在开始前绑定一个 daemon 目标并取得 `status.taskStart` 准入。通用 snapshot 命令以 snapshot 的 `source_path` 与 endpoint 解析唯一目标；元数据缺失、无匹配或歧义时必须失败关闭，不能绕过状态与互斥。
+- `status.taskFinish` 只有在 daemon 应用了匹配终态、或证明是完全相同终态的幂等重放时才可确认成功。锁不可用、过期所有权、重启后丢失的运行时状态或不同终态不得被确认；数据面本身已经失败时，终态上报失败不得替换原始错误。
 - 跨目标并发活动必须在全局投影中聚合；上行和下行同时存在时必须显示双向同步。
 - 速率偏好默认关闭，键名为 `showMenuBarTransferRates`，只读 `global.up` 与 `global.down`。启用后只显示活动任务声明方向中速率有效的方向；错误徽标不得隐藏其他活动任务的速率标题。
 
@@ -95,8 +97,10 @@
 
 - Given 缺少 `activeTask` 的旧快照，When Rust 或 Swift 解码，Then 保持可用且没有活动菜单栏状态。
 - Given 同时存在上行与下行活动，When 投影菜单栏，Then 显示双向同步；零速不得改变活动状态。
-- Given 当前连接已观察到活动任务转为失败，或当前 App 发起的本地任务失败，When 收到失败事件，Then 错误显示 10 秒；初始历史 snapshot 失败不得触发错误。
+- Given 当前连接已观察到活动任务转为失败，或当前 App 发起的本地任务失败，When 收到失败事件，Then 错误显示 10 秒；相同任务的双重观察不续期，不同任务独立计时；初始历史 snapshot 失败不得触发错误。
 - Given 同一目标有 daemon 备份，When 外部恢复或验证申请开始，Then 收到 `target_busy` 且数据面不启动；不同目标可以同时工作。
+- Given 通用恢复或验证命令无法从 snapshot 元数据解析唯一配置目标，When 命令进入准入阶段，Then 返回配置错误且不启动数据面。
+- Given 已准入的外部任务结束，When `status.taskFinish` 的响应丢失，Then CLI 只接受 daemon 的精确幂等确认；Given 数据面失败且终态上报失败，Then CLI 保留数据面的原始失败码。
 - Given 速率偏好关闭或开启，When 全局速率有效，Then 分别隐藏或仅显示声明方向的 `↑`/`↓` 二进制单位速率。
 
 ## 验收清单（Acceptance checklist）
@@ -131,6 +135,10 @@ Dev 受控菜单栏预览。
 PR: include
 
 ![Dev menu bar activity states](./assets/menu-bar-activity-states-dev.png)
+
+## Related ADRs
+
+- [0001-explicit-menu-bar-activity-directions](../../adr/0001-explicit-menu-bar-activity-directions.md)
 
 ## Related PRs
 

@@ -4,6 +4,7 @@ struct MenuBarLocalTask: Equatable {
     var id: String
     var kind: String
     var state: String
+    var targetId: String? = nil
 
     static func eventTaskKind(commandArguments: [String]) -> String? {
         guard commandArguments.contains("--events") else { return nil }
@@ -115,8 +116,19 @@ struct MenuBarPresentation: Equatable {
 final class MenuBarFailureLatch {
     static let duration: TimeInterval = 10
 
+    private enum FailureIdentity: Hashable {
+        case localTask(String)
+        case daemonTargetActivity(targetId: String, generation: Int)
+    }
+
     private var observedActiveTargetIds: Set<String> = []
+    private var activeFailureIdentityByTarget: [String: FailureIdentity] = [:]
+    private var terminalFailureIdentityByTarget: [String: FailureIdentity] = [:]
+    private var terminalLocalTaskIdByTarget: [String: String] = [:]
+    private var targetActivityGenerations: [String: Int] = [:]
     private var localTaskStates: [String: String] = [:]
+    private var localTaskIdByTarget: [String: String] = [:]
+    private var failureExpiryByIdentity: [FailureIdentity: Date] = [:]
     private(set) var failureExpiresAt: Date?
 
     func observeStatus(
@@ -132,31 +144,65 @@ final class MenuBarFailureLatch {
         for target in snapshot.targets {
             let isActive = target.activeTask != nil || target.state == "running"
             if isActive {
-                observedActiveTargetIds.insert(target.targetId)
+                if observedActiveTargetIds.insert(target.targetId).inserted {
+                    beginStatusActivity(for: target.targetId)
+                }
             } else if target.state == "failed" {
                 if observedActiveTargetIds.remove(target.targetId) != nil {
-                    latchFailure(now: now)
+                    let identity = activeFailureIdentityByTarget.removeValue(forKey: target.targetId)
+                        ?? nextDaemonIdentity(for: target.targetId)
+                    terminalFailureIdentityByTarget[target.targetId] = identity
+                    if case let .localTask(taskId) = identity {
+                        terminalLocalTaskIdByTarget[target.targetId] = taskId
+                    } else {
+                        terminalLocalTaskIdByTarget.removeValue(forKey: target.targetId)
+                    }
+                    latchFailure(identity, now: now)
                 }
             } else {
                 observedActiveTargetIds.remove(target.targetId)
+                activeFailureIdentityByTarget.removeValue(forKey: target.targetId)
+                terminalFailureIdentityByTarget.removeValue(forKey: target.targetId)
+                terminalLocalTaskIdByTarget.removeValue(forKey: target.targetId)
             }
         }
     }
 
     func observeLocalTask(_ task: MenuBarLocalTask?, now: Date = Date()) {
-        guard let task else { return }
+        guard let task else {
+            localTaskStates = localTaskStates.filter { $0.value == "running" }
+            localTaskIdByTarget = localTaskIdByTarget.filter { localTaskStates[$0.value] == "running" }
+            return
+        }
         let previous = localTaskStates[task.id]
         localTaskStates[task.id] = task.state
+        let targetId = task.targetId.flatMap { $0.isEmpty ? nil : $0 }
+
+        if task.state == "running", let targetId {
+            localTaskIdByTarget[targetId] = task.id
+            terminalFailureIdentityByTarget.removeValue(forKey: targetId)
+            terminalLocalTaskIdByTarget.removeValue(forKey: targetId)
+            if observedActiveTargetIds.contains(targetId) {
+                activeFailureIdentityByTarget[targetId] = .localTask(task.id)
+            }
+        }
+
         if task.state == "failed", previous != "failed" {
-            latchFailure(now: now)
+            latchFailure(failureIdentity(for: task.id, targetId: targetId, previousState: previous), now: now)
         }
         if task.state == "succeeded" || task.state == "cancelled" {
             localTaskStates.removeValue(forKey: task.id)
+            if let targetId, localTaskIdByTarget[targetId] == task.id {
+                localTaskIdByTarget.removeValue(forKey: targetId)
+            }
         }
     }
 
     func resetStatusSession() {
         observedActiveTargetIds.removeAll()
+        activeFailureIdentityByTarget.removeAll()
+        terminalFailureIdentityByTarget.removeAll()
+        terminalLocalTaskIdByTarget.removeAll()
     }
 
     static func requiresStatusSessionReset(
@@ -169,17 +215,61 @@ final class MenuBarFailureLatch {
     }
 
     func isActive(now: Date = Date()) -> Bool {
-        guard let failureExpiresAt else { return false }
-        guard now < failureExpiresAt else {
-            self.failureExpiresAt = nil
-            return false
-        }
-        return true
+        pruneExpiredFailures(now: now)
+        return failureExpiresAt != nil
     }
 
-    private func latchFailure(now: Date) {
-        guard !isActive(now: now) else { return }
-        failureExpiresAt = now.addingTimeInterval(Self.duration)
+    private func beginStatusActivity(for targetId: String) {
+        let identity: FailureIdentity
+        if let taskId = localTaskIdByTarget[targetId], localTaskStates[taskId] == "running" {
+            identity = .localTask(taskId)
+        } else {
+            if let taskId = localTaskIdByTarget[targetId], localTaskStates[taskId] != "running" {
+                localTaskIdByTarget.removeValue(forKey: targetId)
+            }
+            identity = nextDaemonIdentity(for: targetId)
+        }
+        activeFailureIdentityByTarget[targetId] = identity
+        terminalFailureIdentityByTarget.removeValue(forKey: targetId)
+        terminalLocalTaskIdByTarget.removeValue(forKey: targetId)
+    }
+
+    private func nextDaemonIdentity(for targetId: String) -> FailureIdentity {
+        let generation = (targetActivityGenerations[targetId] ?? 0) + 1
+        targetActivityGenerations[targetId] = generation
+        return .daemonTargetActivity(targetId: targetId, generation: generation)
+    }
+
+    private func failureIdentity(
+        for taskId: String,
+        targetId: String?,
+        previousState: String?
+    ) -> FailureIdentity {
+        guard let targetId else { return .localTask(taskId) }
+
+        if previousState == "running", observedActiveTargetIds.contains(targetId) {
+            let identity = FailureIdentity.localTask(taskId)
+            activeFailureIdentityByTarget[targetId] = identity
+            return identity
+        }
+        if terminalLocalTaskIdByTarget[targetId] == taskId,
+           let identity = terminalFailureIdentityByTarget[targetId]
+        {
+            return identity
+        }
+        return .localTask(taskId)
+    }
+
+    private func latchFailure(_ identity: FailureIdentity, now: Date) {
+        pruneExpiredFailures(now: now)
+        guard failureExpiryByIdentity[identity] == nil else { return }
+        failureExpiryByIdentity[identity] = now.addingTimeInterval(Self.duration)
+        failureExpiresAt = failureExpiryByIdentity.values.min()
+    }
+
+    private func pruneExpiredFailures(now: Date) {
+        failureExpiryByIdentity = failureExpiryByIdentity.filter { $0.value > now }
+        failureExpiresAt = failureExpiryByIdentity.values.min()
     }
 }
 

@@ -3355,10 +3355,13 @@ fn status_target_id_for_snapshot(
     settings: &Settings,
     source_path: Option<&str>,
     endpoint_id: &str,
-) -> Result<Option<String>, CliError> {
-    let Some(source_path) = source_path else {
-        return Ok(None);
-    };
+) -> Result<String, CliError> {
+    let source_path = source_path.ok_or_else(|| {
+        CliError::new(
+            "config.invalid",
+            "snapshot source_path is required to determine daemon task ownership",
+        )
+    })?;
 
     let matches = settings
         .targets
@@ -3367,8 +3370,13 @@ fn status_target_id_for_snapshot(
         .collect::<Vec<_>>();
 
     match matches.as_slice() {
-        [] => Ok(None),
-        [target] => Ok(Some(target.id.clone())),
+        [] => Err(CliError::new(
+            "config.invalid",
+            format!(
+                "no target matches snapshot source_path={source_path} and endpoint_id={endpoint_id}"
+            ),
+        )),
+        [target] => Ok(target.id.clone()),
         _ => Err(CliError::new(
             "config.invalid",
             format!(
@@ -4992,15 +5000,13 @@ async fn backup_run(
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
             }
-            daemon_control_status_task_finish(
+            Err(preserve_data_plane_failure(
                 data_dir,
                 &task_id,
                 "backup",
                 ctx_target_id.as_str(),
-                "failed",
-                Some(e.code),
-            )?;
-            Err(e)
+                e,
+            ))
         }
     }
 }
@@ -5363,10 +5369,14 @@ async fn restore_run(
             ));
         }
 
-        if let Some(target_id) = status_target_id.as_deref() {
-            admit_status_task(config_dir, data_dir, &task_id, "restore", target_id)?;
-        }
-        admitted_target_id = status_target_id.clone();
+        admit_status_task(
+            config_dir,
+            data_dir,
+            &task_id,
+            "restore",
+            status_target_id.as_str(),
+        )?;
+        admitted_target_id = Some(status_target_id.clone());
 
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
@@ -5383,7 +5393,7 @@ async fn restore_run(
             events,
             &task_id,
             "restore",
-            status_target_id.as_deref(),
+            Some(status_target_id.as_str()),
             Some(snapshot_id.as_str()),
         );
         emit_task_progress_preflight(events, &task_id);
@@ -5391,15 +5401,11 @@ async fn restore_run(
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
             throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
-            daemon_status_report: if events {
-                status_target_id.as_ref().map(|target_id| DaemonStatusReport {
-                    data_dir: data_dir.to_path_buf(),
-                    kind: "restore".to_string(),
-                    target_id: target_id.clone(),
-                })
-            } else {
-                None
-            },
+            daemon_status_report: events.then_some(DaemonStatusReport {
+                data_dir: data_dir.to_path_buf(),
+                kind: "restore".to_string(),
+                target_id: status_target_id.clone(),
+            }),
         };
         let opts = RestoreOptions {
             cancel: None,
@@ -5591,14 +5597,9 @@ async fn restore_run(
                 emit_event_stdout(event);
             }
             if let Some(target_id) = admitted_target_id.as_deref() {
-                daemon_control_status_task_finish(
-                    data_dir,
-                    &task_id,
-                    "restore",
-                    target_id,
-                    "failed",
-                    Some(e.code),
-                )?;
+                return Err(preserve_data_plane_failure(
+                    data_dir, &task_id, "restore", target_id, e,
+                ));
             }
             Err(e)
         }
@@ -6159,15 +6160,13 @@ async fn restore_latest(
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
             }
-            daemon_control_status_task_finish(
+            Err(preserve_data_plane_failure(
                 data_dir,
                 &task_id,
                 "restore",
                 t.id.as_str(),
-                "failed",
-                Some(e.code),
-            )?;
-            Err(e)
+                e,
+            ))
         }
     }
 }
@@ -6602,15 +6601,13 @@ async fn verify_latest(
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
             }
-            daemon_control_status_task_finish(
+            Err(preserve_data_plane_failure(
                 data_dir,
                 &task_id,
                 "verify",
                 t.id.as_str(),
-                "failed",
-                Some(e.code),
-            )?;
-            Err(e)
+                e,
+            ))
         }
     }
 }
@@ -6692,10 +6689,14 @@ async fn verify_run(
             ));
         }
 
-        if let Some(target_id) = status_target_id.as_deref() {
-            admit_status_task(config_dir, data_dir, &task_id, "verify", target_id)?;
-        }
-        admitted_target_id = status_target_id.clone();
+        admit_status_task(
+            config_dir,
+            data_dir,
+            &task_id,
+            "verify",
+            status_target_id.as_str(),
+        )?;
+        admitted_target_id = Some(status_target_id.clone());
 
         let bot_token = get_secret(config_dir, data_dir, &ep.bot_token_key)?
             .ok_or_else(|| CliError::new("telegram.unauthorized", "bot token missing"))?;
@@ -6712,7 +6713,7 @@ async fn verify_run(
             events,
             &task_id,
             "verify",
-            status_target_id.as_deref(),
+            Some(status_target_id.as_str()),
             Some(snapshot_id.as_str()),
         );
         emit_task_progress_preflight(events, &task_id);
@@ -6720,15 +6721,11 @@ async fn verify_run(
         let sink = NdjsonProgressSink {
             task_id: task_id.clone(),
             throttle: Mutex::new(ProgressThrottle::new(Duration::from_millis(200))),
-            daemon_status_report: if events {
-                status_target_id.as_ref().map(|target_id| DaemonStatusReport {
-                    data_dir: data_dir.to_path_buf(),
-                    kind: "verify".to_string(),
-                    target_id: target_id.clone(),
-                })
-            } else {
-                None
-            },
+            daemon_status_report: events.then_some(DaemonStatusReport {
+                data_dir: data_dir.to_path_buf(),
+                kind: "verify".to_string(),
+                target_id: status_target_id.clone(),
+            }),
         };
         let opts = VerifyOptions {
             cancel: None,
@@ -6917,14 +6914,9 @@ async fn verify_run(
                 emit_event_stdout(event);
             }
             if let Some(target_id) = admitted_target_id.as_deref() {
-                daemon_control_status_task_finish(
-                    data_dir,
-                    &task_id,
-                    "verify",
-                    target_id,
-                    "failed",
-                    Some(e.code),
-                )?;
+                return Err(preserve_data_plane_failure(
+                    data_dir, &task_id, "verify", target_id, e,
+                ));
             }
             Err(e)
         }
@@ -7259,6 +7251,8 @@ fn control_ipc_call_with_timeouts(
             "control.invalid_request" => ("control.invalid_request", err.details),
             "control.method_not_found" => ("control.method_not_found", err.details),
             "target_busy" => ("target_busy", err.details),
+            "target_not_found" => ("target_not_found", err.details),
+            "task_not_owned" => ("task_not_owned", err.details),
             _ => (
                 "control.failed",
                 serde_json::json!({
@@ -7502,7 +7496,7 @@ mod control_ipc_tests {
 
                     let resp = televy_backup_core::control::ControlResponse::ok(
                         req.id,
-                        serde_json::json!({ "ok": true }),
+                        serde_json::json!({ "ok": true, "acknowledged": true, "replayed": true }),
                     );
                     let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
                     stream.write_all(resp_line.as_bytes()).unwrap();
@@ -7540,6 +7534,48 @@ mod control_ipc_tests {
                 .iter()
                 .all(|request| request.params["state"] == "succeeded")
         );
+    }
+
+    #[test]
+    fn terminal_status_failure_preserves_the_data_plane_error() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let ipc_dir = data_dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                let (mut stream, _addr) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let req: televy_backup_core::control::ControlRequest =
+                    serde_json::from_str(line.trim_end()).unwrap();
+                let response = televy_backup_core::control::ControlResponse::err(
+                    req.id,
+                    televy_backup_core::control::ControlError {
+                        code: "task_not_owned".to_string(),
+                        message: "daemon restart lost task ownership".to_string(),
+                        retryable: false,
+                        details: serde_json::json!({ "targetId": "t1" }),
+                    },
+                );
+                let response_line = serde_json::to_string(&response).unwrap() + "\n";
+                stream.write_all(response_line.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        let original = CliError::new("integrity", "restored data failed verification");
+        let retained =
+            preserve_data_plane_failure(data_dir.path(), "task-1", "restore", "t1", original);
+        assert_eq!(retained.code, "integrity");
+        assert_eq!(retained.message, "restored data failed verification");
+        server.join().unwrap();
     }
 
     #[test]
@@ -7899,7 +7935,22 @@ fn daemon_control_status_task_finish(
             Duration::from_millis(500),
             Duration::from_millis(500),
         ) {
-            Ok(_) => return Ok(()),
+            Ok(response) => {
+                let acknowledged = response
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("acknowledged"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true);
+                if acknowledged {
+                    return Ok(());
+                }
+                return Err(CliError::new(
+                    "control.failed",
+                    "daemon did not acknowledge terminal status transition",
+                )
+                .with_details(serde_json::json!({ "result": response.result })));
+            }
             Err(error) if error.retryable && attempt + 1 < ATTEMPTS => {
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -7920,6 +7971,36 @@ fn daemon_control_status_task_finish(
     _error_code: Option<&str>,
 ) -> Result<(), CliError> {
     Ok(())
+}
+
+fn preserve_data_plane_failure(
+    data_dir: &Path,
+    task_id: &str,
+    kind: &str,
+    target_id: &str,
+    operation_error: CliError,
+) -> CliError {
+    if let Err(terminal_error) = daemon_control_status_task_finish(
+        data_dir,
+        task_id,
+        kind,
+        target_id,
+        "failed",
+        Some(operation_error.code),
+    ) {
+        tracing::warn!(
+            event = "status.task_finish_unacknowledged",
+            task_id,
+            kind,
+            target_id,
+            operation_error_code = operation_error.code,
+            operation_error_message = %operation_error.message,
+            terminal_error_code = terminal_error.code,
+            terminal_error_message = %terminal_error.message,
+            "preserving data-plane failure after terminal status reporting failed"
+        );
+    }
+    operation_error
 }
 
 fn daemon_keychain_get_secret(data_dir: &Path, key: &str) -> Result<Option<String>, CliError> {
@@ -8065,16 +8146,15 @@ mod tests {
 
         assert_eq!(
             status_target_id_for_snapshot(&settings, Some("/source"), "endpoint-a").unwrap(),
-            Some("target-a".to_string())
+            "target-a"
         );
-        assert_eq!(
-            status_target_id_for_snapshot(&settings, Some("/source"), "endpoint-b").unwrap(),
-            None
-        );
-        assert_eq!(
-            status_target_id_for_snapshot(&settings, None, "endpoint-a").unwrap(),
-            None
-        );
+        let endpoint_mismatch =
+            status_target_id_for_snapshot(&settings, Some("/source"), "endpoint-b")
+                .expect_err("an unowned snapshot must not bypass daemon admission");
+        assert_eq!(endpoint_mismatch.code, "config.invalid");
+        let missing_source = status_target_id_for_snapshot(&settings, None, "endpoint-a")
+            .expect_err("a snapshot without source metadata must fail closed");
+        assert_eq!(missing_source.code, "config.invalid");
 
         settings.targets.push(settings_config::Target {
             id: "target-b".to_string(),

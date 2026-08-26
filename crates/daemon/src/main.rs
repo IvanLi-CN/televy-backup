@@ -370,6 +370,7 @@ struct TargetRuntime {
     // When a CLI-run task reports progress to the daemon for UI status purposes, we keep the
     // current task id here so stale updates don't clobber newer runs.
     external_task_id: Option<String>,
+    external_terminal: Option<ExternalTaskTerminal>,
     external_process_id: Option<u32>,
     external_last_report_at: Option<Instant>,
     external_logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
@@ -396,6 +397,26 @@ pub(crate) enum ExternalTaskAdmissionError {
     TargetNotFound,
     TargetBusy(String),
     UnsupportedKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalTaskTerminal {
+    task_id: String,
+    kind: String,
+    state: String,
+    error_code: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExternalTaskFinishOutcome {
+    Applied,
+    IdempotentReplay,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExternalTaskFinishError {
+    TargetNotFound,
+    TaskNotOwned,
 }
 
 #[cfg(unix)]
@@ -439,6 +460,7 @@ impl StatusRuntimeState {
                     active_task: None,
                     backup_queue: None,
                     external_task_id: None,
+                    external_terminal: None,
                     external_process_id: None,
                     external_last_report_at: None,
                     external_logging: None,
@@ -477,6 +499,7 @@ impl StatusRuntimeState {
                 active_task: None,
                 backup_queue: None,
                 external_task_id: None,
+                external_terminal: None,
                 external_process_id: None,
                 external_last_report_at: None,
                 external_logging: None,
@@ -529,6 +552,7 @@ impl StatusRuntimeState {
                     active_task: None,
                     backup_queue: None,
                     external_task_id: None,
+                    external_terminal: None,
                     external_process_id: None,
                     external_last_report_at: None,
                     external_logging: None,
@@ -566,6 +590,7 @@ impl StatusRuntimeState {
             return;
         };
         t.external_task_id = None;
+        t.external_terminal = None;
         t.external_process_id = None;
         t.external_last_report_at = None;
         t.external_logging = None;
@@ -613,7 +638,11 @@ impl StatusRuntimeState {
             return Err(ExternalTaskAdmissionError::TargetNotFound);
         };
 
-        if t.external_task_id.as_deref() == Some(task_id) {
+        if t.external_task_id.as_deref() == Some(task_id)
+            && t.active_task
+                .as_ref()
+                .is_some_and(|active| active.kind == kind)
+        {
             return Ok(());
         }
         if t.active_task.is_some() || t.state == "running" {
@@ -627,6 +656,7 @@ impl StatusRuntimeState {
 
         let now = now_unix_ms();
         t.external_task_id = Some(task_id.to_string());
+        t.external_terminal = None;
         t.external_process_id = process_id.filter(|pid| *pid > 0);
         t.external_last_report_at = Some(Instant::now());
         t.external_logging = logging;
@@ -733,14 +763,31 @@ impl StatusRuntimeState {
         &mut self,
         target_id: &str,
         task_id: &str,
+        kind: &str,
         state: &str,
         error_code: Option<String>,
-    ) {
+    ) -> Result<ExternalTaskFinishOutcome, ExternalTaskFinishError> {
         let Some(t) = self.targets.get_mut(target_id) else {
-            return;
+            return Err(ExternalTaskFinishError::TargetNotFound);
         };
-        if t.external_task_id.as_deref() != Some(task_id) {
-            return;
+        let failed = state == "failed";
+        let terminal = ExternalTaskTerminal {
+            task_id: task_id.to_string(),
+            kind: kind.to_string(),
+            state: state.to_string(),
+            error_code: failed.then(|| error_code.unwrap_or_else(|| "task.failed".to_string())),
+        };
+
+        let owns_task = t.external_task_id.as_deref() == Some(task_id)
+            && t.active_task
+                .as_ref()
+                .is_some_and(|active| active.kind == kind);
+        if !owns_task {
+            return if t.external_terminal.as_ref() == Some(&terminal) {
+                Ok(ExternalTaskFinishOutcome::IdempotentReplay)
+            } else {
+                Err(ExternalTaskFinishError::TaskNotOwned)
+            };
         }
 
         t.external_task_id = None;
@@ -748,7 +795,6 @@ impl StatusRuntimeState {
         t.external_last_report_at = None;
         t.external_logging = None;
         t.active_task = None;
-        let failed = state == "failed";
         t.state = if failed { "failed" } else { "idle" }.to_string();
         let duration_seconds = t
             .running_since
@@ -767,17 +813,19 @@ impl StatusRuntimeState {
         t.down_bps = None;
         t.down_total_bytes = None;
         t.down_rate.reset(Instant::now(), 0);
+        t.external_terminal = Some(terminal.clone());
         t.last_run = Some(TargetRunSummary {
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             ),
             duration_seconds,
             status: Some(if failed { "failed" } else { "succeeded" }.to_string()),
-            error_code: failed.then(|| error_code.unwrap_or_else(|| "task.failed".to_string())),
+            error_code: terminal.error_code,
             files_indexed: None,
             bytes_uploaded,
             bytes_deduped,
         });
+        Ok(ExternalTaskFinishOutcome::Applied)
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -954,25 +1002,27 @@ impl StatusRuntimeState {
         now: Instant,
         process_is_alive: impl Fn(u32) -> bool,
     ) {
-        let reporters_lost: Vec<(String, String)> = self
+        let reporters_lost: Vec<(String, String, String)> = self
             .targets
             .iter()
             .filter_map(|(target_id, target)| {
                 let task_id = target.external_task_id.as_ref()?;
+                let kind = target.active_task.as_ref()?.kind.clone();
                 let is_live = match target.external_process_id {
                     Some(pid) => process_is_alive(pid),
                     None => target.external_last_report_at.is_some_and(|last_report| {
                         now.saturating_duration_since(last_report) <= EXTERNAL_TASK_REPORT_TIMEOUT
                     }),
                 };
-                (!is_live).then(|| (target_id.clone(), task_id.clone()))
+                (!is_live).then(|| (target_id.clone(), task_id.clone(), kind))
             })
             .collect();
 
-        for (target_id, task_id) in reporters_lost {
-            self.mark_external_run_finish(
+        for (target_id, task_id, kind) in reporters_lost {
+            let _ = self.mark_external_run_finish(
                 &target_id,
                 &task_id,
+                &kind,
                 "failed",
                 Some("task.reporter_lost".to_string()),
             );
@@ -1496,6 +1546,7 @@ mod tests {
                 active_task: None,
                 backup_queue: None,
                 external_task_id: None,
+                external_terminal: None,
                 external_process_id: None,
                 external_last_report_at: None,
                 external_logging: None,
@@ -1564,9 +1615,11 @@ mod tests {
         st.mark_external_run_finish(
             "t1",
             "restore-1",
+            "restore",
             "failed",
             Some("restore.network_failed".to_string()),
-        );
+        )
+        .expect("matching external task should finish");
         let target = &st.targets["t1"];
         assert!(target.active_task.is_none());
         assert_eq!(target.state, "failed");
@@ -1576,6 +1629,34 @@ mod tests {
                 .as_ref()
                 .and_then(|run| run.error_code.as_deref()),
             Some("restore.network_failed")
+        );
+
+        assert_eq!(
+            st.mark_external_run_finish(
+                "t1",
+                "restore-1",
+                "restore",
+                "failed",
+                Some("restore.network_failed".to_string()),
+            ),
+            Ok(ExternalTaskFinishOutcome::IdempotentReplay)
+        );
+        assert_eq!(
+            st.mark_external_run_finish("t1", "restore-1", "restore", "succeeded", None),
+            Err(ExternalTaskFinishError::TaskNotOwned)
+        );
+
+        st.mark_external_run_start("t1", "verify-2", "verify", None, None)
+            .expect("a later task should start after terminal acknowledgement");
+        assert_eq!(
+            st.mark_external_run_finish(
+                "t1",
+                "restore-1",
+                "restore",
+                "failed",
+                Some("restore.network_failed".to_string()),
+            ),
+            Err(ExternalTaskFinishError::TaskNotOwned)
         );
     }
 
@@ -1591,7 +1672,8 @@ mod tests {
 
         st.mark_external_run_start("t1", "restore-1", "restore", None, None)
             .expect("restore should start");
-        st.mark_external_run_finish("t1", "restore-1", "succeeded", None);
+        st.mark_external_run_finish("t1", "restore-1", "restore", "succeeded", None)
+            .expect("matching external task should finish");
         st.on_external_progress("t1", "restore-1", "restore", progress(456));
 
         let target = &st.targets["t1"];

@@ -653,15 +653,57 @@ fn handle_request(
                 );
             }
 
-            if let Ok(mut st) = status_state.lock() {
-                st.mark_external_run_finish(
-                    &params.target_id,
-                    &params.task_id,
-                    &params.state,
-                    params.error_code,
-                );
+            let mut st = match status_state.lock() {
+                Ok(st) => st,
+                Err(_) => {
+                    return ControlResponse::err(
+                        req.id.clone(),
+                        ControlError::unavailable(
+                            "status task completion unavailable",
+                            serde_json::json!({ "targetId": params.target_id }),
+                        ),
+                    );
+                }
+            };
+            match st.mark_external_run_finish(
+                &params.target_id,
+                &params.task_id,
+                &params.kind,
+                &params.state,
+                params.error_code,
+            ) {
+                Ok(crate::ExternalTaskFinishOutcome::Applied) => ControlResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({ "ok": true, "acknowledged": true, "replayed": false }),
+                ),
+                Ok(crate::ExternalTaskFinishOutcome::IdempotentReplay) => ControlResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({ "ok": true, "acknowledged": true, "replayed": true }),
+                ),
+                Err(crate::ExternalTaskFinishError::TargetNotFound) => ControlResponse::err(
+                    req.id.clone(),
+                    ControlError {
+                        code: "target_not_found".to_string(),
+                        message: "target is not loaded by daemon".to_string(),
+                        retryable: true,
+                        details: serde_json::json!({ "targetId": params.target_id }),
+                    },
+                ),
+                Err(crate::ExternalTaskFinishError::TaskNotOwned) => ControlResponse::err(
+                    req.id.clone(),
+                    ControlError {
+                        code: "task_not_owned".to_string(),
+                        message: "task does not own an active or matching terminal status"
+                            .to_string(),
+                        retryable: false,
+                        details: serde_json::json!({
+                            "targetId": params.target_id,
+                            "taskId": params.task_id,
+                            "kind": params.kind,
+                        }),
+                    },
+                ),
             }
-            ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
         }
         _ => ControlResponse::err(
             req.id.clone(),
@@ -1571,6 +1613,142 @@ mod tests {
     }
 
     #[test]
+    fn status_task_finish_acknowledges_only_applied_or_matching_replayed_terminal_state() {
+        let config_root = std::path::Path::new("/tmp");
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let context = test_context(
+            config_root,
+            status_state.clone(),
+            Arc::new(Mutex::new(crate::BackupQueue::default())),
+            Arc::new(Notify::new()),
+            Arc::new(crate::DaemonLifecycle::default()),
+        );
+        let runtime_logging = televy_backup_core::local_settings::resolve(config_root);
+        let logging = LoggingStatusContext {
+            runtime: &runtime_logging,
+            data_root: config_root,
+            log_bytes: None,
+            managed_log_usage: None,
+        };
+
+        let started = handle_request(
+            &ControlRequest::new(
+                "restore",
+                "status.taskStart",
+                serde_json::json!({
+                    "taskId": "restore-1",
+                    "kind": "restore",
+                    "targetId": "t1"
+                }),
+            ),
+            &context,
+            &settings(),
+            &logging,
+        );
+        assert!(started.ok);
+
+        let params = serde_json::json!({
+            "taskId": "restore-1",
+            "kind": "restore",
+            "targetId": "t1",
+            "state": "failed",
+            "errorCode": "restore.network_failed"
+        });
+        let applied = handle_request(
+            &ControlRequest::new("restore-finish", "status.taskFinish", params.clone()),
+            &context,
+            &settings(),
+            &logging,
+        );
+        assert!(applied.ok);
+        assert_eq!(applied.result.unwrap()["replayed"], false);
+
+        let replayed = handle_request(
+            &ControlRequest::new("restore-finish-retry", "status.taskFinish", params),
+            &context,
+            &settings(),
+            &logging,
+        );
+        assert!(replayed.ok);
+        assert_eq!(replayed.result.unwrap()["replayed"], true);
+
+        let stale = handle_request(
+            &ControlRequest::new(
+                "restore-finish-stale",
+                "status.taskFinish",
+                serde_json::json!({
+                    "taskId": "restore-1",
+                    "kind": "restore",
+                    "targetId": "t1",
+                    "state": "succeeded"
+                }),
+            ),
+            &context,
+            &settings(),
+            &logging,
+        );
+        assert!(!stale.ok);
+        assert_eq!(
+            stale.error.expect("stale terminal ownership error").code,
+            "task_not_owned"
+        );
+    }
+
+    #[test]
+    fn status_task_finish_fails_closed_when_status_state_is_poisoned() {
+        let config_root = std::path::Path::new("/tmp");
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let poisoned = status_state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned
+                .lock()
+                .expect("status state should lock before poisoning");
+            panic!("poison status state");
+        })
+        .join();
+
+        let context = test_context(
+            config_root,
+            status_state,
+            Arc::new(Mutex::new(crate::BackupQueue::default())),
+            Arc::new(Notify::new()),
+            Arc::new(crate::DaemonLifecycle::default()),
+        );
+        let runtime_logging = televy_backup_core::local_settings::resolve(config_root);
+        let response = handle_request(
+            &ControlRequest::new(
+                "restore-finish",
+                "status.taskFinish",
+                serde_json::json!({
+                    "taskId": "restore-1",
+                    "kind": "restore",
+                    "targetId": "t1",
+                    "state": "failed",
+                    "errorCode": "restore.network_failed"
+                }),
+            ),
+            &context,
+            &settings(),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: config_root,
+                log_bytes: None,
+                managed_log_usage: None,
+            },
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.expect("completion unavailable error").code,
+            "control.unavailable"
+        );
+    }
+
+    #[test]
     fn status_task_finish_rejects_unknown_terminal_state_without_releasing_target() {
         let config_root = std::path::Path::new("/tmp");
         let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
@@ -1865,7 +2043,8 @@ mod tests {
         status_state
             .lock()
             .unwrap()
-            .mark_external_run_finish("t1", "cli-task", "succeeded", None);
+            .mark_external_run_finish("t1", "cli-task", "restore", "succeeded", None)
+            .unwrap();
         status_state.lock().unwrap().mark_run_start("t1");
 
         std::fs::write(

@@ -148,10 +148,14 @@ private func testFailureLatchLifecycle() {
 
     let duplicateFailureLatch = MenuBarFailureLatch()
     duplicateFailureLatch.observeLocalTask(
-        MenuBarLocalTask(id: "target", kind: "restore", state: "failed"),
+        MenuBarLocalTask(id: "restore-task", kind: "restore", state: "running", targetId: "target"),
         now: now
     )
     duplicateFailureLatch.observeStatus(snapshot: running, connectionPhase: .fresh, now: now)
+    duplicateFailureLatch.observeLocalTask(
+        MenuBarLocalTask(id: "restore-task", kind: "restore", state: "failed", targetId: "target"),
+        now: now
+    )
     duplicateFailureLatch.observeStatus(
         snapshot: historicalFailure,
         connectionPhase: .fresh,
@@ -160,6 +164,38 @@ private func testFailureLatchLifecycle() {
     expectMenuBar(
         !duplicateFailureLatch.isActive(now: now.addingTimeInterval(10)),
         "a matching daemon failure must not extend the original ten-second local failure latch"
+    )
+
+    let distinctFailureLatch = MenuBarFailureLatch()
+    distinctFailureLatch.observeLocalTask(
+        MenuBarLocalTask(id: "restore-one", kind: "restore", state: "running", targetId: "target"),
+        now: now
+    )
+    distinctFailureLatch.observeStatus(snapshot: running, connectionPhase: .fresh, now: now)
+    distinctFailureLatch.observeLocalTask(
+        MenuBarLocalTask(id: "restore-one", kind: "restore", state: "failed", targetId: "target"),
+        now: now.addingTimeInterval(1)
+    )
+    distinctFailureLatch.observeStatus(
+        snapshot: historicalFailure,
+        connectionPhase: .fresh,
+        now: now.addingTimeInterval(1.2)
+    )
+    distinctFailureLatch.observeLocalTask(
+        MenuBarLocalTask(id: "restore-two", kind: "restore", state: "running", targetId: "target"),
+        now: now.addingTimeInterval(2)
+    )
+    distinctFailureLatch.observeLocalTask(
+        MenuBarLocalTask(id: "restore-two", kind: "restore", state: "failed", targetId: "target"),
+        now: now.addingTimeInterval(3)
+    )
+    expectMenuBar(
+        distinctFailureLatch.isActive(now: now.addingTimeInterval(11.5)),
+        "a distinct task failure must receive its own full ten-second latch window"
+    )
+    expectMenuBar(
+        !distinctFailureLatch.isActive(now: now.addingTimeInterval(13)),
+        "the second task failure should expire after its own ten-second window"
     )
 
     let reconnectLatch = MenuBarFailureLatch()
