@@ -4095,8 +4095,11 @@ fn list_index_db_paths_for_read(data_dir: &Path) -> Result<Vec<PathBuf>, CliErro
     dbs.sort();
     if dbs.is_empty() {
         let legacy = legacy_global_index_db_path(data_dir);
-        if legacy.exists() {
-            dbs.push(legacy);
+        match std::fs::metadata(&legacy) {
+            Ok(metadata) if metadata.is_file() => dbs.push(legacy),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(CliError::new("db.failed", e.to_string())),
         }
     }
 
