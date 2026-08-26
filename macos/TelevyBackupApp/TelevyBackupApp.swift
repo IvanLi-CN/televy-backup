@@ -4525,6 +4525,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func resetMenuBarStatusSession() {
         menuBarLastStatusIngressAt = nil
         menuBarFailureLatch.resetStatusSession()
+        refreshMenuBarPresentation()
     }
 
     private func observeMenuBarStatusIngress(_ snapshot: StatusSnapshot) {

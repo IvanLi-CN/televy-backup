@@ -284,6 +284,10 @@ private func testFailureLatchLifecycle() {
         !daemonFailureLatch.isActive(now: now.addingTimeInterval(1)),
         "a new daemon session must not retain the prior daemon failure latch"
     )
+    expectMenuBar(
+        presentation(historicalFailure, failure: daemonFailureLatch.isActive(now: now.addingTimeInterval(1))).activity == .idle,
+        "clearing a daemon session must reproject the menu bar without failure"
+    )
 
     let localFailureLatch = MenuBarFailureLatch()
     localFailureLatch.observeLocalTask(
