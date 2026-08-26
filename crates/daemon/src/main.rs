@@ -508,10 +508,12 @@ impl StatusRuntimeState {
         }
     }
 
+    #[cfg(test)]
     fn mark_run_start(&mut self, target_id: &str) {
         self.mark_run_start_with_phase(target_id, "running");
     }
 
+    #[cfg(test)]
     fn mark_backup_run_start(&mut self, target_id: &str) {
         self.mark_run_start_with_phase(target_id, "connecting");
     }

@@ -4,8 +4,8 @@
 
 ## Current Status
 
-- Implementation: in progress
-- Lifecycle: active
+- Implementation: complete
+- Lifecycle: ready for validation
 - Catalog note: active-task status contract and menu-bar projection are implemented together.
 
 ## Coverage / rollout summary
@@ -13,9 +13,10 @@
 - daemon status snapshot、control IPC、CLI task events and macOS menu bar share the `activeTask` contract.
 - The menu-bar rate preference is machine-local and excluded from portable configuration.
 
-## Remaining Gaps
+## Validation Status
 
-- Complete implementation and record validation evidence.
+- Rust and Swift focused tests cover the status contract, live failure lifecycle, task mutual exclusion, rate preference, and status icon rendering.
+- Controlled AppKit previews cover both Release and Dev status icons; the owner has confirmed the final icon treatment.
 
 ## Related Changes
 

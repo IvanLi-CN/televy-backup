@@ -529,27 +529,27 @@ fn handle_request(
                 );
             }
 
-            if let Ok(mut st) = status_state.lock() {
-                if let Err(active_kind) = st.mark_external_run_start(
+            if let Ok(mut st) = status_state.lock()
+                && let Err(active_kind) = st.mark_external_run_start(
                     &params.target_id,
                     &params.task_id,
                     &params.kind,
                     params.process_id,
                     params.logging,
-                ) {
-                    return ControlResponse::err(
-                        req.id.clone(),
-                        ControlError {
-                            code: "target_busy".to_string(),
-                            message: "target already has an active task".to_string(),
-                            retryable: true,
-                            details: serde_json::json!({
-                                "targetId": params.target_id,
-                                "activeKind": active_kind,
-                            }),
-                        },
-                    );
-                }
+                )
+            {
+                return ControlResponse::err(
+                    req.id.clone(),
+                    ControlError {
+                        code: "target_busy".to_string(),
+                        message: "target already has an active task".to_string(),
+                        retryable: true,
+                        details: serde_json::json!({
+                            "targetId": params.target_id,
+                            "activeKind": active_kind,
+                        }),
+                    },
+                );
             }
             ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
         }

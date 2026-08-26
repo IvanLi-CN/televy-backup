@@ -3,9 +3,17 @@ set -euo pipefail
 
 out_dir="${1:-}"
 if [[ -z "$out_dir" ]]; then
-  echo "Usage: $0 <out-dir>" >&2
+  echo "Usage: $0 <out-dir> [dev|release]" >&2
   exit 2
 fi
+variant="${2:-dev}"
+case "$variant" in
+  dev|release) ;;
+  *)
+    echo "Variant must be dev or release" >&2
+    exit 2
+    ;;
+esac
 
 root_dir="$(git rev-parse --show-toplevel)"
 sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
@@ -23,6 +31,6 @@ xcrun swiftc \
   "$root_dir/macos/TelevyBackupApp/MenuBarStatusItemIcon.swift" \
   "$root_dir/macos/TelevyBackupAppTests/MenuBarStatusItemIconPreview.swift"
 
-"$bin_path" "$output"
+"$bin_path" "$output" "$variant"
 test -s "$output"
-echo "Wrote controlled menu-bar preview: $output" >&2
+echo "Wrote controlled $variant menu-bar preview: $output" >&2

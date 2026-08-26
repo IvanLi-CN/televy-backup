@@ -54,7 +54,7 @@
 ### SHOULD
 
 - 速率为零仍保留由 `activeTask` 或备份队列决定的活动状态。
-- Dev 徽标和状态徽标应占用不重叠的固定位置，并保持模板图像语义。
+- 菜单栏图标必须始终保留 `externaldrive` 作为产品主体。Idle 使用无透明占位的原始 `18 × 18pt` 画布；Dev Idle 必须保留既有 `externaldrive + DEV` 图像构成，不得改色、缩放、拉伸或调整徽标位置。活动状态保持同一 `18 × 18pt` 画布，并在原图右下直接叠加 `11 × 11pt` 单色圆形状态徽标；徽标外仅在与主体相接的左侧和上侧扣出 `12 × 12pt` 透明圆形净空轮廓，右侧和下侧直接贴合图像边界。内部再扣出箭头、勾选或双向箭头。主体本身不得改色或变形。错误状态的主盘体继续保持原色；同位置的右下警告标记只使用一种红色，感叹号以透明镂空呈现。
 - 所有菜单栏状态映射应位于可脱离 AppKit 测试的纯 Swift 类型中。
 
 ### COULD
@@ -120,11 +120,17 @@
 
 ## Visual Evidence
 
+Release 受控菜单栏预览。
+
 PR: include
 
-受控菜单栏预览状态。
+![Release menu bar activity states](./assets/menu-bar-activity-states-release.png)
 
-![Menu bar activity states](./assets/menu-bar-activity-states.png)
+Dev 受控菜单栏预览。
+
+PR: include
+
+![Dev menu bar activity states](./assets/menu-bar-activity-states-dev.png)
 
 ## Related PRs
 

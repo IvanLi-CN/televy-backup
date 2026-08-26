@@ -4433,6 +4433,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuBarStatusItemIcon.image(for: activity, isDev: isDevAppVariant())
     }
 
+    private func statusItemName() -> String {
+        isDevAppVariant() ? "TelevyBackup Dev" : "TelevyBackup"
+    }
+
     private func localMenuBarTask() -> MenuBarLocalTask? {
         guard let task = ModelStore.shared.taskPresentationStore.activeTask else { return nil }
         return MenuBarLocalTask(id: task.id, kind: task.kind, state: task.state)
@@ -4450,7 +4454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         if appliedMenuBarPresentation?.activity != presentation.activity {
             button.image = makeStatusItemImage(for: presentation.activity)
-            button.toolTip = "TelevyBackup: \(presentation.activity.accessibilityDescription)"
+            button.toolTip = "\(statusItemName()): \(presentation.activity.accessibilityDescription)"
         }
         if appliedMenuBarPresentation?.title != presentation.title {
             button.title = presentation.title
