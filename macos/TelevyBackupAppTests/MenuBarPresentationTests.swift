@@ -188,13 +188,52 @@ private func testFailurePriorityAndRates() {
     let output = presentation(snapshot, failure: true, rates: true)
     expectMenuBar(output.activity == .failure, "live failure must take priority")
     expectMenuBar(
-        output.title == "\u{2191} 1.0 KB/s \u{2193} 2.0 KB/s",
+        output.title == "\u{2191} 1.0K/s \u{2193} 2.0K/s",
         "failure should preserve active-direction rates"
     )
     expectMenuBar(presentation(snapshot, rates: false).title.isEmpty, "rates are hidden by default")
     expectMenuBar(
         presentation(snapshot, phase: .stale, rates: true).title.isEmpty,
         "stale snapshots must not render rates"
+    )
+}
+
+private func testRateSlots() {
+    let cases: [(Int64?, String)] = [
+        (nil, "----"),
+        (-1, "----"),
+        (0, "  0B"),
+        (12, " 12B"),
+        (999, "999B"),
+        (1_000, "1.0K"),
+        (1_024, "1.0K"),
+        (10 * 1_024, " 10K"),
+        (999 * 1_024, "999K"),
+        (1_023 * 1_024, "1.0M"),
+        (10 * 1_024 * 1_024, " 10M"),
+        (Int64.max, "8.0E"),
+    ]
+    for (bytesPerSecond, expected) in cases {
+        let actual = MenuBarRateSlot.format(bytesPerSecond)
+        expectMenuBar(actual == expected, "rate slot \(String(describing: bytesPerSecond)) should be \(expected), got \(actual)")
+        expectMenuBar(actual.count == MenuBarRateSlot.width, "rate slot must always occupy four characters")
+    }
+
+    let active = menuSnapshot(
+        targets: [menuTarget(id: "backup", state: "running", activity: StatusActiveTask(kind: "backup", directions: ["up"]))],
+        up: nil
+    )
+    expectMenuBar(
+        presentation(active, rates: true).title == "\u{2191} ----/s",
+        "an active direction with an unavailable rate must retain its reserved slot"
+    )
+    let zero = menuSnapshot(
+        targets: [menuTarget(id: "backup", state: "running", activity: StatusActiveTask(kind: "backup", directions: ["up"]))],
+        up: 0
+    )
+    expectMenuBar(
+        presentation(zero, rates: true).title == "\u{2191}   0B/s",
+        "zero rate must retain its active direction and fixed slot"
     )
 }
 
@@ -397,6 +436,7 @@ enum MenuBarPresentationTestsMain {
         testActivityMatrix()
         testActiveTaskDecodingIsForwardCompatible()
         testFailurePriorityAndRates()
+        testRateSlots()
         testFailureLatchLifecycle()
         testLocalTaskAndPreference()
         print("OK: MenuBarPresentationTests")

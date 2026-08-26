@@ -4505,10 +4505,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.toolTip = "\(statusItemName()): \(presentation.activity.accessibilityDescription)"
         }
         if appliedMenuBarPresentation?.title != presentation.title {
-            button.title = presentation.title
+            button.attributedTitle = menuBarRateAttributedTitle(presentation.title)
         }
         appliedMenuBarPresentation = presentation
         scheduleMenuBarFailureExpiry()
+    }
+
+    private func menuBarRateAttributedTitle(_ title: String) -> NSAttributedString {
+        NSAttributedString(
+            string: title,
+            attributes: title.isEmpty ? [:] : [
+                .font: NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular),
+            ]
+        )
     }
 
     private func scheduleMenuBarFailureExpiry() {

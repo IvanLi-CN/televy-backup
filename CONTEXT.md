@@ -20,6 +20,10 @@ _Avoid_: Per-target status
 The upload or download data-flow declared by an active task, including periods when its current transfer rate is zero.
 _Avoid_: Current network rate
 
+**Menu Bar Rate Slot**:
+A fixed-width, four-character field for one visible Transfer Direction in the macOS menu bar. It is rendered in a monospaced font, is separate from the arrow and `/s` suffix, and prevents instantaneous rate formatting from changing the status item's measured width.
+_Avoid_: Detailed transfer rate
+
 **Bidirectional Sync**:
 A Menu Bar Activity State in which upload and download activities coexist, or a native sync activity declares both directions.
 _Avoid_: Two-way backup

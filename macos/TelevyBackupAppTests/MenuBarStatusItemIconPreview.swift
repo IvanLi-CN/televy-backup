@@ -20,7 +20,7 @@ enum MenuBarStatusItemIconPreview {
             fputs("Variant must be dev or release\n", stderr)
             exit(2)
         }
-        let size = NSSize(width: 900, height: 180)
+        let size = NSSize(width: 858, height: 160)
         let image = NSImage(size: size)
         image.lockFocus()
         NSColor(calibratedWhite: 0.95, alpha: 1).setFill()
@@ -31,11 +31,11 @@ enum MenuBarStatusItemIconPreview {
 
         let states: [(MenuBarActivityState, String)] = [
             (.idle, ""),
-            (.backup, "\u{2191} 12.4 MB/s"),
-            (.restore, "\u{2193} 8.1 MB/s"),
+            (.backup, "\u{2191} \(MenuBarRateSlot.format(12 * 1_024 * 1_024))/s"),
+            (.restore, "\u{2193} \(MenuBarRateSlot.format(8 * 1_024 * 1_024 + 102_400))/s"),
             (.verify, ""),
-            (.bidirectional, "\u{2191} 12.4 MB/s  \u{2193} 8.1 MB/s"),
-            (.failure, "\u{2191} 12.4 MB/s  \u{2193} 8.1 MB/s"),
+            (.bidirectional, "\u{2191} \(MenuBarRateSlot.format(12 * 1_024 * 1_024))/s \u{2193} \(MenuBarRateSlot.format(8 * 1_024 * 1_024 + 102_400))/s"),
+            (.failure, "\u{2191} \(MenuBarRateSlot.format(12 * 1_024 * 1_024))/s \u{2193} \(MenuBarRateSlot.format(8 * 1_024 * 1_024 + 102_400))/s"),
         ]
         let slotWidth = barWidth / 3
 
@@ -43,7 +43,7 @@ enum MenuBarStatusItemIconPreview {
             let row = index / 3
             let column = index % 3
             let bar = NSRect(
-                x: 20,
+                x: 16,
                 y: row == 0 ? 106 : 52,
                 width: barWidth,
                 height: barHeight
@@ -104,13 +104,13 @@ enum MenuBarStatusItemIconPreview {
 
         let variantName = isDev ? "Dev" : "Release"
         let caption = NSAttributedString(
-            string: "\(variantName) base icon is unchanged; status directly overlays its lower-right corner. Blue: image canvas.",
+            string: "\(variantName) base icon is unchanged; status directly overlays its lower-right corner. Rate slots use the monospaced four-character format. Blue: image canvas.",
             attributes: [
                 .font: NSFont.systemFont(ofSize: 11, weight: .medium),
                 .foregroundColor: NSColor(calibratedWhite: 0.34, alpha: 1),
             ]
         )
-        caption.draw(at: NSPoint(x: 20, y: 14))
+        caption.draw(at: NSPoint(x: 16, y: 15.5))
         image.unlockFocus()
 
         guard let tiff = image.tiffRepresentation,

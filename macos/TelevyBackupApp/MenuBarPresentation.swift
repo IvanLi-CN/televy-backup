@@ -1,5 +1,46 @@
 import Foundation
 
+enum MenuBarRateSlot {
+    static let width = 4
+
+    private static let units = ["B", "K", "M", "G", "T", "P", "E"]
+    private static let posixLocale = Locale(identifier: "en_US_POSIX")
+
+    static func format(_ bytesPerSecond: Int64?) -> String {
+        guard let bytesPerSecond, bytesPerSecond >= 0 else {
+            return "----"
+        }
+
+        var value = Double(bytesPerSecond)
+        var unitIndex = 0
+        while value >= 1024, unitIndex < units.count - 1 {
+            value /= 1024
+            unitIndex += 1
+        }
+
+        while true {
+            let number: String
+            if unitIndex == 0 {
+                number = String(Int64(value))
+            } else if value < 9.95 {
+                number = String(format: "%.1f", locale: posixLocale, value)
+            } else {
+                number = String(format: "%.0f", locale: posixLocale, value)
+            }
+
+            let slot = number + units[unitIndex]
+            if slot.count <= width {
+                return String(repeating: " ", count: width - slot.count) + slot
+            }
+
+            // Promote before a value would exceed the four-character presentation contract.
+            precondition(unitIndex < units.count - 1, "Int64 rates must fit within the compact unit range")
+            value /= 1024
+            unitIndex += 1
+        }
+    }
+}
+
 struct MenuBarLocalTask: Equatable {
     var id: String
     var kind: String
@@ -96,18 +137,17 @@ struct MenuBarPresentation: Equatable {
         showsTransferRates: Bool
     ) -> String {
         guard showsTransferRates,
-              connectionPhase == .fresh,
-              let global = snapshot?.global
+              connectionPhase == .fresh
         else {
             return ""
         }
 
         var parts: [String] = []
-        if directions.contains("up"), let bytes = global.up.bytesPerSecond, bytes >= 0 {
-            parts.append("\u{2191} \(formatBytes(bytes))/s")
+        if directions.contains("up") {
+            parts.append("\u{2191} \(MenuBarRateSlot.format(snapshot?.global.up.bytesPerSecond))/s")
         }
-        if directions.contains("down"), let bytes = global.down.bytesPerSecond, bytes >= 0 {
-            parts.append("\u{2193} \(formatBytes(bytes))/s")
+        if directions.contains("down") {
+            parts.append("\u{2193} \(MenuBarRateSlot.format(snapshot?.global.down.bytesPerSecond))/s")
         }
         return parts.joined(separator: " ")
     }

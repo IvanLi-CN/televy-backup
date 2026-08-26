@@ -61,5 +61,6 @@ type StatusTaskFinishParams = {
 ## macOS presentation
 
 - `showMenuBarTransferRates` 是 `UserDefaults` Boolean，缺失值表示 `false`。
-- 显示 `global.up.bytesPerSecond` / `global.down.bytesPerSecond` 时使用既有二进制单位格式。只要至少一个当前活动声明相应方向且值非负，即可显示该方向。
+- 显示 `global.up.bytesPerSecond` / `global.down.bytesPerSecond` 时，每个当前活动声明方向使用一个右对齐、等宽的四字符速率槽；箭头与 `/s` 后缀不计入槽宽。单位按二进制量级选择并压缩为单字符 `B/K/M/G/T/P/E`，小于 `10` 的非字节量级保留一位小数，其余显示整数。读数在当前量级下将超过四字符时立即进位。
+- 声明方向的零速显示 `0B`；速率缺失或负值显示 `----`，不得移除该方向段。只有连接不再 fresh 时才隐藏全部速率。
 - 状态优先级为 live failure latch、bidirectional、backup、restore、verify、idle。failure latch 由 live transition 激活，10 秒后过期，绝不持久化。相同 live 任务的本地事件和 daemon 终态共享一个期限；不同任务拥有独立期限。
