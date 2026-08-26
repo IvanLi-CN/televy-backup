@@ -106,6 +106,66 @@ private func testActivityMatrix() {
     )
 }
 
+private func testActiveTaskDecodingIsForwardCompatible() {
+    let json = """
+    {
+      "type": "status.snapshot",
+      "schemaVersion": 1,
+      "generatedAt": 1000,
+      "source": { "kind": "daemon" },
+      "global": {
+        "up": {},
+        "down": {},
+        "upTotal": {},
+        "downTotal": {}
+      },
+      "targets": [
+        {
+          "targetId": "missing-fields",
+          "sourcePath": "/tmp/missing-fields",
+          "endpointId": "endpoint",
+          "enabled": true,
+          "state": "idle",
+          "up": {},
+          "upTotal": {},
+          "activeTask": {}
+        },
+        {
+          "targetId": "unknown-kind",
+          "sourcePath": "/tmp/unknown-kind",
+          "endpointId": "endpoint",
+          "enabled": true,
+          "state": "idle",
+          "up": {},
+          "upTotal": {},
+          "activeTask": { "kind": "archive", "directions": ["up"] }
+        },
+        {
+          "targetId": "wrong-field-types",
+          "sourcePath": "/tmp/wrong-field-types",
+          "endpointId": "endpoint",
+          "enabled": true,
+          "state": "idle",
+          "up": {},
+          "upTotal": {},
+          "activeTask": { "kind": ["backup"], "directions": "up" }
+        }
+      ]
+    }
+    """
+
+    let snapshot = try! JSONDecoder().decode(StatusSnapshot.self, from: Data(json.utf8))
+    expectMenuBar(snapshot.targets.count == 3, "incomplete activeTask must not discard the status snapshot")
+    expectMenuBar(
+        snapshot.targets.allSatisfy { $0.activeTask?.isSupported == false },
+        "incomplete or unknown activity must not become a supported menu bar activity"
+    )
+    expectMenuBar(
+        presentation(snapshot).activity == .idle,
+        "incomplete or unknown activity must not change the menu bar state"
+    )
+}
+
 private func testFailurePriorityAndRates() {
     let snapshot = menuSnapshot(
         targets: [
@@ -283,6 +343,7 @@ private func testLocalTaskAndPreference() {
 enum MenuBarPresentationTestsMain {
     static func main() {
         testActivityMatrix()
+        testActiveTaskDecodingIsForwardCompatible()
         testFailurePriorityAndRates()
         testFailureLatchLifecycle()
         testLocalTaskAndPreference()

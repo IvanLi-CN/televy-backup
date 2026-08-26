@@ -41,7 +41,7 @@ struct MenuBarPresentation: Equatable {
 
         if connectionPhase == .fresh, let snapshot {
             for target in snapshot.targets {
-                if let activity = target.activeTask {
+                if let activity = target.activeTask, activity.isSupported {
                     addActivity(kind: activity.kind, activityDirections: activity.directions)
                 }
                 if target.backupQueue?.activeBatchId != nil || target.backupQueue?.pendingBatchId != nil {
@@ -142,7 +142,7 @@ final class MenuBarFailureLatch {
         }
 
         for target in snapshot.targets {
-            let isActive = target.activeTask != nil || target.state == "running"
+            let isActive = target.activeTask?.isSupported == true || target.state == "running"
             if isActive {
                 if observedActiveTargetIds.insert(target.targetId).inserted {
                     beginStatusActivity(for: target.targetId)

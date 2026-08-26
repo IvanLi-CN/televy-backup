@@ -7375,6 +7375,26 @@ mod control_ipc_tests {
         }
     }
 
+    fn assert_no_control_request(listener: &UnixListener) {
+        listener
+            .set_nonblocking(true)
+            .expect("set control listener nonblocking");
+        let deadline = Instant::now() + Duration::from_millis(250);
+
+        loop {
+            match listener.accept() {
+                Ok((_stream, _addr)) => panic!("terminal status report exceeded three attempts"),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept unexpected control request: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn control_ipc_missing_socket_maps_to_control_unavailable() {
         let dir = tempfile::tempdir().unwrap();
@@ -7786,6 +7806,7 @@ mod control_ipc_tests {
                     stream.write_all(resp_line.as_bytes()).unwrap();
                     stream.flush().unwrap();
                 }
+                assert_no_control_request(&listener);
             }
         });
 
