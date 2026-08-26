@@ -529,29 +529,57 @@ fn handle_request(
                 );
             }
 
-            if let Ok(mut st) = status_state.lock()
-                && let Err(active_kind) = st.mark_external_run_start(
-                    &params.target_id,
-                    &params.task_id,
-                    &params.kind,
-                    params.process_id,
-                    params.logging,
-                )
-            {
-                return ControlResponse::err(
+            let mut st = match status_state.lock() {
+                Ok(st) => st,
+                Err(_) => {
+                    return ControlResponse::err(
+                        req.id.clone(),
+                        ControlError::unavailable(
+                            "status task admission unavailable",
+                            serde_json::json!({ "targetId": params.target_id }),
+                        ),
+                    );
+                }
+            };
+            match st.mark_external_run_start(
+                &params.target_id,
+                &params.task_id,
+                &params.kind,
+                params.process_id,
+                params.logging,
+            ) {
+                Ok(()) => ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true })),
+                Err(crate::ExternalTaskAdmissionError::TargetBusy(active_kind)) => {
+                    ControlResponse::err(
+                        req.id.clone(),
+                        ControlError {
+                            code: "target_busy".to_string(),
+                            message: "target already has an active task".to_string(),
+                            retryable: true,
+                            details: serde_json::json!({
+                                "targetId": params.target_id,
+                                "activeKind": active_kind,
+                            }),
+                        },
+                    )
+                }
+                Err(crate::ExternalTaskAdmissionError::TargetNotFound) => ControlResponse::err(
                     req.id.clone(),
                     ControlError {
-                        code: "target_busy".to_string(),
-                        message: "target already has an active task".to_string(),
+                        code: "target_not_found".to_string(),
+                        message: "target is not loaded by daemon".to_string(),
                         retryable: true,
-                        details: serde_json::json!({
-                            "targetId": params.target_id,
-                            "activeKind": active_kind,
-                        }),
+                        details: serde_json::json!({ "targetId": params.target_id }),
                     },
-                );
+                ),
+                Err(crate::ExternalTaskAdmissionError::UnsupportedKind) => ControlResponse::err(
+                    req.id.clone(),
+                    ControlError::invalid_request(
+                        "unsupported task kind",
+                        serde_json::json!({ "kind": params.kind }),
+                    ),
+                ),
             }
-            ControlResponse::ok(req.id.clone(), serde_json::json!({ "ok": true }))
         }
         "status.taskProgress" => {
             let params: StatusTaskProgressParams = match serde_json::from_value(req.params.clone())
@@ -605,6 +633,25 @@ fn handle_request(
                     );
                 }
             };
+
+            if televy_backup_core::status::ActiveTask::for_kind(&params.kind).is_none() {
+                return ControlResponse::err(
+                    req.id.clone(),
+                    ControlError::invalid_request(
+                        "unsupported task kind",
+                        serde_json::json!({ "kind": params.kind }),
+                    ),
+                );
+            }
+            if !matches!(params.state.as_str(), "succeeded" | "failed") {
+                return ControlResponse::err(
+                    req.id.clone(),
+                    ControlError::invalid_request(
+                        "unsupported task terminal state",
+                        serde_json::json!({ "state": params.state }),
+                    ),
+                );
+            }
 
             if let Ok(mut st) = status_state.lock() {
                 st.mark_external_run_finish(
@@ -1368,6 +1415,96 @@ mod tests {
     }
 
     #[test]
+    fn status_task_start_rejects_targets_missing_from_runtime_state() {
+        let config_root = std::path::Path::new("/tmp");
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let context = test_context(
+            config_root,
+            status_state,
+            Arc::new(Mutex::new(crate::BackupQueue::default())),
+            Arc::new(Notify::new()),
+            Arc::new(crate::DaemonLifecycle::default()),
+        );
+        let runtime_logging = televy_backup_core::local_settings::resolve(config_root);
+        let response = handle_request(
+            &ControlRequest::new(
+                "restore",
+                "status.taskStart",
+                serde_json::json!({
+                    "taskId": "restore-1",
+                    "kind": "restore",
+                    "targetId": "missing"
+                }),
+            ),
+            &context,
+            &settings(),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: config_root,
+                log_bytes: None,
+                managed_log_usage: None,
+            },
+        );
+
+        assert!(!response.ok);
+        let error = response.error.expect("target not found error");
+        assert_eq!(error.code, "target_not_found");
+        assert!(error.retryable);
+    }
+
+    #[test]
+    fn status_task_start_fails_closed_when_status_state_is_poisoned() {
+        let config_root = std::path::Path::new("/tmp");
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let poisoned = status_state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned
+                .lock()
+                .expect("status state should lock before poisoning");
+            panic!("poison status state");
+        })
+        .join();
+
+        let context = test_context(
+            config_root,
+            status_state,
+            Arc::new(Mutex::new(crate::BackupQueue::default())),
+            Arc::new(Notify::new()),
+            Arc::new(crate::DaemonLifecycle::default()),
+        );
+        let runtime_logging = televy_backup_core::local_settings::resolve(config_root);
+        let response = handle_request(
+            &ControlRequest::new(
+                "restore",
+                "status.taskStart",
+                serde_json::json!({
+                    "taskId": "restore-1",
+                    "kind": "restore",
+                    "targetId": "t1"
+                }),
+            ),
+            &context,
+            &settings(),
+            &LoggingStatusContext {
+                runtime: &runtime_logging,
+                data_root: config_root,
+                log_bytes: None,
+                managed_log_usage: None,
+            },
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.expect("admission unavailable error").code,
+            "control.unavailable"
+        );
+    }
+
+    #[test]
     fn status_task_finish_preserves_external_failure_code() {
         let config_root = std::path::Path::new("/tmp");
         let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
@@ -1431,6 +1568,66 @@ mod tests {
                 .and_then(|run| run.error_code.as_deref()),
             Some("restore.network_failed")
         );
+    }
+
+    #[test]
+    fn status_task_finish_rejects_unknown_terminal_state_without_releasing_target() {
+        let config_root = std::path::Path::new("/tmp");
+        let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
+            &settings(),
+        )));
+        let context = test_context(
+            config_root,
+            status_state.clone(),
+            Arc::new(Mutex::new(crate::BackupQueue::default())),
+            Arc::new(Notify::new()),
+            Arc::new(crate::DaemonLifecycle::default()),
+        );
+        let runtime_logging = televy_backup_core::local_settings::resolve(config_root);
+        let logging = LoggingStatusContext {
+            runtime: &runtime_logging,
+            data_root: config_root,
+            log_bytes: None,
+            managed_log_usage: None,
+        };
+
+        let started = handle_request(
+            &ControlRequest::new(
+                "restore",
+                "status.taskStart",
+                serde_json::json!({
+                    "taskId": "restore-1",
+                    "kind": "restore",
+                    "targetId": "t1"
+                }),
+            ),
+            &context,
+            &settings(),
+            &logging,
+        );
+        assert!(started.ok);
+
+        let finished = handle_request(
+            &ControlRequest::new(
+                "restore-finish",
+                "status.taskFinish",
+                serde_json::json!({
+                    "taskId": "restore-1",
+                    "kind": "restore",
+                    "targetId": "t1",
+                    "state": "cancelled"
+                }),
+            ),
+            &context,
+            &settings(),
+            &logging,
+        );
+        assert!(!finished.ok);
+        assert_eq!(
+            finished.error.expect("invalid state error").code,
+            "control.invalid_request"
+        );
+        assert_eq!(status_state.lock().unwrap().targets["t1"].state, "running");
     }
 
     #[test]

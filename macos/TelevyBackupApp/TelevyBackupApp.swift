@@ -217,6 +217,7 @@ final class AppModel {
     private var statusStreamTask: Process? = nil
     private var statusStreamReconnectWork: DispatchWorkItem? = nil
     private var statusStreamBackoffSeconds: Double = 0.5
+    var onStatusStreamEnded: (() -> Void)?
     private var daemonTask: Process? = nil
     private var daemonIpcRetryWork: DispatchWorkItem? = nil
     private var lastDaemonStartAttemptAt: Date? = nil
@@ -890,6 +891,7 @@ final class AppModel {
                 out.fileHandleForReading.readabilityHandler = nil
                 err.fileHandleForReading.readabilityHandler = nil
                 self.statusStreamTask = nil
+                self.onStatusStreamEnded?()
                 self.scheduleStatusStreamReconnect()
             }
         }
@@ -1678,6 +1680,7 @@ final class AppModel {
 
     func restoreLatest(targetId: String, destinationPath: String) {
         guard let cli = cliPath() else {
+            recordLocalTaskFailure(kind: "restore", errorCode: "cli.not_found")
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
@@ -1703,6 +1706,7 @@ final class AppModel {
 
     func verifyLatest(targetId: String) {
         guard let cli = cliPath() else {
+            recordLocalTaskFailure(kind: "verify", errorCode: "cli.not_found")
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
@@ -2766,6 +2770,31 @@ final class AppModel {
         }
     }
 
+    private func recordLocalTaskFailure(kind: String, errorCode: String) {
+        let now = Date()
+        let runningTask = activeTask?.state == "running" ? activeTask : nil
+        let taskId = runningTask?.id ?? "local-\(UUID().uuidString)"
+        activeTask = ActiveTask(
+            id: taskId,
+            kind: runningTask?.kind ?? kind,
+            state: "failed",
+            targetId: runningTask?.targetId,
+            snapshotId: runningTask?.snapshotId,
+            progress: runningTask?.progress,
+            startedAt: runningTask?.startedAt ?? now,
+            updatedAt: now,
+            error: ActiveTaskError(code: errorCode, message: nil)
+        )
+        lastTaskKind = kind
+        lastTaskState = "failed"
+        lastRunErrorCode = errorCode
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + MenuBarFailureLatch.duration) {
+            guard self.activeTask?.id == taskId, self.activeTask?.state == "failed" else { return }
+            self.activeTask = nil
+        }
+    }
+
     private func runProcess(
         exe: String,
         args: [String],
@@ -2775,6 +2804,9 @@ final class AppModel {
         updateTaskState: Bool = true,
         onExit: ((Int32) -> Void)? = nil
     ) {
+        let eventTaskKind = updateTaskState
+            ? MenuBarLocalTask.eventTaskKind(commandArguments: args)
+            : nil
         if updateTaskState {
             DispatchQueue.main.async {
                 self.isRunning = true
@@ -2904,6 +2936,7 @@ final class AppModel {
                     self.isRunning = false
                     self.phase = "idle"
                     if status != 0 {
+                        let receivedTaskFailure = self.lastTaskState == "failed"
                         self.lastRunOk = false
                         self.lastBytesUploaded = self.currentBytesUploaded
                         self.lastBytesDeduped = self.currentBytesDeduped
@@ -2912,8 +2945,14 @@ final class AppModel {
                         }
                         self.lastRunAt = Date()
                         self.taskStartedAt = nil
-                        if self.lastTaskState != "failed" {
-                            let k = self.lastTaskKind ?? "task"
+                        if !receivedTaskFailure, let eventTaskKind {
+                            self.recordLocalTaskFailure(
+                                kind: eventTaskKind,
+                                errorCode: "task.process_failed"
+                            )
+                        }
+                        if !receivedTaskFailure {
+                            let k = eventTaskKind ?? self.lastTaskKind ?? "task"
                             self.showToast("\(k.capitalized) failed", isError: true)
                         }
                     }
@@ -2955,6 +2994,7 @@ final class AppModel {
     private func enqueueBackup(targetIds: [String], allEnabled: Bool) {
         guard canEnqueueBackup() else { return }
         guard let cli = cliPath() else {
+            recordLocalTaskFailure(kind: "backup", errorCode: "cli.not_found")
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             showToast("Backup could not start", isError: true)
             return
@@ -2971,6 +3011,7 @@ final class AppModel {
         )
         guard ensureDaemonRunning() else {
             backupRequest = nil
+            recordLocalTaskFailure(kind: "backup", errorCode: "daemon.unavailable")
             appendLog("ERROR: backup enqueue failed: daemon IPC was not ready")
             appendStatusActivity("Backup enqueue failed")
             showToast("Backup could not start: daemon unavailable", isError: true)
@@ -2995,6 +3036,7 @@ final class AppModel {
                       let response = try? JSONDecoder().decode(BackupEnqueueResponse.self, from: data)
                 else {
                     let error = self.backupEnqueueErrorMessage(stderr: result.stderr)
+                    self.recordLocalTaskFailure(kind: "backup", errorCode: "backup.enqueue_failed")
                     self.appendLog("ERROR: backup enqueue failed: exit=\(result.status) reason=\(result.reason.rawValue) \(result.stderr.prefix(2000))")
                     self.appendStatusActivity("Backup enqueue failed")
                     self.backupRequest = nil
@@ -4391,6 +4433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables: Set<AnyCancellable> = []
     private let menuBarFailureLatch = MenuBarFailureLatch()
     private var menuBarFailureExpiryWork: DispatchWorkItem?
+    private var menuBarLastStatusIngressAt: Date?
     private var appliedMenuBarPresentation: MenuBarPresentation?
     private var popoverHost: NSHostingController<AnyView>? = nil
     private var popoverResizeScheduled: Bool = false
@@ -4479,14 +4522,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
+    private func resetMenuBarStatusSession() {
+        menuBarLastStatusIngressAt = nil
+        menuBarFailureLatch.resetStatusSession()
+    }
+
+    private func observeMenuBarStatusIngress(_ snapshot: StatusSnapshot) {
+        let now = Date()
+        if MenuBarFailureLatch.requiresStatusSessionReset(
+            previousIngressAt: menuBarLastStatusIngressAt,
+            now: now,
+            maximumGap: TimeInterval(StatusFreshness.staleMs) / 1_000
+        ) {
+            menuBarFailureLatch.resetStatusSession()
+        }
+        menuBarLastStatusIngressAt = now
+        menuBarFailureLatch.observeStatus(snapshot: snapshot, connectionPhase: .fresh, now: now)
+        refreshMenuBarPresentation()
+    }
+
     private func bindMenuBarPresentation() {
+        ModelStore.shared.onStatusStreamEnded = { [weak self] in
+            self?.resetMenuBarStatusSession()
+        }
         ModelStore.shared.statusStore.onIngress = { [weak self] snapshot in
-            let observe = {
-                self?.menuBarFailureLatch.observeStatus(
-                    snapshot: snapshot,
-                    connectionPhase: .fresh
-                )
-                self?.refreshMenuBarPresentation()
+            let observe: () -> Void = {
+                self?.observeMenuBarStatusIngress(snapshot)
             }
             if Thread.isMainThread {
                 observe()
@@ -4497,11 +4558,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         ModelStore.shared.statusStore.$state
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] state in
-                self?.menuBarFailureLatch.observeStatus(
-                    snapshot: state.snapshot,
-                    connectionPhase: state.connectionPhase
-                )
+            .sink { [weak self] _ in
                 self?.refreshMenuBarPresentation()
             }
             .store(in: &cancellables)
@@ -4520,7 +4577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in self?.refreshMenuBarPresentation() }
             .store(in: &cancellables)
 
-        NSApplication.shared.publisher(for: \.effectiveAppearance)
+        statusItem?.button?.publisher(for: \.effectiveAppearance)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.appliedMenuBarPresentation = nil

@@ -4,6 +4,11 @@ struct MenuBarLocalTask: Equatable {
     var id: String
     var kind: String
     var state: String
+
+    static func eventTaskKind(commandArguments: [String]) -> String? {
+        guard commandArguments.contains("--events") else { return nil }
+        return ["backup", "restore", "verify"].first { commandArguments.contains($0) }
+    }
 }
 
 struct MenuBarPresentation: Equatable {
@@ -120,7 +125,7 @@ final class MenuBarFailureLatch {
         now: Date = Date()
     ) {
         guard connectionPhase == .fresh, let snapshot else {
-            observedActiveTargetIds.removeAll()
+            resetStatusSession()
             return
         }
 
@@ -148,6 +153,19 @@ final class MenuBarFailureLatch {
         if task.state == "succeeded" || task.state == "cancelled" {
             localTaskStates.removeValue(forKey: task.id)
         }
+    }
+
+    func resetStatusSession() {
+        observedActiveTargetIds.removeAll()
+    }
+
+    static func requiresStatusSessionReset(
+        previousIngressAt: Date?,
+        now: Date,
+        maximumGap: TimeInterval
+    ) -> Bool {
+        guard let previousIngressAt else { return false }
+        return now.timeIntervalSince(previousIngressAt) > maximumGap
     }
 
     func isActive(now: Date = Date()) -> Bool {

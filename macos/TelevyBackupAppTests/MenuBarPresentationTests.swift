@@ -148,7 +148,7 @@ private func testFailureLatchLifecycle() {
 
     let reconnectLatch = MenuBarFailureLatch()
     reconnectLatch.observeStatus(snapshot: running, connectionPhase: .fresh, now: now)
-    reconnectLatch.observeStatus(snapshot: nil, connectionPhase: .stale, now: now.addingTimeInterval(1))
+    reconnectLatch.resetStatusSession()
     reconnectLatch.observeStatus(
         snapshot: historicalFailure,
         connectionPhase: .fresh,
@@ -158,12 +158,36 @@ private func testFailureLatchLifecycle() {
         !reconnectLatch.isActive(now: now.addingTimeInterval(2)),
         "a disconnected session must not turn a first reconnect failure into a live failure"
     )
+    expectMenuBar(
+        !MenuBarFailureLatch.requiresStatusSessionReset(
+            previousIngressAt: now,
+            now: now.addingTimeInterval(4.9),
+            maximumGap: 5
+        ),
+        "an ingress gap shorter than the stale threshold must preserve the session"
+    )
+    expectMenuBar(
+        MenuBarFailureLatch.requiresStatusSessionReset(
+            previousIngressAt: now,
+            now: now.addingTimeInterval(5.1),
+            maximumGap: 5
+        ),
+        "an ingress gap beyond the stale threshold must start a new session"
+    )
 }
 
 private func testLocalTaskAndPreference() {
     expectMenuBar(
         presentation(nil, phase: .disconnected, localTask: MenuBarLocalTask(id: "restore", kind: "restore", state: "running")).activity == .restore,
         "local live task should remain visible when status transport is disconnected"
+    )
+    expectMenuBar(
+        MenuBarLocalTask.eventTaskKind(commandArguments: ["--events", "restore", "latest"]) == "restore",
+        "event restore commands should be eligible for synthetic failure reporting"
+    )
+    expectMenuBar(
+        MenuBarLocalTask.eventTaskKind(commandArguments: ["--json", "backup", "enqueue"]) == nil,
+        "non-event commands must not synthesize a task failure"
     )
 
     let suiteName = "TelevyBackup.MenuBarPresentationTests.\(UUID().uuidString)"
