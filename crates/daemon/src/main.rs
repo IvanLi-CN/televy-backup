@@ -13,9 +13,9 @@ use base64::Engine;
 use chrono::{Datelike, Timelike};
 use sqlx::Row;
 use televy_backup_core::status::{
-    BackupQueueMembership, Counter, GlobalStatus, Progress, Rate, StatusSnapshot, StatusSource,
-    StatusWriteOptions, TargetRunSummary, TargetState, now_unix_ms, status_ipc_socket_path,
-    status_json_path, write_status_snapshot_json_atomic_with_options,
+    ActiveTask, BackupQueueMembership, Counter, GlobalStatus, Progress, Rate, StatusSnapshot,
+    StatusSource, StatusWriteOptions, TargetRunSummary, TargetState, now_unix_ms,
+    status_ipc_socket_path, status_json_path, write_status_snapshot_json_atomic_with_options,
 };
 use televy_backup_core::{
     BackupConfig, BackupOptions, ChunkingConfig, SourceQuickStats, TelegramMtProtoStorage,
@@ -308,10 +308,38 @@ fn fail_backup_queue_target(
     target_id: &str,
     error_code: &str,
 ) {
-    if let Ok(mut status) = status_state.lock() {
-        status.mark_run_finish_failure(target_id, 0.0, error_code.to_string());
-    }
+    backup_task_failed(status_state, target_id, 0.0, error_code);
     complete_backup_queue_target(queue, status_state, target_id);
+}
+
+fn backup_task_succeeded(
+    status_state: &Arc<Mutex<StatusRuntimeState>>,
+    target_id: &str,
+    duration_seconds: f64,
+    files_indexed: u64,
+    bytes_uploaded: u64,
+    bytes_deduped: u64,
+) {
+    if let Ok(mut status) = status_state.lock() {
+        status.mark_run_finish_success(
+            target_id,
+            duration_seconds,
+            files_indexed,
+            bytes_uploaded,
+            bytes_deduped,
+        );
+    }
+}
+
+fn backup_task_failed(
+    status_state: &Arc<Mutex<StatusRuntimeState>>,
+    target_id: &str,
+    duration_seconds: f64,
+    error_code: &str,
+) {
+    if let Ok(mut status) = status_state.lock() {
+        status.mark_run_finish_failure(target_id, duration_seconds, error_code.to_string());
+    }
 }
 
 fn backup_task_cancelled(
@@ -336,11 +364,15 @@ struct TargetRuntime {
     running_since: Option<u64>,
     progress: Option<Progress>,
     last_run: Option<TargetRunSummary>,
+    active_task: Option<ActiveTask>,
     backup_queue: Option<BackupQueueMembership>,
 
     // When a CLI-run task reports progress to the daemon for UI status purposes, we keep the
     // current task id here so stale updates don't clobber newer runs.
     external_task_id: Option<String>,
+    external_terminal: Option<ExternalTaskTerminal>,
+    external_process_id: Option<u32>,
+    external_last_report_at: Option<Instant>,
     external_logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
 
     up_bps: Option<u64>,
@@ -356,6 +388,51 @@ struct TargetRuntime {
 struct StatusRuntimeState {
     target_order: Vec<String>,
     targets: HashMap<String, TargetRuntime>,
+}
+
+const EXTERNAL_TASK_REPORT_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExternalTaskAdmissionError {
+    TargetNotFound,
+    TargetBusy(String),
+    UnsupportedKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalTaskTerminal {
+    task_id: String,
+    kind: String,
+    state: String,
+    error_code: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExternalTaskFinishOutcome {
+    Applied,
+    IdempotentReplay,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ExternalTaskFinishError {
+    TargetNotFound,
+    TaskNotOwned,
+}
+
+#[cfg(unix)]
+fn is_process_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    true
 }
 
 impl StatusRuntimeState {
@@ -380,8 +457,12 @@ impl StatusRuntimeState {
                     running_since: None,
                     progress: None,
                     last_run: None,
+                    active_task: None,
                     backup_queue: None,
                     external_task_id: None,
+                    external_terminal: None,
+                    external_process_id: None,
+                    external_last_report_at: None,
                     external_logging: None,
                     up_bps: None,
                     up_total_bytes: None,
@@ -415,8 +496,12 @@ impl StatusRuntimeState {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                active_task: None,
                 backup_queue: None,
                 external_task_id: None,
+                external_terminal: None,
+                external_process_id: None,
+                external_last_report_at: None,
                 external_logging: None,
                 up_bps: None,
                 up_total_bytes: None,
@@ -464,8 +549,12 @@ impl StatusRuntimeState {
                     running_since: None,
                     progress: None,
                     last_run: None,
+                    active_task: None,
                     backup_queue: None,
                     external_task_id: None,
+                    external_terminal: None,
+                    external_process_id: None,
+                    external_last_report_at: None,
                     external_logging: None,
                     up_bps: None,
                     up_total_bytes: None,
@@ -478,12 +567,22 @@ impl StatusRuntimeState {
         }
     }
 
+    #[cfg(test)]
     fn mark_run_start(&mut self, target_id: &str) {
         self.mark_run_start_with_phase(target_id, "running");
     }
 
+    #[cfg(test)]
     fn mark_backup_run_start(&mut self, target_id: &str) {
         self.mark_run_start_with_phase(target_id, "connecting");
+    }
+
+    fn try_mark_backup_run_start(&mut self, target_id: &str, phase: &str) -> bool {
+        if self.target_is_busy(target_id) {
+            return false;
+        }
+        self.mark_run_start_with_phase(target_id, phase);
+        true
     }
 
     fn mark_run_start_with_phase(&mut self, target_id: &str, phase: &str) {
@@ -491,6 +590,11 @@ impl StatusRuntimeState {
             return;
         };
         t.external_task_id = None;
+        t.external_terminal = None;
+        t.external_process_id = None;
+        t.external_last_report_at = None;
+        t.external_logging = None;
+        t.active_task = ActiveTask::for_kind("backup");
         t.state = "running".to_string();
         let now = now_unix_ms();
         t.running_since = Some(now);
@@ -524,15 +628,39 @@ impl StatusRuntimeState {
         &mut self,
         target_id: &str,
         task_id: &str,
+        kind: &str,
+        process_id: Option<u32>,
         logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
-    ) {
+    ) -> Result<(), ExternalTaskAdmissionError> {
+        let activity =
+            ActiveTask::for_kind(kind).ok_or(ExternalTaskAdmissionError::UnsupportedKind)?;
         let Some(t) = self.targets.get_mut(target_id) else {
-            return;
+            return Err(ExternalTaskAdmissionError::TargetNotFound);
         };
+
+        if t.external_task_id.as_deref() == Some(task_id)
+            && t.active_task
+                .as_ref()
+                .is_some_and(|active| active.kind == kind)
+        {
+            return Ok(());
+        }
+        if t.active_task.is_some() || t.state == "running" {
+            return Err(ExternalTaskAdmissionError::TargetBusy(
+                t.active_task
+                    .as_ref()
+                    .map(|active| active.kind.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            ));
+        }
 
         let now = now_unix_ms();
         t.external_task_id = Some(task_id.to_string());
+        t.external_terminal = None;
+        t.external_process_id = process_id.filter(|pid| *pid > 0);
+        t.external_last_report_at = Some(Instant::now());
         t.external_logging = logging;
+        t.active_task = Some(activity);
         t.state = "running".to_string();
         t.running_since = Some(now);
         t.progress = Some(Progress {
@@ -561,19 +689,30 @@ impl StatusRuntimeState {
         t.down_total_bytes = Some(0);
         t.down_bps = Some(0);
         t.down_rate.reset(Instant::now(), 0);
+        Ok(())
     }
 
-    fn on_external_progress(&mut self, target_id: &str, task_id: &str, p: TaskProgress) {
+    fn on_external_progress(
+        &mut self,
+        target_id: &str,
+        task_id: &str,
+        kind: &str,
+        p: TaskProgress,
+    ) {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
 
-        // Ignore stale updates from an earlier task.
-        match t.external_task_id.as_deref() {
-            Some(active) if active != task_id => return,
-            None => t.external_task_id = Some(task_id.to_string()),
-            _ => {}
+        // status.taskStart is the sole external admission path. Late or untrusted progress
+        // must never recreate ownership after a task has finished or been reaped.
+        let Some(active_task) = t.active_task.as_ref() else {
+            return;
+        };
+        if t.external_task_id.as_deref() != Some(task_id) || active_task.kind != kind {
+            return;
         }
+
+        t.external_last_report_at = Some(Instant::now());
 
         if t.state != "running" {
             t.state = "running".to_string();
@@ -620,17 +759,51 @@ impl StatusRuntimeState {
         }
     }
 
-    fn mark_external_run_finish(&mut self, target_id: &str, task_id: &str) {
+    fn mark_external_run_finish(
+        &mut self,
+        target_id: &str,
+        task_id: &str,
+        kind: &str,
+        state: &str,
+        error_code: Option<String>,
+    ) -> Result<ExternalTaskFinishOutcome, ExternalTaskFinishError> {
         let Some(t) = self.targets.get_mut(target_id) else {
-            return;
+            return Err(ExternalTaskFinishError::TargetNotFound);
         };
-        if t.external_task_id.as_deref() != Some(task_id) {
-            return;
+        let failed = state == "failed";
+        let terminal = ExternalTaskTerminal {
+            task_id: task_id.to_string(),
+            kind: kind.to_string(),
+            state: state.to_string(),
+            error_code: failed.then(|| error_code.unwrap_or_else(|| "task.failed".to_string())),
+        };
+
+        let owns_task = t.external_task_id.as_deref() == Some(task_id)
+            && t.active_task
+                .as_ref()
+                .is_some_and(|active| active.kind == kind);
+        if !owns_task {
+            return if t.external_terminal.as_ref() == Some(&terminal) {
+                Ok(ExternalTaskFinishOutcome::IdempotentReplay)
+            } else {
+                Err(ExternalTaskFinishError::TaskNotOwned)
+            };
         }
 
         t.external_task_id = None;
+        t.external_process_id = None;
+        t.external_last_report_at = None;
         t.external_logging = None;
-        t.state = "idle".to_string();
+        t.active_task = None;
+        t.state = if failed { "failed" } else { "idle" }.to_string();
+        let duration_seconds = t
+            .running_since
+            .map(|started| now_unix_ms().saturating_sub(started) as f64 / 1000.0);
+        let (bytes_uploaded, bytes_deduped) = t
+            .progress
+            .as_ref()
+            .map(|progress| (progress.bytes_uploaded, progress.bytes_deduped))
+            .unwrap_or((None, None));
         t.running_since = None;
         t.progress = None;
         t.up_bps = None;
@@ -640,6 +813,19 @@ impl StatusRuntimeState {
         t.down_bps = None;
         t.down_total_bytes = None;
         t.down_rate.reset(Instant::now(), 0);
+        t.external_terminal = Some(terminal.clone());
+        t.last_run = Some(TargetRunSummary {
+            finished_at: Some(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+            duration_seconds,
+            status: Some(if failed { "failed" } else { "succeeded" }.to_string()),
+            error_code: terminal.error_code,
+            files_indexed: None,
+            bytes_uploaded,
+            bytes_deduped,
+        });
+        Ok(ExternalTaskFinishOutcome::Applied)
     }
 
     fn on_progress(&mut self, target_id: &str, p: TaskProgress) {
@@ -694,7 +880,15 @@ impl StatusRuntimeState {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
+        if t.external_task_id.is_some()
+            || t.active_task
+                .as_ref()
+                .is_none_or(|task| task.kind != "backup")
+        {
+            return;
+        }
         t.state = "idle".to_string();
+        t.active_task = None;
         t.running_since = None;
         t.progress = None;
         t.up_bps = None;
@@ -725,7 +919,15 @@ impl StatusRuntimeState {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
+        if t.external_task_id.is_some()
+            || t.active_task
+                .as_ref()
+                .is_none_or(|task| task.kind != "backup")
+        {
+            return;
+        }
         t.state = "failed".to_string();
+        t.active_task = None;
         t.running_since = None;
         t.progress = None;
         t.up_bps = None;
@@ -751,7 +953,15 @@ impl StatusRuntimeState {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
+        if t.external_task_id.is_some()
+            || t.active_task
+                .as_ref()
+                .is_none_or(|task| task.kind != "backup")
+        {
+            return;
+        }
         t.state = "idle".to_string();
+        t.active_task = None;
         t.running_since = None;
         t.progress = None;
         t.up_bps = None;
@@ -775,6 +985,48 @@ impl StatusRuntimeState {
 
     fn has_running(&self) -> bool {
         self.targets.values().any(|t| t.state == "running")
+    }
+
+    fn target_is_busy(&self, target_id: &str) -> bool {
+        self.targets
+            .get(target_id)
+            .is_some_and(|target| target.active_task.is_some() || target.state == "running")
+    }
+
+    fn reap_finished_external_tasks(&mut self, now: Instant) {
+        self.reap_finished_external_tasks_at(now, is_process_alive);
+    }
+
+    fn reap_finished_external_tasks_at(
+        &mut self,
+        now: Instant,
+        process_is_alive: impl Fn(u32) -> bool,
+    ) {
+        let reporters_lost: Vec<(String, String, String)> = self
+            .targets
+            .iter()
+            .filter_map(|(target_id, target)| {
+                let task_id = target.external_task_id.as_ref()?;
+                let kind = target.active_task.as_ref()?.kind.clone();
+                let is_live = match target.external_process_id {
+                    Some(pid) => process_is_alive(pid),
+                    None => target.external_last_report_at.is_some_and(|last_report| {
+                        now.saturating_duration_since(last_report) <= EXTERNAL_TASK_REPORT_TIMEOUT
+                    }),
+                };
+                (!is_live).then(|| (target_id.clone(), task_id.clone(), kind))
+            })
+            .collect();
+
+        for (target_id, task_id, kind) in reporters_lost {
+            let _ = self.mark_external_run_finish(
+                &target_id,
+                &task_id,
+                &kind,
+                "failed",
+                Some("task.reporter_lost".to_string()),
+            );
+        }
     }
 
     fn has_active_work(&self) -> bool {
@@ -875,6 +1127,7 @@ impl StatusRuntimeState {
                 },
                 progress: t.progress.clone(),
                 last_run: t.last_run.clone(),
+                active_task: t.active_task.clone(),
                 backup_queue: t.backup_queue.clone(),
                 extra: Default::default(),
             });
@@ -1134,6 +1387,7 @@ mod tests {
             queue.lock().unwrap().start_next_target().as_deref(),
             Some("t1")
         );
+        status.lock().unwrap().mark_backup_run_start("t1");
 
         fail_backup_queue_target(&queue, &status, "t1", "target.not_found");
 
@@ -1289,8 +1543,12 @@ mod tests {
                 running_since: None,
                 progress: None,
                 last_run: None,
+                active_task: None,
                 backup_queue: None,
                 external_task_id: None,
+                external_terminal: None,
+                external_process_id: None,
+                external_last_report_at: None,
                 external_logging: None,
                 up_bps: None,
                 up_total_bytes: None,
@@ -1331,6 +1589,188 @@ mod tests {
         st.mark_run_start("t1");
         st.on_progress("t1", progress(123));
         assert_eq!(st.targets.get("t1").unwrap().up_total_bytes, Some(123));
+    }
+
+    #[test]
+    fn external_task_activity_and_failure_are_live_only() {
+        let mut st = state_one_target();
+        st.mark_external_run_start("t1", "restore-1", "restore", None, None)
+            .expect("restore should start");
+
+        let active = st.targets["t1"].active_task.as_ref().expect("active task");
+        assert_eq!(active.kind, "restore");
+        assert_eq!(active.directions, vec!["down"]);
+
+        assert!(matches!(
+            st.mark_external_run_start("t1", "verify-2", "verify", None, None)
+                .expect_err("a second task on the same target must be rejected"),
+            ExternalTaskAdmissionError::TargetBusy(active_kind) if active_kind == "restore"
+        ));
+
+        assert_eq!(
+            st.mark_external_run_start("missing", "verify-3", "verify", None, None),
+            Err(ExternalTaskAdmissionError::TargetNotFound)
+        );
+
+        st.mark_external_run_finish(
+            "t1",
+            "restore-1",
+            "restore",
+            "failed",
+            Some("restore.network_failed".to_string()),
+        )
+        .expect("matching external task should finish");
+        let target = &st.targets["t1"];
+        assert!(target.active_task.is_none());
+        assert_eq!(target.state, "failed");
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.error_code.as_deref()),
+            Some("restore.network_failed")
+        );
+
+        assert_eq!(
+            st.mark_external_run_finish(
+                "t1",
+                "restore-1",
+                "restore",
+                "failed",
+                Some("restore.network_failed".to_string()),
+            ),
+            Ok(ExternalTaskFinishOutcome::IdempotentReplay)
+        );
+        assert_eq!(
+            st.mark_external_run_finish("t1", "restore-1", "restore", "succeeded", None),
+            Err(ExternalTaskFinishError::TaskNotOwned)
+        );
+
+        st.mark_external_run_start("t1", "verify-2", "verify", None, None)
+            .expect("a later task should start after terminal acknowledgement");
+        assert_eq!(
+            st.mark_external_run_finish(
+                "t1",
+                "restore-1",
+                "restore",
+                "failed",
+                Some("restore.network_failed".to_string()),
+            ),
+            Err(ExternalTaskFinishError::TaskNotOwned)
+        );
+    }
+
+    #[test]
+    fn external_progress_requires_prior_admission() {
+        let mut st = state_one_target();
+
+        st.on_external_progress("t1", "restore-1", "restore", progress(123));
+        let target = &st.targets["t1"];
+        assert_eq!(target.state, "idle");
+        assert!(target.active_task.is_none());
+        assert!(target.external_task_id.is_none());
+
+        st.mark_external_run_start("t1", "restore-1", "restore", None, None)
+            .expect("restore should start");
+        st.mark_external_run_finish("t1", "restore-1", "restore", "succeeded", None)
+            .expect("matching external task should finish");
+        st.on_external_progress("t1", "restore-1", "restore", progress(456));
+
+        let target = &st.targets["t1"];
+        assert_eq!(target.state, "idle");
+        assert!(target.active_task.is_none());
+        assert!(target.external_task_id.is_none());
+        assert!(!st.target_is_busy("t1"));
+    }
+
+    #[test]
+    fn external_tasks_can_run_on_different_targets() {
+        let mut st = state_one_target();
+        let mut second = st.targets["t1"].clone();
+        second.target_id = "t2".to_string();
+        st.target_order.push("t2".to_string());
+        st.targets.insert("t2".to_string(), second);
+
+        st.mark_external_run_start("t1", "restore-1", "restore", None, None)
+            .expect("restore should start");
+        st.mark_external_run_start("t2", "backup-1", "backup", None, None)
+            .expect("backup should start on another target");
+
+        let snapshot = st.build_snapshot(1_000);
+        assert_eq!(
+            snapshot.targets[0].active_task.as_ref().unwrap().kind,
+            "restore"
+        );
+        assert_eq!(
+            snapshot.targets[1].active_task.as_ref().unwrap().kind,
+            "backup"
+        );
+    }
+
+    #[test]
+    fn daemon_backup_claim_excludes_external_tasks_on_the_same_target() {
+        let mut st = state_one_target();
+        assert!(st.try_mark_backup_run_start("t1", "connecting"));
+
+        assert!(matches!(
+            st.mark_external_run_start("t1", "restore-1", "restore", None, None)
+                .expect_err("an external task must not replace a daemon backup claim"),
+            ExternalTaskAdmissionError::TargetBusy(active_kind) if active_kind == "backup"
+        ));
+    }
+
+    #[test]
+    fn daemon_backup_completion_never_releases_an_external_task() {
+        let mut st = state_one_target();
+        st.mark_external_run_start("t1", "restore-1", "restore", None, None)
+            .expect("restore should start");
+
+        st.mark_run_finish_cancelled("t1", 0.0);
+        st.mark_run_finish_failure("t1", 0.0, "backup.failed".to_string());
+        st.mark_run_finish_success("t1", 0.0, 0, 0, 0);
+
+        let target = &st.targets["t1"];
+        assert_eq!(target.state, "running");
+        assert_eq!(target.external_task_id.as_deref(), Some("restore-1"));
+        assert_eq!(
+            target.active_task.as_ref().map(|task| task.kind.as_str()),
+            Some("restore")
+        );
+    }
+
+    #[test]
+    fn missing_external_reporter_releases_target() {
+        let mut st = state_one_target();
+        st.mark_external_run_start("t1", "restore-1", "restore", Some(42), None)
+            .expect("restore should start");
+
+        st.reap_finished_external_tasks_at(Instant::now(), |_| false);
+
+        let target = &st.targets["t1"];
+        assert!(!st.target_is_busy("t1"));
+        assert_eq!(target.state, "failed");
+        assert!(target.active_task.is_none());
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.error_code.as_deref()),
+            Some("task.reporter_lost")
+        );
+    }
+
+    #[test]
+    fn snapshots_publish_explicit_backup_activity() {
+        let mut st = state_one_target();
+        st.mark_backup_run_start("t1");
+
+        let snapshot = st.build_snapshot(1_000);
+        let active = snapshot.targets[0]
+            .active_task
+            .as_ref()
+            .expect("backup activity");
+        assert_eq!(active.kind, "backup");
+        assert_eq!(active.directions, vec!["up"]);
     }
 
     #[test]
@@ -1413,13 +1853,16 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
         .unwrap_or_else(Instant::now);
 
     loop {
+        let now = Instant::now();
         let has_active_work = state
             .lock()
             .ok()
-            .map(|st| st.has_active_work())
+            .map(|mut st| {
+                st.reap_finished_external_tasks(now);
+                st.has_active_work()
+            })
             .unwrap_or(false);
 
-        let now = Instant::now();
         let min_interval = if has_active_work {
             Duration::from_millis(200)
         } else {
@@ -1430,6 +1873,7 @@ async fn status_writer_loop(state: Arc<Mutex<StatusRuntimeState>>, status_path: 
             let snapshot_opt = {
                 match state.lock() {
                     Ok(mut st) => {
+                        st.reap_finished_external_tasks(now);
                         st.tick_rates_at(now);
                         Some(st.build_snapshot(now_unix_ms()))
                     }
@@ -1607,6 +2051,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let now_ms = now_unix_ms();
             match ipc_state.lock() {
                 Ok(mut st) => {
+                    st.reap_finished_external_tasks(Instant::now());
                     let has_running = st.has_active_work();
                     // The GUI primarily reads status via IPC; keep rate sampling ticking even if
                     // progress callbacks pause so the UI doesn't get stuck on stale rates.
@@ -2138,53 +2583,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             };
 
-            if is_queued_target && let Ok(mut st) = status_state.lock() {
-                st.mark_backup_run_start(&target.id);
-            }
-
-            let task_id = format!("tsk_{}", Uuid::new_v4());
-            let logging = televy_backup_core::local_settings::resolve(&config_root);
-            if *runtime_logging.read().await != logging {
-                *runtime_logging.write().await = logging.clone();
-            }
-            let run_log = televy_backup_core::run_log::start_run_log_with_retention(
-                "backup",
-                &task_id,
-                &data_root,
-                &logging.effective_filter,
-                logging.retention_prune_enabled.then_some(logging.retention),
-            )?;
-            let started = Instant::now();
-
-            // Record the run before endpoint resolution and Telegram connection so the
-            // externally visible connecting phase has a matching task/run identity.
-            tracing::warn!(
-                event = "run.start",
-                kind = "backup",
-                run_id = %task_id,
-                task_id = %task_id,
-                target_id = %target.id,
-                endpoint_id = %target.endpoint_id,
-                source_path = %target.source_path,
-                log_path = %run_log.path().display(),
-                "run.start"
-            );
-
+            // Publish cancellation control while holding the queue handoff lock. This makes
+            // `backup.stop` either clear the queued target before it starts or cancel its token.
             let task_cancel = if is_queued_target {
                 let Ok(queue) = backup_queue.lock() else {
+                    tracing::error!(
+                        event = "backup.queue_target_delayed",
+                        target_id = %target.id,
+                        reason = "queue_unavailable",
+                        "backup.queue_target_delayed"
+                    );
+                    sleep(Duration::from_secs(1)).await;
                     continue;
                 };
                 if !queue.active_target_matches(&target.id) {
-                    tracing::warn!(
-                        event = "run.finish",
-                        kind = "backup",
-                        run_id = %task_id,
-                        task_id = %task_id,
-                        status = "cancelled",
-                        target_id = %target.id,
-                        "run.finish"
-                    );
-                    backup_task_cancelled(&status_state, &target.id, 0.0);
                     continue;
                 }
                 lifecycle.begin_task()
@@ -2192,6 +2604,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 lifecycle.begin_task()
             };
 
+            let claimed = status_state
+                .lock()
+                .map(|mut status| status.try_mark_backup_run_start(&target.id, "connecting"))
+                .unwrap_or(false);
+            if !claimed {
+                lifecycle.finish_task();
+                if is_queued_target {
+                    tracing::info!(
+                        event = "backup.queue_target_delayed",
+                        target_id = %target.id,
+                        reason = "target_busy",
+                        "backup.queue_target_delayed"
+                    );
+                    sleep(Duration::from_secs(1)).await;
+                } else {
+                    tracing::info!(
+                        event = "backup.scheduled_target_delayed",
+                        target_id = %target.id,
+                        reason = "target_busy",
+                        "backup.scheduled_target_delayed"
+                    );
+                }
+                continue;
+            }
+
+            let task_id = format!("tsk_{}", Uuid::new_v4());
             if task_cancel.is_cancelled() {
                 tracing::warn!(
                     event = "run.finish",
@@ -2210,6 +2648,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
+            let logging = televy_backup_core::local_settings::resolve(&config_root);
+            if *runtime_logging.read().await != logging {
+                *runtime_logging.write().await = logging.clone();
+            }
+            let run_log = match televy_backup_core::run_log::start_run_log_with_retention(
+                "backup",
+                &task_id,
+                &data_root,
+                &logging.effective_filter,
+                logging.retention_prune_enabled.then_some(logging.retention),
+            ) {
+                Ok(run_log) => run_log,
+                Err(error) => {
+                    tracing::error!(
+                        event = "run.finish",
+                        kind = "backup",
+                        run_id = %task_id,
+                        task_id = %task_id,
+                        status = "failed",
+                        error_code = "run_log.init_failed",
+                        error_message = %error,
+                        target_id = %target.id,
+                        "run.finish"
+                    );
+                    backup_task_failed(&status_state, &target.id, 0.0, "run_log.init_failed");
+                    lifecycle.finish_task();
+                    if is_queued_target {
+                        complete_backup_queue_target(&backup_queue, &status_state, &target.id);
+                    }
+                    continue;
+                }
+            };
+            let started = Instant::now();
+
+            // Record the run before endpoint resolution and Telegram connection so the
+            // externally visible connecting phase has a matching task/run identity.
+            tracing::warn!(
+                event = "run.start",
+                kind = "backup",
+                run_id = %task_id,
+                task_id = %task_id,
+                target_id = %target.id,
+                endpoint_id = %target.endpoint_id,
+                source_path = %target.source_path,
+                log_path = %run_log.path().display(),
+                "run.start"
+            );
+
             let Some(ep) = settings
                 .telegram_endpoints
                 .iter()
@@ -2227,13 +2713,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     endpoint_id = %target.endpoint_id,
                     "run.finish"
                 );
+                backup_task_failed(
+                    &status_state,
+                    &target.id,
+                    started.elapsed().as_secs_f64(),
+                    "config.invalid",
+                );
                 if is_queued_target {
-                    fail_backup_queue_target(
-                        &backup_queue,
-                        &status_state,
-                        &target.id,
-                        "config.invalid",
-                    );
+                    complete_backup_queue_target(&backup_queue, &status_state, &target.id);
                 }
                 lifecycle.finish_task();
                 continue;
@@ -2252,13 +2739,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     endpoint_id = %ep.id,
                     "run.finish"
                 );
+                backup_task_failed(
+                    &status_state,
+                    &target.id,
+                    started.elapsed().as_secs_f64(),
+                    "config.invalid",
+                );
                 if is_queued_target {
-                    fail_backup_queue_target(
-                        &backup_queue,
-                        &status_state,
-                        &target.id,
-                        "config.invalid",
-                    );
+                    complete_backup_queue_target(&backup_queue, &status_state, &target.id);
                 }
                 lifecycle.finish_task();
                 continue;
@@ -2280,13 +2768,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     endpoint_id = %ep.id,
                     "run.finish"
                 );
+                backup_task_failed(
+                    &status_state,
+                    &target.id,
+                    started.elapsed().as_secs_f64(),
+                    "telegram.unauthorized",
+                );
                 if is_queued_target {
-                    fail_backup_queue_target(
-                        &backup_queue,
-                        &status_state,
-                        &target.id,
-                        "telegram.unauthorized",
-                    );
+                    complete_backup_queue_target(&backup_queue, &status_state, &target.id);
                 }
                 lifecycle.finish_task();
                 continue;
@@ -2312,12 +2801,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     target_id = %target.id,
                                     "run.finish"
                                 );
+                                backup_task_failed(
+                                    &status_state,
+                                    &target.id,
+                                    started.elapsed().as_secs_f64(),
+                                    "telegram.mtproto.session_invalid",
+                                );
                                 if is_queued_target {
-                                    fail_backup_queue_target(
+                                    complete_backup_queue_target(
                                         &backup_queue,
                                         &status_state,
                                         &target.id,
-                                        "telegram.mtproto.session_invalid",
                                     );
                                 }
                                 lifecycle.finish_task();
@@ -2341,13 +2835,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         target_id = %target.id,
                         "run.finish"
                     );
+                    backup_task_failed(
+                        &status_state,
+                        &target.id,
+                        started.elapsed().as_secs_f64(),
+                        "config.write_failed",
+                    );
                     if is_queued_target {
-                        fail_backup_queue_target(
-                            &backup_queue,
-                            &status_state,
-                            &target.id,
-                            "config.write_failed",
-                        );
+                        complete_backup_queue_target(&backup_queue, &status_state, &target.id);
                     }
                     lifecycle.finish_task();
                     continue;
@@ -2392,13 +2887,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &target.id,
                                 started.elapsed().as_secs_f64(),
                             );
-                        } else if is_queued_target {
-                            fail_backup_queue_target(
-                                &backup_queue,
+                        } else {
+                            backup_task_failed(
                                 &status_state,
                                 &target.id,
+                                started.elapsed().as_secs_f64(),
                                 error.code(),
                             );
+                            if is_queued_target {
+                                complete_backup_queue_target(
+                                    &backup_queue,
+                                    &status_state,
+                                    &target.id,
+                                );
+                            }
                         }
                         lifecycle.finish_task();
                         continue;
@@ -2422,13 +2924,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         endpoint_id = %ep.id,
                         "run.finish"
                     );
+                    backup_task_failed(
+                        &status_state,
+                        &target.id,
+                        started.elapsed().as_secs_f64(),
+                        "telegram.storage_unavailable",
+                    );
                     if is_queued_target {
-                        fail_backup_queue_target(
-                            &backup_queue,
-                            &status_state,
-                            &target.id,
-                            "telegram.storage_unavailable",
-                        );
+                        complete_backup_queue_target(&backup_queue, &status_state, &target.id);
                     }
                     lifecycle.finish_task();
                     continue;
@@ -2489,10 +2992,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let dedupe_pending_db_path = index_dir
                 .join("dedupe")
                 .join(format!("pending.{}.sqlite", ep.id));
-
-            if !is_queued_target && let Ok(mut st) = status_state.lock() {
-                st.mark_run_start(&target.id);
-            }
 
             let sink = StatusProgressSink {
                 target_id: target.id.clone(),
@@ -2680,15 +3179,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "run.finish"
                             );
 
-                            if let Ok(mut st) = status_state.lock() {
-                                st.mark_run_finish_success(
-                                    &target.id,
-                                    duration_seconds,
-                                    res.files_indexed,
-                                    res.bytes_uploaded,
-                                    res.bytes_deduped,
-                                );
-                            }
+                            backup_task_succeeded(
+                                &status_state,
+                                &target.id,
+                                duration_seconds,
+                                res.files_indexed,
+                                res.bytes_uploaded,
+                                res.bytes_deduped,
+                            );
                         }
                         Err(e) => {
                             if matches!(&e, televy_backup_core::Error::Cancelled) {
@@ -2723,13 +3221,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     error_message = %e,
                                     "run.finish"
                                 );
-                                if let Ok(mut st) = status_state.lock() {
-                                    st.mark_run_finish_failure(
-                                        &target.id,
-                                        duration_seconds,
-                                        e.code().to_string(),
-                                    );
-                                }
+                                backup_task_failed(
+                                    &status_state,
+                                    &target.id,
+                                    duration_seconds,
+                                    e.code(),
+                                );
                             }
                         }
                     }
@@ -2760,13 +3257,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "run.finish"
                         );
 
-                        if let Ok(mut st) = status_state.lock() {
-                            st.mark_run_finish_failure(
-                                &target.id,
-                                duration_seconds,
-                                e.code().to_string(),
-                            );
-                        }
+                        backup_task_failed(&status_state, &target.id, duration_seconds, e.code());
                     }
                 }
             }

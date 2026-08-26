@@ -30,6 +30,7 @@ The macOS popover “dashboard” UI is driven by a single snapshot schema (`Sta
       - `targets[].up.bytesPerSecond` is the daemon's estimate of the upload rate.
       - `global.up.bytesPerSecond` is a best-effort sum across targets (typically only one target runs at a time).
       - `global.down.bytesPerSecond` is the daemon's estimate of the download rate (meaningful for restore/verify; usually `0`/`null` during backup).
+      - `targets[].activeTask` is an optional additive declaration of the current `backup`, `restore`, `verify`, or `sync` task and its transfer directions. The macOS menu bar uses this declaration, rather than phase names, rates, or `lastRun`, to determine its current activity.
       - Rates are computed from a rolling 1s window sampled at progress time, with interpolation to avoid "one-tick" spikes when progress updates are coarse.
       - Note: some storage providers may also emit best-effort **wire byte** counters (e.g. MTProto socket bytes) in task progress, but these can get ahead due to kernel buffering and should not be used as the primary "last 1s" bandwidth indicator.
 - **Fallback** (daemon → file): `status.json` written by `televybackupd` via atomic write + rename.
@@ -40,6 +41,8 @@ The macOS popover “dashboard” UI is driven by a single snapshot schema (`Sta
   - The UI should pass `TELEVYBACKUP_CONFIG_DIR` / `TELEVYBACKUP_DATA_DIR` to the spawned CLI so it connects to the same IPC socket as the daemon.
   - If IPC is unavailable, the CLI falls back to reading `status.json`; if both are unavailable, it returns `status.unavailable`.
   - If the CLI binary itself is unavailable (dev/local), the UI may fall back to polling `status.json` directly at low frequency (e.g. 1Hz) to avoid a blank dashboard.
+
+The menu bar keeps a client-memory failure latch for a task failure observed in its current live session. It expires after 10 seconds and is not restored from daemon state, `lastRun`, or application restart. Its optional transfer-rate title is a local `UserDefaults` preference and never belongs to portable configuration.
 
 ## Daemon control IPC (settings/secrets boundary)
 

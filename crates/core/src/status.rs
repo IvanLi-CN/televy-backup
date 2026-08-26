@@ -84,6 +84,29 @@ pub struct BackupQueueMembership {
     pub pending_batch_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveTask {
+    pub kind: String,
+    pub directions: Vec<String>,
+}
+
+impl ActiveTask {
+    pub fn for_kind(kind: &str) -> Option<Self> {
+        let directions = match kind {
+            "backup" => vec!["up"],
+            "restore" => vec!["down"],
+            "verify" => vec![],
+            "sync" => vec!["up", "down"],
+            _ => return None,
+        };
+        Some(Self {
+            kind: kind.to_string(),
+            directions: directions.into_iter().map(str::to_string).collect(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusSource {
@@ -119,6 +142,9 @@ pub struct TargetState {
 
     pub progress: Option<Progress>,
     pub last_run: Option<TargetRunSummary>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_task: Option<ActiveTask>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_queue: Option<BackupQueueMembership>,
@@ -252,6 +278,7 @@ mod tests {
                 up_total: Counter { bytes: None },
                 progress: None,
                 last_run: None,
+                active_task: ActiveTask::for_kind("backup"),
                 backup_queue: None,
                 extra: Default::default(),
             }],
@@ -265,6 +292,13 @@ mod tests {
         assert_eq!(got.schema_version, 1);
         assert_eq!(got.targets.len(), 1);
         assert_eq!(got.targets[0].target_id, "t1");
+        assert_eq!(
+            got.targets[0]
+                .active_task
+                .as_ref()
+                .map(|task| task.directions.clone()),
+            Some(vec!["up".to_string()])
+        );
     }
 
     #[test]
@@ -299,5 +333,15 @@ mod tests {
         let snap: StatusSnapshot = serde_json::from_str(json).unwrap();
         assert_eq!(snap.targets[0].target_id, "t1");
         assert!(snap.targets[0].running_since.is_none());
+        assert!(snap.targets[0].active_task.is_none());
+    }
+
+    #[test]
+    fn active_task_is_additive_and_roundtrips() {
+        let activity = ActiveTask::for_kind("sync").expect("sync activity");
+        let json = serde_json::to_value(&activity).unwrap();
+        assert_eq!(json["kind"], "sync");
+        assert_eq!(json["directions"], serde_json::json!(["up", "down"]));
+        assert!(ActiveTask::for_kind("other").is_none());
     }
 }

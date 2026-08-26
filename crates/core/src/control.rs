@@ -190,8 +190,10 @@ pub struct BackupStopResult {
 #[serde(rename_all = "camelCase")]
 pub struct StatusTaskStartParams {
     pub task_id: String,
-    pub kind: String, // "backup" | "restore" | "verify"
+    pub kind: String, // "backup" | "restore" | "verify" | "sync"
     pub target_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u32>,
     #[serde(default)]
     pub logging: Option<crate::local_settings::ResolvedLogging>,
 }
@@ -220,7 +222,7 @@ pub struct StatusTaskProgress {
 #[serde(rename_all = "camelCase")]
 pub struct StatusTaskProgressParams {
     pub task_id: String,
-    pub kind: String, // "backup" | "restore" | "verify"
+    pub kind: String, // "backup" | "restore" | "verify" | "sync"
     pub target_id: String,
     pub progress: StatusTaskProgress,
 }
@@ -229,7 +231,37 @@ pub struct StatusTaskProgressParams {
 #[serde(rename_all = "camelCase")]
 pub struct StatusTaskFinishParams {
     pub task_id: String,
-    pub kind: String, // "backup" | "restore" | "verify"
+    pub kind: String, // "backup" | "restore" | "verify" | "sync"
     pub target_id: String,
     pub state: String, // "succeeded" | "failed"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StatusTaskFinishParams, StatusTaskStartParams};
+
+    #[test]
+    fn task_start_without_process_id_remains_compatible() {
+        let params: StatusTaskStartParams = serde_json::from_value(serde_json::json!({
+            "taskId": "task-1",
+            "kind": "restore",
+            "targetId": "target-1"
+        }))
+        .unwrap();
+        assert!(params.process_id.is_none());
+    }
+
+    #[test]
+    fn task_finish_without_error_code_remains_compatible() {
+        let params: StatusTaskFinishParams = serde_json::from_value(serde_json::json!({
+            "taskId": "task-1",
+            "kind": "restore",
+            "targetId": "target-1",
+            "state": "failed"
+        }))
+        .unwrap();
+        assert!(params.error_code.is_none());
+    }
 }

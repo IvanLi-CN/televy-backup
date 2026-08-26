@@ -41,6 +41,40 @@ struct StatusBackupQueue: Codable, Equatable {
     var pendingBatchId: String?
 }
 
+struct StatusActiveTask: Codable, Equatable {
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case directions
+    }
+
+    var kind: String
+    var directions: [String]
+
+    init(kind: String, directions: [String]) {
+        self.kind = kind
+        self.directions = directions
+    }
+
+    init(from decoder: Decoder) throws {
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+            kind = ""
+            directions = []
+            return
+        }
+        kind = (try? container.decode(String.self, forKey: .kind)) ?? ""
+        directions = (try? container.decode([String].self, forKey: .directions)) ?? []
+    }
+
+    var isSupported: Bool {
+        switch (kind, directions) {
+        case ("backup", ["up"]), ("restore", ["down"]), ("verify", []), ("sync", ["up", "down"]):
+            true
+        default:
+            false
+        }
+    }
+}
+
 struct StatusSource: Codable {
     var kind: String
     var detail: String?
@@ -66,6 +100,7 @@ struct StatusTarget: Codable, Identifiable {
     var upTotal: StatusCounter
     var progress: StatusProgress?
     var lastRun: StatusTargetRunSummary?
+    var activeTask: StatusActiveTask? = nil
     var backupQueue: StatusBackupQueue? = nil
 
     var id: String { targetId }

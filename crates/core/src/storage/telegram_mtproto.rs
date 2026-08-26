@@ -1,9 +1,12 @@
+use std::collections::VecDeque;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -20,6 +23,39 @@ const MTPROTO_HELPER_READ_TIMEOUT_SECS: u64 = 600;
 // a stalled helper and fail fast so the caller can retry/respawn instead of freezing.
 const MTPROTO_HELPER_UPLOAD_EVENT_TIMEOUT_SECS: u64 = 45;
 const MTPROTO_HELPER_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
+const MTPROTO_HELPER_STDERR_TAIL_MAX_BYTES: usize = 8 * 1024;
+
+fn spawn_helper_stderr_reader(
+    stderr: ChildStderr,
+) -> (Arc<Mutex<VecDeque<u8>>>, Arc<AtomicBool>, JoinHandle<()>) {
+    let tail = Arc::new(Mutex::new(VecDeque::with_capacity(
+        MTPROTO_HELPER_STDERR_TAIL_MAX_BYTES,
+    )));
+    let reader_tail = Arc::clone(&tail);
+    let done = Arc::new(AtomicBool::new(false));
+    let reader_done = Arc::clone(&done);
+    let reader = std::thread::spawn(move || {
+        let mut stderr = BufReader::new(stderr);
+        let mut buffer = [0u8; 1024];
+        loop {
+            let read = match stderr.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            if let Ok(mut saved) = reader_tail.lock() {
+                for byte in &buffer[..read] {
+                    if saved.len() == MTPROTO_HELPER_STDERR_TAIL_MAX_BYTES {
+                        saved.pop_front();
+                    }
+                    saved.push_back(*byte);
+                }
+            }
+            let _ = std::io::stderr().write_all(&buffer[..read]);
+        }
+        reader_done.store(true, Ordering::Release);
+    });
+    (tail, done, reader)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TgMtProtoObjectIdV1 {
@@ -644,6 +680,7 @@ mod tests {
         Graceful,
         HangAfterShutdownAck,
         DelayedUploads,
+        CrashOnUpload,
     }
 
     #[cfg(unix)]
@@ -696,6 +733,7 @@ mod tests {
             FakeHelperMode::Graceful => "graceful",
             FakeHelperMode::HangAfterShutdownAck => "hang_after_ack",
             FakeHelperMode::DelayedUploads => "delayed_uploads",
+            FakeHelperMode::CrashOnUpload => "crash_on_upload",
         };
         let script = format!(
             r#"#!/bin/sh
@@ -727,6 +765,10 @@ while IFS= read -r line; do
       size=$(printf '%s\n' "$line" | sed -n 's/.*"size":\([0-9][0-9]*\).*/\1/p')
       dd bs=1 count="$size" of=/dev/null 2>/dev/null
       printf 'upload_start\n' >> "$EVENTS"
+      if [ "$MODE" = "crash_on_upload" ]; then
+        printf 'intentional helper crash\n' >&2
+        exit 42
+      fi
       printf '%s\n' '{{"ok":true,"event":"upload_progress","bytesUploaded":1}}'
       if [ "$MODE" = "delayed_uploads" ]; then
         sleep 0.3
@@ -974,6 +1016,28 @@ printf 'eof\n' >> "$EVENTS"
     }
 
     #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn mtproto_storage_reports_helper_exit_status_and_stderr() {
+        let fake = write_fake_helper(FakeHelperMode::CrashOnUpload);
+        let cache_dir = fake
+            .script_path
+            .parent()
+            .unwrap()
+            .join("cache-upload-crash");
+        let storage = connect_fake_storage(&fake.script_path, &cache_dir, None, Some(1)).await;
+
+        let error = storage
+            .upload_document("crash.bin", vec![1])
+            .await
+            .expect_err("crashing helper should fail the upload");
+        let message = error.to_string();
+
+        assert!(message.contains("mtproto helper closed stdout"));
+        assert!(message.contains("exit status: 42"));
+        assert!(message.contains("intentional helper crash"));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn mtproto_helper_drop_kills_when_shutdown_hangs() {
         let fake = write_fake_helper(FakeHelperMode::HangAfterShutdownAck);
@@ -1085,6 +1149,9 @@ struct MtProtoHelper {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr_tail: Arc<Mutex<VecDeque<u8>>>,
+    stderr_reader_done: Arc<AtomicBool>,
+    stderr_reader: Option<JoinHandle<()>>,
     session_b64: Option<String>,
 }
 
@@ -1103,7 +1170,7 @@ impl MtProtoHelper {
         let mut child = Command::new(path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| Error::InvalidConfig {
                 message: format!(
@@ -1119,11 +1186,18 @@ impl MtProtoHelper {
         let stdout = child.stdout.take().ok_or_else(|| Error::InvalidConfig {
             message: "mtproto helper missing stdout".to_string(),
         })?;
+        let stderr = child.stderr.take().ok_or_else(|| Error::InvalidConfig {
+            message: "mtproto helper missing stderr".to_string(),
+        })?;
+        let (stderr_tail, stderr_reader_done, stderr_reader) = spawn_helper_stderr_reader(stderr);
 
         Ok(Self {
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            stderr_tail,
+            stderr_reader_done,
+            stderr_reader: Some(stderr_reader),
             session_b64: None,
         })
     }
@@ -1146,6 +1220,7 @@ impl MtProtoHelper {
                 Err(_) => break,
             }
         }
+        self.join_stderr_reader();
     }
 
     fn wait_for_exit_best_effort(&mut self, timeout: Duration) -> bool {
@@ -1166,6 +1241,7 @@ impl MtProtoHelper {
 
     fn shutdown_best_effort(&mut self) {
         if self.has_exited() {
+            self.join_stderr_reader();
             return;
         }
 
@@ -1179,6 +1255,52 @@ impl MtProtoHelper {
             .wait_for_exit_best_effort(Duration::from_secs(MTPROTO_HELPER_SHUTDOWN_TIMEOUT_SECS))
         {
             self.kill_best_effort();
+        }
+        self.join_stderr_reader();
+    }
+
+    fn join_stderr_reader(&mut self) {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while !self.stderr_reader_done.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if self.stderr_reader_done.load(Ordering::Acquire)
+            && let Some(reader) = self.stderr_reader.take()
+        {
+            let _ = reader.join();
+        } else {
+            // A descendant may inherit the stderr pipe after the helper exits. Do not let
+            // cleanup wait forever for that unrelated process; dropping the handle detaches
+            // the bounded diagnostic reader.
+            let _ = self.stderr_reader.take();
+        }
+    }
+
+    fn stderr_tail_for_diagnostic(&self) -> Option<String> {
+        let bytes: Vec<u8> = self.stderr_tail.lock().ok()?.iter().copied().collect();
+        let mut text = String::from_utf8_lossy(&bytes).trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        text.retain(|c| c == '\n' || c == '\r' || c == '\t' || !c.is_control());
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn read_error(&mut self, error: std::io::Error) -> Error {
+        let exit_detail = match self.child.try_wait() {
+            Ok(Some(status)) => {
+                self.join_stderr_reader();
+                format!("helper exit status: {status}")
+            }
+            Ok(None) => "helper process is still running".to_string(),
+            Err(wait_error) => format!("helper exit status unavailable: {wait_error}"),
+        };
+        let stderr_detail = self
+            .stderr_tail_for_diagnostic()
+            .map(|tail| format!("; helper stderr tail: {tail}"))
+            .unwrap_or_default();
+        Error::Telegram {
+            message: format!("mtproto helper read failed: {error}; {exit_detail}{stderr_detail}"),
         }
     }
 
@@ -1572,59 +1694,70 @@ impl MtProtoHelper {
     }
 
     fn read_json_line_with_timeout(&mut self, timeout_secs: u64) -> Result<ResponseEnvelope> {
-        let (child, stdout) = (&mut self.child, &mut self.stdout);
-        let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
+        enum ReadOutcome {
+            Line(String),
+            ReadError(std::io::Error),
+            TimedOut,
+            Disconnected,
+        }
 
-        std::thread::scope(|s| {
-            s.spawn(|| {
-                let mut line = String::new();
-                let res = stdout.read_line(&mut line).and_then(|n| {
-                    if n == 0 {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "mtproto helper closed stdout",
-                        ))
-                    } else {
-                        Ok(line)
-                    }
-                });
-                let _ = tx.send(res);
-            });
-
-            let line = match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-                Ok(Ok(line)) => line,
-                Ok(Err(e)) => {
-                    return Err(Error::Telegram {
-                        message: format!("mtproto helper read failed: {e}"),
-                    });
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // The helper became unresponsive. Kill it so the blocked read unblocks,
-                    // then let the caller decide whether to retry after respawn.
-                    let _ = child.kill();
-                    for _ in 0..50 {
-                        match child.try_wait() {
-                            Ok(Some(_)) => break,
-                            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                            Err(_) => break,
+        let outcome = {
+            let (child, stdout) = (&mut self.child, &mut self.stdout);
+            let (tx, rx) = mpsc::channel::<std::io::Result<String>>();
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let mut line = String::new();
+                    let res = stdout.read_line(&mut line).and_then(|n| {
+                        if n == 0 {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "mtproto helper closed stdout",
+                            ))
+                        } else {
+                            Ok(line)
                         }
-                    }
-                    return Err(Error::Telegram {
-                        message: format!(
-                            "mtproto helper timed out waiting for response after {timeout_secs}s"
-                        ),
                     });
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(Error::Telegram {
-                        message: "mtproto helper response channel disconnected".to_string(),
-                    });
-                }
-            };
+                    let _ = tx.send(res);
+                });
 
-            serde_json::from_str::<ResponseEnvelope>(line.trim_end()).map_err(|e| Error::Telegram {
-                message: format!("mtproto helper invalid response: {e}"),
+                match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+                    Ok(Ok(line)) => ReadOutcome::Line(line),
+                    Ok(Err(error)) => ReadOutcome::ReadError(error),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        // The helper became unresponsive. Kill it so the blocked read unblocks,
+                        // then let the caller decide whether to retry after respawn.
+                        let _ = child.kill();
+                        for _ in 0..50 {
+                            match child.try_wait() {
+                                Ok(Some(_)) => break,
+                                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                                Err(_) => break,
+                            }
+                        }
+                        ReadOutcome::TimedOut
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => ReadOutcome::Disconnected,
+                }
             })
-        })
+        };
+
+        match outcome {
+            ReadOutcome::Line(line) => serde_json::from_str::<ResponseEnvelope>(line.trim_end())
+                .map_err(|error| Error::Telegram {
+                    message: format!("mtproto helper invalid response: {error}"),
+                }),
+            ReadOutcome::ReadError(error) => Err(self.read_error(error)),
+            ReadOutcome::TimedOut => {
+                self.join_stderr_reader();
+                Err(Error::Telegram {
+                    message: format!(
+                        "mtproto helper timed out waiting for response after {timeout_secs}s"
+                    ),
+                })
+            }
+            ReadOutcome::Disconnected => Err(Error::Telegram {
+                message: "mtproto helper response channel disconnected".to_string(),
+            }),
+        }
     }
 }

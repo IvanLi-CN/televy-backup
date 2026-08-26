@@ -52,6 +52,13 @@ type TargetRunSummary = {
   bytesDeduped?: number | null;
 };
 
+type ActiveTask = {
+  // Optional additive activity declaration. Old snapshots omit this field.
+  kind: "backup" | "restore" | "verify" | "sync";
+  // Stable, de-duplicated order: "up" before "down".
+  directions: ("up" | "down")[];
+};
+
 type TargetState = {
   targetId: string;
   label?: string | null;
@@ -71,6 +78,7 @@ type TargetState = {
 
   progress?: Progress | null; // present when running
   lastRun?: TargetRunSummary | null; // present when known
+  activeTask?: ActiveTask | null; // present only while the target is active
 };
 
 type StatusSnapshot = {
@@ -149,3 +157,4 @@ type StatusSnapshot = {
 ### Compatibility rules
 
 - Additive changes only：允许新增字段（UI 必须容错）；删除/重命名字段需 bump `schemaVersion`。
+- `activeTask` 声明任务意图而不是瞬时网络速率：backup、restore、verify、sync 分别使用 `["up"]`、`["down"]`、`[]`、`["up", "down"]`。它在任务结束时清除；客户端不得通过 `lastRun` 恢复它或推断当前菜单栏错误。
