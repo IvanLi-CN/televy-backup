@@ -7328,7 +7328,7 @@ fn control_ipc_call(
 #[cfg(all(test, unix))]
 mod control_ipc_tests {
     use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixListener;
+    use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
 
@@ -7342,6 +7342,37 @@ mod control_ipc_tests {
             thread::sleep(Duration::from_millis(5));
         }
         panic!("socket did not appear: {}", path.display());
+    }
+
+    fn accept_control_request(
+        listener: &UnixListener,
+    ) -> (UnixStream, televy_backup_core::control::ControlRequest) {
+        listener
+            .set_nonblocking(true)
+            .expect("set control listener nonblocking");
+        let deadline = Instant::now() + Duration::from_secs(2);
+
+        loop {
+            match listener.accept() {
+                Ok((stream, _addr)) => {
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().expect("clone accepted stream"))
+                        .read_line(&mut line)
+                        .expect("read control request");
+                    let request =
+                        serde_json::from_str(line.trim_end()).expect("decode control request");
+                    return (stream, request);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for a control IPC retry"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept control request: {error}"),
+            }
+        }
     }
 
     #[test]
@@ -7627,14 +7658,8 @@ mod control_ipc_tests {
             let captured = Arc::clone(&captured);
             move || {
                 let listener = UnixListener::bind(socket_path).unwrap();
-                for attempt in 0..2 {
-                    let (mut stream, _addr) = listener.accept().unwrap();
-                    let mut line = String::new();
-                    BufReader::new(stream.try_clone().unwrap())
-                        .read_line(&mut line)
-                        .unwrap();
-                    let req: televy_backup_core::control::ControlRequest =
-                        serde_json::from_str(line.trim_end()).unwrap();
+                for attempt in 0..3 {
+                    let (mut stream, req) = accept_control_request(&listener);
                     captured.lock().unwrap().push(req.clone());
 
                     let mut resp = televy_backup_core::control::ControlResponse::ok(
@@ -7645,9 +7670,10 @@ mod control_ipc_tests {
                             "replayed": true,
                         }),
                     );
-                    if attempt == 0 {
-                        resp.type_ = "control.request".to_string();
-                        resp.id = "unrelated-request-id".to_string();
+                    match attempt {
+                        0 => resp.type_ = "control.request".to_string(),
+                        1 => resp.id = "unrelated-request-id".to_string(),
+                        _ => {}
                     }
                     let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
                     stream.write_all(resp_line.as_bytes()).unwrap();
@@ -7657,22 +7683,31 @@ mod control_ipc_tests {
         });
 
         wait_for_socket(&socket_path);
-        daemon_control_status_task_finish(
+        let result = daemon_control_status_task_finish(
             data_dir.path(),
             "task-1",
             "restore",
             "t1",
             "succeeded",
             None,
-        )
-        .expect("an invalid response envelope should be retried until acknowledged");
+        );
         server.join().unwrap();
+        result.expect("an invalid response envelope should be retried until acknowledged");
 
         let requests = captured.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.method == "status.taskFinish")
+        );
         assert_eq!(
             requests[0].params, requests[1].params,
-            "the retry must replay the exact terminal transition"
+            "the retry after an invalid type must replay the exact terminal transition"
+        );
+        assert_eq!(
+            requests[1].params, requests[2].params,
+            "the retry after an invalid id must replay the exact terminal transition"
         );
     }
 
@@ -7690,13 +7725,7 @@ mod control_ipc_tests {
             move || {
                 let listener = UnixListener::bind(socket_path).unwrap();
                 for attempt in 0..2 {
-                    let (mut stream, _addr) = listener.accept().unwrap();
-                    let mut line = String::new();
-                    BufReader::new(stream.try_clone().unwrap())
-                        .read_line(&mut line)
-                        .unwrap();
-                    let req: televy_backup_core::control::ControlRequest =
-                        serde_json::from_str(line.trim_end()).unwrap();
+                    let (mut stream, req) = accept_control_request(&listener);
                     captured.lock().unwrap().push(req.clone());
 
                     let result = if attempt == 0 {
@@ -7713,22 +7742,82 @@ mod control_ipc_tests {
         });
 
         wait_for_socket(&socket_path);
-        daemon_control_status_task_finish(
+        let result = daemon_control_status_task_finish(
             data_dir.path(),
             "task-1",
             "restore",
             "t1",
             "succeeded",
             None,
-        )
-        .expect("a missing acknowledgement should be retried until acknowledged");
+        );
         server.join().unwrap();
+        result.expect("a missing acknowledgement should be retried until acknowledged");
 
         let requests = captured.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(
             requests[0].params, requests[1].params,
             "the retry must replay the exact terminal transition"
+        );
+    }
+
+    #[test]
+    fn status_task_finish_stops_after_three_missing_acknowledgements() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let ipc_dir = data_dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            let captured = Arc::clone(&captured);
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                for _ in 0..3 {
+                    let (mut stream, req) = accept_control_request(&listener);
+                    captured.lock().unwrap().push(req.clone());
+
+                    let resp = televy_backup_core::control::ControlResponse::ok(
+                        req.id,
+                        serde_json::json!({ "ok": true }),
+                    );
+                    let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
+                    stream.write_all(resp_line.as_bytes()).unwrap();
+                    stream.flush().unwrap();
+                }
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        let result = daemon_control_status_task_finish(
+            data_dir.path(),
+            "task-1",
+            "restore",
+            "t1",
+            "succeeded",
+            None,
+        );
+        server.join().unwrap();
+
+        let err = result.expect_err("three missing acknowledgements must fail the terminal report");
+        assert_eq!(err.code, "control.unavailable");
+        assert!(err.retryable);
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.method == "status.taskFinish")
+        );
+        assert_eq!(
+            requests[0].params, requests[1].params,
+            "the first retry must replay the exact terminal transition"
+        );
+        assert_eq!(
+            requests[1].params, requests[2].params,
+            "the second retry must replay the exact terminal transition"
         );
     }
 
