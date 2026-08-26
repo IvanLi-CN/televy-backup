@@ -74,6 +74,13 @@ bin_menu_bar_icon="$out_dir/menu-bar-status-item-icon-tests"
   "$root_dir/macos/TelevyBackupAppTests/MenuBarStatusItemIconTests.swift"
 "$bin_menu_bar_icon"
 
+"$swiftc" \
+  -typecheck \
+  -sdk "$sdk_path" \
+  -framework SwiftUI \
+  -framework AppKit \
+  "$root_dir/macos/TelevyBackupApp"/*.swift
+
 "$root_dir/scripts/macos/ui-store-static-check.sh"
 
 bin_popover="$out_dir/popover-layout-size-tests"

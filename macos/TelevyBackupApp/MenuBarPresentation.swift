@@ -203,6 +203,13 @@ final class MenuBarFailureLatch {
         activeFailureIdentityByTarget.removeAll()
         terminalFailureIdentityByTarget.removeAll()
         terminalLocalTaskIdByTarget.removeAll()
+        failureExpiryByIdentity = failureExpiryByIdentity.filter { identity, _ in
+            if case .localTask = identity {
+                return true
+            }
+            return false
+        }
+        failureExpiresAt = failureExpiryByIdentity.values.min()
     }
 
     static func requiresStatusSessionReset(

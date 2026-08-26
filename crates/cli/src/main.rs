@@ -4897,6 +4897,15 @@ async fn backup_run(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(res) => {
+            daemon_control_status_task_finish(
+                data_dir,
+                &task_id,
+                "backup",
+                ctx_target_id.as_str(),
+                "succeeded",
+                None,
+            )?;
+
             tracing::warn!(
                 event = "run.finish",
                 kind = "backup",
@@ -4919,15 +4928,6 @@ async fn backup_run(
                 ignore_invalid_rules = res.ignore_invalid_rules,
                 "run.finish"
             );
-
-            daemon_control_status_task_finish(
-                data_dir,
-                &task_id,
-                "backup",
-                ctx_target_id.as_str(),
-                "succeeded",
-                None,
-            )?;
 
             if events {
                 emit_event_stdout(serde_json::json!({
@@ -5515,6 +5515,17 @@ async fn restore_run(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(res) => {
+            if let Some(target_id) = admitted_target_id.as_deref() {
+                daemon_control_status_task_finish(
+                    data_dir,
+                    &task_id,
+                    "restore",
+                    target_id,
+                    "succeeded",
+                    None,
+                )?;
+            }
+
             tracing::warn!(
                 event = "run.finish",
                 kind = "restore",
@@ -5528,17 +5539,6 @@ async fn restore_run(
                 bytes_written = res.bytes_written,
                 "run.finish"
             );
-
-            if let Some(target_id) = admitted_target_id.as_deref() {
-                daemon_control_status_task_finish(
-                    data_dir,
-                    &task_id,
-                    "restore",
-                    target_id,
-                    "succeeded",
-                    None,
-                )?;
-            }
 
             if events {
                 let mut event = serde_json::json!({
@@ -6079,6 +6079,15 @@ async fn restore_latest(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok((snapshot_id, res)) => {
+            daemon_control_status_task_finish(
+                data_dir,
+                &task_id,
+                "restore",
+                t.id.as_str(),
+                "succeeded",
+                None,
+            )?;
+
             tracing::warn!(
                 event = "run.finish",
                 kind = "restore",
@@ -6095,15 +6104,6 @@ async fn restore_latest(
                 bytes_written = res.bytes_written,
                 "run.finish"
             );
-
-            daemon_control_status_task_finish(
-                data_dir,
-                &task_id,
-                "restore",
-                t.id.as_str(),
-                "succeeded",
-                None,
-            )?;
 
             if events {
                 emit_event_stdout(serde_json::json!({
@@ -6522,6 +6522,15 @@ async fn verify_latest(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok((snapshot_id, res)) => {
+            daemon_control_status_task_finish(
+                data_dir,
+                &task_id,
+                "verify",
+                t.id.as_str(),
+                "succeeded",
+                None,
+            )?;
+
             tracing::warn!(
                 event = "run.finish",
                 kind = "verify",
@@ -6537,15 +6546,6 @@ async fn verify_latest(
                 bytes_checked = res.bytes_checked,
                 "run.finish"
             );
-
-            daemon_control_status_task_finish(
-                data_dir,
-                &task_id,
-                "verify",
-                t.id.as_str(),
-                "succeeded",
-                None,
-            )?;
 
             if events {
                 emit_event_stdout(serde_json::json!({
@@ -6834,6 +6834,17 @@ async fn verify_run(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(res) => {
+            if let Some(target_id) = admitted_target_id.as_deref() {
+                daemon_control_status_task_finish(
+                    data_dir,
+                    &task_id,
+                    "verify",
+                    target_id,
+                    "succeeded",
+                    None,
+                )?;
+            }
+
             tracing::warn!(
                 event = "run.finish",
                 kind = "verify",
@@ -6846,17 +6857,6 @@ async fn verify_run(
                 bytes_checked = res.bytes_checked,
                 "run.finish"
             );
-
-            if let Some(target_id) = admitted_target_id.as_deref() {
-                daemon_control_status_task_finish(
-                    data_dir,
-                    &task_id,
-                    "verify",
-                    target_id,
-                    "succeeded",
-                    None,
-                )?;
-            }
 
             if events {
                 let mut event = serde_json::json!({
@@ -7225,12 +7225,11 @@ fn control_ipc_call_with_timeouts(
 
     let resp: televy_backup_core::control::ControlResponse =
         serde_json::from_str(resp_line.trim_end()).map_err(|e| {
-            CliError::new("control.unavailable", format!("invalid IPC response: {e}")).with_details(
-                serde_json::json!({
+            CliError::retryable("control.unavailable", format!("invalid IPC response: {e}"))
+                .with_details(serde_json::json!({
                     "socketPath": socket_path.display().to_string(),
                     "responseLine": resp_line.clone(),
-                }),
-            )
+                }))
         })?;
 
     if resp.ok {
@@ -7533,6 +7532,71 @@ mod control_ipc_tests {
             requests
                 .iter()
                 .all(|request| request.params["state"] == "succeeded")
+        );
+    }
+
+    #[test]
+    fn status_task_finish_retries_after_an_invalid_response() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let ipc_dir = data_dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+        let captured = Arc::new(Mutex::new(Vec::new()));
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            let captured = Arc::clone(&captured);
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                for attempt in 0..2 {
+                    let (mut stream, _addr) = listener.accept().unwrap();
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let req: televy_backup_core::control::ControlRequest =
+                        serde_json::from_str(line.trim_end()).unwrap();
+                    captured.lock().unwrap().push(req.clone());
+
+                    if attempt == 0 {
+                        stream.write_all(b"{\"ok\":true").unwrap();
+                        stream.flush().unwrap();
+                        continue;
+                    }
+
+                    let resp = televy_backup_core::control::ControlResponse::ok(
+                        req.id,
+                        serde_json::json!({ "ok": true, "acknowledged": true, "replayed": true }),
+                    );
+                    let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
+                    stream.write_all(resp_line.as_bytes()).unwrap();
+                    stream.flush().unwrap();
+                }
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        daemon_control_status_task_finish(
+            data_dir.path(),
+            "task-1",
+            "restore",
+            "t1",
+            "succeeded",
+            None,
+        )
+        .expect("an ambiguous terminal response should be retried until acknowledged");
+        server.join().unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.method == "status.taskFinish")
+        );
+        assert_eq!(
+            requests[0].params, requests[1].params,
+            "the retry must replay the exact terminal transition"
         );
     }
 
@@ -8167,6 +8231,94 @@ mod tests {
         let err = status_target_id_for_snapshot(&settings, Some("/source"), "endpoint-a")
             .expect_err("ambiguous target ownership must fail closed");
         assert_eq!(err.code, "config.invalid");
+    }
+
+    async fn seed_snapshot_without_matching_target(data_dir: &Path, snapshot_id: &str) {
+        let index_dir = data_dir.join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let pool = televy_backup_core::index_db::open_index_db(&index_dir.join("index.ep1.sqlite"))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind(snapshot_id)
+        .bind("2026-08-26T00:00:00Z")
+        .bind("/unowned/source")
+        .bind("Unowned")
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO remote_indexes (snapshot_id, provider, manifest_object_id, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(snapshot_id)
+        .bind("telegram.mtproto/ep1")
+        .bind("manifest-unowned")
+        .bind("2026-08-26T00:00:00Z")
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn generic_restore_and_verify_reject_unowned_snapshots_before_data_plane() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let restore_target = data_dir.path().join("restored");
+        write_config(
+            config_dir.path(),
+            r#"
+version = 2
+
+[[telegram_endpoints]]
+id = "ep1"
+mode = "mtproto"
+chat_id = "-1001"
+bot_token_key = "telegram.bot_token.ep1"
+
+[[targets]]
+id = "owned-target"
+source_path = "/owned/source"
+label = "Owned"
+endpoint_id = "ep1"
+"#,
+        );
+        seed_snapshot_without_matching_target(data_dir.path(), "snap-unowned").await;
+
+        let restore = restore_run(
+            config_dir.path(),
+            data_dir.path(),
+            "snap-unowned".to_string(),
+            restore_target.clone(),
+            false,
+            false,
+        )
+        .await
+        .expect_err("an unowned snapshot must not start restore");
+        assert_eq!(restore.code, "config.invalid");
+        assert!(restore.message.contains("no target matches snapshot"));
+
+        let verify = verify_run(
+            config_dir.path(),
+            data_dir.path(),
+            "snap-unowned".to_string(),
+            false,
+            false,
+        )
+        .await
+        .expect_err("an unowned snapshot must not start verify");
+        assert_eq!(verify.code, "config.invalid");
+        assert!(verify.message.contains("no target matches snapshot"));
+        assert!(
+            !data_dir.path().join("cache").join("mtproto").exists(),
+            "unowned generic tasks must fail before the MTProto data plane is initialized"
+        );
+        assert!(
+            !restore_target.exists(),
+            "an unowned restore must not create its destination"
+        );
     }
 
     fn status_snapshot_one_target(

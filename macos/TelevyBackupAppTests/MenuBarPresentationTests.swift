@@ -198,6 +198,23 @@ private func testFailureLatchLifecycle() {
         "the second task failure should expire after its own ten-second window"
     )
 
+    let daemonFailureLatch = MenuBarFailureLatch()
+    daemonFailureLatch.observeStatus(snapshot: running, connectionPhase: .fresh, now: now)
+    daemonFailureLatch.observeStatus(
+        snapshot: historicalFailure,
+        connectionPhase: .fresh,
+        now: now.addingTimeInterval(1)
+    )
+    expectMenuBar(
+        daemonFailureLatch.isActive(now: now.addingTimeInterval(1)),
+        "a daemon live failure should latch before its session resets"
+    )
+    daemonFailureLatch.resetStatusSession()
+    expectMenuBar(
+        !daemonFailureLatch.isActive(now: now.addingTimeInterval(1)),
+        "a new daemon session must not retain the prior daemon failure latch"
+    )
+
     let reconnectLatch = MenuBarFailureLatch()
     reconnectLatch.observeStatus(snapshot: running, connectionPhase: .fresh, now: now)
     reconnectLatch.resetStatusSession()

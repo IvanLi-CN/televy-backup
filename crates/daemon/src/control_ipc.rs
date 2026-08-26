@@ -1666,13 +1666,42 @@ mod tests {
         assert_eq!(applied.result.unwrap()["replayed"], false);
 
         let replayed = handle_request(
-            &ControlRequest::new("restore-finish-retry", "status.taskFinish", params),
+            &ControlRequest::new("restore-finish-retry", "status.taskFinish", params.clone()),
             &context,
             &settings(),
             &logging,
         );
         assert!(replayed.ok);
         assert_eq!(replayed.result.unwrap()["replayed"], true);
+
+        let restarted_status_state = Arc::new(Mutex::new(
+            crate::StatusRuntimeState::from_settings(&settings()),
+        ));
+        let restarted_context = test_context(
+            config_root,
+            restarted_status_state,
+            Arc::new(Mutex::new(crate::BackupQueue::default())),
+            Arc::new(Notify::new()),
+            Arc::new(crate::DaemonLifecycle::default()),
+        );
+        let after_restart = handle_request(
+            &ControlRequest::new(
+                "restore-finish-after-restart",
+                "status.taskFinish",
+                params.clone(),
+            ),
+            &restarted_context,
+            &settings(),
+            &logging,
+        );
+        assert!(!after_restart.ok);
+        assert_eq!(
+            after_restart
+                .error
+                .expect("restarted daemon must reject an unowned terminal state")
+                .code,
+            "task_not_owned"
+        );
 
         let stale = handle_request(
             &ControlRequest::new(
