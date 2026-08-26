@@ -6973,7 +6973,7 @@ async fn lookup_manifest_meta_any(
         match lookup_manifest_meta(&path, snapshot_id).await {
             Ok(found) => matches.push((path, found)),
             Err(e) if e.code == "snapshot.not_found" => continue,
-            Err(_) => continue,
+            Err(e) => return Err(e),
         }
     }
 
@@ -8614,6 +8614,28 @@ endpoint_id = "ep1"
             .expect_err("duplicate snapshot ids must fail closed");
         assert_eq!(lookup.code, "config.invalid");
         assert!(lookup.message.contains("ambiguous"));
+    }
+
+    #[tokio::test]
+    async fn lookup_manifest_meta_any_propagates_unreadable_indexes() {
+        let data_dir = tempfile::tempdir().unwrap();
+        seed_snapshot_in_endpoint_index(
+            data_dir.path(),
+            "ep1",
+            "snap-readable",
+            "/source/one",
+            "telegram.mtproto/ep1",
+            "manifest-ep1",
+        )
+        .await;
+        let index_dir = data_dir.path().join("index");
+        std::fs::write(index_dir.join("index.ep2.sqlite"), b"not a sqlite database").unwrap();
+
+        let lookup = lookup_manifest_meta_any(data_dir.path(), "snap-readable")
+            .await
+            .expect_err("unreadable index must fail closed");
+        assert_ne!(lookup.code, "snapshot.not_found");
+        assert!(lookup.message.contains("sqlite") || lookup.message.contains("database"));
     }
 
     fn status_snapshot_one_target(
