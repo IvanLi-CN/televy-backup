@@ -56,7 +56,11 @@ struct StatusActiveTask: Codable, Equatable {
     }
 
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+            kind = ""
+            directions = []
+            return
+        }
         kind = (try? container.decode(String.self, forKey: .kind)) ?? ""
         directions = (try? container.decode([String].self, forKey: .directions)) ?? []
     }

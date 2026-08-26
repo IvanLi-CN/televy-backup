@@ -142,7 +142,7 @@ final class MenuBarFailureLatch {
         }
 
         for target in snapshot.targets {
-            let isActive = target.activeTask?.isSupported == true || target.state == "running"
+            let isActive = target.activeTask?.isSupported == true
             if isActive {
                 if observedActiveTargetIds.insert(target.targetId).inserted {
                     beginStatusActivity(for: target.targetId)

@@ -7355,6 +7355,9 @@ mod control_ipc_tests {
         loop {
             match listener.accept() {
                 Ok((stream, _addr)) => {
+                    stream
+                        .set_nonblocking(false)
+                        .expect("set accepted control stream blocking");
                     let mut line = String::new();
                     BufReader::new(stream.try_clone().expect("clone accepted stream"))
                         .read_line(&mut line)

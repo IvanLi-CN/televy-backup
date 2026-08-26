@@ -149,13 +149,23 @@ private func testActiveTaskDecodingIsForwardCompatible() {
           "up": {},
           "upTotal": {},
           "activeTask": { "kind": ["backup"], "directions": "up" }
+        },
+        {
+          "targetId": "scalar-activity",
+          "sourcePath": "/tmp/scalar-activity",
+          "endpointId": "endpoint",
+          "enabled": true,
+          "state": "idle",
+          "up": {},
+          "upTotal": {},
+          "activeTask": "archive"
         }
       ]
     }
     """
 
     let snapshot = try! JSONDecoder().decode(StatusSnapshot.self, from: Data(json.utf8))
-    expectMenuBar(snapshot.targets.count == 3, "incomplete activeTask must not discard the status snapshot")
+    expectMenuBar(snapshot.targets.count == 4, "incomplete activeTask must not discard the status snapshot")
     expectMenuBar(
         snapshot.targets.allSatisfy { $0.activeTask?.isSupported == false },
         "incomplete or unknown activity must not become a supported menu bar activity"
@@ -313,6 +323,44 @@ private func testFailureLatchLifecycle() {
             maximumGap: 5
         ),
         "an ingress gap beyond the stale threshold must start a new session"
+    )
+
+    let legacyStateLatch = MenuBarFailureLatch()
+    legacyStateLatch.observeStatus(
+        snapshot: menuSnapshot(targets: [menuTarget(id: "legacy", state: "running")]),
+        connectionPhase: .fresh,
+        now: now
+    )
+    legacyStateLatch.observeStatus(
+        snapshot: menuSnapshot(targets: [menuTarget(id: "legacy", state: "failed")]),
+        connectionPhase: .fresh,
+        now: now.addingTimeInterval(1)
+    )
+    expectMenuBar(
+        !legacyStateLatch.isActive(now: now.addingTimeInterval(1)),
+        "legacy running state without activeTask must not latch failure"
+    )
+
+    let unknownActivityLatch = MenuBarFailureLatch()
+    unknownActivityLatch.observeStatus(
+        snapshot: menuSnapshot(targets: [
+            menuTarget(
+                id: "unknown",
+                state: "running",
+                activity: StatusActiveTask(kind: "archive", directions: ["up"])
+            )
+        ]),
+        connectionPhase: .fresh,
+        now: now
+    )
+    unknownActivityLatch.observeStatus(
+        snapshot: menuSnapshot(targets: [menuTarget(id: "unknown", state: "failed")]),
+        connectionPhase: .fresh,
+        now: now.addingTimeInterval(1)
+    )
+    expectMenuBar(
+        !unknownActivityLatch.isActive(now: now.addingTimeInterval(1)),
+        "unsupported activeTask must not latch failure"
     )
 }
 
