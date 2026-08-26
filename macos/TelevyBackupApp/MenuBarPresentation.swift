@@ -178,6 +178,7 @@ final class MenuBarFailureLatch {
     }
 
     private func latchFailure(now: Date) {
+        guard !isActive(now: now) else { return }
         failureExpiresAt = now.addingTimeInterval(Self.duration)
     }
 }

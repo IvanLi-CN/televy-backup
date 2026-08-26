@@ -146,6 +146,22 @@ private func testFailureLatchLifecycle() {
     latch.observeLocalTask(MenuBarLocalTask(id: "busy", kind: "restore", state: "failed"), now: now)
     expectMenuBar(latch.isActive(now: now), "current local task failure should latch without a snapshot")
 
+    let duplicateFailureLatch = MenuBarFailureLatch()
+    duplicateFailureLatch.observeLocalTask(
+        MenuBarLocalTask(id: "target", kind: "restore", state: "failed"),
+        now: now
+    )
+    duplicateFailureLatch.observeStatus(snapshot: running, connectionPhase: .fresh, now: now)
+    duplicateFailureLatch.observeStatus(
+        snapshot: historicalFailure,
+        connectionPhase: .fresh,
+        now: now.addingTimeInterval(0.8)
+    )
+    expectMenuBar(
+        !duplicateFailureLatch.isActive(now: now.addingTimeInterval(10)),
+        "a matching daemon failure must not extend the original ten-second local failure latch"
+    )
+
     let reconnectLatch = MenuBarFailureLatch()
     reconnectLatch.observeStatus(snapshot: running, connectionPhase: .fresh, now: now)
     reconnectLatch.resetStatusSession()

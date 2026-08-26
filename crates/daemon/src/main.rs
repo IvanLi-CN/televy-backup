@@ -673,18 +673,13 @@ impl StatusRuntimeState {
             return;
         };
 
-        // Ignore stale updates from an earlier task.
-        match t.external_task_id.as_deref() {
-            Some(active) if active != task_id => return,
-            None if t.active_task.is_some() => return,
-            None => {
-                let Some(activity) = ActiveTask::for_kind(kind) else {
-                    return;
-                };
-                t.external_task_id = Some(task_id.to_string());
-                t.active_task = Some(activity);
-            }
-            _ => {}
+        // status.taskStart is the sole external admission path. Late or untrusted progress
+        // must never recreate ownership after a task has finished or been reaped.
+        let Some(active_task) = t.active_task.as_ref() else {
+            return;
+        };
+        if t.external_task_id.as_deref() != Some(task_id) || active_task.kind != kind {
+            return;
         }
 
         t.external_last_report_at = Some(Instant::now());
@@ -1582,6 +1577,28 @@ mod tests {
                 .and_then(|run| run.error_code.as_deref()),
             Some("restore.network_failed")
         );
+    }
+
+    #[test]
+    fn external_progress_requires_prior_admission() {
+        let mut st = state_one_target();
+
+        st.on_external_progress("t1", "restore-1", "restore", progress(123));
+        let target = &st.targets["t1"];
+        assert_eq!(target.state, "idle");
+        assert!(target.active_task.is_none());
+        assert!(target.external_task_id.is_none());
+
+        st.mark_external_run_start("t1", "restore-1", "restore", None, None)
+            .expect("restore should start");
+        st.mark_external_run_finish("t1", "restore-1", "succeeded", None);
+        st.on_external_progress("t1", "restore-1", "restore", progress(456));
+
+        let target = &st.targets["t1"];
+        assert_eq!(target.state, "idle");
+        assert!(target.active_task.is_none());
+        assert!(target.external_task_id.is_none());
+        assert!(!st.target_is_busy("t1"));
     }
 
     #[test]
