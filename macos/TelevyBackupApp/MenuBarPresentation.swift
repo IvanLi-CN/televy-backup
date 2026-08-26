@@ -119,7 +119,10 @@ final class MenuBarFailureLatch {
         connectionPhase: StatusConnectionPhase,
         now: Date = Date()
     ) {
-        guard connectionPhase == .fresh, let snapshot else { return }
+        guard connectionPhase == .fresh, let snapshot else {
+            observedActiveTargetIds.removeAll()
+            return
+        }
 
         for target in snapshot.targets {
             let isActive = target.activeTask != nil || target.state == "running"

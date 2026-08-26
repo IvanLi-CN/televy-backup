@@ -4583,7 +4583,6 @@ async fn backup_run(
     );
 
     if let Err(e) = admit_status_task(
-        events,
         config_dir,
         data_dir,
         &task_id,
@@ -4906,16 +4905,15 @@ async fn backup_run(
                         "durationSeconds": duration_seconds,
                     }
                 }));
-                daemon_control_status_task_finish(
-                    data_dir,
-                    &task_id,
-                    "backup",
-                    ctx_target_id.as_str(),
-                    "succeeded",
-                    None,
-                );
-                return Ok(());
             }
+            daemon_control_status_task_finish(
+                data_dir,
+                &task_id,
+                "backup",
+                ctx_target_id.as_str(),
+                "succeeded",
+                None,
+            );
 
             if json {
                 println!(
@@ -4964,15 +4962,15 @@ async fn backup_run(
                     "targetId": ctx_target_id.clone(),
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
-                daemon_control_status_task_finish(
-                    data_dir,
-                    &task_id,
-                    "backup",
-                    ctx_target_id.as_str(),
-                    "failed",
-                    Some(e.code),
-                );
             }
+            daemon_control_status_task_finish(
+                data_dir,
+                &task_id,
+                "backup",
+                ctx_target_id.as_str(),
+                "failed",
+                Some(e.code),
+            );
             Err(e)
         }
     }
@@ -5832,14 +5830,7 @@ async fn restore_latest(
         "run.start"
     );
 
-    if let Err(e) = admit_status_task(
-        events,
-        config_dir,
-        data_dir,
-        &task_id,
-        "restore",
-        t.id.as_str(),
-    ) {
+    if let Err(e) = admit_status_task(config_dir, data_dir, &task_id, "restore", t.id.as_str()) {
         return emit_preflight_failed(
             events,
             &task_id,
@@ -6041,16 +6032,15 @@ async fn restore_latest(
                         "durationSeconds": duration_seconds,
                     }
                 }));
-                daemon_control_status_task_finish(
-                    data_dir,
-                    &task_id,
-                    "restore",
-                    t.id.as_str(),
-                    "succeeded",
-                    None,
-                );
-                return Ok(());
             }
+            daemon_control_status_task_finish(
+                data_dir,
+                &task_id,
+                "restore",
+                t.id.as_str(),
+                "succeeded",
+                None,
+            );
 
             if json {
                 println!(
@@ -6089,15 +6079,15 @@ async fn restore_latest(
                     "targetId": t.id.clone(),
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
-                daemon_control_status_task_finish(
-                    data_dir,
-                    &task_id,
-                    "restore",
-                    t.id.as_str(),
-                    "failed",
-                    Some(e.code),
-                );
             }
+            daemon_control_status_task_finish(
+                data_dir,
+                &task_id,
+                "restore",
+                t.id.as_str(),
+                "failed",
+                Some(e.code),
+            );
             Err(e)
         }
     }
@@ -6285,14 +6275,7 @@ async fn verify_latest(
         "run.start"
     );
 
-    if let Err(e) = admit_status_task(
-        events,
-        config_dir,
-        data_dir,
-        &task_id,
-        "verify",
-        t.id.as_str(),
-    ) {
+    if let Err(e) = admit_status_task(config_dir, data_dir, &task_id, "verify", t.id.as_str()) {
         return emit_preflight_failed(
             events,
             &task_id,
@@ -6491,16 +6474,15 @@ async fn verify_latest(
                         "durationSeconds": duration_seconds,
                     }
                 }));
-                daemon_control_status_task_finish(
-                    data_dir,
-                    &task_id,
-                    "verify",
-                    t.id.as_str(),
-                    "succeeded",
-                    None,
-                );
-                return Ok(());
             }
+            daemon_control_status_task_finish(
+                data_dir,
+                &task_id,
+                "verify",
+                t.id.as_str(),
+                "succeeded",
+                None,
+            );
 
             if json {
                 println!(
@@ -6539,15 +6521,15 @@ async fn verify_latest(
                     "targetId": t.id.clone(),
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
-                daemon_control_status_task_finish(
-                    data_dir,
-                    &task_id,
-                    "verify",
-                    t.id.as_str(),
-                    "failed",
-                    Some(e.code),
-                );
             }
+            daemon_control_status_task_finish(
+                data_dir,
+                &task_id,
+                "verify",
+                t.id.as_str(),
+                "failed",
+                Some(e.code),
+            );
             Err(e)
         }
     }
@@ -7268,6 +7250,90 @@ mod control_ipc_tests {
     }
 
     #[test]
+    fn status_task_admission_runs_without_event_output_and_propagates_target_busy() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let ipc_dir = data_dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+        let captured = Arc::new(Mutex::new(None));
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            let captured = Arc::clone(&captured);
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                let (mut stream, _addr) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let req: televy_backup_core::control::ControlRequest =
+                    serde_json::from_str(line.trim_end()).unwrap();
+                *captured.lock().unwrap() = Some(req.clone());
+                let resp = televy_backup_core::control::ControlResponse::err(
+                    req.id,
+                    televy_backup_core::control::ControlError {
+                        code: "target_busy".to_string(),
+                        message: "backup is active".to_string(),
+                        retryable: false,
+                        details: serde_json::json!({ "targetId": "t1" }),
+                    },
+                );
+                let resp_line = serde_json::to_string(&resp).unwrap() + "\n";
+                stream.write_all(resp_line.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        let err = admit_status_task(
+            config_dir.path(),
+            data_dir.path(),
+            "task-1",
+            "restore",
+            "t1",
+        )
+        .expect_err("target_busy must reject the task before its data plane starts");
+        assert_eq!(err.code, "target_busy");
+        server.join().unwrap();
+
+        let request = captured.lock().unwrap().clone().expect("request captured");
+        assert_eq!(request.method, "status.taskStart");
+        assert_eq!(request.params["kind"], "restore");
+        assert_eq!(request.params["targetId"], "t1");
+    }
+
+    #[test]
+    fn status_task_admission_fails_closed_on_timeout() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let ipc_dir = data_dir.path().join("ipc");
+        std::fs::create_dir_all(&ipc_dir).unwrap();
+        let socket_path = ipc_dir.join("control.sock");
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            move || {
+                let listener = UnixListener::bind(socket_path).unwrap();
+                let (stream, _addr) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                thread::sleep(Duration::from_millis(250));
+            }
+        });
+
+        wait_for_socket(&socket_path);
+        let err = admit_status_task(config_dir.path(), data_dir.path(), "task-1", "verify", "t1")
+            .expect_err("ambiguous admission must not start the task");
+        assert_eq!(err.code, "control.timeout");
+        assert!(err.retryable);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn control_ipc_method_not_found_maps_code() {
         let dir = tempfile::tempdir().unwrap();
         let ipc_dir = dir.path().join("ipc");
@@ -7524,37 +7590,15 @@ fn daemon_control_status_task_start(
 }
 
 fn admit_status_task(
-    events: bool,
     config_dir: &Path,
     data_dir: &Path,
     task_id: &str,
     kind: &str,
     target_id: &str,
 ) -> Result<(), CliError> {
-    guard_events(events, || {
-        daemon_control_status_task_start(config_dir, data_dir, task_id, kind, target_id)
-    })
-}
-
-fn guard_events(
-    events: bool,
-    action: impl FnOnce() -> Result<(), CliError>,
-) -> Result<(), CliError> {
-    if !events {
-        return Ok(());
-    }
-    match action() {
-        Ok(()) => Ok(()),
-        Err(error) if error.code == "target_busy" => Err(error),
-        Err(error) => {
-            tracing::warn!(
-                error_code = error.code,
-                error_message = %error.message,
-                "status task reporting unavailable; continuing without daemon activity"
-            );
-            Ok(())
-        }
-    }
+    // The daemon owns same-target admission. Unlike optional progress output, a missing or
+    // ambiguous admission response must prevent the task from entering its data plane.
+    daemon_control_status_task_start(config_dir, data_dir, task_id, kind, target_id)
 }
 
 #[cfg(not(unix))]

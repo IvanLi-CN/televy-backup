@@ -145,6 +145,19 @@ private func testFailureLatchLifecycle() {
 
     latch.observeLocalTask(MenuBarLocalTask(id: "busy", kind: "restore", state: "failed"), now: now)
     expectMenuBar(latch.isActive(now: now), "current local task failure should latch without a snapshot")
+
+    let reconnectLatch = MenuBarFailureLatch()
+    reconnectLatch.observeStatus(snapshot: running, connectionPhase: .fresh, now: now)
+    reconnectLatch.observeStatus(snapshot: nil, connectionPhase: .stale, now: now.addingTimeInterval(1))
+    reconnectLatch.observeStatus(
+        snapshot: historicalFailure,
+        connectionPhase: .fresh,
+        now: now.addingTimeInterval(2)
+    )
+    expectMenuBar(
+        !reconnectLatch.isActive(now: now.addingTimeInterval(2)),
+        "a disconnected session must not turn a first reconnect failure into a live failure"
+    )
 }
 
 private func testLocalTaskAndPreference() {

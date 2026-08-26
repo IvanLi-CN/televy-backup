@@ -67,6 +67,55 @@ private func testFailureMarkerIsSingleRedColor() {
     expectMenuBarIcon(!baseContainsWarningColor, "failure color must not alter the product drive")
 }
 
+private func testFailureBaseTracksMenuBarAppearance() {
+    func hasVisibleNeutralBase(_ image: NSImage, expectsLight: Bool) -> Bool {
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff)
+        else {
+            return false
+        }
+
+        for x in 0..<Int(MenuBarStatusItemIcon.statusClearanceRect.minX) {
+            for y in 0..<18 {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      color.alphaComponent > 0.2
+                else {
+                    continue
+                }
+                let neutral = abs(color.redComponent - color.greenComponent) < 0.05
+                    && abs(color.greenComponent - color.blueComponent) < 0.05
+                if neutral && (expectsLight ? color.redComponent > 0.65 : color.redComponent < 0.3) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    let lightAppearance = NSAppearance(named: .aqua)
+    let darkAppearance = NSAppearance(named: .darkAqua)
+    for isDev in [false, true] {
+        let light = MenuBarStatusItemIcon.image(
+            for: .failure,
+            isDev: isDev,
+            appearance: lightAppearance
+        )
+        let dark = MenuBarStatusItemIcon.image(
+            for: .failure,
+            isDev: isDev,
+            appearance: darkAppearance
+        )
+        expectMenuBarIcon(
+            hasVisibleNeutralBase(light, expectsLight: false),
+            "failure base must remain dark in light appearance"
+        )
+        expectMenuBarIcon(
+            hasVisibleNeutralBase(dark, expectsLight: true),
+            "failure base must remain visible in dark appearance"
+        )
+    }
+}
+
 private func testActivityBadgesAreDistinct() {
     let idle = MenuBarStatusItemIcon.image(for: .idle, isDev: false).tiffRepresentation
     let activities: [MenuBarActivityState] = [.backup, .restore, .verify, .bidirectional]
@@ -125,6 +174,7 @@ enum MenuBarStatusItemIconTestsMain {
     static func main() {
         testTemplateSemantics()
         testFailureMarkerIsSingleRedColor()
+        testFailureBaseTracksMenuBarAppearance()
         testActivityBadgesAreDistinct()
         testActivityBadgesPreserveProductDriveGeometry()
         testDevIdlePreservesTheExistingIcon()

@@ -9,13 +9,23 @@ enum MenuBarStatusItemIcon {
     static let statusClearanceRect = NSRect(x: 6, y: 0, width: 12, height: 12)
     static let statusBadgeRect = NSRect(x: 7, y: 0, width: 11, height: 11)
 
-    static func image(for activity: MenuBarActivityState, isDev: Bool) -> NSImage {
+    static func image(
+        for activity: MenuBarActivityState,
+        isDev: Bool,
+        appearance: NSAppearance? = nil
+    ) -> NSImage {
         if activity == .idle {
             return baseImage(size: idleSize, baseRect: NSRect(origin: .zero, size: idleSize), isDev: isDev)
         }
 
         let image = NSImage(size: activeSize, flipped: false) { _ in
-            drawOriginalBase(in: activeBaseRect, isDev: isDev, activity: activity)
+            let foregroundColor = activity == .failure ? darkFailureBaseColor(for: appearance) : nil
+            drawOriginalBase(
+                in: activeBaseRect,
+                isDev: isDev,
+                activity: activity,
+                foregroundColor: foregroundColor
+            )
             if activity == .failure {
                 clearFailureBadge(in: statusClearanceRect)
                 drawFailureBadge(in: statusBadgeRect)
@@ -38,14 +48,42 @@ enum MenuBarStatusItemIcon {
         return image
     }
 
-    // This is the pre-feature Dev icon construction. Status markers overlay this unchanged base
-    // without recoloring, resizing, or redrawing the product drive or DEV label.
-    private static func drawOriginalBase(in rect: NSRect, isDev: Bool, activity: MenuBarActivityState) {
+    // Normal and light-appearance failure variants use the pre-feature Dev icon unchanged.
+    // On a dark menu bar, failure uses its foreground color on the same base alpha geometry.
+    private static func drawOriginalBase(
+        in rect: NSRect,
+        isDev: Bool,
+        activity: MenuBarActivityState,
+        foregroundColor: NSColor? = nil
+    ) {
         let description = "TelevyBackup \(activity.accessibilityDescription)"
-        NSImage(
+        let symbol = NSImage(
             systemSymbolName: "externaldrive",
             accessibilityDescription: description
-        )?.draw(
+        )
+        if let foregroundColor {
+            drawTemplateSymbol(symbol, in: rect, foregroundColor: foregroundColor)
+        } else {
+            symbol?.draw(
+                in: rect,
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1.0,
+                respectFlipped: false,
+                hints: nil
+            )
+        }
+
+        guard isDev else { return }
+        drawOriginalDevBadge(in: rect, foregroundColor: foregroundColor ?? .black)
+    }
+
+    private static func drawTemplateSymbol(
+        _ symbol: NSImage?,
+        in rect: NSRect,
+        foregroundColor: NSColor
+    ) {
+        symbol?.draw(
             in: rect,
             from: .zero,
             operation: .sourceOver,
@@ -53,19 +91,27 @@ enum MenuBarStatusItemIcon {
             respectFlipped: false,
             hints: nil
         )
-
-        guard isDev else { return }
-        drawOriginalDevBadge(in: rect)
+        guard let context = NSGraphicsContext.current else { return }
+        NSGraphicsContext.saveGraphicsState()
+        context.compositingOperation = .sourceIn
+        foregroundColor.setFill()
+        NSBezierPath(rect: rect).fill()
+        NSGraphicsContext.restoreGraphicsState()
     }
 
-    private static func drawOriginalDevBadge(in rect: NSRect) {
+    private static func darkFailureBaseColor(for appearance: NSAppearance?) -> NSColor? {
+        guard let appearance else { return nil }
+        return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .white : nil
+    }
+
+    private static func drawOriginalDevBadge(in rect: NSRect, foregroundColor: NSColor) {
         let badgeRect = NSRect(
             x: rect.maxX - 15,
             y: rect.minY + 1,
             width: 14,
             height: 7
         )
-        NSColor.black.setFill()
+        foregroundColor.setFill()
         NSBezierPath(roundedRect: badgeRect, xRadius: 2, yRadius: 2).fill()
 
         guard let context = NSGraphicsContext.current else { return }
@@ -75,7 +121,7 @@ enum MenuBarStatusItemIcon {
             string: "DEV",
             attributes: [
                 .font: NSFont.monospacedSystemFont(ofSize: 6, weight: .bold),
-                .foregroundColor: NSColor.black,
+                .foregroundColor: foregroundColor,
             ]
         )
         let textSize = text.size()

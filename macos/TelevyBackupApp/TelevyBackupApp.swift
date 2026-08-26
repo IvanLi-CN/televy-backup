@@ -4430,7 +4430,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makeStatusItemImage(for activity: MenuBarActivityState) -> NSImage? {
-        MenuBarStatusItemIcon.image(for: activity, isDev: isDevAppVariant())
+        let appearance = statusItem?.button?.effectiveAppearance ?? NSApplication.shared.effectiveAppearance
+        return MenuBarStatusItemIcon.image(
+            for: activity,
+            isDev: isDevAppVariant(),
+            appearance: appearance
+        )
     }
 
     private func statusItemName() -> String {
@@ -4513,6 +4518,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification, object: UserDefaults.standard)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.refreshMenuBarPresentation() }
+            .store(in: &cancellables)
+
+        NSApplication.shared.publisher(for: \.effectiveAppearance)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.appliedMenuBarPresentation = nil
+                self?.refreshMenuBarPresentation()
+            }
             .store(in: &cancellables)
     }
 
