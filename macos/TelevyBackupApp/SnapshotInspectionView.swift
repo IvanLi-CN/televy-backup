@@ -92,6 +92,19 @@ private struct SnapshotBlockPage: Decodable {
     let nextCursor: String?
 }
 
+struct SnapshotBlockRequestEpoch {
+    private(set) var value = 0
+
+    mutating func issue() -> Int {
+        value += 1
+        return value
+    }
+
+    func accepts(_ token: Int) -> Bool {
+        token == value
+    }
+}
+
 private struct SnapshotCommandError: Decodable {
     let code: String?
     let message: String?
@@ -259,6 +272,7 @@ private final class SnapshotInspectionStore: ObservableObject {
     private var treeLoadingParents = Set<String>()
     private var blockNextCursor: String?
     private var blocksReachedEnd = false
+    private var blockRequestEpoch = SnapshotBlockRequestEpoch()
     private var activePresentation: SnapshotInspectionPresentation = .tree
     private var activeChangesOnly = true
     private var activeQuery = ""
@@ -451,7 +465,7 @@ private final class SnapshotInspectionStore: ObservableObject {
     private func loadBlockPage() {
         guard !blocksLoading, !blocksReachedEnd, let snapshotId = run?.snapshotId, let model else { return }
         blocksLoading = true
-        let token = requestToken
+        let token = blockRequestEpoch.issue()
         var params: [String: Any] = [
             "snapshotId": snapshotId,
             "changesOnly": activeBlockChangesOnly,
@@ -463,7 +477,7 @@ private final class SnapshotInspectionStore: ObservableObject {
             method: "snapshot.inspect.blocks",
             params: params
         ) { (result: Result<SnapshotBlockPage, SnapshotRequestFailure>) in
-            guard self.requestToken == token else { return }
+            guard self.blockRequestEpoch.accepts(token) else { return }
             self.blocksLoading = false
             switch result {
             case let .success(page):
@@ -494,6 +508,7 @@ private final class SnapshotInspectionStore: ObservableObject {
     }
 
     private func resetBlockContent() {
+        _ = blockRequestEpoch.issue()
         blocks = []
         blockNextCursor = nil
         blocksReachedEnd = false

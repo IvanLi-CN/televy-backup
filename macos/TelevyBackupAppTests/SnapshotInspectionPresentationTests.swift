@@ -103,12 +103,29 @@ private func testTreeExpansionSurvivesAsyncReload() {
     )
 }
 
+private func testBlockRequestEpochRejectsStaleResults() {
+    var epoch = SnapshotBlockRequestEpoch()
+    let unfilteredRequest = epoch.issue()
+    _ = epoch.issue()
+    expect(
+        !epoch.accepts(unfilteredRequest),
+        "a block response from before a filter change must be discarded"
+    )
+
+    let filteredRequest = epoch.issue()
+    expect(
+        epoch.accepts(filteredRequest),
+        "the latest block response must remain applicable"
+    )
+}
+
 @main
 enum SnapshotInspectionPresentationTestsMain {
     static func main() {
         testSnapshotInspectionEligibility()
         testTargetSelectionDismissesUnrelatedSnapshotDetail()
         testTreeExpansionSurvivesAsyncReload()
+        testBlockRequestEpochRejectsStaleResults()
         print("OK: SnapshotInspectionPresentationTests")
     }
 }
