@@ -394,16 +394,30 @@ private final class SnapshotInspectionStore: ObservableObject {
             blocks: .init(distinct: 734, bytes: 9_876_543_210)
         )
         activeChangesOnly = !unavailable
-        let tree = [
-            SnapshotFileEntry(path: "Albums", name: "Albums", kind: "dir", change: "unchanged", isAncestorContext: true, size: 0, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: .init(added: 8, deleted: 2, changed: 3)),
-            SnapshotFileEntry(path: "Library.photoslibrary", name: "Library.photoslibrary", kind: "dir", change: "changed", isAncestorContext: false, size: 0, mtimeMs: 0, mode: 0, baseline: .init(kind: "dir", size: 0, mtimeMs: 0, mode: 0), descendantChanges: .init(added: 6, deleted: 1, changed: 4)),
-            SnapshotFileEntry(path: "new-import.jpg", name: "new-import.jpg", kind: "file", change: "added", isAncestorContext: false, size: 4_120_332, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
-            SnapshotFileEntry(path: "removed-edit.jpg", name: "removed-edit.jpg", kind: "file", change: "deleted", isAncestorContext: false, size: 2_005_120, mtimeMs: 0, mode: 0, baseline: .init(kind: "file", size: 2_005_120, mtimeMs: 0, mode: 0), descendantChanges: nil),
-        ]
-        let albumChildren = [
-            SnapshotFileEntry(path: "Albums/2026-08-27.jpg", name: "2026-08-27.jpg", kind: "file", change: "added", isAncestorContext: false, size: 4_120_332, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
-            SnapshotFileEntry(path: "Albums/old-edit.jpg", name: "old-edit.jpg", kind: "file", change: "deleted", isAncestorContext: false, size: 2_005_120, mtimeMs: 0, mode: 0, baseline: .init(kind: "file", size: 2_005_120, mtimeMs: 0, mode: 0), descendantChanges: nil),
-        ]
+        let tree: [SnapshotFileEntry]
+        let albumChildren: [SnapshotFileEntry]
+        if unavailable {
+            tree = [
+                SnapshotFileEntry(path: "Albums", name: "Albums", kind: "dir", change: "unchanged", isAncestorContext: false, size: 0, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
+                SnapshotFileEntry(path: "Library.photoslibrary", name: "Library.photoslibrary", kind: "dir", change: "unchanged", isAncestorContext: false, size: 0, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
+                SnapshotFileEntry(path: "new-import.jpg", name: "new-import.jpg", kind: "file", change: "unchanged", isAncestorContext: false, size: 4_120_332, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
+                SnapshotFileEntry(path: "original-edit.jpg", name: "original-edit.jpg", kind: "file", change: "unchanged", isAncestorContext: false, size: 2_005_120, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
+            ]
+            albumChildren = [
+                SnapshotFileEntry(path: "Albums/2026-08-27.jpg", name: "2026-08-27.jpg", kind: "file", change: "unchanged", isAncestorContext: false, size: 4_120_332, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
+            ]
+        } else {
+            tree = [
+                SnapshotFileEntry(path: "Albums", name: "Albums", kind: "dir", change: "unchanged", isAncestorContext: true, size: 0, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: .init(added: 8, deleted: 2, changed: 3)),
+                SnapshotFileEntry(path: "Library.photoslibrary", name: "Library.photoslibrary", kind: "dir", change: "changed", isAncestorContext: false, size: 0, mtimeMs: 0, mode: 0, baseline: .init(kind: "dir", size: 0, mtimeMs: 0, mode: 0), descendantChanges: .init(added: 6, deleted: 1, changed: 4)),
+                SnapshotFileEntry(path: "new-import.jpg", name: "new-import.jpg", kind: "file", change: "added", isAncestorContext: false, size: 4_120_332, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
+                SnapshotFileEntry(path: "removed-edit.jpg", name: "removed-edit.jpg", kind: "file", change: "deleted", isAncestorContext: false, size: 2_005_120, mtimeMs: 0, mode: 0, baseline: .init(kind: "file", size: 2_005_120, mtimeMs: 0, mode: 0), descendantChanges: nil),
+            ]
+            albumChildren = [
+                SnapshotFileEntry(path: "Albums/2026-08-27.jpg", name: "2026-08-27.jpg", kind: "file", change: "added", isAncestorContext: false, size: 4_120_332, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
+                SnapshotFileEntry(path: "Albums/old-edit.jpg", name: "old-edit.jpg", kind: "file", change: "deleted", isAncestorContext: false, size: 2_005_120, mtimeMs: 0, mode: 0, baseline: .init(kind: "file", size: 2_005_120, mtimeMs: 0, mode: 0), descendantChanges: nil),
+            ]
+        }
         treeEntries = ["": tree, "Albums": albumChildren]
         listEntries = tree + albumChildren
         blocks = [
@@ -448,12 +462,7 @@ struct SnapshotRunDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            Picker("", selection: $tab) {
-                ForEach(Tab.allCases) { tab in Text(tab.rawValue).tag(tab) }
-            }
-            .pickerStyle(.segmented)
-            .controlSize(.small)
-            .fixedSize()
+            detailToolbar
             Divider()
             content
         }
@@ -471,6 +480,62 @@ struct SnapshotRunDetailView: View {
         .onChange(of: query) { _, _ in reloadFiles() }
     }
 
+    @ViewBuilder
+    private var detailToolbar: some View {
+        if tab == .files, let summary = store.summary, store.issue == nil {
+            ViewThatFits(in: .horizontal) {
+                wideFileToolbar(summary: summary)
+                stackedFileToolbar(summary: summary)
+                compactFileToolbar(summary: summary)
+            }
+        } else {
+            tabPicker
+        }
+    }
+
+    private func wideFileToolbar(summary: SnapshotInspectionSummary) -> some View {
+        HStack(spacing: 16) {
+            tabPicker
+            Spacer(minLength: 24)
+            fileControls(summary: summary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func stackedFileToolbar(summary: SnapshotInspectionSummary) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            tabPicker
+            HStack(spacing: 8) {
+                fileControls(summary: summary)
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func compactFileToolbar(summary: SnapshotInspectionSummary) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            tabPicker
+            HStack(spacing: 8) {
+                filePresentationPicker
+                changesOnlyToggle
+                Spacer(minLength: 0)
+            }
+            fileSearchField.frame(maxWidth: .infinity)
+            availabilityNotice(summary: summary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var tabPicker: some View {
+        Picker("", selection: $tab) {
+            ForEach(Tab.allCases) { tab in Text(tab.rawValue).tag(tab) }
+        }
+        .pickerStyle(.segmented)
+        .controlSize(.small)
+        .frame(width: 208)
+    }
+
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
             Button(action: onBack) {
@@ -478,12 +543,12 @@ struct SnapshotRunDetailView: View {
             }
             .buttonStyle(.borderless)
             .help("Back to history")
-            Text("Backup details")
+            Text("\(run.kind.capitalized) details")
                 .font(.system(size: 18, weight: .bold))
             if let status = run.status {
                 Text(status.capitalized)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(status == "succeeded" ? .green : .secondary)
+                    .foregroundStyle(statusColor)
             }
             Spacer(minLength: 0)
             if let snapshotId = run.snapshotId {
@@ -491,7 +556,25 @@ struct SnapshotRunDetailView: View {
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(snapshotId, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Copy snapshot ID")
+                .accessibilityLabel("Copy snapshot ID")
             }
+        }
+    }
+
+    private var statusColor: Color {
+        switch run.status {
+        case "succeeded": .green
+        case "failed": .red
+        case "running": .blue
+        default: .secondary
         }
     }
 
@@ -500,10 +583,14 @@ struct SnapshotRunDetailView: View {
         if store.summaryLoading {
             SnapshotInspectionStateView(icon: "arrow.triangle.2.circlepath", title: "Loading snapshot", detail: "Reading the retained file map.", showsProgress: true)
         } else if let issue = store.issue {
-            SnapshotInspectionStateView(icon: "exclamationmark.triangle", title: "Snapshot unavailable", detail: issue, showsProgress: false) {
-                if store.issueRetryable {
-                    Button("Retry") { store.retry() }
-                        .controlSize(.small)
+            VStack(alignment: .leading, spacing: 12) {
+                SnapshotExecutionSummaryView(run: run)
+                Divider()
+                SnapshotInspectionStateView(icon: "exclamationmark.triangle", title: "Snapshot unavailable", detail: issue, showsProgress: false) {
+                    if store.issueRetryable {
+                        Button("Retry") { store.retry() }
+                            .controlSize(.small)
+                    }
                 }
             }
         } else if let summary = store.summary {
@@ -522,28 +609,6 @@ struct SnapshotRunDetailView: View {
 
     private func files(summary: SnapshotInspectionSummary) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Picker("File presentation", selection: $presentation) {
-                    ForEach(SnapshotInspectionPresentation.allCases) { item in Text(item.rawValue).tag(item) }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .controlSize(.small)
-                .frame(width: 140)
-                Toggle("Changes only", isOn: $changesOnly)
-                    .toggleStyle(.checkbox)
-                    .controlSize(.small)
-                    .disabled(!store.changesAvailable)
-                TextField("Search paths", text: $query)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 240)
-                Spacer(minLength: 0)
-                if summary.availability.state == "baselineUnavailable" {
-                    Text("Direct baseline unavailable")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-            }
             if presentation == .tree, store.treeEntries["", default: []].isEmpty, !store.filesLoading {
                 SnapshotInspectionStateView(icon: "folder", title: "No files", detail: "No retained paths match this view.", showsProgress: false)
             } else if presentation == .tree {
@@ -564,6 +629,51 @@ struct SnapshotRunDetailView: View {
         .onAppear {
             if summary.availability.state == "baselineUnavailable" { changesOnly = false }
             reloadFiles()
+        }
+    }
+
+    private func fileControls(summary: SnapshotInspectionSummary) -> some View {
+        HStack(spacing: 8) {
+            filePresentationPicker
+            changesOnlyToggle
+            fileSearchField
+            availabilityNotice(summary: summary)
+        }
+    }
+
+    private var filePresentationPicker: some View {
+        Picker("File presentation", selection: $presentation) {
+            ForEach(SnapshotInspectionPresentation.allCases) { item in Text(item.rawValue).tag(item) }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .controlSize(.small)
+        .frame(width: 98)
+    }
+
+    private var changesOnlyToggle: some View {
+        Toggle("Changes only", isOn: $changesOnly)
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .font(.system(size: 11, weight: .medium))
+            .disabled(!store.changesAvailable)
+    }
+
+    private var fileSearchField: some View {
+        TextField("Search paths", text: $query)
+            .textFieldStyle(.roundedBorder)
+            .frame(minWidth: 125, idealWidth: 180, maxWidth: 250)
+    }
+
+    @ViewBuilder
+    private func availabilityNotice(summary: SnapshotInspectionSummary) -> some View {
+        if summary.availability.state == "baselineUnavailable" {
+            Label("Baseline unavailable", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help("The direct base snapshot is no longer retained.")
+                .accessibilityLabel("Direct baseline unavailable")
         }
     }
 
@@ -600,7 +710,12 @@ private struct SnapshotSummaryView: View {
         VStack(alignment: .leading, spacing: 16) {
             Grid(alignment: .leading, horizontalSpacing: 28, verticalSpacing: 8) {
                 GridRow { label("Outcome"); Text((run.status ?? "unknown").capitalized) }
+                GridRow { label("Started"); Text(run.startedAt.map(timestamp) ?? "Unavailable") }
+                GridRow { label("Finished"); Text(run.finishedAt.map(timestamp) ?? "Unavailable") }
                 GridRow { label("Duration"); Text(run.durationSeconds.map(formatDuration) ?? "Unavailable") }
+                GridRow { label("Uploaded"); Text(run.bytesUploaded.map(formatBytes) ?? "Unavailable") }
+                GridRow { label("Deduped"); Text(run.bytesDeduped.map(formatBytes) ?? "Unavailable") }
+                GridRow { label("Error"); Text(errorText) }
                 GridRow { label("Source"); Text(summary.snapshot.sourcePath).lineLimit(1).truncationMode(.middle) }
                 GridRow { label("Snapshot"); Text(summary.snapshot.snapshotId).font(.system(size: 11, design: .monospaced)) }
                 GridRow { label("Baseline"); Text(summary.availability.state == "baselineUnavailable" ? "Unavailable" : (summary.snapshot.baseSnapshotId ?? "First snapshot")) }
@@ -626,6 +741,14 @@ private struct SnapshotSummaryView: View {
         Text(text).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
     }
 
+    private func timestamp(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .standard)
+    }
+
+    private var errorText: String {
+        run.errorCode.flatMap { $0.isEmpty ? nil : $0 } ?? "None"
+    }
+
     private func summaryMetric(_ title: String, _ value: String, _ icon: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Image(systemName: icon).foregroundStyle(.secondary)
@@ -633,6 +756,47 @@ private struct SnapshotSummaryView: View {
             Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
         }
         .frame(minWidth: 72, alignment: .leading)
+    }
+}
+
+private struct SnapshotExecutionSummaryView: View {
+    let run: RunLogSummary
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 7) {
+                GridRow { label("Run"); Text(run.kind.capitalized) }
+                GridRow { label("Outcome"); Text((run.status ?? "unknown").capitalized) }
+                GridRow { label("Started"); Text(run.startedAt.map(timestamp) ?? "Unavailable") }
+                GridRow { label("Finished"); Text(run.finishedAt.map(timestamp) ?? "Unavailable") }
+                GridRow { label("Duration"); Text(run.durationSeconds.map(formatDuration) ?? "Unavailable") }
+                GridRow { label("Error"); Text(errorText) }
+                GridRow { label("Source"); Text(run.sourcePath ?? "Unavailable").lineLimit(1).truncationMode(.middle) }
+            }
+            Spacer(minLength: 0)
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([run.logURL])
+            } label: {
+                Image(systemName: "doc.text")
+            }
+            .buttonStyle(.borderless)
+            .help("Reveal log file in Finder")
+            .accessibilityLabel("Reveal log file in Finder")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Run execution summary")
+    }
+
+    private func label(_ text: String) -> some View {
+        Text(text).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+    }
+
+    private func timestamp(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .standard)
+    }
+
+    private var errorText: String {
+        run.errorCode.flatMap { $0.isEmpty ? nil : $0 } ?? "None"
     }
 }
 
@@ -676,6 +840,54 @@ private final class SnapshotOutlineNode: NSObject {
     }
 }
 
+private enum SnapshotNativeColumns {
+    enum File {
+        static let name = NSUserInterfaceItemIdentifier("snapshot-file-name")
+        static let change = NSUserInterfaceItemIdentifier("snapshot-file-change")
+        static let size = NSUserInterfaceItemIdentifier("snapshot-file-size")
+
+        static func install(on table: NSTableView) {
+            table.headerView = NSTableHeaderView()
+            table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+            table.addTableColumn(column(title: "Name", identifier: name, width: 420, minWidth: 180, expands: true, alignment: .left))
+            table.addTableColumn(column(title: "Change", identifier: change, width: 132, minWidth: 112, expands: false, alignment: .left))
+            table.addTableColumn(column(title: "Size", identifier: size, width: 92, minWidth: 76, expands: false, alignment: .right))
+        }
+    }
+
+    enum Block {
+        static let hash = NSUserInterfaceItemIdentifier("snapshot-block-hash")
+        static let size = NSUserInterfaceItemIdentifier("snapshot-block-size")
+        static let files = NSUserInterfaceItemIdentifier("snapshot-block-files")
+
+        static func install(on table: NSTableView) {
+            table.headerView = NSTableHeaderView()
+            table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+            table.addTableColumn(column(title: "Hash", identifier: hash, width: 420, minWidth: 180, expands: true, alignment: .left))
+            table.addTableColumn(column(title: "Size", identifier: size, width: 108, minWidth: 84, expands: false, alignment: .right))
+            table.addTableColumn(column(title: "Files", identifier: files, width: 96, minWidth: 76, expands: false, alignment: .right))
+        }
+    }
+
+    private static func column(
+        title: String,
+        identifier: NSUserInterfaceItemIdentifier,
+        width: CGFloat,
+        minWidth: CGFloat,
+        expands: Bool,
+        alignment: NSTextAlignment
+    ) -> NSTableColumn {
+        let column = NSTableColumn(identifier: identifier)
+        column.headerCell.stringValue = title
+        column.headerCell.font = .systemFont(ofSize: 11, weight: .semibold)
+        column.headerCell.alignment = alignment
+        column.width = width
+        column.minWidth = minWidth
+        column.resizingMask = expands ? [.autoresizingMask, .userResizingMask] : .userResizingMask
+        return column
+    }
+}
+
 private struct SnapshotOutlineTable: NSViewRepresentable {
     let entriesByParent: [String: [SnapshotFileEntry]]
     let onExpand: (String) -> Void
@@ -684,17 +896,13 @@ private struct SnapshotOutlineTable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let outline = NSOutlineView()
-        outline.headerView = nil
         outline.rowSizeStyle = .small
         outline.delegate = context.coordinator
         outline.dataSource = context.coordinator
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("path"))
-        outline.addTableColumn(column)
-        outline.outlineTableColumn = column
-        let scroll = NSScrollView()
-        scroll.documentView = outline
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
+        SnapshotNativeColumns.File.install(on: outline)
+        outline.outlineTableColumn = outline.tableColumn(withIdentifier: SnapshotNativeColumns.File.name)
+        outline.setAccessibilityLabel("Snapshot file tree")
+        let scroll = SnapshotNativeTable.scrollView(table: outline)
         context.coordinator.outline = outline
         context.coordinator.onExpand = onExpand
         context.coordinator.entriesByParent = entriesByParent
@@ -744,9 +952,20 @@ private struct SnapshotOutlineTable: NSViewRepresentable {
             }
         }
 
-        func outlineView(_: NSOutlineView, viewFor _: NSTableColumn?, item: Any) -> NSView? {
+        func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
             guard let node = item as? SnapshotOutlineNode else { return nil }
-            return SnapshotNativeRowView.file(entry: node.entry)
+            guard let tableColumn else { return nil }
+            switch tableColumn.identifier {
+            case SnapshotNativeColumns.File.name:
+                let inset = CGFloat(outlineView.level(forItem: node)) * outlineView.indentationPerLevel + 20
+                return SnapshotNativeRowView.fileName(entry: node.entry, leadingInset: inset, usesOutlineLayout: true)
+            case SnapshotNativeColumns.File.change:
+                return SnapshotNativeRowView.fileChange(entry: node.entry)
+            case SnapshotNativeColumns.File.size:
+                return SnapshotNativeRowView.fileSize(entry: node.entry)
+            default:
+                return nil
+            }
         }
     }
 }
@@ -759,11 +978,11 @@ private struct SnapshotFileTable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let table = NSTableView()
-        table.headerView = nil
         table.rowSizeStyle = .small
         table.delegate = context.coordinator
         table.dataSource = context.coordinator
-        table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("path")))
+        SnapshotNativeColumns.File.install(on: table)
+        table.setAccessibilityLabel("Snapshot file list")
         let scroll = SnapshotNativeTable.scrollView(table: table, coordinator: context.coordinator)
         context.coordinator.table = table
         context.coordinator.onReachedBottom = onReachedBottom
@@ -784,8 +1003,19 @@ private struct SnapshotFileTable: NSViewRepresentable {
 
         func numberOfRows(in _: NSTableView) -> Int { entries.count }
 
-        func tableView(_: NSTableView, viewFor _: NSTableColumn?, row: Int) -> NSView? {
-            SnapshotNativeRowView.file(entry: entries[row])
+        func tableView(_: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard let tableColumn else { return nil }
+            let entry = entries[row]
+            switch tableColumn.identifier {
+            case SnapshotNativeColumns.File.name:
+                return SnapshotNativeRowView.fileName(entry: entry, leadingInset: 0, usesOutlineLayout: false)
+            case SnapshotNativeColumns.File.change:
+                return SnapshotNativeRowView.fileChange(entry: entry)
+            case SnapshotNativeColumns.File.size:
+                return SnapshotNativeRowView.fileSize(entry: entry)
+            default:
+                return nil
+            }
         }
 
         func visibleRowsApproachEnd() { onReachedBottom?() }
@@ -800,11 +1030,11 @@ private struct SnapshotBlockTable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let table = NSTableView()
-        table.headerView = nil
         table.rowSizeStyle = .small
         table.delegate = context.coordinator
         table.dataSource = context.coordinator
-        table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("block")))
+        SnapshotNativeColumns.Block.install(on: table)
+        table.setAccessibilityLabel("Snapshot blocks")
         let scroll = SnapshotNativeTable.scrollView(table: table, coordinator: context.coordinator)
         context.coordinator.table = table
         context.coordinator.onReachedBottom = onReachedBottom
@@ -825,8 +1055,19 @@ private struct SnapshotBlockTable: NSViewRepresentable {
 
         func numberOfRows(in _: NSTableView) -> Int { entries.count }
 
-        func tableView(_: NSTableView, viewFor _: NSTableColumn?, row: Int) -> NSView? {
-            SnapshotNativeRowView.block(entry: entries[row])
+        func tableView(_: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard let tableColumn else { return nil }
+            let entry = entries[row]
+            switch tableColumn.identifier {
+            case SnapshotNativeColumns.Block.hash:
+                return SnapshotNativeRowView.blockHash(entry: entry)
+            case SnapshotNativeColumns.Block.size:
+                return SnapshotNativeRowView.blockSize(entry: entry)
+            case SnapshotNativeColumns.Block.files:
+                return SnapshotNativeRowView.blockFiles(entry: entry)
+            default:
+                return nil
+            }
         }
 
         func visibleRowsApproachEnd() { onReachedBottom?() }
@@ -837,16 +1078,20 @@ private protocol SnapshotNativeTableObserver: AnyObject {
     func visibleRowsApproachEnd()
 }
 
-private enum SnapshotNativeTable {
-    static func scrollView(table: NSTableView, coordinator: SnapshotNativeTableObserver) -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        scroll.contentView.postsBoundsChangedNotifications = true
-        NotificationCenter.default.addObserver(
+private final class SnapshotTableScrollView: NSScrollView {
+    private var boundsObserver: NSObjectProtocol?
+
+    deinit {
+        if let boundsObserver {
+            NotificationCenter.default.removeObserver(boundsObserver)
+        }
+    }
+
+    func observeVisibleRows(with table: NSTableView, coordinator: SnapshotNativeTableObserver) {
+        contentView.postsBoundsChangedNotifications = true
+        boundsObserver = NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification,
-            object: scroll.contentView,
+            object: contentView,
             queue: .main
         ) { [weak table, weak coordinator] _ in
             guard let table, let coordinator else { return }
@@ -855,82 +1100,200 @@ private enum SnapshotNativeTable {
                 coordinator.visibleRowsApproachEnd()
             }
         }
+    }
+
+    override func layout() {
+        super.layout()
+        synchronizeTableWidth()
+    }
+
+    private func synchronizeTableWidth() {
+        guard let table = documentView as? NSTableView,
+              let nameColumn = table.tableColumns.first
+        else { return }
+
+        let visibleWidth = contentView.bounds.width
+        guard visibleWidth > 0 else { return }
+
+        let columnMetrics = table.tableColumns.indices.map { index in
+            let column = table.tableColumns[index]
+            let cellRect = table.rect(ofColumn: index)
+            return (column: column, extraWidth: max(0, cellRect.width - column.width))
+        }
+        guard let nameMetrics = columnMetrics.first else { return }
+
+        let horizontalInset = table.rect(ofColumn: 0).minX
+        let minimumWidth = (horizontalInset * 2) + columnMetrics.reduce(CGFloat.zero) { partial, metrics in
+            partial + metrics.column.minWidth + metrics.extraWidth
+        }
+        let desiredWidth = max(visibleWidth, minimumWidth)
+        if abs(table.frame.width - desiredWidth) > 0.5 {
+            table.setFrameSize(NSSize(width: desiredWidth, height: table.frame.height))
+        }
+
+        let trailingWidth = columnMetrics.dropFirst().reduce(CGFloat.zero) { partial, metrics in
+            partial + metrics.column.width + metrics.extraWidth
+        }
+        let desiredNameWidth = max(
+            nameColumn.minWidth,
+            desiredWidth - (horizontalInset * 2) - trailingWidth - nameMetrics.extraWidth
+        )
+        if abs(nameColumn.width - desiredNameWidth) > 0.5 {
+            nameColumn.width = desiredNameWidth
+        }
+
+        table.layoutSubtreeIfNeeded()
+    }
+}
+
+private enum SnapshotNativeTable {
+    static func scrollView(table: NSTableView) -> SnapshotTableScrollView {
+        let scroll = SnapshotTableScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        return scroll
+    }
+
+    static func scrollView(table: NSTableView, coordinator: SnapshotNativeTableObserver) -> SnapshotTableScrollView {
+        let scroll = scrollView(table: table)
+        scroll.observeVisibleRows(with: table, coordinator: coordinator)
         return scroll
     }
 }
 
 private enum SnapshotNativeRowView {
-    static func file(entry: SnapshotFileEntry) -> NSTableCellView {
+    static func fileName(
+        entry: SnapshotFileEntry,
+        leadingInset: CGFloat,
+        usesOutlineLayout: Bool
+    ) -> NSTableCellView {
         let status = status(for: entry)
-        return makeFile(
+        return nameCell(
             name: entry.name,
-            status: status.title,
-            size: formatBytes(Int64(entry.size)),
-            icon: icon(for: entry.change),
+            icon: icon(for: entry),
             tint: status.tint,
-            accessibility: "\(entry.path), \(status.title)"
+            accessibility: "\(entry.path), \(status.title)",
+            leadingInset: leadingInset,
+            usesOutlineLayout: usesOutlineLayout
         )
     }
 
-    static func block(entry: SnapshotBlockEntry) -> NSTableCellView {
-        make(
-            text: "\(entry.hash)  \(formatBytes(Int64(entry.size)))  \(entry.referencingFiles) files",
+    static func fileChange(entry: SnapshotFileEntry) -> NSTableCellView {
+        let status = status(for: entry)
+        return textCell(
+            text: status.title,
+            font: .systemFont(ofSize: 10, weight: .semibold),
+            color: status.tint,
+            alignment: .left,
+            accessibility: "Change: \(status.title)"
+        )
+    }
+
+    static func fileSize(entry: SnapshotFileEntry) -> NSTableCellView {
+        textCell(
+            text: formatBytes(Int64(entry.size)),
+            font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
+            color: .secondaryLabelColor,
+            alignment: .right,
+            accessibility: "Size: \(formatBytes(Int64(entry.size)))"
+        )
+    }
+
+    static func blockHash(entry: SnapshotBlockEntry) -> NSTableCellView {
+        nameCell(
+            name: entry.hash,
             icon: "square.stack.3d.up",
-            accessibility: "Block \(entry.hash), \(entry.referencingFiles) referencing files"
+            tint: .secondaryLabelColor,
+            accessibility: "Block \(entry.hash)",
+            leadingInset: 0,
+            usesOutlineLayout: false,
+            font: .monospacedSystemFont(ofSize: 11, weight: .medium)
         )
     }
 
-    private static func make(text: String, icon: String, accessibility: String) -> NSTableCellView {
+    static func blockSize(entry: SnapshotBlockEntry) -> NSTableCellView {
+        textCell(
+            text: formatBytes(Int64(entry.size)),
+            font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
+            color: .secondaryLabelColor,
+            alignment: .right,
+            accessibility: "Size: \(formatBytes(Int64(entry.size)))"
+        )
+    }
+
+    static func blockFiles(entry: SnapshotBlockEntry) -> NSTableCellView {
+        textCell(
+            text: "\(entry.referencingFiles)",
+            font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
+            color: .secondaryLabelColor,
+            alignment: .right,
+            accessibility: "Referenced by \(entry.referencingFiles) files"
+        )
+    }
+
+    private static func nameCell(
+        name: String,
+        icon: String,
+        tint: NSColor,
+        accessibility: String,
+        leadingInset: CGFloat,
+        usesOutlineLayout: Bool,
+        font: NSFont = .systemFont(ofSize: 11, weight: .medium)
+    ) -> NSTableCellView {
         let cell = NSTableCellView()
         let image = NSImageView(image: NSImage(systemSymbolName: icon, accessibilityDescription: accessibility) ?? NSImage())
-        image.frame = NSRect(x: 4, y: 2, width: 16, height: 16)
+        image.translatesAutoresizingMaskIntoConstraints = false
         image.imageScaling = .scaleProportionallyDown
-        let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 11, weight: .medium)
+        image.contentTintColor = tint
+
+        let label = NSTextField(labelWithString: name)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = font
         label.lineBreakMode = .byTruncatingMiddle
-        label.frame = NSRect(x: 26, y: 1, width: 400, height: 18)
-        label.autoresizingMask = [.width]
-        label.setAccessibilityLabel(accessibility)
+
         cell.addSubview(image)
         cell.addSubview(label)
-        cell.textField = label
+        NSLayoutConstraint.activate([
+            image.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: leadingInset + 4),
+            image.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            image.widthAnchor.constraint(equalToConstant: 16),
+            image.heightAnchor.constraint(equalToConstant: 16),
+            label.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 6),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        if !usesOutlineLayout {
+            cell.imageView = image
+            cell.textField = label
+        }
         cell.setAccessibilityLabel(accessibility)
         return cell
     }
 
-    private static func makeFile(
-        name: String,
-        status: String,
-        size: String,
-        icon: String,
-        tint: NSColor,
+    private static func textCell(
+        text: String,
+        font: NSFont,
+        color: NSColor,
+        alignment: NSTextAlignment,
         accessibility: String
     ) -> NSTableCellView {
         let cell = NSTableCellView()
-        let image = NSImageView(image: NSImage(systemSymbolName: icon, accessibilityDescription: accessibility) ?? NSImage())
-        image.frame = NSRect(x: 4, y: 2, width: 16, height: 16)
-        image.imageScaling = .scaleProportionallyDown
-        image.contentTintColor = tint
-
-        let nameLabel = NSTextField(labelWithString: name)
-        nameLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        nameLabel.lineBreakMode = .byTruncatingMiddle
-        nameLabel.frame = NSRect(x: 26, y: 1, width: 250, height: 18)
-        nameLabel.autoresizingMask = [.width]
-
-        let statusLabel = NSTextField(labelWithString: status)
-        statusLabel.font = .systemFont(ofSize: 10, weight: .semibold)
-        statusLabel.textColor = tint
-        statusLabel.frame = NSRect(x: 280, y: 2, width: 82, height: 17)
-
-        let sizeLabel = NSTextField(labelWithString: size)
-        sizeLabel.font = .systemFont(ofSize: 10, weight: .medium)
-        sizeLabel.textColor = .secondaryLabelColor
-        sizeLabel.alignment = .right
-        sizeLabel.frame = NSRect(x: 368, y: 2, width: 78, height: 17)
-
-        [image, nameLabel, statusLabel, sizeLabel].forEach(cell.addSubview)
-        cell.textField = nameLabel
+        let label = NSTextField(labelWithString: text)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = font
+        label.textColor = color
+        label.alignment = alignment
+        label.lineBreakMode = .byTruncatingMiddle
+        cell.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        cell.textField = label
         cell.setAccessibilityLabel(accessibility)
         return cell
     }
@@ -945,12 +1308,17 @@ private enum SnapshotNativeRowView {
         }
     }
 
-    private static func icon(for change: String) -> String {
-        switch change {
+    private static func icon(for entry: SnapshotFileEntry) -> String {
+        switch entry.change {
         case "added": return "plus.circle.fill"
         case "deleted": return "minus.circle.fill"
         case "changed": return "pencil.circle.fill"
-        default: return "folder"
+        default:
+            switch entry.kind {
+            case "dir": return "folder"
+            case "symlink": return "link"
+            default: return "doc"
+            }
         }
     }
 }

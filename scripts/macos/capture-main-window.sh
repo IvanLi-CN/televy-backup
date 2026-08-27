@@ -68,7 +68,7 @@ guard let app = NSRunningApplication(processIdentifier: pid) else {
     exit(1)
 }
 
-if !app.activate(options: [.activateIgnoringOtherApps]) {
+if !app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps]) {
     exit(1)
 }
 ' "$app_pid" >/dev/null 2>&1 || true
@@ -144,4 +144,17 @@ if [[ -z "$wid" ]]; then
   echo "ERROR: main window for demo PID $app_pid was not found; refusing an unscoped capture" >&2
   exit 1
 fi
-screencapture -x -l "$wid" "$out"
+
+# A just-created SwiftUI window can be listed before WindowServer makes it
+# imageable. Keep the capture scoped to the same verified window ID and retry
+# briefly rather than falling back to a display capture.
+for attempt in 1 2 3; do
+  if screencapture -x -l "$wid" "$out" && [[ -s "$out" ]]; then
+    exit 0
+  fi
+  rm -f "$out"
+  sleep 0.4
+done
+
+echo "ERROR: verified main window $wid could not be captured" >&2
+exit 1

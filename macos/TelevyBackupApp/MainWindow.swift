@@ -50,7 +50,11 @@ struct MainWindowRootView: View {
             NavigationSplitView {
                 sidebar
                     // Default sidebar width should be comfortable enough to read status/stage without truncation.
-                    .frame(minWidth: 240, idealWidth: 320, maxWidth: 480)
+                    .frame(
+                        minWidth: MainWindowUIDemo.sidebarWidth ?? 240,
+                        idealWidth: MainWindowUIDemo.sidebarWidth ?? 320,
+                        maxWidth: MainWindowUIDemo.sidebarWidth ?? 480
+                    )
             } detail: {
                 detail
             }
@@ -265,6 +269,17 @@ enum MainWindowUIDemo {
 
     static var scene: String {
         ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
+    }
+
+    static var sidebarWidth: CGFloat? {
+        guard enabled,
+              let rawValue = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SIDEBAR_WIDTH"],
+              let width = Double(rawValue),
+              (240 ... 480).contains(width)
+        else {
+            return nil
+        }
+        return CGFloat(width)
     }
 
     static func initialSelection(targets: [StatusTarget]) -> String? {
