@@ -397,6 +397,8 @@ private final class SnapshotInspectionStore: ObservableObject {
         let tree = [
             SnapshotFileEntry(path: "Albums", name: "Albums", kind: "dir", change: "unchanged", isAncestorContext: true, size: 0, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: .init(added: 8, deleted: 2, changed: 3)),
             SnapshotFileEntry(path: "Library.photoslibrary", name: "Library.photoslibrary", kind: "dir", change: "changed", isAncestorContext: false, size: 0, mtimeMs: 0, mode: 0, baseline: .init(kind: "dir", size: 0, mtimeMs: 0, mode: 0), descendantChanges: .init(added: 6, deleted: 1, changed: 4)),
+            SnapshotFileEntry(path: "new-import.jpg", name: "new-import.jpg", kind: "file", change: "added", isAncestorContext: false, size: 4_120_332, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
+            SnapshotFileEntry(path: "removed-edit.jpg", name: "removed-edit.jpg", kind: "file", change: "deleted", isAncestorContext: false, size: 2_005_120, mtimeMs: 0, mode: 0, baseline: .init(kind: "file", size: 2_005_120, mtimeMs: 0, mode: 0), descendantChanges: nil),
         ]
         let albumChildren = [
             SnapshotFileEntry(path: "Albums/2026-08-27.jpg", name: "2026-08-27.jpg", kind: "file", change: "added", isAncestorContext: false, size: 4_120_332, mtimeMs: 0, mode: 0, baseline: nil, descendantChanges: nil),
@@ -521,9 +523,10 @@ struct SnapshotRunDetailView: View {
     private func files(summary: SnapshotInspectionSummary) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Picker("Presentation", selection: $presentation) {
+                Picker("File presentation", selection: $presentation) {
                     ForEach(SnapshotInspectionPresentation.allCases) { item in Text(item.rawValue).tag(item) }
                 }
+                .labelsHidden()
                 .pickerStyle(.segmented)
                 .controlSize(.small)
                 .frame(width: 140)
@@ -858,9 +861,15 @@ private enum SnapshotNativeTable {
 
 private enum SnapshotNativeRowView {
     static func file(entry: SnapshotFileEntry) -> NSTableCellView {
-        let state = entry.change == "unchanged" && entry.isAncestorContext ? "context" : entry.change
-        let text = "\(entry.name)  \(state)  \(formatBytes(Int64(entry.size)))"
-        return make(text: text, icon: icon(for: entry.change), accessibility: "\(entry.path), \(state)")
+        let status = status(for: entry)
+        return makeFile(
+            name: entry.name,
+            status: status.title,
+            size: formatBytes(Int64(entry.size)),
+            icon: icon(for: entry.change),
+            tint: status.tint,
+            accessibility: "\(entry.path), \(status.title)"
+        )
     }
 
     static func block(entry: SnapshotBlockEntry) -> NSTableCellView {
@@ -887,6 +896,53 @@ private enum SnapshotNativeRowView {
         cell.textField = label
         cell.setAccessibilityLabel(accessibility)
         return cell
+    }
+
+    private static func makeFile(
+        name: String,
+        status: String,
+        size: String,
+        icon: String,
+        tint: NSColor,
+        accessibility: String
+    ) -> NSTableCellView {
+        let cell = NSTableCellView()
+        let image = NSImageView(image: NSImage(systemSymbolName: icon, accessibilityDescription: accessibility) ?? NSImage())
+        image.frame = NSRect(x: 4, y: 2, width: 16, height: 16)
+        image.imageScaling = .scaleProportionallyDown
+        image.contentTintColor = tint
+
+        let nameLabel = NSTextField(labelWithString: name)
+        nameLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        nameLabel.lineBreakMode = .byTruncatingMiddle
+        nameLabel.frame = NSRect(x: 26, y: 1, width: 250, height: 18)
+        nameLabel.autoresizingMask = [.width]
+
+        let statusLabel = NSTextField(labelWithString: status)
+        statusLabel.font = .systemFont(ofSize: 10, weight: .semibold)
+        statusLabel.textColor = tint
+        statusLabel.frame = NSRect(x: 280, y: 2, width: 82, height: 17)
+
+        let sizeLabel = NSTextField(labelWithString: size)
+        sizeLabel.font = .systemFont(ofSize: 10, weight: .medium)
+        sizeLabel.textColor = .secondaryLabelColor
+        sizeLabel.alignment = .right
+        sizeLabel.frame = NSRect(x: 368, y: 2, width: 78, height: 17)
+
+        [image, nameLabel, statusLabel, sizeLabel].forEach(cell.addSubview)
+        cell.textField = nameLabel
+        cell.setAccessibilityLabel(accessibility)
+        return cell
+    }
+
+    private static func status(for entry: SnapshotFileEntry) -> (title: String, tint: NSColor) {
+        if entry.isAncestorContext { return ("Context", .secondaryLabelColor) }
+        switch entry.change {
+        case "added": return ("Added", .systemGreen)
+        case "deleted": return ("Deleted", .systemRed)
+        case "changed": return ("Changed", .systemBlue)
+        default: return ("Unchanged", .secondaryLabelColor)
+        }
     }
 
     private static func icon(for change: String) -> String {

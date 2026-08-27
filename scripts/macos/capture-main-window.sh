@@ -11,7 +11,16 @@ if [[ -z "$scene" || -z "$out" ]]; then
 fi
 
 root_dir="$(git rev-parse --show-toplevel)"
-app_bin="$root_dir/target/macos-app/TelevyBackup.app/Contents/MacOS/TelevyBackup"
+variant="${TELEVYBACKUP_APP_VARIANT:-prod}"
+case "$variant" in
+  prod) app_name="TelevyBackup" ;;
+  dev) app_name="TelevyBackup Dev" ;;
+  *)
+    echo "ERROR: invalid TELEVYBACKUP_APP_VARIANT=$variant (expected: dev|prod)" >&2
+    exit 2
+    ;;
+esac
+app_bin="$root_dir/target/macos-app/$app_name.app/Contents/MacOS/TelevyBackup"
 demo_root="$root_dir/.dev/ui-snapshot"
 data_dir="$demo_root/data"
 config_dir="$demo_root/config"
@@ -69,12 +78,12 @@ cat > "$workdir/find_window.swift" <<'SWIFT'
 import Foundation
 import CoreGraphics
 
-guard CommandLine.arguments.count > 1, let targetPid = Int32(CommandLine.arguments[1]) else {
+guard CommandLine.arguments.count > 2, let targetPid = Int32(CommandLine.arguments[1]) else {
     exit(1)
 }
 
-let targetOwner = "TelevyBackup"
-let targetName = "TelevyBackup"
+let targetOwner = CommandLine.arguments[2]
+let targetName = targetOwner
 
 let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
 let windowInfoAny = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as NSArray? ?? []
@@ -129,7 +138,7 @@ exit(1)
 SWIFT
 
 swiftc "$workdir/find_window.swift" -o "$workdir/find_window" >/dev/null 2>&1
-wid="$($workdir/find_window "$app_pid" 2>/dev/null || true)"
+wid="$($workdir/find_window "$app_pid" "$app_name" 2>/dev/null || true)"
 
 if [[ -z "$wid" ]]; then
   echo "ERROR: main window for demo PID $app_pid was not found; refusing an unscoped capture" >&2
