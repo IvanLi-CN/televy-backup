@@ -128,6 +128,7 @@ impl SnapshotInspectionService {
         let page = session
             .blocks(BlockInspectionRequest {
                 snapshot_id,
+                changes_only: params.changes_only,
                 query: params.query,
                 cursor: params.cursor,
                 limit: params.limit,

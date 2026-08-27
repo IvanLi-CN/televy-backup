@@ -208,6 +208,8 @@ pub struct SnapshotInspectFilesParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SnapshotInspectBlocksParams {
     pub snapshot_id: String,
+    #[serde(default)]
+    pub changes_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -182,4 +182,27 @@ async fn inspect_commands_emit_contract_json_and_reject_mismatched_cursors() {
     );
     assert!(status.success());
     assert_eq!(blocks["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(blocks["entries"][0]["changedFiles"], 1);
+    assert_eq!(blocks["entries"][0]["referencingFiles"], 1);
+
+    let (status, changed_blocks) = run_cli(
+        &temp,
+        &[
+            "snapshots",
+            "inspect",
+            "blocks",
+            "--snapshot-id",
+            "current",
+            "--changes-only",
+        ],
+    );
+    assert!(status.success());
+    assert_eq!(changed_blocks["entries"].as_array().unwrap().len(), 2);
+    assert!(
+        changed_blocks["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["changedFiles"].as_u64().unwrap() > 0)
+    );
 }

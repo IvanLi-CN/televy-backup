@@ -51,7 +51,7 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 - Changes are exactly `added`, `deleted`, or `changed`. A regular file is changed when its kind, size, modification time, or mode differs. A directory or symlink can only be compared by presence or kind. No move state is emitted.
 - A changes-only tree contains the ancestor directories needed to reach a changed entry and provides per-directory added/deleted/changed totals. A changes-only list contains only direct change entries.
 - Deleted entries are displayed at their baseline path with baseline metadata. Changed entries expose current and baseline metadata without exposing file contents.
-- The Blocks view lists distinct logical blocks referenced by regular files in the snapshot, with hash, size, and referencing-file count. It does not classify a block as newly uploaded or reused in the run.
+- The Blocks view lists distinct logical blocks referenced by regular files in the snapshot, with hash, size, changed-file count, and total referencing-file count. It provides a `Changes only` filter for blocks with at least one added or changed current file reference. It does not classify a block as newly uploaded or reused in the run.
 - The inspector loads data outside the main thread and presents visible loading or retryable error feedback. It must use bounded, cursor-based data access and virtualized UI rows rather than materializing a whole snapshot in SwiftUI.
 - File paths, block hashes, and filemap contents stay local to the configured storage/cache path and must not be written to normal run logs or status snapshots.
 
@@ -112,6 +112,7 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 - Given a snapshot containing more files or blocks than a page, when the operator scrolls, searches, expands a node, or changes view, then rows are loaded incrementally and stale work cannot overwrite the current selection.
 - Given a changes-only detail that has loaded its summary, when the operator expands another directory, then the App requests the already-running daemon over its local control socket and the daemon reuses the prepared direct-baseline index rather than launching a CLI process or repeating the full comparison.
 - Given a block referenced by multiple files, when Blocks is opened, then one logical block row reports the aggregate reference count rather than multiple upload-attempt rows.
+- Given a block referenced by changed and unchanged files, when Blocks is opened, then the row reports separate changed-file and total referencing-file counts; when `Changes only` is enabled, unchanged-only block rows are omitted.
 - Given a legacy single-index snapshot or a current two-level snapshot, when it is retained and its filemap is available, then the inspector uses the same restored file-tree semantics as restore/verify.
 
 ## Acceptance Checklist

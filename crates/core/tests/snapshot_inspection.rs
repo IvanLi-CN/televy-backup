@@ -286,6 +286,7 @@ async fn current_filemaps_report_direct_baseline_changes_blocks_and_request_boun
     let blocks = inspector
         .blocks(BlockInspectionRequest {
             snapshot_id: "current".to_string(),
+            changes_only: false,
             query: None,
             cursor: None,
             limit: 10,
@@ -297,7 +298,64 @@ async fn current_filemaps_report_direct_baseline_changes_blocks_and_request_boun
         .iter()
         .find(|entry| entry.hash == "shared-current")
         .unwrap();
+    assert_eq!(shared.changed_files, 2);
     assert_eq!(shared.referencing_files, 2);
+    let same = blocks
+        .entries
+        .iter()
+        .find(|entry| entry.hash == "same-current")
+        .unwrap();
+    assert_eq!(same.changed_files, 0);
+    assert_eq!(same.referencing_files, 1);
+
+    let changed_blocks = inspector
+        .blocks(BlockInspectionRequest {
+            snapshot_id: "current".to_string(),
+            changes_only: true,
+            query: None,
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        changed_blocks
+            .entries
+            .iter()
+            .map(|entry| entry.hash.as_str())
+            .collect::<Vec<_>>(),
+        ["kind-current", "shared-current"]
+    );
+    assert!(
+        changed_blocks
+            .entries
+            .iter()
+            .all(|entry| entry.changed_files > 0)
+    );
+
+    let changed_blocks_page = inspector
+        .blocks(BlockInspectionRequest {
+            snapshot_id: "current".to_string(),
+            changes_only: true,
+            query: None,
+            cursor: None,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    let changed_cursor = changed_blocks_page.next_cursor.expect("block cursor");
+    assert!(matches!(
+        inspector
+            .blocks(BlockInspectionRequest {
+                snapshot_id: "current".to_string(),
+                changes_only: false,
+                query: None,
+                cursor: Some(changed_cursor),
+                limit: 1,
+            })
+            .await,
+        Err(SnapshotInspectionError::InvalidCursor { .. })
+    ));
 }
 
 #[tokio::test]

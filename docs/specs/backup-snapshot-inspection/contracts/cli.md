@@ -9,7 +9,7 @@ The CLI provides a read-only, JSON-only inspection surface over retained backup 
 ```text
 televybackup --json snapshots inspect summary --snapshot-id <snapshot-id>
 televybackup --json snapshots inspect files --snapshot-id <snapshot-id> --presentation <tree|list> --scope <all|changes> [--parent <relative-path>] [--query <text>] [--cursor <opaque>] [--limit <1..500>]
-televybackup --json snapshots inspect blocks --snapshot-id <snapshot-id> [--query <hash-prefix>] [--cursor <opaque>] [--limit <1..500>]
+televybackup --json snapshots inspect blocks --snapshot-id <snapshot-id> [--changes-only] [--query <hash-prefix>] [--cursor <opaque>] [--limit <1..500>]
 ```
 
 - `summary` returns immutable snapshot metadata, aggregate file/block statistics, and difference availability.
@@ -90,6 +90,7 @@ televybackup --json snapshots inspect blocks --snapshot-id <snapshot-id> [--quer
     {
       "hash": "blake3-hex",
       "size": 1048576,
+      "changedFiles": 2,
       "referencingFiles": 3
     }
   ],
@@ -97,7 +98,7 @@ televybackup --json snapshots inspect blocks --snapshot-id <snapshot-id> [--quer
 }
 ```
 
-Rows are one per distinct logical chunk hash referenced by regular files. The contract deliberately contains no upload-attempt, pack, remote object, or new-versus-reused field.
+Rows are one per distinct logical chunk hash referenced by regular files. `referencingFiles` counts all regular files in the selected current snapshot that reference the block. `changedFiles` counts current regular files classified as `added` or `changed` against the direct baseline that reference the block; for a first snapshot, all current regular files count as changed. Deleted baseline files do not contribute to current block rows. `--changes-only` returns only rows with `changedFiles > 0` and is valid when the direct baseline is available or the snapshot is a first snapshot. The contract deliberately contains no upload-attempt, pack, remote object, or new-versus-reused field.
 
 ## Errors
 

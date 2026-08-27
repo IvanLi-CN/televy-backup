@@ -81,6 +81,7 @@ private struct SnapshotFilePage: Decodable {
 private struct SnapshotBlockEntry: Decodable, Identifiable {
     let hash: String
     let size: UInt64
+    let changedFiles: UInt64
     let referencingFiles: UInt64
 
     var id: String { hash }
@@ -261,6 +262,7 @@ private final class SnapshotInspectionStore: ObservableObject {
     private var activePresentation: SnapshotInspectionPresentation = .tree
     private var activeChangesOnly = true
     private var activeQuery = ""
+    private var activeBlockChangesOnly = false
 
     func start(run: RunLogSummary, model: AppModel) {
         self.run = run
@@ -269,6 +271,7 @@ private final class SnapshotInspectionStore: ObservableObject {
         summary = nil
         issue = nil
         issueRetryable = false
+        activeBlockChangesOnly = false
         resetPagedContent()
 
         guard case .inspectable = SnapshotInspectionEligibility.forRun(run) else {
@@ -348,12 +351,23 @@ private final class SnapshotInspectionStore: ObservableObject {
         loadBlockPage()
     }
 
+    func configureBlocks(changesOnly: Bool) {
+        guard activeBlockChangesOnly != changesOnly else { return }
+        activeBlockChangesOnly = changesOnly
+        resetBlockContent()
+        loadBlocksIfNeeded()
+    }
+
     func loadMoreBlocks() {
         guard !blocksReachedEnd, !blocksLoading else { return }
         loadBlockPage()
     }
 
     var changesAvailable: Bool {
+        summary?.availability.state != "baselineUnavailable"
+    }
+
+    var blockChangesAvailable: Bool {
         summary?.availability.state != "baselineUnavailable"
     }
 
@@ -438,7 +452,11 @@ private final class SnapshotInspectionStore: ObservableObject {
         guard !blocksLoading, !blocksReachedEnd, let snapshotId = run?.snapshotId, let model else { return }
         blocksLoading = true
         let token = requestToken
-        var params: [String: Any] = ["snapshotId": snapshotId, "limit": 200]
+        var params: [String: Any] = [
+            "snapshotId": snapshotId,
+            "changesOnly": activeBlockChangesOnly,
+            "limit": 200,
+        ]
         if let blockNextCursor { params["cursor"] = blockNextCursor }
         performControlRequest(
             model: model,
@@ -460,6 +478,11 @@ private final class SnapshotInspectionStore: ObservableObject {
     }
 
     private func resetPagedContent() {
+        resetFilesContent()
+        resetBlockContent()
+    }
+
+    private func resetFilesContent() {
         listEntries = []
         treeEntries = [:]
         listNextCursor = nil
@@ -467,10 +490,13 @@ private final class SnapshotInspectionStore: ObservableObject {
         treeNextCursor = [:]
         treeReachedEnd = []
         treeLoadingParents = []
+        filesLoading = false
+    }
+
+    private func resetBlockContent() {
         blocks = []
         blockNextCursor = nil
         blocksReachedEnd = false
-        filesLoading = false
         blocksLoading = false
     }
 
@@ -541,8 +567,8 @@ private final class SnapshotInspectionStore: ObservableObject {
         treeEntries = ["": tree, "Albums": albumChildren]
         listEntries = tree + albumChildren
         blocks = [
-            SnapshotBlockEntry(hash: "9c47a0f53d1a6cb9", size: 1_048_576, referencingFiles: 4),
-            SnapshotBlockEntry(hash: "b9d202d17d25e8f1", size: 786_432, referencingFiles: 2),
+            SnapshotBlockEntry(hash: "9c47a0f53d1a6cb9", size: 1_048_576, changedFiles: 3, referencingFiles: 4),
+            SnapshotBlockEntry(hash: "b9d202d17d25e8f1", size: 786_432, changedFiles: 0, referencingFiles: 2),
         ]
         listReachedEnd = true
         treeReachedEnd = ["", "Albums"]
@@ -577,6 +603,7 @@ struct SnapshotRunDetailView: View {
     }()
     @State private var presentation: SnapshotInspectionPresentation = .tree
     @State private var changesOnly = true
+    @State private var blockChangesOnly = false
     @State private var query = ""
 
     var body: some View {
@@ -597,6 +624,7 @@ struct SnapshotRunDetailView: View {
         }
         .onChange(of: presentation) { _, _ in reloadFiles() }
         .onChange(of: changesOnly) { _, _ in reloadFiles() }
+        .onChange(of: blockChangesOnly) { _, _ in reloadBlocks() }
         .onChange(of: query) { _, _ in reloadFiles() }
     }
 
@@ -607,6 +635,11 @@ struct SnapshotRunDetailView: View {
                 wideFileToolbar(summary: summary)
                 stackedFileToolbar(summary: summary)
                 compactFileToolbar(summary: summary)
+            }
+        } else if tab == .blocks, let summary = store.summary, store.issue == nil {
+            ViewThatFits(in: .horizontal) {
+                wideBlockToolbar(summary: summary)
+                stackedBlockToolbar(summary: summary)
             }
         } else {
             tabPicker
@@ -645,6 +678,51 @@ struct SnapshotRunDetailView: View {
             availabilityNotice(summary: summary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func wideBlockToolbar(summary: SnapshotInspectionSummary) -> some View {
+        HStack(spacing: 16) {
+            tabPicker
+            Spacer(minLength: 24)
+            blockControls(summary: summary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func stackedBlockToolbar(summary: SnapshotInspectionSummary) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            tabPicker
+            blockControls(summary: summary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func blockControls(summary: SnapshotInspectionSummary) -> some View {
+        HStack(spacing: 8) {
+            blockChangesOnlyToggle
+            blockAvailabilityNotice(summary: summary)
+        }
+    }
+
+    private var blockChangesOnlyToggle: some View {
+        Toggle("Changes only", isOn: $blockChangesOnly)
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .font(.system(size: 11, weight: .medium))
+            .disabled(!store.blockChangesAvailable)
+            .help("Show blocks referenced by added or changed files.")
+    }
+
+    @ViewBuilder
+    private func blockAvailabilityNotice(summary: SnapshotInspectionSummary) -> some View {
+        if summary.availability.state == "baselineUnavailable" {
+            Label("Baseline unavailable", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help("Changed block counts require the direct base snapshot.")
+                .accessibilityLabel("Direct baseline unavailable for changed blocks")
+        }
     }
 
     private var tabPicker: some View {
@@ -797,7 +875,7 @@ struct SnapshotRunDetailView: View {
         }
     }
 
-    private func blocks(summary _: SnapshotInspectionSummary) -> some View {
+    private func blocks(summary: SnapshotInspectionSummary) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             if store.blocks.isEmpty, !store.blocksLoading {
                 SnapshotInspectionStateView(icon: "square.stack.3d.up", title: "No blocks", detail: "This snapshot has no regular-file blocks.", showsProgress: false)
@@ -812,13 +890,22 @@ struct SnapshotRunDetailView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onAppear { store.loadBlocksIfNeeded() }
+        .onAppear {
+            if summary.availability.state == "baselineUnavailable" { blockChangesOnly = false }
+            reloadBlocks()
+        }
     }
 
     private func reloadFiles() {
         if store.summary != nil {
             store.configureFiles(presentation: presentation, changesOnly: changesOnly, query: query)
         }
+    }
+
+    private func reloadBlocks() {
+        guard store.summary != nil else { return }
+        store.configureBlocks(changesOnly: blockChangesOnly)
+        store.loadBlocksIfNeeded()
     }
 }
 
@@ -987,14 +1074,16 @@ private enum SnapshotNativeColumns {
     enum Block {
         static let hash = NSUserInterfaceItemIdentifier("snapshot-block-hash")
         static let size = NSUserInterfaceItemIdentifier("snapshot-block-size")
-        static let files = NSUserInterfaceItemIdentifier("snapshot-block-files")
+        static let changedFiles = NSUserInterfaceItemIdentifier("snapshot-block-changed-files")
+        static let referencedFiles = NSUserInterfaceItemIdentifier("snapshot-block-referenced-files")
 
         static func install(on table: NSTableView) {
             table.headerView = NSTableHeaderView()
             table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
             table.addTableColumn(column(title: "Hash", identifier: hash, width: 420, minWidth: 180, expands: true, alignment: .left))
             table.addTableColumn(column(title: "Size", identifier: size, width: 108, minWidth: 84, expands: false, alignment: .right))
-            table.addTableColumn(column(title: "Files", identifier: files, width: 96, minWidth: 76, expands: false, alignment: .right))
+            table.addTableColumn(column(title: "Changed files", identifier: changedFiles, width: 120, minWidth: 112, expands: false, alignment: .right))
+            table.addTableColumn(column(title: "Referenced files", identifier: referencedFiles, width: 136, minWidth: 124, expands: false, alignment: .right))
         }
     }
 
@@ -1242,8 +1331,10 @@ private struct SnapshotBlockTable: NSViewRepresentable {
                 return SnapshotNativeRowView.blockHash(entry: entry)
             case SnapshotNativeColumns.Block.size:
                 return SnapshotNativeRowView.blockSize(entry: entry)
-            case SnapshotNativeColumns.Block.files:
-                return SnapshotNativeRowView.blockFiles(entry: entry)
+            case SnapshotNativeColumns.Block.changedFiles:
+                return SnapshotNativeRowView.blockChangedFiles(entry: entry)
+            case SnapshotNativeColumns.Block.referencedFiles:
+                return SnapshotNativeRowView.blockReferencedFiles(entry: entry)
             default:
                 return nil
             }
@@ -1403,7 +1494,17 @@ private enum SnapshotNativeRowView {
         )
     }
 
-    static func blockFiles(entry: SnapshotBlockEntry) -> NSTableCellView {
+    static func blockChangedFiles(entry: SnapshotBlockEntry) -> NSTableCellView {
+        textCell(
+            text: "\(entry.changedFiles)",
+            font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
+            color: entry.changedFiles > 0 ? .controlAccentColor : .secondaryLabelColor,
+            alignment: .right,
+            accessibility: "Referenced by \(entry.changedFiles) changed files"
+        )
+    }
+
+    static func blockReferencedFiles(entry: SnapshotBlockEntry) -> NSTableCellView {
         textCell(
             text: "\(entry.referencingFiles)",
             font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),

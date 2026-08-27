@@ -232,6 +232,8 @@ enum SnapshotInspectCmd {
         #[arg(long)]
         snapshot_id: String,
         #[arg(long)]
+        changes_only: bool,
+        #[arg(long)]
         query: Option<String>,
         #[arg(long)]
         cursor: Option<String>,
@@ -4299,6 +4301,7 @@ async fn snapshots_inspect(
         }
         SnapshotInspectCmd::Blocks {
             snapshot_id,
+            changes_only,
             query,
             cursor,
             limit,
@@ -4306,6 +4309,7 @@ async fn snapshots_inspect(
             inspector
                 .blocks(BlockInspectionRequest {
                     snapshot_id,
+                    changes_only,
                     query,
                     cursor,
                     limit,

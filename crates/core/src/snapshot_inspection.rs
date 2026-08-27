@@ -238,6 +238,12 @@ impl SnapshotInspector {
                 .await?,
             ),
         };
+        let block_changes = match changes.as_ref() {
+            Some(changes) => {
+                Some(prepare_changed_blocks(&mut connection, snapshot_id, changes).await?)
+            }
+            None => None,
+        };
         detach_baseline(&mut connection, attached).await?;
 
         let change_summary = match (&context.difference, changes.as_ref()) {
@@ -272,6 +278,7 @@ impl SnapshotInspector {
                 blocks,
             },
             changes,
+            block_changes,
         })
     }
 
@@ -328,6 +335,12 @@ impl SnapshotInspector {
 
     pub async fn blocks(&self, request: BlockInspectionRequest) -> Result<BlockPage> {
         request.validate()?;
+        let session = self.prepare(&request.snapshot_id).await?;
+        session.blocks(request).await
+    }
+
+    async fn blocks_page(&self, request: BlockInspectionRequest) -> Result<BlockPage> {
+        request.validate()?;
         let after = decode_block_cursor(&request)?;
         let context = self.resolve_context(&request.snapshot_id).await?;
         let pool = index_db::open_existing_index_db(&context.current_path).await?;
@@ -360,6 +373,7 @@ impl SnapshotInspector {
             .map(|row| BlockEntry {
                 hash: row.get("hash"),
                 size: non_negative_u64(&row, "size"),
+                changed_files: 0,
                 referencing_files: non_negative_u64(&row, "referencing_files"),
             })
             .collect::<Vec<_>>();
@@ -491,6 +505,7 @@ pub struct SnapshotInspectionSession {
     inspector: SnapshotInspector,
     summary: SnapshotSummary,
     changes: Option<PreparedChanges>,
+    block_changes: Option<PreparedBlockChanges>,
 }
 
 impl SnapshotInspectionSession {
@@ -512,7 +527,29 @@ impl SnapshotInspectionSession {
     }
 
     pub async fn blocks(&self, request: BlockInspectionRequest) -> Result<BlockPage> {
-        self.inspector.blocks(request).await
+        request.validate()?;
+        if request.changes_only {
+            let Some(block_changes) = &self.block_changes else {
+                return Err(SnapshotInspectionError::BaselineUnavailable {
+                    snapshot_id: request.snapshot_id,
+                });
+            };
+            return block_changes.page(&request);
+        }
+
+        let mut query = request;
+        query.changes_only = false;
+        let mut page = self.inspector.blocks_page(query).await?;
+        if let Some(block_changes) = &self.block_changes {
+            for entry in &mut page.entries {
+                entry.changed_files = block_changes
+                    .entries
+                    .get(&entry.hash)
+                    .map(|block| block.changed_files)
+                    .unwrap_or(0);
+            }
+        }
+        Ok(page)
     }
 }
 
@@ -629,6 +666,7 @@ impl FileInspectionRequest {
 #[derive(Debug, Clone)]
 pub struct BlockInspectionRequest {
     pub snapshot_id: String,
+    pub changes_only: bool,
     pub query: Option<String>,
     pub cursor: Option<String>,
     pub limit: u16,
@@ -708,6 +746,7 @@ pub struct BlockPage {
 pub struct BlockEntry {
     pub hash: String,
     pub size: u64,
+    pub changed_files: u64,
     pub referencing_files: u64,
 }
 
@@ -717,6 +756,19 @@ struct PreparedChanges {
     tree_paths: HashMap<String, Vec<String>>,
     list_paths: Vec<String>,
     counts: ChangeCounts,
+}
+
+#[derive(Clone, Default)]
+struct PreparedBlockChanges {
+    entries: HashMap<String, PreparedBlock>,
+    list_paths: Vec<String>,
+}
+
+#[derive(Clone)]
+struct PreparedBlock {
+    size: u64,
+    changed_files: u64,
+    referencing_files: u64,
 }
 
 #[derive(Clone)]
@@ -785,6 +837,40 @@ impl PreparedChanges {
             .flatten()
             .map(|after| encode_file_cursor(request, after));
         Ok(FilePage {
+            entries,
+            next_cursor,
+        })
+    }
+}
+
+impl PreparedBlockChanges {
+    fn page(&self, request: &BlockInspectionRequest) -> Result<BlockPage> {
+        let after = decode_block_cursor(request)?;
+        let query = normalize_query(request.query.as_deref()).to_ascii_lowercase();
+        let after = after.as_deref().unwrap_or_default();
+        let mut entries = self
+            .list_paths
+            .iter()
+            .filter(|path| path.as_bytes() > after.as_bytes())
+            .filter(|path| query.is_empty() || path.starts_with(&query))
+            .filter_map(|path| self.entries.get(path).map(|block| (path, block)))
+            .take(request.limit as usize + 1)
+            .map(|(hash, block)| BlockEntry {
+                hash: hash.clone(),
+                size: block.size,
+                changed_files: block.changed_files,
+                referencing_files: block.referencing_files,
+            })
+            .collect::<Vec<_>>();
+        let has_more = entries.len() > request.limit as usize;
+        if has_more {
+            entries.pop();
+        }
+        let next_cursor = has_more
+            .then(|| entries.last().map(|entry| entry.hash.clone()))
+            .flatten()
+            .map(|after| encode_block_cursor(request, after));
+        Ok(BlockPage {
             entries,
             next_cursor,
         })
@@ -921,6 +1007,77 @@ async fn prepare_baseline_changes(
         );
     }
     Ok(prepare_changes_index(files))
+}
+
+async fn prepare_changed_blocks(
+    connection: &mut SqliteConnection,
+    snapshot_id: &str,
+    changes: &PreparedChanges,
+) -> Result<PreparedBlockChanges> {
+    let mut changed_paths = changes
+        .entries
+        .values()
+        .filter(|entry| entry.change != "unchanged" && entry.kind == "file")
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    changed_paths.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+    let mut entries = HashMap::<String, PreparedBlock>::new();
+    for paths in changed_paths.chunks(900) {
+        let placeholders = vec!["?"; paths.len()].join(", ");
+        let sql = format!(
+            "SELECT fc.chunk_hash AS hash, MAX(c.size) AS size, \
+             COUNT(DISTINCT f.file_id) AS changed_files \
+             FROM file_chunks fc \
+             JOIN files f ON f.file_id = fc.file_id \
+             JOIN chunks c ON c.chunk_hash = fc.chunk_hash \
+             WHERE f.snapshot_id = ? AND f.kind = 'file' AND f.path IN ({placeholders}) \
+             GROUP BY fc.chunk_hash"
+        );
+        let mut query = sqlx::query(&sql).bind(snapshot_id);
+        for path in paths {
+            query = query.bind(path);
+        }
+        for row in query.fetch_all(&mut *connection).await? {
+            let hash: String = row.get("hash");
+            let entry = entries.entry(hash).or_insert_with(|| PreparedBlock {
+                size: 0,
+                changed_files: 0,
+                referencing_files: 0,
+            });
+            entry.size = entry.size.max(non_negative_u64(&row, "size"));
+            entry.changed_files += non_negative_u64(&row, "changed_files");
+        }
+    }
+
+    let hashes = entries.keys().cloned().collect::<Vec<_>>();
+    for hashes in hashes.chunks(900) {
+        let placeholders = vec!["?"; hashes.len()].join(", ");
+        let sql = format!(
+            "SELECT fc.chunk_hash AS hash, COUNT(DISTINCT f.file_id) AS referencing_files \
+             FROM file_chunks fc \
+             JOIN files f ON f.file_id = fc.file_id \
+             WHERE f.snapshot_id = ? AND f.kind = 'file' AND fc.chunk_hash IN ({placeholders}) \
+             GROUP BY fc.chunk_hash"
+        );
+        let mut query = sqlx::query(&sql).bind(snapshot_id);
+        for hash in hashes {
+            query = query.bind(hash);
+        }
+        for row in query.fetch_all(&mut *connection).await? {
+            let hash: String = row.get("hash");
+            if let Some(entry) = entries.get_mut(&hash) {
+                entry.referencing_files = non_negative_u64(&row, "referencing_files");
+            }
+        }
+    }
+
+    let mut list_paths = entries.keys().cloned().collect::<Vec<_>>();
+    list_paths.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    Ok(PreparedBlockChanges {
+        entries,
+        list_paths,
+    })
 }
 
 fn prepare_changes_index(files: Vec<PreparedFile>) -> PreparedChanges {
@@ -1364,6 +1521,8 @@ struct InspectionCursor {
     scope: Option<String>,
     parent: Option<String>,
     query: String,
+    #[serde(default)]
+    changes_only: bool,
     limit: u16,
     after: String,
 }
@@ -1381,6 +1540,7 @@ fn decode_file_cursor(request: &FileInspectionRequest) -> Result<Option<String>>
         || decoded.scope != expected.scope
         || decoded.parent != expected.parent
         || decoded.query != expected.query
+        || decoded.changes_only != expected.changes_only
         || decoded.limit != expected.limit
         || decoded.after.is_empty()
     {
@@ -1404,6 +1564,7 @@ fn decode_block_cursor(request: &BlockInspectionRequest) -> Result<Option<String
         || decoded.scope != expected.scope
         || decoded.parent != expected.parent
         || decoded.query != expected.query
+        || decoded.changes_only != expected.changes_only
         || decoded.limit != expected.limit
         || decoded.after.is_empty()
     {
@@ -1459,6 +1620,7 @@ fn file_cursor(request: &FileInspectionRequest, after: String) -> InspectionCurs
         ),
         parent: request.parent.clone(),
         query: normalize_query(request.query.as_deref()),
+        changes_only: false,
         limit: request.limit,
         after,
     }
@@ -1473,6 +1635,7 @@ fn block_cursor(request: &BlockInspectionRequest, after: String) -> InspectionCu
         scope: None,
         parent: None,
         query: normalize_query(request.query.as_deref()),
+        changes_only: request.changes_only,
         limit: request.limit,
         after,
     }
