@@ -79,11 +79,36 @@ private func testTargetSelectionDismissesUnrelatedSnapshotDetail() {
     )
 }
 
+private func testTreeExpansionSurvivesAsyncReload() {
+    let expanded = Set([
+        "Ivan",
+        "Ivan/code-vibe-monitor",
+        "Ivan/code-vibe-monitor/.git",
+        "Ivan/code-vibe-monitor/.git/.github",
+    ])
+    let restored = SnapshotOutlineExpansion.pathsToRestore(
+        previouslyExpanded: expanded,
+        availablePaths: expanded.union(["Ivan/code-vibe-monitor/.git/.github/workflows"])
+    )
+    expect(
+        restored == expanded,
+        "reloading a directory's children must preserve its expanded ancestor chain"
+    )
+    expect(
+        SnapshotOutlineExpansion.pathsToRestore(
+            previouslyExpanded: expanded,
+            availablePaths: ["Ivan", "Ivan/code-vibe-monitor"]
+        ) == ["Ivan", "Ivan/code-vibe-monitor"],
+        "paths removed by a refreshed tree must not be restored"
+    )
+}
+
 @main
 enum SnapshotInspectionPresentationTestsMain {
     static func main() {
         testSnapshotInspectionEligibility()
         testTargetSelectionDismissesUnrelatedSnapshotDetail()
+        testTreeExpansionSurvivesAsyncReload()
         print("OK: SnapshotInspectionPresentationTests")
     }
 }

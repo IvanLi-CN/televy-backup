@@ -830,6 +830,15 @@ private struct SnapshotInspectionStateView<Actions: View>: View {
     }
 }
 
+enum SnapshotOutlineExpansion {
+    static func pathsToRestore(
+        previouslyExpanded: Set<String>,
+        availablePaths: Set<String>
+    ) -> Set<String> {
+        previouslyExpanded.intersection(availablePaths)
+    }
+}
+
 private final class SnapshotOutlineNode: NSObject {
     let entry: SnapshotFileEntry
     var children: [SnapshotOutlineNode]
@@ -921,15 +930,64 @@ private struct SnapshotOutlineTable: NSViewRepresentable {
         var entriesByParent: [String: [SnapshotFileEntry]] = [:]
         var rootNodes: [SnapshotOutlineNode] = []
         var onExpand: ((String) -> Void)?
+        private var isRestoringExpansion = false
 
         func reload() {
+            let previouslyExpanded = expandedPaths()
             rootNodes = makeNodes(entriesByParent[""] ?? [])
-            outline?.reloadData()
+            guard let outline else { return }
+            let pathsToRestore = SnapshotOutlineExpansion.pathsToRestore(
+                previouslyExpanded: previouslyExpanded,
+                availablePaths: allPaths(in: rootNodes)
+            )
+            outline.reloadData()
+            restoreExpansion(paths: pathsToRestore, in: outline)
         }
 
         private func makeNodes(_ entries: [SnapshotFileEntry]) -> [SnapshotOutlineNode] {
             entries.map { entry in
                 SnapshotOutlineNode(entry: entry, children: makeNodes(entriesByParent[entry.path] ?? []))
+            }
+        }
+
+        private func expandedPaths() -> Set<String> {
+            guard let outline else { return [] }
+            return expandedPaths(in: rootNodes, outline: outline)
+        }
+
+        private func expandedPaths(
+            in nodes: [SnapshotOutlineNode],
+            outline: NSOutlineView
+        ) -> Set<String> {
+            nodes.reduce(into: Set<String>()) { paths, node in
+                guard outline.isItemExpanded(node) else { return }
+                paths.insert(node.entry.path)
+                paths.formUnion(expandedPaths(in: node.children, outline: outline))
+            }
+        }
+
+        private func allPaths(in nodes: [SnapshotOutlineNode]) -> Set<String> {
+            nodes.reduce(into: Set<String>()) { paths, node in
+                paths.insert(node.entry.path)
+                paths.formUnion(allPaths(in: node.children))
+            }
+        }
+
+        private func restoreExpansion(paths: Set<String>, in outline: NSOutlineView) {
+            guard !paths.isEmpty else { return }
+            isRestoringExpansion = true
+            defer { isRestoringExpansion = false }
+            restoreExpansion(paths: paths, in: rootNodes, outline: outline)
+        }
+
+        private func restoreExpansion(
+            paths: Set<String>,
+            in nodes: [SnapshotOutlineNode],
+            outline: NSOutlineView
+        ) {
+            for node in nodes where paths.contains(node.entry.path) {
+                outline.expandItem(node)
+                restoreExpansion(paths: paths, in: node.children, outline: outline)
             }
         }
 
@@ -947,6 +1005,7 @@ private struct SnapshotOutlineTable: NSViewRepresentable {
         }
 
         func outlineViewItemDidExpand(_ notification: Notification) {
+            guard !isRestoringExpansion else { return }
             if let node = notification.userInfo?["NSObject"] as? SnapshotOutlineNode {
                 onExpand?(node.entry.path)
             }
