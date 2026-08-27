@@ -113,6 +113,7 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 - Given a changes-only detail that has loaded its summary, when the operator expands another directory, then the App requests the already-running daemon over its local control socket and the daemon reuses the prepared direct-baseline index rather than launching a CLI process or repeating the full comparison.
 - Given a block referenced by multiple files, when Blocks is opened, then one logical block row reports the aggregate reference count rather than multiple upload-attempt rows.
 - Given a block referenced by changed and unchanged files, when Blocks is opened, then the row reports separate changed-file and total referencing-file counts; when `Changes only` is enabled, unchanged-only block rows are omitted.
+- Given a Blocks page request is still pending when the filter changes, then the stale response is discarded and cannot append rows from the previous filter mode.
 - Given a legacy single-index snapshot or a current two-level snapshot, when it is retained and its filemap is available, then the inspector uses the same restored file-tree semantics as restore/verify.
 
 ## Acceptance Checklist
