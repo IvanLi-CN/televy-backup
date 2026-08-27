@@ -2,7 +2,7 @@
 
 ## Scope
 
-The CLI provides a read-only, JSON-only inspection surface over retained backup snapshots. The macOS App invokes it outside the main thread; it is the only App-facing access path to snapshot filemaps.
+The CLI provides a read-only, JSON-only inspection surface over retained backup snapshots for terminal users. The macOS App uses the daemon's local control IPC instead; the CLI remains an independent public contract.
 
 ## Commands
 

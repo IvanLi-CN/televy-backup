@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -159,6 +160,118 @@ impl SnapshotInspector {
             files,
             changes,
             blocks,
+        })
+    }
+
+    /// Prepares one retained snapshot for repeated local file-tree inspection.
+    ///
+    /// The prepared state contains only filemap metadata and direct-baseline
+    /// classifications. It is intended for a long-lived local consumer such as
+    /// the daemon, which can serve many expanded tree nodes without rerunning
+    /// the full SQL difference query for every node.
+    pub async fn prepare(&self, snapshot_id: &str) -> Result<SnapshotInspectionSession> {
+        let context = self.resolve_context(snapshot_id).await?;
+        let pool = index_db::open_existing_index_db(&context.current_path).await?;
+        let mut connection = pool.acquire().await?;
+        let attached = attach_baseline_if_needed(&mut connection, &context).await?;
+
+        let file_row = sqlx::query(
+            r#"
+            SELECT
+              COUNT(*) AS entries,
+              COALESCE(SUM(CASE WHEN kind = 'file' THEN 1 ELSE 0 END), 0) AS regular_files,
+              COALESCE(SUM(CASE WHEN kind = 'dir' THEN 1 ELSE 0 END), 0) AS directories,
+              COALESCE(SUM(CASE WHEN kind = 'symlink' THEN 1 ELSE 0 END), 0) AS symlinks,
+              COALESCE(SUM(CASE WHEN kind = 'file' THEN size ELSE 0 END), 0) AS bytes
+            FROM files
+            WHERE snapshot_id = ?
+            "#,
+        )
+        .bind(snapshot_id)
+        .fetch_one(&mut *connection)
+        .await?;
+
+        let block_row = sqlx::query(
+            r#"
+            SELECT COUNT(*) AS distinct_blocks, COALESCE(SUM(size), 0) AS bytes
+            FROM (
+              SELECT fc.chunk_hash, MAX(c.size) AS size
+              FROM file_chunks fc
+              JOIN files f ON f.file_id = fc.file_id
+              JOIN chunks c ON c.chunk_hash = fc.chunk_hash
+              WHERE f.snapshot_id = ? AND f.kind = 'file'
+              GROUP BY fc.chunk_hash
+            )
+            "#,
+        )
+        .bind(snapshot_id)
+        .fetch_one(&mut *connection)
+        .await?;
+
+        let files = FileCounts {
+            entries: non_negative_u64(&file_row, "entries"),
+            regular_files: non_negative_u64(&file_row, "regular_files"),
+            directories: non_negative_u64(&file_row, "directories"),
+            symlinks: non_negative_u64(&file_row, "symlinks"),
+            bytes: non_negative_u64(&file_row, "bytes"),
+        };
+        let blocks = BlockCounts {
+            distinct: non_negative_u64(&block_row, "distinct_blocks"),
+            bytes: non_negative_u64(&block_row, "bytes"),
+        };
+
+        let changes = match &context.difference {
+            DifferenceContext::FirstSnapshot => {
+                prepare_first_snapshot_changes(&mut connection, snapshot_id).await?
+            }
+            DifferenceContext::BaselineUnavailable => None,
+            DifferenceContext::Available {
+                snapshot_id: base_snapshot_id,
+                ..
+            } => Some(
+                prepare_baseline_changes(
+                    &mut connection,
+                    snapshot_id,
+                    base_snapshot_id,
+                    context.base_table_name(),
+                )
+                .await?,
+            ),
+        };
+        detach_baseline(&mut connection, attached).await?;
+
+        let change_summary = match (&context.difference, changes.as_ref()) {
+            (DifferenceContext::BaselineUnavailable, _) => ChangeSummary {
+                state: "baselineUnavailable".to_string(),
+                added: 0,
+                deleted: 0,
+                changed: 0,
+            },
+            (DifferenceContext::FirstSnapshot, Some(changes)) => ChangeSummary {
+                state: "firstSnapshot".to_string(),
+                added: changes.counts.added,
+                deleted: 0,
+                changed: 0,
+            },
+            (DifferenceContext::Available { .. }, Some(changes)) => ChangeSummary {
+                state: "available".to_string(),
+                added: changes.counts.added,
+                deleted: changes.counts.deleted,
+                changed: changes.counts.changed,
+            },
+            _ => unreachable!("available snapshot differences are prepared"),
+        };
+
+        Ok(SnapshotInspectionSession {
+            inspector: self.clone(),
+            summary: SnapshotSummary {
+                snapshot: context.metadata,
+                availability: DifferenceAvailability::from_context(&context.difference),
+                files,
+                changes: change_summary,
+                blocks,
+            },
+            changes,
         })
     }
 
@@ -368,6 +481,41 @@ impl SnapshotInspector {
     }
 }
 
+/// A precomputed direct-baseline comparison for a single retained snapshot.
+///
+/// This intentionally lives in memory. It is derived from retained filemaps
+/// and is discarded when its owning daemon exits, so it does not create a new
+/// retained file-history surface.
+#[derive(Clone)]
+pub struct SnapshotInspectionSession {
+    inspector: SnapshotInspector,
+    summary: SnapshotSummary,
+    changes: Option<PreparedChanges>,
+}
+
+impl SnapshotInspectionSession {
+    pub fn summary(&self) -> SnapshotSummary {
+        self.summary.clone()
+    }
+
+    pub async fn files(&self, request: FileInspectionRequest) -> Result<FilePage> {
+        request.validate()?;
+        if request.scope == FileScope::All {
+            return self.inspector.files(request).await;
+        }
+        let Some(changes) = &self.changes else {
+            return Err(SnapshotInspectionError::BaselineUnavailable {
+                snapshot_id: request.snapshot_id,
+            });
+        };
+        changes.files(&request)
+    }
+
+    pub async fn blocks(&self, request: BlockInspectionRequest) -> Result<BlockPage> {
+        self.inspector.blocks(request).await
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotMetadata {
@@ -378,7 +526,7 @@ pub struct SnapshotMetadata {
     pub base_snapshot_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotSummary {
     pub snapshot: SnapshotMetadata,
@@ -388,7 +536,7 @@ pub struct SnapshotSummary {
     pub blocks: BlockCounts,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DifferenceAvailability {
     pub state: String,
@@ -416,7 +564,7 @@ impl DifferenceAvailability {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileCounts {
     pub entries: u64,
@@ -426,7 +574,7 @@ pub struct FileCounts {
     pub bytes: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeSummary {
     pub state: String,
@@ -435,7 +583,7 @@ pub struct ChangeSummary {
     pub changed: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BlockCounts {
     pub distinct: u64,
@@ -507,14 +655,14 @@ impl BlockInspectionRequest {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilePage {
     pub entries: Vec<FileEntry>,
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileEntry {
     pub path: String,
@@ -531,7 +679,7 @@ pub struct FileEntry {
     pub descendant_changes: Option<ChangeCounts>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileMetadata {
     pub kind: String,
@@ -540,7 +688,7 @@ pub struct FileMetadata {
     pub mode: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeCounts {
     pub added: u64,
@@ -561,6 +709,298 @@ pub struct BlockEntry {
     pub hash: String,
     pub size: u64,
     pub referencing_files: u64,
+}
+
+#[derive(Clone)]
+struct PreparedChanges {
+    entries: HashMap<String, PreparedFile>,
+    tree_paths: HashMap<String, Vec<String>>,
+    list_paths: Vec<String>,
+    counts: ChangeCounts,
+}
+
+#[derive(Clone)]
+struct PreparedFile {
+    path: String,
+    kind: String,
+    change: String,
+    size: u64,
+    mtime_ms: i64,
+    mode: i64,
+    baseline: Option<FileMetadata>,
+    descendant_changes: ChangeCounts,
+}
+
+impl PreparedFile {
+    fn to_file_entry(&self, tree: bool) -> FileEntry {
+        FileEntry {
+            path: self.path.clone(),
+            name: self
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&self.path)
+                .to_string(),
+            kind: self.kind.clone(),
+            change: self.change.clone(),
+            is_ancestor_context: tree && self.change == "unchanged",
+            size: self.size,
+            mtime_ms: self.mtime_ms,
+            mode: self.mode,
+            baseline: self.baseline.clone(),
+            descendant_changes: (tree && self.kind == "dir")
+                .then(|| self.descendant_changes.clone()),
+        }
+    }
+}
+
+impl PreparedChanges {
+    fn files(&self, request: &FileInspectionRequest) -> Result<FilePage> {
+        let after = decode_file_cursor(request)?;
+        let tree = request.presentation == FilePresentation::Tree;
+        let paths = if tree {
+            self.tree_paths
+                .get(request.parent.as_deref().unwrap_or_default())
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+        } else {
+            self.list_paths.as_slice()
+        };
+        let query = normalize_query(request.query.as_deref()).to_ascii_lowercase();
+        let after = after.as_deref().unwrap_or_default();
+        let mut entries = paths
+            .iter()
+            .filter(|path| path.as_bytes() > after.as_bytes())
+            .filter(|path| query.is_empty() || path.to_ascii_lowercase().contains(&query))
+            .filter_map(|path| self.entries.get(path))
+            .take(request.limit as usize + 1)
+            .map(|entry| entry.to_file_entry(tree))
+            .collect::<Vec<_>>();
+        let has_more = entries.len() > request.limit as usize;
+        if has_more {
+            entries.pop();
+        }
+        let next_cursor = has_more
+            .then(|| entries.last().map(|entry| entry.path.clone()))
+            .flatten()
+            .map(|after| encode_file_cursor(request, after));
+        Ok(FilePage {
+            entries,
+            next_cursor,
+        })
+    }
+}
+
+async fn prepare_first_snapshot_changes(
+    connection: &mut SqliteConnection,
+    snapshot_id: &str,
+) -> Result<Option<PreparedChanges>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT path, kind, size, mtime_ms, mode
+        FROM files
+        WHERE snapshot_id = ?
+        ORDER BY path COLLATE BINARY
+        "#,
+    )
+    .bind(snapshot_id)
+    .fetch_all(&mut *connection)
+    .await?;
+    let files = rows
+        .into_iter()
+        .map(|row| PreparedFile {
+            path: row.get("path"),
+            kind: row.get("kind"),
+            change: "added".to_string(),
+            size: non_negative_u64(&row, "size"),
+            mtime_ms: row.get("mtime_ms"),
+            mode: row.get("mode"),
+            baseline: None,
+            descendant_changes: ChangeCounts::default(),
+        })
+        .collect();
+    Ok(Some(prepare_changes_index(files)))
+}
+
+async fn prepare_baseline_changes(
+    connection: &mut SqliteConnection,
+    snapshot_id: &str,
+    base_snapshot_id: &str,
+    base_table: &str,
+) -> Result<PreparedChanges> {
+    let cte = changes_cte(base_table);
+    let sql = format!(
+        r#"
+        {cte}
+        SELECT path, kind, size, mtime_ms, mode,
+               baseline_kind, baseline_size, baseline_mtime_ms, baseline_mode, change
+        FROM changes
+        WHERE change != 'unchanged'
+        ORDER BY path COLLATE BINARY
+        "#
+    );
+    let rows = bind_changes_query(
+        sqlx::query(&sql),
+        base_snapshot_id,
+        snapshot_id,
+        snapshot_id,
+        base_snapshot_id,
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut files = rows
+        .into_iter()
+        .map(|row| {
+            let change: String = row.get("change");
+            let baseline = match change.as_str() {
+                "added" | "unchanged" => None,
+                _ => Some(FileMetadata {
+                    kind: row.get("baseline_kind"),
+                    size: non_negative_u64(&row, "baseline_size"),
+                    mtime_ms: row.get("baseline_mtime_ms"),
+                    mode: row.get("baseline_mode"),
+                }),
+            };
+            PreparedFile {
+                path: row.get("path"),
+                kind: row.get("kind"),
+                change,
+                size: non_negative_u64(&row, "size"),
+                mtime_ms: row.get("mtime_ms"),
+                mode: row.get("mode"),
+                baseline,
+                descendant_changes: ChangeCounts::default(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    // The UI needs unchanged directories only as tree context. Fetching them by
+    // exact path avoids holding every unchanged file in a large snapshot in the
+    // daemon just to prepare one changes-only tree.
+    let changed_paths = files
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<HashSet<_>>();
+    let mut ancestor_paths = HashSet::new();
+    for entry in &files {
+        let mut parent = parent_path(&entry.path);
+        while !parent.is_empty() {
+            if !changed_paths.contains(parent) {
+                ancestor_paths.insert(parent.to_string());
+            }
+            parent = parent_path(parent);
+        }
+    }
+    let mut ancestor_paths = ancestor_paths.into_iter().collect::<Vec<_>>();
+    ancestor_paths.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    for paths in ancestor_paths.chunks(900) {
+        let placeholders = vec!["?"; paths.len()].join(", ");
+        let sql = format!(
+            "SELECT path, kind, size, mtime_ms, mode FROM files \
+             WHERE snapshot_id = ? AND kind = 'dir' AND path IN ({placeholders})"
+        );
+        let mut query = sqlx::query(&sql).bind(snapshot_id);
+        for path in paths {
+            query = query.bind(path);
+        }
+        files.extend(
+            query
+                .fetch_all(&mut *connection)
+                .await?
+                .into_iter()
+                .map(|row| PreparedFile {
+                    path: row.get("path"),
+                    kind: row.get("kind"),
+                    change: "unchanged".to_string(),
+                    size: non_negative_u64(&row, "size"),
+                    mtime_ms: row.get("mtime_ms"),
+                    mode: row.get("mode"),
+                    baseline: None,
+                    descendant_changes: ChangeCounts::default(),
+                }),
+        );
+    }
+    Ok(prepare_changes_index(files))
+}
+
+fn prepare_changes_index(files: Vec<PreparedFile>) -> PreparedChanges {
+    let changed_paths = files
+        .iter()
+        .filter(|entry| entry.change != "unchanged")
+        .map(|entry| entry.path.clone())
+        .collect::<HashSet<_>>();
+    let mut required_paths = changed_paths.clone();
+    for path in &changed_paths {
+        let mut parent = parent_path(path);
+        while !parent.is_empty() {
+            required_paths.insert(parent.to_string());
+            parent = parent_path(parent);
+        }
+    }
+
+    let mut entries = files
+        .into_iter()
+        .filter(|entry| {
+            entry.change != "unchanged"
+                || (entry.kind == "dir" && required_paths.contains(&entry.path))
+        })
+        .map(|entry| (entry.path.clone(), entry))
+        .collect::<HashMap<_, _>>();
+
+    let mut counts = ChangeCounts::default();
+    let changed_entries = entries
+        .values()
+        .filter(|entry| entry.change != "unchanged")
+        .cloned()
+        .collect::<Vec<_>>();
+    for entry in &changed_entries {
+        match entry.change.as_str() {
+            "added" => counts.added += 1,
+            "deleted" => counts.deleted += 1,
+            "changed" => counts.changed += 1,
+            _ => {}
+        }
+        let mut parent = parent_path(&entry.path);
+        while !parent.is_empty() {
+            if let Some(ancestor) = entries.get_mut(parent) {
+                match entry.change.as_str() {
+                    "added" => ancestor.descendant_changes.added += 1,
+                    "deleted" => ancestor.descendant_changes.deleted += 1,
+                    "changed" => ancestor.descendant_changes.changed += 1,
+                    _ => {}
+                }
+            }
+            parent = parent_path(parent);
+        }
+    }
+
+    let mut tree_paths = HashMap::<String, Vec<String>>::new();
+    for entry in entries.values() {
+        tree_paths
+            .entry(parent_path(&entry.path).to_string())
+            .or_default()
+            .push(entry.path.clone());
+    }
+    for paths in tree_paths.values_mut() {
+        paths.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    }
+    let mut list_paths = changed_paths.into_iter().collect::<Vec<_>>();
+    list_paths.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+    // Keep only the paths whose metadata can be presented through the changes views.
+    entries.retain(|path, entry| entry.change != "unchanged" || required_paths.contains(path));
+    PreparedChanges {
+        entries,
+        tree_paths,
+        list_paths,
+        counts,
+    }
+}
+
+fn parent_path(path: &str) -> &str {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("")
 }
 
 struct InspectionContext {

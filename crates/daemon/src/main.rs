@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod control_ipc;
+mod snapshot_inspection_ipc;
 mod status_ipc;
 mod vault_ipc;
 
@@ -2125,6 +2126,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let control_ipc_settings = Arc::new(RwLock::new(settings.clone()));
+    let snapshot_inspection = Arc::new(snapshot_inspection_ipc::SnapshotInspectionService::new(
+        config_root.clone(),
+        data_root.clone(),
+        control_ipc_settings.clone(),
+    ));
 
     let control_socket_path = televy_backup_core::control::control_ipc_socket_path(&data_root);
     let _control_ipc_server = match control_ipc::spawn_control_ipc_server(
@@ -2139,6 +2145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             lifecycle: lifecycle.clone(),
             runtime_logging: runtime_logging.clone(),
             data_root: data_root.clone(),
+            snapshot_inspection: snapshot_inspection.clone(),
         },
     ) {
         Ok(h) => Some(h),
@@ -3069,6 +3076,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e)
                 }
             };
+            // A completed attempt may add snapshots or apply retention. Never serve an
+            // inspection session whose direct baseline was just changed or pruned.
+            snapshot_inspection.clear().await;
             let duration_seconds = started.elapsed().as_secs_f64();
 
             match result {
@@ -3649,7 +3659,7 @@ fn default_data_dir() -> PathBuf {
     default_config_dir()
 }
 
-const MASTER_KEY_KEY: &str = "televybackup.master_key";
+pub(crate) const MASTER_KEY_KEY: &str = "televybackup.master_key";
 static CONFIG_ROOT_CACHE: OnceLock<PathBuf> = OnceLock::new();
 static VAULT_KEY_CACHE: OnceLock<Mutex<Option<[u8; 32]>>> = OnceLock::new();
 static VAULT_KEY_LOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -3680,7 +3690,7 @@ fn get_secret_from_store(
     store.get(key).map(|s| s.to_string())
 }
 
-fn decode_base64_32(b64: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+pub(crate) fn decode_base64_32(b64: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes())?;
     let arr: [u8; 32] = bytes.try_into().map_err(|_| "invalid key length")?;
     Ok(arr)

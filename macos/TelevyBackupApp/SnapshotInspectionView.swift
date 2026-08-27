@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Darwin
 import Foundation
 import SwiftUI
 
@@ -94,6 +95,123 @@ private struct SnapshotCommandError: Decodable {
     let code: String?
     let message: String?
     let retryable: Bool?
+}
+
+private struct SnapshotControlResponse<Response: Decodable>: Decodable {
+    let type: String
+    let id: String
+    let ok: Bool
+    let result: Response?
+    let error: SnapshotCommandError?
+}
+
+private enum SnapshotControlIPC {
+    private static let maxResponseBytes = 8 * 1024 * 1024
+
+    static func request<Response: Decodable>(
+        socketPath: String,
+        method: String,
+        params: [String: Any]
+    ) -> Result<Response, SnapshotRequestFailure> {
+        let id = UUID().uuidString
+        let envelope: [String: Any] = [
+            "type": "control.request",
+            "id": id,
+            "method": method,
+            "params": params,
+        ]
+        guard JSONSerialization.isValidJSONObject(envelope),
+              var request = try? JSONSerialization.data(withJSONObject: envelope)
+        else {
+            return .failure(.init(message: "Snapshot request could not be encoded.", retryable: false))
+        }
+        request.append(0x0A)
+
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            return .failure(.init(message: "TelevyBackup service is unavailable.", retryable: true))
+        }
+        defer { close(fd) }
+
+        var timeout = timeval(tv_sec: 90, tv_usec: 0)
+        _ = withUnsafePointer(to: &timeout) {
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
+        }
+        _ = withUnsafePointer(to: &timeout) {
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
+        }
+
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let maxPathLength = MemoryLayout.size(ofValue: address.sun_path) - 1
+        guard socketPath.utf8.count <= maxPathLength else {
+            return .failure(.init(message: "TelevyBackup service path is invalid.", retryable: false))
+        }
+        _ = socketPath.withCString { path in
+            strncpy(&address.sun_path.0, path, maxPathLength)
+        }
+        let connected: Int32 = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard connected == 0 else {
+            return .failure(.init(message: "TelevyBackup service is unavailable.", retryable: true))
+        }
+
+        let sent = request.withUnsafeBytes { rawBuffer -> Bool in
+            guard let baseAddress = rawBuffer.baseAddress else { return false }
+            var offset = 0
+            while offset < request.count {
+                let written = Darwin.write(fd, baseAddress.advanced(by: offset), request.count - offset)
+                if written > 0 {
+                    offset += written
+                } else if written < 0, errno == EINTR {
+                    continue
+                } else {
+                    return false
+                }
+            }
+            return true
+        }
+        guard sent else {
+            return .failure(.init(message: "TelevyBackup service request failed.", retryable: true))
+        }
+
+        var response = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while response.count < maxResponseBytes {
+            let count = buffer.withUnsafeMutableBytes { rawBuffer in
+                Darwin.read(fd, rawBuffer.baseAddress, rawBuffer.count)
+            }
+            if count > 0 {
+                response.append(buffer, count: count)
+                if response.contains(0x0A) { break }
+            } else if count == 0 {
+                break
+            } else if errno != EINTR {
+                return .failure(.init(message: "TelevyBackup service did not respond.", retryable: true))
+            }
+        }
+        guard let newline = response.firstIndex(of: 0x0A) else {
+            return .failure(.init(message: "TelevyBackup service returned an invalid response.", retryable: true))
+        }
+        let line = response.prefix(upTo: newline)
+        guard let decoded = try? JSONDecoder().decode(
+            SnapshotControlResponse<Response>.self,
+            from: line
+        ), decoded.type == "control.response", decoded.id == id
+        else {
+            return .failure(.init(message: "TelevyBackup service returned an invalid response.", retryable: true))
+        }
+        if decoded.ok, let result = decoded.result {
+            return .success(result)
+        }
+        return .failure(.init(
+            message: decoded.error?.message ?? decoded.error?.code ?? "Snapshot inspection failed.",
+            retryable: decoded.error?.retryable ?? false
+        ))
+    }
 }
 
 enum SnapshotInspectionPresentation: String, CaseIterable, Identifiable {
@@ -252,7 +370,11 @@ private final class SnapshotInspectionStore: ObservableObject {
         guard let snapshotId = run?.snapshotId, let model else { return }
         summaryLoading = true
         let token = requestToken
-        performJSONCommand(model: model, args: ["--json", "snapshots", "inspect", "summary", "--snapshot-id", snapshotId]) {
+        performControlRequest(
+            model: model,
+            method: "snapshot.inspect.summary",
+            params: ["snapshotId": snapshotId]
+        ) {
             (result: Result<SnapshotInspectionSummary, SnapshotRequestFailure>) in
             guard self.requestToken == token else { return }
             self.summaryLoading = false
@@ -293,32 +415,36 @@ private final class SnapshotInspectionStore: ObservableObject {
         completion: @escaping (Result<SnapshotFilePage, SnapshotRequestFailure>) -> Void
     ) {
         guard let snapshotId = run?.snapshotId, let model else { return }
-        var args = [
-            "--json", "snapshots", "inspect", "files",
-            "--snapshot-id", snapshotId,
-            "--presentation", activePresentation.commandValue,
-            "--scope", activeChangesOnly ? "changes" : "all",
-            "--limit", "200",
+        var params: [String: Any] = [
+            "snapshotId": snapshotId,
+            "presentation": activePresentation.commandValue,
+            "scope": activeChangesOnly ? "changes" : "all",
+            "limit": 200,
         ]
-        if let parent { args += ["--parent", parent] }
+        if let parent { params["parent"] = parent }
         if !activeQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            args += ["--query", activeQuery]
+            params["query"] = activeQuery
         }
-        if let cursor { args += ["--cursor", cursor] }
-        performJSONCommand(model: model, args: args, completion: completion)
+        if let cursor { params["cursor"] = cursor }
+        performControlRequest(
+            model: model,
+            method: "snapshot.inspect.files",
+            params: params,
+            completion: completion
+        )
     }
 
     private func loadBlockPage() {
         guard !blocksLoading, !blocksReachedEnd, let snapshotId = run?.snapshotId, let model else { return }
         blocksLoading = true
         let token = requestToken
-        var args = [
-            "--json", "snapshots", "inspect", "blocks",
-            "--snapshot-id", snapshotId,
-            "--limit", "200",
-        ]
-        if let blockNextCursor { args += ["--cursor", blockNextCursor] }
-        performJSONCommand(model: model, args: args) { (result: Result<SnapshotBlockPage, SnapshotRequestFailure>) in
+        var params: [String: Any] = ["snapshotId": snapshotId, "limit": 200]
+        if let blockNextCursor { params["cursor"] = blockNextCursor }
+        performControlRequest(
+            model: model,
+            method: "snapshot.inspect.blocks",
+            params: params
+        ) { (result: Result<SnapshotBlockPage, SnapshotRequestFailure>) in
             guard self.requestToken == token else { return }
             self.blocksLoading = false
             switch result {
@@ -348,29 +474,23 @@ private final class SnapshotInspectionStore: ObservableObject {
         blocksLoading = false
     }
 
-    private func performJSONCommand<Response: Decodable>(
+    private func performControlRequest<Response: Decodable>(
         model: AppModel,
-        args: [String],
+        method: String,
+        params: [String: Any],
         completion: @escaping (Result<Response, SnapshotRequestFailure>) -> Void
     ) {
-        guard let cli = model.cliPath() else {
-            completion(.failure(.init(message: "TelevyBackup CLI is unavailable.", retryable: false)))
+        guard model.ensureDaemonRunning() else {
+            completion(.failure(.init(message: "TelevyBackup service is unavailable.", retryable: true)))
             return
         }
+        let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = model.runCommandCapture(exe: cli, args: args, timeoutSeconds: 90)
-            let payload = result.status == 0 ? result.stdout : result.stderr
-            let decoded: Result<Response, SnapshotRequestFailure>
-            if result.status == 0, let data = payload.data(using: .utf8), let response = try? JSONDecoder().decode(Response.self, from: data) {
-                decoded = .success(response)
-            } else if let data = payload.data(using: .utf8), let error = try? JSONDecoder().decode(SnapshotCommandError.self, from: data) {
-                decoded = .failure(.init(
-                    message: error.message ?? error.code ?? "Snapshot inspection failed.",
-                    retryable: error.retryable ?? false
-                ))
-            } else {
-                decoded = .failure(.init(message: "Snapshot inspection failed.", retryable: false))
-            }
+            let decoded: Result<Response, SnapshotRequestFailure> = SnapshotControlIPC.request(
+                socketPath: socketPath,
+                method: method,
+                params: params
+            )
             DispatchQueue.main.async { completion(decoded) }
         }
     }

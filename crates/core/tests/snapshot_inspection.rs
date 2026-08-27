@@ -464,3 +464,59 @@ async fn empty_legacy_single_index_snapshot_is_still_inspectable() {
     assert_eq!(summary.files.entries, 0);
     assert_eq!(summary.blocks.distinct, 0);
 }
+
+#[tokio::test]
+async fn prepared_session_reuses_direct_baseline_tree_metadata() {
+    let temp = TempDir::new().unwrap();
+    let (endpoint_path, filemap_dir) = endpoint_with_filemaps(&temp).await;
+    let inspector = SnapshotInspector::new(endpoint_path, filemap_dir);
+
+    let session = inspector.prepare("current").await.unwrap();
+    let summary = session.summary();
+    assert_eq!(summary.changes.state, "available");
+    assert_eq!(summary.changes.added, 1);
+    assert_eq!(summary.changes.deleted, 1);
+    assert_eq!(summary.changes.changed, 2);
+
+    let root = session
+        .files(file_request(
+            "current",
+            FilePresentation::Tree,
+            FileScope::Changes,
+            None,
+            20,
+        ))
+        .await
+        .unwrap();
+    let docs = root
+        .entries
+        .iter()
+        .find(|entry| entry.path == "docs")
+        .unwrap();
+    assert!(docs.is_ancestor_context);
+    assert_eq!(docs.descendant_changes.as_ref().unwrap().added, 1);
+    assert_eq!(docs.descendant_changes.as_ref().unwrap().deleted, 1);
+    assert_eq!(docs.descendant_changes.as_ref().unwrap().changed, 1);
+
+    let mut children_request = file_request(
+        "current",
+        FilePresentation::Tree,
+        FileScope::Changes,
+        None,
+        20,
+    );
+    children_request.parent = Some("docs".to_string());
+    let children = session.files(children_request).await.unwrap();
+    assert_eq!(
+        children
+            .entries
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.change.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("docs/added.txt", "added"),
+            ("docs/changed.txt", "changed"),
+            ("docs/deleted.txt", "deleted"),
+        ]
+    );
+}

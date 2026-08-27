@@ -25,7 +25,7 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 ### In scope
 
 - A run-detail route inside the Main Window, entered by activating a history row and exited through native back navigation.
-- A read-only snapshot inspector exposed through the CLI's JSON contract and backed by core filemap access.
+- A read-only snapshot inspector exposed through the CLI's JSON contract for terminal users and through daemon control IPC for the macOS App.
 - On-demand loading of a retained snapshot filemap, with compatibility for current two-level indexes and legacy single-index snapshots.
 - Tree and list presentations, a changes-only filter, and a logical-block presentation.
 - Explicit loading, empty, unavailable, and error states.
@@ -92,8 +92,9 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 
 | Interface | Kind | Scope | Change | Contract | Owner | Consumers | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `snapshots inspect` | CLI JSON | internal | New | [CLI contract](./contracts/cli.md) | CLI/core | macOS App | Read-only paged snapshot inspector |
-| Snapshot filemap resolver | Core API | internal | Modify | [CLI contract](./contracts/cli.md) | core | CLI | Reuses retained-snapshot materialization semantics |
+| `snapshots inspect` | CLI JSON | internal | New | [CLI contract](./contracts/cli.md) | CLI/core | terminal users | Read-only paged snapshot inspector |
+| `snapshot.inspect.summary/files/blocks` | daemon control IPC | internal | New | This specification | daemon/core | macOS App | Read-only JSON requests over the existing local authenticated control socket |
+| Snapshot filemap resolver | Core API | internal | Modify | [CLI contract](./contracts/cli.md) | core | CLI, daemon | Reuses retained-snapshot materialization semantics |
 | Run detail route and views | Swift API | internal | New | This specification | macOS App | Main Window | Summary, Files, Blocks |
 
 ### Contract documents
@@ -109,6 +110,7 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 - Given a snapshot whose baseline was pruned, when the run detail is opened, then all-files browsing remains available, changes-only is disabled with an explanation, and no other snapshot is used as a substitute.
 - Given an expired snapshot or a failed/cancelled backup run, when its row is activated, then the App shows the execution summary and unavailable reason but does not request or display a file/block list.
 - Given a snapshot containing more files or blocks than a page, when the operator scrolls, searches, expands a node, or changes view, then rows are loaded incrementally and stale work cannot overwrite the current selection.
+- Given a changes-only detail that has loaded its summary, when the operator expands another directory, then the App requests the already-running daemon over its local control socket and the daemon reuses the prepared direct-baseline index rather than launching a CLI process or repeating the full comparison.
 - Given a block referenced by multiple files, when Blocks is opened, then one logical block row reports the aggregate reference count rather than multiple upload-attempt rows.
 - Given a legacy single-index snapshot or a current two-level snapshot, when it is retained and its filemap is available, then the inspector uses the same restored file-tree semantics as restore/verify.
 
