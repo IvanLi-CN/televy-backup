@@ -52,10 +52,38 @@ private func testSnapshotInspectionEligibility() {
     )
 }
 
+private func testTargetSelectionDismissesUnrelatedSnapshotDetail() {
+    expect(
+        SnapshotRunDetailSelection.shouldKeepDetail(
+            runTargetId: "target",
+            selectedTargetId: "target",
+            unknownTargetId: "__unknown_target__"
+        ),
+        "snapshot detail should remain visible for its selected target"
+    )
+    expect(
+        !SnapshotRunDetailSelection.shouldKeepDetail(
+            runTargetId: "target",
+            selectedTargetId: "other-target",
+            unknownTargetId: "__unknown_target__"
+        ),
+        "switching targets should dismiss the previous target snapshot detail"
+    )
+    expect(
+        SnapshotRunDetailSelection.shouldKeepDetail(
+            runTargetId: nil,
+            selectedTargetId: "__unknown_target__",
+            unknownTargetId: "__unknown_target__"
+        ),
+        "unknown-target snapshot detail should remain visible for the unknown target selection"
+    )
+}
+
 @main
 enum SnapshotInspectionPresentationTestsMain {
     static func main() {
         testSnapshotInspectionEligibility()
+        testTargetSelectionDismissesUnrelatedSnapshotDetail()
         print("OK: SnapshotInspectionPresentationTests")
     }
 }

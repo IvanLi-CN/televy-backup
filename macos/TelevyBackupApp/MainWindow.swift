@@ -29,6 +29,19 @@ struct RunLogSummary: Identifiable {
     let ignoreInvalidRules: Int64?
 }
 
+enum SnapshotRunDetailSelection {
+    static func shouldKeepDetail(
+        runTargetId: String?,
+        selectedTargetId: String?,
+        unknownTargetId: String
+    ) -> Bool {
+        if let runTargetId {
+            return runTargetId == selectedTargetId
+        }
+        return selectedTargetId == unknownTargetId
+    }
+}
+
 struct MainWindowRootView: View {
     @Environment(\.appRuntime) private var model
     @EnvironmentObject var runHistoryStore: RunHistoryStore
@@ -72,6 +85,17 @@ struct MainWindowRootView: View {
             } else {
                 model.refreshRunHistory()
             }
+        }
+        .onChange(of: selection) { _, newSelection in
+            guard let selectedRun else { return }
+            guard !SnapshotRunDetailSelection.shouldKeepDetail(
+                runTargetId: selectedRun.targetId,
+                selectedTargetId: newSelection,
+                unknownTargetId: Selection.unknownTarget
+            ) else {
+                return
+            }
+            self.selectedRun = nil
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
