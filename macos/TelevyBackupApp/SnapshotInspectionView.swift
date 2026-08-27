@@ -957,7 +957,7 @@ private struct SnapshotOutlineTable: NSViewRepresentable {
             guard let tableColumn else { return nil }
             switch tableColumn.identifier {
             case SnapshotNativeColumns.File.name:
-                let inset = CGFloat(outlineView.level(forItem: node)) * outlineView.indentationPerLevel + 20
+                let inset = CGFloat(outlineView.level(forItem: node)) * outlineView.indentationPerLevel
                 return SnapshotNativeRowView.fileName(entry: node.entry, leadingInset: inset, usesOutlineLayout: true)
             case SnapshotNativeColumns.File.change:
                 return SnapshotNativeRowView.fileChange(entry: node.entry)
