@@ -29,6 +29,19 @@ struct RunLogSummary: Identifiable {
     let ignoreInvalidRules: Int64?
 }
 
+enum SnapshotRunDetailSelection {
+    static func shouldKeepDetail(
+        runTargetId: String?,
+        selectedTargetId: String?,
+        unknownTargetId: String
+    ) -> Bool {
+        if let runTargetId {
+            return runTargetId == selectedTargetId
+        }
+        return selectedTargetId == unknownTargetId
+    }
+}
+
 struct MainWindowRootView: View {
     @Environment(\.appRuntime) private var model
     @EnvironmentObject var runHistoryStore: RunHistoryStore
@@ -36,6 +49,7 @@ struct MainWindowRootView: View {
     @EnvironmentObject var diagnosticsStore: DiagnosticsStore
     @EnvironmentObject var statusStore: StatusStore
     @State private var selection: String?
+    @State private var selectedRun: RunLogSummary?
 
     private enum Selection {
         static let unknownTarget = "__unknown_target__"
@@ -49,7 +63,11 @@ struct MainWindowRootView: View {
             NavigationSplitView {
                 sidebar
                     // Default sidebar width should be comfortable enough to read status/stage without truncation.
-                    .frame(minWidth: 240, idealWidth: 320, maxWidth: 480)
+                    .frame(
+                        minWidth: MainWindowUIDemo.sidebarWidth ?? 240,
+                        idealWidth: MainWindowUIDemo.sidebarWidth ?? 320,
+                        maxWidth: MainWindowUIDemo.sidebarWidth ?? 480
+                    )
             } detail: {
                 detail
             }
@@ -59,9 +77,25 @@ struct MainWindowRootView: View {
                 if selection == nil {
                     selection = MainWindowUIDemo.initialSelection(targets: statusStore.snapshot?.targets ?? [])
                 }
+                if MainWindowUIDemo.scene.hasPrefix("main-window-snapshot-") {
+                    selectedRun = MainWindowUIDemo.scene == "main-window-snapshot-failed-unavailable"
+                        ? runHistoryStore.runs.first(where: { $0.status == "failed" })
+                        : runHistoryStore.runs.first(where: { $0.kind == "backup" })
+                }
             } else {
                 model.refreshRunHistory()
             }
+        }
+        .onChange(of: selection) { _, newSelection in
+            guard let selectedRun else { return }
+            guard !SnapshotRunDetailSelection.shouldKeepDetail(
+                runTargetId: selectedRun.targetId,
+                selectedTargetId: newSelection,
+                unknownTargetId: Selection.unknownTarget
+            ) else {
+                return
+            }
+            self.selectedRun = nil
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -222,12 +256,16 @@ struct MainWindowRootView: View {
     @ViewBuilder
     private var detail: some View {
         let targets = statusStore.snapshot?.targets ?? []
-        if selection == Selection.unknownTarget {
-            UnknownTargetDetailView()
+        if let selectedRun {
+            SnapshotRunDetailView(run: selectedRun) {
+                self.selectedRun = nil
+            }
+        } else if selection == Selection.unknownTarget {
+            UnknownTargetDetailView(onOpenRun: { selectedRun = $0 })
         } else if let selection,
            let target = targets.first(where: { $0.targetId == selection })
         {
-            TargetDetailView(target: target)
+            TargetDetailView(target: target, onOpenRun: { selectedRun = $0 })
         } else {
             VStack(spacing: 12) {
                 Image(systemName: "sidebar.left")
@@ -248,7 +286,7 @@ struct MainWindowRootView: View {
     }
 }
 
-private enum MainWindowUIDemo {
+enum MainWindowUIDemo {
     static var enabled: Bool {
         ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1"
     }
@@ -257,9 +295,20 @@ private enum MainWindowUIDemo {
         ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
     }
 
+    static var sidebarWidth: CGFloat? {
+        guard enabled,
+              let rawValue = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SIDEBAR_WIDTH"],
+              let width = Double(rawValue),
+              (240 ... 480).contains(width)
+        else {
+            return nil
+        }
+        return CGFloat(width)
+    }
+
     static func initialSelection(targets: [StatusTarget]) -> String? {
         guard enabled else { return nil }
-        if scene.hasPrefix("main-window-target-") {
+        if scene.hasPrefix("main-window-target-") || scene.hasPrefix("main-window-snapshot-") {
             return targets.first?.targetId
         }
         return nil
@@ -505,6 +554,7 @@ private struct TargetDetailView: View {
     @EnvironmentObject var taskStore: TaskPresentationStore
     @EnvironmentObject var statusStore: StatusStore
     let target: StatusTarget
+    let onOpenRun: (RunLogSummary) -> Void
 
     private struct OverviewMetricItem: Identifiable {
         let id = UUID()
@@ -989,7 +1039,7 @@ private struct TargetDetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
             List(runs) { run in
-                RunLogRow(run: run)
+                RunLogRow(run: run, onOpen: onOpenRun)
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
@@ -1190,6 +1240,7 @@ private struct UnknownTargetListRow: View {
 private struct UnknownTargetDetailView: View {
     @Environment(\.appRuntime) private var model
     @EnvironmentObject var runHistoryStore: RunHistoryStore
+    let onOpenRun: (RunLogSummary) -> Void
 
     private var runs: [RunLogSummary] {
         runHistoryStore.runs
@@ -1216,7 +1267,7 @@ private struct UnknownTargetDetailView: View {
                     .padding(.vertical, 6)
             } else {
                 List(runs) { run in
-                    RunLogRow(run: run)
+                    RunLogRow(run: run, onOpen: onOpenRun)
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
@@ -1290,6 +1341,7 @@ private struct StatusBadge: View {
 
 private struct RunLogRow: View {
     let run: RunLogSummary
+    var onOpen: ((RunLogSummary) -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -1338,6 +1390,11 @@ private struct RunLogRow: View {
                 .help("Reveal log file in Finder")
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onOpen?(run)
+        }
+        .accessibilityHint(onOpen == nil ? "" : "Open backup details")
     }
 
     private func summaryLine(_ r: RunLogSummary) -> String {

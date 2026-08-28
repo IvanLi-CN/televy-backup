@@ -34,6 +34,7 @@ pub(crate) struct ControlContext {
     pub(crate) lifecycle: Arc<crate::DaemonLifecycle>,
     pub(crate) runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
     pub(crate) data_root: PathBuf,
+    pub(crate) snapshot_inspection: Arc<crate::snapshot_inspection_ipc::SnapshotInspectionService>,
 }
 
 pub struct ControlIpcServerHandle {
@@ -239,6 +240,12 @@ async fn handle_control_ipc_client(
             return Ok(());
         }
     };
+
+    if req.method.starts_with("snapshot.inspect.") {
+        let response = context.snapshot_inspection.handle(&req).await;
+        write_json_line(&mut w, &response).await?;
+        return Ok(());
+    }
 
     let (log_bytes, managed_log_usage) = if req.method == "logging.status" {
         let log_dir = televy_backup_core::run_log::resolve_log_dir(&context.data_root);
@@ -1210,9 +1217,11 @@ mod tests {
         backup_queue_notify: Arc<Notify>,
         lifecycle: Arc<crate::DaemonLifecycle>,
     ) -> ControlContext {
+        let settings = Arc::new(RwLock::new(settings()));
+        let data_root = config_root.to_path_buf();
         ControlContext {
             config_root: config_root.to_path_buf(),
-            settings: Arc::new(RwLock::new(settings())),
+            settings: settings.clone(),
             status_state,
             backup_queue,
             backup_queue_notify,
@@ -1221,7 +1230,14 @@ mod tests {
             runtime_logging: Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
                 config_root,
             ))),
-            data_root: config_root.to_path_buf(),
+            data_root: data_root.clone(),
+            snapshot_inspection: Arc::new(
+                crate::snapshot_inspection_ipc::SnapshotInspectionService::new(
+                    config_root.to_path_buf(),
+                    data_root,
+                    settings,
+                ),
+            ),
         }
     }
 
@@ -1275,18 +1291,27 @@ mod tests {
         let runtime_logging = Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
             &cfg_root,
         )));
+        let control_settings = Arc::new(RwLock::new(settings()));
+        let data_root = dir.path().join("data");
         let _server = spawn_control_ipc_server(
             socket_path.clone(),
             ControlContext {
                 config_root: cfg_root,
-                settings: Arc::new(RwLock::new(settings())),
+                settings: control_settings.clone(),
                 status_state,
                 backup_queue: Arc::new(Mutex::new(crate::BackupQueue::default())),
                 backup_queue_notify: Arc::new(Notify::new()),
                 settings_reload_requested: Arc::new(AtomicBool::new(false)),
                 lifecycle: Arc::new(crate::DaemonLifecycle::default()),
                 runtime_logging,
-                data_root: dir.path().join("data"),
+                data_root: data_root.clone(),
+                snapshot_inspection: Arc::new(
+                    crate::snapshot_inspection_ipc::SnapshotInspectionService::new(
+                        dir.path().join("cfg"),
+                        data_root,
+                        control_settings,
+                    ),
+                ),
             },
         )
         .unwrap();

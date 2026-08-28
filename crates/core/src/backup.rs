@@ -4611,12 +4611,6 @@ async fn apply_retention_snapshot_batch(
         }
 
         if retry_err.is_none()
-            && let Err(e) = clear_base_snapshot_refs_for_retention(&mut tx, snapshot_ids).await
-        {
-            retry_err = Some(e);
-        }
-
-        if retry_err.is_none()
             && let Err(e) = delete_rows_for_snapshot_ids(
                 &mut tx,
                 "DELETE FROM snapshots WHERE snapshot_id IN (",
@@ -4732,18 +4726,6 @@ async fn delete_rows_for_snapshot_ids(
     snapshot_ids: &[String],
 ) -> std::result::Result<u64, sqlx::Error> {
     let mut query = QueryBuilder::<Sqlite>::new(sql_prefix);
-    push_string_bind_list(&mut query, snapshot_ids);
-    query.push(")");
-    Ok(query.build().execute(&mut **tx).await?.rows_affected())
-}
-
-async fn clear_base_snapshot_refs_for_retention(
-    tx: &mut sqlx::Transaction<'_, Sqlite>,
-    snapshot_ids: &[String],
-) -> std::result::Result<u64, sqlx::Error> {
-    let mut query = QueryBuilder::<Sqlite>::new(
-        "UPDATE snapshots SET base_snapshot_id = NULL WHERE base_snapshot_id IN (",
-    );
     push_string_bind_list(&mut query, snapshot_ids);
     query.push(")");
     Ok(query.build().execute(&mut **tx).await?.rows_affected())
@@ -6741,15 +6723,17 @@ fn revalidate_file_for_base_copy(
 mod tests {
     use std::collections::BTreeMap;
     use std::io;
+    use std::path::Path;
 
     use ignore::Error as IgnoreError;
     use sqlx::Row;
 
     use super::{
         BaseCopyRevalidation, BaseFileChunkCopyRow, SCAN_TRACE_BUCKET_US, SCAN_TRACE_MAX_BUCKETS,
-        ScanActivityTrace, ScanPerformance, ScanSqliteRetryWait, ScanWorkKind, attach_db,
-        delete_transient_scan_file, error_has_flood_wait, export_endpoint_index_db_for_upload,
-        file_metadata_values, ignore_error_is_non_root_not_found, initialize_base_chunk_copy_map,
+        ScanActivityTrace, ScanPerformance, ScanSqliteRetryWait, ScanWorkKind, apply_retention,
+        attach_db, delete_transient_scan_file, error_has_flood_wait,
+        export_endpoint_index_db_for_upload, file_metadata_values,
+        ignore_error_is_non_root_not_found, initialize_base_chunk_copy_map,
         insert_filemap_chunks_batch, materialize_base_chunk_copy_map,
         revalidate_file_for_base_copy, seed_base_snapshot_chunks, stage_base_chunk_copy_batch,
     };
@@ -6852,6 +6836,39 @@ mod tests {
             .unwrap()
             .get("n");
         assert_eq!(rows, 0);
+    }
+
+    #[tokio::test]
+    async fn retention_preserves_a_pruned_direct_baseline_reference() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = crate::index_db::open_index_db(&temp.path().join("endpoint.sqlite"))
+            .await
+            .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('base', '2026-01-01T00:00:00Z', '/source', 'base', NULL)",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('current', '2026-01-02T00:00:00Z', '/source', 'current', 'base')",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+
+        let pruned = apply_retention(&mut conn, Path::new("/source"), 1)
+            .await
+            .unwrap();
+        assert_eq!(pruned, ["base"]);
+        let base_snapshot_id: Option<String> = sqlx::query_scalar(
+            "SELECT base_snapshot_id FROM snapshots WHERE snapshot_id = 'current'",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(base_snapshot_id.as_deref(), Some("base"));
     }
 
     #[tokio::test]

@@ -34,3 +34,39 @@ _Avoid_: Restore
 
 **Current Task Failure**:
 A failure emitted by a backup, restore, or verification task in the current live session. Historical run results do not determine the Menu Bar Activity State.
+
+TelevyBackup also preserves source directories as independently addressable backup snapshots. The history experience distinguishes the execution of a backup from the snapshot it successfully produces.
+
+## Backup History
+
+**Backup Run**:
+One attempted execution of a backup task, including attempts that fail or are cancelled. A run may not produce a snapshot.
+_Avoid_: Backup, snapshot
+
+**Backup Snapshot**:
+The completed, restorable file-tree state produced by a successful backup run.
+_Avoid_: Backup run, backup task
+
+**Snapshot Retention Window**:
+The most recent backup snapshots of a target that remain available for detailed inspection and restore.
+_Avoid_: Backup history, log retention
+
+**Baseline Snapshot**:
+The directly preceding successful snapshot of the same target that a backup snapshot is compared with.
+_Avoid_: Previous run, latest snapshot
+
+**File Tree Change**:
+A difference between a file entry in a backup snapshot and its baseline: added, deleted, or changed. A regular file is changed when its type, size, modification time, or permissions differ; a directory or symlink is changed only when its recorded type differs. It does not mean a content diff is available.
+_Avoid_: File diff, content change, move
+
+**Difference Tree**:
+The tree projection of file-tree changes that retains ancestor directories as navigation context and aggregates the changes below them.
+_Avoid_: Flat change list
+
+**Difference Availability**:
+Whether a backup snapshot and its direct baseline are both available for comparison. When unavailable, the snapshot remains browseable but exposes no substituted comparison.
+_Avoid_: Nearest-snapshot comparison, approximate diff
+
+**Backup Block**:
+A deduplicated logical data block referenced by one or more regular files in a backup snapshot.
+_Avoid_: Upload attempt, pack

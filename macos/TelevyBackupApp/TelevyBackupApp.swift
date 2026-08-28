@@ -688,6 +688,13 @@ final class AppModel {
         return defaultDataDir()
     }
 
+    func controlSocketPath() -> String {
+        effectiveDataDirURL()
+            .appendingPathComponent("ipc")
+            .appendingPathComponent("control.sock")
+            .path
+    }
+
     private func bundledMacOSDirURL() -> URL {
         Bundle.main.bundleURL
             .appendingPathComponent("Contents")

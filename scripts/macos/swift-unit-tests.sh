@@ -107,6 +107,18 @@ bin_demo_paths="$out_dir/ui-demo-sandbox-path-tests"
   "$root_dir/macos/TelevyBackupAppTests/UIDemoSandboxPathTests.swift"
 "$bin_demo_paths"
 
+bin_snapshot_inspection="$out_dir/snapshot-inspection-presentation-tests"
+"$swiftc" \
+  -sdk "$sdk_path" \
+  -O \
+  -D TELEVYBACKUP_TESTING \
+  -framework SwiftUI \
+  -framework AppKit \
+  -o "$bin_snapshot_inspection" \
+  "$root_dir/macos/TelevyBackupApp"/*.swift \
+  "$root_dir/macos/TelevyBackupAppTests/SnapshotInspectionPresentationTests.swift"
+"$bin_snapshot_inspection"
+
 bin_diagnostics="$out_dir/diagnostics-settings-tests"
 "$swiftc" \
   -sdk "$sdk_path" \
