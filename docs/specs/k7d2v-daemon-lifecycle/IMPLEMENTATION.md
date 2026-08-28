@@ -17,6 +17,7 @@
 - 完整退出期间显示阻塞式收尾状态；daemon 未在十秒内停止时取消 App 退出、恢复 App 状态流与计时器，并保留失败说明。
 - 完整退出仅在 release 默认环境 disable LaunchAgent 以阻止 keep-alive 重启，并将 CLI stop 指向 Formula 的 config/data 目录，优雅停止后再 bootout；App 等待 CLI 十秒窗口加返回余量；dev/custom-dir 不变更 release 服务；bootout 失败会取消 App 退出；remote index preflight 与 post-backup bootstrap update 均接入任务取消 token，CLI start 脱离调用终端。
 - `scripts/macos/gui-lifecycle-integration-test.sh` 覆盖 GUI-only handoff 与 complete-exit 两条进程路径；complete-exit 的自动确认仅在生命周期测试构建中启用，并等待 daemon 初次就绪后触发，避免测试竞态。
+- GUI-only CLI 等待 stopped lease 与 lifecycle lock 释放时使用单一条件门，保持 fail-closed 语义并通过 clippy 严格检查。
 
 ## Remaining Gaps
 

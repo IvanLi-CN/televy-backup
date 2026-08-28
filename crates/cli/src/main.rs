@@ -1151,12 +1151,13 @@ fn gui_quit(data_dir: &Path, json: bool) -> Result<(), CliError> {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if let Ok(current) = read_gui_control_lease(&paths) {
-            if current.state == "stopped" && gui_lifecycle_lock_is_free(&paths)? {
-                tracing::info!(event = "gui.quit", result = "exited", pid = current.pid, bundle_id = %current.bundle_id);
-                emit_gui_quit_result(json, false);
-                return Ok(());
-            }
+        if let Ok(current) = read_gui_control_lease(&paths)
+            && current.state == "stopped"
+            && gui_lifecycle_lock_is_free(&paths)?
+        {
+            tracing::info!(event = "gui.quit", result = "exited", pid = current.pid, bundle_id = %current.bundle_id);
+            emit_gui_quit_result(json, false);
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
