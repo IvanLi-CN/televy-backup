@@ -978,6 +978,23 @@ fn gui_control_error(message: impl Into<String>) -> CliError {
 }
 
 #[cfg(unix)]
+fn check_gui_data_dir(data_dir: &Path) -> Result<(), CliError> {
+    let metadata = fs::symlink_metadata(data_dir)
+        .map_err(|e| gui_control_error(format!("GUI data directory unavailable: {e}")))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(gui_control_error(
+            "GUI data directory is not an owned directory",
+        ));
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(gui_control_error(
+            "GUI data directory is not owned by this user",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn check_gui_private_dir(paths: &GuiControlPaths) -> Result<(), CliError> {
     let metadata = fs::symlink_metadata(&paths.ipc_dir)
         .map_err(|e| gui_control_error(format!("GUI control directory unavailable: {e}")))?;
@@ -986,9 +1003,7 @@ fn check_gui_private_dir(paths: &GuiControlPaths) -> Result<(), CliError> {
             "GUI control directory is not a private directory",
         ));
     }
-    if metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o077 != 0
-    {
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.permissions().mode() & 0o077 != 0 {
         return Err(gui_control_error(
             "GUI control directory permissions are unsafe",
         ));
@@ -1009,9 +1024,7 @@ fn check_gui_private_file(path: &Path, expect_socket: bool) -> Result<(), CliErr
             "GUI control path has an unsafe file type",
         ));
     }
-    if metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o077 != 0
-    {
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.permissions().mode() & 0o077 != 0 {
         return Err(gui_control_error("GUI control file permissions are unsafe"));
     }
     Ok(())
@@ -1076,6 +1089,7 @@ fn emit_gui_quit_result(json: bool, already_not_running: bool) {
 
 #[cfg(unix)]
 fn gui_quit(data_dir: &Path, json: bool) -> Result<(), CliError> {
+    check_gui_data_dir(data_dir)?;
     let paths = GuiControlPaths::for_data_dir(data_dir);
     check_gui_private_dir(&paths)?;
     let lease = read_gui_control_lease(&paths)?;

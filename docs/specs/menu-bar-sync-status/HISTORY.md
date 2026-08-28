@@ -11,6 +11,7 @@
 - 同一目标一律互斥，跨目标允许并发并用全局方向聚合。
 - 外部任务终态不是 fire-and-forget：只有匹配应用或精确幂等重放可以确认，避免 CLI 在 daemon 未记录终态时报告成功。
 - 通用恢复和验证必须解析唯一目标后准入；无法归属的 snapshot 不以绕过互斥的方式继续运行。
+- 右键快捷菜单不以任意 `running` 推断 Stop Backup，而是复用明确 backup activity 或 manual queue；退出 GUI 与完全退出继续保持 daemon 所有权边界。
 
 ## Key Reasons / Replacements
 

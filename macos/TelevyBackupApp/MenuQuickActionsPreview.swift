@@ -11,8 +11,8 @@ struct MenuQuickActionsPreview: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            row("Backup", icon: "play.fill", enabled: state == .backupAvailable)
-            row("Stop Backup", icon: "stop.fill", enabled: state == .stopAvailable)
+            row("Backup", icon: "play.fill", enabled: state == MenuBackupControlState.backupAvailable)
+            row("Stop Backup", icon: "stop.fill", enabled: state == MenuBackupControlState.stopAvailable)
             Divider().padding(.vertical, 4)
             row("Main Window", icon: "rectangle.grid.2x2.fill", enabled: true)
             row("Settings", icon: "gearshape", enabled: true)
@@ -64,8 +64,8 @@ struct MenuQuickActionsPreview: View {
                 upTotal: StatusCounter(bytes: nil),
                 progress: nil,
                 lastRun: nil,
-                backupQueue: StatusBackupQueue(activeBatchId: "preview-batch", pendingBatchId: nil),
-                activeTask: StatusActiveTask(kind: "backup", directions: ["up"])
+                activeTask: StatusActiveTask(kind: "backup", directions: ["up"]),
+                backupQueue: StatusBackupQueue(activeBatchId: "preview-batch", pendingBatchId: nil)
             ),
         ]
     )

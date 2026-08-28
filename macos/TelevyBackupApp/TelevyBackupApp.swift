@@ -4788,6 +4788,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        #if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
+        scheduleCompleteExitForLifecycleTestIfRequested()
+        #endif
+
         let env = ProcessInfo.processInfo.environment
         let shouldOpenSettings = env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1"
             || ModelStore.shared.openSettingsOnLaunchOverrideEnabled()
@@ -5017,6 +5021,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let env = ProcessInfo.processInfo.environment
         return env["TELEVYBACKUP_UI_DEMO"] == "1" || env["TELEVYBACKUP_UI_SNAPSHOT_DIR"] != nil
     }
+
+    #if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
+    private func scheduleCompleteExitForLifecycleTestIfRequested() {
+        guard ProcessInfo.processInfo.environment["TELEVYBACKUP_TEST_COMPLETE_EXIT"] == "1" else {
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, !self.terminationInProgress else { return }
+            self.menuCompleteExitRequested = true
+            NSApp.terminate(nil)
+        }
+    }
+    #endif
 
     private func requestGuiOnlyExitFromControlPlane() -> GuiQuitDecision {
         if Thread.isMainThread {

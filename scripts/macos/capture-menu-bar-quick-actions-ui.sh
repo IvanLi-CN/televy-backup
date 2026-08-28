@@ -28,7 +28,7 @@ config_dir="$demo_root/config"
 prefix="menu-quick-actions-$appearance"
 
 mkdir -p "$out_dir" "$data_dir" "$config_dir"
-rm -f "$out_dir/$prefix-popover.png"
+rm -f "$out_dir/$prefix-popover.png" "$out_dir/$prefix-window-0.png"
 
 env \
   TELEVYBACKUP_ALLOW_MULTI_INSTANCE=1 \
@@ -46,6 +46,10 @@ env \
   TELEVYBACKUP_OPEN_MAIN_WINDOW_ON_LAUNCH=0 \
   TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH=0 \
   "$app_bin" >/dev/null 2>&1
+
+if [[ -f "$out_dir/$prefix-window-0.png" && ! -f "$out_dir/$prefix-popover.png" ]]; then
+  mv "$out_dir/$prefix-window-0.png" "$out_dir/$prefix-popover.png"
+fi
 
 if [[ ! -f "$out_dir/$prefix-popover.png" ]]; then
   echo "ERROR: missing menu quick-actions preview" >&2

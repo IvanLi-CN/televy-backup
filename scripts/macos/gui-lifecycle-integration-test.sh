@@ -5,17 +5,24 @@ root_dir="$(git rev-parse --show-toplevel)"
 mode="${1:-gui-only}"
 
 case "$mode" in
-  gui-only) ;;
+  gui-only|--complete-exit) ;;
   *)
-    echo "Usage: $0 [gui-only]" >&2
+    echo "Usage: $0 [gui-only|--complete-exit]" >&2
     exit 2
     ;;
 esac
 
 : "${TELEVYBACKUP_CODESIGN_IDENTITY:=-}"
-TELEVYBACKUP_APP_VARIANT=dev \
-  TELEVYBACKUP_CODESIGN_IDENTITY="$TELEVYBACKUP_CODESIGN_IDENTITY" \
-  "$root_dir/scripts/macos/build-app.sh" >/dev/null
+if [[ "$mode" == "--complete-exit" ]]; then
+  TELEVYBACKUP_GUI_LIFECYCLE_TESTING=1 \
+    TELEVYBACKUP_APP_VARIANT=dev \
+    TELEVYBACKUP_CODESIGN_IDENTITY="$TELEVYBACKUP_CODESIGN_IDENTITY" \
+    "$root_dir/scripts/macos/build-app.sh" >/dev/null
+else
+  TELEVYBACKUP_APP_VARIANT=dev \
+    TELEVYBACKUP_CODESIGN_IDENTITY="$TELEVYBACKUP_CODESIGN_IDENTITY" \
+    "$root_dir/scripts/macos/build-app.sh" >/dev/null
+fi
 
 app_bin="$root_dir/target/macos-app/TelevyBackup Dev.app/Contents/MacOS/TelevyBackup"
 cli_bin="$root_dir/target/macos-app/TelevyBackup Dev.app/Contents/MacOS/televybackup-cli"
@@ -42,6 +49,7 @@ env \
   TELEVYBACKUP_ALLOW_MULTI_INSTANCE=1 \
   TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH=0 \
   TELEVYBACKUP_DISABLE_KEYCHAIN=1 \
+  TELEVYBACKUP_TEST_COMPLETE_EXIT="$([[ "$mode" == "--complete-exit" ]] && echo 1 || echo 0)" \
   "$app_bin" \
   --disable-keychain \
   --data-dir "$data_dir" \
@@ -81,6 +89,25 @@ for _ in {1..100}; do
   sleep 0.1
 done
 "$cli_bin" --json --data-dir "$data_dir" daemon status >/dev/null
+
+if [[ "$mode" == "--complete-exit" ]]; then
+  for _ in {1..100}; do
+    if ! kill -0 "$gui_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  if kill -0 "$gui_pid" 2>/dev/null; then
+    echo "ERROR: GUI process is still running after complete exit" >&2
+    exit 1
+  fi
+  if "$cli_bin" --json --data-dir "$data_dir" daemon status >/dev/null 2>&1; then
+    echo "ERROR: complete exit left the isolated daemon running" >&2
+    exit 1
+  fi
+  echo "OK: complete exit stops the isolated daemon"
+  exit 0
+fi
 
 result="$("$cli_bin" --json --data-dir "$data_dir" gui quit)"
 printf '%s' "$result" | rg -q '"exited":true' || {

@@ -43,8 +43,8 @@ private func target(
             )
         },
         lastRun: nil,
-        backupQueue: StatusBackupQueue(activeBatchId: activeBatchId, pendingBatchId: pendingBatchId),
-        activeTask: activeTask
+        activeTask: activeTask,
+        backupQueue: StatusBackupQueue(activeBatchId: activeBatchId, pendingBatchId: pendingBatchId)
     )
 }
 

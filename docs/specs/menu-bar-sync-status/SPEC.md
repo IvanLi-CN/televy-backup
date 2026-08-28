@@ -17,6 +17,7 @@
 - 将当前 live 会话失败锁存 10 秒，且不从历史结果、禁用目标或重启后的快照恢复。
 - 保持同一目标上的备份、恢复和验证互斥，允许跨目标并发并汇总为双向同步。
 - 提供默认关闭、仅存于本机 `UserDefaults` 的菜单栏全局速率显示偏好。
+- 提供不改变 daemon 所有权的菜单栏快捷菜单，用于全局备份、停止备份、打开界面与两种明确的退出语义。
 
 ### Non-goals
 
@@ -31,6 +32,7 @@
 - core status/control 协议、daemon runtime 活动态及外部任务终态。
 - daemon 目标互斥准入和手动备份队列的延后执行。
 - macOS 菜单栏纯投影、失败锁存、静态模板徽标、速率标题和设置偏好。
+- 菜单栏左键 popover 与右键固定快捷菜单，及其基于 fresh 状态、请求进度和 GUI lifecycle gate 的可用性。
 - Rust/Swift 自动化测试与受控菜单栏渲染证据。
 
 ### Out of scope
@@ -52,6 +54,11 @@
 - `status.taskFinish` 只有在 daemon 应用了匹配终态、或证明是完全相同终态的幂等重放时才可确认成功。锁不可用、过期所有权、重启后丢失的运行时状态或不同终态不得被确认；数据面本身已经失败时，终态上报失败不得替换原始错误。
 - 跨目标并发活动必须在全局投影中聚合；上行和下行同时存在时必须显示双向同步。
 - 速率偏好默认关闭，键名为 `showMenuBarTransferRates`，只读 `global.up` 与 `global.down`。启用后只显示活动任务声明的方向；每个方向使用右对齐的四字符等宽速率槽，箭头与 `/s` 后缀不计入槽宽。错误徽标不得隐藏其他活动任务的速率标题。
+- 左键只切换 popover。右键先关闭 popover，再按固定顺序显示 `Backup`、`Stop Backup`、分隔线、`Main Window`、`Settings`、分隔线、`Quit GUI`、`Quit Completely`。
+- `Backup` 在状态缺失时可以先确保 daemon 可用；有 fresh status 时只在至少一个 enabled target、没有 lifecycle 或请求进行中、且没有未知 running task 时可用。动作以 `backup enqueue --all-enabled` 请求 daemon batch。
+- `Stop Backup` 只在 supported `activeTask.kind=backup` 或 manual `backupQueue` 存在时可用，并调用全局 `backup.stop`；restore、verify 和 sync 不得被它误判为可停止备份。
+- stale、disconnected、unknown/old running snapshot、进行中的 enqueue/stop、或 GUI lifecycle busy 时，相关 Backup/Stop Backup 动作必须禁用。快捷动作失败时必须恢复 popover 并显示错误，而不改变 daemon 状态。
+- `Quit GUI` 直接执行 GUI-only exit；`Quit Completely` 在有 enabled schedule 时必须显示破坏性确认。GUI-only exit 不停止 daemon、LaunchAgent、daemon queue 或 GUI fallback daemon；complete exit 取消 GUI-owned local jobs，并只停止所选环境的 daemon。
 
 ### SHOULD
 
@@ -72,6 +79,7 @@
 2. macOS App 从 fresh status snapshot 聚合 `activeTask`、备份队列和本地 CLI 事件。它只将已见活动态后的失败转变交给内存失败锁存。
 3. 菜单栏先选择唯一状态，再选择匹配状态的静态模板徽标。速率标题独立于徽标；每个活动方向占用固定的等宽槽，读数变化不会改变状态项宽度。
 4. 设置开关写入 `UserDefaults`；App 重启后读取同一偏好，而 daemon、配置包和远端配置不感知该值。
+5. 右键快捷菜单从相同的 status snapshot 和 lifecycle gate 投影 action availability；它不从历史 run 或任意 `running` 猜测 backup。失败的动作回到 popover 提示，不把菜单栏变成 daemon 控制通道。
 
 ### Edge cases / errors
 
@@ -80,6 +88,7 @@
 - 失败锁存期间若仍有活动任务，错误徽标优先，但已启用的有效方向速率继续显示。
 - 速率槽使用二进制量级和单字符单位 `B/K/M/G/T/P/E`。`1.0K` 至 `9.9K` 保留一位小数，`10K` 至 `999K` 显示整数；当读数将超过四字符时立即进位。零值显示为 `0B`，缺失或无效值显示为 `----`；只有连接 stale 时才隐藏全部速率。
 - unknown/old `activeTask` 不得使 App 崩溃；其字段按可选值容错，旧客户端忽略新增字段。
+- GUI-only exit 被 CLI 或菜单请求时，GUI 必须拒绝 active sheet、未保存设置、GUI-owned local job 或并发 lifecycle 操作；CLI 不可用、GUI IPC 超时、daemon 未退出或 LaunchAgent 卸载失败时，complete exit 必须保持 GUI 运行。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -90,6 +99,7 @@
 | `targets[].activeTask` | status snapshot | internal | Modify | `./contracts/status-activity.md` | daemon/core | CLI, macOS App | additive-only |
 | `status.taskStart` / `status.taskFinish` | control RPC | internal | Modify | `./contracts/status-activity.md` | daemon/core | CLI | task admission and terminal error code |
 | `showMenuBarTransferRates` | macOS preference | local | New | `./contracts/status-activity.md` | macOS App | macOS App | UserDefaults only |
+| menu-bar quick actions | macOS UI | local | New | `./contracts/status-activity.md` | macOS App | user | fixed actions with status-derived gating |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -105,6 +115,8 @@
 - Given 已准入的外部任务结束，When `status.taskFinish` 的响应丢失，Then CLI 只接受 daemon 的精确幂等确认；Given 数据面失败且终态上报失败，Then CLI 保留数据面的原始失败码。
 - Given 速率偏好关闭或开启，When 存在活动方向，Then 分别隐藏或显示每个声明方向的 `↑`/`↓` 四字符等宽二进制单位速率；数值、精度与量级变化不得改变同一方向段的宽度。
 - Given 菜单栏收到与当前视觉键相同的 `effectiveAppearance` 通知，When 刷新图标，Then 不写入 `button.image`；Given 失败图标在浅色和深色之间切换，When 第一次进入新的视觉键，Then 只写入一次并复用该键缓存的图像。
+- Given a fresh snapshot with a backup task or manual queue, When the user right-clicks the menu bar item, Then Stop Backup is enabled and calls `backup.stop`; Given restore, verify, sync, stale, or unknown running status, Then it is not enabled as Stop Backup.
+- Given the menu bar item, When the user left-clicks or right-clicks, Then the former only toggles popover and the latter closes popover before showing the six fixed quick actions. GUI-only exit preserves daemon state; complete exit asks for destructive confirmation only when schedules are enabled.
 
 ## 验收清单（Acceptance checklist）
 
@@ -142,6 +154,7 @@ PR: include
 ## Related ADRs
 
 - [0001-explicit-menu-bar-activity-directions](../../adr/0001-explicit-menu-bar-activity-directions.md)
+- [0002-gui-only-handoff-control-plane](../../adr/0002-gui-only-handoff-control-plane.md)
 
 ## Related PRs
 

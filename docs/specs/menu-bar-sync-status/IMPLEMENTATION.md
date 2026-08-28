@@ -15,10 +15,11 @@
 - External terminal status now requires a matching applied transition or an exact in-memory replay acknowledgement; stale ownership and daemon restart do not create a false acknowledgement.
 - Generic restore and verify resolve a unique configured target before admission, while the menu-bar failure latch deduplicates only the same task identity.
 - Menu-bar icon assignment is keyed and cached. Repeated `effectiveAppearance` notifications no longer reassign the same image, while failure icons retain one cached rendering per light and dark treatment.
+- The status-bar button now routes left clicks to the popover and right clicks to a fixed quick-action menu. Its backup/stop availability reuses `TargetPresentation` and the active-task contract; GUI-only and complete exits share the lifecycle gate and keep daemon ownership explicit.
 
 ## Validation Status
 
-- Rust and Swift focused tests cover the status contract, live failure lifecycle, task mutual exclusion, rate preference, and status icon rendering.
+- Rust and Swift focused tests cover the status contract, live failure lifecycle, task mutual exclusion, rate preference, status icon rendering, and quick-action backup gating.
 - Controlled AppKit previews cover both Release and Dev status icons; the owner has confirmed the final icon treatment.
 
 ## Related Changes
