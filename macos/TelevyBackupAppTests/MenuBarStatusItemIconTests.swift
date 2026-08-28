@@ -169,6 +169,65 @@ private func testDevIdlePreservesTheExistingIcon() {
     )
 }
 
+private func testImageUpdatesAreIdempotentAndCached() {
+    let store = MenuBarStatusItemImageStore()
+    let lightAppearance = NSAppearance(named: .aqua)
+    let darkAppearance = NSAppearance(named: .darkAqua)
+
+    guard let firstFailure = store.imageIfNeeded(
+        for: .failure,
+        isDev: false,
+        appearance: lightAppearance
+    ) else {
+        expectMenuBarIcon(false, "the initial status icon must require an image assignment")
+        return
+    }
+
+    expectMenuBarIcon(
+        store.imageIfNeeded(for: .failure, isDev: false, appearance: lightAppearance) == nil,
+        "an effective-appearance callback with unchanged inputs must not assign the image again"
+    )
+
+    guard let darkFailure = store.imageIfNeeded(
+        for: .failure,
+        isDev: false,
+        appearance: darkAppearance
+    ) else {
+        expectMenuBarIcon(false, "a real light-to-dark failure appearance change must assign an image")
+        return
+    }
+    expectMenuBarIcon(
+        store.imageIfNeeded(for: .failure, isDev: false, appearance: darkAppearance) == nil,
+        "the redraw caused by an appearance-specific failure image must not feed back into another assignment"
+    )
+
+    guard let cachedLightFailure = store.imageIfNeeded(
+        for: .failure,
+        isDev: false,
+        appearance: lightAppearance
+    ) else {
+        expectMenuBarIcon(false, "returning to light appearance must restore the failure image")
+        return
+    }
+    expectMenuBarIcon(
+        cachedLightFailure === firstFailure,
+        "returning to an already-rendered appearance must reuse its cached image"
+    )
+    expectMenuBarIcon(
+        darkFailure !== firstFailure,
+        "light and dark failure images must retain their distinct base treatments"
+    )
+
+    guard store.imageIfNeeded(for: .backup, isDev: false, appearance: lightAppearance) != nil else {
+        expectMenuBarIcon(false, "an activity change must assign its image")
+        return
+    }
+    expectMenuBarIcon(
+        store.imageIfNeeded(for: .backup, isDev: false, appearance: darkAppearance) == nil,
+        "template activity images must not be reassigned for an appearance-only callback"
+    )
+}
+
 @main
 enum MenuBarStatusItemIconTestsMain {
     static func main() {
@@ -178,6 +237,7 @@ enum MenuBarStatusItemIconTestsMain {
         testActivityBadgesAreDistinct()
         testActivityBadgesPreserveProductDriveGeometry()
         testDevIdlePreservesTheExistingIcon()
+        testImageUpdatesAreIdempotentAndCached()
         print("OK: MenuBarStatusItemIconTests")
     }
 }
