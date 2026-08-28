@@ -129,19 +129,15 @@ App 曾通过 `control/backup-now` 文件请求 daemon 执行全量备份。daem
 
 ## Visual Evidence
 
-PR: include
 
 ![Light Popover: Connecting and Queued](./assets/light-connecting-queued-popover.png)
 
-PR: include
 
 ![Light Main Window: Connecting and Queued](./assets/light-connecting-queued-main-window.png)
 
-PR: include
 
 ![Dark Popover: Running and Next queued](./assets/dark-running-next-queued-popover.png)
 
-PR: include
 
 ![Dark Main Window: Running and Next queued](./assets/dark-running-next-queued-main-window.png)
 

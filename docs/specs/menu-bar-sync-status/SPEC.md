@@ -141,23 +141,19 @@
 
 Release 受控菜单栏预览。
 
-PR: include
 
 ![Release menu bar activity states](./assets/menu-bar-activity-states-release.png)
 
 Dev 受控菜单栏预览。
 
-PR: include
 
 ![Dev menu bar activity states](./assets/menu-bar-activity-states-dev.png)
 
 菜单栏快捷菜单受控预览（Backup 禁用、Stop Backup 可用）。
 
-PR: include
 
 ![Dark menu bar quick actions](./assets/menu-bar-quick-actions-dark.png)
 
-PR: include
 
 ![Light menu bar quick actions](./assets/menu-bar-quick-actions-light.png)
 
