@@ -14,6 +14,7 @@
 - The menu-bar rate preference is machine-local and excluded from portable configuration.
 - External terminal status now requires a matching applied transition or an exact in-memory replay acknowledgement; stale ownership and daemon restart do not create a false acknowledgement.
 - Generic restore and verify resolve a unique configured target before admission, while the menu-bar failure latch deduplicates only the same task identity.
+- Menu-bar icon assignment is keyed and cached. Repeated `effectiveAppearance` notifications no longer reassign the same image, while failure icons retain one cached rendering per light and dark treatment.
 
 ## Validation Status
 

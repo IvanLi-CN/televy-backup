@@ -4442,6 +4442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarFailureExpiryWork: DispatchWorkItem?
     private var menuBarLastStatusIngressAt: Date?
     private var appliedMenuBarPresentation: MenuBarPresentation?
+    private let menuBarStatusItemImageStore = MenuBarStatusItemImageStore()
     private var popoverHost: NSHostingController<AnyView>? = nil
     private var popoverResizeScheduled: Bool = false
     private let appearanceOverride = ModelStore.shared.appearanceOverride
@@ -4479,13 +4480,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func makeStatusItemImage(for activity: MenuBarActivityState) -> NSImage? {
-        let appearance = statusItem?.button?.effectiveAppearance ?? NSApplication.shared.effectiveAppearance
-        return MenuBarStatusItemIcon.image(
+    private func updateStatusItemImageIfNeeded(
+        for activity: MenuBarActivityState,
+        button: NSStatusBarButton
+    ) {
+        guard let image = menuBarStatusItemImageStore.imageIfNeeded(
             for: activity,
             isDev: isDevAppVariant(),
-            appearance: appearance
-        )
+            appearance: button.effectiveAppearance
+        ) else {
+            return
+        }
+        button.image = image
     }
 
     private func statusItemName() -> String {
@@ -4507,8 +4513,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hasLiveFailure: menuBarFailureLatch.isActive(),
             showsTransferRates: MenuBarPreferences.showsTransferRates()
         )
+        updateStatusItemImageIfNeeded(for: presentation.activity, button: button)
         if appliedMenuBarPresentation?.activity != presentation.activity {
-            button.image = makeStatusItemImage(for: presentation.activity)
             button.toolTip = "\(statusItemName()): \(presentation.activity.accessibilityDescription)"
         }
         if appliedMenuBarPresentation?.title != presentation.title {
@@ -4599,7 +4605,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.publisher(for: \.effectiveAppearance)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.appliedMenuBarPresentation = nil
                 self?.refreshMenuBarPresentation()
             }
             .store(in: &cancellables)
@@ -4610,12 +4615,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appearanceOverride.apply(to: NSApp)
 
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = status
         if let button = status.button {
-            button.image = makeStatusItemImage(for: .idle)
+            updateStatusItemImageIfNeeded(for: .idle, button: button)
             button.action = #selector(togglePopover(_:))
             button.target = self
         }
-        statusItem = status
         bindMenuBarPresentation()
         refreshMenuBarPresentation()
 

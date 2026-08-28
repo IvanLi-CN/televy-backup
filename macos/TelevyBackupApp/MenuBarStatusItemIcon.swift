@@ -313,3 +313,54 @@ enum MenuBarStatusItemIcon {
         return [up, down]
     }
 }
+
+private enum MenuBarStatusItemIconAppearanceVariant: Hashable {
+    case template
+    case lightFailure
+    case darkFailure
+
+    init(activity: MenuBarActivityState, appearance: NSAppearance?) {
+        guard activity == .failure else {
+            self = .template
+            return
+        }
+        self = appearance?.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? .darkFailure
+            : .lightFailure
+    }
+}
+
+private struct MenuBarStatusItemIconKey: Hashable {
+    let activity: MenuBarActivityState
+    let isDev: Bool
+    let appearance: MenuBarStatusItemIconAppearanceVariant
+
+    init(activity: MenuBarActivityState, isDev: Bool, appearance: NSAppearance?) {
+        self.activity = activity
+        self.isDev = isDev
+        self.appearance = MenuBarStatusItemIconAppearanceVariant(activity: activity, appearance: appearance)
+    }
+}
+
+final class MenuBarStatusItemImageStore {
+    private var appliedKey: MenuBarStatusItemIconKey?
+    private var cachedImages: [MenuBarStatusItemIconKey: NSImage] = [:]
+
+    func imageIfNeeded(
+        for activity: MenuBarActivityState,
+        isDev: Bool,
+        appearance: NSAppearance?
+    ) -> NSImage? {
+        let key = MenuBarStatusItemIconKey(activity: activity, isDev: isDev, appearance: appearance)
+        guard key != appliedKey else { return nil }
+        appliedKey = key
+
+        if let cachedImage = cachedImages[key] {
+            return cachedImage
+        }
+
+        let image = MenuBarStatusItemIcon.image(for: activity, isDev: isDev, appearance: appearance)
+        cachedImages[key] = image
+        return image
+    }
+}
