@@ -151,6 +151,16 @@ PR: include
 
 ![Dev menu bar activity states](./assets/menu-bar-activity-states-dev.png)
 
+菜单栏快捷菜单受控预览（Backup 禁用、Stop Backup 可用）。
+
+PR: include
+
+![Dark menu bar quick actions](./assets/menu-bar-quick-actions-dark.png)
+
+PR: include
+
+![Light menu bar quick actions](./assets/menu-bar-quick-actions-light.png)
+
 ## Related ADRs
 
 - [0001-explicit-menu-bar-activity-directions](../../adr/0001-explicit-menu-bar-activity-directions.md)
