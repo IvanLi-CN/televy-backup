@@ -147,6 +147,10 @@ PR: include
 
 这些图片由 `scripts/macos/capture-backup-queue-ui.sh` 的独立 demo 实例生成，范围仅为 Popover 与 Main Window；主窗口捕获按 launch PID 绑定并拒绝全屏回退。
 
+## Related ADRs
+
+- [0002-gui-only-handoff-control-plane](../../adr/0002-gui-only-handoff-control-plane.md)
+
 ## Related PRs
 
 - None

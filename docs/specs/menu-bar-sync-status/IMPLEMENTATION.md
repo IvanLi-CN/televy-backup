@@ -16,10 +16,11 @@
 - Generic restore and verify resolve a unique configured target before admission, while the menu-bar failure latch deduplicates only the same task identity.
 - Menu-bar icon assignment is keyed and cached. Repeated `effectiveAppearance` notifications no longer reassign the same image, while failure icons retain one cached rendering per light and dark treatment.
 - The status-bar button now routes left clicks to the popover and right clicks to a fixed quick-action menu. Its backup/stop availability reuses `TargetPresentation` and the active-task contract; GUI-only and complete exits share the lifecycle gate and keep daemon ownership explicit.
+- The deterministic quick-action preview captures the same six-item menu in light and dark appearances; lifecycle integration exercises the matching GUI-only and complete-exit ownership boundaries without reusing daemon IPC as a GUI control channel.
 
 ## Validation Status
 
-- Rust and Swift focused tests cover the status contract, live failure lifecycle, task mutual exclusion, rate preference, status icon rendering, and quick-action backup gating.
+- Rust and Swift focused tests cover the status contract, live failure lifecycle, task mutual exclusion, rate preference, status icon rendering, and quick-action backup gating; the lifecycle integration script covers both exit modes.
 - Controlled AppKit previews cover both Release and Dev status icons; the owner has confirmed the final icon treatment.
 
 ## Related Changes
