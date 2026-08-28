@@ -5027,7 +5027,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard ProcessInfo.processInfo.environment["TELEVYBACKUP_TEST_COMPLETE_EXIT"] == "1" else {
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             guard let self, !self.terminationInProgress else { return }
             self.menuCompleteExitRequested = true
             NSApp.terminate(nil)
