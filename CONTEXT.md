@@ -1,6 +1,6 @@
 # TelevyBackup
 
-TelevyBackup protects local data in remote storage and restores protected data back to a local destination. Its macOS client presents the current transfer activity in the menu bar.
+TelevyBackup protects local data in remote storage and restores protected data back to a local destination. Its macOS client presents transfer activity and controls the local backup environment.
 
 ## Transfer Activity
 
@@ -70,3 +70,25 @@ _Avoid_: Nearest-snapshot comparison, approximate diff
 **Backup Block**:
 A deduplicated logical data block referenced by one or more regular files in a backup snapshot.
 _Avoid_: Upload attempt, pack
+
+## GUI Lifecycle
+
+**GUI Controller**:
+The macOS app instance that presents and controls one local backup environment. It is separate from the daemon that executes scheduled and queued work.
+_Avoid_: Daemon, backup worker
+
+**GUI-only Exit**:
+An orderly end of a GUI Controller for one backup environment while its daemon, scheduled work, and daemon-owned queue remain available.
+_Avoid_: Complete exit, stop backup
+
+**Complete Exit**:
+An orderly end of the GUI Controller that also stops the daemon for the selected backup environment and cancels GUI-owned local jobs.
+_Avoid_: GUI-only exit, close window
+
+**GUI-owned Local Job**:
+A command process started directly by the GUI and owned by that GUI's lifecycle. It is distinct from daemon work, including a daemon that the GUI started as a local fallback.
+_Avoid_: Daemon task, backup queue member
+
+**Backup Quick Action**:
+The menu-bar action that requests one daemon-managed backup batch for all enabled targets in the current backup environment.
+_Avoid_: Per-target backup

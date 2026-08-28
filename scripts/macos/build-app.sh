@@ -50,12 +50,18 @@ cp "$root_dir/crates/mtproto-helper/target/release/televybackup-mtproto-helper" 
 
 sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
 
-xcrun swiftc \
+swiftc_args=(
   -sdk "$sdk_path" \
   -parse-as-library \
   -O \
   -framework SwiftUI \
   -framework AppKit \
+)
+if [[ "${TELEVYBACKUP_GUI_LIFECYCLE_TESTING:-0}" == "1" ]]; then
+  swiftc_args+=(-D TELEVYBACKUP_GUI_LIFECYCLE_TESTING)
+fi
+
+xcrun swiftc "${swiftc_args[@]}" \
   -o "$macos_dir/$executable_name" \
   "$src_dir"/*.swift
 

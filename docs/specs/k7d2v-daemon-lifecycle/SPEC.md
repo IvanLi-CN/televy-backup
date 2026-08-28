@@ -13,7 +13,8 @@
 ### Goals
 
 - 让 daemon 接受可认证的本地控制 IPC 停止请求，取消活动任务、回收 helper 并关闭所有本地资源。
-- 为 App 提供统一的退出入口；定时任务已启用时，让用户选择仅退出 App 或完全退出。
+- 为 App 提供统一的退出入口；定时任务已启用时，让用户选择仅退出 GUI 或完全退出。
+- 提供独立于 daemon 控制面的 GUI-only handoff，使更新后的 GUI 可以让旧 GUI 退出而不影响 daemon。
 - 提供 `televybackup daemon start|status|stop`，并使 CLI 临时启动行为不干扰已有共享实例。
 
 ### Non-goals
@@ -40,7 +41,8 @@
 ### MUST
 
 - `daemon.stop` 必须请求取消活动备份并使 daemon 退出；取消状态必须可追溯，资源和 Unix sockets 不得残留。
-- App 无已启用 schedule 时必须执行完全退出；有已启用 schedule 时必须提供“退出 App”“完全退出”“取消”。
+- App 无已启用 schedule 时，普通 Command-Q 必须执行完全退出；有已启用 schedule 时必须提供“退出 GUI”“完全退出”“取消”，完全退出再作破坏性确认。
+- `televybackup gui quit` 和菜单栏“退出 GUI”必须只结束精确环境的 GUI，不得停止 daemon、卸载 LaunchAgent、清空 daemon 队列或终止 GUI fallback daemon。
 - 完全退出等待最多十秒；超时后只对本次确认归属的 daemon 使用强制终止 fallback。
 - LaunchAgent 管理的 daemon 在完全退出时必须被 unload，避免 `keep_alive` 自动重启；恢复由 `televybackup daemon start` 或 `brew services start` 显式完成。
 - `televybackup daemon start` 必须在 daemon IPC 可连接后返回；`stop` 与 App 完全退出共享同一优雅停止协议。
@@ -55,7 +57,8 @@
 ### Core flows
 
 - daemon 收到 `daemon.stop`：标记停止、取消活动任务；任务返回后关闭 IPC 服务和 storage cache，进程退出。
-- App 触发退出：先停止 UI 状态流、轮询、重连任务和 UI 启动的 CLI。若 schedule 已启用，确认对话框决定是否保留 daemon；完全退出时调用 `daemon.stop`、必要时 unload LaunchAgent，并等待退出。
+- App 触发退出：先停止 UI 状态流、轮询和重连任务。若 schedule 已启用，确认对话框决定是否保留 daemon；完全退出时取消 GUI-owned local jobs、调用 `daemon.stop`、必要时 unload LaunchAgent，并等待退出。GUI-only exit 保留 daemon 及其 fallback 子进程。
+- `gui quit` 通过专用本机 GUI 控制 socket 请求退出；CLI 只有在 GUI 记录 stopped lease 且 lifecycle lock 已释放时才报告成功。
 - CLI daemon-dependent 命令在 IPC 不可用时可临时启动 daemon 并在自身结束后回收；`daemon start` 是显式后台常驻入口。
 
 ### Edge cases / errors
@@ -63,6 +66,7 @@
 - 停止请求与运行中任务并发时，任务以 cancelled 终态结束；无活动任务时立即进入服务收尾。
 - IPC 不可达、daemon 未退出或 LaunchAgent 卸载失败必须给出明确错误，不能伪报完全退出成功。
 - 仅退出 App 不得停止计划 daemon 或卸载 LaunchAgent。
+- GUI 控制 socket、lease 或 lock 缺失、不安全、版本不匹配或超时必须 fail closed；CLI 不得扫描、信号终止或接管遗留 GUI。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -72,11 +76,14 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `daemon.stop` | rpc | internal | New | ./contracts/rpc.md | daemon | App, CLI | 请求取消并关闭 daemon |
 | `televybackup daemon start|status|stop` | cli | external | New | ./contracts/cli.md | CLI | users, App scripts | start 在 IPC ready 后返回 |
+| `televybackup gui quit` | cli | external | New | ./contracts/gui-control.md | CLI | users, GUI updater | 只请求 GUI-only exit |
+| `ipc/gui.sock` + lease + lock | local IPC | local user | New | ./contracts/gui-control.md | macOS App | CLI | daemon control 之外的 GUI 生命周期证明 |
 
 ### 契约文档（按 Kind 拆分）
 
 - [RPC](./contracts/rpc.md)
 - [CLI](./contracts/cli.md)
+- [GUI control](./contracts/gui-control.md)
 
 ## 验收标准（Acceptance Criteria）
 
@@ -84,6 +91,8 @@
 - Given 已启用 schedule，When App 收到退出请求，Then 用户可以选择保留 daemon 的仅退出或取消任务并完全退出。
 - Given Homebrew LaunchAgent 启动 daemon，When 用户选择完全退出，Then LaunchAgent 被 unload，daemon 不会被 keep-alive 重启。
 - Given daemon-dependent CLI 命令发现 IPC 不可用，When 命令允许临时启动，Then 它只停止自身创建的实例。
+- Given a running GUI and the exact data directory, When `televybackup gui quit` is accepted, Then it returns success only after the stopped lease and lifecycle-lock release, while the daemon remains reachable.
+- Given no compatible GUI listener, unsafe GUI control path, or a lifecycle conflict, When `televybackup gui quit` runs, Then it returns `gui.unavailable` or `gui.busy` without process scanning or daemon control.
 
 ## 非功能性验收 / 质量门槛
 
@@ -111,6 +120,10 @@
 完全退出期间，界面阻止重复操作，并显示 daemon 正在收尾及十秒上限。
 
 ![Daemon shutdown waiting state](./assets/shutdown-waiting-popover.png)
+
+## Related ADRs
+
+- [0002-gui-only-handoff-control-plane](../../adr/0002-gui-only-handoff-control-plane.md)
 
 ## Related PRs
 

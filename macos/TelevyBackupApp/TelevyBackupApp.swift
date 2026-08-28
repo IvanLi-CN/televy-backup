@@ -222,9 +222,65 @@ final class AppModel {
     private var daemonIpcRetryWork: DispatchWorkItem? = nil
     private var lastDaemonStartAttemptAt: Date? = nil
     private var lastRateSampleByTargetId: [String: RateSample] = [:]
+    private let guiOwnedProcessLock = NSLock()
+    private var guiOwnedProcesses: [ObjectIdentifier: Process] = [:]
+    var menuQuickActionFailureHandler: ((String) -> Void)? = nil
 
     func hasEnabledSchedule() -> Bool {
         scheduleEnabled
+    }
+
+    func guiControlDataDirURL() -> URL {
+        effectiveDataDirURL()
+    }
+
+    func hasGUIOwnedLocalJobs() -> Bool {
+        guiOwnedProcessLock.lock()
+        defer { guiOwnedProcessLock.unlock() }
+        return !guiOwnedProcesses.isEmpty
+    }
+
+    func cancelGUIOwnedLocalJobs() {
+        guiOwnedProcessLock.lock()
+        let tasks = Array(guiOwnedProcesses.values)
+        guiOwnedProcessLock.unlock()
+
+        for task in tasks where task.isRunning {
+            task.terminate()
+            let pid = task.processIdentifier
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                guard task.isRunning, task.processIdentifier == pid else { return }
+                _ = kill(pid_t(pid), SIGKILL)
+            }
+        }
+    }
+
+    private func registerGUIOwnedProcess(_ task: Process) {
+        guiOwnedProcessLock.lock()
+        guiOwnedProcesses[ObjectIdentifier(task)] = task
+        guiOwnedProcessLock.unlock()
+    }
+
+    private func unregisterGUIOwnedProcess(_ task: Process) {
+        guiOwnedProcessLock.lock()
+        guiOwnedProcesses.removeValue(forKey: ObjectIdentifier(task))
+        guiOwnedProcessLock.unlock()
+    }
+
+    func menuBackupControlState(lifecycleBusy: Bool) -> MenuBackupControlState {
+        TargetPresentation.menuBackupControlState(
+            snap: statusStore.snapshot,
+            backupRequest: backupRequest,
+            backupStopRequest: backupStopRequest,
+            lifecycleBusy: lifecycleBusy,
+            nowMs: Int64(Date().timeIntervalSince1970 * 1000)
+        )
+    }
+
+    func reportMenuQuickActionError(_ message: String) {
+        appendLog("ERROR: menu quick action failed: \(message)")
+        showToast(message, isError: true)
+        menuQuickActionFailureHandler?(message)
     }
 
     func beginDaemonShutdownPresentation() {
@@ -262,6 +318,7 @@ final class AppModel {
         statusStreamTask = nil
 
         guard fullyStopDaemon else { return nil }
+        cancelGUIOwnedLocalJobs()
         let service = "gui/\(getuid())/homebrew.mxcl.televybackupd"
         let managesHomebrewLaunchAgent = !preferBundledDaemonForCurrentEnvironment()
         let launchAgentLoaded = managesHomebrewLaunchAgent && runCommandCapture(
@@ -305,20 +362,22 @@ final class AppModel {
             }
         }
 
+        guard let cli = cliPath() else {
+            restoreLaunchAgentIfNeeded()
+            return "The bundled CLI is unavailable, so the daemon could not be stopped safely."
+        }
+        let result = runCommandCapture(
+            exe: cli,
+            args: ["daemon", "stop"],
+            timeoutSeconds: 11,
+            env: daemonStopEnvironment
+        )
         var failure: String?
-        if let cli = cliPath() {
-            let result = runCommandCapture(
-                exe: cli,
-                args: ["daemon", "stop"],
-                timeoutSeconds: 11,
-                env: daemonStopEnvironment
-            )
-            if result.status != 0 {
-                appendLog("ERROR: daemon stop failed: exit=\(result.status) reason=\(result.reason.rawValue)")
-                failure = result.stderr.isEmpty
-                    ? "The daemon did not stop within 10 seconds."
-                    : result.stderr
-            }
+        if result.status != 0 {
+            appendLog("ERROR: daemon stop failed: exit=\(result.status) reason=\(result.reason.rawValue)")
+            failure = result.stderr.isEmpty
+                ? "The daemon did not stop within 10 seconds."
+                : result.stderr
         }
 
         if failure != nil {
@@ -2507,6 +2566,8 @@ final class AppModel {
 
         do {
             try task.run()
+            registerGUIOwnedProcess(task)
+            defer { unregisterGUIOwnedProcess(task) }
 
             // Close our copies of the write ends so the drainers can observe EOF when the child exits.
             out.fileHandleForWriting.closeFile()
@@ -2882,6 +2943,8 @@ final class AppModel {
             var status: Int32 = 1
             do {
                 try task.run()
+                self.registerGUIOwnedProcess(task)
+                defer { self.unregisterGUIOwnedProcess(task) }
 
                 if updateTaskState, args.contains("--events") {
                     // Surface the run log row early (run.start is written at the beginning of the task).
@@ -2975,6 +3038,14 @@ final class AppModel {
         enqueueBackup(targetIds: [], allEnabled: true)
     }
 
+    func triggerMenuBackupNowAllEnabled() {
+        enqueueBackup(targetIds: [], allEnabled: true, revealFailureInPopover: true)
+    }
+
+    func triggerMenuStopBackup() {
+        stopBackup(revealFailureInPopover: true)
+    }
+
     func triggerBackupPrimaryAction() {
         switch backupButtonState() {
         case .idle:
@@ -2998,12 +3069,19 @@ final class AppModel {
         backupButtonState() == .idle
     }
 
-    private func enqueueBackup(targetIds: [String], allEnabled: Bool) {
+    private func enqueueBackup(
+        targetIds: [String],
+        allEnabled: Bool,
+        revealFailureInPopover: Bool = false
+    ) {
         guard canEnqueueBackup() else { return }
         guard let cli = cliPath() else {
             recordLocalTaskFailure(kind: "backup", errorCode: "cli.not_found")
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             showToast("Backup could not start", isError: true)
+            if revealFailureInPopover {
+                reportMenuQuickActionError("Backup could not start")
+            }
             return
         }
 
@@ -3022,6 +3100,9 @@ final class AppModel {
             appendLog("ERROR: backup enqueue failed: daemon IPC was not ready")
             appendStatusActivity("Backup enqueue failed")
             showToast("Backup could not start: daemon unavailable", isError: true)
+            if revealFailureInPopover {
+                reportMenuQuickActionError("Backup could not start: daemon unavailable")
+            }
             return
         }
 
@@ -3048,6 +3129,9 @@ final class AppModel {
                     self.appendStatusActivity("Backup enqueue failed")
                     self.backupRequest = nil
                     self.showToast(error, isError: true)
+                    if revealFailureInPopover {
+                        self.reportMenuQuickActionError(error)
+                    }
                     return
                 }
 
@@ -3068,11 +3152,14 @@ final class AppModel {
         }
     }
 
-    private func stopBackup() {
+    private func stopBackup(revealFailureInPopover: Bool = false) {
         guard backupButtonState() == .stop else { return }
         guard let cli = cliPath() else {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             showToast("Backup could not stop", isError: true)
+            if revealFailureInPopover {
+                reportMenuQuickActionError("Backup could not stop")
+            }
             return
         }
 
@@ -3093,7 +3180,11 @@ final class AppModel {
                     self.backupStopRequest = nil
                     self.appendLog("ERROR: backup stop failed: exit=\(result.status) reason=\(result.reason.rawValue) \(result.stderr.prefix(2000))")
                     self.appendStatusActivity("Backup stop failed")
-                    self.showToast(self.backupControlErrorMessage(stderr: result.stderr, fallback: "Backup could not stop"), isError: true)
+                    let error = self.backupControlErrorMessage(stderr: result.stderr, fallback: "Backup could not stop")
+                    self.showToast(error, isError: true)
+                    if revealFailureInPopover {
+                        self.reportMenuQuickActionError(error)
+                    }
                     return
                 }
 
@@ -4447,6 +4538,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popoverResizeScheduled: Bool = false
     private let appearanceOverride = ModelStore.shared.appearanceOverride
     private var terminationInProgress = false
+    private let lifecycleGate = GuiLifecycleGate()
+    private var guiControlServer: GuiControlServer?
+    private var guiOnlyExitRequested = false
+    private var menuCompleteExitRequested = false
 
     // Prevent accidental multi-launch (e.g. `open -n`) from creating duplicate status bar items and
     // competing daemons. We keep the earliest-launched instance alive and exit the rest.
@@ -4614,23 +4709,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         exitIfSecondaryInstance()
         appearanceOverride.apply(to: NSApp)
 
+        if !guiControlRegistrationIsDisabled() {
+            let server = GuiControlServer(
+                dataDir: ModelStore.shared.guiControlDataDirURL(),
+                bundleId: Bundle.main.bundleIdentifier ?? "unknown",
+                requestQuit: { [weak self] in
+                    self?.requestGuiOnlyExitFromControlPlane()
+                        ?? .unavailable("GUI controller is no longer available")
+                }
+            )
+            if let failure = server.start() {
+                fputs("TelevyBackup GUI control unavailable: \(failure)\n", stderr)
+                Darwin.exit(1)
+            }
+            guiControlServer = server
+        }
+
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem = status
         if let button = status.button {
             updateStatusItemImageIfNeeded(for: .idle, button: button)
-            button.action = #selector(togglePopover(_:))
+            button.action = #selector(handleStatusItemClick(_:))
             button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         bindMenuBarPresentation()
         refreshMenuBarPresentation()
+        ModelStore.shared.menuQuickActionFailureHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.showPopover(nil)
+            }
+        }
 
         popover.behavior = .transient
         popover.animates = true
         popover.contentSize = NSSize(width: PopoverAutoSize.width, height: 460)
         appearanceOverride.apply(to: popover)
+        let content: AnyView = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] == "menu-quick-actions"
+            ? AnyView(MenuQuickActionsPreview())
+            : AnyView(PopoverRootView())
         let host = NSHostingController(
             rootView: AnyView(
-                PopoverRootView()
+                content
                     .environment(\.appRuntime, ModelStore.shared)
                     .environmentObject(ModelStore.shared.statusStore)
                     .environmentObject(ModelStore.shared.taskPresentationStore)
@@ -4667,6 +4787,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.showPopover(nil)
             }
         }
+
+        #if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
+        scheduleCompleteExitForLifecycleTestIfRequested()
+        #endif
 
         let env = ProcessInfo.processInfo.environment
         let shouldOpenSettings = env["TELEVYBACKUP_OPEN_SETTINGS_ON_LAUNCH"] == "1"
@@ -4735,22 +4859,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guiControlAudit("application.should-terminate")
         if terminationInProgress {
             return .terminateNow
         }
 
         let fullyStopDaemon: Bool
-        if ModelStore.shared.hasEnabledSchedule() {
+        if guiOnlyExitRequested {
+            fullyStopDaemon = false
+        } else if menuCompleteExitRequested {
+            fullyStopDaemon = true
+        } else if ModelStore.shared.hasEnabledSchedule() {
             let alert = NSAlert()
             alert.messageText = "Quit TelevyBackup?"
             alert.informativeText = "Scheduled backups are enabled. You can close the app and leave the daemon running, or stop scheduled backups completely."
-            alert.addButton(withTitle: "Quit App")
+            alert.addButton(withTitle: "Quit GUI")
             alert.addButton(withTitle: "Quit Completely")
             alert.addButton(withTitle: "Cancel")
             switch alert.runModal() {
             case .alertFirstButtonReturn:
                 fullyStopDaemon = false
             case .alertSecondButtonReturn:
+                let confirm = NSAlert()
+                confirm.messageText = "Quit Completely?"
+                confirm.informativeText = "This cancels active backups, stops the daemon, and disables scheduled backups."
+                confirm.addButton(withTitle: "Quit Completely")
+                confirm.addButton(withTitle: "Cancel")
+                guard confirm.runModal() == .alertFirstButtonReturn else {
+                    return .terminateCancel
+                }
                 fullyStopDaemon = true
             default:
                 return .terminateCancel
@@ -4758,30 +4895,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             fullyStopDaemon = true
         }
+        guiControlAudit(fullyStopDaemon ? "application.complete-exit" : "application.gui-only-exit")
 
+        if !guiOnlyExitRequested {
+            guard lifecycleGate.tryBegin(fullyStopDaemon ? "complete-exit" : "gui-only-exit") else {
+                return .terminateCancel
+            }
+        }
+        if !fullyStopDaemon && ModelStore.shared.hasGUIOwnedLocalJobs() {
+            lifecycleGate.end()
+            ModelStore.shared.reportMenuQuickActionError("GUI-only exit is unavailable while a local task is running")
+            return .terminateCancel
+        }
+
+        guiControlAudit("application.termination-started")
         terminationInProgress = true
+        if !fullyStopDaemon {
+            if let failure = ModelStore.shared.stopRuntimeResources(fullyStopDaemon: false) {
+                guiControlAudit("application.termination-failed")
+                terminationInProgress = false
+                guiOnlyExitRequested = false
+                lifecycleGate.end()
+                ModelStore.shared.reportMenuQuickActionError(failure)
+                return .terminateCancel
+            }
+            guiControlAudit("application.termination-approved")
+            return .terminateNow
+        }
+
         if fullyStopDaemon {
             ModelStore.shared.beginDaemonShutdownPresentation()
         }
         DispatchQueue.global(qos: .userInitiated).async {
+            guiControlAudit("application.runtime-stop-started")
             let failure = ModelStore.shared.stopRuntimeResources(fullyStopDaemon: fullyStopDaemon)
-            DispatchQueue.main.async {
-                if let failure {
+            guiControlAudit("application.runtime-stop-finished")
+            if let failure {
+                guiControlAudit("application.termination-failed")
+                sender.reply(toApplicationShouldTerminate: false)
+                DispatchQueue.main.async {
                     self.terminationInProgress = false
+                    self.guiOnlyExitRequested = false
+                    self.menuCompleteExitRequested = false
+                    self.lifecycleGate.end()
                     ModelStore.shared.restoreRuntimeResourcesAfterFailedDaemonShutdown()
                     ModelStore.shared.finishDaemonShutdownPresentation(error: failure)
-                    sender.reply(toApplicationShouldTerminate: false)
-                } else {
-                    sender.reply(toApplicationShouldTerminate: true)
                 }
+            } else {
+                guiControlAudit("application.termination-approved")
+                sender.reply(toApplicationShouldTerminate: true)
             }
         }
         return .terminateLater
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        guiControlAudit("application.will-terminate")
+        guiControlServer?.markStopped()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showPopover(nil)
         return true
+    }
+
+    @objc private func handleStatusItemClick(_ sender: Any?) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            closePopover(sender)
+            showQuickActionMenu()
+            return
+        }
+        togglePopover(sender)
     }
 
     @objc private func togglePopover(_ sender: Any?) {
@@ -4831,6 +5015,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func closePopover(_ sender: Any?) {
         popover.performClose(sender)
+    }
+
+    private func guiControlRegistrationIsDisabled() -> Bool {
+        let env = ProcessInfo.processInfo.environment
+        return env["TELEVYBACKUP_UI_DEMO"] == "1" || env["TELEVYBACKUP_UI_SNAPSHOT_DIR"] != nil
+    }
+
+    #if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
+    private func scheduleCompleteExitForLifecycleTestIfRequested() {
+        guard ProcessInfo.processInfo.environment["TELEVYBACKUP_TEST_COMPLETE_EXIT"] == "1" else {
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
+            guard let self, !self.terminationInProgress else { return }
+            self.menuCompleteExitRequested = true
+            NSApp.terminate(nil)
+        }
+    }
+    #endif
+
+    private func requestGuiOnlyExitFromControlPlane() -> GuiQuitDecision {
+        if Thread.isMainThread {
+            return beginGuiOnlyExitFromControlPlane()
+        }
+        var decision: GuiQuitDecision = .unavailable("GUI main loop is unavailable")
+        DispatchQueue.main.sync {
+            decision = self.beginGuiOnlyExitFromControlPlane()
+        }
+        return decision
+    }
+
+    private func beginGuiOnlyExitFromControlPlane() -> GuiQuitDecision {
+        guard !terminationInProgress else {
+            return .busy("GUI termination is already in progress")
+        }
+        guard NSApp.modalWindow == nil,
+              !NSApp.windows.contains(where: { $0.attachedSheet != nil || $0.isDocumentEdited })
+        else {
+            return .busy("GUI has an active sheet or unsaved settings")
+        }
+        guard !ModelStore.shared.hasGUIOwnedLocalJobs() else {
+            return .busy("GUI owns a local command that must finish or be cancelled first")
+        }
+        guard lifecycleGate.tryBegin("gui-only-exit") else {
+            return .busy("GUI lifecycle operation is already in progress")
+        }
+        guiOnlyExitRequested = true
+        guiControlAudit("gui-only-exit.scheduled")
+        DispatchQueue.main.async {
+            guiControlAudit("gui-only-exit.terminate")
+            NSApp.terminate(nil)
+        }
+        return .accepted
+    }
+
+    private func showQuickActionMenu() {
+        guard let button = statusItem?.button else { return }
+        let model = ModelStore.shared
+        let state = model.menuBackupControlState(lifecycleBusy: lifecycleGate.isBusy || terminationInProgress)
+        let menu = NSMenu()
+        menu.addItem(makeMenuItem("Backup", action: #selector(quickBackup(_:)), enabled: state == .backupAvailable))
+        menu.addItem(makeMenuItem("Stop Backup", action: #selector(quickStopBackup(_:)), enabled: state == .stopAvailable))
+        menu.addItem(.separator())
+        menu.addItem(makeMenuItem("Main Window", action: #selector(quickOpenMainWindow(_:)), enabled: !terminationInProgress))
+        menu.addItem(makeMenuItem("Settings", action: #selector(quickOpenSettings(_:)), enabled: !terminationInProgress))
+        menu.addItem(.separator())
+        menu.addItem(makeMenuItem("Quit GUI", action: #selector(quickQuitGUI(_:)), enabled: !lifecycleGate.isBusy && !terminationInProgress))
+        menu.addItem(makeMenuItem("Quit Completely", action: #selector(quickQuitCompletely(_:)), enabled: !lifecycleGate.isBusy && !terminationInProgress))
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height), in: button)
+    }
+
+    private func makeMenuItem(_ title: String, action: Selector, enabled: Bool) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.isEnabled = enabled
+        return item
+    }
+
+    @objc private func quickBackup(_ sender: Any?) {
+        ModelStore.shared.triggerMenuBackupNowAllEnabled()
+    }
+
+    @objc private func quickStopBackup(_ sender: Any?) {
+        ModelStore.shared.triggerMenuStopBackup()
+    }
+
+    @objc private func quickOpenMainWindow(_ sender: Any?) {
+        ModelStore.shared.openMainWindow()
+    }
+
+    @objc private func quickOpenSettings(_ sender: Any?) {
+        ModelStore.shared.openSettingsWindow()
+    }
+
+    @objc private func quickQuitGUI(_ sender: Any?) {
+        switch beginGuiOnlyExitFromControlPlane() {
+        case .accepted:
+            break
+        case let .busy(message), let .unavailable(message):
+            ModelStore.shared.reportMenuQuickActionError(message)
+            showPopover(nil)
+        }
+    }
+
+    @objc private func quickQuitCompletely(_ sender: Any?) {
+        if ModelStore.shared.hasEnabledSchedule() {
+            let confirm = NSAlert()
+            confirm.messageText = "Quit Completely?"
+            confirm.informativeText = "This cancels active backups, stops the daemon, and disables scheduled backups."
+            confirm.addButton(withTitle: "Quit Completely")
+            confirm.addButton(withTitle: "Cancel")
+            guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        }
+        menuCompleteExitRequested = true
+        NSApp.terminate(nil)
     }
 
     private func configurePopoverWindowIfNeeded() {

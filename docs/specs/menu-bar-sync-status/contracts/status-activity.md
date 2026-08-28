@@ -64,3 +64,11 @@ type StatusTaskFinishParams = {
 - 显示 `global.up.bytesPerSecond` / `global.down.bytesPerSecond` 时，每个当前活动声明方向使用一个右对齐、等宽的四字符速率槽；箭头与 `/s` 后缀不计入槽宽。单位按二进制量级选择并压缩为单字符 `B/K/M/G/T/P/E`，小于 `10` 的非字节量级保留一位小数，其余显示整数。读数在当前量级下将超过四字符时立即进位。
 - 声明方向的零速显示 `0B`；速率缺失或负值显示 `----`，不得移除该方向段。只有连接不再 fresh 时才隐藏全部速率。
 - 状态优先级为 live failure latch、bidirectional、backup、restore、verify、idle。failure latch 由 live transition 激活，10 秒后过期，绝不持久化。相同 live 任务的本地事件和 daemon 终态共享一个期限；不同任务拥有独立期限。
+
+## Menu-bar quick actions
+
+The status-bar right-click menu is a local GUI projection, not a daemon control socket. Its stable order is `Backup`, `Stop Backup`, separator, `Main Window`, `Settings`, separator, `Quit GUI`, `Quit Completely`; left-click only toggles the popover.
+
+- `Backup` sends the existing `backup enqueue --all-enabled` request after the GUI ensures its daemon is reachable. It is disabled for stale/disconnected state, no enabled target, an unknown running task, an in-flight backup request, or a busy GUI lifecycle.
+- `Stop Backup` sends the existing global `backup stop` request only when a supported `activeTask.kind=backup` or manual `backupQueue` proves daemon-managed backup work. Restore, verify, sync, and historical failures are not stop candidates.
+- `Quit GUI` is GUI-only and uses the GUI lifecycle control plane. `Quit Completely` stops the exact environment's daemon only after its schedule-dependent destructive confirmation. A failed quick action reopens the popover and presents the error without treating it as daemon success.
