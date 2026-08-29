@@ -9,9 +9,9 @@ private func expect(_ ok: @autoclosure () -> Bool, _ message: String) -> Bool {
     return true
 }
 
-private func decode(_ json: String) -> CliDiagnosticsStatus {
+private func decode(_ json: String) -> ControlDiagnosticsStatus {
     do {
-        return try JSONDecoder().decode(CliDiagnosticsStatus.self, from: Data(json.utf8))
+        return try JSONDecoder().decode(ControlDiagnosticsStatus.self, from: Data(json.utf8))
     } catch {
         fputs("FAIL: diagnostics decode failed: \(error)\n", stderr)
         exit(1)
@@ -39,7 +39,7 @@ private func runDiagnosticsSettingsTests() {
     let retention = decode(#"{"configuredLevel":"normal","effectiveLevel":"normal","effectiveFilter":"warn","source":"local.toml","overriddenBy":null,"pendingLevel":null,"logDirectory":"/tmp/logs","logBytes":100,"managedLogBytes":80,"managedLogCount":2,"retention":{"max_total_gib":17,"max_age_days":45},"retentionPruneEnabled":true,"daemonAvailable":true}"#)
     expect(retention.managedLogBytes == 80, "managed run-log bytes should decode")
     expect(retention.managedLogCount == 2, "managed run-log count should decode")
-    expect(retention.retention == CliLogRetention(maxTotalGiB: 17, maxAgeDays: 45), "retention should decode")
+    expect(retention.retention == ControlLogRetention(maxTotalGiB: 17, maxAgeDays: 45), "retention should decode")
     expect(retention.retentionPruneEnabled == true, "retention pruning status should decode")
 
     for (value, minimum, maximum) in [(1, 1, 100), (17, 1, 100), (100, 1, 100), (7, 7, 365), (45, 7, 365), (365, 7, 365)] {
@@ -59,7 +59,7 @@ private func runDiagnosticsSettingsTests() {
         !LogRetentionAutoSavePolicy.shouldSave(
             maxTotalGiB: 17,
             maxAgeDays: 45,
-            configured: CliLogRetention(maxTotalGiB: 17, maxAgeDays: 45)
+            configured: ControlLogRetention(maxTotalGiB: 17, maxAgeDays: 45)
         ),
         "unchanged retention should not queue an auto-save"
     )
@@ -67,7 +67,7 @@ private func runDiagnosticsSettingsTests() {
         LogRetentionAutoSavePolicy.shouldSave(
             maxTotalGiB: 20,
             maxAgeDays: 45,
-            configured: CliLogRetention(maxTotalGiB: 17, maxAgeDays: 45)
+            configured: ControlLogRetention(maxTotalGiB: 17, maxAgeDays: 45)
         ),
         "changed retention should queue an auto-save"
     )
@@ -75,7 +75,7 @@ private func runDiagnosticsSettingsTests() {
         !LogRetentionAutoSavePolicy.shouldSave(
             maxTotalGiB: 0,
             maxAgeDays: 45,
-            configured: CliLogRetention(maxTotalGiB: 17, maxAgeDays: 45)
+            configured: ControlLogRetention(maxTotalGiB: 17, maxAgeDays: 45)
         ),
         "invalid retention should never queue an auto-save"
     )

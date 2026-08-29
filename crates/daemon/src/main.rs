@@ -2023,6 +2023,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     let _daemon_instance_lock = acquire_daemon_instance_lock(&data_root)?;
 
+    if control_ipc::recover_bundle_transaction(&config_root)? {
+        tracing::warn!(
+            event = "settings.bundle_transaction_recovered",
+            "recovered an unfinished settings bundle transaction"
+        );
+    }
+
     let config_path = settings_config::config_path(&config_root);
     let mut settings = settings_config::load_settings_v2(&config_root)?;
     let _ = CONFIG_ROOT_CACHE.set(config_root.clone());

@@ -304,6 +304,14 @@ pub fn save_settings_v2(config_dir: &Path, settings: &SettingsV2) -> Result<()> 
     Ok(())
 }
 
+pub fn settings_revision(settings: &SettingsV2) -> Result<String> {
+    validate_settings_schema_v2(settings)?;
+    let text = toml::to_string(settings).map_err(|e| Error::InvalidConfig {
+        message: format!("config encode failed: {e}"),
+    })?;
+    Ok(blake3::hash(text.as_bytes()).to_hex().to_string())
+}
+
 pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
     if settings.version != SETTINGS_SCHEMA_VERSION {
         return Err(Error::InvalidConfig {
@@ -927,5 +935,17 @@ endpoint_id = "e1"
         s.chunking.max_bytes = 2 * 1024 * 1024;
         let err = validate_settings_schema_v2(&s).unwrap_err();
         assert!(err.to_string().contains("min <= avg <= max"));
+    }
+
+    #[test]
+    fn settings_revision_is_stable_and_changes_with_content() {
+        let first = base_settings_v2();
+        let mut second = first.clone();
+        second.retention.keep_last_snapshots += 1;
+
+        let first_revision = settings_revision(&first).unwrap();
+        assert_eq!(first_revision, settings_revision(&first).unwrap());
+        assert_ne!(first_revision, settings_revision(&second).unwrap());
+        assert_eq!(first_revision.len(), 64);
     }
 }

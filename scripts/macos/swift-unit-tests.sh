@@ -9,6 +9,14 @@ mkdir -p "$out_dir"
 sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
 swiftc="$(xcrun --find swiftc)"
 
+# SettingsWindow is daemon-facing UI and must stay on control IPC. Keep this red-capable seam
+# close to the existing Swift checks so a future edit cannot silently reintroduce the CLI process
+# boundary that caused signal=9 failures.
+if rg -n 'runCommandCapture|cliPath\(' "$root_dir/macos/TelevyBackupApp/SettingsWindow.swift"; then
+  echo "SettingsWindow must not invoke the CLI" >&2
+  exit 1
+fi
+
 bin_rebind="$out_dir/import-bundle-rebind-logic-tests"
 "$swiftc" \
   -sdk "$sdk_path" \
