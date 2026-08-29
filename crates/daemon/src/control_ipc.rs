@@ -36,10 +36,10 @@ fn operation_store() -> &'static Mutex<HashMap<String, OperationStatusResult>> {
 fn operation_start() -> String {
     let operation_id = format!("op_{}", uuid::Uuid::new_v4());
     if let Ok(mut operations) = operation_store().lock() {
-        if operations.len() >= 256 {
-            if let Some(oldest_id) = operations.keys().next().cloned() {
-                operations.remove(&oldest_id);
-            }
+        if operations.len() >= 256
+            && let Some(oldest_id) = operations.keys().next().cloned()
+        {
+            operations.remove(&oldest_id);
         }
         operations.insert(
             operation_id.clone(),
