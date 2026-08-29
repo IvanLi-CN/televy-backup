@@ -2628,7 +2628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_get_and_set_enforce_revision() {
+    async fn settings_control_ipc_revision_conflict_rejects_overwrite() {
         let dir = tempfile::tempdir().unwrap();
         let config_root = dir.path().join("config");
         let initial = settings();
