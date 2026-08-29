@@ -33,26 +33,43 @@ fn operation_store() -> &'static Mutex<HashMap<String, OperationStatusResult>> {
     OPERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn operation_start() -> String {
+fn terminal_operation_id(operations: &HashMap<String, OperationStatusResult>) -> Option<String> {
+    operations
+        .iter()
+        .find(|(_, status)| matches!(status.state.as_str(), "succeeded" | "failed"))
+        .map(|(id, _)| id.clone())
+}
+
+fn operation_start() -> Result<String, ControlError> {
     let operation_id = format!("op_{}", uuid::Uuid::new_v4());
-    if let Ok(mut operations) = operation_store().lock() {
-        if operations.len() >= 256
-            && let Some(oldest_id) = operations.keys().next().cloned()
-        {
-            operations.remove(&oldest_id);
+    let mut operations = operation_store().lock().map_err(|_| {
+        ControlError::unavailable("operation store unavailable", serde_json::json!({}))
+    })?;
+    if operations.len() >= 256 {
+        let terminal_id = terminal_operation_id(&operations);
+        if let Some(terminal_id) = terminal_id {
+            operations.remove(&terminal_id);
+        } else {
+            return Err(ControlError {
+                code: "operation.capacity".to_string(),
+                message: "The daemon is retaining the maximum number of active operations."
+                    .to_string(),
+                retryable: true,
+                details: serde_json::json!({}),
+            });
         }
-        operations.insert(
-            operation_id.clone(),
-            OperationStatusResult {
-                operation_id: operation_id.clone(),
-                state: "pending".to_string(),
-                progress: None,
-                result: None,
-                error: None,
-            },
-        );
     }
-    operation_id
+    operations.insert(
+        operation_id.clone(),
+        OperationStatusResult {
+            operation_id: operation_id.clone(),
+            state: "pending".to_string(),
+            progress: None,
+            result: None,
+            error: None,
+        },
+    );
+    Ok(operation_id)
 }
 
 fn operation_mark_running(operation_id: &str) {
@@ -533,10 +550,55 @@ async fn handle_settings_request(
             };
             let config_root = context.config_root.clone();
             let next_settings = params.settings.clone();
+            let next_settings_for_state = next_settings.clone();
             let expected_revision = params.expected_revision.clone();
-            let result = tokio::time::timeout(
-                Duration::from_secs(10),
-                tokio::task::spawn_blocking(move || {
+            let settings_state = context.settings.clone();
+            let reload_requested = context.settings_reload_requested.clone();
+            let current = match televy_backup_core::config::load_settings_v2(&config_root) {
+                Ok(current) => current,
+                Err(_) => {
+                    return ControlResponse::err(
+                        req.id.clone(),
+                        ControlError {
+                            code: "config.invalid".to_string(),
+                            message: "Current settings are invalid.".to_string(),
+                            retryable: false,
+                            details: serde_json::json!({}),
+                        },
+                    );
+                }
+            };
+            let current_revision = match televy_backup_core::config::settings_revision(&current) {
+                Ok(revision) => revision,
+                Err(_) => {
+                    return ControlResponse::err(
+                        req.id.clone(),
+                        ControlError {
+                            code: "config.invalid".to_string(),
+                            message: "Current settings are invalid.".to_string(),
+                            retryable: false,
+                            details: serde_json::json!({}),
+                        },
+                    );
+                }
+            };
+            if current_revision != expected_revision {
+                return ControlResponse::err(
+                    req.id.clone(),
+                    ControlError {
+                        code: "settings.revision_conflict".to_string(),
+                        message: "settings changed outside this editor".to_string(),
+                        retryable: false,
+                        details: serde_json::json!({ "currentRevision": current_revision }),
+                    },
+                );
+            }
+            let operation_id = match operation_start() {
+                Ok(operation_id) => operation_id,
+                Err(error) => return ControlResponse::err(req.id.clone(), error),
+            };
+            spawn_operation(operation_id.clone(), async move {
+                let result = tokio::task::spawn_blocking(move || {
                     let _write_guard = SETTINGS_WRITE_LOCK
                         .get_or_init(|| Mutex::new(()))
                         .lock()
@@ -547,16 +609,16 @@ async fn handle_settings_request(
                             )
                         })?;
                     let current = televy_backup_core::config::load_settings_v2(&config_root)
-                        .map_err(|error| ControlError {
+                        .map_err(|_| ControlError {
                             code: "config.invalid".to_string(),
-                            message: error.to_string(),
+                            message: "Current settings are invalid.".to_string(),
                             retryable: false,
                             details: serde_json::json!({}),
                         })?;
                     let current_revision = televy_backup_core::config::settings_revision(&current)
-                        .map_err(|error| ControlError {
+                        .map_err(|_| ControlError {
                             code: "config.invalid".to_string(),
-                            message: error.to_string(),
+                            message: "Current settings are invalid.".to_string(),
                             retryable: false,
                             details: serde_json::json!({}),
                         })?;
@@ -569,48 +631,41 @@ async fn handle_settings_request(
                         });
                     }
                     televy_backup_core::config::save_settings_v2(&config_root, &next_settings)
-                        .map_err(|error| ControlError {
+                        .map_err(|_| ControlError {
                             code: "config.write_failed".to_string(),
-                            message: error.to_string(),
-                            retryable: false,
+                            message: "Settings could not be written.".to_string(),
+                            retryable: true,
                             details: serde_json::json!({}),
                         })?;
                     let revision = televy_backup_core::config::settings_revision(&next_settings)
-                        .map_err(|error| ControlError {
+                        .map_err(|_| ControlError {
                             code: "config.invalid".to_string(),
-                            message: error.to_string(),
+                            message: "Updated settings are invalid.".to_string(),
                             retryable: false,
                             details: serde_json::json!({}),
                         })?;
                     Ok::<SettingsSetResult, ControlError>(SettingsSetResult { revision })
-                }),
-            )
-            .await;
-
-            match result {
-                Ok(Ok(Ok(result))) => {
-                    *context.settings.write().await = params.settings;
-                    context
-                        .settings_reload_requested
-                        .store(true, Ordering::Release);
-                    ControlResponse::ok(
-                        req.id.clone(),
-                        serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
-                    )
-                }
-                Ok(Ok(Err(error))) => ControlResponse::err(req.id.clone(), error),
-                Ok(Err(error)) => ControlResponse::err(
-                    req.id.clone(),
+                })
+                .await
+                .map_err(|error| {
                     ControlError::unavailable(
                         "settings write task failed",
-                        serde_json::json!({ "error": error.to_string() }),
-                    ),
-                ),
-                Err(_) => ControlResponse::err(
-                    req.id.clone(),
-                    ControlError::timeout("settings write timed out", serde_json::json!({})),
-                ),
-            }
+                        serde_json::json!({"task": error.to_string()}),
+                    )
+                })??;
+                *settings_state.write().await = next_settings_for_state;
+                reload_requested.store(true, Ordering::Release);
+                serde_json::to_value(result).map_err(|_| ControlError {
+                    code: "control.serialization_failed".to_string(),
+                    message: "Settings response could not be encoded.".to_string(),
+                    retryable: false,
+                    details: serde_json::json!({}),
+                })
+            });
+            ControlResponse::ok(
+                req.id.clone(),
+                serde_json::json!({"operationId": operation_id}),
+            )
         }
         _ => ControlResponse::err(
             req.id.clone(),
@@ -706,25 +761,21 @@ async fn handle_settings_bundle_request(
                     );
                 }
             };
-            let operation_id = operation_start();
+            let operation_id = match operation_start() {
+                Ok(operation_id) => operation_id,
+                Err(error) => return ControlResponse::err(req.id.clone(), error),
+            };
             spawn_operation(operation_id.clone(), async move {
-                match tokio::time::timeout(
-                    Duration::from_secs(30),
-                    tokio::task::spawn_blocking(move || {
-                        apply_bundle(&config_root, &data_root, params)
-                    }),
-                )
+                match tokio::task::spawn_blocking(move || {
+                    apply_bundle(&config_root, &data_root, params)
+                })
                 .await
                 {
-                    Ok(Ok(Ok(value))) => Ok(value),
-                    Ok(Ok(Err(error))) => Err(error),
-                    Ok(Err(_error)) => Err(ControlError::unavailable(
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(ControlError::unavailable(
                         "settings bundle task failed",
-                        serde_json::json!({}),
-                    )),
-                    Err(_) => Err(ControlError::timeout(
-                        "settings bundle operation timed out",
-                        serde_json::json!({}),
+                        serde_json::json!({"task": error.to_string()}),
                     )),
                 }
             });
@@ -930,14 +981,33 @@ fn inspect_bundle(
         .iter()
         .map(|ep| serde_json::json!({"id": ep.id, "chatId": ep.chat_id, "mode": ep.mode}))
         .collect::<Vec<_>>();
-    let preflight = decoded.payload.settings.targets.iter().map(|target| serde_json::json!({
-        "targetId": target.id,
-        "sourcePathExists": std::path::Path::new(&target.source_path).exists(),
-        "bootstrap": {"state": "missing", "details": {}},
-        "remoteLatest": {"state": "missing", "snapshotId": serde_json::Value::Null, "manifestObjectId": serde_json::Value::Null},
-        "localIndex": {"state": "missing", "details": {}},
-        "conflict": {"state": "none", "reasons": []}
-    })).collect::<Vec<_>>();
+    let preflight = decoded
+        .payload
+        .settings
+        .targets
+        .iter()
+        .map(|target| {
+            let source_path_exists = std::path::Path::new(&target.source_path).exists();
+            let reasons = if source_path_exists {
+                Vec::<&str>::new()
+            } else {
+                vec!["missing_path"]
+            };
+            let conflict_state = if reasons.is_empty() {
+                "none"
+            } else {
+                "needs_resolution"
+            };
+            serde_json::json!({
+                "targetId": target.id,
+                "sourcePathExists": source_path_exists,
+                "bootstrap": {"state": "missing", "details": {}},
+                "remoteLatest": {"state": "missing", "snapshotId": serde_json::Value::Null, "manifestObjectId": serde_json::Value::Null},
+                "localIndex": {"state": "missing", "details": {}},
+                "conflict": {"state": conflict_state, "reasons": reasons}
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
         "format": televy_backup_core::config_bundle::CONFIG_BUNDLE_FORMAT_V2,
         "localMasterKey": {"state": master_state},
@@ -967,6 +1037,119 @@ fn compare_bundle_folder(
     Ok(
         serde_json::json!({"ok": true, "state": state, "targetId": params.target_id, "sourcePath": params.source_path, "remoteSnapshotId": null, "remoteManifestObjectId": null, "diff": {"missingLocalFiles": 0, "extraLocalFiles": 0, "sizeMismatchFiles": 0, "hashMismatchFiles": 0, "ioErrorFiles": 0, "missingLocalExamples": [], "extraLocalExamples": [], "mismatchExamples": []}}),
     )
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+enum BundleApplyResolution {
+    OverwriteLocal,
+    OverwriteRemote,
+    Rebind { new_source_path: String },
+    Skip,
+}
+
+fn resolve_bundle_targets(
+    bundle_targets: &[televy_backup_core::config::Target],
+    selected_target_ids: &[String],
+    resolutions_value: &serde_json::Value,
+) -> Result<Vec<televy_backup_core::config::Target>, ControlError> {
+    if selected_target_ids.is_empty() {
+        return Err(ControlError::invalid_request(
+            "at least one bundle target must be selected",
+            serde_json::json!({}),
+        ));
+    }
+    let resolutions: std::collections::HashMap<String, BundleApplyResolution> =
+        if resolutions_value.is_null() {
+            std::collections::HashMap::new()
+        } else {
+            serde_json::from_value(resolutions_value.clone()).map_err(|error| ControlError {
+                code: "config_bundle.invalid_resolution".to_string(),
+                message: "bundle target resolutions are invalid".to_string(),
+                retryable: false,
+                details: serde_json::json!({"error": error.to_string()}),
+            })?
+        };
+    let bundle_target_ids = bundle_targets
+        .iter()
+        .map(|target| target.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if selected_target_ids
+        .iter()
+        .any(|target_id| !bundle_target_ids.contains(target_id.as_str()))
+    {
+        return Err(ControlError {
+            code: "config_bundle.invalid_target".to_string(),
+            message: "selectedTargetIds contains an unknown target".to_string(),
+            retryable: false,
+            details: serde_json::json!({}),
+        });
+    }
+    if resolutions
+        .keys()
+        .any(|target_id| !bundle_target_ids.contains(target_id.as_str()))
+    {
+        return Err(ControlError {
+            code: "config_bundle.invalid_target".to_string(),
+            message: "resolutions contains an unknown target".to_string(),
+            retryable: false,
+            details: serde_json::json!({}),
+        });
+    }
+    let selected = selected_target_ids
+        .iter()
+        .collect::<std::collections::HashSet<_>>();
+    let mut resolved_targets = Vec::new();
+    for mut target in bundle_targets
+        .iter()
+        .filter(|target| selected.contains(&target.id))
+        .cloned()
+    {
+        match resolutions.get(&target.id) {
+            Some(BundleApplyResolution::Skip) => continue,
+            Some(BundleApplyResolution::OverwriteRemote) => {
+                return Err(ControlError {
+                    code: "config_bundle.conflict".to_string(),
+                    message: "overwrite_remote is not supported during import".to_string(),
+                    retryable: false,
+                    details: serde_json::json!({"targetId": target.id}),
+                });
+            }
+            Some(BundleApplyResolution::Rebind { new_source_path }) => {
+                let path = new_source_path.trim();
+                if path.is_empty() || !std::path::Path::new(path).exists() {
+                    return Err(ControlError {
+                        code: "config_bundle.conflict".to_string(),
+                        message: "rebind folder does not exist".to_string(),
+                        retryable: false,
+                        details: serde_json::json!({"targetId": target.id}),
+                    });
+                }
+                target.source_path = path.to_string();
+                resolved_targets.push(target);
+            }
+            Some(BundleApplyResolution::OverwriteLocal) | None => {
+                if !std::path::Path::new(&target.source_path).exists() {
+                    return Err(ControlError {
+                        code: "config_bundle.conflict".to_string(),
+                        message: "target folder does not exist; choose rebind or skip".to_string(),
+                        retryable: false,
+                        details: serde_json::json!({"targetId": target.id}),
+                    });
+                }
+                resolved_targets.push(target);
+            }
+        }
+    }
+    if resolved_targets.is_empty() {
+        return Err(ControlError {
+            code: "config_bundle.invalid_target".to_string(),
+            message: "all selected targets were skipped".to_string(),
+            retryable: false,
+            details: serde_json::json!({}),
+        });
+    }
+    Ok(resolved_targets)
 }
 
 fn apply_bundle(
@@ -1024,22 +1207,17 @@ fn apply_bundle(
         retryable: false,
         details: serde_json::json!({}),
     })?;
-    let selected = params
-        .selected_target_ids
-        .iter()
-        .collect::<std::collections::HashSet<_>>();
+    let resolved_targets = resolve_bundle_targets(
+        &decoded.payload.settings.targets,
+        &params.selected_target_ids,
+        &params.resolutions,
+    )?;
     let mut next = current.clone();
     next.schedule = decoded.payload.settings.schedule.clone();
     next.retention = decoded.payload.settings.retention.clone();
     next.chunking = decoded.payload.settings.chunking.clone();
     next.telegram = decoded.payload.settings.telegram.clone();
-    for target in decoded
-        .payload
-        .settings
-        .targets
-        .iter()
-        .filter(|target| selected.contains(&target.id))
-    {
+    for target in &resolved_targets {
         if let Some(existing) = next.targets.iter_mut().find(|value| value.id == target.id) {
             *existing = target.clone();
         } else {
@@ -1094,9 +1272,17 @@ fn apply_bundle(
             retryable: false,
             details: serde_json::json!({}),
         })?;
-    Ok(
-        serde_json::json!({"ok": true, "revision": revision, "localIndex": {"rebuiltDbPath": "", "rebuiltFrom": {"mode": "unchanged"}}, "applied": {"targets": params.selected_target_ids, "endpoints": [], "secretsWritten": []}, "actions": {"updatedPinnedCatalog": [], "localIndexSynced": []}}),
-    )
+    let applied_target_ids = resolved_targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "ok": true,
+        "revision": revision,
+        "localIndex": {"rebuiltDbPath": "", "rebuiltFrom": {"mode": "unchanged"}},
+        "applied": {"targets": applied_target_ids, "endpoints": [], "secretsWritten": []},
+        "actions": {"updatedPinnedCatalog": [], "localIndexSynced": []}
+    }))
 }
 
 const BUNDLE_TXN_MARKER: &str = ".settings-bundle.transaction";
@@ -1258,7 +1444,10 @@ async fn handle_telegram_request(
                     );
                 }
             };
-            let operation_id = operation_start();
+            let operation_id = match operation_start() {
+                Ok(operation_id) => operation_id,
+                Err(error) => return ControlResponse::err(req.id.clone(), error),
+            };
             spawn_operation(operation_id.clone(), async move {
                 match tokio::time::timeout(
                     Duration::from_secs(180),
@@ -1292,7 +1481,10 @@ async fn handle_telegram_request(
                     );
                 }
             };
-            let operation_id = operation_start();
+            let operation_id = match operation_start() {
+                Ok(operation_id) => operation_id,
+                Err(error) => return ControlResponse::err(req.id.clone(), error),
+            };
             let operation_timeout = params.timeout_seconds.clamp(1, 600) + 15;
             spawn_operation(operation_id.clone(), async move {
                 match tokio::time::timeout(
@@ -2559,6 +2751,56 @@ mod tests {
         s
     }
 
+    #[test]
+    fn bundle_resolution_applies_rebind_and_rejects_unsafe_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        let replacement = dir.path().join("replacement");
+        std::fs::create_dir(&replacement).unwrap();
+        let mut bundle_settings = settings();
+        bundle_settings.targets[0].source_path = dir.path().join("missing").display().to_string();
+
+        let resolutions = serde_json::json!({
+            "t1": {"mode": "rebind", "new_source_path": replacement}
+        });
+        let resolved =
+            resolve_bundle_targets(&bundle_settings.targets, &["t1".to_string()], &resolutions)
+                .unwrap();
+        assert_eq!(resolved[0].source_path, replacement.display().to_string());
+
+        let skip = serde_json::json!({"t1": {"mode": "skip"}});
+        let error = resolve_bundle_targets(&bundle_settings.targets, &["t1".to_string()], &skip)
+            .unwrap_err();
+        assert_eq!(error.code, "config_bundle.invalid_target");
+
+        let overwrite_remote = serde_json::json!({"t1": {"mode": "overwrite_remote"}});
+        let error = resolve_bundle_targets(
+            &bundle_settings.targets,
+            &["t1".to_string()],
+            &overwrite_remote,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "config_bundle.conflict");
+    }
+
+    #[test]
+    fn operation_retention_only_evicts_terminal_records() {
+        let operations = (0..256)
+            .map(|index| {
+                (
+                    format!("op_{index}"),
+                    OperationStatusResult {
+                        operation_id: format!("op_{index}"),
+                        state: "running".to_string(),
+                        progress: None,
+                        result: None,
+                        error: None,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert!(terminal_operation_id(&operations).is_none());
+    }
+
     fn test_context(
         config_root: &std::path::Path,
         status_state: Arc<Mutex<crate::StatusRuntimeState>>,
@@ -2680,6 +2922,29 @@ mod tests {
         )
         .await;
         assert!(set.ok);
+        let operation_id = set
+            .result
+            .as_ref()
+            .and_then(|value| value.get("operationId"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        for _ in 0..20 {
+            let response = operation_get(&ControlRequest::new(
+                "set-status",
+                "operation.get",
+                serde_json::json!({"operationId": operation_id}),
+            ));
+            if response
+                .result
+                .as_ref()
+                .and_then(|value| value.get("state"))
+                .and_then(serde_json::Value::as_str)
+                == Some("succeeded")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         let saved = televy_backup_core::config::load_settings_v2(&config_root).unwrap();
         assert_eq!(
             saved.retention.keep_last_snapshots,
@@ -2689,7 +2954,7 @@ mod tests {
 
     #[tokio::test]
     async fn operation_get_returns_terminal_result() {
-        let operation_id = operation_start();
+        let operation_id = operation_start().expect("operation store available in test");
         spawn_operation(operation_id.clone(), async {
             Ok(serde_json::json!({"ok": true}))
         });

@@ -1893,13 +1893,15 @@ struct SettingsWindowRootView: View {
         }
         let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
-            let result: Result<SettingsSetResponse, ControlRequestFailure> = ControlIPCClient.request(
+            let result: Result<SettingsSetResponse, ControlRequestFailure> = ControlIPCClient.requestOperation(
                 socketPath: socketPath,
                 method: "settings.set",
                 params: [
                     "settings": settingsObject,
                     "expectedRevision": settingsRevision,
-                ]
+                ],
+                timeoutSeconds: 10,
+                operationTimeoutSeconds: 60
             )
             DispatchQueue.main.async {
                 guard seq == self.saveSeq else { return }
@@ -4383,6 +4385,8 @@ struct EndpointEditor: View {
     @State private var apiHashDraftMasked: Bool = false
     @State private var validateText: String = "Not validated"
     @State private var validateOk: Bool? = nil
+    @State private var secretError: String?
+    @State private var secretRetryAction: SecretRetryAction?
     @State private var dialogsLoading: Bool = false
     @State private var dialogsError: String? = nil
     @State private var dialogs: [TelegramDialogItem] = []
@@ -4406,6 +4410,12 @@ struct EndpointEditor: View {
             let u = username.map { "@\($0)" } ?? "-"
             return "\(configChatId)  \(title)  (\(kind), \(u))"
         }
+    }
+
+    private enum SecretRetryAction {
+        case botToken
+        case apiHash
+        case clearSessions
     }
 
     var body: some View {
@@ -4472,6 +4482,17 @@ struct EndpointEditor: View {
                     Text(dialogsError)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.red)
+                }
+                if let secretError {
+                    HStack(spacing: 8) {
+                        Text(secretError)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.red)
+                        if secretRetryAction != nil {
+                            Button("Retry") { retrySecretAction() }
+                                .buttonStyle(.bordered)
+                        }
+                    }
                 }
 
                 HStack {
@@ -4645,6 +4666,8 @@ struct EndpointEditor: View {
         .onChange(of: endpointId) { _, _ in
             validateOk = nil
             validateText = "Not validated"
+            secretError = nil
+            secretRetryAction = nil
             botTokenDraft = ""
             botTokenDraftMasked = false
             apiHashDraft = ""
@@ -4674,11 +4697,18 @@ struct EndpointEditor: View {
                 timeoutSeconds: 30
             )
             DispatchQueue.main.async {
-                guard case .success = result else { return }
-                botTokenDraft = String(repeating: "•", count: 18)
-                botTokenDraftMasked = true
-                onEndpointTouchedCommitted(endpointId)
-                onReload()
+                switch result {
+                case .success:
+                    secretError = nil
+                    secretRetryAction = nil
+                    botTokenDraft = String(repeating: "•", count: 18)
+                    botTokenDraftMasked = true
+                    onEndpointTouchedCommitted(endpointId)
+                    onReload()
+                case let .failure(error):
+                    secretError = controlFailureMessage(error)
+                    secretRetryAction = .botToken
+                }
             }
         }
     }
@@ -4696,11 +4726,18 @@ struct EndpointEditor: View {
                 timeoutSeconds: 30
             )
             DispatchQueue.main.async {
-                guard case .success = result else { return }
-                apiHashDraft = String(repeating: "•", count: 18)
-                apiHashDraftMasked = true
-                onEndpointTouchedCommitted(endpointId)
-                onReload()
+                switch result {
+                case .success:
+                    secretError = nil
+                    secretRetryAction = nil
+                    apiHashDraft = String(repeating: "•", count: 18)
+                    apiHashDraftMasked = true
+                    onEndpointTouchedCommitted(endpointId)
+                    onReload()
+                case let .failure(error):
+                    secretError = controlFailureMessage(error)
+                    secretRetryAction = .apiHash
+                }
             }
         }
     }
@@ -4715,10 +4752,30 @@ struct EndpointEditor: View {
                 timeoutSeconds: 30
             )
             DispatchQueue.main.async {
-                guard case .success = result else { return }
-                onEndpointTouchedCommitted(endpointId)
-                onReload()
+                switch result {
+                case .success:
+                    secretError = nil
+                    secretRetryAction = nil
+                    onEndpointTouchedCommitted(endpointId)
+                    onReload()
+                case let .failure(error):
+                    secretError = controlFailureMessage(error)
+                    secretRetryAction = .clearSessions
+                }
             }
+        }
+    }
+
+    private func retrySecretAction() {
+        switch secretRetryAction {
+        case .botToken:
+            saveBotToken(endpointId: endpointId)
+        case .apiHash:
+            saveApiHash(endpointId: endpointId)
+        case .clearSessions:
+            clearSessions(endpointId: endpointId)
+        case nil:
+            break
         }
     }
 
@@ -4729,11 +4786,12 @@ struct EndpointEditor: View {
         let isLikelyPrivateChat = (chatIdInt ?? 0) > 0
         let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
-            let result: Result<TelegramValidateResponse, ControlRequestFailure> = ControlIPCClient.request(
+            let result: Result<TelegramValidateResponse, ControlRequestFailure> = ControlIPCClient.requestOperation(
                 socketPath: socketPath,
                 method: "telegram.validate",
                 params: ["endpointId": endpointId],
-                timeoutSeconds: 180
+                timeoutSeconds: 10,
+                operationTimeoutSeconds: 195
             )
             DispatchQueue.main.async {
                 switch result {

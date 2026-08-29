@@ -29,7 +29,8 @@ Responses echo the request id and contain either `result` or a structured `error
 The settings methods are:
 
 - `settings.get` -> `{settings, secrets, secretsError, revision}`
-- `settings.set` with `{settings, expectedRevision}` -> `{revision}`
+- `settings.set` with `{settings, expectedRevision}` returns `{operationId}`; poll `operation.get`
+  for the terminal `{revision}` result.
 - `settings.bundle.export`, `settings.bundle.inspect`, `settings.bundle.compareFolder`, and
   `settings.bundle.apply`
 - `diagnostics.get`, `diagnostics.setLogLevel`, and `diagnostics.setLogRetention`
@@ -50,6 +51,8 @@ work and retains an in-memory status record with `state` (`pending`, `running`, 
 timeout and never starts a second operation.
 Operation records are bounded in memory and are intentionally not a durable task queue; a daemon
 restart ends in-flight operations and the app reports the resulting unavailable/timeout state.
+The daemon retains at most 256 records, evicting terminal records only; if all retained records
+are active it rejects a new operation with `operation.capacity`.
 Configuration bundle writes are the exception: their encrypted rollback marker is recovered before
 the daemon loads settings.
 
