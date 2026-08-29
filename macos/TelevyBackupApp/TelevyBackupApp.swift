@@ -2225,6 +2225,7 @@ final class AppModel {
 	            self.configureSettingsWindowIfNeeded(window)
 	            NSApp.activate(ignoringOtherApps: true)
 	            window.makeKeyAndOrderFront(nil)
+	            NotificationCenter.default.post(name: .settingsWindowRequested, object: nil)
 	        }
 	    }
 

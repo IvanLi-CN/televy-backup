@@ -5,13 +5,33 @@ import ObjectiveC
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct CliSettingsGetResponse: Decodable {
+struct ControlSettingsGetResponse: Decodable {
     let settings: SettingsV2
-    let secrets: CliSecretsPresence?
-    let secretsError: CliSecretsError?
+    let secrets: ControlSecretsPresence?
+    let secretsError: ControlSecretsError?
+    let revision: String
 }
 
-struct CliSecretsPresence: Decodable {
+struct SettingsSetResponse: Decodable {
+    let revision: String
+}
+
+struct ControlAckResponse: Decodable {
+    let ok: Bool?
+}
+
+extension Notification.Name {
+    static let settingsWindowRequested = Notification.Name("TelevyBackup.settingsWindowRequested")
+}
+
+struct TelegramValidateResponse: Decodable {
+    let mode: String?
+    let endpointId: String?
+    let chatId: String?
+    let roundTripOk: Bool?
+}
+
+struct ControlSecretsPresence: Decodable {
     let masterKeyPresent: Bool?
     let telegramMtprotoApiHashPresent: Bool?
     let telegramBotTokenPresentByEndpoint: [String: Bool]?
@@ -25,7 +45,7 @@ struct CliSecretsPresence: Decodable {
     }
 }
 
-struct CliSecretsError: Decodable {
+struct ControlSecretsError: Decodable {
     let code: String
     let message: String
     let retryable: Bool?
@@ -40,7 +60,7 @@ enum AppLogLevel: String, Codable, CaseIterable, Identifiable {
     var title: String { rawValue.capitalized }
 }
 
-struct CliLogRetention: Decodable, Equatable {
+struct ControlLogRetention: Decodable, Equatable {
     let maxTotalGiB: UInt16
     let maxAgeDays: UInt16
 
@@ -85,7 +105,7 @@ enum LogRetentionAutoSavePolicy {
     static func shouldSave(
         maxTotalGiB: Int,
         maxAgeDays: Int,
-        configured: CliLogRetention?
+        configured: ControlLogRetention?
     ) -> Bool {
         guard (1...100).contains(maxTotalGiB), (7...365).contains(maxAgeDays),
               let configured
@@ -97,7 +117,7 @@ enum LogRetentionAutoSavePolicy {
     }
 }
 
-struct CliDiagnosticsStatus: Decodable, Equatable {
+struct ControlDiagnosticsStatus: Decodable, Equatable {
     let configuredLevel: AppLogLevel
     let effectiveLevel: String
     let effectiveFilter: String
@@ -108,7 +128,7 @@ struct CliDiagnosticsStatus: Decodable, Equatable {
     let logBytes: UInt64?
     let managedLogBytes: UInt64?
     let managedLogCount: UInt64?
-    let retention: CliLogRetention?
+    let retention: ControlLogRetention?
     let retentionPruneEnabled: Bool?
     let configurationError: String?
     let daemonAvailable: Bool
@@ -126,12 +146,12 @@ struct CliDiagnosticsStatus: Decodable, Equatable {
     var runtimeStatusUnavailable: Bool { !daemonAvailable }
 }
 
-struct CliSettingsExportBundleResponse: Decodable {
+struct ControlSettingsExportBundleResponse: Decodable {
     let bundleKey: String
     let format: String
 }
 
-struct CliSettingsImportBundleDryRunResponse: Decodable {
+struct ControlSettingsImportBundleDryRunResponse: Decodable {
     struct LocalMasterKey: Decodable {
         let state: String
     }
@@ -205,7 +225,7 @@ struct CliSettingsImportBundleDryRunResponse: Decodable {
     let preflight: Preflight
 }
 
-struct CliSettingsImportBundleCompareFolderResponse: Decodable {
+struct ControlSettingsImportBundleCompareFolderResponse: Decodable {
     struct Diff: Decodable {
         let missingLocalFiles: Int
         let extraLocalFiles: Int
@@ -226,7 +246,7 @@ struct CliSettingsImportBundleCompareFolderResponse: Decodable {
     let diff: Diff
 }
 
-struct CliSettingsImportBundleApplyResponse: Decodable {
+struct ControlSettingsImportBundleApplyResponse: Decodable {
     let ok: Bool
 }
 
@@ -552,10 +572,10 @@ struct SettingsWindowRootView: View {
     @AppStorage(MenuBarPreferences.showTransferRatesKey) private var showsMenuBarTransferRates = false
 
     @State private var settings: SettingsV2?
-    @State private var secrets: CliSecretsPresence?
-    @State private var secretsError: CliSecretsError?
+    @State private var secrets: ControlSecretsPresence?
+    @State private var secretsError: ControlSecretsError?
     @State private var loadError: String?
-    @State private var diagnostics: CliDiagnosticsStatus?
+    @State private var diagnostics: ControlDiagnosticsStatus?
     @State private var diagnosticsError: String?
     @State private var isSavingDiagnostics = false
     @State private var isSavingLogRetention = false
@@ -570,6 +590,9 @@ struct SettingsWindowRootView: View {
     @State private var isSaving: Bool = false
     @State private var saveSeq: Int = 0
     @State private var reloadSeq: Int = 0
+    @State private var settingsRevision: String?
+    @State private var reloadInFlight = false
+    @State private var reloadPending = false
 
     private struct ImportConfigBundleSheetRequest: Identifiable {
         let id = UUID()
@@ -591,10 +614,15 @@ struct SettingsWindowRootView: View {
 
             VStack(spacing: 0) {
                 if let loadError {
-                    Text(loadError)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding()
+                    HStack(spacing: 10) {
+                        Text(loadError)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Retry") { requestReload() }
+                            .buttonStyle(.bordered)
+                    }
+                    .padding()
                 }
 
                 content
@@ -646,8 +674,11 @@ struct SettingsWindowRootView: View {
                     exportBackupConfig()
                 }
             }
-            reload()
+            requestReload()
             reloadDiagnostics()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .settingsWindowRequested)) { _ in
+            requestReload()
         }
         .onChange(of: selectedTargetId) { _, _ in
             ensureSelectedTargetEndpointValid()
@@ -999,7 +1030,7 @@ struct SettingsWindowRootView: View {
             let scene = SettingsUIDemo.scene
             let effective = scene == "diagnostics-debug" ? "debug" : "normal"
             let override = scene == "diagnostics-override" ? "TELEVYBACKUP_LOG" : nil
-            applyDiagnostics(CliDiagnosticsStatus(
+            applyDiagnostics(ControlDiagnosticsStatus(
                 configuredLevel: scene == "diagnostics-debug" ? .debug : .normal,
                 effectiveLevel: override == nil ? effective : "custom",
                 effectiveFilter: override == nil ? effective : "info,sqlx=warn",
@@ -1010,7 +1041,7 @@ struct SettingsWindowRootView: View {
                 logBytes: scene == "diagnostics-debug" ? 39_720_000_000 : 18_400_000,
                 managedLogBytes: scene == "diagnostics-debug" ? 39_700_000_000 : 16_200_000,
                 managedLogCount: scene == "diagnostics-debug" ? 73 : 4,
-                retention: CliLogRetention(
+                retention: ControlLogRetention(
                     maxTotalGiB: scene == "diagnostics-retention" ? 17 : 5,
                     maxAgeDays: scene == "diagnostics-retention" ? 45 : 30
                 ),
@@ -1021,57 +1052,52 @@ struct SettingsWindowRootView: View {
             diagnosticsError = nil
             return
         }
-        guard let cli = model.cliPath() else {
-            diagnosticsError = "televybackup CLI not found"
-            return
-        }
         diagnosticsReloadSeq += 1
         let seq = diagnosticsReloadSeq
+        let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = model.runCommandCapture(exe: cli, args: ["--json", "diagnostics", "get"], timeoutSeconds: 10)
-            guard result.status == 0, let data = result.stdout.data(using: .utf8),
-                  let decoded = try? JSONDecoder().decode(CliDiagnosticsStatus.self, from: data) else {
-                DispatchQueue.main.async {
-                    guard seq == self.diagnosticsReloadSeq else { return }
-                    self.diagnosticsError = "Could not load diagnostics settings."
-                }
-                return
-            }
+            let result: Result<ControlDiagnosticsStatus, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "diagnostics.get"
+            )
             DispatchQueue.main.async {
                 guard seq == self.diagnosticsReloadSeq else { return }
-                self.applyDiagnostics(decoded)
-                self.diagnosticsError = decoded.configurationError
+                switch result {
+                case let .success(decoded):
+                    self.applyDiagnostics(decoded)
+                    self.diagnosticsError = decoded.configurationError
+                case let .failure(error):
+                    self.diagnosticsError = "Could not load diagnostics settings: \(controlFailureMessage(error))"
+                }
             }
         }
     }
 
     private func saveLogLevel(_ level: AppLogLevel) {
-        guard !isSavingLogRetention, diagnostics?.pickerDisabled == false, let cli = model.cliPath() else { return }
+        guard !isSavingLogRetention, diagnostics?.pickerDisabled == false else { return }
         isSavingDiagnostics = true
         diagnosticsReloadSeq += 1
         diagnosticsError = nil
+        let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = model.runCommandCapture(
-                exe: cli,
-                args: ["--json", "diagnostics", "set-log-level", "--level", level.rawValue],
-                timeoutSeconds: 10
+            let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "diagnostics.setLogLevel",
+                params: ["level": level.rawValue]
             )
-            let decoded = result.stdout.data(using: .utf8).flatMap {
-                try? JSONDecoder().decode(CliDiagnosticsStatus.self, from: $0)
-            }
             DispatchQueue.main.async {
                 self.isSavingDiagnostics = false
-                if result.status == 0, let decoded {
-                    self.applyDiagnostics(decoded)
-                    self.diagnosticsError = decoded.configurationError
-                } else {
-                    self.diagnosticsError = "Could not save the log level."
+                switch result {
+                case .success:
+                    self.reloadDiagnostics()
+                case let .failure(error):
+                    self.diagnosticsError = "Could not save the log level: \(controlFailureMessage(error))"
                 }
             }
         }
     }
 
-    private func applyDiagnostics(_ status: CliDiagnosticsStatus) {
+    private func applyDiagnostics(_ status: ControlDiagnosticsStatus) {
         diagnostics = status
         if let retention = status.retention {
             retentionMaxTotalGiB = Int(retention.maxTotalGiB)
@@ -1080,32 +1106,29 @@ struct SettingsWindowRootView: View {
     }
 
     private func saveLogRetention() {
-        guard !isSavingDiagnostics, retentionInputsValid, let cli = model.cliPath() else { return }
+        guard !isSavingDiagnostics, retentionInputsValid else { return }
         isSavingLogRetention = true
         diagnosticsReloadSeq += 1
         diagnosticsError = nil
         let maxTotalGiB = retentionMaxTotalGiB
         let maxAgeDays = retentionMaxAgeDays
+        let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = model.runCommandCapture(
-                exe: cli,
-                args: [
-                    "--json", "diagnostics", "set-log-retention",
-                    "--max-total-gib", "\(maxTotalGiB)",
-                    "--max-age-days", "\(maxAgeDays)",
-                ],
-                timeoutSeconds: 10
+            let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "diagnostics.setLogRetention",
+                params: [
+                    "maxTotalGiB": maxTotalGiB,
+                    "maxAgeDays": maxAgeDays,
+                ]
             )
-            let decoded = result.stdout.data(using: .utf8).flatMap {
-                try? JSONDecoder().decode(CliDiagnosticsStatus.self, from: $0)
-            }
             DispatchQueue.main.async {
                 self.isSavingLogRetention = false
-                if result.status == 0, let decoded {
-                    self.applyDiagnostics(decoded)
-                    self.diagnosticsError = decoded.configurationError
-                } else {
-                    self.diagnosticsError = "Could not save log storage settings."
+                switch result {
+                case .success:
+                    self.reloadDiagnostics()
+                case let .failure(error):
+                    self.diagnosticsError = "Could not save log storage settings: \(controlFailureMessage(error))"
                 }
             }
         }
@@ -1207,7 +1230,7 @@ struct SettingsWindowRootView: View {
                                 section = .endpoints
                                 selectedEndpointId = endpointId
                             },
-                            onReload: { self.reload() }
+                            onReload: { self.requestReload() }
                         )
                         .padding(.vertical, 10)
                         .padding(.horizontal, 12)
@@ -1299,7 +1322,7 @@ struct SettingsWindowRootView: View {
                             endpointId: endpointId,
                             onEndpointTouchedPending: { pendingLastTouchedEndpointId = $0 },
                             onEndpointTouchedCommitted: { EndpointHeuristicsDefaults.commitEndpointTouched(endpointId: $0) },
-                            onReload: { self.reload() }
+                            onReload: { self.requestReload() }
                         )
                         .padding(.vertical, 10)
                         .padding(.horizontal, 12)
@@ -1380,8 +1403,7 @@ struct SettingsWindowRootView: View {
                         Spacer()
                         Button("Export…") {
                             if secretsUnavailable && secretsRetryable {
-                                model.ensureDaemonRunning()
-                                reload()
+                                requestReload()
                             }
                             exportBackupConfig()
                         }
@@ -1399,8 +1421,7 @@ struct SettingsWindowRootView: View {
                         Spacer()
                         Button("Import…") {
                             if secretsUnavailable && secretsRetryable {
-                                model.ensureDaemonRunning()
-                                reload()
+                                requestReload()
                             }
                             chooseImportBackupConfigFile()
                         }
@@ -1421,7 +1442,8 @@ struct SettingsWindowRootView: View {
         .sheet(item: $importConfigBundleSheetRequest) { req in
             ImportConfigBundleSheet(
                 initialFileUrl: req.fileUrl,
-                onApplied: { reload() }
+                expectedRevision: settingsRevision,
+                onApplied: { requestReload() }
             )
             .environment(\.appRuntime, model)
         }
@@ -1540,7 +1562,24 @@ struct SettingsWindowRootView: View {
         return s.targets.firstIndex(where: { $0.id == selectedTargetId })
     }
 
-    private func reload() {
+    private func requestReload() {
+        guard !reloadInFlight else {
+            reloadPending = true
+            return
+        }
+        reloadInFlight = true
+        performReload()
+    }
+
+    private func finishReload() {
+        reloadInFlight = false
+        if reloadPending {
+            reloadPending = false
+            requestReload()
+        }
+    }
+
+    private func performReload() {
         if SettingsUIDemo.enabled {
             DispatchQueue.main.async {
                 let demoSettings = SettingsUIDemo.makeSettings(scene: SettingsUIDemo.scene)
@@ -1551,7 +1590,7 @@ struct SettingsWindowRootView: View {
                     botTokenPresent[ep.id] = true
                     mtprotoSessionPresent[ep.id] = true
                 }
-                self.secrets = CliSecretsPresence(
+                self.secrets = ControlSecretsPresence(
                     masterKeyPresent: true,
                     telegramMtprotoApiHashPresent: true,
                     telegramBotTokenPresentByEndpoint: botTokenPresent,
@@ -1560,6 +1599,10 @@ struct SettingsWindowRootView: View {
                 self.loadError = nil
                 self.section = SettingsUIDemo.initialSection
                 self.settings = demoSettings
+                self.settingsRevision = "demo-revision"
+                if SettingsUIDemo.scene == "settings-failure" {
+                    self.loadError = "Settings service unavailable (control.timeout)."
+                }
 
                 if !SettingsUIDemo.disableAutoSelect {
                     if self.selectedTargetId == nil {
@@ -1572,90 +1615,55 @@ struct SettingsWindowRootView: View {
                     if SettingsUIDemo.scene == "targets-unselected" { self.selectedTargetId = nil }
                     if SettingsUIDemo.scene == "endpoints-unselected" { self.selectedEndpointId = nil }
                 }
+                self.finishReload()
             }
-            return
-        }
-
-        guard let cli = model.cliPath() else {
-            loadError = "televybackup CLI not found (set TELEVYBACKUP_CLI_PATH)"
             return
         }
 
         reloadSeq += 1
         let seq = reloadSeq
+        let socketPath = model.controlSocketPath()
 
         DispatchQueue.global(qos: .userInitiated).async {
-            // `settings get --with-secrets` queries secrets presence via control IPC, which requires
-            // the daemon to be running. Start it proactively so the Backup Config actions are not
-            // incorrectly disabled on first open.
-            model.ensureDaemonRunning()
-
-            let res = model.runCommandCapture(
-                exe: cli,
-                args: ["--json", "settings", "get", "--with-secrets"],
-                // NOTE: `settings get --with-secrets` calls daemon control IPC which itself can take ~30s
-                // to time out. Keep the outer timeout higher so we don't SIGTERM the CLI before it can
-                // return a useful JSON payload (including secretsError).
-                timeoutSeconds: 90
+            let result: Result<ControlSettingsGetResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "settings.get",
+                params: [:]
             )
-            if res.status != 0 {
-                DispatchQueue.main.async {
-                    guard seq == self.reloadSeq else { return }
-                    if res.reason == .uncaughtSignal {
-                        self.loadError = "settings get failed: signal=\(res.status)"
-                    } else {
-                        self.loadError = "settings get failed: exit=\(res.status)"
-                    }
-                }
-                return
-            }
-            guard let data = res.stdout.data(using: .utf8) else {
-                DispatchQueue.main.async {
-                    guard seq == self.reloadSeq else { return }
-                    self.loadError = "settings get: bad output"
-                }
-                return
-            }
-
-            let decoded: CliSettingsGetResponse
-            do {
-                decoded = try JSONDecoder().decode(CliSettingsGetResponse.self, from: data)
-            } catch {
-                DispatchQueue.main.async {
-                    guard seq == self.reloadSeq else { return }
-                    self.loadError = "settings get: JSON decode failed"
-                }
-                return
-            }
 
             DispatchQueue.main.async {
                 guard seq == self.reloadSeq else { return }
-                self.settings = decoded.settings
-                self.secrets = decoded.secrets
-                self.secretsError = decoded.secretsError
-                self.loadError = nil
-                if !SettingsUIDemo.disableAutoSelect {
-                    if let selected = self.selectedTargetId {
-                        let ids = Set(decoded.settings.targets.map(\.id))
-                        if !ids.contains(selected) {
+                switch result {
+                case let .success(decoded):
+                    self.settings = decoded.settings
+                    self.settingsRevision = decoded.revision
+                    self.secrets = decoded.secrets
+                    self.secretsError = decoded.secretsError
+                    self.loadError = nil
+                    if !SettingsUIDemo.disableAutoSelect {
+                        if let selected = self.selectedTargetId {
+                            let ids = Set(decoded.settings.targets.map(\.id))
+                            if !ids.contains(selected) {
+                                self.selectedTargetId = decoded.settings.targets.first?.id
+                            }
+                        } else {
                             self.selectedTargetId = decoded.settings.targets.first?.id
                         }
-                    } else {
-                        self.selectedTargetId = decoded.settings.targets.first?.id
                     }
-                }
-                if let selected = self.selectedEndpointId {
-                    let ids = Set(decoded.settings.telegram_endpoints.map(\.id))
-                    if !ids.contains(selected) {
-                        self.selectedEndpointId = nil
+                    if let selected = self.selectedEndpointId {
+                        let ids = Set(decoded.settings.telegram_endpoints.map(\.id))
+                        if !ids.contains(selected) {
+                            self.selectedEndpointId = nil
+                        }
                     }
+                    if !SettingsUIDemo.disableAutoSelect, self.selectedEndpointId == nil {
+                        self.selectedEndpointId = self.sortedEndpoints(settings: decoded.settings).first?.id
+                    }
+                    self.reloadDiagnostics()
+                case let .failure(error):
+                    self.loadError = "settings get failed: \(controlFailureMessage(error))"
                 }
-                if !SettingsUIDemo.disableAutoSelect, self.selectedEndpointId == nil {
-                    self.selectedEndpointId = self.sortedEndpoints(settings: decoded.settings).first?.id
-                }
-                // reload() starts the daemon before loading settings. Query diagnostics again now
-                // so an earlier startup fallback cannot leave this window showing stale status.
-                self.reloadDiagnostics()
+                self.finishReload()
             }
         }
     }
@@ -1673,12 +1681,6 @@ struct SettingsWindowRootView: View {
     }
 
     private func exportBackupConfig() {
-        model.ensureDaemonRunning()
-        guard let cli = model.cliPath() else {
-            showToast("televybackup CLI not found", isError: true)
-            return
-        }
-
         let panel = NSSavePanel()
         panel.title = "Export backup config"
         panel.prompt = "Export"
@@ -1792,29 +1794,24 @@ struct SettingsWindowRootView: View {
 
             let passphrase = passphraseField.stringValue
             let message = messageView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            let socketPath = model.controlSocketPath()
 
             DispatchQueue.global(qos: .userInitiated).async {
-                var args = ["--json", "settings", "export-bundle"]
-                if !message.isEmpty {
-                    args.append(contentsOf: ["--hint", message])
-                }
-
-                let res = model.runCommandCapture(
-                    exe: cli,
-                    args: args,
-                    timeoutSeconds: 60,
-                    env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": passphrase]
+                let result: Result<ControlSettingsExportBundleResponse, ControlRequestFailure> = ControlIPCClient.request(
+                    socketPath: socketPath,
+                    method: "settings.bundle.export",
+                    params: ["passphrase": passphrase, "hint": message]
                 )
-                guard res.status == 0, let data = res.stdout.data(using: .utf8) else {
+                guard case let .success(decoded) = result else {
                     DispatchQueue.main.async {
-                        let text = res.stderr.isEmpty ? "Export failed: exit=\(res.status)" : res.stderr
+                        let text: String
+                        if case let .failure(error) = result {
+                            text = "Export failed: \(controlFailureMessage(error))"
+                        } else {
+                            text = "Export failed"
+                        }
                         showToast(text, isError: true)
                     }
-                    return
-                }
-
-                guard let decoded = try? JSONDecoder().decode(CliSettingsExportBundleResponse.self, from: data) else {
-                    DispatchQueue.main.async { showToast("Export JSON decode failed", isError: true) }
                     return
                 }
 
@@ -1881,37 +1878,47 @@ struct SettingsWindowRootView: View {
     }
 
     private func saveNow() {
-        guard let cli = model.cliPath(), let settings else { return }
+        guard let settings, let settingsRevision else { return }
         saveSeq += 1
         let seq = saveSeq
         DispatchQueue.main.async {
             self.isSaving = true
         }
 
-        let toml = renderToml(settings: settings)
+        guard let encoded = try? JSONEncoder().encode(settings),
+              let settingsObject = try? JSONSerialization.jsonObject(with: encoded) else {
+            self.isSaving = false
+            self.loadError = "settings set: JSON encode failed"
+            return
+        }
+        let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
-            let res = model.runCommandCapture(
-                exe: cli,
-                args: ["--json", "settings", "set"],
-                stdin: toml + "\n",
-                timeoutSeconds: 30
+            let result: Result<SettingsSetResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "settings.set",
+                params: [
+                    "settings": settingsObject,
+                    "expectedRevision": settingsRevision,
+                ]
             )
             DispatchQueue.main.async {
                 guard seq == self.saveSeq else { return }
                 self.isSaving = false
-                if res.status != 0 {
-                    self.loadError = "settings set failed: exit=\(res.status)"
-                    return
+                switch result {
+                case let .success(response):
+                    self.settingsRevision = response.revision
+                    if let id = self.pendingLastTouchedEndpointId {
+                        EndpointHeuristicsDefaults.commitEndpointTouched(endpointId: id)
+                        self.pendingLastTouchedEndpointId = nil
+                    }
+                    if let id = self.pendingLastSelectedEndpointId {
+                        EndpointHeuristicsDefaults.commitEndpointSelectedForTarget(endpointId: id)
+                        self.pendingLastSelectedEndpointId = nil
+                    }
+                    self.loadError = nil
+                case let .failure(error):
+                    self.loadError = "settings set failed: \(controlFailureMessage(error))"
                 }
-                if let id = self.pendingLastTouchedEndpointId {
-                    EndpointHeuristicsDefaults.commitEndpointTouched(endpointId: id)
-                    self.pendingLastTouchedEndpointId = nil
-                }
-                if let id = self.pendingLastSelectedEndpointId {
-                    EndpointHeuristicsDefaults.commitEndpointSelectedForTarget(endpointId: id)
-                    self.pendingLastSelectedEndpointId = nil
-                }
-                self.reload()
             }
         }
     }
@@ -2498,6 +2505,7 @@ private struct ImportConfigBundleSheet: View {
     @Environment(\.appRuntime) private var model
 
     let initialFileUrl: URL?
+    let expectedRevision: String?
     let onApplied: () -> Void
 
     @State private var passphraseFocused: Bool = false
@@ -2508,7 +2516,7 @@ private struct ImportConfigBundleSheet: View {
     @State private var hintPreview: String?
     @State private var passphrase: String = ""
     @State private var inspecting: Bool = false
-    @State private var inspection: CliSettingsImportBundleDryRunResponse?
+    @State private var inspection: ControlSettingsImportBundleDryRunResponse?
     @State private var inspectError: String?
     @State private var didAutoSnapshot: Bool = false
     @State private var didLoadInitialFile: Bool = false
@@ -2525,65 +2533,6 @@ private struct ImportConfigBundleSheet: View {
 
     private struct ConfigBundleOuterPreview: Decodable {
         let hint: String?
-    }
-
-    private struct CliErrorEnvelope: Decodable {
-        let code: String
-        let message: String
-    }
-
-    private enum CliErrorHint {
-        case incorrectPassphrase
-        case invalidFile
-    }
-
-    private func decodeCliErrorEnvelope(_ stderr: String) -> CliErrorEnvelope? {
-        let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        // Fast path: stderr is exactly one JSON object line.
-        if let data = trimmed.data(using: .utf8),
-           let decoded = try? JSONDecoder().decode(CliErrorEnvelope.self, from: data)
-        {
-            return decoded
-        }
-
-        // Tolerate extra lines (e.g. stray logs). Take the last JSON-looking line.
-        let lines = trimmed
-            .split(whereSeparator: \.isNewline)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        for line in lines.reversed() {
-            guard line.hasPrefix("{"), line.hasSuffix("}") else { continue }
-            guard let data = line.data(using: .utf8) else { continue }
-            if let decoded = try? JSONDecoder().decode(CliErrorEnvelope.self, from: data) {
-                return decoded
-            }
-        }
-        return nil
-    }
-
-    private func humanizeCliFailure(_ stderr: String, fallback: String) -> (message: String, hint: CliErrorHint?) {
-        let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return (fallback, nil) }
-
-        guard let env = decodeCliErrorEnvelope(trimmed) else { return (trimmed, nil) }
-
-        // Avoid exposing internal framing/key terms. Keep this user-facing and actionable.
-        if env.code == "crypto" {
-            if env.message.contains("decrypt failed") {
-                return ("Incorrect passphrase / PIN. Please try again.", .incorrectPassphrase)
-            }
-            if env.message.contains("invalid config bundle") || env.message.contains("config bundle") {
-                return ("Invalid backup config file.", .invalidFile)
-            }
-        }
-
-        if env.code == "config_bundle.passphrase_required" {
-            return ("Passphrase is required.", .incorrectPassphrase)
-        }
-
-        return (env.message, nil)
     }
 
     private func base64UrlNoPadDecode(_ s: String) -> Data? {
@@ -2631,8 +2580,9 @@ private struct ImportConfigBundleSheet: View {
         return "TBC2:" + trimmed
     }
 
-    init(initialFileUrl: URL? = nil, onApplied: @escaping () -> Void) {
+    init(initialFileUrl: URL? = nil, expectedRevision: String? = nil, onApplied: @escaping () -> Void) {
         self.initialFileUrl = initialFileUrl
+        self.expectedRevision = expectedRevision
         self.onApplied = onApplied
         _fileUrl = State(initialValue: initialFileUrl)
     }
@@ -2700,7 +2650,7 @@ private struct ImportConfigBundleSheet: View {
         // Content-level compare between local folder and remote latest snapshot (remote index DB),
         // used to avoid prompting when data is already identical.
         var rebindCompareState: RebindCompareState = .unknown
-        var rebindCompareDiff: CliSettingsImportBundleCompareFolderResponse.Diff? = nil
+        var rebindCompareDiff: ControlSettingsImportBundleCompareFolderResponse.Diff? = nil
         var rebindCompareError: String? = nil
     }
 
@@ -2720,7 +2670,7 @@ private struct ImportConfigBundleSheet: View {
 	        }
 	    }
 
-	    private var preflightByTargetId: [String: CliSettingsImportBundleDryRunResponse.PreflightTarget] {
+	    private var preflightByTargetId: [String: ControlSettingsImportBundleDryRunResponse.PreflightTarget] {
 	        guard let inspection else { return [:] }
 	        return Dictionary(uniqueKeysWithValues: inspection.preflight.targets.map { ($0.targetId, $0) })
 	    }
@@ -2775,7 +2725,7 @@ private struct ImportConfigBundleSheet: View {
             switch demo {
             case "match":
                 s.rebindCompareState = .match
-                s.rebindCompareDiff = CliSettingsImportBundleCompareFolderResponse.Diff(
+                s.rebindCompareDiff = ControlSettingsImportBundleCompareFolderResponse.Diff(
                     missingLocalFiles: 0,
                     extraLocalFiles: 0,
                     sizeMismatchFiles: 0,
@@ -2787,7 +2737,7 @@ private struct ImportConfigBundleSheet: View {
                 )
             case "mismatch":
                 s.rebindCompareState = .mismatch
-                s.rebindCompareDiff = CliSettingsImportBundleCompareFolderResponse.Diff(
+                s.rebindCompareDiff = ControlSettingsImportBundleCompareFolderResponse.Diff(
                     missingLocalFiles: 1,
                     extraLocalFiles: 1,
                     sizeMismatchFiles: 0,
@@ -2818,8 +2768,6 @@ private struct ImportConfigBundleSheet: View {
         guard !key.isEmpty else { return }
         if fileEncrypted && pp.isEmpty { return }
 
-        guard let cli = model.cliPath() else { return }
-
         let sourcePathTrimmed = sourcePath.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Mark as checking and reset any previous diff/error.
@@ -2839,31 +2787,15 @@ private struct ImportConfigBundleSheet: View {
             Self.compareConcurrencyLimit.wait()
             defer { Self.compareConcurrencyLimit.signal() }
 
-            let payload: [String: Any] = [
-                "bundleKey": key,
-                "targetId": targetId,
-                "sourcePath": sourcePathTrimmed,
-            ]
-
-            guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
-                  let stdin = String(data: data, encoding: .utf8)
-            else {
-                DispatchQueue.main.async {
-                    guard var s = resolutions[targetId] else { return }
-                    guard s.compareSourcePath == sourcePathTrimmed else { return }
-                    s.rebindCompareState = .error
-                    s.rebindCompareError = "Failed to encode compare JSON"
-                    resolutions[targetId] = s
-                }
-                return
-            }
-
-            let res = model.runCommandCapture(
-                exe: cli,
-                args: ["--json", "settings", "import-bundle", "--compare-folder"],
-                stdin: stdin + "\n",
-                timeoutSeconds: 600,
-                env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": pp]
+            let result: Result<ControlSettingsImportBundleCompareFolderResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: model.controlSocketPath(),
+                method: "settings.bundle.compareFolder",
+                params: [
+                    "bundleKey": key,
+                    "passphrase": pp,
+                    "targetId": targetId,
+                    "sourcePath": sourcePathTrimmed,
+                ]
             )
 
             DispatchQueue.main.async {
@@ -2873,45 +2805,33 @@ private struct ImportConfigBundleSheet: View {
                 // auto-compare moved on to a different path).
                 guard s.compareSourcePath == sourcePathTrimmed else { return }
 
-                if res.status != 0 {
-                    let err = humanizeCliFailure(res.stderr, fallback: "Compare failed")
+                guard case let .success(decoded) = result else {
+                    let err: ControlRequestFailure
+                    if case let .failure(error) = result {
+                        err = error
+                    } else {
+                        return
+                    }
                     s.rebindCompareState = .error
                     s.rebindCompareError = err.message
                     s.rebindCompareDiff = nil
                     resolutions[targetId] = s
                     return
                 }
-
-                guard let outData = res.stdout.data(using: .utf8) else {
+                s.rebindCompareDiff = decoded.diff
+                s.rebindCompareError = nil
+                switch decoded.state {
+                case "match":
+                    s.rebindCompareState = .match
+                case "mismatch":
+                    s.rebindCompareState = .mismatch
+                case "remote_missing":
+                    s.rebindCompareState = .remote_missing
+                default:
                     s.rebindCompareState = .error
-                    s.rebindCompareError = "Compare returned empty output"
-                    s.rebindCompareDiff = nil
-                    resolutions[targetId] = s
-                    return
+                    s.rebindCompareError = "Unknown compare state: \(decoded.state)"
                 }
-
-                do {
-                    let decoded = try JSONDecoder().decode(CliSettingsImportBundleCompareFolderResponse.self, from: outData)
-                    s.rebindCompareDiff = decoded.diff
-                    s.rebindCompareError = nil
-                    switch decoded.state {
-                    case "match":
-                        s.rebindCompareState = .match
-                    case "mismatch":
-                        s.rebindCompareState = .mismatch
-                    case "remote_missing":
-                        s.rebindCompareState = .remote_missing
-                    default:
-                        s.rebindCompareState = .error
-                        s.rebindCompareError = "Unknown compare state: \(decoded.state)"
-                    }
-                    resolutions[targetId] = s
-                } catch {
-                    s.rebindCompareState = .error
-                    s.rebindCompareError = "Compare JSON decode failed"
-                    s.rebindCompareDiff = nil
-                    resolutions[targetId] = s
-                }
+                resolutions[targetId] = s
             }
         }
     }
@@ -3085,7 +3005,7 @@ private struct ImportConfigBundleSheet: View {
         }
     }
 
-    private func applyDefaults(from inspection: CliSettingsImportBundleDryRunResponse) {
+    private func applyDefaults(from inspection: ControlSettingsImportBundleDryRunResponse) {
         selectedTargetIds = Set(inspection.bundle.targets.map(\.id))
 
         var next: [String: ResolutionState] = [:]
@@ -3142,42 +3062,31 @@ private struct ImportConfigBundleSheet: View {
         applyError = nil
         inspection = nil
 
-        model.ensureDaemonRunning()
-        guard let cli = model.cliPath() else {
-            inspectError = "televybackup CLI not found"
-            inspecting = false
-            return
-        }
-
-        var env: [String: String] = [:]
-        if fileEncrypted {
-            env["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE"] = passphrase
-        }
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "settings", "import-bundle", "--dry-run"],
-            stdin: key + "\n",
-            timeoutSeconds: 120,
-            env: env
+        let result: Result<ControlSettingsImportBundleDryRunResponse, ControlRequestFailure> = ControlIPCClient.request(
+            socketPath: model.controlSocketPath(),
+            method: "settings.bundle.inspect",
+            params: [
+                "bundleKey": key,
+                "passphrase": fileEncrypted ? passphrase : "",
+            ],
+            timeoutSeconds: 120
         )
-        guard res.status == 0, let data = res.stdout.data(using: .utf8) else {
-            let err = humanizeCliFailure(res.stderr, fallback: "Inspect failed")
-            inspectError = err.message
-            if err.hint == .incorrectPassphrase {
+        guard case let .success(decoded) = result else {
+            if case let .failure(error) = result {
+                inspectError = controlFailureMessage(error)
+            } else {
+                inspectError = "Inspect failed"
+            }
+            if inspectError?.localizedCaseInsensitiveContains("passphrase") == true {
                 DispatchQueue.main.async { passphraseFocused = true }
             }
             inspecting = false
             return
         }
 
-        do {
-            let decoded = try JSONDecoder().decode(CliSettingsImportBundleDryRunResponse.self, from: data)
-            inspection = decoded
-            applyDefaults(from: decoded)
-            kickOffAutoCompare()
-        } catch {
-            inspectError = "Inspect JSON decode failed"
-        }
+        inspection = decoded
+        applyDefaults(from: decoded)
+        kickOffAutoCompare()
 
         inspecting = false
     }
@@ -3247,7 +3156,6 @@ private struct ImportConfigBundleSheet: View {
 
     private func applyBundle() {
         guard canApply() else { return }
-        guard let cli = model.cliPath() else { return }
 
         applying = true
         applyError = nil
@@ -3273,6 +3181,7 @@ private struct ImportConfigBundleSheet: View {
         let payload: [String: Any] = [
             "bundleKey": key,
             "selectedTargetIds": selected,
+            "expectedRevision": expectedRevision ?? "",
             "confirm": [
                 // UI already gates apply behind an explicit click; avoid a second typed confirmation.
                 "phrase": "IMPORT",
@@ -3280,20 +3189,13 @@ private struct ImportConfigBundleSheet: View {
             "resolutions": resolutionsObj,
         ]
 
-        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
-              let stdin = String(data: data, encoding: .utf8)
-        else {
-            applyError = "Failed to encode apply JSON"
-            applying = false
-            return
-        }
-
         // Post-import actions for rebinding when local != remote latest.
         // - Use remote latest: run restore into the new folder.
         // - Merge (Option B): run a backup to generate a new snapshot from local bytes.
         struct PostAction {
             let status: String
-            let args: [String]
+            let method: String
+            let params: [String: Any]
             let timeoutSeconds: Double
         }
 
@@ -3315,13 +3217,15 @@ private struct ImportConfigBundleSheet: View {
             case .use_remote_latest:
                 post.append(PostAction(
                     status: "Restoring remote latest (\(id))…",
-                    args: ["restore", "latest", "--target-id", id, "--target", path],
+                    method: "restore.latest",
+                    params: ["targetId": id, "target": path],
                     timeoutSeconds: 3600
                 ))
             case .merge_local_to_remote:
                 post.append(PostAction(
                     status: "Queueing local folder backup (\(id))…",
-                    args: ["backup", "enqueue", "--target-id", id],
+                    method: "backup.enqueue",
+                    params: ["scope": "targets", "targetIds": [id]],
                     timeoutSeconds: 15
                 ))
             case .keep_local, .undecided:
@@ -3330,36 +3234,22 @@ private struct ImportConfigBundleSheet: View {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            func ensureDaemonRunningOnMain() -> Bool {
-                DispatchQueue.main.sync {
-                    model.ensureDaemonRunning()
-                }
-            }
-
-            func failForDaemonUnavailable() {
-                DispatchQueue.main.async {
-                    applyError = "Daemon is unavailable"
-                    applying = false
-                }
-            }
-
-            guard ensureDaemonRunningOnMain() else {
-                failForDaemonUnavailable()
-                return
-            }
-            let res = model.runCommandCapture(
-                exe: cli,
-                args: ["--json", "settings", "import-bundle", "--apply"],
-                stdin: stdin + "\n",
-                timeoutSeconds: 180,
-                env: ["TELEVYBACKUP_CONFIG_BUNDLE_PASSPHRASE": passphraseValue]
+            let result: Result<ControlSettingsImportBundleApplyResponse, ControlRequestFailure> = ControlIPCClient.requestOperation(
+                socketPath: model.controlSocketPath(),
+                method: "settings.bundle.apply",
+                params: payload.merging(["passphrase": passphraseValue]) { _, new in new },
+                timeoutSeconds: 10,
+                operationTimeoutSeconds: 3600
             )
 
-            guard res.status == 0, let outData = res.stdout.data(using: .utf8) else {
-                let err = humanizeCliFailure(res.stderr, fallback: "Import failed")
+            guard case let .success(decoded) = result, decoded.ok else {
                 DispatchQueue.main.async {
-                    applyError = err.message
-                    if err.hint == .incorrectPassphrase {
+                    if case let .failure(error) = result {
+                        applyError = controlFailureMessage(error)
+                    } else {
+                        applyError = "Import failed"
+                    }
+                    if applyError?.localizedCaseInsensitiveContains("passphrase") == true {
                         passphraseFocused = true
                     }
                     applying = false
@@ -3367,40 +3257,17 @@ private struct ImportConfigBundleSheet: View {
                 return
             }
 
-            do {
-                let decoded = try JSONDecoder().decode(CliSettingsImportBundleApplyResponse.self, from: outData)
-                guard decoded.ok else {
-                    DispatchQueue.main.async {
-                        applyError = "Apply failed"
-                        applying = false
-                    }
-                    return
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    applyError = "Apply JSON decode failed"
-                    applying = false
-                }
-                return
-            }
-
             for a in post {
                 DispatchQueue.main.async { postApplyStatus = a.status }
-                guard ensureDaemonRunningOnMain() else {
-                    failForDaemonUnavailable()
-                    return
-                }
-                let res = model.runCommandCapture(
-                    exe: cli,
-                    args: a.args,
-                    stdin: nil,
-                    timeoutSeconds: a.timeoutSeconds,
-                    env: [:]
+                let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                    socketPath: model.controlSocketPath(),
+                    method: a.method,
+                    params: a.params,
+                    timeoutSeconds: a.timeoutSeconds
                 )
-                if res.status != 0 {
-                    let err = humanizeCliFailure(res.stderr, fallback: "Post-import action failed")
+                if case let .failure(error) = result {
                     DispatchQueue.main.async {
-                        applyError = err.message
+                        applyError = controlFailureMessage(error)
                         postApplyStatus = nil
                         applying = false
                     }
@@ -3446,18 +3313,18 @@ private struct ImportConfigBundleSheet: View {
         return out
     }
 
-    private func demoInspection(targetsCount: Int) -> CliSettingsImportBundleDryRunResponse {
+    private func demoInspection(targetsCount: Int) -> ControlSettingsImportBundleDryRunResponse {
         let n = max(1, targetsCount)
         let includeConflicts = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_IMPORT_CONFLICTS"] == "1"
-        let epA = CliSettingsImportBundleDryRunResponse.BundleEndpoint(
+        let epA = ControlSettingsImportBundleDryRunResponse.BundleEndpoint(
             id: "ep_demo_a",
             chatId: "123456",
             mode: "mtproto"
         )
 
-        let targets: [CliSettingsImportBundleDryRunResponse.BundleTarget] = (0..<n).map { i in
+        let targets: [ControlSettingsImportBundleDryRunResponse.BundleTarget] = (0..<n).map { i in
             let id = String(format: "t_demo_%02d", i + 1)
-            return CliSettingsImportBundleDryRunResponse.BundleTarget(
+            return ControlSettingsImportBundleDryRunResponse.BundleTarget(
                 id: id,
                 sourcePath: "/Users/ivan/Demo/Folder\(i + 1)",
                 endpointId: epA.id,
@@ -3465,15 +3332,15 @@ private struct ImportConfigBundleSheet: View {
             )
         }
 
-        let preflightTargets: [CliSettingsImportBundleDryRunResponse.PreflightTarget] = targets.enumerated().map { i, t in
+        let preflightTargets: [ControlSettingsImportBundleDryRunResponse.PreflightTarget] = targets.enumerated().map { i, t in
             var sourcePathExists = true
-            var bootstrap = CliSettingsImportBundleDryRunResponse.Bootstrap(state: "ok", details: nil)
-            let remoteLatest = CliSettingsImportBundleDryRunResponse.RemoteLatest(
+            var bootstrap = ControlSettingsImportBundleDryRunResponse.Bootstrap(state: "ok", details: nil)
+            let remoteLatest = ControlSettingsImportBundleDryRunResponse.RemoteLatest(
                 state: "ok",
                 snapshotId: "s_demo_latest",
                 manifestObjectId: "m_demo_latest"
             )
-            let localIndex = CliSettingsImportBundleDryRunResponse.LocalIndex(state: "match", details: nil)
+            let localIndex = ControlSettingsImportBundleDryRunResponse.LocalIndex(state: "match", details: nil)
             var reasons: [String] = []
 
             if includeConflicts {
@@ -3482,7 +3349,7 @@ private struct ImportConfigBundleSheet: View {
                     sourcePathExists = false
                     reasons = ["missing_path"]
                 } else if i == 1 {
-                    bootstrap = CliSettingsImportBundleDryRunResponse.Bootstrap(
+                    bootstrap = ControlSettingsImportBundleDryRunResponse.Bootstrap(
                         state: "invalid",
                         details: ["error": "decrypt failed"]
                     )
@@ -3492,34 +3359,34 @@ private struct ImportConfigBundleSheet: View {
 
             let conflictState = reasons.isEmpty ? "none" : "needs_resolution"
 
-            return CliSettingsImportBundleDryRunResponse.PreflightTarget(
+            return ControlSettingsImportBundleDryRunResponse.PreflightTarget(
                 targetId: t.id,
                 sourcePathExists: sourcePathExists,
                 bootstrap: bootstrap,
                 remoteLatest: remoteLatest,
                 localIndex: localIndex,
-                conflict: CliSettingsImportBundleDryRunResponse.Conflict(state: conflictState, reasons: reasons)
+                conflict: ControlSettingsImportBundleDryRunResponse.Conflict(state: conflictState, reasons: reasons)
             )
         }
 
-        let secretsCoverage = CliSettingsImportBundleDryRunResponse.SecretsCoverage(
+        let secretsCoverage = ControlSettingsImportBundleDryRunResponse.SecretsCoverage(
             presentKeys: [],
             excludedKeys: [],
             missingKeys: []
         )
 
-        return CliSettingsImportBundleDryRunResponse(
+        return ControlSettingsImportBundleDryRunResponse(
             format: "tbc2",
-            localMasterKey: CliSettingsImportBundleDryRunResponse.LocalMasterKey(state: "match"),
+            localMasterKey: ControlSettingsImportBundleDryRunResponse.LocalMasterKey(state: "match"),
             localHasTargets: true,
             nextAction: "apply",
-            bundle: CliSettingsImportBundleDryRunResponse.Bundle(
+            bundle: ControlSettingsImportBundleDryRunResponse.Bundle(
                 settingsVersion: 2,
                 targets: targets,
                 endpoints: [epA],
                 secretsCoverage: secretsCoverage
             ),
-            preflight: CliSettingsImportBundleDryRunResponse.Preflight(targets: preflightTargets)
+            preflight: ControlSettingsImportBundleDryRunResponse.Preflight(targets: preflightTargets)
         )
     }
 
@@ -3674,7 +3541,7 @@ private struct ImportConfigBundleSheet: View {
         }
 
         @ViewBuilder
-        private func resultView(inspection: CliSettingsImportBundleDryRunResponse) -> some View {
+        private func resultView(inspection: ControlSettingsImportBundleDryRunResponse) -> some View {
             let targetsCount = inspection.bundle.targets.count
             let endpointsCount = inspection.bundle.endpoints.count
             let missingKeys = inspection.bundle.secretsCoverage.missingKeys
@@ -4198,7 +4065,7 @@ private struct ImportConfigBundleSheet: View {
 struct TargetEditor: View {
     @Environment(\.appRuntime) private var model
     @Binding var settings: SettingsV2
-    let secrets: CliSecretsPresence?
+    let secrets: ControlSecretsPresence?
     let targetIndex: Int
     let embedded: Bool
     let onEndpointSelected: (_ endpointId: String) -> Void
@@ -4210,7 +4077,7 @@ struct TargetEditor: View {
 
     init(
         settings: Binding<SettingsV2>,
-        secrets: CliSecretsPresence?,
+        secrets: ControlSecretsPresence?,
         targetIndex: Int,
         embedded: Bool = false,
         onEndpointSelected: @escaping (_ endpointId: String) -> Void,
@@ -4474,19 +4341,26 @@ struct TargetEditor: View {
     }
 
     private func testConnection(endpointId: String) {
-        guard let cli = model.cliPath() else { return }
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "telegram", "validate", "--endpoint-id", endpointId],
-            timeoutSeconds: 180
-        )
-        if res.status == 0 {
-            validateOk = true
-            validateText = "Connected"
-            onReload()
-        } else {
-            validateOk = false
-            validateText = "Failed (see ui.log)"
+        let socketPath = model.controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<TelegramValidateResponse, ControlRequestFailure> = ControlIPCClient.requestOperation(
+                socketPath: socketPath,
+                method: "telegram.validate",
+                params: ["endpointId": endpointId],
+                timeoutSeconds: 10,
+                operationTimeoutSeconds: 195
+            )
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    validateOk = true
+                    validateText = "Connected"
+                    onReload()
+                case let .failure(error):
+                    validateOk = false
+                    validateText = controlFailureMessage(error)
+                }
+            }
         }
     }
 }
@@ -4494,7 +4368,7 @@ struct TargetEditor: View {
 struct EndpointEditor: View {
     @Environment(\.appRuntime) private var model
     @Binding var settings: SettingsV2
-    let secrets: CliSecretsPresence?
+    let secrets: ControlSecretsPresence?
     let endpointId: String
     let onEndpointTouchedPending: (_ endpointId: String) -> Void
     let onEndpointTouchedCommitted: (_ endpointId: String) -> Void
@@ -4517,11 +4391,6 @@ struct EndpointEditor: View {
 
     struct TelegramWaitChatResponse: Decodable {
         let chat: TelegramDialogItem
-    }
-
-    struct CliErrorEnvelope: Decodable {
-        let code: String
-        let message: String
     }
 
     struct TelegramDialogItem: Decodable {
@@ -4794,78 +4663,89 @@ struct EndpointEditor: View {
     }
 
     private func saveBotToken(endpointId: String) {
-        guard let cli = model.cliPath() else { return }
-        model.ensureDaemonRunning()
         let token = botTokenDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if token.isEmpty { return }
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "secrets", "set-telegram-bot-token", "--endpoint-id", endpointId],
-            stdin: token + "\n",
-            timeoutSeconds: 30
-        )
-        if res.status == 0 {
-            botTokenDraft = String(repeating: "•", count: 18)
-            botTokenDraftMasked = true
-            onEndpointTouchedCommitted(endpointId)
-            onReload()
+        let socketPath = model.controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "secrets.setTelegramBotToken",
+                params: ["endpointId": endpointId, "token": token],
+                timeoutSeconds: 30
+            )
+            DispatchQueue.main.async {
+                guard case .success = result else { return }
+                botTokenDraft = String(repeating: "•", count: 18)
+                botTokenDraftMasked = true
+                onEndpointTouchedCommitted(endpointId)
+                onReload()
+            }
         }
     }
 
     private func saveApiHash(endpointId: String) {
-        guard let cli = model.cliPath() else { return }
-        model.ensureDaemonRunning()
         if apiHashDraftMasked { return }
         let apiHash = apiHashDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         if apiHash.isEmpty { return }
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "secrets", "set-telegram-api-hash"],
-            stdin: apiHash + "\n",
-            timeoutSeconds: 30
-        )
-        if res.status == 0 {
-            apiHashDraft = String(repeating: "•", count: 18)
-            apiHashDraftMasked = true
-            onEndpointTouchedCommitted(endpointId)
-            onReload()
+        let socketPath = model.controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "secrets.setTelegramApiHash",
+                params: ["apiHash": apiHash],
+                timeoutSeconds: 30
+            )
+            DispatchQueue.main.async {
+                guard case .success = result else { return }
+                apiHashDraft = String(repeating: "•", count: 18)
+                apiHashDraftMasked = true
+                onEndpointTouchedCommitted(endpointId)
+                onReload()
+            }
         }
     }
 
     private func clearSessions(endpointId: String) {
-        guard let cli = model.cliPath() else { return }
-        model.ensureDaemonRunning()
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "secrets", "clear-telegram-mtproto-session"],
-            timeoutSeconds: 30
-        )
-        if res.status == 0 {
-            onEndpointTouchedCommitted(endpointId)
-            onReload()
+        let socketPath = model.controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "secrets.clearTelegramMtprotoSession",
+                params: ["endpointId": endpointId],
+                timeoutSeconds: 30
+            )
+            DispatchQueue.main.async {
+                guard case .success = result else { return }
+                onEndpointTouchedCommitted(endpointId)
+                onReload()
+            }
         }
     }
 
     private func testConnection(endpointId: String) {
-        guard let cli = model.cliPath() else { return }
-        model.ensureDaemonRunning()
         let epIndex = settings.telegram_endpoints.firstIndex(where: { $0.id == endpointId })
         let chatIdTrimmed = epIndex.map { settings.telegram_endpoints[$0].chat_id.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
         let chatIdInt = Int64(chatIdTrimmed)
         let isLikelyPrivateChat = (chatIdInt ?? 0) > 0
-
-        let res = model.runCommandCapture(
-            exe: cli,
-            args: ["--json", "telegram", "validate", "--endpoint-id", endpointId],
-            timeoutSeconds: 180
-        )
-        if res.status == 0 {
-            validateOk = true
-            validateText = isLikelyPrivateChat ? "Connected (bootstrap unsupported: private chat)" : "Connected"
-            onReload()
-        } else {
-            validateOk = false
-            validateText = "Failed (see ui.log)"
+        let socketPath = model.controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<TelegramValidateResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "telegram.validate",
+                params: ["endpointId": endpointId],
+                timeoutSeconds: 180
+            )
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    validateOk = true
+                    validateText = isLikelyPrivateChat ? "Connected (bootstrap unsupported: private chat)" : "Connected"
+                    onReload()
+                case let .failure(error):
+                    validateOk = false
+                    validateText = controlFailureMessage(error)
+                }
+            }
         }
     }
 
@@ -4923,41 +4803,29 @@ struct EndpointEditor: View {
     }
 
     private func loadDialogs(endpointId: String) {
-        guard let cli = model.cliPath() else { return }
         dialogsLoading = true
         dialogsError = nil
         dialogsSearch = ""
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let res = model.runCommandCapture(
-                exe: cli,
-                args: ["--json", "telegram", "wait-chat", "--endpoint-id", endpointId, "--timeout-secs", "60"],
-                timeoutSeconds: 75
+            let result: Result<TelegramWaitChatResponse, ControlRequestFailure> = ControlIPCClient.requestOperation(
+                socketPath: model.controlSocketPath(),
+                method: "telegram.waitChat",
+                params: ["endpointId": endpointId, "timeoutSeconds": 60, "includeUsers": false],
+                timeoutSeconds: 10,
+                operationTimeoutSeconds: 75
             )
 
             DispatchQueue.main.async {
                 dialogsLoading = false
-                if res.status != 0 {
-                    if let data = res.stderr.data(using: .utf8),
-                       let decoded = try? JSONDecoder().decode(CliErrorEnvelope.self, from: data) {
-                        dialogsError = decoded.message
-                    } else {
-                        dialogsError = "Failed to discover chat (see ui.log)"
-                    }
-                    return
-                }
-                guard let data = res.stdout.data(using: .utf8) else {
-                    dialogsError = "Failed to parse chat (empty output)"
-                    return
-                }
-                do {
-                    let decoded = try JSONDecoder().decode(TelegramWaitChatResponse.self, from: data)
+                switch result {
+                case let .success(decoded):
                     let item = decoded.chat
                     if !dialogs.contains(where: { $0.id == item.id }) {
                         dialogs.append(item)
                     }
-                } catch {
-                    dialogsError = "Failed to parse chat (see ui.log)"
+                case let .failure(error):
+                    dialogsError = controlFailureMessage(error)
                 }
             }
         }

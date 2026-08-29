@@ -139,6 +139,116 @@ pub struct SecretsPresenceResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SettingsGetResult {
+    pub settings: crate::config::SettingsV2,
+    pub secrets: Option<SecretsPresenceResult>,
+    pub secrets_error: Option<ControlError>,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SettingsSetParams {
+    pub settings: crate::config::SettingsV2,
+    pub expected_revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSetResult {
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SettingsBundleExportParams {
+    pub passphrase: String,
+    #[serde(default)]
+    pub hint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsBundleExportResult {
+    pub bundle_key: String,
+    pub format: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SettingsBundleInspectParams {
+    pub bundle_key: String,
+    pub passphrase: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SettingsBundleCompareFolderParams {
+    pub bundle_key: String,
+    pub passphrase: String,
+    pub target_id: String,
+    pub source_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SettingsBundleApplyParams {
+    pub bundle_key: String,
+    pub passphrase: String,
+    pub selected_target_ids: Vec<String>,
+    pub expected_revision: String,
+    #[serde(default)]
+    pub resolutions: serde_json::Value,
+    #[serde(default)]
+    pub confirm: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TelegramValidateParams {
+    pub endpoint_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TelegramWaitChatParams {
+    pub endpoint_id: String,
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub include_users: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OperationGetParams {
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationStartResult {
+    pub operation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationStatusResult {
+    pub operation_id: String,
+    pub state: String,
+    pub progress: Option<serde_json::Value>,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<ControlError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreLatestParams {
+    pub target_id: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SecretsSetTelegramBotTokenParams {
     pub endpoint_id: String,
     pub token: String,

@@ -4,7 +4,9 @@
 
 - **GUI app**: native macOS app (SwiftUI/AppKit; built via `scripts/macos/*`).
   - Provides Settings UI and task controls (backup/restore/verify).
-  - Spawns the local `televybackup` CLI for long-running operations and streams progress from stdout.
+  - SettingsWindow daemon business calls use the versioned `control.sock` contract exclusively;
+    it never launches the CLI or falls back to a second transport. The status dashboard may still
+    consume the existing CLI status stream for task progress.
 - **Core library**: `televy_backup_core` (`crates/core/`).
   - Implements scan → CDC chunking → hash → encrypt framing → enqueue uploads → worker uploads → SQLite index. Filemap statements are bounded to 512 entries and the scan transaction commits once; unchanged-file baseline metadata is resolved once per batch.
   - Backup pipeline is phase-split (scan/upload/index); scan enqueues jobs into a bounded queue and upload workers honor endpoint rate limits.

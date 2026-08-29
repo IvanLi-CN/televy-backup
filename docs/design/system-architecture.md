@@ -13,7 +13,8 @@
 - 责任：
   - Settings window：编辑 v2 Settings（targets/endpoints/schedule/recovery key 等）。
   - Popover Dashboard：展示全局 network + 多 target 状态；排障信息通过 Main window 的 Diagnostics（target detail）提供。
-  - 通过启动/管理本地 CLI/daemon（best-effort）来获取任务进度与状态快照。
+  - Settings window 的 daemon 业务全部通过版本化 control IPC；不启动 CLI，也不做 CLI 兼容回退。
+    Popover 的历史 status stream 仍可通过 CLI 转发任务进度快照。
 
 ### 1.2 CLI（televybackup）
 
