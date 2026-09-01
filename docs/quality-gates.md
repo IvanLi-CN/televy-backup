@@ -51,4 +51,4 @@ Use the exact GitHub check names below as the merge gate contract for PRs target
 
 - Hooks: `lefthook`
 - Rust checks are expected to stay green locally before push when practical.
-- Release script contract tests are part of CI because release logic is shell-driven and easy to regress silently.
+- Release script and notification workflow contract tests are part of CI because release logic and reusable-workflow wiring are easy to regress silently.
