@@ -147,7 +147,11 @@ run_release_intent_tests() {
 run_notify_workflow_contract_tests() {
   local workflow_file="$root_dir/.github/workflows/notify-release-failure.yml"
   local workflow_text
+  local failure_job
+  local smoke_job
   workflow_text="$(<"$workflow_file")"
+  failure_job="$(awk '/^  notify_failure:/{found=1} found && /^  [A-Za-z0-9_-]+:/ && !/^  notify_failure:/{exit} found{print}' "$workflow_file")"
+  smoke_job="$(awk '/^  smoke_test:/{found=1} found && /^  [A-Za-z0-9_-]+:/ && !/^  smoke_test:/{exit} found{print}' "$workflow_file")"
 
   assert_count "$workflow_file" 'IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b' 2
   assert_count "$workflow_file" 'id-token: write' 2
@@ -165,17 +169,35 @@ run_notify_workflow_contract_tests() {
   assert_contains "$workflow_text" 'types:'
   assert_contains "$workflow_text" '- completed'
   assert_contains "$workflow_text" 'branches:'
-  assert_contains "$workflow_text" 'if: ${{ github.event_name == '\''workflow_run'\'' && github.event.workflow_run.conclusion == '\''failure'\'' }}'
   assert_contains "$workflow_text" 'workflow_dispatch:'
 
-  assert_contains "$workflow_text" '🚨 Release Failed · ${{ github.repository }}'
-  assert_contains "$workflow_text" 'status: ${{ github.event.workflow_run.conclusion }}'
-  assert_contains "$workflow_text" 'target_sha: ${{ needs.resolve_release_context.outputs.head_sha }}'
-  assert_contains "$workflow_text" 'run_url: ${{ github.event.workflow_run.html_url }}'
-  assert_contains "$workflow_text" '🧪 Smoke Test · ${{ github.repository }}'
-  assert_contains "$workflow_text" 'status: smoke test'
-  assert_contains "$workflow_text" 'target_sha: ${{ github.sha }}'
-  assert_contains "$workflow_text" "run_url: \${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}"
+  assert_contains "$failure_job" 'if: ${{ github.event_name == '\''workflow_run'\'' && github.event.workflow_run.conclusion == '\''failure'\'' }}'
+  assert_contains "$failure_job" 'permissions:'
+  assert_contains "$failure_job" 'id-token: write'
+  assert_contains "$failure_job" 'uses: IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b'
+  assert_contains "$failure_job" 'outcome: failure'
+  assert_contains "$failure_job" 'summary: |'
+  assert_contains "$failure_job" '🚨 Release Failed · ${{ github.repository }}'
+  assert_contains "$failure_job" 'status: ${{ github.event.workflow_run.conclusion }}'
+  assert_contains "$failure_job" 'target_sha: ${{ needs.resolve_release_context.outputs.head_sha }}'
+  assert_contains "$failure_job" 'run_url: ${{ github.event.workflow_run.html_url }}'
+  assert_not_contains "$failure_job" 'gateway_url:'
+  assert_not_contains "$failure_job" 'oidc_audience:'
+  assert_not_contains "$failure_job" 'secrets:'
+
+  assert_contains "$smoke_job" 'if: ${{ github.event_name == '\''workflow_dispatch'\'' }}'
+  assert_contains "$smoke_job" 'permissions:'
+  assert_contains "$smoke_job" 'id-token: write'
+  assert_contains "$smoke_job" 'uses: IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b'
+  assert_contains "$smoke_job" 'outcome: failure'
+  assert_contains "$smoke_job" 'summary: |'
+  assert_contains "$smoke_job" '🧪 Smoke Test · ${{ github.repository }}'
+  assert_contains "$smoke_job" 'status: smoke test'
+  assert_contains "$smoke_job" 'target_sha: ${{ github.sha }}'
+  assert_contains "$smoke_job" "run_url: \${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}"
+  assert_not_contains "$smoke_job" 'gateway_url:'
+  assert_not_contains "$smoke_job" 'oidc_audience:'
+  assert_not_contains "$smoke_job" 'secrets:'
 }
 
 run_compute_version_tests
