@@ -151,10 +151,11 @@ run_notify_workflow_contract_tests() {
 
   assert_count "$workflow_file" 'IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b' 2
   assert_count "$workflow_file" 'id-token: write' 2
-  assert_count "$workflow_file" 'summary: >-' 2
+  assert_count "$workflow_file" 'summary: |' 2
   assert_count "$workflow_file" 'outcome: failure' 2
   assert_not_contains "$workflow_text" 'IvanLi-CN/github-workflows/.github/workflows/release-failure-telegram.yml@main'
   assert_not_contains "$workflow_text" 'SHOUTRRR_URL'
+  assert_not_contains "$workflow_text" 'alert_kind:'
   assert_not_contains "$workflow_text" 'gateway_url:'
   assert_not_contains "$workflow_text" 'oidc_audience:'
 
@@ -167,15 +168,14 @@ run_notify_workflow_contract_tests() {
   assert_contains "$workflow_text" 'if: ${{ github.event_name == '\''workflow_run'\'' && github.event.workflow_run.conclusion == '\''failure'\'' }}'
   assert_contains "$workflow_text" 'workflow_dispatch:'
 
-  assert_contains "$workflow_text" 'title: Release failure'
-  assert_contains "$workflow_text" 'project: ${{ github.repository }}'
+  assert_contains "$workflow_text" '🚨 Release Failed · ${{ github.repository }}'
   assert_contains "$workflow_text" 'status: ${{ github.event.workflow_run.conclusion }}'
-  assert_contains "$workflow_text" 'target SHA: ${{ needs.resolve_release_context.outputs.head_sha }}'
-  assert_contains "$workflow_text" 'run URL: ${{ github.event.workflow_run.html_url }}'
-  assert_contains "$workflow_text" 'title: Release notifier smoke test'
-  assert_contains "$workflow_text" 'status: failure'
-  assert_contains "$workflow_text" 'target SHA: ${{ github.sha }}'
-  assert_contains "$workflow_text" "run URL: \${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}"
+  assert_contains "$workflow_text" 'target_sha: ${{ needs.resolve_release_context.outputs.head_sha }}'
+  assert_contains "$workflow_text" 'run_url: ${{ github.event.workflow_run.html_url }}'
+  assert_contains "$workflow_text" '🧪 Smoke Test · ${{ github.repository }}'
+  assert_contains "$workflow_text" 'status: smoke test'
+  assert_contains "$workflow_text" 'target_sha: ${{ github.sha }}'
+  assert_contains "$workflow_text" "run_url: \${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}"
 }
 
 run_compute_version_tests

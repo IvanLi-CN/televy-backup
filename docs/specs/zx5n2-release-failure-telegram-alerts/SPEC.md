@@ -18,11 +18,12 @@
 - 两个调用 job 授予 `id-token: write`；调用方省略 `gateway_url` 与 `oidc_audience`，由 Oidrune 选择默认 gateway。
 - 调用方不再传递 Telegram/Shoutrrr secret。
 - 调用方必须完整生成 `summary`，至少包含：
-  - 项目名；
+-  - 首行为 `🚨 Release Failed · owner/repo`（failure）或 `🧪 Smoke Test · owner/repo`（smoke）；
   - 状态；
   - 目标 SHA；
   - run URL；
   - failure 或 smoke 标题。
+- summary 保留多行正文格式，继续包含 workflow、event、ref、run attempt、actor 和 note。
 - 失败路径额外保留 ref、run attempt、actor 和 target SHA 解析详情；smoke 路径额外保留 ref、run attempt、actor 和 smoke 说明。
 
 ## Non-goals
