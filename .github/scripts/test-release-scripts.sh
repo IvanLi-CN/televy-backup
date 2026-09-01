@@ -17,6 +17,27 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    echo "Expected output not to contain: $needle" >&2
+    exit 1
+  fi
+}
+
+assert_count() {
+  local file="$1"
+  local needle="$2"
+  local expected="$3"
+  local actual
+  actual="$(awk -v needle="$needle" 'index($0, needle) { count++ } END { print count + 0 }' "$file")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "Expected $expected occurrences of '$needle' in $file, got $actual" >&2
+    exit 1
+  fi
+}
+
 setup_git_repo() {
   local repo_dir="$1"
   mkdir -p "$repo_dir/crates/daemon"
@@ -123,9 +144,44 @@ run_release_intent_tests() {
   assert_contains "$out" 'reason=ambiguous_or_missing_pr(count=0)'
 }
 
+run_notify_workflow_contract_tests() {
+  local workflow_file="$root_dir/.github/workflows/notify-release-failure.yml"
+  local workflow_text
+  workflow_text="$(<"$workflow_file")"
+
+  assert_count "$workflow_file" 'IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b' 2
+  assert_count "$workflow_file" 'id-token: write' 2
+  assert_count "$workflow_file" 'summary: >-' 2
+  assert_count "$workflow_file" 'outcome: failure' 2
+  assert_not_contains "$workflow_text" 'IvanLi-CN/github-workflows/.github/workflows/release-failure-telegram.yml@main'
+  assert_not_contains "$workflow_text" 'SHOUTRRR_URL'
+  assert_not_contains "$workflow_text" 'gateway_url:'
+  assert_not_contains "$workflow_text" 'oidc_audience:'
+
+  assert_contains "$workflow_text" 'workflow_run:'
+  assert_contains "$workflow_text" 'workflows:'
+  assert_contains "$workflow_text" '- Release'
+  assert_contains "$workflow_text" 'types:'
+  assert_contains "$workflow_text" '- completed'
+  assert_contains "$workflow_text" 'branches:'
+  assert_contains "$workflow_text" 'if: ${{ github.event_name == '\''workflow_run'\'' && github.event.workflow_run.conclusion == '\''failure'\'' }}'
+  assert_contains "$workflow_text" 'workflow_dispatch:'
+
+  assert_contains "$workflow_text" 'title: Release failure'
+  assert_contains "$workflow_text" 'project: ${{ github.repository }}'
+  assert_contains "$workflow_text" 'status: ${{ github.event.workflow_run.conclusion }}'
+  assert_contains "$workflow_text" 'target SHA: ${{ needs.resolve_release_context.outputs.head_sha }}'
+  assert_contains "$workflow_text" 'run URL: ${{ github.event.workflow_run.html_url }}'
+  assert_contains "$workflow_text" 'title: Release notifier smoke test'
+  assert_contains "$workflow_text" 'status: failure'
+  assert_contains "$workflow_text" 'target SHA: ${{ github.sha }}'
+  assert_contains "$workflow_text" "run URL: \${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}"
+}
+
 run_compute_version_tests
 run_label_gate_tests
 run_freeze_release_intent_tests
 run_release_intent_tests
+run_notify_workflow_contract_tests
 
-echo 'release script tests passed'
+echo 'release script and notification workflow contract tests passed'
