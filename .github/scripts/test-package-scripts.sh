@@ -9,11 +9,9 @@ bash -n "$root_dir/scripts/macos/package-release.sh" \
   "$root_dir/scripts/macos/assemble-universal.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh"
-python3 - <<'PY'
-import yaml
-for path in ['.github/workflows/package-ci.yml', '.github/workflows/release-backfill.yml']:
-    yaml.safe_load(open(path, encoding='utf-8'))
-PY
+ruby -ryaml -e 'ARGV.each { |path| YAML.load_file(path) }' \
+  .github/workflows/package-ci.yml \
+  .github/workflows/release-backfill.yml
 
 version="1.2.3-rc.abc1234"
 for asset in \
