@@ -407,13 +407,40 @@ pub fn install_service(
 
 pub fn uninstall_service(config_dir: &Path, json: bool) -> Result<(), CliError> {
     let plist = plist_path();
+    let root = service_root(config_dir);
+    let manifest = read_manifest(config_dir)?;
+    if manifest.is_none() {
+        if plist.is_file() || root.is_dir() {
+            return Err(CliError::new(
+                "service.ownership_conflict",
+                "refusing to remove service files without a product-owned manifest; inspect and remove them manually",
+            ));
+        }
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"uninstalled": true, "alreadyAbsent": true, "label": SERVICE_LABEL, "preserved": ["config", "data", "logs", "keychain"]})
+            );
+        } else {
+            println!("managed service already absent; user data preserved");
+        }
+        return Ok(());
+    }
+    if manifest
+        .as_ref()
+        .is_some_and(|value| value.label != SERVICE_LABEL)
+    {
+        return Err(CliError::new(
+            "service.ownership_conflict",
+            "service manifest belongs to a different product label; refusing to remove it",
+        ));
+    }
     let domain = gui_domain();
     if plist.is_file() {
         let _ = launchctl(&["bootout", &domain, SERVICE_LABEL]);
         fs::remove_file(&plist)
             .map_err(|e| CliError::new("service.uninstall_failed", e.to_string()))?;
     }
-    let root = service_root(config_dir);
     if root.is_dir() {
         fs::remove_dir_all(&root)
             .map_err(|e| CliError::new("service.uninstall_failed", e.to_string()))?;
