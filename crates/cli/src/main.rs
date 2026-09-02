@@ -35,8 +35,19 @@ use tokio::io::AsyncBufReadExt;
 use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
+mod service;
+
+const BUILD_VERSION: &str = match option_env!("TELEVYBACKUP_BUILD_VERSION") {
+    Some(value) => value,
+    None => env!("CARGO_PKG_VERSION"),
+};
+const BUILD_LONG_VERSION: &str = match option_env!("TELEVYBACKUP_BUILD_LONG_VERSION") {
+    Some(value) => value,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 #[derive(Parser)]
-#[command(name = "televybackup")]
+#[command(name = "televybackup", version = BUILD_VERSION, long_version = BUILD_LONG_VERSION)]
 #[command(about = "TelevyBackup CLI (native macOS app backend)", long_about = None)]
 struct Cli {
     #[arg(long)]
@@ -119,6 +130,12 @@ enum DaemonCmd {
     Start,
     Status,
     Stop,
+    InstallService {
+        #[arg(long)]
+        replace: bool,
+    },
+    UninstallService,
+    ServiceStatus,
 }
 
 #[derive(Subcommand)]
@@ -905,7 +922,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Daemon { cmd } => match cmd {
             DaemonCmd::Start => daemon_start(&config_dir, &data_dir, cli.json).await,
             DaemonCmd::Status => daemon_status(&data_dir, cli.json),
-            DaemonCmd::Stop => daemon_stop(&data_dir, cli.json).await,
+            DaemonCmd::Stop => daemon_stop(&config_dir, &data_dir, cli.json).await,
+            DaemonCmd::InstallService { replace } => {
+                service::install_service(&config_dir, &data_dir, replace, cli.json)
+            }
+            DaemonCmd::UninstallService => service::uninstall_service(&config_dir, cli.json),
+            DaemonCmd::ServiceStatus => service::service_status(&config_dir, &data_dir, cli.json),
         },
         Command::Gui { cmd } => match cmd {
             GuiCmd::Quit => gui_quit(&gui_data_dir, cli.json),
@@ -1426,6 +1448,34 @@ async fn daemon_start(config_dir: &Path, data_dir: &Path, json: bool) -> Result<
         return Ok(());
     }
 
+    if service::managed_service_matches(config_dir, data_dir) {
+        service::kickstart_service().map_err(|e| {
+            CliError::retryable(
+                "daemon.start_failed",
+                format!("managed service: {}", e.message),
+            )
+        })?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if daemon_ipc_ready(data_dir) {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"running": true, "started": true, "managedService": true})
+                    );
+                } else {
+                    println!("managed daemon started");
+                }
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        return Err(CliError::retryable(
+            "daemon.start_timeout",
+            "managed daemon IPC did not become ready within 5s",
+        ));
+    }
+
     let daemon = daemon_binary_path();
     let mut command = ProcessCommand::new(&daemon);
     command
@@ -1499,7 +1549,10 @@ fn daemon_status(data_dir: &Path, json: bool) -> Result<(), CliError> {
     }
 }
 
-async fn daemon_stop(data_dir: &Path, json: bool) -> Result<(), CliError> {
+async fn daemon_stop(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
+    if service::managed_service_matches(config_dir, data_dir) {
+        let _ = service::stop_service();
+    }
     if !daemon_ipc_ready(data_dir) {
         if json {
             println!(

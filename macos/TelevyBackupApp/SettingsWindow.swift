@@ -494,9 +494,22 @@ private enum SettingsUIDemo {
     static var initialSection: SettingsSection {
         if enabled && scene.hasPrefix("diagnostics") { return .diagnostics }
         if enabled && scene.hasPrefix("backup-config") { return .recoveryKey }
-        if scene == "schedule" { return .schedule }
+        if scene == "schedule" || scene.hasPrefix("service-") { return .schedule }
         if scene.hasPrefix("endpoints") { return .endpoints }
         return .targets
+    }
+
+    static var serviceStatus: ManagedServiceStatus {
+        switch scene {
+        case "service-installed":
+            return ManagedServiceStatus(installed: true, launchdLoaded: true, environmentMatch: true, version: "0.9.1", configDir: "/Users/ivan/Library/Application Support/TelevyBackup", dataDir: "/Users/ivan/Library/Application Support/TelevyBackup")
+        case "service-update":
+            return ManagedServiceStatus(installed: true, launchdLoaded: false, environmentMatch: true, version: "0.9.0", configDir: "/Users/ivan/Library/Application Support/TelevyBackup", dataDir: "/Users/ivan/Library/Application Support/TelevyBackup")
+        case "service-conflict":
+            return ManagedServiceStatus(installed: true, launchdLoaded: true, environmentMatch: false, version: "0.9.0", configDir: "/Users/ivan/Other/config", dataDir: "/Users/ivan/Other/data")
+        default:
+            return ManagedServiceStatus(installed: false, launchdLoaded: false, environmentMatch: nil, version: nil, configDir: nil, dataDir: nil)
+        }
     }
 
     static var shouldOpenBackupConfigImportSheet: Bool {
@@ -593,6 +606,9 @@ struct SettingsWindowRootView: View {
     @State private var settingsRevision: String?
     @State private var reloadInFlight = false
     @State private var reloadPending = false
+    @State private var managedServiceStatus: ManagedServiceStatus?
+    @State private var managedServiceError: String?
+    @State private var managedServiceBusy = false
 
     private struct ImportConfigBundleSheetRequest: Identifiable {
         let id = UUID()
@@ -676,6 +692,7 @@ struct SettingsWindowRootView: View {
             }
             requestReload()
             reloadDiagnostics()
+            refreshManagedService()
         }
         .onReceive(NotificationCenter.default.publisher(for: .settingsWindowRequested)) { _ in
             requestReload()
@@ -1548,12 +1565,108 @@ struct SettingsWindowRootView: View {
                     Text("Targets inherit this schedule unless you set a target-specific override.")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
+
+                    managedServiceView
                 }
             }
             .frame(maxWidth: 700, alignment: .leading)
             .padding(.horizontal, 24)
             .padding(.vertical, 22)
             .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private var managedServiceView: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Run daemon in the background", isOn: Binding(
+                    get: { managedServiceStatus?.installed ?? false },
+                    set: { enabled in
+                        performManagedServiceAction(enabled ? "install-service" : "uninstall-service")
+                    }
+                ))
+                .toggleStyle(.switch)
+                .disabled(managedServiceBusy)
+
+                HStack(spacing: 8) {
+                    Image(systemName: managedServiceStatus?.stateSymbol ?? "questionmark.circle")
+                        .foregroundStyle(managedServiceStatus?.environmentMatch == false ? .orange : .secondary)
+                    Text(managedServiceStatus?.stateTitle ?? "Checking service status…")
+                        .font(.system(size: 12, weight: .semibold))
+                    if let version = managedServiceStatus?.version {
+                        Text(version)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if managedServiceBusy { ProgressView().controlSize(.small) }
+                }
+
+                if managedServiceStatus?.environmentMatch == false {
+                    Text("The existing service uses different config or data directories. Reinstall explicitly to change the binding.")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.orange)
+                }
+                if let managedServiceError {
+                    Label(managedServiceError, systemImage: "xmark.octagon")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.red)
+                }
+
+                HStack {
+                    Button("Update / reinstall") { performManagedServiceAction("install-service", replace: true) }
+                        .buttonStyle(.bordered)
+                        .disabled(managedServiceBusy)
+                    Button("Refresh") { refreshManagedService() }
+                        .buttonStyle(.borderless)
+                        .disabled(managedServiceBusy)
+                }
+            }
+            .padding(14)
+        } label: {
+            Text("Product-managed background service")
+                .font(.system(size: 13, weight: .semibold))
+        }
+    }
+
+    private func refreshManagedService() {
+        if SettingsUIDemo.enabled {
+            managedServiceStatus = SettingsUIDemo.serviceStatus
+            managedServiceError = SettingsUIDemo.scene == "service-failure" ? "Service status is unavailable" : nil
+            return
+        }
+        model.fetchManagedServiceStatus { status, error in
+            managedServiceStatus = status
+            managedServiceError = error
+        }
+    }
+
+    private func performManagedServiceAction(_ action: String, replace: Bool = false) {
+        guard !managedServiceBusy else { return }
+        if SettingsUIDemo.enabled {
+            managedServiceBusy = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                managedServiceBusy = false
+                if SettingsUIDemo.scene == "service-failure" {
+                    managedServiceError = "The service operation failed; no files were changed"
+                } else if action == "uninstall-service" {
+                    managedServiceStatus = ManagedServiceStatus(installed: false, launchdLoaded: false, environmentMatch: nil, version: nil, configDir: nil, dataDir: nil)
+                } else {
+                    managedServiceStatus = SettingsUIDemo.serviceStatus
+                }
+            }
+            return
+        }
+        managedServiceBusy = true
+        managedServiceError = nil
+        model.performManagedServiceAction(action, replace: replace) { success, error in
+            managedServiceBusy = false
+            if success {
+                refreshManagedService()
+            } else {
+                managedServiceError = error ?? "The service operation failed; no files were changed"
+                refreshManagedService()
+            }
         }
     }
 

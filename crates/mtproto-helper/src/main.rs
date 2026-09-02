@@ -19,6 +19,15 @@ use tokio::sync::Mutex;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, Instant, timeout};
 
+const BUILD_VERSION: &str = match option_env!("TELEVYBACKUP_BUILD_VERSION") {
+    Some(value) => value,
+    None => env!("CARGO_PKG_VERSION"),
+};
+const BUILD_COMMIT: &str = match option_env!("TELEVYBACKUP_BUILD_COMMIT") {
+    Some(value) => value,
+    None => "unknown",
+};
+
 const TG_MTPROTO_OBJECT_ID_PREFIX_V1: &str = "tgmtproto:v1:";
 const INIT_IS_AUTHORIZED_TIMEOUT_SECS: u64 = 120;
 const INIT_BOT_SIGN_IN_TIMEOUT_SECS: u64 = 120;
@@ -534,6 +543,10 @@ struct TgMtProtoObjectIdV1Payload {
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().skip(1).any(|arg| arg == "--version" || arg == "-V") {
+        println!("televybackup-mtproto-helper {BUILD_VERSION} ({BUILD_COMMIT})");
+        return;
+    }
     let stdin = std::io::stdin();
     let mut input = BufReader::new(stdin.lock());
     let stdout = std::io::stdout();

@@ -113,7 +113,7 @@ The UI dashboard is best-effort without the daemon, but “live” status requir
 Expected behavior:
 
 - When the user opens the popover, the app should make a best-effort attempt to ensure the daemon is running (so `status.json` begins updating quickly).
-  - Preferred: `launchctl kickstart` the user LaunchAgent if present (Homebrew services label `homebrew.mxcl.televybackupd`).
+  - Preferred: `launchctl kickstart` the product-managed user LaunchAgent if installed (`com.ivan.televybackup.daemon`); detect the Homebrew label only as a legacy fallback.
   - Fallback (dev/local): spawn a bundled `televybackupd` if available.
 - When the user clicks `Backup now` in the popover header, the app triggers an immediate backup wave for all `enabled=true` targets by writing a control file:
   - Path: `$TELEVYBACKUP_DATA_DIR/control/backup-now`
@@ -121,7 +121,7 @@ Expected behavior:
 
 Implementation options:
 
-- **LaunchAgent (recommended)**: install/manage `televybackupd` via `launchd` (e.g. Homebrew services).
+- **LaunchAgent (recommended)**: install/manage `televybackupd` via the product CLI and `launchd` (`com.ivan.televybackup.daemon`). Existing Homebrew services remain a compatibility path.
   - The UI can optionally “kickstart” the LaunchAgent when opening the popover.
   - Pros: standard macOS background-process model; stable; avoids multiple daemon instances.
 - **Bundle-and-spawn**: embed `televybackupd` inside the `.app` bundle and spawn it from the UI.

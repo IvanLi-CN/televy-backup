@@ -1915,6 +1915,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "televy_backup_core",
  "tempfile",

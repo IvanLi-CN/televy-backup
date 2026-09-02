@@ -44,6 +44,7 @@ jobs:
       pr_url: ${{ steps.meta.outputs.pr_url }}
       release_intent_label: ${{ steps.meta.outputs.release_intent_label }}
       reason: ${{ steps.meta.outputs.reason }}
+      source_commit: ${{ steps.meta.outputs.source_commit }}
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@v4
@@ -145,6 +146,7 @@ jobs:
           echo "pr_url=${{ steps.intent.outputs.pr_url }}" >> "$GITHUB_OUTPUT"
           echo "release_intent_label=${{ steps.intent.outputs.release_intent_label }}" >> "$GITHUB_OUTPUT"
           echo "reason=${{ steps.intent.outputs.reason }}" >> "$GITHUB_OUTPUT"
+          echo "source_commit=${RELEASE_HEAD_SHA}" >> "$GITHUB_OUTPUT"
 
           if [[ "${{ steps.intent.outputs.should_release }}" == "true" ]]; then
             echo "app_effective_version=${APP_EFFECTIVE_VERSION}" >> "$GITHUB_OUTPUT"
@@ -154,52 +156,142 @@ jobs:
             echo "release_tag=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Configure Git user
-        if: ${{ steps.intent.outputs.should_release == 'true' }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+  build-arm64:
+    name: Build arm64 package
+    runs-on: macos-15
+    needs: [prepare]
+    if: ${{ needs.prepare.outputs.should_release == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_commit }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.91.0
+          targets: aarch64-apple-darwin
+      - name: Build arm64 artifacts
+        env:
+          RUST_TOOLCHAIN: 1.91.0
+        run: bash scripts/macos/package-release.sh --version "${{ needs.prepare.outputs.app_effective_version }}" --arch arm64 --output-dir dist/arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-package-arm64
+          path: dist/arm64
 
-      - name: Create and push tag (if missing)
-        if: ${{ steps.intent.outputs.should_release == 'true' }}
-        shell: bash
+  build-x86_64:
+    name: Build x86_64 package
+    runs-on: macos-15-intel
+    needs: [prepare]
+    if: ${{ needs.prepare.outputs.should_release == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_commit }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.91.0
+          targets: x86_64-apple-darwin
+      - name: Build x86_64 artifacts
+        env:
+          RUST_TOOLCHAIN: 1.91.0
+        run: bash scripts/macos/package-release.sh --version "${{ needs.prepare.outputs.app_effective_version }}" --arch x86_64 --output-dir dist/x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-package-x86_64
+          path: dist/x86_64
+
+  assemble-universal:
+    name: Assemble Universal 2 package
+    runs-on: macos-15
+    needs: [prepare, build-arm64, build-x86_64]
+    if: ${{ needs.prepare.outputs.should_release == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_commit }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-package-arm64
+          path: dist/arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-package-x86_64
+          path: dist/x86_64
+      - name: Assemble and validate final assets
+        env:
+          RUST_TOOLCHAIN: 1.91.0
         run: |
           set -euo pipefail
-          tag="v${APP_EFFECTIVE_VERSION}"
-          echo "target tag: $tag"
-          git fetch --tags --force >/dev/null 2>&1 || true
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null             || git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-            echo "Tag ${tag} already exists. Skipping push."
-          else
-            git tag -a "$tag" -m "$tag"
-            if git push origin "refs/tags/${tag}"; then
-              echo "Pushed ${tag}."
-            else
-              git fetch --tags --force >/dev/null 2>&1 || true
-              if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
-                echo "Tag ${tag} was created concurrently. Treating as success."
-              else
-                echo "::error::Failed to push tag ${tag}." >&2
-                exit 1
-              fi
-            fi
-          fi
+          mkdir -p dist/final
+          arm_app="$(find dist/arm64 -maxdepth 1 -type d -name '*.app' -print -quit)"
+          x86_app="$(find dist/x86_64 -maxdepth 1 -type d -name '*.app' -print -quit)"
+          bash scripts/macos/assemble-universal.sh --version "${{ needs.prepare.outputs.app_effective_version }}" --arm64-app "$arm_app" --x86_64-app "$x86_app" --output-dir dist/final
+          cp dist/arm64/TelevyBackup-*-arm64.dmg dist/final/
+          cp dist/x86_64/TelevyBackup-*-x86_64.dmg dist/final/
+          cp dist/arm64/televybackup-tools-*-arm64.tar.gz dist/final/
+          cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
+          bash scripts/macos/generate-release-manifest.sh --version "${{ needs.prepare.outputs.app_effective_version }}" --asset-dir dist/final --source-commit "${{ needs.prepare.outputs.source_commit }}" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
+          bash scripts/macos/verify-release-assets.sh --version "${{ needs.prepare.outputs.app_effective_version }}" --asset-dir dist/final
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/final
 
   publish:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [prepare]
+    needs: [prepare, assemble-universal]
     if: ${{ needs.prepare.outputs.should_release == 'true' }}
     steps:
-      - name: Create or update GitHub Release
-        uses: softprops/action-gh-release@v2
+      - uses: actions/checkout@v4
         with:
-          tag_name: ${{ needs.prepare.outputs.release_tag }}
-          name: ${{ needs.prepare.outputs.release_tag }}
-          prerelease: ${{ needs.prepare.outputs.release_channel == 'rc' }}
-          generate_release_notes: true
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.source_commit }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist/final
+      - name: Create tag, draft release, upload and publish atomically
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_CHANNEL: ${{ needs.prepare.outputs.release_channel }}
+          SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          existing="$(git rev-list -n 1 "$RELEASE_TAG" 2>/dev/null || true)"
+          if [[ -n "$existing" && "$existing" != "$SOURCE_COMMIT" ]]; then
+            echo "tag $RELEASE_TAG exists at $existing, expected $SOURCE_COMMIT" >&2
+            exit 1
+          fi
+          if [[ -z "$existing" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$RELEASE_TAG" "$SOURCE_COMMIT" -m "$RELEASE_TAG"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+          prerelease=false
+          [[ "$RELEASE_CHANNEL" == rc ]] && prerelease=true
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --draft --title "$RELEASE_TAG" --generate-notes $( [[ "$prerelease" == true ]] && printf '%s' '--prerelease' )
+          fi
+          remote_assets="$(gh release view "$RELEASE_TAG" --json assets)"
+          while IFS= read -r asset; do
+            name="$(basename "$asset")"
+            local_sha="$(sha256sum "$asset" | awk '{print $1}')"
+            remote_sha="$(REMOTE="$remote_assets" NAME="$name" python3 -c 'import json,os; p=json.loads(os.environ["REMOTE"]); print(next((a.get("digest","").removeprefix("sha256:")) for a in p.get("assets",[]) if a.get("name")==os.environ["NAME"]),"")')"
+            if [[ -n "$remote_sha" ]]; then
+              [[ "$remote_sha" == "$local_sha" ]] || { echo "asset hash mismatch: $name" >&2; exit 1; }
+              echo "asset already uploaded with matching hash: $name"
+            else
+              gh release upload "$RELEASE_TAG" "$asset"
+            fi
+          done < <(find dist/final -maxdepth 1 -type f -print)
+          gh release edit "$RELEASE_TAG" --draft=false
 
   skipped:
     name: Release skipped

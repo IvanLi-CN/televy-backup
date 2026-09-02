@@ -6,7 +6,7 @@ out="${2:-}"
 
 if [[ -z "$scene" || -z "$out" ]]; then
   echo "Usage: $0 <scene> <out.png>" >&2
-  echo "Scenes: settings-failure | targets-empty | endpoints-empty | targets-unselected | endpoints-unselected | diagnostics-normal | diagnostics-debug | diagnostics-override | diagnostics-retention" >&2
+  echo "Scenes: settings-failure | targets-empty | endpoints-empty | targets-unselected | endpoints-unselected | schedule | service-installed | service-update | service-conflict | service-failure | diagnostics-normal | diagnostics-debug | diagnostics-override | diagnostics-retention" >&2
   exit 2
 fi
 

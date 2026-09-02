@@ -53,6 +53,29 @@ final class ModelStore {
     static let shared = AppModel()
 }
 
+struct ManagedServiceStatus: Decodable, Equatable {
+    let installed: Bool
+    let launchdLoaded: Bool
+    let environmentMatch: Bool?
+    let version: String?
+    let configDir: String?
+    let dataDir: String?
+
+    var stateTitle: String {
+        guard installed else { return "Off" }
+        if environmentMatch == false { return "Directory conflict" }
+        if !launchdLoaded { return "Needs update" }
+        return "Running in background"
+    }
+
+    var stateSymbol: String {
+        guard installed else { return "moon.zzz" }
+        if environmentMatch == false { return "exclamationmark.triangle" }
+        if !launchdLoaded { return "arrow.triangle.2.circlepath" }
+        return "checkmark.circle"
+    }
+}
+
 private struct AppRuntimeKey: EnvironmentKey {
     static let defaultValue = ModelStore.shared
 }
@@ -319,15 +342,27 @@ final class AppModel {
 
         guard fullyStopDaemon else { return nil }
         cancelGUIOwnedLocalJobs()
-        let service = "gui/\(getuid())/homebrew.mxcl.televybackupd"
-        let managesHomebrewLaunchAgent = !preferBundledDaemonForCurrentEnvironment()
-        let launchAgentLoaded = managesHomebrewLaunchAgent && runCommandCapture(
+        let nativeService = "gui/\(getuid())/com.ivan.televybackup.daemon"
+        let homebrewService = "gui/\(getuid())/homebrew.mxcl.televybackupd"
+        let managesLaunchAgent = !preferBundledDaemonForCurrentEnvironment()
+        let service: String?
+        if managesLaunchAgent && runCommandCapture(
             exe: "/bin/launchctl",
-            args: ["print", service],
+            args: ["print", nativeService],
             timeoutSeconds: 2
-        ).status == 0
+        ).status == 0 {
+            service = nativeService
+        } else if managesLaunchAgent && runCommandCapture(
+            exe: "/bin/launchctl",
+            args: ["print", homebrewService],
+            timeoutSeconds: 2
+        ).status == 0 {
+            service = homebrewService
+        } else {
+            service = nil
+        }
         let daemonStopEnvironment: [String: String]
-        if launchAgentLoaded {
+        if service == homebrewService {
             guard let homebrewEnvironment = homebrewDaemonEnvironment() else {
                 return "The Homebrew daemon service location could not be determined."
             }
@@ -336,13 +371,14 @@ final class AppModel {
             daemonStopEnvironment = [:]
         }
         let disabledForShutdown: Bool
-        if managesHomebrewLaunchAgent {
+        if let service {
             let disabled = runCommandCapture(
                 exe: "/bin/launchctl",
                 args: ["print-disabled", "gui/\(getuid())"],
                 timeoutSeconds: 2
             )
-            let launchAgentWasDisabled = disabled.stdout.contains("\"homebrew.mxcl.televybackupd\" => true")
+            let label = service.split(separator: "/").last.map(String.init) ?? ""
+            let launchAgentWasDisabled = disabled.stdout.contains("\"\(label)\" => true")
             let disable = launchAgentWasDisabled
                 ? nil
                 : runCommandCapture(exe: "/bin/launchctl", args: ["disable", service], timeoutSeconds: 3)
@@ -350,12 +386,10 @@ final class AppModel {
             if let disable, disable.status != 0 {
                 appendLog("INFO: LaunchAgent not disabled: exit=\(disable.status)")
             }
-        } else {
-            disabledForShutdown = false
-        }
+        } else { disabledForShutdown = false }
 
         func restoreLaunchAgentIfNeeded() {
-            guard disabledForShutdown else { return }
+            guard disabledForShutdown, let service else { return }
             let enable = runCommandCapture(exe: "/bin/launchctl", args: ["enable", service], timeoutSeconds: 3)
             if enable.status != 0 {
                 appendLog("WARN: LaunchAgent could not be re-enabled: exit=\(enable.status)")
@@ -385,7 +419,7 @@ final class AppModel {
             return failure
         }
 
-        if launchAgentLoaded {
+        if let service {
             let unload = runCommandCapture(exe: "/bin/launchctl", args: ["bootout", service], timeoutSeconds: 5)
             if unload.status != 0 {
                 appendLog("ERROR: LaunchAgent not unloaded: exit=\(unload.status)")
@@ -829,6 +863,44 @@ final class AppModel {
         }
     }
 
+    func fetchManagedServiceStatus(completion: @escaping (ManagedServiceStatus?, String?) -> Void) {
+        guard let cli = cliPath() else {
+            DispatchQueue.main.async { completion(nil, "CLI is unavailable in this app bundle") }
+            return
+        }
+        let config = configTomlPath().deletingLastPathComponent().path
+        let data = guiControlDataDirURL().path
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = self.runCommandCapture(exe: cli, args: ["--json", "--config-dir", config, "--data-dir", data, "daemon", "service-status"], timeoutSeconds: 5)
+            let output = result.stdout.isEmpty ? result.stderr : result.stdout
+            let status = try? JSONDecoder().decode(ManagedServiceStatus.self, from: Data(output.utf8))
+            let error = status == nil ? output.trimmingCharacters(in: .whitespacesAndNewlines).prefix(300).description : nil
+            DispatchQueue.main.async { completion(status, error) }
+        }
+    }
+
+    func performManagedServiceAction(_ action: String, replace: Bool = false, completion: @escaping (Bool, String?) -> Void) {
+        guard ["install-service", "uninstall-service"].contains(action) else {
+            completion(false, "Unsupported service operation")
+            return
+        }
+        guard let cli = cliPath() else {
+            DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
+            return
+        }
+        let config = configTomlPath().deletingLastPathComponent().path
+        let data = guiControlDataDirURL().path
+        DispatchQueue.global(qos: .userInitiated).async {
+            var args = ["--json", "--config-dir", config, "--data-dir", data, "daemon", action]
+            if replace { args.append("--replace") }
+            let result = self.runCommandCapture(exe: cli, args: args, timeoutSeconds: 20)
+            let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(300).description
+            DispatchQueue.main.async { completion(result.status == 0, result.status == 0 ? nil : output) }
+        }
+    }
+
     func daemonPath() -> String? {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents")
@@ -1018,7 +1090,17 @@ final class AppModel {
                 }
             }
 
-            // Prefer launchd service if installed (Homebrew services).
+            // Prefer the product-managed LaunchAgent, then retain Homebrew as a legacy fallback.
+            if kickstartLaunchAgent(label: "com.ivan.televybackup.daemon") {
+                appendStatusActivity("Daemon kickstarted via launchd (com.ivan.televybackup.daemon)")
+                if waitForDaemonIpcReady(timeoutSeconds: 2.0) {
+                    return true
+                }
+                appendStatusActivity("Daemon starting (IPC not ready yet)")
+                scheduleDaemonIpcRetry()
+                return false
+            }
+
             if kickstartLaunchAgent(label: "homebrew.mxcl.televybackupd") {
                 appendStatusActivity("Daemon kickstarted via launchd (homebrew.mxcl.televybackupd)")
                 if waitForDaemonIpcReady(timeoutSeconds: 2.0) {

@@ -4,6 +4,7 @@ on:
   workflow_run:
     workflows:
       - Release
+      - Release exact-tag backfill
     types:
       - completed
     branches:
