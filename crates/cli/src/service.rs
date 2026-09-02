@@ -245,6 +245,14 @@ fn install_inner(
             format!("create {}: {e}", versions.display()),
         )
     })?;
+    // launchd opens these paths before starting the daemon, so create the
+    // parent directory during installation instead of relying on daemon code.
+    fs::create_dir_all(data_dir.join("logs")).map_err(|e| {
+        CliError::new(
+            "service.install_failed",
+            format!("create {}: {e}", data_dir.join("logs").display()),
+        )
+    })?;
     let daemon = sibling_binary("televybackupd")?;
     let helper = sibling_binary("televybackup-mtproto-helper")?;
     let version = current_version();

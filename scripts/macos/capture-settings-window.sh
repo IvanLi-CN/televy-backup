@@ -11,7 +11,13 @@ if [[ -z "$scene" || -z "$out" ]]; then
 fi
 
 root_dir="$(git rev-parse --show-toplevel)"
-app_bin="$root_dir/target/macos-app/TelevyBackup.app/Contents/MacOS/TelevyBackup"
+app_variant="${TELEVYBACKUP_APP_VARIANT:-dev}"
+case "$app_variant" in
+  dev) app_name="TelevyBackup Dev.app" ;;
+  prod|release) app_name="TelevyBackup.app" ;;
+  *) echo "ERROR: unsupported TELEVYBACKUP_APP_VARIANT: $app_variant" >&2; exit 2 ;;
+esac
+app_bin="$root_dir/target/macos-app/$app_name/Contents/MacOS/TelevyBackup"
 demo_root="$root_dir/.dev/ui-snapshot"
 data_dir="$demo_root/data"
 config_dir="$demo_root/config"
