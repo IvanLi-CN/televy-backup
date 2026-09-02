@@ -114,7 +114,12 @@ exit(1)
 SWIFT
 
 swiftc "$workdir/find_window.swift" -o "$workdir/find_window" >/dev/null 2>&1
-wid="$($workdir/find_window "$app_pid" 2>/dev/null || true)"
+wid=""
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  wid="$($workdir/find_window "$app_pid" 2>/dev/null || true)"
+  [[ -n "$wid" ]] && break
+  sleep 1
+done
 
 if [[ -n "$wid" ]]; then
   screencapture -x -l "$wid" "$out"
