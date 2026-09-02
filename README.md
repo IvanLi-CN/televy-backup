@@ -259,11 +259,14 @@ The CLI can manage the local daemon explicitly:
 televybackup daemon start
 televybackup daemon status
 televybackup daemon stop
+televybackup daemon install-service
+televybackup daemon service-status
+televybackup daemon uninstall-service
 ```
 
-`daemon start` returns after the local IPC service is ready. `daemon stop` cancels an active scheduled backup and waits up to 10 seconds for graceful shutdown. In the macOS app, quitting with schedules enabled offers a choice between quitting the app only and fully stopping the daemon; a full stop unloads the Homebrew LaunchAgent so its keep-alive setting cannot restart the process.
+`daemon start` returns after the local IPC service is ready. `daemon stop` cancels an active scheduled backup and waits up to 10 seconds for graceful shutdown. `install-service` explicitly installs the single product-managed per-user LaunchAgent; a different config/data directory requires `--replace`. Uninstall removes only managed service files and preserves user data. In the macOS app, quitting with schedules enabled offers a choice between quitting the app only and fully stopping the daemon; a full stop unloads the product-managed LaunchAgent (or the legacy Homebrew service) so its keep-alive setting cannot restart the process.
 
-Homebrew templates live under `packaging/homebrew/`.
+Release DMGs and native tool archives are built by the macOS package workflow. Verify `SHA256SUMS` before following the ad-hoc Gatekeeper instructions in [`packaging/INSTALL.md`](packaging/INSTALL.md). Homebrew templates under `packaging/homebrew/` are legacy compatibility artifacts and are not maintained by the release flow.
 
 ## Docs
 

@@ -26,6 +26,18 @@ esac
 executable_name="TelevyBackup"
 src_dir="$root_dir/macos/TelevyBackupApp"
 out_root="$root_dir/target/macos-app"
+release_version="${TELEVYBACKUP_RELEASE_VERSION:-0.1.0}"
+source_commit="${TELEVYBACKUP_SOURCE_COMMIT:-$(git rev-parse HEAD)}"
+build_number="${TELEVYBACKUP_BUILD_NUMBER:-$(git rev-list --count "$source_commit" 2>/dev/null || printf '0')}"
+cargo_target="${TELEVYBACKUP_CARGO_TARGET:-}"
+short_version="${release_version%%-*}"
+if [[ ! "$short_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "ERROR: release version must contain numeric semver base: $release_version" >&2
+  exit 2
+fi
+export TELEVYBACKUP_BUILD_VERSION="$release_version"
+export TELEVYBACKUP_BUILD_COMMIT="$source_commit"
+export TELEVYBACKUP_BUILD_NUMBER="$build_number"
 app_dir="$out_root/${bundle_display_name}.app"
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
@@ -36,17 +48,26 @@ mkdir -p "$resources_dir"
 
 rm -f "$resources_dir/televybackup" "$resources_dir/televybackup-mtproto-helper" 2>/dev/null || true
 
-echo "Building CLI..."
-cargo build -p televybackup --release
-cp "$root_dir/target/release/televybackup" "$macos_dir/televybackup-cli"
+binary_dir="$root_dir/target/release"
+if [[ -n "$cargo_target" ]]; then
+  binary_dir="$root_dir/target/$cargo_target/release"
+fi
+
+echo "Building CLI ($release_version, $cargo_target)..."
+if [[ -n "$cargo_target" ]]; then cargo build -p televybackup --release --target "$cargo_target"; else cargo build -p televybackup --release; fi
+cp "$binary_dir/televybackup" "$macos_dir/televybackup-cli"
 
 echo "Building daemon..."
-cargo build -p televybackupd --release
-cp "$root_dir/target/release/televybackupd" "$macos_dir/televybackupd"
+if [[ -n "$cargo_target" ]]; then cargo build -p televybackupd --release --target "$cargo_target"; else cargo build -p televybackupd --release; fi
+cp "$binary_dir/televybackupd" "$macos_dir/televybackupd"
 
 echo "Building MTProto helper..."
-cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release
-cp "$root_dir/crates/mtproto-helper/target/release/televybackup-mtproto-helper" "$macos_dir/televybackup-mtproto-helper"
+if [[ -n "$cargo_target" ]]; then cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release --target "$cargo_target"; else cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release; fi
+helper_binary_dir="$root_dir/crates/mtproto-helper/target/release"
+if [[ -n "$cargo_target" ]]; then
+  helper_binary_dir="$root_dir/crates/mtproto-helper/target/$cargo_target/release"
+fi
+cp "$helper_binary_dir/televybackup-mtproto-helper" "$macos_dir/televybackup-mtproto-helper"
 
 sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
 
@@ -77,9 +98,13 @@ cat > "$contents_dir/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key>
   <string>$bundle_id</string>
   <key>CFBundleVersion</key>
-  <string>0.1.0</string>
+  <string>$build_number</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>$short_version</string>
+  <key>TelevyBackupReleaseVersion</key>
+  <string>$release_version</string>
+  <key>TelevyBackupSourceCommit</key>
+  <string>$source_commit</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
@@ -92,20 +117,14 @@ cat > "$contents_dir/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign_identity="${TELEVYBACKUP_CODESIGN_IDENTITY:-}"
-if [[ -z "$codesign_identity" ]]; then
-  codesign_identity="$(
-    security find-identity -v -p codesigning 2>/dev/null \
-      | awk -F'"' '/Apple Development|Developer ID Application/ {print $2; exit}'
-  )"
-fi
+codesign_identity="${TELEVYBACKUP_CODESIGN_IDENTITY:--}"
 
 if [[ -n "$codesign_identity" ]]; then
-  echo "Codesigning with: $codesign_identity"
+  echo "Codesigning with controlled identity: $codesign_identity"
   codesign --force --sign "$codesign_identity" -i "$bundle_id.cli" "$macos_dir/televybackup-cli" \
-    || echo "WARN: codesign CLI failed (Keychain prompts may repeat)"
+    || echo "WARN: codesign CLI failed"
   codesign --force --sign "$codesign_identity" -i "$bundle_id.mtproto-helper" "$macos_dir/televybackup-mtproto-helper" \
-    || echo "WARN: codesign helper failed (Keychain prompts may repeat)"
+    || echo "WARN: codesign helper failed"
   codesign --force --deep --sign "$codesign_identity" "$app_dir" \
     || echo "WARN: codesign app failed"
 else

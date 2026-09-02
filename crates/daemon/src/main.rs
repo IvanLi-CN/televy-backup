@@ -28,6 +28,27 @@ use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+const BUILD_VERSION: &str = match option_env!("TELEVYBACKUP_BUILD_VERSION") {
+    Some(value) => value,
+    None => env!("CARGO_PKG_VERSION"),
+};
+const BUILD_COMMIT: &str = match option_env!("TELEVYBACKUP_BUILD_COMMIT") {
+    Some(value) => value,
+    None => "unknown",
+};
+
+fn print_version_if_requested() -> bool {
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("televybackupd {BUILD_VERSION} ({BUILD_COMMIT})");
+        true
+    } else {
+        false
+    }
+}
+
 mod control_ipc;
 mod snapshot_inspection_ipc;
 mod status_ipc;
@@ -2010,6 +2031,9 @@ fn acquire_daemon_instance_lock(data_root: &Path) -> std::io::Result<File> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if print_version_if_requested() {
+        return Ok(());
+    }
     let config_dir = std::env::var("TELEVYBACKUP_CONFIG_DIR")
         .ok()
         .map(PathBuf::from);

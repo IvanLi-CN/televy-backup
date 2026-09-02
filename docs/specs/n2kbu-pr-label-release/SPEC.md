@@ -30,7 +30,7 @@
 
 ### Non-goals
 
-- 不引入额外制品打包或多平台构建发布。
+- 不拥有 macOS 制品打包或多架构构建；这些由 [`macos-release-distribution`](../macos-release-distribution/SPEC.md) 统一定义。
 - 不变更现有 Rust/macOS 测试矩阵内容。
 - 不自动 merge PR。
 

@@ -200,10 +200,34 @@ run_notify_workflow_contract_tests() {
   assert_not_contains "$smoke_job" 'secrets:'
 }
 
+run_release_package_workflow_contract_tests() {
+  local workflow_file="$root_dir/.github/workflows/release.yml"
+  local workflow_text
+  workflow_text="$(<"$workflow_file")"
+  assert_contains "$workflow_text" 'runs-on: macos-15'
+  assert_contains "$workflow_text" 'runs-on: macos-15-intel'
+  assert_contains "$workflow_text" 'release-package-arm64'
+  assert_contains "$workflow_text" 'release-package-x86_64'
+  assert_contains "$workflow_text" 'release-assets'
+  assert_contains "$workflow_text" 'gh release create "$RELEASE_TAG" --draft'
+  assert_contains "$workflow_text" 'gh release edit "$RELEASE_TAG" --draft=false'
+  assert_contains "$workflow_text" 'asset hash mismatch'
+  assert_not_contains "$workflow_text" 'softprops/action-gh-release'
+
+  local backfill_file="$root_dir/.github/workflows/release-backfill.yml"
+  local backfill_text
+  backfill_text="$(<"$backfill_file")"
+  assert_contains "$backfill_text" 'type: boolean'
+  assert_contains "$backfill_text" 'default: false'
+  assert_contains "$backfill_text" 'tag source is not on main'
+  assert_contains "$backfill_text" 'Overlay current packaging tooling'
+}
+
 run_compute_version_tests
 run_label_gate_tests
 run_freeze_release_intent_tests
 run_release_intent_tests
 run_notify_workflow_contract_tests
+run_release_package_workflow_contract_tests
 
 echo 'release script and notification workflow contract tests passed'

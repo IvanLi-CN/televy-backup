@@ -6,12 +6,18 @@ out="${2:-}"
 
 if [[ -z "$scene" || -z "$out" ]]; then
   echo "Usage: $0 <scene> <out.png>" >&2
-  echo "Scenes: settings-failure | targets-empty | endpoints-empty | targets-unselected | endpoints-unselected | diagnostics-normal | diagnostics-debug | diagnostics-override | diagnostics-retention" >&2
+  echo "Scenes: settings-failure | targets-empty | endpoints-empty | targets-unselected | endpoints-unselected | schedule | service-installed | service-update | service-conflict | service-failure | diagnostics-normal | diagnostics-debug | diagnostics-override | diagnostics-retention" >&2
   exit 2
 fi
 
 root_dir="$(git rev-parse --show-toplevel)"
-app_bin="$root_dir/target/macos-app/TelevyBackup.app/Contents/MacOS/TelevyBackup"
+app_variant="${TELEVYBACKUP_APP_VARIANT:-dev}"
+case "$app_variant" in
+  dev) app_name="TelevyBackup Dev.app"; window_owner="TelevyBackup Dev" ;;
+  prod|release) app_name="TelevyBackup.app"; window_owner="TelevyBackup" ;;
+  *) echo "ERROR: unsupported TELEVYBACKUP_APP_VARIANT: $app_variant" >&2; exit 2 ;;
+esac
+app_bin="$root_dir/target/macos-app/$app_name/Contents/MacOS/TelevyBackup"
 demo_root="$root_dir/.dev/ui-snapshot"
 data_dir="$demo_root/data"
 config_dir="$demo_root/config"
@@ -70,11 +76,11 @@ cat > "$workdir/find_window.swift" <<'SWIFT'
 import Foundation
 import CoreGraphics
 
-let targetOwner = "TelevyBackup"
 let targetName = "Settings"
 guard CommandLine.arguments.count > 1, let targetPid = Int(CommandLine.arguments[1]) else {
     exit(2)
 }
+let targetOwner = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "TelevyBackup"
 
 let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
 let windowInfoAny = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as NSArray? ?? []
@@ -108,7 +114,12 @@ exit(1)
 SWIFT
 
 swiftc "$workdir/find_window.swift" -o "$workdir/find_window" >/dev/null 2>&1
-wid="$($workdir/find_window "$app_pid" 2>/dev/null || true)"
+wid=""
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  wid="$($workdir/find_window "$app_pid" "$window_owner" 2>/dev/null || true)"
+  [[ -n "$wid" ]] && break
+  sleep 1
+done
 
 if [[ -n "$wid" ]]; then
   screencapture -x -l "$wid" "$out"

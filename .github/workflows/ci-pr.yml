@@ -46,6 +46,12 @@ jobs:
       - name: Release script contract tests
         run: bash ./.github/scripts/test-release-scripts.sh
 
+      - name: Package script contract tests
+        run: bash ./.github/scripts/test-package-scripts.sh
+
+      - name: Daemon service contract tests
+        run: bash ./.github/scripts/test-daemon-service.sh
+
       - name: Cache cargo directories
         uses: actions/cache@v4
         with:

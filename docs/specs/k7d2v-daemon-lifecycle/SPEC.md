@@ -29,7 +29,7 @@
 - daemon 停止请求、活动任务 `CancellationToken`、十秒优雅退出窗口和强制终止 fallback。
 - App 顶部退出图标、`Command-Q`、定时任务确认对话框和 App-owned 进程回收。
 - CLI 的 daemon 管理命令与 daemon-dependent 命令的临时启动。
-- Homebrew LaunchAgent 的完全退出时 unload 语义和用户文档。
+- 产品自管 LaunchAgent 的完全退出时 unload 语义、Homebrew 兼容检测和用户文档。
 
 ### Out of scope
 
@@ -44,7 +44,7 @@
 - App 无已启用 schedule 时，普通 Command-Q 必须执行完全退出；有已启用 schedule 时必须提供“退出 GUI”“完全退出”“取消”，完全退出再作破坏性确认。
 - `televybackup gui quit` 和菜单栏“退出 GUI”必须只结束精确环境的 GUI，不得停止 daemon、卸载 LaunchAgent、清空 daemon 队列或终止 GUI fallback daemon。
 - 完全退出等待最多十秒；超时后只对本次确认归属的 daemon 使用强制终止 fallback。
-- LaunchAgent 管理的 daemon 在完全退出时必须被 unload，避免 `keep_alive` 自动重启；恢复由 `televybackup daemon start` 或 `brew services start` 显式完成。
+- 产品或 Homebrew LaunchAgent 管理的 daemon 在完全退出时必须被 unload，避免 `keep_alive` 自动重启；产品服务由 `televybackup daemon start` 显式恢复，Homebrew 仅保留兼容入口。
 - `televybackup daemon start` 必须在 daemon IPC 可连接后返回；`stop` 与 App 完全退出共享同一优雅停止协议。
 - CLI 临时启动只回收由该 CLI 进程创建的 daemon，绝不停止预先存在的共享实例。
 
@@ -89,7 +89,7 @@
 
 - Given daemon 空闲或正在备份，When 执行 `televybackup daemon stop`，Then daemon 在十秒内优雅退出，活动任务为 cancelled，且无 socket、lock 或 helper 残留。
 - Given 已启用 schedule，When App 收到退出请求，Then 用户可以选择保留 daemon 的仅退出或取消任务并完全退出。
-- Given Homebrew LaunchAgent 启动 daemon，When 用户选择完全退出，Then LaunchAgent 被 unload，daemon 不会被 keep-alive 重启。
+- Given 产品或 Homebrew LaunchAgent 启动 daemon，When 用户选择完全退出，Then 对应 LaunchAgent 被 unload，daemon 不会被 keep-alive 重启。
 - Given daemon-dependent CLI 命令发现 IPC 不可用，When 命令允许临时启动，Then 它只停止自身创建的实例。
 - Given a running GUI and the exact data directory, When `televybackup gui quit` is accepted, Then it returns success only after the stopped lease and lifecycle-lock release, while the daemon remains reachable.
 - Given no compatible GUI listener, unsafe GUI control path, or a lifecycle conflict, When `televybackup gui quit` runs, Then it returns `gui.unavailable` or `gui.busy` without process scanning or daemon control.
@@ -131,7 +131,7 @@
 
 ## 风险 / 开放问题 / 假设
 
-- release 默认运行环境中，用户选择完全退出时先 disable Homebrew LaunchAgent 阻止 keep-alive 重启，再使用 Formula 的 config/data 目录请求 daemon 优雅停止，成功后 bootout 原本已加载的服务；App 等待比 CLI 的十秒收尾窗口多出返回余量。dev 或自定义目录运行只停止当前环境的 daemon，绝不变更 release LaunchAgent。停止或 bootout 失败时取消 App 退出并恢复本次 disable。
+- release 默认运行环境中，用户选择完全退出时先 disable 已加载的产品 LaunchAgent；若未安装产品服务，再兼容检测 Homebrew LaunchAgent 并使用其 config/data 目录请求 daemon 优雅停止，成功后 bootout 原本已加载的服务。dev 或自定义目录运行只停止当前环境的 daemon，绝不变更其他环境的 LaunchAgent。停止或 bootout 失败时取消 App 退出并恢复本次 disable。
 - 十秒是用户确认的优雅退出上限；强制终止仅用于已确认归属的 daemon。
 
 ## 参考

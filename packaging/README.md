@@ -1,6 +1,12 @@
 # Packaging
 
-This folder contains Homebrew templates and build notes for the MVP.
+This folder contains the macOS release installation guide and legacy Homebrew templates.
+
+## Release packages
+
+Native packaging is driven by `scripts/macos/package-release.sh`, `assemble-universal.sh`, and
+`verify-release-assets.sh`. The release workflow publishes the three DMGs, two native tool
+archives, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after the full asset gate passes.
 
 ## Homebrew (daemon)
 
@@ -14,10 +20,13 @@ The service expects:
 - `TELEVYBACKUP_CONFIG_DIR` (contains `config.toml`)
 - `TELEVYBACKUP_DATA_DIR` (contains `index/index.sqlite`)
 
-## Homebrew (GUI)
+## Homebrew (legacy)
 
 - Cask template: `packaging/homebrew/televybackup.rb`
 
-The cask assumes a `.dmg` will be uploaded to GitHub Releases.
+Homebrew formulas are retained for existing users but are not maintained by the product release
+flow. New installs should use the signed release DMG or tool archive and the product-managed
+LaunchAgent (`televybackup daemon install-service`). The cask's historical URL and version are not
+the current release contract.
 
 The GUI app is a native macOS `.app` bundle (SwiftUI/AppKit), built via `scripts/macos/build-app.sh`.

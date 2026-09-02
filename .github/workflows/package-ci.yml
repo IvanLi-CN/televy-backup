@@ -1,0 +1,97 @@
+name: macOS package matrix
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'macos/**'
+      - 'packaging/**'
+      - 'scripts/macos/**'
+      - '.github/workflows/package-ci.yml'
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Commit or ref to package; defaults to the triggering commit
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TELEVYBACKUP_CI_VERSION: 0.0.0-ci.${{ github.run_number }}
+
+jobs:
+  arm64:
+    name: arm64 native package
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.91.0
+          targets: aarch64-apple-darwin
+      - run: bash scripts/macos/package-release.sh --version "$TELEVYBACKUP_CI_VERSION" --arch arm64 --output-dir dist/arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-ci-arm64
+          path: dist/arm64
+
+  x86_64:
+    name: x86_64 native package
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.91.0
+          targets: x86_64-apple-darwin
+      - run: bash scripts/macos/package-release.sh --version "$TELEVYBACKUP_CI_VERSION" --arch x86_64 --output-dir dist/x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-ci-x86_64
+          path: dist/x86_64
+
+  universal2:
+    name: Universal 2 assembly
+    runs-on: macos-15
+    needs: [arm64, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: package-ci-arm64
+          path: dist/arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: package-ci-x86_64
+          path: dist/x86_64
+      - name: Assemble, hash, and inspect
+        env:
+          RUST_TOOLCHAIN: 1.91.0
+        run: |
+          set -euo pipefail
+          mkdir -p dist/final
+          arm_app="$(find dist/arm64 -maxdepth 1 -type d -name '*.app' -print -quit)"
+          x86_app="$(find dist/x86_64 -maxdepth 1 -type d -name '*.app' -print -quit)"
+          bash scripts/macos/assemble-universal.sh --version "$TELEVYBACKUP_CI_VERSION" --arm64-app "$arm_app" --x86_64-app "$x86_app" --output-dir dist/final
+          cp dist/arm64/TelevyBackup-*-arm64.dmg dist/final/
+          cp dist/x86_64/TelevyBackup-*-x86_64.dmg dist/final/
+          cp dist/arm64/televybackup-tools-*-arm64.tar.gz dist/final/
+          cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
+          bash scripts/macos/generate-release-manifest.sh --version "$TELEVYBACKUP_CI_VERSION" --asset-dir dist/final --source-commit "$(git rev-parse HEAD)" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
+          bash scripts/macos/verify-release-assets.sh --version "$TELEVYBACKUP_CI_VERSION" --asset-dir dist/final
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-ci-universal2
+          path: dist/final
