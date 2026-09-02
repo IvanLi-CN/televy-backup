@@ -6,8 +6,12 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 cargo build -q -p televybackup
+target_dir="${CARGO_TARGET_DIR:-target}"
+if [[ "$target_dir" != /* ]]; then
+  target_dir="$root_dir/$target_dir"
+fi
 mkdir -p "$tmp_dir/bin" "$tmp_dir/config-a" "$tmp_dir/data-a" "$tmp_dir/config-b" "$tmp_dir/data-b"
-cp "$root_dir/target/debug/televybackup" "$tmp_dir/bin/televybackup"
+cp "$target_dir/debug/televybackup" "$tmp_dir/bin/televybackup"
 printf '#!/bin/sh\nexit 0\n' > "$tmp_dir/bin/televybackupd"
 printf '#!/bin/sh\nexit 0\n' > "$tmp_dir/bin/televybackup-mtproto-helper"
 chmod 755 "$tmp_dir/bin/"*
