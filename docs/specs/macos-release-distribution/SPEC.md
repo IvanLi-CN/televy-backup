@@ -90,3 +90,15 @@ Covers: REQ-MRD-007. Swift unit tests and isolated Settings snapshots provide th
 
 - [0002-settings-window-ipc-only](../../adr/0002-settings-window-ipc-only.md)
 - [0003-product-managed-daemon-launchagent](../../adr/0003-product-managed-daemon-launchagent.md)
+
+## Visual Evidence
+
+Approved isolated Dev Settings window scenes for the managed background service:
+
+- [service-installed](assets/service-installed.png)
+- [service-update](assets/service-update.png)
+- [service-conflict](assets/service-conflict.png)
+- [service-failure](assets/service-failure.png)
+
+Capture contract: `target_program=com.ivan.televybackup.dev`, Settings window only. The
+images contain no desktop or unrelated windows.

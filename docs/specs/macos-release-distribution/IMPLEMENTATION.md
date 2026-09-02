@@ -2,7 +2,7 @@
 
 ## Status
 
-The distribution contract is being implemented in the `th/feat/macos-release-distribution` fast-track. The first delivery covers packaging scripts, native CI, product-managed service commands, Settings state, and release workflow gates.
+The distribution contract is implemented in the `th/feat/macos-release-distribution` fast-track. The first delivery covers packaging scripts, native CI, product-managed service commands, Settings state, and release workflow gates.
 
 ## Components
 
@@ -23,3 +23,7 @@ The distribution contract is being implemented in the `th/feat/macos-release-dis
 - native macOS package matrix and Universal 2 verification in GitHub Actions
 - shared testbox full-feature Rust validation
 
+## Visual Evidence
+
+The approved Settings service-state scenes are stored in the topic assets:
+`service-installed`, `service-update`, `service-conflict`, and `service-failure`.
