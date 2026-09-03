@@ -283,7 +283,7 @@ jobs:
           while IFS= read -r asset; do
             name="$(basename "$asset")"
             local_sha="$(sha256sum "$asset" | awk '{print $1}')"
-            remote_sha="$(REMOTE="$remote_assets" NAME="$name" python3 -c 'import json,os; p=json.loads(os.environ["REMOTE"]); print(next((a.get("digest","").removeprefix("sha256:")) for a in p.get("assets",[]) if a.get("name")==os.environ["NAME"]),"")')"
+            remote_sha="$(REMOTE="$remote_assets" NAME="$name" python3 -c 'import json,os; p=json.loads(os.environ["REMOTE"]); print(next((a.get("digest","").removeprefix("sha256:") for a in p.get("assets",[]) if a.get("name")==os.environ["NAME"]), ""))')"
             if [[ -n "$remote_sha" ]]; then
               [[ "$remote_sha" == "$local_sha" ]] || { echo "asset hash mismatch: $name" >&2; exit 1; }
               echo "asset already uploaded with matching hash: $name"
