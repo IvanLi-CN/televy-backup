@@ -10,6 +10,23 @@ bash -n "$root_dir/scripts/macos/package-release.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh"
 assemble_text="$(<"$root_dir/scripts/macos/assemble-universal.sh")"
+package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
+[[ "$package_text" == *'app_dest="$output_dir/TelevyBackup.app"'* ]] || {
+  echo 'architecture package must stage the stable TelevyBackup.app name' >&2
+  exit 1
+}
+[[ "$package_text" != *'TelevyBackup-${version}-${arch}.app'* ]] || {
+  echo 'architecture package must not version the DMG app entry name' >&2
+  exit 1
+}
+[[ "$assemble_text" == *'universal_app="$output_dir/TelevyBackup.app"'* ]] || {
+  echo 'universal package must stage the stable TelevyBackup.app name' >&2
+  exit 1
+}
+[[ "$assemble_text" != *'TelevyBackup-${version}.app'* ]] || {
+  echo 'universal package must not version the DMG app entry name' >&2
+  exit 1
+}
 [[ "$assemble_text" == *'rm -rf "$universal_app/Contents/_CodeSignature"'* ]] || {
   echo 'universal assembly must clear the copied thin-binary signature' >&2
   exit 1

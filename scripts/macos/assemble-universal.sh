@@ -17,7 +17,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$version" && -d "$arm_app" && -d "$x86_app" && -n "$output_dir" ]] || usage
 mkdir -p "$output_dir"
-universal_app="$output_dir/TelevyBackup-${version}.app"
+universal_app="$output_dir/TelevyBackup.app"
 rm -rf "$universal_app"
 cp -R "$arm_app" "$universal_app"
 for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper; do
