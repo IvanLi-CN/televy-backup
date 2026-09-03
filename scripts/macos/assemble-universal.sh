@@ -26,7 +26,14 @@ for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-h
   [[ -f "$arm_binary" && -f "$x86_binary" ]] || { echo "missing binary: $binary" >&2; exit 1; }
   lipo -create "$arm_binary" "$x86_binary" -output "$universal_app/Contents/MacOS/$binary"
 done
-codesign --force --deep --sign - "$universal_app"
+
+# The copied arm64 bundle carries a thin-binary CodeResources seal. Remove it
+# before signing the lipo outputs so the universal bundle gets a fresh seal.
+rm -rf "$universal_app/Contents/_CodeSignature"
+for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper; do
+  codesign --force --sign - "$universal_app/Contents/MacOS/$binary"
+done
+codesign --force --sign - "$universal_app"
 codesign --verify --deep --strict "$universal_app"
 
 staging="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-universal.XXXXXX")"
