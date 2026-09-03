@@ -212,7 +212,19 @@ run_release_package_workflow_contract_tests() {
   assert_contains "$workflow_text" 'gh release create "$RELEASE_TAG" --draft'
   assert_contains "$workflow_text" 'gh release edit "$RELEASE_TAG" --draft=false'
   assert_contains "$workflow_text" 'asset hash mismatch'
+  assert_contains "$workflow_text" 'next((a.get("digest","").removeprefix("sha256:") for a in p.get("assets",[]) if a.get("name")==os.environ["NAME"]), "")'
   assert_not_contains "$workflow_text" 'softprops/action-gh-release'
+
+  local digest_lookup
+  digest_lookup="$(
+    REMOTE='{"assets":[]}' NAME='missing.tar.gz' python3 -c 'import json,os; p=json.loads(os.environ["REMOTE"]); print(next((a.get("digest","").removeprefix("sha256:") for a in p.get("assets",[]) if a.get("name")==os.environ["NAME"]), ""))'
+  )"
+  [[ -z "$digest_lookup" ]] || { echo 'empty remote asset list should produce an empty digest' >&2; exit 1; }
+
+  digest_lookup="$(
+    REMOTE='{"assets":[{"name":"bundle.tar.gz","digest":"sha256:deadbeef"}]}' NAME='bundle.tar.gz' python3 -c 'import json,os; p=json.loads(os.environ["REMOTE"]); print(next((a.get("digest","").removeprefix("sha256:") for a in p.get("assets",[]) if a.get("name")==os.environ["NAME"]), ""))'
+  )"
+  [[ "$digest_lookup" == 'deadbeef' ]] || { echo "matching remote asset digest lookup failed: $digest_lookup" >&2; exit 1; }
 
   local backfill_file="$root_dir/.github/workflows/release-backfill.yml"
   local backfill_text
