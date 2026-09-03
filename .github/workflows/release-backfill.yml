@@ -151,8 +151,8 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          gh release view "$TAG" >/dev/null
-          remote="$(gh release view "$TAG" --json assets)"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          remote="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets)"
           while IFS= read -r file; do
             name="$(basename "$file")"
             local_sha="$(sha256sum "$file" | awk '{print $1}')"
@@ -160,7 +160,7 @@ jobs:
             if [[ -n "$remote_sha" ]]; then
               [[ "$remote_sha" == "$local_sha" ]] || { echo "asset hash mismatch: $name" >&2; exit 1; }
             else
-              gh release upload "$TAG" "$file"
+              gh release upload "$TAG" "$file" --repo "$GITHUB_REPOSITORY"
             fi
           done < <(find dist/final -maxdepth 1 -type f -print)
-          gh release edit "$TAG" --draft=false
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

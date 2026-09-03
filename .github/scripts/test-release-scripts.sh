@@ -234,6 +234,9 @@ run_release_package_workflow_contract_tests() {
   assert_contains "$backfill_text" 'tag source is not on main'
   assert_contains "$backfill_text" 'Overlay current packaging tooling'
   assert_contains "$backfill_text" 'next((a.get("digest","").removeprefix("sha256:") for a in p.get("assets",[]) if a.get("name")==os.environ["NAME"]), "")'
+  assert_contains "$backfill_text" 'gh release view "$TAG" --repo "$GITHUB_REPOSITORY"'
+  assert_contains "$backfill_text" 'gh release upload "$TAG" "$file" --repo "$GITHUB_REPOSITORY"'
+  assert_contains "$backfill_text" 'gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false'
 }
 
 run_compute_version_tests
