@@ -20,7 +20,7 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 
 ### REQ-MRD-001: Traceable release assets
 
-Every stable or RC release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBackup-<version>-arm64.dmg`, `TelevyBackup-<version>-x86_64.dmg`, `televybackup-tools-<version>-arm64.tar.gz`, `televybackup-tools-<version>-x86_64.tar.gz`, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after all asset checks pass.
+Every stable or RC release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBackup-<version>-arm64.dmg`, `TelevyBackup-<version>-x86_64.dmg`, `televybackup-tools-<version>-arm64.tar.gz`, `televybackup-tools-<version>-x86_64.tar.gz`, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after all asset checks pass. Each DMG MUST contain one installable app entry named `TelevyBackup.app`; version and architecture belong in the downloadable DMG filename, not the app entry name.
 
 ### REQ-MRD-002: Native build matrix
 

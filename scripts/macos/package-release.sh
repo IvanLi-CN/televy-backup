@@ -38,10 +38,9 @@ bash "$root_dir/scripts/macos/build-app.sh"
 app_source="$root_dir/target/macos-app/TelevyBackup.app"
 [[ -d "$app_source" ]] || { echo "missing app bundle: $app_source" >&2; exit 1; }
 
-app_name="TelevyBackup-${version}-${arch}.app"
 dmg_name="TelevyBackup-${version}-${arch}.dmg"
 tools_name="televybackup-tools-${version}-${arch}.tar.gz"
-app_dest="$output_dir/$app_name"
+app_dest="$output_dir/TelevyBackup.app"
 rm -rf "$app_dest"
 cp -R "$app_source" "$app_dest"
 
