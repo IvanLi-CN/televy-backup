@@ -9,6 +9,15 @@ bash -n "$root_dir/scripts/macos/package-release.sh" \
   "$root_dir/scripts/macos/assemble-universal.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh"
+assemble_text="$(<"$root_dir/scripts/macos/assemble-universal.sh")"
+[[ "$assemble_text" == *'rm -rf "$universal_app/Contents/_CodeSignature"'* ]] || {
+  echo 'universal assembly must clear the copied thin-binary signature' >&2
+  exit 1
+}
+[[ "$assemble_text" == *'codesign --force --sign - "$universal_app/Contents/MacOS/$binary"'* ]] || {
+  echo 'universal assembly must sign each merged binary before signing the app' >&2
+  exit 1
+}
 ruby -ryaml -e 'ARGV.each { |path| YAML.load_file(path) }' \
   .github/workflows/package-ci.yml \
   .github/workflows/release-backfill.yml
