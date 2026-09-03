@@ -233,6 +233,7 @@ run_release_package_workflow_contract_tests() {
   assert_contains "$backfill_text" 'default: false'
   assert_contains "$backfill_text" 'tag source is not on main'
   assert_contains "$backfill_text" 'Overlay current packaging tooling'
+  assert_contains "$backfill_text" 'next((a.get("digest","").removeprefix("sha256:") for a in p.get("assets",[]) if a.get("name")==os.environ["NAME"]), "")'
 }
 
 run_compute_version_tests
