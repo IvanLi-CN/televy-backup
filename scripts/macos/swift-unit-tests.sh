@@ -9,11 +9,52 @@ mkdir -p "$out_dir"
 sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
 swiftc="$(xcrun --find swiftc)"
 
+search_file() {
+  local pattern="$1"
+  local path="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -n "$pattern" "$path"
+  else
+    grep -En "$pattern" "$path"
+  fi
+}
+
+search_stdin() {
+  local pattern="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -n "$pattern"
+  else
+    grep -En "$pattern"
+  fi
+}
+
+search_stdin_quiet() {
+  local pattern="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -q "$pattern"
+  else
+    grep -Eq "$pattern"
+  fi
+}
+
 # SettingsWindow is daemon-facing UI and must stay on control IPC. Keep this red-capable seam
 # close to the existing Swift checks so a future edit cannot silently reintroduce the CLI process
 # boundary that caused signal=9 failures.
-if rg -n 'runCommandCapture|cliPath\(' "$root_dir/macos/TelevyBackupApp/SettingsWindow.swift"; then
+if search_file 'runCommandCapture|cliPath\(' "$root_dir/macos/TelevyBackupApp/SettingsWindow.swift"; then
   echo "SettingsWindow must not invoke the CLI" >&2
+  exit 1
+fi
+
+# AppModel refreshes shared settings after launch and backup completion. Keep that path on the
+# daemon control socket too; otherwise a background refresh can reintroduce the signal=9 failure
+# even though the Settings window itself is IPC-only.
+refresh_settings_source="$(sed -n '/private func refreshSettings(withSecrets:/,/func openSettingsWindow/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if printf '%s\n' "$refresh_settings_source" | search_stdin 'runCommandCapture|cliPath\('; then
+  echo "AppModel.refreshSettings must not invoke the CLI" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$refresh_settings_source" | search_stdin_quiet 'ControlIPCClient\.request'; then
+  echo "AppModel.refreshSettings must use ControlIPCClient" >&2
   exit 1
 fi
 

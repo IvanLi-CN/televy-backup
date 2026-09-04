@@ -2182,27 +2182,18 @@ final class AppModel {
     }
 
     private func refreshSettings(withSecrets: Bool, completion: (() -> Void)? = nil) {
-        guard let cli = cliPath() else {
-            DispatchQueue.main.async { completion?() }
-            return
-        }
-        var args = ["--json", "settings", "get"]
-        if withSecrets { args.append("--with-secrets") }
-        let timeout = withSecrets ? 180.0 : 10.0
-        let result = runCommandCapture(exe: cli, args: args, timeoutSeconds: timeout)
-        if result.status != 0 {
-            appendLog("ERROR: settings get failed: exit=\(result.status) reason=\(result.reason.rawValue)")
-            if !result.stderr.isEmpty {
-                appendLog("stderr: \(result.stderr.prefix(2000))")
+        let socketPath = controlSocketPath()
+        let result: Result<ControlSettingsGetResponse, ControlRequestFailure> = ControlIPCClient.request(
+            socketPath: socketPath,
+            method: "settings.get"
+        )
+        guard case let .success(decoded) = result else {
+            if case let .failure(error) = result {
+                appendLog(
+                    "ERROR: settings get failed: code=\(error.code) retryable=\(error.retryable)"
+                )
+                appendLog("message: \(error.message)")
             }
-        }
-
-        let combined = (!result.stdout.isEmpty ? result.stdout : result.stderr)
-        guard let obj = parseJsonObject(combined) else {
-            appendLog("ERROR: settings get JSON parse failed")
-            if !result.stdout.isEmpty { appendLog("stdout: \(result.stdout.prefix(2000))") }
-            if !result.stderr.isEmpty { appendLog("stderr: \(result.stderr.prefix(2000))") }
-
             if let fallback = readConfigTomlBasics() {
                 appendLog("WARN: falling back to config.toml parsing")
                 DispatchQueue.main.async {
@@ -2222,22 +2213,17 @@ final class AppModel {
             return
         }
 
-        let settings = obj["settings"] as? [String: Any]
-        let targets = (settings?["targets"] as? [[String: Any]]) ?? []
-        let endpoints = (settings?["telegram_endpoints"] as? [[String: Any]]) ?? []
-        let schedule = (settings?["schedule"] as? [String: Any]) ?? [:]
-        let telegram = (settings?["telegram"] as? [String: Any]) ?? [:]
-        let mtproto = (telegram["mtproto"] as? [String: Any]) ?? [:]
-        let apiIdNum = (mtproto["api_id"] as? NSNumber)?.intValue ?? 0
-
-        let selectedTarget = targets.first
-        let selectedSourcePath = (selectedTarget?["source_path"] as? String) ?? ""
-        let selectedEndpointId = (selectedTarget?["endpoint_id"] as? String) ?? ""
-        let selectedEndpoint = endpoints.first(where: { ($0["id"] as? String) == selectedEndpointId })
-        let chatId = (selectedEndpoint?["chat_id"] as? String) ?? ""
-
-        let scheduleEnabled = (schedule["enabled"] as? Bool) ?? false
-        let scheduleKind = (schedule["kind"] as? String) ?? "hourly"
+        let settings = decoded.settings
+        let selectedTarget = settings.targets.first
+        let selectedEndpointId = selectedTarget?.endpoint_id ?? ""
+        let selectedEndpoint = settings.telegram_endpoints.first {
+            $0.id == selectedEndpointId
+        }
+        let selectedSourcePath = selectedTarget?.source_path ?? ""
+        let chatId = selectedEndpoint?.chat_id ?? ""
+        let apiIdNum = settings.telegram.mtproto.api_id
+        let scheduleEnabled = settings.schedule.enabled
+        let scheduleKind = settings.schedule.kind
 
         DispatchQueue.main.async {
             self.sourcePath = selectedSourcePath
@@ -2247,24 +2233,13 @@ final class AppModel {
             self.chatId = chatId
             self.mtprotoApiId = apiIdNum > 0 ? String(apiIdNum) : ""
             if withSecrets {
-                if let secrets = obj["secrets"] as? [String: Any] {
-                    let masterPresent = (secrets["masterKeyPresent"] as? Bool) ?? false
-                    let apiHashPresent = (secrets["telegramMtprotoApiHashPresent"] as? Bool) ?? false
-
-                    let botByEndpoint = secrets["telegramBotTokenPresentByEndpoint"] as? [String: Any]
-                    let sessionByEndpoint =
-                        secrets["telegramMtprotoSessionPresentByEndpoint"] as? [String: Any]
-                    let botAny = botByEndpoint?[selectedEndpointId]
-                    let sessionAny = sessionByEndpoint?[selectedEndpointId]
-                    let botPresent =
-                        (botAny as? Bool) ?? ((botAny as? NSNumber)?.boolValue ?? false)
-                    let sessionPresent =
-                        (sessionAny as? Bool) ?? ((sessionAny as? NSNumber)?.boolValue ?? false)
-
-                    self.botTokenPresent = botPresent
-                    self.masterKeyPresent = masterPresent
-                    self.mtprotoApiHashPresent = apiHashPresent
-                    self.mtprotoSessionPresent = sessionPresent
+                if let secrets = decoded.secrets {
+                    self.botTokenPresent =
+                        secrets.telegramBotTokenPresentByEndpoint?[selectedEndpointId] ?? false
+                    self.masterKeyPresent = secrets.masterKeyPresent ?? false
+                    self.mtprotoApiHashPresent = secrets.telegramMtprotoApiHashPresent ?? false
+                    self.mtprotoSessionPresent =
+                        secrets.telegramMtprotoSessionPresentByEndpoint?[selectedEndpointId] ?? false
                     self.secretPresenceKnown = true
                 } else {
                     // If secrets presence couldn't be fetched (e.g. Keychain locked / vault not available),
