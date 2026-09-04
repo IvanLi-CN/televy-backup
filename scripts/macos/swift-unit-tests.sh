@@ -17,6 +17,19 @@ if rg -n 'runCommandCapture|cliPath\(' "$root_dir/macos/TelevyBackupApp/Settings
   exit 1
 fi
 
+# AppModel refreshes shared settings after launch and backup completion. Keep that path on the
+# daemon control socket too; otherwise a background refresh can reintroduce the signal=9 failure
+# even though the Settings window itself is IPC-only.
+refresh_settings_source="$(sed -n '/private func refreshSettings(withSecrets:/,/func openSettingsWindow/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if printf '%s\n' "$refresh_settings_source" | rg -n 'runCommandCapture|cliPath\('; then
+  echo "AppModel.refreshSettings must not invoke the CLI" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$refresh_settings_source" | rg -q 'ControlIPCClient\.request'; then
+  echo "AppModel.refreshSettings must use ControlIPCClient" >&2
+  exit 1
+fi
+
 bin_rebind="$out_dir/import-bundle-rebind-logic-tests"
 "$swiftc" \
   -sdk "$sdk_path" \
