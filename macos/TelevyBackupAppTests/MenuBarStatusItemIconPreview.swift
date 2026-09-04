@@ -104,7 +104,7 @@ enum MenuBarStatusItemIconPreview {
 
         let variantName = isDev ? "Dev" : "Release"
         let caption = NSAttributedString(
-            string: "\(variantName) base icon is unchanged; status directly overlays its lower-right corner. Rate slots use the monospaced four-character format. Blue: image canvas.",
+            string: "\(variantName) uses the monochrome TelevyBackup brand mark; status directly overlays its lower-right corner. Rate slots use the monospaced four-character format.",
             attributes: [
                 .font: NSFont.systemFont(ofSize: 11, weight: .medium),
                 .foregroundColor: NSColor(calibratedWhite: 0.34, alpha: 1),

@@ -3522,10 +3522,7 @@ struct PopoverRootView: View {
                             RoundedRectangle(cornerRadius: 9, style: .continuous)
                                 .strokeBorder(theme.headerIconTileStroke, lineWidth: 1)
                         )
-                    Circle()
-                        .fill(Color.blue)
-                        .frame(width: 12, height: 12)
-                        .opacity(0.95)
+                    TelevyBackupBrandMark(size: 20)
                 }
 
                 VStack(alignment: .leading, spacing: 2) {

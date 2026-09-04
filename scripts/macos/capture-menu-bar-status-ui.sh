@@ -27,7 +27,9 @@ xcrun swiftc \
   -O \
   -framework AppKit \
   -framework Combine \
+  -framework SwiftUI \
   -o "$bin_path" \
+  "$root_dir/macos/TelevyBackupApp/BrandMark.swift" \
   "$root_dir/macos/TelevyBackupApp/MenuBarActivityState.swift" \
   "$root_dir/macos/TelevyBackupApp/StatusModels.swift" \
   "$root_dir/macos/TelevyBackupApp/StatusStore.swift" \

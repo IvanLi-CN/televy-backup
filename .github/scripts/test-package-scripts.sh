@@ -7,8 +7,32 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 bash -n "$root_dir/scripts/macos/package-release.sh" \
   "$root_dir/scripts/macos/assemble-universal.sh" \
+  "$root_dir/scripts/macos/generate-brand-variants.sh" \
+  "$root_dir/scripts/macos/verify-brand-assets.sh" \
+  "$root_dir/scripts/macos/generate-app-icon-assets.sh" \
+  "$root_dir/scripts/macos/verify-app-icon-assets.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh"
+build_text="$(<"$root_dir/scripts/macos/build-app.sh")"
+verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
+[[ "$build_text" == *'verify-brand-assets.sh'* && "$verify_brand_text" == *'shared geometry'* ]] || {
+  echo 'build must run the shared-geometry brand asset verifier' >&2
+  exit 1
+}
+[[ "$build_text" == *'CFBundleIconFile'* && "$build_text" == *'TelevyBackup.icns'* ]] || {
+  echo 'build script must declare and copy TelevyBackup.icns' >&2
+  exit 1
+}
+icon_text="$(<"$root_dir/scripts/macos/generate-app-icon-assets.sh")"
+[[ "$icon_text" == *'icon_512x512@2x.png:1024'* && "$icon_text" == *'iconutil -c icns'* ]] || {
+  echo 'app icon generator must produce the complete iconset and ICNS' >&2
+  exit 1
+}
+verify_icon_text="$(<"$root_dir/scripts/macos/verify-app-icon-assets.sh")"
+[[ "$verify_icon_text" == *'icon_16x16.png:16'* && "$verify_icon_text" == *'iconutil -c iconset'* ]] || {
+  echo 'app icon verifier must check standard sizes and ICNS round-trip' >&2
+  exit 1
+}
 assemble_text="$(<"$root_dir/scripts/macos/assemble-universal.sh")"
 package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" == *'app_dest="$output_dir/TelevyBackup.app"'* ]] || {
@@ -38,6 +62,11 @@ package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 ruby -ryaml -e 'ARGV.each { |path| YAML.load_file(path) }' \
   .github/workflows/package-ci.yml \
   .github/workflows/release-backfill.yml
+workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
+[[ "$workflow_text" == *'dist/arm64/TelevyBackup.app'* && "$workflow_text" == *'dist/x86_64/TelevyBackup.app'* ]] || {
+  echo 'package CI must verify the staged architecture app bundles' >&2
+  exit 1
+}
 
 version="1.2.3-rc.abc1234"
 for asset in \

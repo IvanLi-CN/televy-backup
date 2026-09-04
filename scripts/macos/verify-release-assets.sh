@@ -28,6 +28,24 @@ PY
 for app in "$asset_dir"/*.app; do
   [[ -d "$app" ]] || continue
   codesign --verify --deep --strict "$app"
+  [[ -s "$app/Contents/Resources/TelevyBackup.icns" ]] || {
+    echo "app bundle missing TelevyBackup.icns: $app" >&2
+    exit 1
+  }
+  icon_file="$(/usr/bin/plutil -extract CFBundleIconFile raw -o - "$app/Contents/Info.plist")"
+  [[ "$icon_file" == "TelevyBackup.icns" ]] || {
+    echo "app bundle has unexpected CFBundleIconFile: $icon_file" >&2
+    exit 1
+  }
+  for brand_asset in \
+    televybackup-logo-ui.svg \
+    televybackup-logo-dark.svg \
+    televybackup-logo-template.svg; do
+    [[ -s "$app/Contents/Resources/Brand/$brand_asset" ]] || {
+      echo "app bundle missing Brand/$brand_asset: $app" >&2
+      exit 1
+    }
+  done
   for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper; do
     info="$(lipo -info "$app/Contents/MacOS/$binary")"
     [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "universal binary missing slice: $binary" >&2; exit 1; }

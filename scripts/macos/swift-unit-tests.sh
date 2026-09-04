@@ -75,9 +75,11 @@ bin_menu_bar_icon="$out_dir/menu-bar-status-item-icon-tests"
 "$swiftc" \
   -sdk "$sdk_path" \
   -O \
+  -framework SwiftUI \
   -framework AppKit \
   -o "$bin_menu_bar_icon" \
   "$root_dir/macos/TelevyBackupApp/MenuBarActivityState.swift" \
+  "$root_dir/macos/TelevyBackupApp/BrandMark.swift" \
   "$root_dir/macos/TelevyBackupApp/MenuBarStatusItemIcon.swift" \
   "$root_dir/macos/TelevyBackupAppTests/MenuBarStatusItemIconTests.swift"
 "$bin_menu_bar_icon"

@@ -46,6 +46,28 @@ resources_dir="$contents_dir/Resources"
 mkdir -p "$macos_dir"
 mkdir -p "$resources_dir"
 
+brand_source_dir="$root_dir/assets/brand"
+app_icon_source="$root_dir/macos/TelevyBackupApp/Resources/TelevyBackup.icns"
+bash "$root_dir/scripts/macos/verify-brand-assets.sh" "$brand_source_dir"
+[[ -s "$app_icon_source" ]] || {
+  echo "ERROR: missing app icon: $app_icon_source" >&2
+  exit 1
+}
+for brand_asset in \
+  televybackup-logo-ui.svg \
+  televybackup-logo-dark.svg \
+  televybackup-logo-template.svg; do
+  [[ -s "$brand_source_dir/$brand_asset" ]] || {
+    echo "ERROR: missing brand asset: $brand_source_dir/$brand_asset" >&2
+    exit 1
+  }
+done
+mkdir -p "$resources_dir/Brand"
+cp "$app_icon_source" "$resources_dir/TelevyBackup.icns"
+cp "$brand_source_dir/televybackup-logo-ui.svg" "$resources_dir/Brand/televybackup-logo-ui.svg"
+cp "$brand_source_dir/televybackup-logo-dark.svg" "$resources_dir/Brand/televybackup-logo-dark.svg"
+cp "$brand_source_dir/televybackup-logo-template.svg" "$resources_dir/Brand/televybackup-logo-template.svg"
+
 rm -f "$resources_dir/televybackup" "$resources_dir/televybackup-mtproto-helper" 2>/dev/null || true
 
 binary_dir="$root_dir/target/release"
@@ -109,6 +131,8 @@ cat > "$contents_dir/Info.plist" <<PLIST
   <string>APPL</string>
   <key>CFBundleExecutable</key>
   <string>$executable_name</string>
+  <key>CFBundleIconFile</key>
+  <string>TelevyBackup.icns</string>
   <key>LSMinimumSystemVersion</key>
   <string>15.0</string>
   <key>LSUIElement</key>

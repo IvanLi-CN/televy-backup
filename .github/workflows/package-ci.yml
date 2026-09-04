@@ -7,6 +7,7 @@ on:
       - 'crates/**'
       - 'macos/**'
       - 'packaging/**'
+      - 'assets/brand/**'
       - 'scripts/macos/**'
       - '.github/workflows/package-ci.yml'
   workflow_dispatch:
@@ -36,6 +37,7 @@ jobs:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
       - run: bash scripts/macos/package-release.sh --version "$TELEVYBACKUP_CI_VERSION" --arch arm64 --output-dir dist/arm64
+      - run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/arm64/TelevyBackup.app
       - uses: actions/upload-artifact@v4
         with:
           name: package-ci-arm64
@@ -54,6 +56,7 @@ jobs:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
       - run: bash scripts/macos/package-release.sh --version "$TELEVYBACKUP_CI_VERSION" --arch x86_64 --output-dir dist/x86_64
+      - run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/x86_64/TelevyBackup.app
       - uses: actions/upload-artifact@v4
         with:
           name: package-ci-x86_64

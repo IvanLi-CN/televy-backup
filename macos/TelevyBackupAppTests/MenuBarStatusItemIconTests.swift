@@ -28,6 +28,15 @@ private func testTemplateSemantics() {
     expectMenuBarIcon(!failure.isTemplate, "failure must preserve its colored marker")
 }
 
+private func testBrandMarkAssetLoadsForMenuBar() {
+    guard let mark = BrandMarkAsset.image(for: .template) else {
+        expectMenuBarIcon(false, "menu bar template brand mark must load from the app resources")
+        return
+    }
+    expectMenuBarIcon(mark.size.width > 0 && mark.size.height > 0, "brand mark must have a valid size")
+    expectMenuBarIcon(mark.isTemplate, "menu bar brand mark must retain template semantics")
+}
+
 private func testFailureMarkerIsSingleRedColor() {
     let image = MenuBarStatusItemIcon.image(for: .failure, isDev: false)
     guard let tiff = image.tiffRepresentation,
@@ -231,6 +240,7 @@ private func testImageUpdatesAreIdempotentAndCached() {
 @main
 enum MenuBarStatusItemIconTestsMain {
     static func main() {
+        testBrandMarkAssetLoadsForMenuBar()
         testTemplateSemantics()
         testFailureMarkerIsSingleRedColor()
         testFailureBaseTracksMenuBarAppearance()
