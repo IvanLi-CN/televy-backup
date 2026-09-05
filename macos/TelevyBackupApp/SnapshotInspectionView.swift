@@ -1512,10 +1512,16 @@ private struct SnapshotStorageTable: NSViewRepresentable {
 
         weak var table: NSTableView?
         var rows: [Row] = []
+        var storageEntriesByID: [String: SnapshotStorageEntry] = [:]
+        var expandedStorageIDs: Set<String> = []
+        var loadingStorageIDs: Set<String> = []
         var onReachedBottom: (() -> Void)?
         var onToggle: ((SnapshotStorageEntry) -> Void)?
 
         func update(entries: [SnapshotStorageEntry], expandedBlocks: [String: [SnapshotStorageBlockEntry]], loadingObjectIDs: Set<String>) {
+            storageEntriesByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+            expandedStorageIDs = Set(expandedBlocks.keys)
+            loadingStorageIDs = loadingObjectIDs
             rows = entries.flatMap { entry -> [Row] in
                 var result: [Row] = [.object(entry)]
                 if let blocks = expandedBlocks[entry.id] {
@@ -1535,7 +1541,14 @@ private struct SnapshotStorageTable: NSViewRepresentable {
             switch rows[row] {
             case let .object(entry):
                 switch tableColumn.identifier {
-                case SnapshotNativeColumns.Storage.object: return SnapshotNativeRowView.storageObject(entry: entry)
+                case SnapshotNativeColumns.Storage.object:
+                    let isExpanded = expandedStorageIDs.contains(entry.id) || loadingStorageIDs.contains(entry.id)
+                    return SnapshotNativeRowView.storageObject(
+                        entry: entry,
+                        isExpanded: isExpanded,
+                        target: self,
+                        action: #selector(toggleStorageObject(_:))
+                    )
                 case SnapshotNativeColumns.Storage.kind: return SnapshotNativeRowView.storageKind(entry: entry)
                 case SnapshotNativeColumns.Storage.document: return SnapshotNativeRowView.storageDocument(entry: entry)
                 case SnapshotNativeColumns.Storage.logical: return SnapshotNativeRowView.storageLogical(entry: entry)
@@ -1560,6 +1573,11 @@ private struct SnapshotStorageTable: NSViewRepresentable {
             guard let table, table.selectedRow >= 0, table.selectedRow < rows.count else { return }
             if case let .object(entry) = rows[table.selectedRow] { onToggle?(entry) }
             table.deselectRow(table.selectedRow)
+        }
+
+        @objc func toggleStorageObject(_ sender: NSButton) {
+            guard let id = sender.identifier?.rawValue, let entry = storageEntriesByID[id] else { return }
+            onToggle?(entry)
         }
 
         func visibleRowsApproachEnd() { onReachedBottom?() }
@@ -1736,16 +1754,56 @@ private enum SnapshotNativeRowView {
         )
     }
 
-    static func storageObject(entry: SnapshotStorageEntry) -> NSTableCellView {
-        nameCell(
-            name: entry.shortId,
-            icon: entry.kind == "pack" ? "shippingbox" : "doc",
-            tint: entry.kind == "pack" ? .controlAccentColor : .secondaryLabelColor,
-            accessibility: "Storage object \(entry.shortId)",
-            leadingInset: 0,
-            usesOutlineLayout: false,
-            font: .monospacedSystemFont(ofSize: 11, weight: .medium)
-        )
+    static func storageObject(
+        entry: SnapshotStorageEntry,
+        isExpanded: Bool,
+        target: AnyObject,
+        action: Selector
+    ) -> NSTableCellView {
+        let cell = NSTableCellView()
+        let disclosureImage = NSImage(
+            systemSymbolName: isExpanded ? "chevron.down" : "chevron.right",
+            accessibilityDescription: isExpanded ? "Collapse storage object" : "Expand storage object"
+        ) ?? NSImage()
+        let disclosure = NSButton(image: disclosureImage, target: target, action: action)
+        disclosure.identifier = NSUserInterfaceItemIdentifier(entry.id)
+        disclosure.setButtonType(.momentaryChange)
+        disclosure.isBordered = false
+        disclosure.imageScaling = .scaleProportionallyDown
+        disclosure.contentTintColor = .secondaryLabelColor
+        disclosure.setAccessibilityLabel(isExpanded ? "Collapse storage object \(entry.shortId)" : "Expand storage object \(entry.shortId)")
+        disclosure.translatesAutoresizingMaskIntoConstraints = false
+
+        let image = NSImageView(image: NSImage(systemSymbolName: entry.kind == "pack" ? "shippingbox" : "doc", accessibilityDescription: "Storage object") ?? NSImage())
+        image.translatesAutoresizingMaskIntoConstraints = false
+        image.imageScaling = .scaleProportionallyDown
+        image.contentTintColor = entry.kind == "pack" ? .controlAccentColor : .secondaryLabelColor
+
+        let label = NSTextField(labelWithString: entry.shortId)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+        label.lineBreakMode = .byTruncatingMiddle
+
+        cell.addSubview(disclosure)
+        cell.addSubview(image)
+        cell.addSubview(label)
+        NSLayoutConstraint.activate([
+            disclosure.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 3),
+            disclosure.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            disclosure.widthAnchor.constraint(equalToConstant: 16),
+            disclosure.heightAnchor.constraint(equalToConstant: 16),
+            image.leadingAnchor.constraint(equalTo: disclosure.trailingAnchor, constant: 2),
+            image.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            image.widthAnchor.constraint(equalToConstant: 16),
+            image.heightAnchor.constraint(equalToConstant: 16),
+            label.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 6),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        cell.imageView = image
+        cell.textField = label
+        cell.setAccessibilityLabel("Storage object \(entry.shortId)")
+        return cell
     }
 
     static func storageKind(entry: SnapshotStorageEntry) -> NSTableCellView {
@@ -1772,7 +1830,7 @@ private enum SnapshotNativeRowView {
     }
 
     static func storageBlock(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
-        nameCell(name: entry.hash, icon: "arrow.turn.down.right", tint: .secondaryLabelColor, accessibility: "Block slice \(entry.hash)", leadingInset: 14, usesOutlineLayout: false, font: .monospacedSystemFont(ofSize: 10, weight: .medium))
+        nameCell(name: entry.hash, icon: "square.stack.3d.up", tint: .secondaryLabelColor, accessibility: "Block slice \(entry.hash)", leadingInset: 22, usesOutlineLayout: false, font: .monospacedSystemFont(ofSize: 10, weight: .medium))
     }
 
     static func storageSliceType(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
