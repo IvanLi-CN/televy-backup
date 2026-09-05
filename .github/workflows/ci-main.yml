@@ -46,6 +46,13 @@ jobs:
       - name: Release script contract tests
         run: bash ./.github/scripts/test-release-scripts.sh
 
+      - name: Release chain fixture tests
+        run: |
+          bash ./.github/scripts/test-release-chain.sh
+          bash ./.github/scripts/test-release-preparation.sh
+          bash ./.github/scripts/test-release-completion.sh
+          bash ./.github/scripts/test-release-workflows.sh
+
       - name: Cache cargo directories
         uses: actions/cache@v4
         with:

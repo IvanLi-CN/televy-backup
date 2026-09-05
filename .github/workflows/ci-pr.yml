@@ -84,6 +84,14 @@ jobs:
         if: needs.classify.outputs.kind == 'source'
         run: bash ./.github/scripts/test-release-scripts.sh
 
+      - name: Release chain fixture tests
+        if: needs.classify.outputs.kind == 'source'
+        run: |
+          bash ./.github/scripts/test-release-chain.sh
+          bash ./.github/scripts/test-release-preparation.sh
+          bash ./.github/scripts/test-release-completion.sh
+          bash ./.github/scripts/test-release-workflows.sh
+
       - name: Package script contract tests
         if: needs.classify.outputs.kind == 'source'
         run: bash ./.github/scripts/test-package-scripts.sh
