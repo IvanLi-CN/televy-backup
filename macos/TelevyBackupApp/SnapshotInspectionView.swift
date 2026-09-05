@@ -1761,16 +1761,11 @@ private enum SnapshotNativeRowView {
         action: Selector
     ) -> NSTableCellView {
         let cell = NSTableCellView()
-        let disclosureImage = NSImage(
-            systemSymbolName: isExpanded ? "chevron.down" : "chevron.right",
-            accessibilityDescription: isExpanded ? "Collapse storage object" : "Expand storage object"
-        ) ?? NSImage()
-        let disclosure = NSButton(image: disclosureImage, target: target, action: action)
+        let disclosure = NSButton(title: "", target: target, action: action)
         disclosure.identifier = NSUserInterfaceItemIdentifier(entry.id)
-        disclosure.setButtonType(.momentaryChange)
-        disclosure.isBordered = false
-        disclosure.imageScaling = .scaleProportionallyDown
-        disclosure.contentTintColor = .secondaryLabelColor
+        disclosure.bezelStyle = .disclosure
+        disclosure.setButtonType(.pushOnPushOff)
+        disclosure.state = isExpanded ? .on : .off
         disclosure.setAccessibilityLabel(isExpanded ? "Collapse storage object \(entry.shortId)" : "Expand storage object \(entry.shortId)")
         disclosure.translatesAutoresizingMaskIntoConstraints = false
 
