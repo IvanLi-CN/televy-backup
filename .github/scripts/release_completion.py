@@ -64,6 +64,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.repo_root:
             CHAIN.ROOT = args.repo_root.resolve()
         intent = labels(args.labels_json)
+        changed = CHAIN.git("diff", "--name-only", f"{args.base}...{args.commit}").splitlines()
+        if intent["action"] == "skip" and "VERSION" not in changed:
+            print(json.dumps({"status": "skip"}, sort_keys=True))
+            return 0
         if not checks_ready(args.checks_json):
             raise CompletionError("source PR checks are not all successful")
         try:
@@ -74,7 +78,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps({"status": "migration"}, sort_keys=True))
                 return 0
             if intent["action"] == "skip":
-                changed = CHAIN.git("diff", "--name-only", f"{args.base}...{args.commit}").splitlines()
                 if "VERSION" in changed:
                     raise CompletionError("non-migration skip PR must not modify VERSION")
                 print(json.dumps({"status": "skip"}, sort_keys=True))

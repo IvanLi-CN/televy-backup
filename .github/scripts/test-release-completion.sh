@@ -32,6 +32,13 @@ out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json")"
 [[ "$out" == *'"status": "ready"'* ]]
 
+printf '[{"name":"type:skip"},{"name":"channel:stable"}]\n' > "$tmp_dir/skip-labels.json"
+printf '{"check_runs":[]}\n' > "$tmp_dir/skip-checks.json"
+skip_out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
+  --repo-root "$repo_dir" \
+  --commit "$source_sha" --base "$source_sha" --labels-json "$tmp_dir/skip-labels.json" --checks-json "$tmp_dir/skip-checks.json")"
+[[ "$skip_out" == *'"status": "skip"'* ]]
+
 migration_dir="$tmp_dir/migration"
 mkdir -p "$migration_dir"
 git -C "$migration_dir" init -q
