@@ -26,8 +26,13 @@ esac
 executable_name="TelevyBackup"
 src_dir="$root_dir/macos/TelevyBackupApp"
 out_root="$root_dir/target/macos-app"
-release_version="${TELEVYBACKUP_RELEASE_VERSION:-0.1.0}"
 source_commit="${TELEVYBACKUP_SOURCE_COMMIT:-$(git rev-parse HEAD)}"
+build_mode="${TELEVYBACKUP_BUILD_MODE:-development}"
+case "$build_mode" in
+  development|release) ;;
+  *) echo "ERROR: invalid TELEVYBACKUP_BUILD_MODE=$build_mode (expected: development|release)" >&2; exit 2 ;;
+esac
+release_version="$(python3 "$root_dir/scripts/product-version.py" --mode "$build_mode" --source-sha "$source_commit")"
 build_number="${TELEVYBACKUP_BUILD_NUMBER:-$(git rev-list --count "$source_commit" 2>/dev/null || printf '0')}"
 cargo_target="${TELEVYBACKUP_CARGO_TARGET:-}"
 short_version="${release_version%%-*}"
@@ -35,7 +40,7 @@ if [[ ! "$short_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "ERROR: release version must contain numeric semver base: $release_version" >&2
   exit 2
 fi
-export TELEVYBACKUP_BUILD_VERSION="$release_version"
+export TELEVYBACKUP_BUILD_MODE="$build_mode"
 export TELEVYBACKUP_BUILD_COMMIT="$source_commit"
 export TELEVYBACKUP_BUILD_NUMBER="$build_number"
 app_dir="$out_root/${bundle_display_name}.app"

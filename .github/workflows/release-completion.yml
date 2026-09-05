@@ -1,0 +1,54 @@
+name: Release completion
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+  merge_group:
+
+concurrency:
+  group: release-completion-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  checks: read
+  contents: read
+  pull-requests: read
+
+jobs:
+  release-completion:
+    name: Release completion
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+
+      - name: Fetch pull request head
+        run: git fetch --no-tags origin "${{ github.event.pull_request.head.sha }}"
+
+      - name: Verify VERSION and release completion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          jq '.pull_request.labels' "${GITHUB_EVENT_PATH}" > "${RUNNER_TEMP}/labels.json"
+          verification_sha="${HEAD_SHA}"
+          if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then
+            verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
+          python3 .github/scripts/release_completion.py \
+            --repo-root . \
+            --commit "${HEAD_SHA}" \
+            --base "${BASE_SHA}" \
+            --labels-json "${RUNNER_TEMP}/labels.json" \
+            --checks-json "${RUNNER_TEMP}/source-checks.json" \
+            --allow-migration \
+            --migration-version 0.9.2

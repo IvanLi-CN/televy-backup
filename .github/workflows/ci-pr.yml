@@ -3,6 +3,7 @@ name: CI (PR)
 on:
   pull_request:
     branches: [main]
+  merge_group:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -18,15 +19,49 @@ env:
   RUST_TOOLCHAIN: 1.91.0
 
 jobs:
+  classify:
+    name: Classify CI preparation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      kind: ${{ steps.classify.outputs.kind }}
+    steps:
+      - name: Checkout pull request head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+
+      - name: Classify VERSION preparation commit
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 .github/scripts/release_chain.py verify-prepared --commit HEAD >/dev/null 2>&1; then
+            echo "kind=prepared" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=source" >> "$GITHUB_OUTPUT"
+          fi
+
   quality:
+    needs: classify
+    if: needs.classify.result == 'success'
     runs-on: ubuntu-latest
     env:
       CARGO_TARGET_DIR: target/ci/pr/rust
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+
+      - name: Verify prepared release source
+        if: needs.classify.outputs.kind == 'prepared'
+        run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
 
       - name: Install system dependencies
+        if: needs.classify.outputs.kind == 'source'
         run: |
           sudo apt update
           sudo apt install -y \
@@ -36,23 +71,37 @@ jobs:
             curl
 
       - name: Set up Rust toolchain
+        if: needs.classify.outputs.kind == 'source'
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - name: Install Rust components
+        if: needs.classify.outputs.kind == 'source'
         run: rustup component add rustfmt clippy
 
       - name: Release script contract tests
+        if: needs.classify.outputs.kind == 'source'
         run: bash ./.github/scripts/test-release-scripts.sh
 
+      - name: Release chain fixture tests
+        if: needs.classify.outputs.kind == 'source'
+        run: |
+          bash ./.github/scripts/test-release-chain.sh
+          bash ./.github/scripts/test-release-preparation.sh
+          bash ./.github/scripts/test-release-completion.sh
+          bash ./.github/scripts/test-release-workflows.sh
+
       - name: Package script contract tests
+        if: needs.classify.outputs.kind == 'source'
         run: bash ./.github/scripts/test-package-scripts.sh
 
       - name: Daemon service contract tests
+        if: needs.classify.outputs.kind == 'source'
         run: bash ./.github/scripts/test-daemon-service.sh
 
       - name: Cache cargo directories
+        if: needs.classify.outputs.kind == 'source'
         uses: actions/cache@v4
         with:
           path: |
@@ -66,39 +115,38 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Cargo fmt check
+        if: needs.classify.outputs.kind == 'source'
         run: cargo fmt --all -- --check
 
       - name: Cargo clippy
+        if: needs.classify.outputs.kind == 'source'
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Cargo test
+        if: needs.classify.outputs.kind == 'source'
         run: cargo test --all-features
 
       - name: Cargo test (mtproto-helper)
+        if: needs.classify.outputs.kind == 'source'
         run: |
           cd crates/mtproto-helper
           cargo test
 
   macos-swift:
+    needs: classify
+    if: needs.classify.result == 'success'
     name: macOS Swift tests
     runs-on: macos-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
 
       - name: Swift unit/UI layout tests
+        if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/swift-unit-tests.sh
-
-  bootstrap-label-gate:
-    name: Release intent label gate
-    if: github.event.pull_request.number == 53
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Validate release intent + channel labels
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: bash ./.github/scripts/label-gate.sh
+      - name: Verify prepared release source
+        if: needs.classify.outputs.kind == 'prepared'
+        run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD

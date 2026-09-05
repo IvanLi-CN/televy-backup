@@ -3,13 +3,7 @@ name: macOS package matrix
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'crates/**'
-      - 'macos/**'
-      - 'packaging/**'
-      - 'assets/brand/**'
-      - 'scripts/macos/**'
-      - '.github/workflows/package-ci.yml'
+  merge_group:
   workflow_dispatch:
     inputs:
       source_ref:
@@ -20,11 +14,28 @@ on:
 permissions:
   contents: read
 
-env:
-  TELEVYBACKUP_CI_VERSION: 0.0.0-ci.${{ github.run_number }}
-
 jobs:
+  classify:
+    name: Classify package preparation
+    runs-on: ubuntu-latest
+    outputs:
+      kind: ${{ steps.classify.outputs.kind }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+      - id: classify
+        run: |
+          if python3 .github/scripts/release_chain.py verify-prepared --commit HEAD >/dev/null 2>&1; then
+            echo "kind=prepared" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=source" >> "$GITHUB_OUTPUT"
+          fi
+
   arm64:
+    needs: classify
+    if: needs.classify.result == 'success'
     name: arm64 native package
     runs-on: macos-15
     steps:
@@ -32,18 +43,27 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           fetch-depth: 0
+      - name: Verify prepared release source
+        if: needs.classify.outputs.kind == 'prepared'
+        run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
       - uses: dtolnay/rust-toolchain@v1
+        if: needs.classify.outputs.kind == 'source'
         with:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
-      - run: bash scripts/macos/package-release.sh --version "$TELEVYBACKUP_CI_VERSION" --arch arm64 --output-dir dist/arm64
-      - run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/arm64/TelevyBackup.app
+      - if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/package-release.sh --mode development --arch arm64 --output-dir dist/arm64
+      - if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/arm64/TelevyBackup.app
       - uses: actions/upload-artifact@v4
+        if: needs.classify.outputs.kind == 'source'
         with:
           name: package-ci-arm64
           path: dist/arm64
 
   x86_64:
+    needs: classify
+    if: needs.classify.result == 'success'
     name: x86_64 native package
     runs-on: macos-15-intel
     steps:
@@ -51,13 +71,20 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           fetch-depth: 0
+      - name: Verify prepared release source
+        if: needs.classify.outputs.kind == 'prepared'
+        run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
       - uses: dtolnay/rust-toolchain@v1
+        if: needs.classify.outputs.kind == 'source'
         with:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
-      - run: bash scripts/macos/package-release.sh --version "$TELEVYBACKUP_CI_VERSION" --arch x86_64 --output-dir dist/x86_64
-      - run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/x86_64/TelevyBackup.app
+      - if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/package-release.sh --mode development --arch x86_64 --output-dir dist/x86_64
+      - if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/x86_64/TelevyBackup.app
       - uses: actions/upload-artifact@v4
+        if: needs.classify.outputs.kind == 'source'
         with:
           name: package-ci-x86_64
           path: dist/x86_64
@@ -65,21 +92,28 @@ jobs:
   universal2:
     name: Universal 2 assembly
     runs-on: macos-15
-    needs: [arm64, x86_64]
+    needs: [classify, arm64, x86_64]
+    if: needs.classify.result == 'success'
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_ref || github.sha }}
           fetch-depth: 0
       - uses: actions/download-artifact@v4
+        if: needs.classify.outputs.kind == 'source'
         with:
           name: package-ci-arm64
           path: dist/arm64
       - uses: actions/download-artifact@v4
+        if: needs.classify.outputs.kind == 'source'
         with:
           name: package-ci-x86_64
           path: dist/x86_64
+      - name: Verify prepared release source
+        if: needs.classify.outputs.kind == 'prepared'
+        run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
       - name: Assemble, hash, and inspect
+        if: needs.classify.outputs.kind == 'source'
         env:
           RUST_TOOLCHAIN: 1.91.0
         run: |
@@ -87,14 +121,15 @@ jobs:
           mkdir -p dist/final
           arm_app="$(find dist/arm64 -maxdepth 1 -type d -name '*.app' -print -quit)"
           x86_app="$(find dist/x86_64 -maxdepth 1 -type d -name '*.app' -print -quit)"
-          bash scripts/macos/assemble-universal.sh --version "$TELEVYBACKUP_CI_VERSION" --arm64-app "$arm_app" --x86_64-app "$x86_app" --output-dir dist/final
+          bash scripts/macos/assemble-universal.sh --mode development --arm64-app "$arm_app" --x86_64-app "$x86_app" --output-dir dist/final
           cp dist/arm64/TelevyBackup-*-arm64.dmg dist/final/
           cp dist/x86_64/TelevyBackup-*-x86_64.dmg dist/final/
           cp dist/arm64/televybackup-tools-*-arm64.tar.gz dist/final/
           cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
-          bash scripts/macos/generate-release-manifest.sh --version "$TELEVYBACKUP_CI_VERSION" --asset-dir dist/final --source-commit "$(git rev-parse HEAD)" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
-          bash scripts/macos/verify-release-assets.sh --version "$TELEVYBACKUP_CI_VERSION" --asset-dir dist/final
+          bash scripts/macos/generate-release-manifest.sh --mode development --asset-dir dist/final --source-commit "$(git rev-parse HEAD)" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
+          bash scripts/macos/verify-release-assets.sh --mode development --asset-dir dist/final
       - uses: actions/upload-artifact@v4
+        if: needs.classify.outputs.kind == 'source'
         with:
           name: package-ci-universal2
           path: dist/final

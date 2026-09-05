@@ -3,8 +3,7 @@ name: Notify failed release
 on:
   workflow_run:
     workflows:
-      - Release
-      - Release exact-tag backfill
+      - Release Product
     types:
       - completed
     branches:
@@ -24,6 +23,9 @@ jobs:
       head_sha: ${{ steps.resolve.outputs.head_sha }}
       actor: ${{ steps.resolve.outputs.actor }}
       extra_details: ${{ steps.resolve.outputs.extra_details }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      recovery: ${{ steps.resolve.outputs.recovery }}
     steps:
       - name: Resolve failed release metadata
         id: resolve
@@ -121,6 +123,8 @@ jobs:
 
           resolved_sha = fallback_head_sha
           extra_details = ''
+          version = ''
+          tag = ''
 
           try:
               jobs = list_jobs()
@@ -159,6 +163,19 @@ jobs:
               else:
                   extra_details = f'target sha resolution fell back to workflow_run head sha ({type(exc).__name__})'
 
+          if resolved_sha:
+              try:
+                  version_payload = api_json(f'/repos/{repository}/contents/VERSION?ref={resolved_sha}')
+                  encoded = version_payload.get('content', '')
+                  if isinstance(encoded, str):
+                      import base64
+                      candidate = base64.b64decode(encoded.replace('\n', '')).decode('utf-8').strip()
+                      if re.fullmatch(r'\d+\.\d+\.\d+(?:-rc\.\d+)?', candidate):
+                          version = candidate
+                          tag = f'v{candidate}'
+              except Exception:  # noqa: BLE001
+                  pass
+
           with open(output_path, 'a', encoding='utf-8') as handle:
               handle.write(f'ref_label={pick_ref_label()}\n')
               handle.write(f'head_sha={resolved_sha or fallback_head_sha}\n')
@@ -166,6 +183,10 @@ jobs:
               handle.write('extra_details<<EOF\n')
               handle.write(extra_details)
               handle.write('\nEOF\n')
+              handle.write(f'version={version}\n')
+              handle.write(f'tag={tag}\n')
+              recovery = f'workflow_dispatch operation=recover commit_sha={resolved_sha}' if resolved_sha and version else 'recovery identity unavailable'
+              handle.write(f'recovery={recovery}\n')
           PYCODE
 
   notify_failure:
@@ -188,6 +209,9 @@ jobs:
         actor: ${{ needs.resolve_release_context.outputs.actor }}
         run_url: ${{ github.event.workflow_run.html_url }}
         note: ${{ needs.resolve_release_context.outputs.extra_details }}
+        version: ${{ needs.resolve_release_context.outputs.version }}
+        tag: ${{ needs.resolve_release_context.outputs.tag }}
+        recovery: ${{ needs.resolve_release_context.outputs.recovery }}
 
   smoke_test:
     if: ${{ github.event_name == 'workflow_dispatch' }}

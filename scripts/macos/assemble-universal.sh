@@ -2,20 +2,24 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: assemble-universal.sh --version VERSION --arm64-app APP --x86_64-app APP --output-dir DIR" >&2
+  echo "usage: assemble-universal.sh --mode release|development --arm64-app APP --x86_64-app APP --output-dir DIR" >&2
   exit 2
 }
-version=""; arm_app=""; x86_app=""; output_dir=""
+mode=""; arm_app=""; x86_app=""; output_dir=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version) version="${2:-}"; shift 2 ;;
+    --mode) mode="${2:-}"; shift 2 ;;
     --arm64-app) arm_app="${2:-}"; shift 2 ;;
     --x86_64-app) x86_app="${2:-}"; shift 2 ;;
     --output-dir) output_dir="${2:-}"; shift 2 ;;
     *) usage ;;
   esac
 done
-[[ -n "$version" && -d "$arm_app" && -d "$x86_app" && -n "$output_dir" ]] || usage
+[[ -n "$mode" && -d "$arm_app" && -d "$x86_app" && -n "$output_dir" ]] || usage
+[[ "$mode" == "release" || "$mode" == "development" ]] || usage
+root_dir="$(git rev-parse --show-toplevel)"
+source_commit="$(git rev-parse HEAD)"
+version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
 mkdir -p "$output_dir"
 universal_app="$output_dir/TelevyBackup.app"
 rm -rf "$universal_app"

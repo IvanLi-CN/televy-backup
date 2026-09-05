@@ -1,54 +1,29 @@
 # Quality gates
 
-This repo treats PR checks as an explicit merge contract, not just “whatever happens to run on GitHub”.
-
-## Baseline policy
-
-- `baseline_policy`: `explicit-waiver-required`
-- Rule: every declared required check must be green before merge unless there is a documented waiver.
+TelevyBackup treats pull request checks as an explicit merge contract. The canonical declaration is `.github/quality-gates.json`; this document explains the repository-facing policy without changing GitHub settings.
 
 ## Required checks
 
-Use the exact GitHub check names below as the merge gate contract for PRs targeting `main`:
-
 - `quality`
 - `macOS Swift tests`
-- `Release intent label gate`
+- `arm64 native package`
+- `x86_64 native package`
+- `Universal 2 assembly`
+- `Validate PR labels`
+- `Release completion`
 
-## Informational checks
+The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks.
 
-- None declared.
+## Release checks
 
-## Expected PR workflows
+`Label Gate` enforces exactly one `type:*` and one `channel:*` label. Source PR heads run the full Rust, Swift, and native package matrix. A trusted preparation run adds only `VERSION` to the PR branch and then the same required check names run structural verification against that preparation commit. `Release completion` is the required PR-local contract for ancestry, VERSION, labels, source checks, and migration handling.
 
-- `CI (PR)`
-  - `quality`
-  - `macOS Swift tests`
-- `PR Label Gate`
-  - `Release intent label gate`
+After a normal merge, `Release Product` reads only the committed merge SHA and VERSION. Its manual entry is restricted to same-identity `recover`. Failed releases are handled by `Notify failed release`, which reports the resolved SHA, VERSION, tag, and recovery command.
 
-## Waivers
+## Remote alignment
 
-- None.
+The declaration is the repository source of truth. GitHub ruleset and branch-protection settings must be reconciled separately by an authorized owner; this change records the expected policy but performs no remote mutation.
 
-## Bootstrap note
+## Local verification
 
-- PR `#53` introduces the `pull_request_target` workflow that backs `Release intent label gate`.
-- Because `pull_request_target` resolves workflow definitions from the base branch, PR `#53` cannot receive that check from `main` yet.
-- Bootstrap validation for PR `#53` is therefore emitted by a temporary `CI (PR)` job with the exact check name `Release intent label gate`.
-- After PR `#53` merges, subsequent PRs are validated automatically through `pull_request_target`; the bootstrap-only PR job stays inactive for every PR other than `#53`.
-
-## GitHub alignment
-
-- Repo-local declaration is the source of truth.
-- GitHub branch protection / rulesets must be reconciled to the `required_checks` set above.
-- Current GitHub-side required-check configuration: `存在`.
-  - Verified on GitHub Settings > Branches on 2026-03-08.
-  - Enforced required checks: `quality`, `macOS Swift tests`, `Release intent label gate`.
-  - `Require a pull request before merging` is also enabled for `main`.
-
-## Local quality workflow
-
-- Hooks: `lefthook`
-- Rust checks are expected to stay green locally before push when practical.
-- Release script and notification workflow contract tests are part of CI because release logic and reusable-workflow wiring are easy to regress silently.
+Run `bash .github/scripts/test-release-scripts.sh`, the focused release fixture scripts, `bash .github/scripts/test-package-scripts.sh`, and the Rust checks before opening a PR. Hosted macOS jobs remain authoritative for Swift and native packaging.

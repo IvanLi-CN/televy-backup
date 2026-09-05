@@ -2,33 +2,32 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: package-release.sh --version VERSION --arch arm64|x86_64 --output-dir DIR" >&2
+  echo "usage: package-release.sh --mode release|development --arch arm64|x86_64 --output-dir DIR" >&2
   exit 2
 }
 
-version=""
+mode=""
 arch=""
 output_dir=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version) version="${2:-}"; shift 2 ;;
+    --mode) mode="${2:-}"; shift 2 ;;
     --arch) arch="${2:-}"; shift 2 ;;
     --output-dir) output_dir="${2:-}"; shift 2 ;;
     *) usage ;;
   esac
 done
-[[ -n "$version" && -n "$arch" && -n "$output_dir" ]] || usage
+[[ -n "$mode" && -n "$arch" && -n "$output_dir" ]] || usage
+[[ "$mode" == "release" || "$mode" == "development" ]] || usage
 [[ "$arch" == "arm64" || "$arch" == "x86_64" ]] || usage
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || {
-  echo "invalid release version: $version" >&2
-  exit 2
-}
 
 root_dir="$(git rev-parse --show-toplevel)"
+source_commit="$(git rev-parse HEAD)"
+version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
 mkdir -p "$output_dir"
 export TELEVYBACKUP_APP_VARIANT=prod
-export TELEVYBACKUP_RELEASE_VERSION="$version"
-export TELEVYBACKUP_SOURCE_COMMIT="$(git rev-parse HEAD)"
+export TELEVYBACKUP_BUILD_MODE="$mode"
+export TELEVYBACKUP_SOURCE_COMMIT="$source_commit"
 if [[ -z "${TELEVYBACKUP_CARGO_TARGET:-}" ]]; then
   if [[ "$arch" == "arm64" ]]; then export TELEVYBACKUP_CARGO_TARGET=aarch64-apple-darwin; else export TELEVYBACKUP_CARGO_TARGET=x86_64-apple-darwin; fi
 fi
