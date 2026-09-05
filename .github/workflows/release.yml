@@ -184,7 +184,7 @@ jobs:
     permissions:
       contents: write
       issues: write
-      pull-requests: read
+      pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
       PRODUCT_TAG: ${{ needs.resolve.outputs.tag }}
