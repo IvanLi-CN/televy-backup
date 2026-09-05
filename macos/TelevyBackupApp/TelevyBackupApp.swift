@@ -3514,16 +3514,7 @@ struct PopoverRootView: View {
 
         return VStack(spacing: 0) {
             HStack(alignment: .center, spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(theme.headerIconTileBackground)
-                        .frame(width: 28, height: 28)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .strokeBorder(theme.headerIconTileStroke, lineWidth: 1)
-                        )
-                    TelevyBackupBrandMark(size: 20)
-                }
+                TelevyBackupBrandMark(size: 28)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("TelevyBackup")

@@ -10,6 +10,7 @@ bash -n "$root_dir/scripts/macos/package-release.sh" \
   "$root_dir/scripts/macos/generate-brand-variants.sh" \
   "$root_dir/scripts/macos/verify-brand-assets.sh" \
   "$root_dir/scripts/macos/generate-app-icon-assets.sh" \
+  "$root_dir/scripts/macos/generate-app-icon-previews.sh" \
   "$root_dir/scripts/macos/verify-app-icon-assets.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh"
@@ -19,18 +20,18 @@ verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
   echo 'build must run the shared-geometry brand asset verifier' >&2
   exit 1
 }
-[[ "$build_text" == *'CFBundleIconFile'* && "$build_text" == *'TelevyBackup.icns'* ]] || {
-  echo 'build script must declare and copy TelevyBackup.icns' >&2
+[[ "$build_text" == *'CFBundleIconFile'* && "$build_text" == *'CFBundleIconName'* && "$build_text" == *'Assets.xcassets'* ]] || {
+  echo 'build script must declare the AppIcon catalog and TelevyBackup.icns fallback' >&2
   exit 1
 }
 icon_text="$(<"$root_dir/scripts/macos/generate-app-icon-assets.sh")"
-[[ "$icon_text" == *'icon_512x512@2x.png:1024'* && "$icon_text" == *'iconutil -c icns'* ]] || {
-  echo 'app icon generator must produce the complete iconset and ICNS' >&2
+[[ "$icon_text" == *'icon_512x512@2x.png:1024'* && "$icon_text" == *'iconutil -c icns'* && "$icon_text" == *'AppIcon-dark-'* ]] || {
+  echo 'app icon generator must produce the complete iconset, appearance catalog, and ICNS' >&2
   exit 1
 }
 verify_icon_text="$(<"$root_dir/scripts/macos/verify-app-icon-assets.sh")"
-[[ "$verify_icon_text" == *'icon_16x16.png:16'* && "$verify_icon_text" == *'iconutil -c iconset'* ]] || {
-  echo 'app icon verifier must check standard sizes and ICNS round-trip' >&2
+[[ "$verify_icon_text" == *'icon_16x16.png:16'* && "$verify_icon_text" == *'iconutil -c iconset'* && "$verify_icon_text" == *'Assets.car'* ]] || {
+  echo 'app icon verifier must check standard sizes, AppIcon catalog, and ICNS round-trip' >&2
   exit 1
 }
 assemble_text="$(<"$root_dir/scripts/macos/assemble-universal.sh")"

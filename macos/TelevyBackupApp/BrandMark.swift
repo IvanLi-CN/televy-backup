@@ -9,9 +9,9 @@ enum BrandMarkVariant: Hashable {
     var fileName: String {
         switch self {
         case .lightUI:
-            return "televybackup-logo-ui.svg"
+            return "televybackup-logo-ui-compact.svg"
         case .darkUI:
-            return "televybackup-logo-dark.svg"
+            return "televybackup-logo-dark-compact.svg"
         case .template:
             return "televybackup-logo-template.svg"
         }

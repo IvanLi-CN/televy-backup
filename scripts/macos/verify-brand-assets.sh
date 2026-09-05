@@ -12,12 +12,26 @@ from pathlib import Path
 
 brand_dir = Path(sys.argv[1]).resolve()
 expected = {
-    "televybackup-logo.svg": ("#ffffff", "#263238", "#1677ff"),
-    "televybackup-logo-dark.svg": ("none", "#74869c", "#5aa9ff"),
-    "televybackup-logo-monochrome.svg": ("#ffffff", "#000000", "#000000"),
-    "televybackup-logo-ui.svg": ("none", "#263238", "#1677ff"),
-    "televybackup-logo-template.svg": ("none", "#000000", "#000000"),
+    "televybackup-logo.svg": ("0 0 1254 1254", "#ffffff", "#263238", "#1677ff"),
+    "televybackup-logo-dark.svg": ("0 0 1254 1254", "none", "#bbc9d8", "#a2ceff"),
+    "televybackup-logo-monochrome.svg": ("0 0 1254 1254", "#ffffff", "#000000", "#000000"),
+    "televybackup-logo-ui.svg": ("0 0 1254 1254", "none", "#263238", "#1677ff"),
+    "televybackup-logo-ui-compact.svg": ("125 125 1000 1000", "none", "#263238", "#1677ff"),
+    "televybackup-logo-dark-compact.svg": ("125 125 1000 1000", "none", "#bbc9d8", "#a2ceff"),
+    "televybackup-logo-template.svg": ("0 0 1254 1254", "none", "#000000", "#000000"),
+    "televybackup-logo-compact.svg": ("125 125 1000 1000", "#ffffff", "#263238", "#1677ff"),
 }
+for appearance, colors in {
+    "default": ("#ffffff", "#263238", "#1677ff"),
+    "dark": ("#263238", "#74869c", "#5aa9ff"),
+    "mono": ("#ffffff", "#000000", "#000000"),
+}.items():
+    expected[f"macos/layers/{appearance}/televybackup-logo.svg"] = (
+        "0 0 1254 1254", *colors
+    )
+    expected[f"macos/layers/{appearance}/televybackup-logo-compact.svg"] = (
+        "125 125 1000 1000", *colors
+    )
 
 def local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
@@ -34,7 +48,8 @@ for filename, colors in expected.items():
         root = ET.fromstring(raw)
     except ET.ParseError as error:
         raise SystemExit(f"invalid brand SVG {path}: {error}")
-    if local_name(root.tag) != "svg" or root.attrib.get("viewBox") != "0 0 1254 1254":
+    view_box, *colors = colors
+    if local_name(root.tag) != "svg" or root.attrib.get("viewBox") != view_box:
         raise SystemExit(f"unexpected SVG root/viewBox: {path}")
     elements = [element for element in root.iter() if local_name(element.tag) in {"rect", "path"}]
     if [local_name(element.tag) for element in elements] != ["rect", "path", "path"]:
@@ -44,7 +59,7 @@ for filename, colors in expected.items():
         raise SystemExit(f"brand SVG has an empty path: {path}")
     style = " ".join(element.text or "" for element in root.iter() if local_name(element.tag) == "style")
     found = tuple(re.search(rf"\.({name})\s*\{{\s*fill:\s*([^;]+);", style).group(2).lower() for name in ("canvas", "disk", "wing"))
-    if found != colors:
+    if found != tuple(colors):
         raise SystemExit(f"unexpected color parameters in {path}: {found}")
     if geometry is None:
         geometry = paths

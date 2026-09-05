@@ -32,14 +32,25 @@ for app in "$asset_dir"/*.app; do
     echo "app bundle missing TelevyBackup.icns: $app" >&2
     exit 1
   }
+  [[ -s "$app/Contents/Resources/Assets.car" ]] || {
+    echo "app bundle missing Assets.car: $app" >&2
+    exit 1
+  }
   icon_file="$(/usr/bin/plutil -extract CFBundleIconFile raw -o - "$app/Contents/Info.plist")"
   [[ "$icon_file" == "TelevyBackup.icns" ]] || {
     echo "app bundle has unexpected CFBundleIconFile: $icon_file" >&2
     exit 1
   }
+  icon_name="$(/usr/bin/plutil -extract CFBundleIconName raw -o - "$app/Contents/Info.plist")"
+  [[ "$icon_name" == "AppIcon" ]] || {
+    echo "app bundle has unexpected CFBundleIconName: $icon_name" >&2
+    exit 1
+  }
   for brand_asset in \
     televybackup-logo-ui.svg \
+    televybackup-logo-ui-compact.svg \
     televybackup-logo-dark.svg \
+    televybackup-logo-dark-compact.svg \
     televybackup-logo-template.svg; do
     [[ -s "$app/Contents/Resources/Brand/$brand_asset" ]] || {
       echo "app bundle missing Brand/$brand_asset: $app" >&2

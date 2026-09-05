@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1254" height="1254" viewBox="0 0 1254 1254" role="img" aria-labelledby="title desc">
-  <title id="title">TelevyBackup dark theme logo</title>
+  <title id="title">TelevyBackup logo</title>
   <desc id="desc">A storage drive with an abstract folded transmission wing.</desc>
   <style>
     /* Color parameters */
     .canvas { fill: none; }
-    .disk { fill: #74869c; }
-    .wing { fill: #5aa9ff; }
+    .disk { fill: #bbc9d8; }
+    .wing { fill: #a2ceff; }
   </style>
   <rect class="canvas" width="1254" height="1254"/>
   <g class="disk" transform="translate(0 1254) scale(.1 -.1)">
