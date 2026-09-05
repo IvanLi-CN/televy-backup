@@ -4,7 +4,7 @@
 
 ## Current Status
 
-- Implementation: in progress; Storage object inspection is being integrated
+- Implementation: complete; Storage object inspection is available end to end
 - Lifecycle: active
 - Catalog note: implemented
 
@@ -28,8 +28,7 @@
 
 ## Remaining Gaps
 
-- Deterministic light and dark Main Window Storage captures remain required before the feature can be declared visually complete.
-- Fast-track PR creation, CI/review convergence, and final implementation status update remain required.
+- Fast-track PR creation and CI/review convergence remain required for delivery.
 
 ## References
 
