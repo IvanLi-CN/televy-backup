@@ -17,7 +17,8 @@ env:
   RUST_TOOLCHAIN: 1.91.0
 
 jobs:
-  quality:
+  main-quality:
+    name: Mainline quality
     runs-on: ubuntu-latest
     env:
       CARGO_TARGET_DIR: target/ci/main/rust
@@ -44,6 +45,13 @@ jobs:
 
       - name: Release script contract tests
         run: bash ./.github/scripts/test-release-scripts.sh
+
+      - name: Release chain fixture tests
+        run: |
+          bash ./.github/scripts/test-release-chain.sh
+          bash ./.github/scripts/test-release-preparation.sh
+          bash ./.github/scripts/test-release-completion.sh
+          bash ./.github/scripts/test-release-workflows.sh
 
       - name: Cache cargo directories
         uses: actions/cache@v4
@@ -72,8 +80,8 @@ jobs:
           cd crates/mtproto-helper
           cargo test
 
-  macos-swift:
-    name: macOS Swift tests
+  main-macos-swift:
+    name: Mainline macOS Swift tests
     runs-on: macos-latest
     steps:
       - name: Checkout repository
@@ -82,30 +90,15 @@ jobs:
       - name: Swift unit/UI layout tests
         run: bash scripts/macos/swift-unit-tests.sh
 
-  release-intent-freeze:
-    name: Freeze release intent
+  release-preparation-validation:
+    name: Release preparation validation
     runs-on: ubuntu-latest
-    needs: [quality, macos-swift]
-    permissions:
-      contents: read
-      issues: read
-      pull-requests: read
+    needs: [main-quality, main-macos-swift]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Freeze merged PR release intent
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WORKFLOW_RUN_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          bash ./.github/scripts/freeze-release-intent.sh dist/release-intent/release-intent.json
-
-      - name: Upload frozen release intent artifact
-        uses: actions/upload-artifact@v4
         with:
-          name: release-intent-${{ github.sha }}
-          path: dist/release-intent/release-intent.json
-          if-no-files-found: error
-          retention-days: 7
+          fetch-depth: 2
+
+      - name: Verify merged VERSION preparation
+        run: python3 .github/scripts/release_chain.py verify-merged --commit HEAD

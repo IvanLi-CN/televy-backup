@@ -28,14 +28,8 @@ use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const BUILD_VERSION: &str = match option_env!("TELEVYBACKUP_BUILD_VERSION") {
-    Some(value) => value,
-    None => env!("CARGO_PKG_VERSION"),
-};
-const BUILD_COMMIT: &str = match option_env!("TELEVYBACKUP_BUILD_COMMIT") {
-    Some(value) => value,
-    None => "unknown",
-};
+const BUILD_VERSION: &str = env!("TELEVYBACKUP_BUILD_VERSION");
+const BUILD_COMMIT: &str = env!("TELEVYBACKUP_BUILD_COMMIT");
 
 fn print_version_if_requested() -> bool {
     if std::env::args()

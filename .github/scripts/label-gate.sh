@@ -65,18 +65,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 
-allowed_intents = {
-    "type:docs",
-    "type:skip",
-    "type:patch",
-    "type:minor",
-    "type:major",
-}
-allowed_channels = {
-    "channel:stable",
-    "channel:rc",
-}
+root = Path(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
+contract = json.loads((root / ".github/release-contract.json").read_text(encoding="utf-8"))
+groups = contract.get("label_groups", {})
+allowed_intents = set(groups.get("type", []))
+allowed_channels = set(groups.get("channel", []))
 
 labels = json.loads(os.environ["labels_json"])
 names = [label.get("name", "") for label in labels if isinstance(label, dict)]

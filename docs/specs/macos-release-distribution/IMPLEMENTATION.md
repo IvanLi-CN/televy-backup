@@ -12,7 +12,7 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 | macOS package assembly | `scripts/macos/package-release.sh`, `assemble-universal.sh`, `verify-release-assets.sh` | REQ-MRD-001, 002, 004 |
 | Managed service | `crates/cli/src/service.rs` | REQ-MRD-005, 006 |
 | GUI service control | `macos/TelevyBackupApp/SettingsWindow.swift` | REQ-MRD-007 |
-| Release orchestration | `.github/workflows/release.yml`, `release-backfill.yml` | REQ-MRD-008 |
+| Release orchestration | `.github/workflows/release.yml`, `.github/workflows/release-completion.yml` | REQ-MRD-008; see `product-version-release-chain` for the current VERSION-only contract |
 
 ## Required Evidence
 

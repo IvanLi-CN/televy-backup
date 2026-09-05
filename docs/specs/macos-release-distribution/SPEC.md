@@ -1,6 +1,6 @@
 # macOS Release Distribution and Product-Managed Daemon
 
-> Current contract for downloadable macOS artifacts, version metadata, and the user LaunchAgent. Implementation coverage is tracked in `IMPLEMENTATION.md`; lifecycle history is tracked in `HISTORY.md`.
+> Current packaging and service requirements remain here. Release orchestration is governed by [`product-version-release-chain`](../product-version-release-chain/SPEC.md); implementation coverage is tracked in `IMPLEMENTATION.md` and lifecycle history in `HISTORY.md`.
 
 ## Context and Scope
 

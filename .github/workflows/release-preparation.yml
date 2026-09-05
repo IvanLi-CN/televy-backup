@@ -1,0 +1,162 @@
+name: Prepare product version
+
+on:
+  workflow_run:
+    workflows: [CI (PR), Label Gate, macOS package matrix]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open in-repository product PR to prepare
+        required: true
+        type: string
+      operation:
+        description: Preparation operation
+        required: true
+        type: choice
+        options: [automatic, exact]
+        default: automatic
+      exact_version:
+        description: Exact VERSION for major, minor, or RC intent
+        required: false
+        type: string
+
+concurrency:
+  group: prepare-product-version-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+  checks: read
+
+jobs:
+  prepare:
+    name: Prepare product version
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'pull_request_target'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout trusted release policy
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure GitHub Actions identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh auth setup-git
+
+      - name: Resolve pull request and source checks
+        id: pr
+        env:
+          EVENT_PATH: ${{ github.event_path }}
+          DISPATCH_PR: ${{ inputs.pr_number || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="${DISPATCH_PR}"
+          if [[ -z "${pr_number}" ]]; then
+            pr_number="$(jq -r '.workflow_run.pull_requests[0].number // empty' "${EVENT_PATH}")"
+          fi
+          test -n "${pr_number}"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" > "${RUNNER_TEMP}/pull-request.json"
+          test "$(jq -r '.state' "${RUNNER_TEMP}/pull-request.json")" = open
+          test "$(jq -r '.base.ref' "${RUNNER_TEMP}/pull-request.json")" = main
+          test "$(jq -r '.head.repo.full_name // empty' "${RUNNER_TEMP}/pull-request.json")" = "${GITHUB_REPOSITORY}"
+          source_sha="$(jq -r '.head.sha' "${RUNNER_TEMP}/pull-request.json")"
+          base_sha="$(jq -r '.base.sha' "${RUNNER_TEMP}/pull-request.json")"
+          head_ref="$(jq -r '.head.ref' "${RUNNER_TEMP}/pull-request.json")"
+          git check-ref-format --branch "${head_ref}" >/dev/null
+          jq '.labels' "${RUNNER_TEMP}/pull-request.json" > "${RUNNER_TEMP}/labels.json"
+          git fetch --force --tags origin
+          git fetch --no-tags origin "${source_sha}" "${base_sha}"
+          verification_sha="${source_sha}"
+          if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${source_sha}" 2>/dev/null)"; then
+            verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/check-runs.json"
+          {
+            echo "number=${pr_number}"
+            echo "source_sha=${source_sha}"
+            echo "verification_sha=${verification_sha}"
+            echo "base_sha=${base_sha}"
+            echo "head_ref=${head_ref}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Stage VERSION-only preparation payload
+        id: prepare
+        env:
+          PREPARE_OPERATION: ${{ inputs.operation || 'automatic' }}
+          EXACT_VERSION: ${{ inputs.exact_version || '' }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "${{ steps.pr.outputs.source_sha }}"
+          git worktree add --detach "${RUNNER_TEMP}/release-source" "${{ steps.pr.outputs.source_sha }}"
+          python3 .github/scripts/release_preparation.py \
+            --repo-root "${RUNNER_TEMP}/release-source" \
+            --source-sha "${{ steps.pr.outputs.source_sha }}" \
+            --base-sha "${{ steps.pr.outputs.base_sha }}" \
+            --labels-json "${RUNNER_TEMP}/labels.json" \
+            --checks-json "${RUNNER_TEMP}/check-runs.json" \
+            --mode "${PREPARE_OPERATION}" \
+            --exact-version "${EXACT_VERSION}" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Create GitHub-signed VERSION commit on the pull request
+        id: create-version
+        if: steps.prepare.outputs.prepared == 'created'
+        env:
+          RELEASE_SHA: ${{ steps.prepare.outputs.release_sha }}
+          SOURCE_SHA: ${{ steps.pr.outputs.source_sha }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          source_root="${RUNNER_TEMP}/release-source"
+          test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${SOURCE_SHA}"
+          version_content="$(base64 < "${source_root}/VERSION" | tr -d '\n')"
+          headline="$(git -C "${source_root}" show -s --format=%s "${RELEASE_SHA}")"
+          body="$(git -C "${source_root}" show -s --format=%b "${RELEASE_SHA}")"
+          payload="${RUNNER_TEMP}/create-version-commit.json"
+          response="${RUNNER_TEMP}/create-version-commit-response.json"
+          jq -n \
+            --arg repo "${GITHUB_REPOSITORY}" \
+            --arg branch "${HEAD_REF}" \
+            --arg expected_head_oid "${SOURCE_SHA}" \
+            --arg headline "${headline}" \
+            --arg body "${body}" \
+            --arg contents "${version_content}" \
+            '{query:"mutation CreateVersionCommit($input:CreateCommitOnBranchInput!){createCommitOnBranch(input:$input){commit{oid}}}",variables:{input:{branch:{repositoryNameWithOwner:$repo,branchName:$branch},expectedHeadOid:$expected_head_oid,message:{headline:$headline,body:$body},fileChanges:{additions:[{path:"VERSION",contents:$contents}]}}}}' > "${payload}"
+          gh api graphql --input "${payload}" > "${response}"
+          test "$(jq -r '(.errors // []) | length' "${response}")" = 0
+          prepared_sha="$(jq -r '.data.createCommitOnBranch.commit.oid // empty' "${response}")"
+          test -n "${prepared_sha}"
+          test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${prepared_sha}"
+          echo "prepared_sha=${prepared_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify prepared VERSION commit and GitHub signature
+        if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'
+        env:
+          PREPARED_SHA: ${{ steps.create-version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}
+          SOURCE_SHA: ${{ steps.pr.outputs.source_sha }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${PREPARED_SHA}"
+          git fetch --no-tags origin "${PREPARED_SHA}"
+          python3 .github/scripts/release_chain.py verify-prepared --commit "${PREPARED_SHA}" --source-sha "${SOURCE_SHA}"
+          verified=false
+          for _ in $(seq 1 30); do
+            verified="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PREPARED_SHA}" --jq '.commit.verification.verified')"
+            [[ "${verified}" == true ]] && break
+            sleep 2
+          done
+          test "${verified}" = true

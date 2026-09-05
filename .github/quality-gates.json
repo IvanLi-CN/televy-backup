@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "baseline_policy": "explicit-waiver-required",
+    "require_signed_commits": true,
+    "branch_protection": {
+      "protected_branches": ["main"],
+      "require_pull_request": true,
+      "disallow_direct_pushes": true
+    }
+  },
+  "required_checks": [
+    "quality",
+    "macOS Swift tests",
+    "arm64 native package",
+    "x86_64 native package",
+    "Universal 2 assembly",
+    "Validate PR labels",
+    "Release completion"
+  ],
+  "informational_checks": [],
+  "expected_pr_workflows": [
+    {"workflow": "CI (PR)", "jobs": ["quality", "macOS Swift tests"]},
+    {"workflow": "macOS package matrix", "jobs": ["arm64 native package", "x86_64 native package", "Universal 2 assembly"]},
+    {"workflow": "Label Gate", "jobs": ["Validate PR labels"]},
+    {"workflow": "Release completion", "jobs": ["Release completion"]}
+  ],
+  "waivers": []
+}

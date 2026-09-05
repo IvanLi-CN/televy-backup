@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() { echo "usage: generate-release-manifest.sh --version VERSION --asset-dir DIR --source-commit SHA --packaging-commit SHA --output FILE" >&2; exit 2; }
-version=""; asset_dir=""; source_commit=""; packaging_commit=""; output=""
+usage() { echo "usage: generate-release-manifest.sh --mode release|development --asset-dir DIR --source-commit SHA --packaging-commit SHA --output FILE" >&2; exit 2; }
+mode=""; asset_dir=""; source_commit=""; packaging_commit=""; output=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version) version="${2:-}"; shift 2 ;;
+    --mode) mode="${2:-}"; shift 2 ;;
     --asset-dir) asset_dir="${2:-}"; shift 2 ;;
     --source-commit) source_commit="${2:-}"; shift 2 ;;
     --packaging-commit) packaging_commit="${2:-}"; shift 2 ;;
@@ -13,7 +13,10 @@ while [[ $# -gt 0 ]]; do
     *) usage ;;
   esac
 done
-[[ -n "$version" && -d "$asset_dir" && -n "$source_commit" && -n "$packaging_commit" && -n "$output" ]] || usage
+[[ -n "$mode" && -d "$asset_dir" && -n "$source_commit" && -n "$packaging_commit" && -n "$output" ]] || usage
+[[ "$mode" == "release" || "$mode" == "development" ]] || usage
+root_dir="$(git rev-parse --show-toplevel)"
+version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
 python3 - "$version" "$asset_dir" "$source_commit" "$packaging_commit" "$output" <<'PY'
 import hashlib, json, os, platform, sys
 version, asset_dir, source, packaging, output = sys.argv[1:]
