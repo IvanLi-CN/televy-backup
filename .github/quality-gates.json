@@ -22,7 +22,7 @@
   "expected_pr_workflows": [
     {"workflow": "CI (PR)", "jobs": ["quality", "macOS Swift tests"]},
     {"workflow": "macOS package matrix", "jobs": ["arm64 native package", "x86_64 native package", "Universal 2 assembly"]},
-    {"workflow": "Label Gate", "jobs": ["Release intent label gate"]},
+    {"workflow": "Release intent label gate", "jobs": ["Release intent label gate"]},
     {"workflow": "Release completion", "jobs": ["Release completion"]}
   ],
   "waivers": []
