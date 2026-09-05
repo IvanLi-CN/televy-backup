@@ -125,14 +125,6 @@ struct PopoverTheme {
         return [Color.white.opacity(0.12), Color.white.opacity(0.00)]
     }
 
-    var headerIconTileBackground: Color {
-        isDark ? Color.white.opacity(0.12) : Color.white.opacity(0.32)
-    }
-
-    var headerIconTileStroke: Color {
-        isDark ? Color.white.opacity(0.16) : Color.white.opacity(0.35)
-    }
-
     var actionButtonBackground: Color {
         isDark ? Color.white.opacity(0.10) : Color.white.opacity(0.26)
     }

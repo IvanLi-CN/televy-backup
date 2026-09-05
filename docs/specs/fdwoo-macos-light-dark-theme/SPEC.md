@@ -21,6 +21,8 @@
 - 新增内部主题桥接层：`AppAppearanceOverride` 与 `PopoverTheme`。
 - 提供仅用于测试 / 截图的 `TELEVYBACKUP_UI_APPEARANCE=system|light|dark`。
 - 让 Popover、Main Window、Settings Window 在浅色/深色下都具备可接受的对比度与一致性。
+- 让 Popover 标题区在浅色/深色外观下使用同一几何的透明双色品牌标记；不增加包框，Logo 显示画布为 28pt。
+- 暗色 Popover 使用提高亮度的 Graphite Azure 变体（磁盘 `#BBC9D8`、折翼 `#A2CEFF`），保证小尺寸下的轮廓可读性。
 - 补齐可重复的主题截图路径，并把最终证据写入本 spec。
 
 ### Non-goals
@@ -85,6 +87,7 @@
 
 ![Light Popover](./assets/theme-light-popover.png)
 ![Dark Popover](./assets/theme-dark-popover.png)
+以上 Popover 证据包含标题区无包框的 28pt 双色品牌标记；暗色图使用高对比 Graphite Azure 变体。
 ![Light Main Window](./assets/theme-light-main-window.png)
 ![Dark Main Window](./assets/theme-dark-main-window.png)
 ![Light Settings Window](./assets/theme-light-settings.png)

@@ -51,6 +51,37 @@ resources_dir="$contents_dir/Resources"
 mkdir -p "$macos_dir"
 mkdir -p "$resources_dir"
 
+brand_source_dir="$root_dir/assets/brand"
+app_icon_source="$root_dir/macos/TelevyBackupApp/Resources/TelevyBackup.icns"
+asset_catalog_source="$brand_source_dir/macos/Assets.xcassets"
+bash "$root_dir/scripts/macos/verify-brand-assets.sh" "$brand_source_dir"
+[[ -s "$app_icon_source" ]] || {
+  echo "ERROR: missing app icon: $app_icon_source" >&2
+  exit 1
+}
+[[ -s "$asset_catalog_source/AppIcon.appiconset/Contents.json" ]] || {
+  echo "ERROR: missing AppIcon asset catalog: $asset_catalog_source" >&2
+  exit 1
+}
+for brand_asset in \
+  televybackup-logo-ui.svg \
+  televybackup-logo-ui-compact.svg \
+  televybackup-logo-dark.svg \
+  televybackup-logo-dark-compact.svg \
+  televybackup-logo-template.svg; do
+  [[ -s "$brand_source_dir/$brand_asset" ]] || {
+    echo "ERROR: missing brand asset: $brand_source_dir/$brand_asset" >&2
+    exit 1
+  }
+done
+mkdir -p "$resources_dir/Brand"
+cp "$app_icon_source" "$resources_dir/TelevyBackup.icns"
+cp "$brand_source_dir/televybackup-logo-ui.svg" "$resources_dir/Brand/televybackup-logo-ui.svg"
+cp "$brand_source_dir/televybackup-logo-ui-compact.svg" "$resources_dir/Brand/televybackup-logo-ui-compact.svg"
+cp "$brand_source_dir/televybackup-logo-dark.svg" "$resources_dir/Brand/televybackup-logo-dark.svg"
+cp "$brand_source_dir/televybackup-logo-dark-compact.svg" "$resources_dir/Brand/televybackup-logo-dark-compact.svg"
+cp "$brand_source_dir/televybackup-logo-template.svg" "$resources_dir/Brand/televybackup-logo-template.svg"
+
 rm -f "$resources_dir/televybackup" "$resources_dir/televybackup-mtproto-helper" 2>/dev/null || true
 
 binary_dir="$root_dir/target/release"
@@ -114,6 +145,10 @@ cat > "$contents_dir/Info.plist" <<PLIST
   <string>APPL</string>
   <key>CFBundleExecutable</key>
   <string>$executable_name</string>
+  <key>CFBundleIconFile</key>
+  <string>TelevyBackup.icns</string>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
   <key>LSMinimumSystemVersion</key>
   <string>15.0</string>
   <key>LSUIElement</key>
@@ -121,6 +156,23 @@ cat > "$contents_dir/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+actool_partial_plist="$contents_dir/actool-partial.plist"
+echo "Compiling AppIcon asset catalog..."
+xcrun actool \
+  --compile "$resources_dir" \
+  --platform macosx \
+  --minimum-deployment-target 15.0 \
+  --app-icon AppIcon \
+  --output-partial-info-plist "$actool_partial_plist" \
+  "$asset_catalog_source"
+actool_icon_name="$(/usr/bin/plutil -extract CFBundleIconName raw -o - "$actool_partial_plist")"
+[[ "$actool_icon_name" == "AppIcon" ]] || {
+  echo "ERROR: actool did not emit CFBundleIconName=AppIcon" >&2
+  exit 1
+}
+/usr/bin/plutil -replace CFBundleIconName -string "$actool_icon_name" "$contents_dir/Info.plist"
+rm -f "$actool_partial_plist" "$resources_dir/AppIcon.icns"
 
 codesign_identity="${TELEVYBACKUP_CODESIGN_IDENTITY:--}"
 

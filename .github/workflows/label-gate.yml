@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   label-gate:
-    name: Validate PR labels
+    name: Release intent label gate
     if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:

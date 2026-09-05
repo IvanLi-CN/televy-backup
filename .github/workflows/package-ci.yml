@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.sha }}
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
@@ -53,6 +53,8 @@ jobs:
           targets: aarch64-apple-darwin
       - if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/package-release.sh --mode development --arch arm64 --output-dir dist/arm64
+      - if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/arm64/TelevyBackup.app
       - uses: actions/upload-artifact@v4
         if: needs.classify.outputs.kind == 'source'
         with:
@@ -67,7 +69,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.sha }}
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
@@ -79,6 +81,8 @@ jobs:
           targets: x86_64-apple-darwin
       - if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/package-release.sh --mode development --arch x86_64 --output-dir dist/x86_64
+      - if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/x86_64/TelevyBackup.app
       - uses: actions/upload-artifact@v4
         if: needs.classify.outputs.kind == 'source'
         with:
@@ -93,7 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.sha }}
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         if: needs.classify.outputs.kind == 'source'

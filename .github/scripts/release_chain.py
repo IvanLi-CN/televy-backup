@@ -203,6 +203,14 @@ def verify_tag(version: str, expected_sha: str | None = None, allow_existing: bo
     raise ReleaseChainError(f"product tag {tag} is already owned by {target}")
 
 
+def next_available_patch(current: str) -> str:
+    """Choose the first next-patch version whose product tag is unowned."""
+    candidate = PRODUCT_VERSION.next_patch(current)
+    while tag_target(f"v{candidate}") is not None:
+        candidate = PRODUCT_VERSION.next_patch(candidate)
+    return candidate
+
+
 def strictly_newer(candidate: str, current: str) -> bool:
     left = PRODUCT_VERSION.parse_version(candidate)
     right = PRODUCT_VERSION.parse_version(current)
@@ -224,7 +232,7 @@ def stage(args: argparse.Namespace) -> None:
         raise ReleaseChainError("source checkout must be clean before preparation")
     current = PRODUCT_VERSION.read_version(ROOT / "VERSION")
     if args.mode == "automatic":
-        version = PRODUCT_VERSION.next_patch(current)
+        version = next_available_patch(current)
     elif args.mode == "exact" and args.exact_version:
         version = args.exact_version
         parsed = PRODUCT_VERSION.parse_version(version)

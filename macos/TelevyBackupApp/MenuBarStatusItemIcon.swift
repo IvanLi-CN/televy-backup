@@ -48,19 +48,15 @@ enum MenuBarStatusItemIcon {
         return image
     }
 
-    // Normal and light-appearance failure variants use the pre-feature Dev icon unchanged.
-    // On a dark menu bar, failure uses its foreground color on the same base alpha geometry.
+    // Normal and activity variants use the monochrome template brand mark. On a dark menu bar,
+    // failure uses its foreground color on the same base alpha geometry.
     private static func drawOriginalBase(
         in rect: NSRect,
         isDev: Bool,
         activity: MenuBarActivityState,
         foregroundColor: NSColor? = nil
     ) {
-        let description = "TelevyBackup \(activity.accessibilityDescription)"
-        let symbol = NSImage(
-            systemSymbolName: "externaldrive",
-            accessibilityDescription: description
-        )
+        let symbol = BrandMarkAsset.image(for: .template)
         if let foregroundColor {
             drawTemplateSymbol(symbol, in: rect, foregroundColor: foregroundColor)
         } else {

@@ -10,7 +10,33 @@ bash -n \
   "$root_dir/scripts/macos/package-release.sh" \
   "$root_dir/scripts/macos/assemble-universal.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh" \
-  "$root_dir/scripts/macos/verify-release-assets.sh"
+  "$root_dir/scripts/macos/verify-release-assets.sh" \
+  "$root_dir/scripts/macos/generate-brand-variants.sh" \
+  "$root_dir/scripts/macos/verify-brand-assets.sh" \
+  "$root_dir/scripts/macos/generate-app-icon-assets.sh" \
+  "$root_dir/scripts/macos/generate-app-icon-previews.sh" \
+  "$root_dir/scripts/macos/verify-app-icon-assets.sh"
+
+build_text="$(<"$root_dir/scripts/macos/build-app.sh")"
+verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
+[[ "$build_text" == *'verify-brand-assets.sh'* && "$verify_brand_text" == *'shared geometry'* ]] || {
+  echo "brand asset verification is not wired into the build contract" >&2
+  exit 1
+}
+[[ "$build_text" == *'CFBundleIconFile'* && "$build_text" == *'CFBundleIconName'* && "$build_text" == *'Assets.xcassets'* ]] || {
+  echo "AppIcon bundle contract is not wired into build-app.sh" >&2
+  exit 1
+}
+icon_text="$(<"$root_dir/scripts/macos/generate-app-icon-assets.sh")"
+[[ "$icon_text" == *'icon_512x512@2x.png:1024'* && "$icon_text" == *'iconutil -c icns'* && "$icon_text" == *'AppIcon-dark-'* ]] || {
+  echo "AppIcon generation contract is incomplete" >&2
+  exit 1
+}
+verify_icon_text="$(<"$root_dir/scripts/macos/verify-app-icon-assets.sh")"
+[[ "$verify_icon_text" == *'icon_16x16.png:16'* && "$verify_icon_text" == *'iconutil -c iconset'* && "$verify_icon_text" == *'Assets.car'* ]] || {
+  echo "AppIcon verification contract is incomplete" >&2
+  exit 1
+}
 
 package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" == *'--mode release|development'* ]]

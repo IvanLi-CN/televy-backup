@@ -15,6 +15,7 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 - **Managed service**: the single user LaunchAgent labeled `com.ivan.televybackup.daemon`.
 - **Environment**: the exact config and data directory pair passed to the daemon.
 - **Universal 2**: a Mach-O binary containing both arm64 and x86_64 slices.
+- **Brand bundle**: the compiled `Assets.car` App Icon catalog, the `TelevyBackup.icns` compatibility fallback, and the three runtime SVGs under `Contents/Resources/Brand`.
 
 ## Requirements
 
@@ -49,6 +50,15 @@ The Settings Schedule page MUST default the service switch to off, display insta
 ### REQ-MRD-008: Release atomicity and backfill
 
 Normal release runs MUST build and validate all assets before creating a draft Release and MUST make it public only after upload and hash verification. Exact-tag backfill MUST default to build-only, use the tag's source commit without moving the tag or bumping its version, and reject an existing asset name with a different hash.
+
+### REQ-MRD-009: Product brand assets
+
+Every GUI app bundle MUST contain `TelevyBackup.icns`, declare it through
+`CFBundleIconFile`, declare `AppIcon` through `CFBundleIconName`, and include
+`Assets.car` compiled from `assets/brand/macos/Assets.xcassets`. It MUST also
+include the light UI, dark UI, and monochrome template SVGs under
+`Contents/Resources/Brand`. The iconset, asset catalog, and runtime SVGs MUST be
+generated from the selected Graphite Azure geometry without embedded raster data.
 
 ## Compatibility
 
@@ -85,6 +95,7 @@ Covers: REQ-MRD-007. Swift unit tests and isolated Settings snapshots provide th
 | REQ-MRD-003 | binary version contract tests; plist inspection |
 | REQ-MRD-005, 006 | CLI service tests; transaction fixture |
 | REQ-MRD-007 | Swift unit tests; isolated Settings snapshots |
+| REQ-MRD-009 | app build; brand and App Icon asset verifiers; bundle inspection |
 
 ## Related ADRs
 
@@ -102,3 +113,10 @@ Approved isolated Dev Settings window scenes for the managed background service:
 
 Capture contract: `target_program=com.ivan.televybackup.dev`, Settings window only. The
 images contain no desktop or unrelated windows.
+
+Brand bundle evidence is covered by the asset verifier and the Popover/menu-bar
+visual evidence in the related UI Specs.
+
+App Icon review references are stored under
+`assets/brand/macos/previews/`: Default, Dark, and Mono/Tinted appearances are
+shown at 48px, 128px, and 512px with rounded, squircle, and circle masks.
