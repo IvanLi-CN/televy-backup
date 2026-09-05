@@ -19,7 +19,7 @@ JSON
 python3 - "$tmp_dir/checks.json" <<'PY'
 import json
 import sys
-names = ["Validate PR labels", "quality", "macOS Swift tests", "arm64 native package", "x86_64 native package", "Universal 2 assembly"]
+names = ["Release intent label gate", "quality", "macOS Swift tests", "arm64 native package", "x86_64 native package", "Universal 2 assembly"]
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump({"check_runs": [{"name": name, "conclusion": "success"} for name in names]}, handle)
 PY

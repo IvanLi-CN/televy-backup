@@ -9,7 +9,7 @@ TelevyBackup treats pull request checks as an explicit merge contract. The canon
 - `arm64 native package`
 - `x86_64 native package`
 - `Universal 2 assembly`
-- `Validate PR labels`
+- `Release intent label gate`
 - `Release completion`
 
 The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks.

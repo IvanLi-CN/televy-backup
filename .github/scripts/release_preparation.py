@@ -13,7 +13,7 @@ import release_chain as CHAIN  # noqa: E402
 
 
 REQUIRED_SOURCE_CHECKS = {
-    "Validate PR labels",
+    "Release intent label gate",
     "quality",
     "macOS Swift tests",
     "arm64 native package",
