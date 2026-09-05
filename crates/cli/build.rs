@@ -45,7 +45,10 @@ fn main() {
     println!("cargo:rustc-env=TELEVYBACKUP_BUILD_NUMBER={build_number}");
     println!("cargo:rustc-env=TELEVYBACKUP_BUILD_LONG_VERSION={version} ({commit})");
     println!("cargo:rerun-if-changed={}", root.join("VERSION").display());
-    println!("cargo:rerun-if-changed={}", root.join("scripts/product-version.py").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("scripts/product-version.py").display()
+    );
     println!("cargo:rerun-if-env-changed=TELEVYBACKUP_BUILD_MODE");
     println!("cargo:rerun-if-env-changed=TELEVYBACKUP_BUILD_COMMIT");
     println!("cargo:rerun-if-env-changed=TELEVYBACKUP_BUILD_NUMBER");
