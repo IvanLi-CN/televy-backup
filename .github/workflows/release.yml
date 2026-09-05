@@ -210,6 +210,8 @@ jobs:
           tag_json="$(python3 .github/scripts/release_chain.py "${tag_args[@]}")"
           status="$(printf '%s' "${tag_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
           if [[ "${status}" == available ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git tag -a "${PRODUCT_TAG}" "${RELEASE_SHA}" -m "${PRODUCT_TAG}"
             git push origin "refs/tags/${PRODUCT_TAG}"
           fi
