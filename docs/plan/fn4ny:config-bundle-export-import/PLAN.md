@@ -1,5 +1,8 @@
 # Settings：配置整包导出/导入（keyed config bundle）（#fn4ny）
 
+> Canonical spec: `docs/specs/config-bundle-export-import/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

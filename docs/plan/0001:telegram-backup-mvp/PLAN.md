@@ -1,5 +1,8 @@
 # TelevyBackup MVP（Telegram 存储 + 差异备份）（#0001）
 
+> Canonical spec: `docs/specs/telegram-backup-mvp/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

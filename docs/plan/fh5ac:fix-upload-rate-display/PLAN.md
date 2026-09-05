@@ -1,5 +1,8 @@
 # 修复上传速度显示不正确（MTProto progress + status stream）（#fh5ac）
 
+> Canonical spec: `docs/specs/fix-upload-rate-display/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

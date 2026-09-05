@@ -1,5 +1,8 @@
 # Import bundle: Targets add "Change folder" button（#dxddw）
 
+> Canonical spec: `docs/specs/import-bundle-target-change-directory/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

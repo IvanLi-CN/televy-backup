@@ -1,5 +1,8 @@
 # CLI events 实时状态与 GUI 进度一致性修复（flush + progress）（#fwwqp）
 
+> Canonical spec: `docs/specs/events-live-task-ui/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成
@@ -49,7 +52,7 @@
 
 - 兼容性：
   - 不破坏 `televybackup --events` stdout NDJSON 合约（只输出 events）。
-  - 允许新增字段；不删除/重命名现有字段（见 `docs/plan/0001:telegram-backup-mvp/contracts/events.md`）。
+  - 允许新增字段；不删除/重命名现有字段（见 `docs/specs/telegram-backup-mvp/contracts/events.md`）。
 - 体验阈值：
   - 点击 Verify/Restore/（CLI 触发的）Backup 后 **<= 300ms**：UI 显示 running（目标行/详情页至少一处）。
   - 任务执行中 **<= 1s**：UI 至少一次可见更新（phase/bytes/chunks 任一维度）。

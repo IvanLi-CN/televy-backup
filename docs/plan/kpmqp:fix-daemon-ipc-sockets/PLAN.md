@@ -1,5 +1,8 @@
 # 修复 daemon IPC 可靠性（解锁 Recovery Key/Verify）（#kpmqp）
 
+> Canonical spec: `docs/specs/fix-daemon-ipc-sockets/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

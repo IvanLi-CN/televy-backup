@@ -1,5 +1,8 @@
 # 设置窗口独立化与多备份目录（多 Telegram Endpoint + 金钥恢复）（#0005）
 
+> Canonical spec: `docs/specs/multi-backup-directories-keyed-restore/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成
@@ -185,7 +188,7 @@
 ## 文档更新（Docs to Update）
 
 - `docs/architecture.md`：更新 Known limitations（新增跨设备 restore 机制），补充 bootstrap/catalog 与多 endpoint 设计。
-- `docs/plan/0001:telegram-backup-mvp/contracts/file-formats.md`：同步 config schema（v1 → v2）与 bootstrap/catalog 说明。
+- `docs/specs/telegram-backup-mvp/contracts/file-formats.md`：同步 config schema（v1 → v2）与 bootstrap/catalog 说明。
 - `README.md`：增加“金钥备份/迁移”与“新设备恢复”指引。
 
 ## 实现里程碑（Milestones）

@@ -1,5 +1,8 @@
 # Telegram 通信升级为 MTProto API（MTProto-only，移除 Bot API）（#0004）
 
+> Canonical spec: `docs/specs/telegram-mtproto-storage/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

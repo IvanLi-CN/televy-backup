@@ -1,5 +1,8 @@
 # MTProto upload resilience（retry + heartbeat）（#njr29）
 
+> Canonical spec: `docs/specs/mtproto-upload-resilience/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

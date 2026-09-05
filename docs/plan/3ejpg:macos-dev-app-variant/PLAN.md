@@ -1,5 +1,8 @@
 # macOS：dev app variant（Bundle ID / 名称隔离 + menubar DEV 徽标）（#3ejpg）
 
+> Canonical spec: `docs/specs/macos-dev-app-variant/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

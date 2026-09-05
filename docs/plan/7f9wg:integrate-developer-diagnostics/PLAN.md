@@ -1,5 +1,8 @@
 # macOS：移除 Developer window，把 Diagnostics 整合进主界面（#7f9wg）
 
+> Canonical spec: `docs/specs/integrate-developer-diagnostics/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

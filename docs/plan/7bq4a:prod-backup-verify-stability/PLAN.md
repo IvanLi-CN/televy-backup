@@ -1,5 +1,8 @@
 # 修复发行版最近备份/验证失败（Telegram 超时、索引误判、瞬态文件、Vault Key 缓存）（#7bq4a）
 
+> Canonical spec: `docs/specs/prod-backup-verify-stability/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

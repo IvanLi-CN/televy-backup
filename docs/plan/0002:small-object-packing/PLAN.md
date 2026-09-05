@@ -1,5 +1,8 @@
 # 小对象打包降低 Bot API 调用频率（Pack）（#0002）
 
+> Canonical spec: `docs/specs/small-object-packing/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成
@@ -104,8 +107,8 @@
 
 ## 文档更新（Docs to Update）
 
-- `docs/plan/0001:telegram-backup-mvp/contracts/file-formats.md`: 如采用 pack，需要补充/调整 “chunk 上传对象” 的文件格式与体积策略说明。
-- `docs/plan/0001:telegram-backup-mvp/contracts/db.md`: 如采用 pack，需要补充/调整 `chunk_objects.object_id` 的编码约定或引入新表。
+- `docs/specs/telegram-backup-mvp/contracts/file-formats.md`: 如采用 pack，需要补充/调整 “chunk 上传对象” 的文件格式与体积策略说明。
+- `docs/specs/telegram-backup-mvp/contracts/db.md`: 如采用 pack，需要补充/调整 `chunk_objects.object_id` 的编码约定或引入新表。
 - `docs/requirements.md`: 补充“上传对象归并策略”（pack 的启用条件与体积约束等，便于用户理解备份行为）。
 
 ## 实现里程碑（Milestones）

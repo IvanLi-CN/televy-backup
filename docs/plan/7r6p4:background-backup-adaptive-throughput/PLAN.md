@@ -1,5 +1,8 @@
 # 后台备份吞吐自适应优化（稳定优先，尽量跑满带宽）（#7r6p4）
 
+> Canonical spec: `docs/specs/background-backup-adaptive-throughput/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

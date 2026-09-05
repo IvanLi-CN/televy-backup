@@ -1,5 +1,7 @@
 # macOS 菜单栏同步状态与传输速率
 
+> Canonical topic retained as the canonical source for current product behavior.
+
 > 当前有效规范以本文为准；实现覆盖与当前状态见 `./IMPLEMENTATION.md`，关键演进原因见 `./HISTORY.md`。
 
 ## 背景 / 问题陈述
@@ -177,7 +179,7 @@ Dev 受控菜单栏预览。
 
 ## 参考（References）
 
-- `../../plan/0010:status-popover-dashboard/contracts/events.md`
-- `../../plan/0011:daemon-status-ipc/contracts/events.md`
+- `../status-popover-dashboard/contracts/events.md`
+- `../daemon-status-ipc/contracts/events.md`
 - `../../../CONTEXT.md`
 - `../../adr/0001-explicit-menu-bar-activity-directions.md`

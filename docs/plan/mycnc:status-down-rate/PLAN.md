@@ -1,5 +1,8 @@
 # 状态面板：下载速率实时显示（1s 窗口）与异常波动修复
 
+> Canonical spec: `docs/specs/status-down-rate/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 背景 / 问题陈述
 
 当前 UI 的 NETWORK 区域中，下载（Down）速率经常出现以下问题：

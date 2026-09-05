@@ -1,5 +1,8 @@
 # 状态弹出界面移除日志页（日志仅落盘）（#0008）
 
+> Canonical spec: `docs/specs/status-popup-file-logging/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成
@@ -130,7 +133,7 @@
 
 - `README.md`: 在 troubleshooting/日志段落补充 UI 日志文件 `ui.log` 的默认位置与用途（区分 per-run NDJSON 与 UI 日志）。
 - `docs/architecture.md`: 补充“可观测性/日志”小节对 UI 日志位置的引用（如该文档已有相关章节，则只追加最小说明）。
-- `docs/specs/0003-sync-logging-durability/contracts/file-formats.md`: 补充一句“UI 日志文件 `ui.log` 与 per-run logs 同目录”的说明（保持边界清晰）。
+- `docs/specs/sync-logging-durability/contracts/file-formats.md`: 补充一句“UI 日志文件 `ui.log` 与 per-run logs 同目录”的说明（保持边界清晰）。
 
 ## 实现里程碑（Milestones）
 
@@ -161,4 +164,4 @@
   - 日志 UI：`LogsView`
   - UI 日志落盘：`uiLogFileURL()` / `appendFileLog(_:)`
 - macOS 构建脚本：`scripts/macos/build-app.sh`
-- 后端每轮同步日志（NDJSON）契约：`docs/specs/0003-sync-logging-durability/contracts/file-formats.md`
+- 后端每轮同步日志（NDJSON）契约：`docs/specs/sync-logging-durability/contracts/file-formats.md`

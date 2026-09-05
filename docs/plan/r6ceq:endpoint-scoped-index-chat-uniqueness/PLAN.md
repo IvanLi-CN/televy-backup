@@ -1,5 +1,8 @@
 # 索引按 Endpoint 隔离 + 禁止 chat 复用（#r6ceq）
 
+> Canonical spec: `docs/specs/endpoint-scoped-index-chat-uniqueness/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 待实现

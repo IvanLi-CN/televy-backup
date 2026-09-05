@@ -1,5 +1,8 @@
 # Master key 轮换（in-place, resumable）（#4fexy）
 
+> Canonical spec: `docs/specs/master-key-rotation/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 待实现

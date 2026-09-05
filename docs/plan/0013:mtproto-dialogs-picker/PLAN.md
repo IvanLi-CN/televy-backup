@@ -1,5 +1,8 @@
 # MTProto dialogs picker（自动选可用 chat_id）（#0013）
 
+> Canonical spec: `docs/specs/mtproto-dialogs-picker/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

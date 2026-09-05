@@ -1,5 +1,7 @@
 # Settings Control IPC
 
+> Canonical topic retained as the canonical source for current product behavior.
+
 ## Goals
 
 - Provide one versioned control-socket contract for settings, diagnostics, secrets, Telegram,
