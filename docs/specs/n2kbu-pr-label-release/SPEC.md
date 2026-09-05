@@ -1,4 +1,6 @@
-# PR + Label 发布能力（#n2kbu）
+# PR + Label 发布能力（#n2kbu，历史）
+
+> This historical topic is superseded by [`product-version-release-chain`](../product-version-release-chain/SPEC.md). Its frozen-intent and backfill design is retained only for historical context; the VERSION-only contract is authoritative.
 
 ## 状态
 

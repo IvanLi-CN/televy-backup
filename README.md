@@ -275,16 +275,10 @@ Release DMGs and native tool archives are built by the macOS package workflow. V
 - `docs/plan/README.md`
 - `docs/quality-gates.md`
 
-## PR label release flow
+## VERSION-only release flow
 
-Merges to `main` use the merged PR labels as the release source of truth.
+The root `VERSION` file is the only product version source. It contains a stable `X.Y.Z` or RC `X.Y.Z-rc.N` value; Cargo package metadata is not a release fallback. The migration baseline is `0.9.2`, matching the existing `v0.9.2` identity.
 
-- Every PR targeting `main` must carry exactly one release intent label:
-  - `type:patch`, `type:minor`, `type:major` -> publish a release
-  - `type:docs`, `type:skip` -> skip release
-- Every PR targeting `main` must carry exactly one release channel label:
-  - `channel:stable` -> publish stable tag `vX.Y.Z`
-  - `channel:rc` -> publish prerelease tag `vX.Y.Z-rc.<sha7>`
-- Unknown or conflicting `type:*` / `channel:*` labels fail the PR label gate.
-- Release versioning starts from the highest existing stable semver tag and applies the PR bump level.
-- If a merged commit cannot be mapped to exactly one PR, release is skipped conservatively.
+Every PR targeting `main` must carry exactly one `type:*` label and one `channel:*` label. Patch plus stable prepares the next patch automatically. Major, minor, and every RC use a controlled exact VERSION dispatch. Docs and skip labels do not publish.
+
+After source checks pass, the trusted preparation workflow adds only `VERSION` to the PR branch through GitHub-native `createCommitOnBranch` with `expectedHeadOid`; GitHub commit verification is required. Normal merge release consumes the merge SHA and committed VERSION. Manual recovery is limited to the same merge SHA and VERSION. See [`docs/specs/product-version-release-chain/SPEC.md`](docs/specs/product-version-release-chain/SPEC.md) and [`docs/quality-gates.md`](docs/quality-gates.md).

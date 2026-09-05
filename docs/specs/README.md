@@ -48,6 +48,7 @@
 | 0003 | Sync Logging Durability and Local Diagnostics | 部分完成（1/5） | `0003-sync-logging-durability/SPEC.md` | 2026-07-31 | 已迁移 legacy spec；待实现安全默认、日志偏好、Diagnostics UI 与视觉证据 |
 | macos-ui-state-isolation | macOS UI 状态隔离与空闲 CPU 治理 | 已完成 | `macos-ui-state-isolation/SPEC.md` | 2026-08-14 | 领域 Store 与有界发布已落地；隔离 Dev 主窗口 30 秒 CPU 平均 0.04%、峰值 0.30% |
 | macos-release-distribution | active | 进行中 | `macos-release-distribution/SPEC.md` | - | 可下载 macOS 制品、版本元数据与产品自管 LaunchAgent |
+| product-version-release-chain | 已完成 | implemented | `product-version-release-chain/SPEC.md` | - | 根 VERSION 权威、PR-local preparation、normal-merge release/recover；不修改远端规则 |
 
 ## Topic Catalog (slug-only)
 
