@@ -24,7 +24,7 @@ Covers: G1, G2, A1, A2, A4.
 
 ### REQ-PVR-003: Labels have an exact release action
 
-`Label Gate` MUST require exactly one `type:*` label from the declared type set and exactly one `channel:*` label from the declared channel set. Patch plus stable uses automatic next-patch preparation; major, minor, and every RC use a controlled exact version; docs and skip do not publish.
+`Label Gate` MUST require exactly one `type:*` label from the declared type set and exactly one `channel:*` label from the declared channel set. Patch plus stable uses automatic next-patch preparation, advancing past already-owned product tags when necessary; major, minor, and every RC use a controlled exact version; docs and skip do not publish.
 
 Covers: G1, G3, A3.
 

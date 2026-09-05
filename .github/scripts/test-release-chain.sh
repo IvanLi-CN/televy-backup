@@ -23,6 +23,7 @@ for key, value in (("user.name", "fixture"), ("user.email", "fixture@example.com
 subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
 subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture source"], check=True)
 source = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+subprocess.run(["git", "-C", str(repo), "tag", "v0.9.3", source], check=True)
 
 spec = importlib.util.spec_from_file_location("release_chain", root / ".github/scripts/release_chain.py")
 assert spec and spec.loader
@@ -41,8 +42,8 @@ chain.stage(argparse.Namespace(
     intent_components="none",
 ))
 prepared = chain.verify_prepared(chain.git("rev-parse", "HEAD"), source)
-assert prepared["version"] == "0.9.3"
-assert prepared["tag"] == "v0.9.3"
+assert prepared["version"] == "0.9.4"
+assert prepared["tag"] == "v0.9.4"
 assert chain.diff_names(chain.git("rev-parse", "HEAD")) == ["VERSION"]
 
 (repo / "README").write_text("invalid\n", encoding="utf-8")
