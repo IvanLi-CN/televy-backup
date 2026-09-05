@@ -219,12 +219,17 @@ jobs:
       - name: Create or update GitHub Release
         run: |
           set -euo pipefail
+          release_files=()
+          while IFS= read -r -d '' asset; do
+            release_files+=("$asset")
+          done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
+          ((${#release_files[@]} > 0))
           if gh release view "${PRODUCT_TAG}" >/dev/null 2>&1; then
-            gh release upload "${PRODUCT_TAG}" release-assets/* --clobber
+            gh release upload "${PRODUCT_TAG}" "${release_files[@]}" --clobber
           else
             flags=(--verify-tag --title "${PRODUCT_TAG}" --generate-notes)
             [[ "${PRODUCT_CHANNEL}" == rc ]] && flags+=(--prerelease)
-            gh release create "${PRODUCT_TAG}" release-assets/* "${flags[@]}"
+            gh release create "${PRODUCT_TAG}" "${release_files[@]}" "${flags[@]}"
           fi
       - name: Upsert PR release version comment
         if: env.PR_NUMBER != ''
