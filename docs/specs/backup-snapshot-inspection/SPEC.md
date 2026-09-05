@@ -4,11 +4,11 @@
 
 > Current requirements are defined here. Implementation coverage is recorded in `./IMPLEMENTATION.md`, topic-local compatibility and background in `./HISTORY.md`, and durable rationale in the related ADR.
 
-## Background
+## Context and Scope
 
 The Main Window groups run-log summaries by target, but a row cannot currently answer which files a successful backup captured, how its file tree differs from the backup's direct baseline, or which logical backup blocks it references. Run logs alone cannot provide that evidence; the snapshot filemap is the authority.
 
-## Goals
+### Goals
 
 - Let an operator open a backup run from target history and inspect its result without leaving the Main Window.
 - Show a successful retained snapshot's summary, file list, direct-baseline file-tree changes, and deduplicated logical backup blocks.
@@ -17,7 +17,7 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 - Keep large snapshot inspection responsive through background paging, lazy tree expansion, search, and virtualized rows.
 - Preserve the existing macOS native, dense, light/dark adaptive visual language.
 
-## Non-goals
+### Non-goals
 
 - File-content, text, binary, or side-by-side diffs.
 - Move or rename detection; a path change remains a deletion plus an addition.
@@ -25,9 +25,9 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 - Querying Telegram for an object inventory, document status, message metadata, or missing legacy size/time values.
 - Changing snapshot retention, restoring a selected historical snapshot, or retaining an independent permanent full-file history.
 
-## Scope
+### Scope
 
-### In scope
+#### In scope
 
 - A run-detail route inside the Main Window, entered by activating a history row and exited through native back navigation.
 - A read-only snapshot inspector exposed through the CLI's JSON contract for terminal users and through daemon control IPC for the macOS App.
@@ -36,7 +36,7 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 - A lazy Storage presentation with Pack/Direct filtering, opaque-ID search, bounded paging, and row expansion to snapshot-referenced block slices.
 - Explicit loading, empty, unavailable, and error states.
 
-### Out of scope
+#### Out of scope
 
 - Changing the backup scanner, chunking, index format, remote retention, or run-log retention.
 - Direct macOS App reads of endpoint/filemap SQLite databases.
@@ -50,18 +50,18 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 
 ### MUST
 
-- A history row for any run opens a detail page. Failed, cancelled, and running backups show run summary and available error/log information but must not show fabricated file or block data.
-- A successful backup with a retained snapshot shows `Summary`, `Files`, and `Blocks` views. Summary is the default view; Files defaults to tree presentation with changes-only enabled.
-- The Files view supports a tree and a flat list presentation, path search, and an all-files/changes-only switch. The selected presentation and filter remain stable while the detail page is open.
-- Changes compare only the snapshot's `base_snapshot_id`. A first snapshot marks every stored entry as added. If the direct baseline is unavailable, the snapshot remains browseable but changes-only is disabled with an explanatory state.
-- Changes are exactly `added`, `deleted`, or `changed`. A regular file is changed when its kind, size, modification time, or mode differs. A directory or symlink can only be compared by presence or kind. No move state is emitted.
-- A changes-only tree contains the ancestor directories needed to reach a changed entry and provides per-directory added/deleted/changed totals. A changes-only list contains only direct change entries.
-- Deleted entries are displayed at their baseline path with baseline metadata. Changed entries expose current and baseline metadata without exposing file contents.
-- The Blocks view lists distinct logical blocks referenced by regular files in the snapshot, with hash, size, changed-file count, and total referencing-file count. It provides a `Changes only` filter for blocks with at least one added or changed current file reference. It does not classify a block as newly uploaded or reused in the run.
-- The inspector loads data outside the main thread and presents visible loading or retryable error feedback. It must use bounded, cursor-based data access and virtualized UI rows rather than materializing a whole snapshot in SwiftUI.
-- File paths, block hashes, and filemap contents stay local to the configured storage/cache path and must not be written to normal run logs or status snapshots.
-- Storage rows expose only a stable opaque storage ID, `pack|direct` kind, optional recorded document size/time, reference counts, and logical bytes. Raw Telegram chat, message, and document locator fields are never returned.
-- Storage object grouping is derived only from the selected snapshot's ordinary file block mappings. A missing legacy `storage_objects` row returns unknown physical size/time and is never inferred from logical or slice bytes.
+- `REQ-SI-001`: A history row for any run opens a detail page. Failed, cancelled, and running backups show run summary and available error/log information but must not show fabricated file or block data.
+- `REQ-SI-002`: A successful backup with a retained snapshot shows `Summary`, `Files`, `Blocks`, and `Storage` views. Summary is the default view; Files defaults to tree presentation with changes-only enabled.
+- `REQ-SI-003`: The Files view supports a tree and a flat list presentation, path search, and an all-files/changes-only switch. The selected presentation and filter remain stable while the detail page is open.
+- `REQ-SI-004`: Changes compare only the snapshot's `base_snapshot_id`. A first snapshot marks every stored entry as added. If the direct baseline is unavailable, the snapshot remains browseable but changes-only is disabled with an explanatory state.
+- `REQ-SI-005`: Changes are exactly `added`, `deleted`, or `changed`. A regular file is changed when its kind, size, modification time, or mode differs. A directory or symlink can only be compared by presence or kind. No move state is emitted.
+- `REQ-SI-006`: A changes-only tree contains the ancestor directories needed to reach a changed entry and provides per-directory added/deleted/changed totals. A changes-only list contains only direct change entries.
+- `REQ-SI-007`: Deleted entries are displayed at their baseline path with baseline metadata. Changed entries expose current and baseline metadata without exposing file contents.
+- `REQ-SI-008`: The Blocks view lists distinct logical blocks referenced by regular files in the snapshot, with hash, size, changed-file count, and total referencing-file count. It provides a `Changes only` filter for blocks with at least one added or changed current file reference. It does not classify a block as newly uploaded or reused in the run.
+- `REQ-SI-009`: The inspector loads data outside the main thread and presents visible loading or retryable error feedback. It must use bounded, cursor-based data access and virtualized UI rows rather than materializing a whole snapshot in SwiftUI.
+- `REQ-SI-010`: File paths, block hashes, and filemap contents stay local to the configured storage/cache path and must not be written to normal run logs or status snapshots.
+- `REQ-SI-011`: Storage rows expose only a stable opaque storage ID, `pack|direct` kind, optional recorded document size/time, reference counts, and logical bytes. Raw Telegram chat, message, and document locator fields are never returned.
+- `REQ-SI-012`: Storage object grouping is derived only from the selected snapshot's ordinary file block mappings. A missing legacy `storage_objects` row returns unknown physical size/time and is never inferred from logical or slice bytes.
 
 ### SHOULD
 
@@ -131,40 +131,16 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 - Given a newly uploaded physical object, when its mapping is persisted, then Storage reports its exact uploaded document bytes and record time; given a legacy mapping without an object record, then both fields are unavailable and no remote request is made.
 - Given a Storage object page or expansion request, when its snapshot, filter, query, object ID, or limit differs from the cursor context, then the cursor is rejected as invalid and no raw Telegram identifier is returned.
 
-## Acceptance Checklist
+## Verification
 
-- [x] The durable behavior and boundaries are defined.
-- [x] Loading, retention, baseline, legacy, and failure cases are covered.
-- [x] Internal interfaces and their consumers are identified.
-- [x] Acceptance criteria support implementation and review.
-
-## Quality Gates
-
-### Testing
-
-- Rust unit tests for cursor validation, direct-baseline added/deleted/changed classification, first snapshots, unavailable baselines, duplicate block aggregation, legacy/current filemap resolution, physical object persistence, Storage grouping, and object block slices.
-- CLI JSON contract tests for summary, tree/list pages, Storage/object-block pages, search, empty pages, unavailable snapshots, and structured errors.
-- Swift tests for eligibility, navigation, presentation/filter state, Storage lazy loading/filter/search/expansion, accessibility labels, cancellation of stale loads, and unavailable/error states.
-- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --all-features`, `scripts/macos/swift-unit-tests.sh`, and `scripts/macos/build-app.sh`.
-
-### UI Evidence
-
-- Capture deterministic light and dark Main Window demo scenes for a successful Storage detail, including recorded and legacy-not-recorded rows, before declaring the UI complete.
+- `VER-SI-001`: Core tests cover retained snapshots, baseline semantics, block aggregation, cursor binding, physical-object persistence, Storage grouping, legacy unknown metadata, and materialized dedupe mappings; covers: REQ-SI-001, REQ-SI-004, REQ-SI-005, REQ-SI-006, REQ-SI-007, REQ-SI-008, REQ-SI-009, REQ-SI-010, REQ-SI-012.
+- `VER-SI-002`: CLI JSON and daemon IPC tests cover paged `storage` and `storage-blocks` responses, opaque-only IDs, filter/query/limit-bound cursors, and selected-snapshot block expansion; covers: REQ-SI-002, REQ-SI-009, REQ-SI-011, REQ-SI-012.
+- `VER-SI-003`: Swift presentation tests and deterministic Main Window light/dark demos cover lazy loading, filter/search reset, expansion, loading/error/empty/legacy states, and distinct Document versus Logical columns; covers: REQ-SI-001, REQ-SI-002, REQ-SI-003, REQ-SI-009, REQ-SI-011, REQ-SI-012.
+- `VER-SI-004`: Formatting, clippy, workspace all-features tests, macOS unit tests, and app build must pass before delivery; covers: REQ-SI-009, REQ-SI-010.
 
 ## Visual Evidence
 
-None before implementation.
-
-## Related PRs
-
-- None
-
-## Risks and Assumptions
-
-- Remote filemap download can be slow or fail; summary must remain usable while inspection data loads or retries.
-- Snapshot filemaps can be very large; cursor semantics, virtualized rows, and bounded cache behavior are correctness requirements as well as performance requirements.
-- Retention removes the metadata needed to locate old filemaps even when remote data objects remain physically present; that is an intentional inspection boundary.
-- The future delta-filemap format must materialize the same immutable snapshot view before this inspector queries it.
+Deterministic light and dark Main Window Storage demos are required owner-facing evidence for this capability. They must include a recorded object, a legacy `Not recorded` object, distinct Document and Logical columns, and an expanded pack slice without Telegram locator fields.
 
 ## References
 
