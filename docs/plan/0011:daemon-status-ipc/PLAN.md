@@ -1,5 +1,8 @@
 # daemon 状态 IPC：替换 file-based 状态源（#0011）
 
+> Canonical spec: `docs/specs/daemon-status-ipc/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成
@@ -112,7 +115,7 @@
 
 ## 文档更新（Docs to Update）
 
-- `docs/plan/0010:status-popover-dashboard/contracts/cli.md`: 如数据源策略对 UI 有可见影响，补充说明（实现阶段同步）。
+- `docs/specs/status-popover-dashboard/contracts/cli.md`: 如数据源策略对 UI 有可见影响，补充说明（实现阶段同步）。
 
 ## 实现里程碑（Milestones）
 

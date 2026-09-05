@@ -279,7 +279,7 @@ checkpoint complete before the filemap is uploaded.
 
 The local index database schema is defined in:
 
-- `docs/plan/0001:telegram-backup-mvp/contracts/db.md`
+- `docs/specs/telegram-backup-mvp/contracts/db.md`
 
 Key tables:
 

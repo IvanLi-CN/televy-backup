@@ -1,5 +1,7 @@
 # macOS UI 状态隔离与空闲 CPU 治理
 
+> Canonical topic retained as the canonical source for current product behavior.
+
 > 当前有效规范以本文为准；实现覆盖与当前状态见 `./IMPLEMENTATION.md`，关键演进原因见 `./HISTORY.md`。
 
 ## 背景 / 问题陈述

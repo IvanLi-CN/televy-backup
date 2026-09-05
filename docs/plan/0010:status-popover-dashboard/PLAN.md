@@ -1,5 +1,8 @@
 # 状态弹窗重做：全局网络 + 多目标面板 + 开发者视图（#0010）
 
+> Canonical spec: `docs/specs/status-popover-dashboard/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

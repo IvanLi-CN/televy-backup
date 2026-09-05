@@ -1,5 +1,7 @@
 # Backup Snapshot Inspection
 
+> Canonical topic retained as the canonical source for current product behavior.
+
 > Current requirements are defined here. Implementation coverage is recorded in `./IMPLEMENTATION.md`, topic-local compatibility and background in `./HISTORY.md`, and durable rationale in the related ADR.
 
 ## Background
@@ -153,8 +155,8 @@ None before implementation.
 
 ## References
 
-- [Two-level endpoint and snapshot indexes](../t764g-endpoint-two-level-index/SPEC.md)
-- [Index tiering and historical filemap availability](../dyu56-index-tiered-filemaps/SPEC.md)
-- [Run-log durability](../0003-sync-logging-durability/SPEC.md)
+- [Two-level endpoint and snapshot indexes](../endpoint-two-level-index/SPEC.md)
+- [Index tiering and historical filemap availability](../index-tiered-filemaps/SPEC.md)
+- [Run-log durability](../sync-logging-durability/SPEC.md)
 - [Topic implementation status](./IMPLEMENTATION.md)
 - [Topic history](./HISTORY.md)

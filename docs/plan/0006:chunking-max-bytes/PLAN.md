@@ -1,5 +1,8 @@
 # Chunking 分块上限调整（按存储模式 + 内存预算）（#0006）
 
+> Canonical spec: `docs/specs/chunking-max-bytes/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

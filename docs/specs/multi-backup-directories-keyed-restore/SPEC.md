@@ -1,0 +1,187 @@
+# 设置窗口独立化与多备份目录（多 Telegram Endpoint + 金钥恢复）
+
+> Canonical topic spec migrated from `docs/plan/0005:multi-backup-directories-keyed-restore/PLAN.md`.
+> Legacy source retained pending delete approval.
+
+## 已冻结决策（Decisions, frozen）
+
+- bootstrap/catalog 可发现方式：使用 Telegram chat 的 **pinned message** 作为 root pointer（被 pin 的消息携带加密的 catalog document）。
+- backup target 粒度：**一个目录一个 target**（单 `source_path`）。
+- 调度（schedule）：每个 target 有独立 schedule；默认继承全局 schedule（可按字段 override）。
+- 金钥（recovery key）：以**字符串**形式导入/导出；允许在 Settings window 内展示与复制（默认隐藏，显式 reveal）。
+- endpoint 标识：使用稳定的 `endpoint_id`（不可变；用于 provider namespace），多个 target 可复用同一 endpoint。
+- Settings window 交互：采用**自动保存**语义（不提供 “Save” 按钮）。
+- Settings window 导航：采用 toolbar（三项：Targets / Recovery Key / Schedule）。
+- Settings 入口：popover 右上角齿轮按钮打开 Settings window；并要求支持快捷键打开 Settings（默认 `⌘,`）。
+- Recovery Key 导入：`Import…` 采用 **sheet（附着在窗口上的 modal 面板）+ 二次确认** 交互。
+- UI 图标：使用 Iconify 图标（本计划设计图采用 `tabler:*`），便于实现阶段与设计保持一致。
+- secrets 存储：对齐计划 #0004：Keychain **只存 1 条** vault key（`televybackup.vault_key`）；其余敏感信息
+  写入本地加密 secrets store（`secrets.enc`）。
+
+
+## 背景 / 问题陈述
+
+- 当前 macOS App 的设置（Settings）是 Popover 内的一个 Tab：不符合“系统设置/Preferences”的常见交互，且后续设置项会继续膨胀，维护与可用性会变差。
+- 当前配置对 Telegram 存储目标只有一个全局 `telegram`（bot token + chat_id），无法表达“多个备份目录分别对应不同 Telegram endpoint（bot/chat）”，也无法在 UI 中自然地管理多个备份条目。
+- 当前恢复（restore/verify）依赖本地 SQLite index 中的 `manifest_object_id`，缺少“新设备在没有旧 SQLite 的前提下，从 Telegram 端自助发现并完成恢复”的路径（`docs/architecture.md` 已标注该限制）。
+- 本计划希望在不引入新后端的前提下：拆出独立 Settings window，支持多备份目录与 endpoint 绑定，并提供可迁移的“金钥（recovery key）”与可发现的远端引导信息，使“换电脑/重装后仍可下载并解密恢复”。
+
+
+## 用户与场景（Users & Scenarios）
+
+**用户**
+
+- 单用户 macOS：可能有多个需要备份/恢复的目录（多个外接盘、多个路径、或多个备份盘挂载点）。
+
+**核心场景**
+
+- 用户在 Settings window 中配置多个 backup target，并为每个 target 选择对应的 Telegram endpoint（bot token + chat_id）。
+- 用户在新电脑上重装后，仅凭“金钥 + Bot token + chat_id”（以及 MTProto 所需的 `api_id + api_hash`，以及要恢复的目录/target 选择）即可完成 restore/verify。
+
+
+## 目标 / 非目标
+
+### Goals
+
+- 新增独立 Settings window（标准 macOS Preferences 样式：titlebar toolbar + 系统表单/列表控件），作为**主设置入口**，支持编辑全部设置项与列表型配置。
+- Popover **移除 Settings tab**，保留现有视觉与结构，**仅做最小必要改动**：导航调整为 `Overview / Logs`，并通过右上角齿轮按钮打开 Settings window。
+- 支持配置多个“backup target（备份条目）”，每个条目至少包含：`source_path`、`label`（可选）、绑定的 Telegram endpoint 引用。
+- 每个 backup target 的 **Bot 信息（bot token + chat_id）必须在该 target 的编辑界面中直接可见/可编辑**（允许选择/复用已有 `endpoint_id`，但不强制用户先去单独页面配置 endpoint）。
+- 支持配置多个 Telegram endpoint（bot token + chat_id），且允许多个 backup target 复用同一个 endpoint。
+- 支持“金钥”导入/导出：允许把 master key 从旧设备迁移到新设备（存于 secrets store；`config.toml` 不落 secret）。
+- 支持跨设备恢复：在没有旧设备本地 SQLite 的前提下，能够从 Telegram 获取所需的 `snapshot_id + manifest_object_id` 并完成 restore/verify。
+- 多 endpoint 场景下必须有稳定的 provider namespace 规则：避免不同 endpoint 的对象引用/去重互相污染，且 namespace 不包含 token 明文。
+
+### Non-goals
+
+- 不做多窗口复杂应用（仅新增 Settings window；Popover 仍保留核心状态/触发入口）。
+- 不在本计划内实现 Telegram 远端 GC/聊天历史清理策略。
+- 不在本计划内引入新的存储后端（S3/WebDAV 等）。
+- 不在本计划内实现“无需任何 Telegram 能力的离线恢复”（仍需 bot token 访问 Telegram）。
+
+
+## 范围（Scope）
+
+### In scope
+
+- macOS App：Settings window 结构与交互；backup target 列表的新增/删除/编辑；endpoint 管理入口；金钥导入/导出入口（或引导到 CLI）。
+- CLI：
+  - settings schema v2 的读取/校验与写回；
+  - 多 endpoint 的 secret presence（每个 endpoint 的 token 是否已写入 secrets store）；
+  - 金钥导入/导出；
+  - 恢复命令新增“按 source/target 恢复”的用户路径（无需手填 snapshot_id/manifest_object_id）。
+- Daemon：按配置运行多个 backup target（可能跨 endpoint）；并为每个 endpoint 维护远端 bootstrap/catalog（可发现的引导信息）。
+- Core：为多 endpoint 透传稳定的 provider namespace（不含 secret）；以及 bootstrap/catalog 的上传/下载辅助能力。
+
+### Out of scope
+
+- 旧配置/旧数据的自动无损迁移到不同 chat（如果用户想换 chat，视为新 endpoint）。
+- 复杂权限/多用户隔离。
+
+
+## 需求（Requirements）
+
+### MUST
+
+- Settings window
+  - 必须存在独立 Settings window（非 Popover 内 tab），可从 App 菜单/Popover 进入，且符合 macOS 常见“Preferences/Settings”体验。
+  - 必须支持快捷键打开 Settings window（默认 `⌘,`），并优先复用系统习惯（App 菜单项 `Settings…` / `Preferences…`）。
+  - 必须支持在 Settings 中新增/删除/编辑多个 backup target。
+  - 必须在“目录（target）编辑”界面中直接完成该目录对应的 Bot 配置：
+    - Chat ID 可编辑
+    - Bot token 可写入/更新 secrets store（token 不通过 argv；从输入框/安全输入写入）
+    - 可对该目录对应的 bot/chat 进行 `validate`（含 pinned bootstrap 的可用性）
+- Config & mapping
+  - 必须支持多个 backup target，每个 target 必须能绑定一个 Telegram endpoint（bot token + chat_id 的组合）。
+  - 必须允许多个 target 绑定同一个 endpoint。
+  - 必须保持“不在 config.toml 中存 token 明文”的约束；token 仅存 secrets store（加密）。
+- Recovery / portability
+  - 必须提供“金钥”导入/导出能力，使得用户可在新设备重建解密能力（master key）。
+- 必须定义并实现一个“远端引导信息（bootstrap/catalog）”机制，使得在新设备没有旧 SQLite 的情况下，也能定位到要恢复的 snapshot（至少 latest）所需的 `manifest_object_id`。
+- 必须保证用户只需要：金钥 + bot token + chat_id（以及 MTProto 所需的 `api_id + api_hash`，以及要恢复的 source_path/target 选择）即可完成 restore/verify。
+- Safety & privacy
+  - 必须明确并实现 provider namespace 规则：用于区分不同 endpoint 的对象引用/去重；namespace 不得包含 token 明文。
+  - 必须在 UI/CLI 输出中避免泄露 secrets（token/master key/金钥本体）。
+- Backward compatibility
+  - 必须为现有单 endpoint 配置提供兼容策略（读取 v1；保存/写回时迁移到 v2，或提供一次性迁移命令）。
+
+
+## 接口契约（Interfaces & Contracts）
+
+### 接口清单（Inventory）
+
+| 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `config.toml` schema v2 | Config | internal | Modify | ./contracts/config.md | core/cli | app/daemon | targets + endpoints + 兼容 v1 |
+| CLI/IPC commands | CLI | internal | Modify | ./contracts/cli.md | cli | app/daemon | settings/secrets/restore 的形状变化 |
+| Remote bootstrap/catalog | File format | internal | New | ./contracts/file-formats.md | core/daemon | cli/app | Telegram 端可发现的引导信息 |
+
+### 契约文档（按 Kind 拆分）
+
+- [contracts/README.md](./contracts/README.md)
+- [contracts/config.md](./contracts/config.md)
+- [contracts/cli.md](./contracts/cli.md)
+- [contracts/file-formats.md](./contracts/file-formats.md)
+
+
+## 验收标准（Acceptance Criteria）
+
+- Given TelevyBackup App 运行，
+  When 用户点击 “Settings…”（或等价入口），
+  Then 打开独立 Settings window；Popover 保持现有视觉，仅将导航调整为 `Overview / Logs` 并通过右上角齿轮按钮打开 Settings window。
+- Given TelevyBackup App 运行，
+  When 用户按下 `⌘,`，
+  Then 打开（或聚焦）Settings window。
+- Given 配置中存在 2 个 backup target，
+  When 用户在 Settings window 查看与编辑，
+  Then 可以新增/删除并保存，且 CLI `settings get --json` 返回包含这 2 个 target 的结构化数据。
+- Given 用户选中某个目录 target，
+  When 在该目录的编辑界面输入/更新 Chat ID 与 bot token 并点击 Test connection，
+  Then `telegram validate --endpoint-id <endpoint_id>` 成功（或返回可操作的错误），且 bot token 不会写入 `config.toml`。
+- Given 两个 backup target 引用同一 endpoint，
+  When 分别触发 backup，
+  Then 二者均能正常上传/更新索引，且不会要求重复录入 bot token。
+- Given 旧设备已至少完成一次备份并已生成远端 bootstrap/catalog，
+  When 新设备导入金钥并配置相同 endpoint（bot token + chat_id），
+  Then 能列出可恢复的 target（至少 latest），并可恢复到指定目录且 verify 通过。
+- Given endpoint 的 chat 不可用（用户删号/ bot 被 block/ bot 被踢出群等），
+  When 执行 backup 或恢复，
+  Then 返回稳定错误码与用户可操作的提示（例如需更换 endpoint/重新 init bootstrap）。
+
+
+## Repo reconnaissance（关键实现触点）
+
+> 目的：在进入实现前，确认本计划将改动/影响的关键入口点与数据流，避免 impl 阶段才发现“找不到入口/形状不一致”。
+
+- macOS UI：
+  - `macos/TelevyBackupApp/TelevyBackupApp.swift`：当前 UI 仍是 popover 内 `Overview / Logs / Settings` 三 tab（`Tab.settings`），且写回的是 v1 `config.toml`（全局 `telegram` + `schedule` + `sources`）。本计划需要改为 popover `Overview / Logs` + gear 打开独立 Settings window，并实现 `⌘,` 打开设置。
+- CLI：
+  - `crates/cli/src/main.rs`：当前 `settings get/set`、`telegram validate`、`secrets set-telegram-bot-token/init-master-key` 为单 endpoint 形状；需要扩展为 settings v2（targets + telegram_endpoints）与按 `--endpoint-id` 的 secrets/validate/restore 入口（详见 `./contracts/cli.md`）。
+- Daemon：
+  - `crates/daemon/src/main.rs`：当前按全局 schedule 轮询并对 `settings.sources[]` 逐个跑 backup，且只支持单 `telegram` endpoint；本计划需要支持 per-target schedule（继承/override）与多 endpoint。
+- Core / storage / provider namespace：
+  - `crates/core/src/storage.rs`：`Storage::provider()` 需要支持动态 provider；multi-endpoint 下 provider namespace 包含 `endpoint_id`（`telegram.mtproto/<endpoint_id>`），用于去重隔离与索引引用。
+  - `crates/core/src/backup.rs` / `crates/core/src/restore.rs`：读写 SQLite index 时会依赖 `provider` 字段用于对象引用与去重隔离；multi-endpoint 下将受 provider namespace 变更影响。
+
+
+## 约束与风险（Constraints & Risks）
+
+- Telegram 无法枚举历史文件：跨设备恢复必须依赖可发现的 bootstrap 指针（例如 pinned message）或用户手动提供指针。
+- UI 约束：Popover 现有视觉与信息架构不得做“超出合理范围”的改动；Settings window 采用标准 macOS Preferences 风格（避免在内容区自制 tabs/pills），Popover 内只做最小必要变更（移除 Settings tab + gear 打开 Settings window）。
+- endpoint/账号风险：
+  - chat 失效（退群/踢出 bot/拉黑 bot/解散群/删号等）会导致无法继续上传；且若 pinned bootstrap/catalog 丢失，将阻断新设备恢复。
+  - 若 endpoint 使用的是 **私聊（bot ↔ 用户）**：当该用户账号被删号/不可用时，该 chat 往往会变为不可访问（Telegram 层面可能表现为 `chat not found` 等），从而同时影响“上传”和“通过 pinned message 发现 bootstrap”的能力。
+  - 若 endpoint 使用的是 **群组/超级群/频道**：单个成员删号通常不影响 chat，但“群被解散/频道被删/bot 被移除/置顶消息被取消置顶或被删除”仍会破坏 bootstrap 可发现性。
+  - bot 创建者账号被删号：Telegram 未公开保证 bot 的生命周期与所有权迁移行为；保守起见应视为运维风险（例如无法通过 BotFather 管理/轮换 token）。实现层面：只要 token 仍有效，备份/恢复可继续工作；若 token 被撤销或 bot 被封禁，则该 endpoint 的远端数据将不可再读取（即便仍持有金钥）。
+  - bot token 泄露意味着该 endpoint 的远端密文可被读取（仍需 master key 才能解密）。
+- 多 endpoint 的 provider namespace 若设计不当，可能导致“用错 object_id”或 dedup 污染，最终造成 restore/verify 失败或错误恢复。
+
+
+## 开放问题（需要主人决策）
+
+None
+
+
+## 假设（Assumptions，需要确认）
+
+None

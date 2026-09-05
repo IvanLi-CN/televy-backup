@@ -1,5 +1,10 @@
 # Implementation
 
+## Current State
+
+Implemented in the current release-chain delivery. The repository contract is
+normative; GitHub ruleset changes remain outside this topic.
+
 ## Components
 
 | Component | Location |

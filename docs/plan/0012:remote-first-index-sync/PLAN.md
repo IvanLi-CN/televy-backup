@@ -1,5 +1,8 @@
 # 备份远端索引权威 + 本地自动同步（remote-first）（#0012）
 
+> Canonical spec: `docs/specs/remote-first-index-sync/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

@@ -1,5 +1,8 @@
 # 开发期绕过 Keychain（codesign + vault key）（#nvr79）
 
+> Canonical spec: `docs/specs/avoid-keychain-in-dev/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

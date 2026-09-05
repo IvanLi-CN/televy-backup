@@ -272,7 +272,8 @@ Release DMGs and native tool archives are built by the macOS package workflow. V
 
 - `docs/requirements.md`
 - `docs/architecture.md`
-- `docs/plan/README.md`
+- `docs/specs/README.md` (canonical topic specifications)
+- `docs/plan/README.md` (retained legacy Plan and design-resource index)
 - `docs/quality-gates.md`
 
 ## VERSION-only release flow

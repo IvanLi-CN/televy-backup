@@ -1,5 +1,8 @@
 # Targets 主界面与执行记录（按目标聚合 backup/restore/verify）（#kaa5e）
 
+> Canonical spec: `docs/specs/targets-runs-main-window/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

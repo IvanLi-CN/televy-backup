@@ -1,8 +1,6 @@
 # TelevyBackup VERSION-only Release Chain
 
-## Status
-
-Implemented in the current release-chain delivery. The repository contract is normative; GitHub ruleset changes remain outside this topic.
+> Canonical topic retained as the canonical source for current product behavior.
 
 ## Related ADRs
 

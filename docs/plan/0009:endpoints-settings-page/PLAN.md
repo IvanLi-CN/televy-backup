@@ -1,5 +1,8 @@
 # Settings：Endpoints 独立配置页（Targets 仅绑定）（#0009）
 
+> Canonical spec: `docs/specs/endpoints-settings-page/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

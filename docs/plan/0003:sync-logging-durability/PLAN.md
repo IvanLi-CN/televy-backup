@@ -1,6 +1,6 @@
 # Sync 日志落盘与可排查性（每轮独立日志 + env 配置日志等级）（#0003）
 
-> Canonical spec: `docs/specs/0003-sync-logging-durability/SPEC.md`.
+> Canonical spec: `docs/specs/sync-logging-durability/SPEC.md`.
 > This legacy directory is retained pending delete approval and is no longer the
 > current contract source.
 

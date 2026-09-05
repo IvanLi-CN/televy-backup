@@ -1,5 +1,7 @@
 # macOS Release Distribution and Product-Managed Daemon
 
+> Canonical topic retained as the canonical source for current product behavior.
+
 > Current packaging and service requirements remain here. Release orchestration is governed by [`product-version-release-chain`](../product-version-release-chain/SPEC.md); implementation coverage is tracked in `IMPLEMENTATION.md` and lifecycle history in `HISTORY.md`.
 
 ## Context and Scope

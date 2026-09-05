@@ -1,5 +1,8 @@
 # Import bundle: Rebind compare local vs remote latest（#w2k9p）
 
+> Canonical spec: `docs/specs/import-bundle-rebind-remote-compare/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成

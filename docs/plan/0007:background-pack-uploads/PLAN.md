@@ -1,5 +1,8 @@
 # Pack 上传后台并发（scan 与 upload 解耦）（#0007）
 
+> Canonical spec: `docs/specs/background-pack-uploads/SPEC.md`.
+> This legacy source is retained pending delete approval.
+
 ## 状态
 
 - Status: 已完成
@@ -114,7 +117,7 @@
 ## 文档更新（Docs to Update）
 
 - `docs/architecture.md`: 补充“备份管线分阶段（scan/upload/index）”以及 upload worker/队列/回压的高层说明。
-- `docs/specs/0003-sync-logging-durability/SPEC.md`: 如 scan/upload 阶段语义发生变化（scan 不再包含上传等待），在规范或验收口径中补充说明。
+- `docs/specs/sync-logging-durability/SPEC.md`: 如 scan/upload 阶段语义发生变化（scan 不再包含上传等待），在规范或验收口径中补充说明。
 
 ## 实现里程碑（Milestones）
 
