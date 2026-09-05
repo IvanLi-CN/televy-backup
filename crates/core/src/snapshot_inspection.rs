@@ -5,6 +5,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqliteConnection};
 
+use crate::storage::{ChunkObjectRef, parse_chunk_object_ref, storage_object_id};
 use crate::{Error, index_db};
 
 pub const MAX_PAGE_SIZE: u16 = 500;
@@ -43,13 +44,28 @@ impl From<sqlx::Error> for SnapshotInspectionError {
 pub struct SnapshotInspector {
     endpoint_db_path: PathBuf,
     filemap_dir: PathBuf,
+    storage_db_path: PathBuf,
 }
 
 impl SnapshotInspector {
     pub fn new(endpoint_db_path: impl Into<PathBuf>, filemap_dir: impl Into<PathBuf>) -> Self {
+        let endpoint_db_path = endpoint_db_path.into();
+        Self {
+            endpoint_db_path: endpoint_db_path.clone(),
+            filemap_dir: filemap_dir.into(),
+            storage_db_path: endpoint_db_path,
+        }
+    }
+
+    pub fn new_with_storage_db(
+        endpoint_db_path: impl Into<PathBuf>,
+        filemap_dir: impl Into<PathBuf>,
+        storage_db_path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             endpoint_db_path: endpoint_db_path.into(),
             filemap_dir: filemap_dir.into(),
+            storage_db_path: storage_db_path.into(),
         }
     }
 
@@ -339,6 +355,226 @@ impl SnapshotInspector {
         session.blocks(request).await
     }
 
+    pub async fn storage(&self, request: StorageInspectionRequest) -> Result<StoragePage> {
+        request.validate()?;
+        let after = decode_storage_cursor(&request)?;
+        let context = self.resolve_context(&request.snapshot_id).await?;
+        let groups = self
+            .collect_storage_objects(&context, request.snapshot_id.as_str())
+            .await?;
+        let query = normalize_query(request.query.as_deref());
+        let after = after.as_deref().unwrap_or_default();
+        let mut entries = groups
+            .into_iter()
+            .filter(|entry| {
+                request
+                    .kind
+                    .as_deref()
+                    .is_none_or(|kind| kind == entry.kind)
+            })
+            .filter(|entry| query.is_empty() || entry.storage_id.starts_with(&query))
+            .filter(|entry| entry.storage_id.as_bytes() > after.as_bytes())
+            .take(request.limit as usize + 1)
+            .map(StorageObjectAggregate::into_entry)
+            .collect::<Vec<_>>();
+        let has_more = entries.len() > request.limit as usize;
+        if has_more {
+            entries.pop();
+        }
+        let next_cursor = has_more
+            .then(|| entries.last().map(|entry| entry.storage_id.clone()))
+            .flatten()
+            .map(|after| encode_storage_cursor(&request, after));
+        Ok(StoragePage {
+            entries,
+            next_cursor,
+        })
+    }
+
+    pub async fn storage_blocks(
+        &self,
+        request: StorageBlocksInspectionRequest,
+    ) -> Result<StorageBlocksPage> {
+        request.validate()?;
+        let after = decode_storage_blocks_cursor(&request)?;
+        let context = self.resolve_context(&request.snapshot_id).await?;
+        let groups = self
+            .collect_storage_objects(&context, request.snapshot_id.as_str())
+            .await?;
+        let Some(group) = groups
+            .into_iter()
+            .find(|entry| entry.storage_id == request.storage_id)
+        else {
+            return Err(SnapshotInspectionError::InvalidArgument {
+                message: "storage_id is not referenced by the selected snapshot".to_string(),
+            });
+        };
+        let after = after.as_deref().unwrap_or_default();
+        let mut entries = group
+            .blocks
+            .into_iter()
+            .filter(|entry| entry.cursor_key().as_str() > after)
+            .take(request.limit as usize + 1)
+            .map(StorageBlockEntry::from)
+            .collect::<Vec<_>>();
+        let has_more = entries.len() > request.limit as usize;
+        if has_more {
+            entries.pop();
+        }
+        let next_cursor = has_more
+            .then(|| entries.last().map(StorageBlockEntry::cursor_key))
+            .flatten()
+            .map(|after| encode_storage_blocks_cursor(&request, after));
+        Ok(StorageBlocksPage {
+            entries,
+            next_cursor,
+        })
+    }
+
+    async fn collect_storage_objects(
+        &self,
+        context: &InspectionContext,
+        snapshot_id: &str,
+    ) -> Result<Vec<StorageObjectAggregate>> {
+        let filemap_pool = index_db::open_existing_index_db(&context.current_path).await?;
+        let rows = sqlx::query(
+            r#"
+            SELECT fc.chunk_hash AS hash, c.size AS size, fc.len AS len
+            FROM file_chunks fc
+            JOIN files f ON f.file_id = fc.file_id
+            JOIN chunks c ON c.chunk_hash = fc.chunk_hash
+            WHERE f.snapshot_id = ? AND f.kind = 'file'
+            ORDER BY fc.chunk_hash COLLATE BINARY, fc.offset, fc.len
+            "#,
+        )
+        .bind(snapshot_id)
+        .fetch_all(&filemap_pool)
+        .await?;
+        let mut chunk_rows = Vec::with_capacity(rows.len());
+        let mut hashes = Vec::new();
+        for row in rows {
+            let hash: String = row.get("hash");
+            if !hashes.iter().any(|item| item == &hash) {
+                hashes.push(hash.clone());
+            }
+            chunk_rows.push(StorageChunkRow {
+                hash,
+                size: non_negative_u64(&row, "size"),
+                len: non_negative_u64(&row, "len"),
+            });
+        }
+        if hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let storage_pool = index_db::open_existing_index_db(&self.storage_db_path).await?;
+        let has_storage_metadata = sqlx::query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'storage_objects'",
+        )
+        .fetch_optional(&storage_pool)
+        .await?
+        .is_some();
+        let mut mappings = HashMap::<String, Vec<(String, String)>>::new();
+        for batch in hashes.chunks(900) {
+            let placeholders = vec!["?"; batch.len()].join(", ");
+            let query = format!(
+                "SELECT chunk_hash, provider, object_id FROM chunk_objects WHERE chunk_hash IN ({placeholders})"
+            );
+            let mut query = sqlx::query(&query);
+            for hash in batch {
+                query = query.bind(hash);
+            }
+            for row in query.fetch_all(&storage_pool).await? {
+                mappings
+                    .entry(row.get::<String, _>("chunk_hash"))
+                    .or_default()
+                    .push((row.get("provider"), row.get("object_id")));
+            }
+        }
+
+        let mut groups = HashMap::<String, StorageObjectAggregate>::new();
+        let mut metadata =
+            HashMap::<(String, String), (String, Option<u64>, Option<String>)>::new();
+        for chunk in chunk_rows {
+            let Some(objects) = mappings.get(&chunk.hash) else {
+                continue;
+            };
+            for (provider, encoded) in objects {
+                let (kind, object_id, slice_offset, slice_len) =
+                    match parse_chunk_object_ref(encoded)? {
+                        ChunkObjectRef::Direct { object_id } => ("direct", object_id, 0, chunk.len),
+                        ChunkObjectRef::PackSlice {
+                            pack_object_id,
+                            offset,
+                            len,
+                        } => ("pack", pack_object_id, offset, len),
+                    };
+                let key = storage_object_id(provider, &object_id);
+                let entry = groups
+                    .entry(key.clone())
+                    .or_insert_with(|| StorageObjectAggregate {
+                        storage_id: key,
+                        kind: kind.to_string(),
+                        provider: provider.clone(),
+                        object_id: object_id.clone(),
+                        document_bytes: None,
+                        recorded_at: None,
+                        referenced_blocks: 0,
+                        logical_bytes: 0,
+                        blocks: Vec::new(),
+                        seen_hashes: HashSet::new(),
+                    });
+                if entry.seen_hashes.insert(chunk.hash.clone()) {
+                    entry.logical_bytes = entry.logical_bytes.saturating_add(chunk.size);
+                    entry.referenced_blocks = entry.referenced_blocks.saturating_add(1);
+                }
+                let block = StorageBlockAggregate {
+                    hash: chunk.hash.clone(),
+                    size: chunk.size,
+                    offset: slice_offset,
+                    length: slice_len,
+                };
+                if !entry.blocks.iter().any(|item| item == &block) {
+                    entry.blocks.push(block);
+                }
+                if let std::collections::hash_map::Entry::Vacant(slot) =
+                    metadata.entry((provider.clone(), object_id.clone()))
+                {
+                    let row = if has_storage_metadata {
+                        sqlx::query(
+                            "SELECT document_bytes, recorded_at FROM storage_objects WHERE provider = ? AND object_id = ?",
+                        )
+                        .bind(provider)
+                        .bind(&object_id)
+                        .fetch_optional(&storage_pool)
+                        .await?
+                    } else {
+                        None
+                    };
+                    slot.insert((
+                        kind.to_string(),
+                        row.as_ref()
+                            .and_then(|row| row.try_get::<i64, _>("document_bytes").ok())
+                            .map(|v| v.max(0) as u64),
+                        row.and_then(|row| row.try_get::<String, _>("recorded_at").ok()),
+                    ));
+                }
+            }
+        }
+        for entry in groups.values_mut() {
+            if let Some((_, bytes, recorded_at)) =
+                metadata.get(&(entry.provider.clone(), entry.object_id.clone()))
+            {
+                entry.document_bytes = *bytes;
+                entry.recorded_at = recorded_at.clone();
+            }
+            entry.blocks.sort_by_key(|left| left.cursor_key());
+        }
+        let mut groups = groups.into_values().collect::<Vec<_>>();
+        groups.sort_by(|left, right| left.storage_id.cmp(&right.storage_id));
+        Ok(groups)
+    }
+
     async fn blocks_page(&self, request: BlockInspectionRequest) -> Result<BlockPage> {
         request.validate()?;
         let after = decode_block_cursor(&request)?;
@@ -551,6 +787,19 @@ impl SnapshotInspectionSession {
         }
         Ok(page)
     }
+
+    pub async fn storage(&self, request: StorageInspectionRequest) -> Result<StoragePage> {
+        request.validate()?;
+        self.inspector.storage(request).await
+    }
+
+    pub async fn storage_blocks(
+        &self,
+        request: StorageBlocksInspectionRequest,
+    ) -> Result<StorageBlocksPage> {
+        request.validate()?;
+        self.inspector.storage_blocks(request).await
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -748,6 +997,160 @@ pub struct BlockEntry {
     pub size: u64,
     pub changed_files: u64,
     pub referencing_files: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StorageInspectionRequest {
+    pub snapshot_id: String,
+    pub kind: Option<String>,
+    pub query: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+impl StorageInspectionRequest {
+    fn validate(&self) -> Result<()> {
+        validate_page_size(self.limit)?;
+        if self.snapshot_id.trim().is_empty() {
+            return Err(SnapshotInspectionError::InvalidArgument {
+                message: "snapshot_id must not be empty".to_string(),
+            });
+        }
+        if self
+            .kind
+            .as_deref()
+            .is_some_and(|kind| kind != "pack" && kind != "direct")
+        {
+            return Err(SnapshotInspectionError::InvalidArgument {
+                message: "storage kind must be pack or direct".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StorageBlocksInspectionRequest {
+    pub snapshot_id: String,
+    pub storage_id: String,
+    pub cursor: Option<String>,
+    pub limit: u16,
+}
+
+impl StorageBlocksInspectionRequest {
+    fn validate(&self) -> Result<()> {
+        validate_page_size(self.limit)?;
+        if self.snapshot_id.trim().is_empty() || self.storage_id.trim().is_empty() {
+            return Err(SnapshotInspectionError::InvalidArgument {
+                message: "snapshot_id and storage_id must not be empty".to_string(),
+            });
+        }
+        if !self.storage_id.starts_with("sto_") {
+            return Err(SnapshotInspectionError::InvalidArgument {
+                message: "storage_id must be an opaque storage identifier".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoragePage {
+    pub entries: Vec<StorageObjectEntry>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageObjectEntry {
+    pub storage_id: String,
+    pub kind: String,
+    pub document_bytes: Option<u64>,
+    pub recorded_at: Option<String>,
+    pub referenced_blocks: u64,
+    pub logical_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageBlocksPage {
+    pub entries: Vec<StorageBlockEntry>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StorageBlockAggregate {
+    hash: String,
+    size: u64,
+    offset: u64,
+    length: u64,
+}
+
+impl StorageBlockAggregate {
+    fn cursor_key(&self) -> String {
+        format!("{}:{:020}:{:020}", self.hash, self.offset, self.length)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StorageObjectAggregate {
+    storage_id: String,
+    kind: String,
+    provider: String,
+    object_id: String,
+    document_bytes: Option<u64>,
+    recorded_at: Option<String>,
+    referenced_blocks: u64,
+    logical_bytes: u64,
+    blocks: Vec<StorageBlockAggregate>,
+    seen_hashes: HashSet<String>,
+}
+
+impl StorageObjectAggregate {
+    fn into_entry(self) -> StorageObjectEntry {
+        StorageObjectEntry {
+            storage_id: self.storage_id,
+            kind: self.kind,
+            document_bytes: self.document_bytes,
+            recorded_at: self.recorded_at,
+            referenced_blocks: self.referenced_blocks,
+            logical_bytes: self.logical_bytes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageBlockEntry {
+    pub hash: String,
+    pub size: u64,
+    pub offset: u64,
+    pub length: u64,
+}
+
+impl From<StorageBlockAggregate> for StorageBlockEntry {
+    fn from(value: StorageBlockAggregate) -> Self {
+        Self {
+            hash: value.hash,
+            size: value.size,
+            offset: value.offset,
+            length: value.length,
+        }
+    }
+}
+
+impl StorageBlockEntry {
+    fn cursor_key(&self) -> String {
+        format!("{}:{:020}:{:020}", self.hash, self.offset, self.length)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StorageChunkRow {
+    hash: String,
+    size: u64,
+    len: u64,
 }
 
 #[derive(Clone)]
@@ -1575,6 +1978,49 @@ fn decode_block_cursor(request: &BlockInspectionRequest) -> Result<Option<String
     Ok(Some(decoded.after))
 }
 
+fn decode_storage_cursor(request: &StorageInspectionRequest) -> Result<Option<String>> {
+    let Some(cursor) = request.cursor.as_deref() else {
+        return Ok(None);
+    };
+    let decoded = decode_cursor(cursor)?;
+    let expected = storage_cursor(request, String::new());
+    if decoded.version != expected.version
+        || decoded.resource != expected.resource
+        || decoded.snapshot_id != expected.snapshot_id
+        || decoded.query != expected.query
+        || decoded.scope != expected.scope
+        || decoded.limit != expected.limit
+        || decoded.after.is_empty()
+    {
+        return Err(SnapshotInspectionError::InvalidCursor {
+            message: "cursor does not match the storage inspection request".to_string(),
+        });
+    }
+    Ok(Some(decoded.after))
+}
+
+fn decode_storage_blocks_cursor(
+    request: &StorageBlocksInspectionRequest,
+) -> Result<Option<String>> {
+    let Some(cursor) = request.cursor.as_deref() else {
+        return Ok(None);
+    };
+    let decoded = decode_cursor(cursor)?;
+    let expected = storage_blocks_cursor(request, String::new());
+    if decoded.version != expected.version
+        || decoded.resource != expected.resource
+        || decoded.snapshot_id != expected.snapshot_id
+        || decoded.parent != expected.parent
+        || decoded.limit != expected.limit
+        || decoded.after.is_empty()
+    {
+        return Err(SnapshotInspectionError::InvalidCursor {
+            message: "cursor does not match the storage block inspection request".to_string(),
+        });
+    }
+    Ok(Some(decoded.after))
+}
+
 fn decode_cursor(cursor: &str) -> Result<InspectionCursor> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(cursor)
@@ -1592,6 +2038,14 @@ fn encode_file_cursor(request: &FileInspectionRequest, after: String) -> String 
 
 fn encode_block_cursor(request: &BlockInspectionRequest, after: String) -> String {
     encode_cursor(block_cursor(request, after))
+}
+
+fn encode_storage_cursor(request: &StorageInspectionRequest, after: String) -> String {
+    encode_cursor(storage_cursor(request, after))
+}
+
+fn encode_storage_blocks_cursor(request: &StorageBlocksInspectionRequest, after: String) -> String {
+    encode_cursor(storage_blocks_cursor(request, after))
 }
 
 fn encode_cursor(cursor: InspectionCursor) -> String {
@@ -1636,6 +2090,39 @@ fn block_cursor(request: &BlockInspectionRequest, after: String) -> InspectionCu
         parent: None,
         query: normalize_query(request.query.as_deref()),
         changes_only: request.changes_only,
+        limit: request.limit,
+        after,
+    }
+}
+
+fn storage_cursor(request: &StorageInspectionRequest, after: String) -> InspectionCursor {
+    InspectionCursor {
+        version: CURSOR_VERSION,
+        resource: "storage".to_string(),
+        snapshot_id: request.snapshot_id.clone(),
+        presentation: None,
+        scope: request.kind.clone(),
+        parent: None,
+        query: normalize_query(request.query.as_deref()),
+        changes_only: false,
+        limit: request.limit,
+        after,
+    }
+}
+
+fn storage_blocks_cursor(
+    request: &StorageBlocksInspectionRequest,
+    after: String,
+) -> InspectionCursor {
+    InspectionCursor {
+        version: CURSOR_VERSION,
+        resource: "storage-blocks".to_string(),
+        snapshot_id: request.snapshot_id.clone(),
+        presentation: None,
+        scope: None,
+        parent: Some(request.storage_id.clone()),
+        query: String::new(),
+        changes_only: false,
         limit: request.limit,
         after,
     }

@@ -79,6 +79,23 @@
 - `<offset>`：十进制字节偏移（从 pack 文件起始算起；指向该 chunk 的“加密 blob”）
 - `<len>`：十进制字节长度（该 chunk 的“加密 blob”长度）
 
+### `storage_objects`
+
+用于记录成功上传的物理 Telegram document 元数据；只保留本地写入时已知的信息。
+
+- `provider` TEXT NOT NULL
+- `object_id` TEXT NOT NULL（规范化的物理 document 引用，不通过 Storage inspection 返回）
+- `storage_id` TEXT NOT NULL（由 provider/object pair 派生的稳定 opaque ID）
+- `kind` TEXT NOT NULL（`direct|pack`）
+- `document_bytes` INTEGER NOT NULL（实际上传 payload 字节数）
+- `recorded_at` TEXT NOT NULL（ISO8601）
+
+约束：
+- PRIMARY KEY (`provider`, `object_id`)
+- UNIQUE (`provider`, `storage_id`)
+
+旧索引可能没有对应行；读取时 document bytes 和 record time 必须显示为未知，不能从逻辑块或 pack slice 字节数推导。
+
 ### `remote_indexes`
 
 记录每次备份完成后上传的“索引 manifest”（加密）的远端引用。

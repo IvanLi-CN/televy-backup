@@ -8,11 +8,13 @@ use tokio::sync::{Mutex, RwLock};
 
 use televy_backup_core::control::{
     ControlError, ControlRequest, ControlResponse, SnapshotInspectBlocksParams,
-    SnapshotInspectFilesParams, SnapshotInspectSummaryParams,
+    SnapshotInspectFilesParams, SnapshotInspectStorageBlocksParams, SnapshotInspectStorageParams,
+    SnapshotInspectSummaryParams,
 };
 use televy_backup_core::snapshot_inspection::{
     BlockInspectionRequest, FileInspectionRequest, FilePresentation, FileScope,
     SnapshotInspectionError, SnapshotInspectionSession, SnapshotInspector,
+    StorageBlocksInspectionRequest, StorageInspectionRequest,
 };
 use televy_backup_core::{TelegramMtProtoStorage, TelegramMtProtoStorageConfig};
 
@@ -54,6 +56,8 @@ impl SnapshotInspectionService {
             "snapshot.inspect.summary" => self.summary(request).await,
             "snapshot.inspect.files" => self.files(request).await,
             "snapshot.inspect.blocks" => self.blocks(request).await,
+            "snapshot.inspect.storage" => self.storage(request).await,
+            "snapshot.inspect.storage-blocks" => self.storage_blocks(request).await,
             _ => {
                 return ControlResponse::err(
                     request.id.clone(),
@@ -130,6 +134,42 @@ impl SnapshotInspectionService {
                 snapshot_id,
                 changes_only: params.changes_only,
                 query: params.query,
+                cursor: params.cursor,
+                limit: params.limit,
+            })
+            .await
+            .map_err(map_inspection_error)?;
+        serde_json::to_value(page).map_err(serialization_error)
+    }
+
+    async fn storage(&self, request: &ControlRequest) -> Result<serde_json::Value, ControlError> {
+        let params: SnapshotInspectStorageParams = decode_params(&request.params)?;
+        let snapshot_id = params.snapshot_id.clone();
+        let session = self.session_for(&snapshot_id).await?;
+        let page = session
+            .storage(StorageInspectionRequest {
+                snapshot_id,
+                kind: params.kind,
+                query: params.query,
+                cursor: params.cursor,
+                limit: params.limit,
+            })
+            .await
+            .map_err(map_inspection_error)?;
+        serde_json::to_value(page).map_err(serialization_error)
+    }
+
+    async fn storage_blocks(
+        &self,
+        request: &ControlRequest,
+    ) -> Result<serde_json::Value, ControlError> {
+        let params: SnapshotInspectStorageBlocksParams = decode_params(&request.params)?;
+        let snapshot_id = params.snapshot_id.clone();
+        let session = self.session_for(&snapshot_id).await?;
+        let page = session
+            .storage_blocks(StorageBlocksInspectionRequest {
+                snapshot_id,
+                storage_id: params.storage_id,
                 cursor: params.cursor,
                 limit: params.limit,
             })
@@ -250,7 +290,22 @@ async fn snapshot_inspector_for(
             .await?;
         }
     }
-    Ok(SnapshotInspector::new(endpoint_db_path, filemap_dir))
+    let storage_db_path = endpoint_id_from_provider(provider.as_deref())
+        .ok()
+        .flatten()
+        .map(|endpoint_id| {
+            data_root
+                .join("index")
+                .join("dedupe")
+                .join(format!("dedupe.{endpoint_id}.sqlite"))
+        })
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| endpoint_db_path.clone());
+    Ok(SnapshotInspector::new_with_storage_db(
+        endpoint_db_path,
+        filemap_dir,
+        storage_db_path,
+    ))
 }
 
 async fn find_snapshot_endpoint_db(
@@ -770,6 +825,83 @@ mod tests {
         assert_eq!(
             files.result.unwrap()["entries"][0]["path"].as_str(),
             Some("docs")
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_control_methods_return_opaque_objects_and_slices() {
+        let (temp, service, current_path) = service_fixture().await;
+        let current = televy_backup_core::index_db::open_index_db(&current_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES ('storage-chunk', 7, 'blake3', 'xchacha20poly1305', '2026-08-27T00:00:00Z')",
+        )
+        .execute(&current)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len) VALUES ('current-new', 0, 'storage-chunk', 0, 7)",
+        )
+        .execute(&current)
+        .await
+        .unwrap();
+        drop(current);
+
+        let endpoint_path = temp.path().join("data/index/index.ep1.sqlite");
+        let endpoint = televy_backup_core::index_db::open_index_db(&endpoint_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES ('storage-chunk', 7, 'blake3', 'xchacha20poly1305', '2026-08-27T00:00:00Z')",
+        )
+        .execute(&endpoint)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at) VALUES ('storage-chunk', 'test.mem', 'tgfile:doc-storage', '2026-08-27T00:00:00Z')",
+        )
+        .execute(&endpoint)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO storage_objects (provider, object_id, storage_id, kind, document_bytes, recorded_at) VALUES ('test.mem', 'doc-storage', 'sto_test', 'direct', 11, '2026-08-27T00:00:01Z')",
+        )
+        .execute(&endpoint)
+        .await
+        .unwrap();
+        drop(endpoint);
+
+        let storage = service
+            .handle(&ControlRequest::new(
+                "storage",
+                "snapshot.inspect.storage",
+                serde_json::json!({ "snapshotId": "current", "limit": 10 }),
+            ))
+            .await;
+        assert!(storage.ok);
+        let storage = storage.result.unwrap();
+        let entry = &storage["entries"][0];
+        let storage_id = entry["storageId"].as_str().unwrap().to_string();
+        assert!(storage_id.starts_with("sto_"));
+        assert!(entry.get("objectId").is_none());
+        assert_eq!(entry["documentBytes"], 11);
+
+        let blocks = service
+            .handle(&ControlRequest::new(
+                "storage-blocks",
+                "snapshot.inspect.storage-blocks",
+                serde_json::json!({
+                    "snapshotId": "current",
+                    "storageId": storage_id,
+                    "limit": 10,
+                }),
+            ))
+            .await;
+        assert!(blocks.ok);
+        assert_eq!(
+            blocks.result.unwrap()["entries"][0]["hash"],
+            "storage-chunk"
         );
     }
 

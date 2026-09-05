@@ -10,13 +10,18 @@ The CLI provides a read-only, JSON-only inspection surface over retained backup 
 televybackup --json snapshots inspect summary --snapshot-id <snapshot-id>
 televybackup --json snapshots inspect files --snapshot-id <snapshot-id> --presentation <tree|list> --scope <all|changes> [--parent <relative-path>] [--query <text>] [--cursor <opaque>] [--limit <1..500>]
 televybackup --json snapshots inspect blocks --snapshot-id <snapshot-id> [--changes-only] [--query <hash-prefix>] [--cursor <opaque>] [--limit <1..500>]
+televybackup --json snapshots inspect storage --snapshot-id <snapshot-id> [--kind <pack|direct>] [--query <opaque-id-prefix>] [--cursor <opaque>] [--limit <1..500>]
+televybackup --json snapshots inspect storage-blocks --snapshot-id <snapshot-id> --storage-id <opaque-storage-id> [--cursor <opaque>] [--limit <1..500>]
 ```
 
 - `summary` returns immutable snapshot metadata, aggregate file/block statistics, and difference availability.
 - `files` returns direct children for `presentation=tree` and flat entries for `presentation=list`.
+- `storage` returns one row per physical `Pack` or `Direct` document referenced by the selected snapshot's ordinary file blocks. `kind` and `query` are optional and cursor-bound.
+- `storage-blocks` returns the selected snapshot's block hash, logical block size, and physical slice offset/length for one opaque storage ID.
 - `scope=changes` is valid only when difference availability is `available` or `firstSnapshot`.
 - Tree responses in changes scope include unchanged ancestor context rows and their aggregate descendant change counts.
 - A cursor is opaque, scoped to the exact immutable query, and must not be reused after any snapshot, presentation, scope, parent, or query change.
+- Storage cursors are scoped to the exact snapshot, kind filter, opaque-ID query, object ID (for `storage-blocks`), and limit.
 
 ## Summary Result
 
@@ -98,7 +103,58 @@ televybackup --json snapshots inspect blocks --snapshot-id <snapshot-id> [--chan
 }
 ```
 
-Rows are one per distinct logical chunk hash referenced by regular files. `referencingFiles` counts all regular files in the selected current snapshot that reference the block. `changedFiles` counts current regular files classified as `added` or `changed` against the direct baseline that reference the block; for a first snapshot, all current regular files count as changed. Deleted baseline files do not contribute to current block rows. `--changes-only` returns only rows with `changedFiles > 0` and is valid when the direct baseline is available or the snapshot is a first snapshot. The contract deliberately contains no upload-attempt, pack, remote object, or new-versus-reused field.
+Rows are one per distinct logical chunk hash referenced by regular files. `referencingFiles` counts all regular files in the selected current snapshot that reference the block. `changedFiles` counts current regular files classified as `added` or `changed` against the direct baseline that reference the block; for a first snapshot, all current regular files count as changed. Deleted baseline files do not contribute to current block rows. `--changes-only` returns only rows with `changedFiles > 0` and is valid when the direct baseline is available or the snapshot is a first snapshot.
+
+## Storage Page Result
+
+```json
+{
+  "entries": [
+    {
+      "storageId": "sto_...",
+      "kind": "pack",
+      "documentBytes": 67108864,
+      "recordedAt": "2026-08-27T00:00:01.123Z",
+      "referencedBlocks": 42,
+      "logicalBytes": 41943040
+    },
+    {
+      "storageId": "sto_...",
+      "kind": "direct",
+      "documentBytes": null,
+      "recordedAt": null,
+      "referencedBlocks": 1,
+      "logicalBytes": 1048576
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+`storageId` is a stable opaque identifier derived from the local provider/object mapping. `kind` is
+`pack` or `direct`. `documentBytes` and `recordedAt` are present only for objects recorded after the
+physical-object metadata feature was introduced; legacy mappings return `null` for both. `logicalBytes`
+is the sum of selected snapshot block lengths and is not a Telegram document size.
+
+## Storage Block Page Result
+
+```json
+{
+  "entries": [
+    {
+      "hash": "blake3-hex",
+      "size": 1048576,
+      "offset": 2097152,
+      "length": 1048576
+    }
+  ],
+  "nextCursor": null
+}
+```
+
+Entries are limited to blocks referenced by ordinary files in the selected snapshot and to slices
+belonging to the requested physical object. No Telegram chat, message, or document locator field is
+part of either response.
 
 ## Errors
 

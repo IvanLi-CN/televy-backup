@@ -229,6 +229,14 @@ The storage provider is **MTProto-only**:
   - `PACK_TARGET_BYTES = 64MiB ± 8MiB` (per-pack jitter)
   - `PACK_MAX_ENTRIES_PER_PACK = 32`
 
+Snapshot Storage inspection uses the local `storage_objects` table alongside
+`chunk_objects`. A successful physical upload records the normalized provider/object pair, a
+stable opaque `sto_...` identifier, `direct` or `pack` kind, the exact encrypted document payload
+bytes, and the record timestamp. The endpoint index is used when remote dedupe is disabled; the
+materialized dedupe index is used when it is enabled. Legacy mappings without a row remain readable
+but expose unknown document bytes/time. This is an offline, selected-snapshot view: it never queries
+Telegram for document or message metadata and never returns raw Telegram locator fields.
+
 ## Remote bootstrap/catalog (pinned)
 
 Cross-device restore (without the old local SQLite) uses a per-endpoint “bootstrap catalog”:
@@ -285,6 +293,7 @@ Key tables:
 
 - `snapshots`, `files`, `file_chunks`
 - `chunks`, `chunk_objects`
+- `storage_objects` (write-time physical document metadata)
 - `remote_index_parts`, `remote_indexes`
 
 ## Retention policy

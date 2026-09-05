@@ -32,7 +32,9 @@ use crate::pack::{
 };
 use crate::progress::{ProgressSink, TaskProgress};
 use crate::storage::MTPROTO_ENGINEERED_UPLOAD_MAX_BYTES;
-use crate::storage::{Storage, encode_tgfile_object_id, encode_tgpack_object_id};
+use crate::storage::{
+    Storage, encode_tgfile_object_id, encode_tgpack_object_id, storage_object_id,
+};
 use crate::{Error, Result};
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::sleep;
@@ -1102,6 +1104,14 @@ struct ChunkObjectMapping {
     chunk_hash: String,
     object_id: String,
     source_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct StorageObjectMapping {
+    storage_id: String,
+    object_id: String,
+    kind: &'static str,
+    document_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -3176,6 +3186,7 @@ pub async fn run_backup_with<S: Storage>(
         bytes_uploaded: u64,
         first_error: Option<Error>,
         chunk_objects: Vec<ChunkObjectMapping>,
+        storage_objects: Vec<StorageObjectMapping>,
     }
 
     let collect_future = {
@@ -3218,6 +3229,12 @@ pub async fn run_backup_with<S: Storage>(
                             object_id: encode_tgfile_object_id(&object_id),
                             source_bytes,
                         });
+                        stats.storage_objects.push(StorageObjectMapping {
+                            storage_id: storage_object_id(&provider_for_checkpoint, &object_id),
+                            object_id,
+                            kind: "direct",
+                            document_bytes: bytes,
+                        });
                         stats.chunks_uploaded += 1;
                         stats.data_objects_uploaded += 1;
                         stats.bytes_uploaded += bytes;
@@ -3242,6 +3259,15 @@ pub async fn run_backup_with<S: Storage>(
                             });
                             stats.chunks_uploaded += 1;
                         }
+                        stats.storage_objects.push(StorageObjectMapping {
+                            storage_id: storage_object_id(
+                                &provider_for_checkpoint,
+                                &pack_object_id,
+                            ),
+                            object_id: pack_object_id,
+                            kind: "pack",
+                            document_bytes: bytes,
+                        });
                         stats.data_objects_uploaded += 1;
                         stats.bytes_uploaded += bytes;
                         upload_confirmed_bytes.fetch_add(bytes, Ordering::Relaxed);
@@ -3721,6 +3747,7 @@ pub async fn run_backup_with<S: Storage>(
         bytes_uploaded,
         first_error,
         chunk_objects,
+        storage_objects,
     } = upload_stats;
 
     let tail_res = if dedupe_enabled {
@@ -3732,15 +3759,34 @@ pub async fn run_backup_with<S: Storage>(
         let mut pending_conn: DbConn = pool.acquire().await?;
         drop(pool);
 
-        record_dedupe_chunk_objects_batch(
+        let chunk_result = record_dedupe_chunk_objects_batch(
             dedupe_conn,
             &mut pending_conn,
             &provider_owned,
             &chunk_objects,
         )
-        .await
+        .await;
+        match chunk_result {
+            Ok(()) => {
+                record_dedupe_storage_objects_batch(
+                    dedupe_conn,
+                    &mut pending_conn,
+                    &provider_owned,
+                    &storage_objects,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        }
     } else {
-        record_chunk_objects_batch(&mut conn, &provider_owned, &chunk_objects).await
+        let chunk_result =
+            record_chunk_objects_batch(&mut conn, &provider_owned, &chunk_objects).await;
+        match chunk_result {
+            Ok(()) => {
+                record_storage_objects_batch(&mut conn, &provider_owned, &storage_objects).await
+            }
+            Err(error) => Err(error),
+        }
     };
 
     if let Err(tail_err) = tail_res {
@@ -4305,6 +4351,40 @@ async fn record_chunk_objects_batch(
     }
 }
 
+async fn record_storage_objects_batch(
+    conn: &mut DbConn,
+    provider: &str,
+    storage_objects: &[StorageObjectMapping],
+) -> Result<()> {
+    if storage_objects.is_empty() {
+        return Ok(());
+    }
+    let mut tx = conn.begin().await?;
+    for object in storage_objects {
+        sqlx::query(
+            r#"
+            INSERT INTO storage_objects
+              (provider, object_id, storage_id, kind, document_bytes, recorded_at)
+            VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            ON CONFLICT(provider, object_id) DO UPDATE SET
+              storage_id = excluded.storage_id,
+              kind = excluded.kind,
+              document_bytes = excluded.document_bytes,
+              recorded_at = excluded.recorded_at
+            "#,
+        )
+        .bind(provider)
+        .bind(&object.object_id)
+        .bind(&object.storage_id)
+        .bind(object.kind)
+        .bind(object.document_bytes as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn dedupe_db_has_any_chunk_objects(conn: &mut DbConn) -> Result<bool> {
     let row = sqlx::query("SELECT 1 AS n FROM chunk_objects LIMIT 1")
         .fetch_optional(&mut **conn)
@@ -4348,6 +4428,25 @@ async fn seed_dedupe_db_from_endpoint_db(
     .execute(&mut *tx)
     .await?;
 
+    let source_has_storage_objects = sqlx::query(
+        "SELECT 1 FROM src.sqlite_master WHERE type = 'table' AND name = 'storage_objects'",
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if source_has_storage_objects {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO storage_objects
+              (provider, object_id, storage_id, kind, document_bytes, recorded_at)
+            SELECT provider, object_id, storage_id, kind, document_bytes, recorded_at
+            FROM src.storage_objects
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
     tx.commit().await?;
 
     sqlx::query("DETACH DATABASE src")
@@ -4365,6 +4464,17 @@ async fn record_dedupe_chunk_objects_batch(
 ) -> Result<()> {
     record_dedupe_chunk_objects_batch_inner(dedupe_conn, provider, chunk_objects).await?;
     record_dedupe_chunk_objects_batch_inner(pending_conn, provider, chunk_objects).await?;
+    Ok(())
+}
+
+async fn record_dedupe_storage_objects_batch(
+    dedupe_conn: &mut DbConn,
+    pending_conn: &mut DbConn,
+    provider: &str,
+    storage_objects: &[StorageObjectMapping],
+) -> Result<()> {
+    record_storage_objects_batch(dedupe_conn, provider, storage_objects).await?;
+    record_storage_objects_batch(pending_conn, provider, storage_objects).await?;
     Ok(())
 }
 
@@ -5456,6 +5566,25 @@ async fn export_endpoint_index_db_for_upload(
         )
         .execute(&mut *tx)
         .await?;
+
+        let source_has_storage_objects = sqlx::query(
+            "SELECT 1 FROM src.sqlite_master WHERE type = 'table' AND name = 'storage_objects'",
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+        if source_has_storage_objects {
+            sqlx::query(
+                r#"
+                INSERT INTO storage_objects
+                  (provider, object_id, storage_id, kind, document_bytes, recorded_at)
+                SELECT provider, object_id, storage_id, kind, document_bytes, recorded_at
+                FROM src.storage_objects
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     sqlx::query(
@@ -5889,6 +6018,25 @@ async fn export_dedupe_tables_only_db(
         )
         .execute(&mut *tx)
         .await?;
+
+        let source_has_storage_objects = sqlx::query(
+            "SELECT 1 FROM src.sqlite_master WHERE type = 'table' AND name = 'storage_objects'",
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+        if source_has_storage_objects {
+            sqlx::query(
+                r#"
+                INSERT INTO storage_objects
+                  (provider, object_id, storage_id, kind, document_bytes, recorded_at)
+                SELECT provider, object_id, storage_id, kind, document_bytes, recorded_at
+                FROM src.storage_objects
+                "#,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
 
         tx.commit().await?;
 

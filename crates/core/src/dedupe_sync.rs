@@ -164,6 +164,25 @@ async fn apply_dedupe_delta(
     .execute(&mut *tx)
     .await?;
 
+    let source_has_storage_objects = sqlx::query(
+        "SELECT 1 FROM src.sqlite_master WHERE type = 'table' AND name = 'storage_objects'",
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if source_has_storage_objects {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO storage_objects
+              (provider, object_id, storage_id, kind, document_bytes, recorded_at)
+            SELECT provider, object_id, storage_id, kind, document_bytes, recorded_at
+            FROM src.storage_objects
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
     tx.commit().await?;
 
     sqlx::query("DETACH DATABASE src")

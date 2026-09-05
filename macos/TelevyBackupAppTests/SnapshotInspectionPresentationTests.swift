@@ -119,6 +119,14 @@ private func testBlockRequestEpochRejectsStaleResults() {
     )
 }
 
+private func testStorageRequestEpochRejectsStaleExpansion() {
+    var epoch = SnapshotBlockRequestEpoch()
+    let packRequest = epoch.issue()
+    let directRequest = epoch.issue()
+    expect(!epoch.accepts(packRequest), "a storage response from before an expansion must be discarded")
+    expect(epoch.accepts(directRequest), "the latest storage expansion response must remain applicable")
+}
+
 @main
 enum SnapshotInspectionPresentationTestsMain {
     static func main() {
@@ -126,6 +134,7 @@ enum SnapshotInspectionPresentationTestsMain {
         testTargetSelectionDismissesUnrelatedSnapshotDetail()
         testTreeExpansionSurvivesAsyncReload()
         testBlockRequestEpochRejectsStaleResults()
+        testStorageRequestEpochRejectsStaleExpansion()
         print("OK: SnapshotInspectionPresentationTests")
     }
 }

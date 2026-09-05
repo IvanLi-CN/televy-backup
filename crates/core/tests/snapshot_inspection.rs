@@ -5,7 +5,8 @@ use televy_backup_core::{
     index_db,
     snapshot_inspection::{
         BlockInspectionRequest, FileInspectionRequest, FilePresentation, FileScope,
-        SnapshotInspectionError, SnapshotInspector,
+        SnapshotInspectionError, SnapshotInspector, StorageBlocksInspectionRequest,
+        StorageInspectionRequest,
     },
 };
 use tempfile::TempDir;
@@ -577,4 +578,144 @@ async fn prepared_session_reuses_direct_baseline_tree_metadata() {
             ("docs/deleted.txt", "deleted"),
         ]
     );
+}
+
+#[tokio::test]
+async fn storage_groups_pack_slices_and_keeps_legacy_metadata_unknown() {
+    let temp = TempDir::new().unwrap();
+    let (endpoint_path, filemap_dir) = endpoint_with_filemaps(&temp).await;
+    let endpoint = index_db::open_index_db(&endpoint_path).await.unwrap();
+    for (hash, object_id) in [
+        ("shared-current", "tgpack:pack-1@0+16"),
+        ("kind-current", "tgfile:direct-1"),
+        ("same-current", "tgfile:legacy-direct"),
+    ] {
+        sqlx::query(
+            "INSERT OR IGNORE INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES (?, 16, 'blake3', 'xchacha20poly1305', '2026-08-27T00:00:00Z')",
+        )
+        .bind(hash)
+        .execute(&endpoint)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at) VALUES (?, 'test.provider', ?, '2026-08-27T00:00:00Z')",
+        )
+        .bind(hash)
+        .bind(object_id)
+        .execute(&endpoint)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO storage_objects (provider, object_id, storage_id, kind, document_bytes, recorded_at) VALUES ('test.provider', 'pack-1', 'sto_pack', 'pack', 64, '2026-08-27T00:00:01Z')",
+    )
+    .execute(&endpoint)
+    .await
+    .unwrap();
+    drop(endpoint);
+
+    let inspector = SnapshotInspector::new(&endpoint_path, &filemap_dir);
+    let page = inspector
+        .storage(StorageInspectionRequest {
+            snapshot_id: "current".to_string(),
+            kind: None,
+            query: None,
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 3);
+    let pack = page
+        .entries
+        .iter()
+        .find(|entry| entry.kind == "pack")
+        .unwrap();
+    assert_eq!(pack.document_bytes, Some(64));
+    assert_eq!(pack.referenced_blocks, 1);
+    assert_eq!(pack.logical_bytes, 16);
+    let legacy = page
+        .entries
+        .iter()
+        .find(|entry| entry.storage_id != pack.storage_id && entry.document_bytes.is_none())
+        .unwrap();
+    let blocks = inspector
+        .storage_blocks(StorageBlocksInspectionRequest {
+            snapshot_id: "current".to_string(),
+            storage_id: pack.storage_id.clone(),
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(blocks.entries[0].hash, "shared-current");
+    assert!(blocks.entries[0].length > 0);
+    let paged = inspector
+        .storage(StorageInspectionRequest {
+            snapshot_id: "current".to_string(),
+            kind: None,
+            query: None,
+            cursor: None,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    let cursor = paged.next_cursor.expect("storage cursor");
+    assert!(matches!(
+        inspector
+            .storage(StorageInspectionRequest {
+                snapshot_id: "current".to_string(),
+                kind: Some("direct".to_string()),
+                query: None,
+                cursor: Some(cursor),
+                limit: 10,
+            })
+            .await,
+        Err(SnapshotInspectionError::InvalidCursor { .. })
+    ));
+    assert_eq!(legacy.recorded_at, None);
+}
+
+#[tokio::test]
+async fn storage_uses_materialized_dedupe_mappings_when_configured() {
+    let temp = TempDir::new().unwrap();
+    let (endpoint_path, filemap_dir) = endpoint_with_filemaps(&temp).await;
+    let dedupe_path = temp.path().join("dedupe.sqlite");
+    let dedupe = index_db::open_index_db(&dedupe_path).await.unwrap();
+    sqlx::query(
+        "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES ('shared-current', 16, 'blake3', 'xchacha20poly1305', '2026-08-27T00:00:00Z')",
+    )
+    .execute(&dedupe)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at) VALUES ('shared-current', 'test.provider', 'tgpack:dedupe-pack@4+16', '2026-08-27T00:00:00Z')",
+    )
+    .execute(&dedupe)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO storage_objects (provider, object_id, storage_id, kind, document_bytes, recorded_at) VALUES ('test.provider', 'dedupe-pack', 'sto_dedupe', 'pack', 32, '2026-08-27T00:00:01Z')",
+    )
+    .execute(&dedupe)
+    .await
+    .unwrap();
+    drop(dedupe);
+
+    let inspector =
+        SnapshotInspector::new_with_storage_db(&endpoint_path, &filemap_dir, &dedupe_path);
+    let page = inspector
+        .storage(StorageInspectionRequest {
+            snapshot_id: "current".to_string(),
+            kind: Some("pack".to_string()),
+            query: None,
+            cursor: None,
+            limit: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].kind, "pack");
+    assert_eq!(page.entries[0].document_bytes, Some(32));
+    assert_eq!(page.entries[0].logical_bytes, 16);
 }

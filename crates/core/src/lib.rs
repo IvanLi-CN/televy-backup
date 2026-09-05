@@ -44,5 +44,5 @@ pub use storage::{
     ChunkObjectRef, InMemoryStorage, Storage, TelegramDialogInfo, TelegramMtProtoStorage,
     TelegramMtProtoStorageConfig, TgMtProtoObjectIdV1, encode_tgfile_object_id,
     encode_tgmtproto_object_id_v1, encode_tgpack_object_id, parse_chunk_object_ref,
-    parse_tgmtproto_object_id_v1,
+    parse_tgmtproto_object_id_v1, storage_object_id,
 };

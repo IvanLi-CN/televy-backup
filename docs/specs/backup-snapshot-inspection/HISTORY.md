@@ -12,6 +12,8 @@
 - Run logs deliberately retain execution summaries instead of complete file lists.
 - Snapshot retention is the single authority for detailed file and block availability; this avoids a divergent permanent history store.
 - Direct-baseline comparison is required to preserve the meaning of a backup's delta.
+- Physical Storage inspection is additive: successful uploads record exact document bytes and record time in the local endpoint/dedupe index, while legacy mappings remain inspectable with unknown physical metadata.
+- The Storage view is snapshot-scoped and does not create a permanent remote inventory or expose Telegram locator fields. See [Offline storage object inspection](../../adr/0005-offline-storage-object-inspection.md) for the boundary rationale.
 
 ## References
 

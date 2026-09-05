@@ -2,6 +2,10 @@
 
 > Canonical topic retained as the canonical source for current product behavior.
 
+## Related ADRs
+
+- [0005-offline-storage-object-inspection](../../adr/0005-offline-storage-object-inspection.md)
+
 ## 背景 / 问题陈述
 
 - 现状：同一个 Telegram endpoint 下存在多个大目录（多个 targets / source_path）时，备份会反复上传/下载“包含其它目录历史文件映射”的巨型 index DB（SQLite），导致：
@@ -48,7 +52,7 @@
 
 - 一级 Endpoint DB（远端对象）
   - 包含：`snapshots / remote_indexes / remote_index_parts / tasks (+ endpoint_state)`
-  - 说明：全端点去重映射（`chunks/chunk_objects`）在 #3z7rj 中迁移为独立的 remote dedupe（Base + Delta + Catalog），不再由 endpoint DB 承载
+  - 说明：全端点去重映射（`chunks/chunk_objects/storage_objects`）在 #3z7rj 中迁移为独立的 remote dedupe（Base + Delta + Catalog），不再由 endpoint DB 承载
   - 不再包含：任何 `files / file_chunks`
   - 由 bootstrap 的 `endpointLatest` 指向
 - 二级 Snapshot Filemap DB（远端对象）
@@ -83,7 +87,7 @@
 2) Scan + upload pipeline
 
 - endpoint DB：只写元数据表（`snapshots/remote_indexes/remote_index_parts/tasks/endpoint_state`）
-- dedupe DB：在 #3z7rj 中承担全端点去重映射（`chunks/chunk_objects`）
+- dedupe DB：在 #3z7rj 中承担全端点去重映射（`chunks/chunk_objects/storage_objects`）
 - filemap DB（每个 snapshot 新建本地 sqlite）：写 `snapshots/files/file_chunks/chunks`
 - base-chunk-copy：
   - 从 base filemap DB 查 `files/file_chunks` 并复制到新 filemap DB（不依赖 endpoint DB 的 files/file_chunks）

@@ -92,6 +92,40 @@ private struct SnapshotBlockPage: Decodable {
     let nextCursor: String?
 }
 
+private struct SnapshotStorageEntry: Decodable, Identifiable {
+    let storageId: String
+    let kind: String
+    let documentBytes: UInt64?
+    let recordedAt: String?
+    let referencedBlocks: UInt64
+    let logicalBytes: UInt64
+
+    var id: String { storageId }
+    var shortId: String {
+        guard storageId.count > 18 else { return storageId }
+        return "\(storageId.prefix(10))...\(storageId.suffix(6))"
+    }
+}
+
+private struct SnapshotStoragePage: Decodable {
+    let entries: [SnapshotStorageEntry]
+    let nextCursor: String?
+}
+
+private struct SnapshotStorageBlockEntry: Decodable, Identifiable {
+    let hash: String
+    let size: UInt64
+    let offset: UInt64
+    let length: UInt64
+
+    var id: String { "\(hash):\(offset):\(length)" }
+}
+
+private struct SnapshotStorageBlocksPage: Decodable {
+    let entries: [SnapshotStorageBlockEntry]
+    let nextCursor: String?
+}
+
 struct SnapshotBlockRequestEpoch {
     private(set) var value = 0
 
@@ -136,8 +170,11 @@ private final class SnapshotInspectionStore: ObservableObject {
     @Published private(set) var listEntries: [SnapshotFileEntry] = []
     @Published private(set) var treeEntries: [String: [SnapshotFileEntry]] = [:]
     @Published private(set) var blocks: [SnapshotBlockEntry] = []
+    @Published private(set) var storageEntries: [SnapshotStorageEntry] = []
+    @Published private(set) var storageBlocks: [String: [SnapshotStorageBlockEntry]] = [:]
     @Published private(set) var filesLoading = false
     @Published private(set) var blocksLoading = false
+    @Published private(set) var storageLoading = false
 
     private var run: RunLogSummary?
     private weak var model: AppModel?
@@ -154,6 +191,14 @@ private final class SnapshotInspectionStore: ObservableObject {
     private var activeChangesOnly = true
     private var activeQuery = ""
     private var activeBlockChangesOnly = false
+    private var storageNextCursor: String?
+    private var storageReachedEnd = false
+    private var storageBlockNextCursor: [String: String?] = [:]
+    private var storageBlockReachedEnd = Set<String>()
+    private var storageBlockLoading = Set<String>()
+    private var storageRequestEpoch = SnapshotBlockRequestEpoch()
+    private var activeStorageKind: String?
+    private var activeStorageQuery = ""
 
     func start(run: RunLogSummary, model: AppModel) {
         self.run = run
@@ -163,6 +208,8 @@ private final class SnapshotInspectionStore: ObservableObject {
         issue = nil
         issueRetryable = false
         activeBlockChangesOnly = false
+        activeStorageKind = nil
+        activeStorageQuery = ""
         resetPagedContent()
 
         guard case .inspectable = SnapshotInspectionEligibility.forRun(run) else {
@@ -253,6 +300,36 @@ private final class SnapshotInspectionStore: ObservableObject {
         guard !blocksReachedEnd, !blocksLoading else { return }
         loadBlockPage()
     }
+
+    func loadStorageIfNeeded() {
+        guard summary != nil, issue == nil, storageEntries.isEmpty, !storageLoading else { return }
+        loadStoragePage()
+    }
+
+    func configureStorage(kind: String?, query: String) {
+        guard activeStorageKind != kind || activeStorageQuery != query else { return }
+        activeStorageKind = kind
+        activeStorageQuery = query
+        resetStorageContent()
+        loadStorageIfNeeded()
+    }
+
+    func loadMoreStorage() {
+        guard !storageReachedEnd, !storageLoading else { return }
+        loadStoragePage()
+    }
+
+    func toggleStorage(_ entry: SnapshotStorageEntry) {
+        if storageBlocks[entry.id] != nil {
+            storageBlocks[entry.id] = nil
+            storageBlockReachedEnd.remove(entry.id)
+            storageBlockNextCursor[entry.id] = nil
+            return
+        }
+        loadStorageBlocks(entry.id)
+    }
+
+    var loadingStorageObjectIDs: Set<String> { storageBlockLoading }
 
     var changesAvailable: Bool {
         summary?.availability.state != "baselineUnavailable"
@@ -368,9 +445,54 @@ private final class SnapshotInspectionStore: ObservableObject {
         }
     }
 
+    private func loadStoragePage() {
+        guard !storageLoading, !storageReachedEnd, let snapshotId = run?.snapshotId, let model else { return }
+        storageLoading = true
+        let token = storageRequestEpoch.issue()
+        var params: [String: Any] = ["snapshotId": snapshotId, "limit": 200]
+        if let activeStorageKind { params["kind"] = activeStorageKind }
+        if !activeStorageQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { params["query"] = activeStorageQuery }
+        if let storageNextCursor { params["cursor"] = storageNextCursor }
+        performControlRequest(model: model, method: "snapshot.inspect.storage", params: params) { (result: Result<SnapshotStoragePage, ControlRequestFailure>) in
+            guard self.storageRequestEpoch.accepts(token) else { return }
+            self.storageLoading = false
+            switch result {
+            case let .success(page):
+                self.storageEntries.append(contentsOf: page.entries)
+                self.storageNextCursor = page.nextCursor
+                self.storageReachedEnd = page.nextCursor == nil
+            case let .failure(failure):
+                self.issue = failure.message
+                self.issueRetryable = failure.retryable
+            }
+        }
+    }
+
+    private func loadStorageBlocks(_ storageId: String) {
+        guard !storageBlockLoading.contains(storageId), !storageBlockReachedEnd.contains(storageId), let snapshotId = run?.snapshotId, let model else { return }
+        storageBlockLoading.insert(storageId)
+        let token = storageRequestEpoch.issue()
+        var params: [String: Any] = ["snapshotId": snapshotId, "storageId": storageId, "limit": 200]
+        if let cursor = storageBlockNextCursor[storageId] ?? nil { params["cursor"] = cursor }
+        performControlRequest(model: model, method: "snapshot.inspect.storage-blocks", params: params) { (result: Result<SnapshotStorageBlocksPage, ControlRequestFailure>) in
+            guard self.storageRequestEpoch.accepts(token) else { return }
+            self.storageBlockLoading.remove(storageId)
+            switch result {
+            case let .success(page):
+                self.storageBlocks[storageId, default: []].append(contentsOf: page.entries)
+                self.storageBlockNextCursor[storageId] = page.nextCursor
+                if page.nextCursor == nil { self.storageBlockReachedEnd.insert(storageId) }
+            case let .failure(failure):
+                self.issue = failure.message
+                self.issueRetryable = failure.retryable
+            }
+        }
+    }
+
     private func resetPagedContent() {
         resetFilesContent()
         resetBlockContent()
+        resetStorageContent()
     }
 
     private func resetFilesContent() {
@@ -390,6 +512,18 @@ private final class SnapshotInspectionStore: ObservableObject {
         blockNextCursor = nil
         blocksReachedEnd = false
         blocksLoading = false
+    }
+
+    private func resetStorageContent() {
+        _ = storageRequestEpoch.issue()
+        storageEntries = []
+        storageBlocks = [:]
+        storageNextCursor = nil
+        storageReachedEnd = false
+        storageBlockNextCursor = [:]
+        storageBlockReachedEnd = []
+        storageBlockLoading = []
+        storageLoading = false
     }
 
     private func performControlRequest<Response: Decodable>(
@@ -462,9 +596,20 @@ private final class SnapshotInspectionStore: ObservableObject {
             SnapshotBlockEntry(hash: "9c47a0f53d1a6cb9", size: 1_048_576, changedFiles: 3, referencingFiles: 4),
             SnapshotBlockEntry(hash: "b9d202d17d25e8f1", size: 786_432, changedFiles: 0, referencingFiles: 2),
         ]
+        storageEntries = [
+            SnapshotStorageEntry(storageId: "sto_3e7a8f1c2d", kind: "pack", documentBytes: 64 * 1_024 * 1_024, recordedAt: "2026-08-27T00:00:01Z", referencedBlocks: 42, logicalBytes: 40 * 1_024 * 1_024),
+            SnapshotStorageEntry(storageId: "sto_legacy_91b4", kind: "direct", documentBytes: nil, recordedAt: nil, referencedBlocks: 1, logicalBytes: 786_432),
+        ]
+        storageBlocks = [
+            "sto_3e7a8f1c2d": [
+                SnapshotStorageBlockEntry(hash: "9c47a0f53d1a6cb9", size: 1_048_576, offset: 0, length: 1_048_617),
+                SnapshotStorageBlockEntry(hash: "a102b0c4d5e6f789", size: 786_432, offset: 1_048_617, length: 786_473),
+            ],
+        ]
         listReachedEnd = true
         treeReachedEnd = ["", "Albums"]
         blocksReachedEnd = true
+        storageReachedEnd = true
     }
 }
 
@@ -477,6 +622,7 @@ struct SnapshotRunDetailView: View {
         case summary = "Summary"
         case files = "Files"
         case blocks = "Blocks"
+        case storage = "Storage"
 
         var id: String { rawValue }
     }
@@ -486,12 +632,15 @@ struct SnapshotRunDetailView: View {
         let scene = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
         return scene == "main-window-snapshot-changes" || scene == "main-window-snapshot-baseline-unavailable"
             ? .files
+            : scene == "main-window-snapshot-storage" ? .storage
             : .summary
     }()
     @State private var presentation: SnapshotInspectionPresentation = .tree
     @State private var changesOnly = true
     @State private var blockChangesOnly = false
     @State private var query = ""
+    @State private var storageKind: String?
+    @State private var storageQuery = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -508,11 +657,14 @@ struct SnapshotRunDetailView: View {
         .onChange(of: tab) { _, newTab in
             if newTab == .blocks { store.loadBlocksIfNeeded() }
             if newTab == .files { store.loadInitialFiles() }
+            if newTab == .storage { store.loadStorageIfNeeded() }
         }
         .onChange(of: presentation) { _, _ in reloadFiles() }
         .onChange(of: changesOnly) { _, _ in reloadFiles() }
         .onChange(of: blockChangesOnly) { _, _ in reloadBlocks() }
         .onChange(of: query) { _, _ in reloadFiles() }
+        .onChange(of: storageKind) { _, _ in reloadStorage() }
+        .onChange(of: storageQuery) { _, _ in reloadStorage() }
     }
 
     @ViewBuilder
@@ -527,6 +679,11 @@ struct SnapshotRunDetailView: View {
             ViewThatFits(in: .horizontal) {
                 wideBlockToolbar(summary: summary)
                 stackedBlockToolbar(summary: summary)
+            }
+        } else if tab == .storage, store.issue == nil {
+            ViewThatFits(in: .horizontal) {
+                wideStorageToolbar
+                stackedStorageToolbar
             }
         } else {
             tabPicker
@@ -591,6 +748,40 @@ struct SnapshotRunDetailView: View {
         }
     }
 
+    private var wideStorageToolbar: some View {
+        HStack(spacing: 16) {
+            tabPicker
+            Spacer(minLength: 24)
+            storageControls
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var stackedStorageToolbar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            tabPicker
+            storageControls
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var storageControls: some View {
+        HStack(spacing: 8) {
+            Picker("Storage kind", selection: $storageKind) {
+                Text("All").tag(String?.none)
+                Text("Pack").tag(String?.some("pack"))
+                Text("Direct").tag(String?.some("direct"))
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .frame(width: 158)
+            TextField("Search object ID", text: $storageQuery)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 150, idealWidth: 210, maxWidth: 260)
+        }
+    }
+
     private var blockChangesOnlyToggle: some View {
         Toggle("Changes only", isOn: $blockChangesOnly)
             .toggleStyle(.checkbox)
@@ -618,7 +809,7 @@ struct SnapshotRunDetailView: View {
         }
         .pickerStyle(.segmented)
         .controlSize(.small)
-        .frame(width: 208)
+        .frame(width: 280)
     }
 
     private var header: some View {
@@ -686,6 +877,8 @@ struct SnapshotRunDetailView: View {
                 files(summary: summary)
             case .blocks:
                 blocks(summary: summary)
+            case .storage:
+                storage()
             }
         } else {
             SnapshotInspectionStateView(icon: "doc.text", title: "No snapshot data", detail: "This run has no inspectable retained snapshot.", showsProgress: false)
@@ -783,6 +976,30 @@ struct SnapshotRunDetailView: View {
         }
     }
 
+    private func storage() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if store.storageEntries.isEmpty, !store.storageLoading {
+                SnapshotInspectionStateView(icon: "externaldrive", title: "No storage objects", detail: "No Pack or Direct documents are referenced by this snapshot.", showsProgress: false)
+            } else {
+                SnapshotStorageTable(
+                    entries: store.storageEntries,
+                    expandedBlocks: store.storageBlocks,
+                    loadingObjectIDs: store.loadingStorageObjectIDs,
+                    onReachedBottom: { store.loadMoreStorage() },
+                    onToggle: { store.toggleStorage($0) }
+                )
+            }
+            if store.storageLoading {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading storage objects...").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onAppear { reloadStorage() }
+    }
+
     private func reloadFiles() {
         if store.summary != nil {
             store.configureFiles(presentation: presentation, changesOnly: changesOnly, query: query)
@@ -793,6 +1010,12 @@ struct SnapshotRunDetailView: View {
         guard store.summary != nil else { return }
         store.configureBlocks(changesOnly: blockChangesOnly)
         store.loadBlocksIfNeeded()
+    }
+
+    private func reloadStorage() {
+        guard store.summary != nil else { return }
+        store.configureStorage(kind: storageKind, query: storageQuery)
+        store.loadStorageIfNeeded()
     }
 }
 
@@ -971,6 +1194,26 @@ private enum SnapshotNativeColumns {
             table.addTableColumn(column(title: "Size", identifier: size, width: 108, minWidth: 84, expands: false, alignment: .right))
             table.addTableColumn(column(title: "Changed files", identifier: changedFiles, width: 120, minWidth: 112, expands: false, alignment: .right))
             table.addTableColumn(column(title: "Referenced files", identifier: referencedFiles, width: 136, minWidth: 124, expands: false, alignment: .right))
+        }
+    }
+
+    enum Storage {
+        static let object = NSUserInterfaceItemIdentifier("snapshot-storage-object")
+        static let kind = NSUserInterfaceItemIdentifier("snapshot-storage-kind")
+        static let document = NSUserInterfaceItemIdentifier("snapshot-storage-document")
+        static let logical = NSUserInterfaceItemIdentifier("snapshot-storage-logical")
+        static let references = NSUserInterfaceItemIdentifier("snapshot-storage-references")
+        static let recorded = NSUserInterfaceItemIdentifier("snapshot-storage-recorded")
+
+        static func install(on table: NSTableView) {
+            table.headerView = NSTableHeaderView()
+            table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+            table.addTableColumn(column(title: "Object", identifier: object, width: 210, minWidth: 180, expands: true, alignment: .left))
+            table.addTableColumn(column(title: "Type", identifier: kind, width: 58, minWidth: 52, expands: false, alignment: .left))
+            table.addTableColumn(column(title: "Document", identifier: document, width: 90, minWidth: 84, expands: false, alignment: .right))
+            table.addTableColumn(column(title: "Logical", identifier: logical, width: 88, minWidth: 80, expands: false, alignment: .right))
+            table.addTableColumn(column(title: "Blocks", identifier: references, width: 52, minWidth: 48, expands: false, alignment: .right))
+            table.addTableColumn(column(title: "Recorded", identifier: recorded, width: 110, minWidth: 96, expands: false, alignment: .right))
         }
     }
 
@@ -1231,6 +1474,98 @@ private struct SnapshotBlockTable: NSViewRepresentable {
     }
 }
 
+private struct SnapshotStorageTable: NSViewRepresentable {
+    let entries: [SnapshotStorageEntry]
+    let expandedBlocks: [String: [SnapshotStorageBlockEntry]]
+    let loadingObjectIDs: Set<String>
+    let onReachedBottom: () -> Void
+    let onToggle: (SnapshotStorageEntry) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let table = NSTableView()
+        table.rowSizeStyle = .small
+        table.delegate = context.coordinator
+        table.dataSource = context.coordinator
+        SnapshotNativeColumns.Storage.install(on: table)
+        table.setAccessibilityLabel("Snapshot storage objects")
+        let scroll = SnapshotNativeTable.scrollView(table: table, coordinator: context.coordinator)
+        context.coordinator.table = table
+        context.coordinator.onReachedBottom = onReachedBottom
+        context.coordinator.onToggle = onToggle
+        context.coordinator.update(entries: entries, expandedBlocks: expandedBlocks, loadingObjectIDs: loadingObjectIDs)
+        return scroll
+    }
+
+    func updateNSView(_: NSScrollView, context: Context) {
+        context.coordinator.onReachedBottom = onReachedBottom
+        context.coordinator.onToggle = onToggle
+        context.coordinator.update(entries: entries, expandedBlocks: expandedBlocks, loadingObjectIDs: loadingObjectIDs)
+    }
+
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, SnapshotNativeTableObserver {
+        enum Row {
+            case object(SnapshotStorageEntry)
+            case block(SnapshotStorageBlockEntry)
+        }
+
+        weak var table: NSTableView?
+        var rows: [Row] = []
+        var onReachedBottom: (() -> Void)?
+        var onToggle: ((SnapshotStorageEntry) -> Void)?
+
+        func update(entries: [SnapshotStorageEntry], expandedBlocks: [String: [SnapshotStorageBlockEntry]], loadingObjectIDs: Set<String>) {
+            rows = entries.flatMap { entry -> [Row] in
+                var result: [Row] = [.object(entry)]
+                if let blocks = expandedBlocks[entry.id] {
+                    result.append(contentsOf: blocks.map(Row.block))
+                } else if loadingObjectIDs.contains(entry.id) {
+                    result.append(.block(SnapshotStorageBlockEntry(hash: "Loading slices...", size: 0, offset: 0, length: 0)))
+                }
+                return result
+            }
+            table?.reloadData()
+        }
+
+        func numberOfRows(in _: NSTableView) -> Int { rows.count }
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard let tableColumn else { return nil }
+            switch rows[row] {
+            case let .object(entry):
+                switch tableColumn.identifier {
+                case SnapshotNativeColumns.Storage.object: return SnapshotNativeRowView.storageObject(entry: entry)
+                case SnapshotNativeColumns.Storage.kind: return SnapshotNativeRowView.storageKind(entry: entry)
+                case SnapshotNativeColumns.Storage.document: return SnapshotNativeRowView.storageDocument(entry: entry)
+                case SnapshotNativeColumns.Storage.logical: return SnapshotNativeRowView.storageLogical(entry: entry)
+                case SnapshotNativeColumns.Storage.references: return SnapshotNativeRowView.storageReferences(entry: entry)
+                case SnapshotNativeColumns.Storage.recorded: return SnapshotNativeRowView.storageRecorded(entry: entry)
+                default: return nil
+                }
+            case let .block(entry):
+                switch tableColumn.identifier {
+                case SnapshotNativeColumns.Storage.object: return SnapshotNativeRowView.storageBlock(entry: entry)
+                case SnapshotNativeColumns.Storage.kind: return SnapshotNativeRowView.storageSliceType(entry: entry)
+                case SnapshotNativeColumns.Storage.document: return SnapshotNativeRowView.storageSliceLength(entry: entry)
+                case SnapshotNativeColumns.Storage.logical: return SnapshotNativeRowView.storageBlockSize(entry: entry)
+                case SnapshotNativeColumns.Storage.references: return SnapshotNativeRowView.storageSliceOffset(entry: entry)
+                case SnapshotNativeColumns.Storage.recorded: return SnapshotNativeRowView.empty()
+                default: return nil
+                }
+            }
+        }
+
+        func tableViewSelectionDidChange(_ notification: Notification) {
+            guard let table, table.selectedRow >= 0, table.selectedRow < rows.count else { return }
+            if case let .object(entry) = rows[table.selectedRow] { onToggle?(entry) }
+            table.deselectRow(table.selectedRow)
+        }
+
+        func visibleRowsApproachEnd() { onReachedBottom?() }
+    }
+}
+
 private protocol SnapshotNativeTableObserver: AnyObject {
     func visibleRowsApproachEnd()
 }
@@ -1399,6 +1734,65 @@ private enum SnapshotNativeRowView {
             alignment: .right,
             accessibility: "Referenced by \(entry.referencingFiles) files"
         )
+    }
+
+    static func storageObject(entry: SnapshotStorageEntry) -> NSTableCellView {
+        nameCell(
+            name: entry.shortId,
+            icon: entry.kind == "pack" ? "shippingbox" : "doc",
+            tint: entry.kind == "pack" ? .controlAccentColor : .secondaryLabelColor,
+            accessibility: "Storage object \(entry.shortId)",
+            leadingInset: 0,
+            usesOutlineLayout: false,
+            font: .monospacedSystemFont(ofSize: 11, weight: .medium)
+        )
+    }
+
+    static func storageKind(entry: SnapshotStorageEntry) -> NSTableCellView {
+        textCell(text: entry.kind.capitalized, font: .systemFont(ofSize: 10, weight: .semibold), color: entry.kind == "pack" ? .controlAccentColor : .secondaryLabelColor, alignment: .left, accessibility: "Type: \(entry.kind)")
+    }
+
+    static func storageDocument(entry: SnapshotStorageEntry) -> NSTableCellView {
+        let text = entry.documentBytes.map { formatBytes(Int64($0)) } ?? "Not recorded"
+        return textCell(text: text, font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: entry.documentBytes == nil ? .secondaryLabelColor : .labelColor, alignment: .right, accessibility: "Telegram document size: \(text)")
+    }
+
+    static func storageLogical(entry: SnapshotStorageEntry) -> NSTableCellView {
+        textCell(text: formatBytes(Int64(entry.logicalBytes)), font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Logical bytes: \(formatBytes(Int64(entry.logicalBytes)))")
+    }
+
+    static func storageReferences(entry: SnapshotStorageEntry) -> NSTableCellView {
+        textCell(text: "\(entry.referencedBlocks)", font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "\(entry.referencedBlocks) referenced blocks")
+    }
+
+    static func storageRecorded(entry: SnapshotStorageEntry) -> NSTableCellView {
+        let rawRecorded = entry.recordedAt
+        let recorded = rawRecorded.map { String($0.prefix(16)).replacingOccurrences(of: "T", with: " ") } ?? "Not recorded"
+        return textCell(text: recorded, font: .systemFont(ofSize: 10, weight: .medium), color: rawRecorded == nil ? .secondaryLabelColor : .labelColor, alignment: .right, accessibility: "Recorded: \(rawRecorded ?? recorded)")
+    }
+
+    static func storageBlock(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
+        nameCell(name: "+- \(entry.hash)", icon: "square.stack.3d.up", tint: .secondaryLabelColor, accessibility: "Block slice \(entry.hash)", leadingInset: 14, usesOutlineLayout: false, font: .monospacedSystemFont(ofSize: 10, weight: .medium))
+    }
+
+    static func storageSliceType(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
+        textCell(text: "Slice", font: .systemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .left, accessibility: "Physical slice")
+    }
+
+    static func storageSliceLength(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
+        textCell(text: formatBytes(Int64(entry.length)), font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Slice length: \(formatBytes(Int64(entry.length)))")
+    }
+
+    static func storageBlockSize(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
+        textCell(text: formatBytes(Int64(entry.size)), font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Logical block size: \(formatBytes(Int64(entry.size)))")
+    }
+
+    static func storageSliceOffset(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
+        textCell(text: "offset \(formatBytes(Int64(entry.offset)))", font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Slice offset: \(formatBytes(Int64(entry.offset)))")
+    }
+
+    static func empty() -> NSTableCellView {
+        textCell(text: "", font: .systemFont(ofSize: 10), color: .secondaryLabelColor, alignment: .right, accessibility: "")
     }
 
     private static func nameCell(
