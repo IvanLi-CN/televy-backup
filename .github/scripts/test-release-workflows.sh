@@ -40,4 +40,5 @@ if [[ "$release_text" == *"gh release upload \"\${PRODUCT_TAG}\" release-assets/
   exit 1
 fi
 assert_contains "release regular-file collection" "$release_text" "find release-assets -maxdepth 1 -type f"
+assert_contains "release comment permission" "$release_text" "pull-requests: write"
 echo "release workflow contract tests passed"
