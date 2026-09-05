@@ -37,14 +37,8 @@ use tokio_util::sync::CancellationToken;
 
 mod service;
 
-const BUILD_VERSION: &str = match option_env!("TELEVYBACKUP_BUILD_VERSION") {
-    Some(value) => value,
-    None => env!("CARGO_PKG_VERSION"),
-};
-const BUILD_LONG_VERSION: &str = match option_env!("TELEVYBACKUP_BUILD_LONG_VERSION") {
-    Some(value) => value,
-    None => env!("CARGO_PKG_VERSION"),
-};
+const BUILD_VERSION: &str = env!("TELEVYBACKUP_BUILD_VERSION");
+const BUILD_LONG_VERSION: &str = env!("TELEVYBACKUP_BUILD_LONG_VERSION");
 
 #[derive(Parser)]
 #[command(name = "televybackup", version = BUILD_VERSION, long_version = BUILD_LONG_VERSION)]

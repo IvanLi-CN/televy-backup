@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "source_of_truth": "VERSION",
+  "version_file": "VERSION",
+  "migration_baseline": "0.9.2",
+  "version_grammar": {
+    "stable": "X.Y.Z",
+    "rc": "X.Y.Z-rc.N"
+  },
+  "label_groups": {
+    "type": [
+      "type:major",
+      "type:minor",
+      "type:patch",
+      "type:docs",
+      "type:skip"
+    ],
+    "channel": [
+      "channel:stable",
+      "channel:rc"
+    ]
+  },
+  "release_actions": {
+    "automatic": "type:patch + channel:stable",
+    "exact": "type:major, type:minor, or any channel:rc",
+    "skip": "type:docs or type:skip"
+  },
+  "workflows": {
+    "label_gate": "Label Gate",
+    "preparation": "Prepare product version",
+    "completion": "Release completion",
+    "release": "Release Product",
+    "failure_notification": "Notify failed release"
+  },
+  "preparation": {
+    "mode": "pr-local-version-only",
+    "write_api": "createCommitOnBranch",
+    "expected_head_oid": true,
+    "signature": "github-native-verified",
+    "only_path": "VERSION",
+    "no_gpg_secrets": true
+  },
+  "recovery": {
+    "operation": "recover",
+    "identity": "same merge SHA and VERSION",
+    "backfill": false,
+    "snapshot": false,
+    "queue": false
+  },
+  "merge_policy": {
+    "normal_merge_only": true,
+    "release_reads_committed_version": true,
+    "remote_rules_mutated_by_this_contract": false
+  }
+}

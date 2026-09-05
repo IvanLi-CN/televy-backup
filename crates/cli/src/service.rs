@@ -49,9 +49,7 @@ fn launchctl_path() -> PathBuf {
 }
 
 fn current_version() -> String {
-    option_env!("TELEVYBACKUP_BUILD_VERSION")
-        .unwrap_or(env!("CARGO_PKG_VERSION"))
-        .to_string()
+    env!("TELEVYBACKUP_BUILD_VERSION").to_string()
 }
 
 fn sibling_binary(name: &str) -> Result<PathBuf, CliError> {

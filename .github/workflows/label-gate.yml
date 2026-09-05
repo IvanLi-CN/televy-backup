@@ -1,9 +1,10 @@
-name: PR Label Gate
+name: Label Gate
 
 on:
   pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+  merge_group:
   workflow_dispatch:
     inputs:
       pr_number:
@@ -22,7 +23,8 @@ permissions:
 
 jobs:
   label-gate:
-    name: Release intent label gate
+    name: Validate PR labels
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout trusted gate scripts (base)

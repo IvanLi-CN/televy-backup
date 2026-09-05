@@ -1,179 +1,118 @@
-name: Release
+name: Release Product
 
 on:
   workflow_run:
-    workflows: ["CI (main)"]
+    workflows: [CI (main)]
     types: [completed]
     branches: [main]
   workflow_dispatch:
     inputs:
-      head_sha:
-        description: Commit SHA on main to backfill release for
+      operation:
+        description: Release operation
+        required: true
+        type: choice
+        options: [recover]
+        default: recover
+      commit_sha:
+        description: Merged main SHA to recover
         required: true
         type: string
 
 concurrency:
-  group: release-main
+  group: release-product-main
   cancel-in-progress: false
 
 permissions:
   contents: write
-  issues: read
+  issues: write
   pull-requests: read
 
-env:
-  RELEASE_HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.head_sha || github.event.workflow_run.head_sha }}
-  RELEASE_INTENT_ARTIFACT: release-intent-${{ github.event_name == 'workflow_dispatch' && inputs.head_sha || github.event.workflow_run.head_sha }}
-
 jobs:
-  prepare:
-    name: Prepare release metadata
+  resolve:
+    name: Resolve merged product release
     runs-on: ubuntu-latest
-    if: >-
-      (github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push') ||
-      github.event_name == 'workflow_dispatch'
     outputs:
-      should_release: ${{ steps.meta.outputs.should_release }}
-      app_effective_version: ${{ steps.meta.outputs.app_effective_version }}
-      release_tag: ${{ steps.meta.outputs.release_tag }}
-      release_channel: ${{ steps.meta.outputs.release_channel }}
-      bump_level: ${{ steps.meta.outputs.bump_level }}
-      pr_number: ${{ steps.meta.outputs.pr_number }}
-      pr_url: ${{ steps.meta.outputs.pr_url }}
-      release_intent_label: ${{ steps.meta.outputs.release_intent_label }}
-      reason: ${{ steps.meta.outputs.reason }}
-      source_commit: ${{ steps.meta.outputs.source_commit }}
+      enabled: ${{ steps.release.outputs.enabled }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      channel: ${{ steps.release.outputs.channel }}
+      pr_number: ${{ steps.release.outputs.pr_number }}
+      reason: ${{ steps.release.outputs.reason }}
     steps:
-      - name: Checkout (full history)
+      - name: Checkout main history
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
-          ref: ${{ env.RELEASE_HEAD_SHA }}
+          persist-credentials: false
 
-      - name: Log release target markers
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "RELEASE_REQUESTED_SHA=${RELEASE_HEAD_SHA}"
-          echo "RELEASE_TARGET_SHA=${RELEASE_HEAD_SHA}"
-
-      - name: Verify release head is reachable from main
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "${RELEASE_HEAD_SHA}" "origin/main"; then
-            echo "::error::RELEASE_HEAD_SHA (${RELEASE_HEAD_SHA}) is not reachable from origin/main"
-            exit 1
-          fi
-
-      - name: Resolve CI (main) run id for frozen intent
-        id: source-run
-        shell: bash
+      - name: Resolve immutable merged identity
+        id: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-            echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          api_root="${GITHUB_API_URL:-https://api.github.com}"
-          runs_json="$(
-            curl -fsSL               --max-time 20               -H "Accept: application/vnd.github+json"               -H "Authorization: Bearer ${GITHUB_TOKEN}"               -H "X-GitHub-Api-Version: 2022-11-28"               "${api_root}/repos/${GITHUB_REPOSITORY}/actions/workflows/ci-main.yml/runs?branch=main&event=push&per_page=100"
-          )"
-
-          run_id="$(RUNS_JSON="$runs_json" RELEASE_HEAD_SHA="$RELEASE_HEAD_SHA" python3 -c 'import json, os; runs=json.loads(os.environ["RUNS_JSON"]).get("workflow_runs", []); head=os.environ["RELEASE_HEAD_SHA"]; print(next((str(run.get("id", "")) for run in runs if run.get("head_sha") == head and run.get("conclusion") == "success"), ""))')"
-          echo "run_id=${run_id}" >> "$GITHUB_OUTPUT"
-
-      - name: Download frozen release intent artifact
-        id: download-intent
-        if: ${{ steps.source-run.outputs.run_id != '' }}
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ env.RELEASE_INTENT_ARTIFACT }}
-          path: dist/release-intent
-          run-id: ${{ steps.source-run.outputs.run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Load frozen release intent
-        id: intent
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion || 'success' }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event || 'workflow_dispatch' }}
+          TARGET_INPUT: ${{ github.event.workflow_run.head_sha || inputs.commit_sha }}
+          OPERATION: ${{ inputs.operation || 'publish' }}
         shell: bash
         run: |
           set -euo pipefail
-          artifact_path="dist/release-intent/release-intent.json"
-          if [[ ! -f "$artifact_path" ]]; then
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "bump_level=" >> "$GITHUB_OUTPUT"
-            echo "release_intent_label=" >> "$GITHUB_OUTPUT"
-            echo "release_channel=stable" >> "$GITHUB_OUTPUT"
-            echo "pr_number=" >> "$GITHUB_OUTPUT"
-            echo "pr_url=" >> "$GITHUB_OUTPUT"
-            echo "reason=frozen_intent_missing" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          ARTIFACT_PATH="$artifact_path" GITHUB_OUTPUT_PATH="$GITHUB_OUTPUT" python3 -c 'import json, os; artifact=json.loads(open(os.environ["ARTIFACT_PATH"], encoding="utf-8").read()); keys=["should_release","bump_level","release_intent_label","release_channel","pr_number","pr_url","reason"]; f=open(os.environ["GITHUB_OUTPUT_PATH"], "a", encoding="utf-8"); [f.write(f"{key}={artifact.get(key, "")}\n") for key in keys]; f.close()'
-
-      - name: Compute effective version
-        if: ${{ steps.intent.outputs.should_release == 'true' }}
-        env:
-          BUMP_LEVEL: ${{ steps.intent.outputs.bump_level }}
-        run: bash ./.github/scripts/compute-version.sh
-
-      - name: Apply prerelease suffix
-        if: ${{ steps.intent.outputs.should_release == 'true' && steps.intent.outputs.release_channel == 'rc' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          short_sha="$(git rev-parse --short HEAD)"
-          echo "APP_EFFECTIVE_VERSION=${APP_EFFECTIVE_VERSION}-rc.${short_sha}" >> "$GITHUB_ENV"
-          echo "Computed prerelease APP_EFFECTIVE_VERSION=${APP_EFFECTIVE_VERSION}-rc.${short_sha}"
-
-      - name: Export release metadata
-        id: meta
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "should_release=${{ steps.intent.outputs.should_release }}" >> "$GITHUB_OUTPUT"
-          echo "release_channel=${{ steps.intent.outputs.release_channel }}" >> "$GITHUB_OUTPUT"
-          echo "bump_level=${{ steps.intent.outputs.bump_level }}" >> "$GITHUB_OUTPUT"
-          echo "pr_number=${{ steps.intent.outputs.pr_number }}" >> "$GITHUB_OUTPUT"
-          echo "pr_url=${{ steps.intent.outputs.pr_url }}" >> "$GITHUB_OUTPUT"
-          echo "release_intent_label=${{ steps.intent.outputs.release_intent_label }}" >> "$GITHUB_OUTPUT"
-          echo "reason=${{ steps.intent.outputs.reason }}" >> "$GITHUB_OUTPUT"
-          echo "source_commit=${RELEASE_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-
-          if [[ "${{ steps.intent.outputs.should_release }}" == "true" ]]; then
-            echo "app_effective_version=${APP_EFFECTIVE_VERSION}" >> "$GITHUB_OUTPUT"
-            echo "release_tag=v${APP_EFFECTIVE_VERSION}" >> "$GITHUB_OUTPUT"
+          git fetch --force origin main --tags
+          main_sha="$(git rev-parse origin/main)"
+          test -n "${TARGET_INPUT}"
+          if [[ "${EVENT_NAME}" == workflow_run ]]; then
+            test "${WORKFLOW_CONCLUSION}" = success
+            test "${WORKFLOW_EVENT}" = push
+            test "${TARGET_INPUT}" = "${main_sha}"
           else
-            echo "app_effective_version=" >> "$GITHUB_OUTPUT"
-            echo "release_tag=" >> "$GITHUB_OUTPUT"
+            test "${OPERATION}" = recover
+            git merge-base --is-ancestor "${TARGET_INPUT}" "${main_sha}"
           fi
+          git checkout --detach "${TARGET_INPUT}"
+          prepared_json="$(python3 .github/scripts/release_chain.py verify-merged --commit "${TARGET_INPUT}")"
+          prepared="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("prepared", "false"))')"
+          if [[ "${prepared}" != true ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "reason=$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("reason", "not_product_merge"))')" >> "$GITHUB_OUTPUT"
+            echo "Product release skipped for ${TARGET_INPUT}: ${prepared_json}"
+            exit 0
+          fi
+          version="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          tag="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag"])')"
+          channel="$(python3 scripts/product-version.py --mode release --source-sha "${TARGET_INPUT}" --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["channel"])')"
+          test "${version}" = "$(python3 scripts/product-version.py --mode release --source-sha "${TARGET_INPUT}")"
+          pr_number="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TARGET_INPUT}/pulls" --jq '.[0].number // empty' || true)"
+          {
+            echo "enabled=true"
+            echo "source_sha=${TARGET_INPUT}"
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "channel=${channel}"
+            echo "pr_number=${pr_number}"
+            echo "reason=product_merge"
+          } >> "$GITHUB_OUTPUT"
+          echo "RELEASE_TARGET_SHA=${TARGET_INPUT} RELEASE_VERSION=${version} RELEASE_TAG=${tag}"
+          tag_args=(verify-tag --version "${version}" --expected-sha "${TARGET_INPUT}")
+          [[ "${OPERATION}" == recover ]] && tag_args+=(--allow-existing)
+          python3 .github/scripts/release_chain.py "${tag_args[@]}"
 
   build-arm64:
     name: Build arm64 package
+    needs: resolve
+    if: needs.resolve.outputs.enabled == 'true'
     runs-on: macos-15
-    needs: [prepare]
-    if: ${{ needs.prepare.outputs.should_release == 'true' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.source_commit }}
+          ref: ${{ needs.resolve.outputs.source_sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
-      - name: Build arm64 artifacts
-        env:
-          RUST_TOOLCHAIN: 1.91.0
-        run: bash scripts/macos/package-release.sh --version "${{ needs.prepare.outputs.app_effective_version }}" --arch arm64 --output-dir dist/arm64
+      - run: bash scripts/macos/package-release.sh --mode release --arch arm64 --output-dir dist/arm64
       - uses: actions/upload-artifact@v4
         with:
           name: release-package-arm64
@@ -181,36 +120,33 @@ jobs:
 
   build-x86_64:
     name: Build x86_64 package
+    needs: resolve
+    if: needs.resolve.outputs.enabled == 'true'
     runs-on: macos-15-intel
-    needs: [prepare]
-    if: ${{ needs.prepare.outputs.should_release == 'true' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.source_commit }}
+          ref: ${{ needs.resolve.outputs.source_sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
-      - name: Build x86_64 artifacts
-        env:
-          RUST_TOOLCHAIN: 1.91.0
-        run: bash scripts/macos/package-release.sh --version "${{ needs.prepare.outputs.app_effective_version }}" --arch x86_64 --output-dir dist/x86_64
+      - run: bash scripts/macos/package-release.sh --mode release --arch x86_64 --output-dir dist/x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: release-package-x86_64
           path: dist/x86_64
 
-  assemble-universal:
+  assemble:
     name: Assemble Universal 2 package
+    needs: [resolve, build-arm64, build-x86_64]
+    if: needs.resolve.outputs.enabled == 'true'
     runs-on: macos-15
-    needs: [prepare, build-arm64, build-x86_64]
-    if: ${{ needs.prepare.outputs.should_release == 'true' }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.source_commit }}
+          ref: ${{ needs.resolve.outputs.source_sha }}
           fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
@@ -228,80 +164,86 @@ jobs:
           mkdir -p dist/final
           arm_app="$(find dist/arm64 -maxdepth 1 -type d -name '*.app' -print -quit)"
           x86_app="$(find dist/x86_64 -maxdepth 1 -type d -name '*.app' -print -quit)"
-          bash scripts/macos/assemble-universal.sh --version "${{ needs.prepare.outputs.app_effective_version }}" --arm64-app "$arm_app" --x86_64-app "$x86_app" --output-dir dist/final
+          bash scripts/macos/assemble-universal.sh --mode release --arm64-app "$arm_app" --x86_64-app "$x86_app" --output-dir dist/final
           cp dist/arm64/TelevyBackup-*-arm64.dmg dist/final/
           cp dist/x86_64/TelevyBackup-*-x86_64.dmg dist/final/
           cp dist/arm64/televybackup-tools-*-arm64.tar.gz dist/final/
           cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
-          bash scripts/macos/generate-release-manifest.sh --version "${{ needs.prepare.outputs.app_effective_version }}" --asset-dir dist/final --source-commit "${{ needs.prepare.outputs.source_commit }}" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
-          bash scripts/macos/verify-release-assets.sh --version "${{ needs.prepare.outputs.app_effective_version }}" --asset-dir dist/final
+          bash scripts/macos/generate-release-manifest.sh --mode release --asset-dir dist/final --source-commit "${{ needs.resolve.outputs.source_sha }}" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
+          bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final
       - uses: actions/upload-artifact@v4
         with:
           name: release-assets
           path: dist/final
 
   publish:
-    name: Create GitHub Release
+    name: Publish GitHub Release
+    needs: [resolve, assemble]
+    if: needs.resolve.outputs.enabled == 'true'
     runs-on: ubuntu-latest
-    needs: [prepare, assemble-universal]
-    if: ${{ needs.prepare.outputs.should_release == 'true' }}
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PRODUCT_TAG: ${{ needs.resolve.outputs.tag }}
+      PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
+      PRODUCT_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      RELEASE_SHA: ${{ needs.resolve.outputs.source_sha }}
+      PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+      OPERATION: ${{ inputs.operation || 'publish' }}
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
           fetch-depth: 0
-          ref: ${{ needs.prepare.outputs.source_commit }}
       - uses: actions/download-artifact@v4
         with:
           name: release-assets
-          path: dist/final
-      - name: Create tag, draft release, upload and publish atomically
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
-          RELEASE_CHANNEL: ${{ needs.prepare.outputs.release_channel }}
-          SOURCE_COMMIT: ${{ needs.prepare.outputs.source_commit }}
+          path: release-assets
+      - name: Create or verify immutable tag
         run: |
           set -euo pipefail
-          git fetch --tags --force
-          existing="$(git rev-list -n 1 "$RELEASE_TAG" 2>/dev/null || true)"
-          if [[ -n "$existing" && "$existing" != "$SOURCE_COMMIT" ]]; then
-            echo "tag $RELEASE_TAG exists at $existing, expected $SOURCE_COMMIT" >&2
-            exit 1
+          tag_args=(verify-tag --version "${PRODUCT_VERSION}" --expected-sha "${RELEASE_SHA}")
+          [[ "${OPERATION}" == recover ]] && tag_args+=(--allow-existing)
+          tag_json="$(python3 .github/scripts/release_chain.py "${tag_args[@]}")"
+          status="$(printf '%s' "${tag_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
+          if [[ "${status}" == available ]]; then
+            git tag -a "${PRODUCT_TAG}" "${RELEASE_SHA}" -m "${PRODUCT_TAG}"
+            git push origin "refs/tags/${PRODUCT_TAG}"
           fi
-          if [[ -z "$existing" ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "$RELEASE_TAG" "$SOURCE_COMMIT" -m "$RELEASE_TAG"
-            git push origin "refs/tags/$RELEASE_TAG"
+          python3 .github/scripts/release_chain.py verify-tag --version "${PRODUCT_VERSION}" --expected-sha "${RELEASE_SHA}" --allow-existing
+      - name: Create or update GitHub Release
+        run: |
+          set -euo pipefail
+          if gh release view "${PRODUCT_TAG}" >/dev/null 2>&1; then
+            gh release upload "${PRODUCT_TAG}" release-assets/* --clobber
+          else
+            flags=(--verify-tag --title "${PRODUCT_TAG}" --generate-notes)
+            [[ "${PRODUCT_CHANNEL}" == rc ]] && flags+=(--prerelease)
+            gh release create "${PRODUCT_TAG}" release-assets/* "${flags[@]}"
           fi
-          prerelease=false
-          [[ "$RELEASE_CHANNEL" == rc ]] && prerelease=true
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --draft --title "$RELEASE_TAG" --generate-notes $( [[ "$prerelease" == true ]] && printf '%s' '--prerelease' )
+      - name: Upsert PR release version comment
+        if: env.PR_NUMBER != ''
+        run: |
+          set -euo pipefail
+          marker='<!-- televybackup-release-version-comment -->'
+          body="${marker}
+          Released TelevyBackup ${PRODUCT_VERSION} (${PRODUCT_CHANNEL}) from merge ${RELEASE_SHA}.
+          Tag: ${PRODUCT_TAG}"
+          comment_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --jq '.[] | select(.body | contains("<!-- televybackup-release-version-comment -->")) | .id' | head -n 1 || true)"
+          if [[ -n "${comment_id}" ]]; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -f body="${body}"
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="${body}"
           fi
-          remote_assets="$(gh release view "$RELEASE_TAG" --json assets)"
-          while IFS= read -r asset; do
-            name="$(basename "$asset")"
-            local_sha="$(sha256sum "$asset" | awk '{print $1}')"
-            remote_sha="$(REMOTE="$remote_assets" NAME="$name" python3 -c 'import json,os; p=json.loads(os.environ["REMOTE"]); print(next((a.get("digest","").removeprefix("sha256:") for a in p.get("assets",[]) if a.get("name")==os.environ["NAME"]), ""))')"
-            if [[ -n "$remote_sha" ]]; then
-              [[ "$remote_sha" == "$local_sha" ]] || { echo "asset hash mismatch: $name" >&2; exit 1; }
-              echo "asset already uploaded with matching hash: $name"
-            else
-              gh release upload "$RELEASE_TAG" "$asset"
-            fi
-          done < <(find dist/final -maxdepth 1 -type f -print)
-          gh release edit "$RELEASE_TAG" --draft=false
 
   skipped:
     name: Release skipped
+    needs: resolve
+    if: needs.resolve.outputs.enabled != 'true'
     runs-on: ubuntu-latest
-    needs: [prepare]
-    if: ${{ needs.prepare.outputs.should_release != 'true' }}
     steps:
-      - name: Explain skip reason
-        run: |
-          echo "Release skipped."
-          echo "reason=${{ needs.prepare.outputs.reason }}"
-          echo "pr_number=${{ needs.prepare.outputs.pr_number }}"
-          echo "release_intent_label=${{ needs.prepare.outputs.release_intent_label }}"
+      - run: |
+          echo "Release skipped: ${{ needs.resolve.outputs.reason }}"
