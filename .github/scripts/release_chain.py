@@ -43,6 +43,16 @@ def git_raw(*args: str, check: bool = True) -> str:
     return result.stdout
 
 
+def tree_path_exists(commit: str, path: str) -> bool:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}:{path}"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def release_action(type_label: str, channel: str) -> str:
     if type_label not in VALID_TYPES:
         raise ReleaseChainError(f"unsupported release intent type: {type_label}")

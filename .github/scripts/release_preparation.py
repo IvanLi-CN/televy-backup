@@ -108,8 +108,7 @@ def prepare(args: argparse.Namespace) -> None:
         )
         return
 
-    base_version = CHAIN.git("rev-parse", f"{args.base_sha}:VERSION", check=False)
-    if not base_version:
+    if not CHAIN.tree_path_exists(args.base_sha, "VERSION"):
         changed = CHAIN.git("diff", "--name-only", f"{args.base_sha}...{args.source_sha}").splitlines()
         if changed == ["VERSION"] and CHAIN.commit_version(args.source_sha) == "0.9.2":
             output(

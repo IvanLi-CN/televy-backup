@@ -41,7 +41,7 @@ def checks_ready(path: Path) -> bool:
 
 
 def verify_migration(commit: str, base: str, version: str) -> None:
-    if CHAIN.git("rev-parse", f"{base}:VERSION", check=False):
+    if CHAIN.tree_path_exists(base, "VERSION"):
         raise CompletionError("migration is only allowed when base has no VERSION")
     if CHAIN.commit_version(commit) != version:
         raise CompletionError("migration VERSION does not match the approved baseline")
