@@ -31,4 +31,24 @@ out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \
   --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json")"
 [[ "$out" == *'"status": "ready"'* ]]
+
+migration_dir="$tmp_dir/migration"
+mkdir -p "$migration_dir"
+git -C "$migration_dir" init -q
+git -C "$migration_dir" config user.name fixture
+git -C "$migration_dir" config user.email fixture@example.com
+printf 'source\n' > "$migration_dir/README"
+git -C "$migration_dir" add README
+git -C "$migration_dir" commit -qm source
+migration_base="$(git -C "$migration_dir" rev-parse HEAD)"
+printf '0.9.2\n' > "$migration_dir/VERSION"
+git -C "$migration_dir" add VERSION
+git -C "$migration_dir" commit -qm migration
+migration_sha="$(git -C "$migration_dir" rev-parse HEAD)"
+printf '[{"name":"type:skip"},{"name":"channel:stable"}]\n' > "$tmp_dir/migration-labels.json"
+migration_out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
+  --repo-root "$migration_dir" --commit "$migration_sha" --base "$migration_base" \
+  --labels-json "$tmp_dir/migration-labels.json" --checks-json "$tmp_dir/checks.json" \
+  --allow-migration --migration-version 0.9.2)"
+[[ "$migration_out" == *'"status": "migration"'* ]]
 echo "release completion fixture tests passed"

@@ -108,6 +108,16 @@ def prepare(args: argparse.Namespace) -> None:
         )
         return
 
+    base_version = CHAIN.git("rev-parse", f"{args.base_sha}:VERSION", check=False)
+    if not base_version:
+        changed = CHAIN.git("diff", "--name-only", f"{args.base_sha}...{args.source_sha}").splitlines()
+        if changed == ["VERSION"] and CHAIN.commit_version(args.source_sha) == "0.9.2":
+            output(
+                {"prepared": "migration", "release_action": "skip", "source_sha": args.source_sha},
+                args.github_output,
+            )
+            return
+
     source_is_ready(repo_root, args.source_sha, args.base_sha)
     if intent["action"] == "skip":
         output({"prepared": "not_required", "release_action": "skip", "source_sha": args.source_sha}, args.github_output)
