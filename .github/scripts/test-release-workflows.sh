@@ -34,4 +34,10 @@ if [[ "$notify_text" == *"Release exact-tag backfill"* ]]; then
   exit 1
 fi
 assert_contains "notifier recovery output" "$notify_text" "recovery:"
+release_text="$(<"$root_dir/.github/workflows/release.yml")"
+if [[ "$release_text" == *"gh release upload \"\${PRODUCT_TAG}\" release-assets/*"* || "$release_text" == *"gh release create \"\${PRODUCT_TAG}\" release-assets/*"* ]]; then
+  printf 'release workflow must not pass app bundle directories to gh release\n' >&2
+  exit 1
+fi
+assert_contains "release regular-file collection" "$release_text" "find release-assets -maxdepth 1 -type f"
 echo "release workflow contract tests passed"
