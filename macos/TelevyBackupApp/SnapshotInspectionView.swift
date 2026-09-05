@@ -1772,7 +1772,7 @@ private enum SnapshotNativeRowView {
     }
 
     static func storageBlock(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
-        nameCell(name: "+- \(entry.hash)", icon: "square.stack.3d.up", tint: .secondaryLabelColor, accessibility: "Block slice \(entry.hash)", leadingInset: 14, usesOutlineLayout: false, font: .monospacedSystemFont(ofSize: 10, weight: .medium))
+        nameCell(name: entry.hash, icon: "arrow.turn.down.right", tint: .secondaryLabelColor, accessibility: "Block slice \(entry.hash)", leadingInset: 14, usesOutlineLayout: false, font: .monospacedSystemFont(ofSize: 10, weight: .medium))
     }
 
     static func storageSliceType(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
