@@ -39,10 +39,11 @@ class ProductVersionTests(unittest.TestCase):
 
     def test_resolve_modes(self) -> None:
         sha = "a" * 40
+        current = MODULE.read_version()
         development = MODULE.resolve("development", sha)
         release = MODULE.resolve("release", sha)
-        self.assertEqual(development["version"], "0.9.3-dev.aaaaaaa")
-        self.assertEqual(release["version"], "0.9.2")
+        self.assertEqual(development["version"], f"{MODULE.next_patch(current)}-dev.aaaaaaa")
+        self.assertEqual(release["version"], current)
         self.assertEqual(development["sourceSha"], sha)
         self.assertEqual(development["shortSha"], "a" * 7)
 

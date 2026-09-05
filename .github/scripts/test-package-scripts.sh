@@ -44,7 +44,7 @@ package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" == *'app_dest="$output_dir/TelevyBackup.app"'* ]]
 [[ "$package_text" != *'--version'* ]]
 
-version="0.9.2"
+version="$(tr -d '\n' < "$root_dir/VERSION")"
 for asset in \
   "TelevyBackup-${version}.dmg" \
   "TelevyBackup-${version}-arm64.dmg" \
@@ -71,12 +71,12 @@ bash "$root_dir/scripts/macos/generate-release-manifest.sh" \
   --output "$tmp_dir/BUILD-MANIFEST.json"
 bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir"
 
-python3 - "$tmp_dir/BUILD-MANIFEST.json" <<'PY'
+python3 - "$tmp_dir/BUILD-MANIFEST.json" "$version" <<'PY'
 import json
 import sys
 
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
-assert payload["release_version"] == "0.9.2"
+assert payload["release_version"] == sys.argv[2]
 assert payload["signing"] == "ad-hoc"
 assert len(payload["assets"]) == 5
 PY
