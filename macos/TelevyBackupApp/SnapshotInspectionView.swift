@@ -163,6 +163,8 @@ enum SnapshotInspectionEligibility: Equatable {
 }
 
 private final class SnapshotInspectionStore: ObservableObject {
+    private static let storageRequestTimeoutSeconds: Double = 90
+
     @Published private(set) var summary: SnapshotInspectionSummary?
     @Published private(set) var summaryLoading = false
     @Published private(set) var issue: String?
@@ -453,7 +455,12 @@ private final class SnapshotInspectionStore: ObservableObject {
         if let activeStorageKind { params["kind"] = activeStorageKind }
         if !activeStorageQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { params["query"] = activeStorageQuery }
         if let storageNextCursor { params["cursor"] = storageNextCursor }
-        performControlRequest(model: model, method: "snapshot.inspect.storage", params: params) { (result: Result<SnapshotStoragePage, ControlRequestFailure>) in
+        performControlRequest(
+            model: model,
+            method: "snapshot.inspect.storage",
+            params: params,
+            timeoutSeconds: Self.storageRequestTimeoutSeconds
+        ) { (result: Result<SnapshotStoragePage, ControlRequestFailure>) in
             guard self.storageRequestEpoch.accepts(token) else { return }
             self.storageLoading = false
             switch result {
@@ -474,7 +481,12 @@ private final class SnapshotInspectionStore: ObservableObject {
         let token = storageRequestEpoch.issue()
         var params: [String: Any] = ["snapshotId": snapshotId, "storageId": storageId, "limit": 200]
         if let cursor = storageBlockNextCursor[storageId] ?? nil { params["cursor"] = cursor }
-        performControlRequest(model: model, method: "snapshot.inspect.storage-blocks", params: params) { (result: Result<SnapshotStorageBlocksPage, ControlRequestFailure>) in
+        performControlRequest(
+            model: model,
+            method: "snapshot.inspect.storage-blocks",
+            params: params,
+            timeoutSeconds: Self.storageRequestTimeoutSeconds
+        ) { (result: Result<SnapshotStorageBlocksPage, ControlRequestFailure>) in
             guard self.storageRequestEpoch.accepts(token) else { return }
             self.storageBlockLoading.remove(storageId)
             switch result {
@@ -530,6 +542,7 @@ private final class SnapshotInspectionStore: ObservableObject {
         model: AppModel,
         method: String,
         params: [String: Any],
+        timeoutSeconds: Double? = nil,
         completion: @escaping (Result<Response, ControlRequestFailure>) -> Void
     ) {
         guard model.ensureDaemonRunning() else {
@@ -541,7 +554,8 @@ private final class SnapshotInspectionStore: ObservableObject {
             let decoded: Result<Response, ControlRequestFailure> = ControlIPCClient.request(
                 socketPath: socketPath,
                 method: method,
-                params: params
+                params: params,
+                timeoutSeconds: timeoutSeconds ?? 10
             )
             DispatchQueue.main.async { completion(decoded) }
         }

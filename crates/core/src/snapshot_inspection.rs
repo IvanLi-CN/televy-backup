@@ -436,138 +436,171 @@ impl SnapshotInspector {
         context: &InspectionContext,
         snapshot_id: &str,
     ) -> Result<Vec<StorageObjectAggregate>> {
-        let filemap_pool = index_db::open_existing_index_db(&context.current_path).await?;
-        let rows = sqlx::query(
-            r#"
-            SELECT fc.chunk_hash AS hash, c.size AS size, fc.len AS len
-            FROM file_chunks fc
-            JOIN files f ON f.file_id = fc.file_id
-            JOIN chunks c ON c.chunk_hash = fc.chunk_hash
-            WHERE f.snapshot_id = ? AND f.kind = 'file'
-            "#,
-        )
-        .bind(snapshot_id)
-        .fetch_all(&filemap_pool)
-        .await?;
-        let mut chunk_rows = Vec::with_capacity(rows.len());
-        let mut hashes = Vec::new();
-        let mut seen_hashes = HashSet::new();
-        for row in rows {
-            let hash: String = row.get("hash");
-            if seen_hashes.insert(hash.clone()) {
-                hashes.push(hash.clone());
-            }
-            chunk_rows.push(StorageChunkRow {
-                hash,
-                size: non_negative_u64(&row, "size"),
-                len: non_negative_u64(&row, "len"),
-            });
-        }
-        if hashes.is_empty() {
-            return Ok(Vec::new());
-        }
-
         let storage_pool = index_db::open_existing_index_db(&self.storage_db_path).await?;
-        // Older local/remote dedupe catalogs may not have the reverse lookup index. Build it
-        // lazily so Storage remains usable without requiring a backup or online migration first.
-        // A read-only catalog can still be inspected; in that case the indexed lookup below
-        // remains correct, only slower.
-        let _ = sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_chunk_objects_chunk_hash ON chunk_objects(chunk_hash, provider, object_id)",
-        )
-        .execute(&storage_pool)
-        .await;
+        // Storage inspection is a read-only view. Do not create or alter indexes here: a backup
+        // may be writing the same catalog, and request-time DDL would wait on its write lock.
+        // Current catalogs carry the reverse lookup index; older catalogs remain readable through
+        // the same query, with the expected slower fallback.
+        sqlx::query("PRAGMA cache_size = -65536")
+            .execute(&storage_pool)
+            .await?;
+        // The dedupe catalog can be much larger than the filemap. Mapping a bounded prefix keeps
+        // repeated indexed reads from issuing a syscall per B-tree page without reserving the
+        // full catalog in resident memory. Storage inspection never writes this connection.
+        sqlx::query("PRAGMA mmap_size = 1073741824")
+            .execute(&storage_pool)
+            .await?;
+        sqlx::query("PRAGMA temp_store = MEMORY")
+            .execute(&storage_pool)
+            .await?;
         let has_storage_metadata = sqlx::query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'storage_objects'",
         )
         .fetch_optional(&storage_pool)
         .await?
         .is_some();
-        let mut mappings = HashMap::<String, Vec<(String, String)>>::new();
-        for batch in hashes.chunks(900) {
-            let placeholders = vec!["?"; batch.len()].join(", ");
-            let query = format!(
-                "SELECT chunk_hash, provider, object_id FROM chunk_objects WHERE chunk_hash IN ({placeholders})"
-            );
-            let mut query = sqlx::query(&query);
-            for hash in batch {
-                query = query.bind(hash);
-            }
-            for row in query.fetch_all(&storage_pool).await? {
-                mappings
-                    .entry(row.get::<String, _>("chunk_hash"))
-                    .or_default()
-                    .push((row.get("provider"), row.get("object_id")));
-            }
+
+        // The endpoint/filemap and dedupe catalogs are separate databases in the current
+        // layout. Attach the filemap to the storage connection so SQLite can use the
+        // chunk-hash index in one join instead of issuing one large IN query per batch.
+        let same_database = self.storage_db_path == context.current_path;
+        if !same_database {
+            let current_path = context.current_path.to_string_lossy().into_owned();
+            sqlx::query("ATTACH DATABASE ? AS snapshot_filemap")
+                .bind(current_path)
+                .execute(&storage_pool)
+                .await?;
         }
+        let rows = if same_database {
+            sqlx::query(
+                r#"
+                SELECT fc.chunk_hash AS hash, c.size AS size, fc.len AS len,
+                       co.provider AS provider, co.object_id AS encoded
+                FROM file_chunks fc
+                JOIN files f ON f.file_id = fc.file_id
+                JOIN chunks c ON c.chunk_hash = fc.chunk_hash
+                JOIN chunk_objects co ON co.chunk_hash = fc.chunk_hash
+                WHERE f.snapshot_id = ? AND f.kind = 'file'
+                "#,
+            )
+            .bind(snapshot_id)
+            .fetch_all(&storage_pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT fc.chunk_hash AS hash, c.size AS size, fc.len AS len,
+                       co.provider AS provider, co.object_id AS encoded
+                FROM snapshot_filemap.file_chunks fc
+                JOIN snapshot_filemap.files f ON f.file_id = fc.file_id
+                JOIN snapshot_filemap.chunks c ON c.chunk_hash = fc.chunk_hash
+                JOIN chunk_objects co ON co.chunk_hash = fc.chunk_hash
+                WHERE f.snapshot_id = ? AND f.kind = 'file'
+                "#,
+            )
+            .bind(snapshot_id)
+            .fetch_all(&storage_pool)
+            .await?
+        };
+        if !same_database {
+            sqlx::query("DETACH DATABASE snapshot_filemap")
+                .execute(&storage_pool)
+                .await?;
+        }
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chunk_rows = rows
+            .into_iter()
+            .map(|row| StorageChunkRow {
+                hash: row.get("hash"),
+                size: non_negative_u64(&row, "size"),
+                len: non_negative_u64(&row, "len"),
+                provider: row.get("provider"),
+                encoded: row.get("encoded"),
+            })
+            .collect::<Vec<_>>();
+
+        let storage_metadata = if has_storage_metadata {
+            sqlx::query(
+                "SELECT provider, object_id, document_bytes, recorded_at FROM storage_objects",
+            )
+            .fetch_all(&storage_pool)
+            .await?
+            .into_iter()
+            .map(|row| {
+                (
+                    (
+                        row.get::<String, _>("provider"),
+                        row.get::<String, _>("object_id"),
+                    ),
+                    (
+                        row.try_get::<i64, _>("document_bytes")
+                            .ok()
+                            .map(|value| value.max(0) as u64),
+                        row.try_get::<String, _>("recorded_at").ok(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>()
+        } else {
+            HashMap::new()
+        };
 
         let mut groups = HashMap::<String, StorageObjectAggregate>::new();
         let mut metadata =
             HashMap::<(String, String), (String, Option<u64>, Option<String>)>::new();
         for chunk in chunk_rows {
-            let Some(objects) = mappings.get(&chunk.hash) else {
-                continue;
-            };
-            for (provider, encoded) in objects {
-                let (kind, object_id, slice_offset, slice_len) =
-                    match parse_chunk_object_ref(encoded)? {
-                        ChunkObjectRef::Direct { object_id } => ("direct", object_id, 0, chunk.len),
-                        ChunkObjectRef::PackSlice {
-                            pack_object_id,
-                            offset,
-                            len,
-                        } => ("pack", pack_object_id, offset, len),
-                    };
-                let key = storage_object_id(provider, &object_id);
-                let entry = groups
-                    .entry(key.clone())
-                    .or_insert_with(|| StorageObjectAggregate {
-                        storage_id: key,
-                        kind: kind.to_string(),
-                        provider: provider.clone(),
-                        object_id: object_id.clone(),
-                        document_bytes: None,
-                        recorded_at: None,
-                        referenced_blocks: 0,
-                        logical_bytes: 0,
-                        blocks: Vec::new(),
-                        seen_hashes: HashSet::new(),
-                    });
-                if entry.seen_hashes.insert(chunk.hash.clone()) {
-                    entry.logical_bytes = entry.logical_bytes.saturating_add(chunk.size);
-                    entry.referenced_blocks = entry.referenced_blocks.saturating_add(1);
-                }
-                let block = StorageBlockAggregate {
-                    hash: chunk.hash.clone(),
-                    size: chunk.size,
-                    offset: slice_offset,
-                    length: slice_len,
+            let provider = chunk.provider;
+            let (kind, object_id, slice_offset, slice_len) =
+                match parse_chunk_object_ref(&chunk.encoded)? {
+                    ChunkObjectRef::Direct { object_id } => ("direct", object_id, 0, chunk.len),
+                    ChunkObjectRef::PackSlice {
+                        pack_object_id,
+                        offset,
+                        len,
+                    } => ("pack", pack_object_id, offset, len),
                 };
-                if !entry.blocks.iter().any(|item| item == &block) {
-                    entry.blocks.push(block);
-                }
-                if let std::collections::hash_map::Entry::Vacant(slot) =
-                    metadata.entry((provider.clone(), object_id.clone()))
-                {
-                    let row = if has_storage_metadata {
-                        sqlx::query(
-                            "SELECT document_bytes, recorded_at FROM storage_objects WHERE provider = ? AND object_id = ?",
-                        )
-                        .bind(provider)
-                        .bind(&object_id)
-                        .fetch_optional(&storage_pool)
-                        .await?
-                    } else {
-                        None
-                    };
-                    slot.insert((
-                        kind.to_string(),
-                        row.as_ref()
-                            .and_then(|row| row.try_get::<i64, _>("document_bytes").ok())
-                            .map(|v| v.max(0) as u64),
-                        row.and_then(|row| row.try_get::<String, _>("recorded_at").ok()),
-                    ));
-                }
+            let key = storage_object_id(&provider, &object_id);
+            let entry = groups
+                .entry(key.clone())
+                .or_insert_with(|| StorageObjectAggregate {
+                    storage_id: key,
+                    kind: kind.to_string(),
+                    provider: provider.clone(),
+                    object_id: object_id.clone(),
+                    document_bytes: None,
+                    recorded_at: None,
+                    referenced_blocks: 0,
+                    logical_bytes: 0,
+                    blocks: Vec::new(),
+                    seen_hashes: HashSet::new(),
+                });
+            if entry.seen_hashes.insert(chunk.hash.clone()) {
+                entry.logical_bytes = entry.logical_bytes.saturating_add(chunk.size);
+                entry.referenced_blocks = entry.referenced_blocks.saturating_add(1);
+            }
+            let block = StorageBlockAggregate {
+                hash: chunk.hash.clone(),
+                size: chunk.size,
+                offset: slice_offset,
+                length: slice_len,
+            };
+            if !entry.blocks.iter().any(|item| item == &block) {
+                entry.blocks.push(block);
+            }
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                metadata.entry((provider.clone(), object_id.clone()))
+            {
+                slot.insert((
+                    kind.to_string(),
+                    storage_metadata
+                        .get(&(provider.clone(), object_id.clone()))
+                        .and_then(|(document_bytes, _)| *document_bytes),
+                    storage_metadata
+                        .get(&(provider.clone(), object_id.clone()))
+                        .and_then(|(_, recorded_at)| recorded_at.clone()),
+                ));
             }
         }
         for entry in groups.values_mut() {
@@ -1160,6 +1193,8 @@ struct StorageChunkRow {
     hash: String,
     size: u64,
     len: u64,
+    provider: String,
+    encoded: String,
 }
 
 #[derive(Clone)]
