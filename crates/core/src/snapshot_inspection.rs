@@ -444,7 +444,6 @@ impl SnapshotInspector {
             JOIN files f ON f.file_id = fc.file_id
             JOIN chunks c ON c.chunk_hash = fc.chunk_hash
             WHERE f.snapshot_id = ? AND f.kind = 'file'
-            ORDER BY fc.chunk_hash COLLATE BINARY, fc.offset, fc.len
             "#,
         )
         .bind(snapshot_id)
@@ -452,9 +451,10 @@ impl SnapshotInspector {
         .await?;
         let mut chunk_rows = Vec::with_capacity(rows.len());
         let mut hashes = Vec::new();
+        let mut seen_hashes = HashSet::new();
         for row in rows {
             let hash: String = row.get("hash");
-            if !hashes.iter().any(|item| item == &hash) {
+            if seen_hashes.insert(hash.clone()) {
                 hashes.push(hash.clone());
             }
             chunk_rows.push(StorageChunkRow {
@@ -468,6 +468,15 @@ impl SnapshotInspector {
         }
 
         let storage_pool = index_db::open_existing_index_db(&self.storage_db_path).await?;
+        // Older local/remote dedupe catalogs may not have the reverse lookup index. Build it
+        // lazily so Storage remains usable without requiring a backup or online migration first.
+        // A read-only catalog can still be inspected; in that case the indexed lookup below
+        // remains correct, only slower.
+        let _ = sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_chunk_objects_chunk_hash ON chunk_objects(chunk_hash, provider, object_id)",
+        )
+        .execute(&storage_pool)
+        .await;
         let has_storage_metadata = sqlx::query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'storage_objects'",
         )
