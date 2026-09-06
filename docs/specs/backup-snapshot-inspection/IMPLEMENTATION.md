@@ -19,6 +19,7 @@
 - Storage coverage adds persistent physical-object metadata on successful uploads, snapshot-scoped Pack/Direct grouping, opaque-ID object-block paging, legacy unknown-size/time semantics, and daemon/CLI parity.
 - The Storage tab reads a complete local sidecar index instead of regrouping every snapshot mapping for each page or row expansion. Successful daemon backups schedule a local build without delaying their run result; an older missing sidecar is built when Storage is selected. Both use the selected snapshot's local filemap and the same endpoint/dedupe catalog, defer while backup activity is active, and atomically publish before pages become available.
 - Source-filemap preparation and Storage-index preparation are intentionally separate. The App displays local checks, remote snapshot-map download, verification, decompression, cache writing, and local Storage indexing as distinct states.
+- MTProto helper transport errors preserve the helper's exit status and stderr tail across the stdout-close/reap race, keeping source-filemap download failures actionable on Linux and macOS.
 
 ## Implementation Boundaries
 

@@ -17,6 +17,7 @@
 - The Storage tab has deterministic light and dark Main Window demo evidence covering recorded and legacy physical metadata, logical/document size separation, and expanded pack slices.
 - Storage paging now relies on a retained-snapshot local sidecar so a repeated object page or expansion does not repeat full catalog aggregation. The sidecar is intentionally disposable and follows retained-snapshot cleanup; see [Snapshot storage inspection sidecar](../../adr/0006-snapshot-storage-inspection-sidecar.md).
 - Filemap materialization remains automatic when a retained snapshot is opened. The owner-visible App state distinguishes that remote snapshot-map download from the subsequent local Storage-index preparation.
+- Helper failures wait briefly for process termination before formatting diagnostics, so the reported exit status and stderr tail remain available when stdout closes before the operating system reaps the helper.
 
 ## References
 
