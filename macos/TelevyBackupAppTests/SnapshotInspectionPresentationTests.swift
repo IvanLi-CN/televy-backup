@@ -127,6 +127,23 @@ private func testStorageRequestEpochRejectsStaleExpansion() {
     expect(epoch.accepts(directRequest), "the latest storage expansion response must remain applicable")
 }
 
+private func testStoragePreparationDoesNotShowPageLoader() {
+    expect(
+        !SnapshotStorageLoadingPresentation.showsPageLoader(
+            storageLoading: true,
+            preparationState: "preparing"
+        ),
+        "polling a local Storage index must not show the object-page loader"
+    )
+    expect(
+        SnapshotStorageLoadingPresentation.showsPageLoader(
+            storageLoading: true,
+            preparationState: nil
+        ),
+        "a ready object-page request should show the object-page loader"
+    )
+}
+
 @main
 enum SnapshotInspectionPresentationTestsMain {
     static func main() {
@@ -135,6 +152,7 @@ enum SnapshotInspectionPresentationTestsMain {
         testTreeExpansionSurvivesAsyncReload()
         testBlockRequestEpochRejectsStaleResults()
         testStorageRequestEpochRejectsStaleExpansion()
+        testStoragePreparationDoesNotShowPageLoader()
         print("OK: SnapshotInspectionPresentationTests")
     }
 }

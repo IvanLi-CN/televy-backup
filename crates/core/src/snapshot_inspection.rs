@@ -110,7 +110,7 @@ impl SnapshotInspector {
 
     pub async fn summary(&self, snapshot_id: &str) -> Result<SnapshotSummary> {
         let context = self.resolve_context(snapshot_id).await?;
-        let pool = index_db::open_existing_index_db(&context.current_path).await?;
+        let pool = index_db::open_readonly_index_db(&context.current_path).await?;
         let mut connection = pool.acquire().await?;
         let attached = attach_baseline_if_needed(&mut connection, &context).await?;
 
@@ -218,7 +218,7 @@ impl SnapshotInspector {
     /// the full SQL difference query for every node.
     pub async fn prepare(&self, snapshot_id: &str) -> Result<SnapshotInspectionSession> {
         let context = self.resolve_context(snapshot_id).await?;
-        let pool = index_db::open_existing_index_db(&context.current_path).await?;
+        let pool = index_db::open_readonly_index_db(&context.current_path).await?;
         let mut connection = pool.acquire().await?;
         let attached = attach_baseline_if_needed(&mut connection, &context).await?;
 
@@ -341,7 +341,7 @@ impl SnapshotInspector {
             });
         }
 
-        let pool = index_db::open_existing_index_db(&context.current_path).await?;
+        let pool = index_db::open_readonly_index_db(&context.current_path).await?;
         let mut connection = pool.acquire().await?;
         let attached = attach_baseline_if_needed(&mut connection, &context).await?;
         let rows = match (&request.scope, &context.difference) {
@@ -396,7 +396,7 @@ impl SnapshotInspector {
                 snapshot_id: request.snapshot_id,
             });
         }
-        let pool = index_db::open_existing_index_db(&sidecar_path).await?;
+        let pool = index_db::open_readonly_index_db(&sidecar_path).await?;
         let query = normalize_query(request.query.as_deref());
         let after = after.as_deref().unwrap_or_default();
         let kind = request.kind.as_deref().unwrap_or_default();
@@ -461,7 +461,7 @@ impl SnapshotInspector {
                 snapshot_id: request.snapshot_id,
             });
         }
-        let pool = index_db::open_existing_index_db(&sidecar_path).await?;
+        let pool = index_db::open_readonly_index_db(&sidecar_path).await?;
         let Some((after_hash, after_offset, after_length)) = after
             .as_deref()
             .map(parse_storage_block_cursor_key)
@@ -564,8 +564,8 @@ impl SnapshotInspector {
             let sidecar_pool = index_db::open_index_db(&temporary_path).await?;
             ensure_storage_index_schema(&sidecar_pool).await?;
 
-            let storage_pool = index_db::open_existing_index_db(&self.storage_db_path).await?;
-            let metadata_pool = index_db::open_existing_index_db(&self.storage_db_path).await?;
+            let storage_pool = index_db::open_readonly_index_db(&self.storage_db_path).await?;
+            let metadata_pool = index_db::open_readonly_index_db(&self.storage_db_path).await?;
             let has_storage_metadata = sqlx::query(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'storage_objects'",
             )
@@ -680,7 +680,7 @@ impl SnapshotInspector {
         request.validate()?;
         let after = decode_block_cursor(&request)?;
         let context = self.resolve_context(&request.snapshot_id).await?;
-        let pool = index_db::open_existing_index_db(&context.current_path).await?;
+        let pool = index_db::open_readonly_index_db(&context.current_path).await?;
         let query_text = normalize_query(request.query.as_deref());
         let rows = sqlx::query(
             r#"
@@ -734,7 +734,7 @@ impl SnapshotInspector {
                 message: "snapshot_id must not be empty".to_string(),
             });
         }
-        let endpoint_pool = index_db::open_existing_index_db(&self.endpoint_db_path).await?;
+        let endpoint_pool = index_db::open_readonly_index_db(&self.endpoint_db_path).await?;
         let row = sqlx::query(
             "SELECT snapshot_id, created_at, source_path, label, base_snapshot_id FROM snapshots WHERE snapshot_id = ?",
         )
@@ -1303,7 +1303,7 @@ async fn storage_index_is_complete(path: &Path, snapshot_id: &str) -> Result<boo
     if !path.is_file() {
         return Ok(false);
     }
-    let pool = match index_db::open_existing_index_db(path).await {
+    let pool = match index_db::open_readonly_index_db(path).await {
         Ok(pool) => pool,
         Err(_) => return Ok(false),
     };

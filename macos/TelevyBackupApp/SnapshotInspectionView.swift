@@ -161,6 +161,12 @@ struct SnapshotBlockRequestEpoch {
     }
 }
 
+enum SnapshotStorageLoadingPresentation {
+    static func showsPageLoader(storageLoading: Bool, preparationState: String?) -> Bool {
+        storageLoading && preparationState == nil
+    }
+}
+
 enum SnapshotInspectionPresentation: String, CaseIterable, Identifiable {
     case tree = "Tree"
     case list = "List"
@@ -1346,7 +1352,10 @@ struct SnapshotRunDetailView: View {
                 )
                 .clipShape(RoundedRectangle(cornerRadius: snapshotTableSurfaceCornerRadius, style: .continuous))
             }
-            if store.storageLoading {
+            if SnapshotStorageLoadingPresentation.showsPageLoader(
+                storageLoading: store.storageLoading,
+                preparationState: store.storagePreparationState
+            ) {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
                     Text("Loading storage objects...").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)

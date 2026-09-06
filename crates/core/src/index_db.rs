@@ -264,9 +264,42 @@ pub async fn open_existing_index_db(path: &Path) -> Result<SqlitePool> {
     Ok(pool)
 }
 
+/// Opens an existing index for queries without changing its persisted SQLite journal mode.
+///
+/// Snapshot filemaps use WAL while they are assembled. A reader that requests DELETE journal
+/// mode must acquire an exclusive lock to switch modes, which can block unrelated inspection
+/// requests behind a long-running read. Inspection paths therefore use this read-only opener.
+pub async fn open_readonly_index_db(path: &Path) -> Result<SqlitePool> {
+    debug!(
+        event = "sqlite.open_readonly",
+        db_path = %path.display(),
+        "sqlite.open_readonly"
+    );
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .busy_timeout(Duration::from_secs(60));
+
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(SQLITE_POOL_ACQUIRE_TIMEOUT)
+        .connect_with(options)
+        .await
+        .map_err(|e| {
+            error!(
+                event = "io.sqlite.readonly_connect_failed",
+                db_path = %path.display(),
+                error = %e,
+                "io.sqlite.readonly_connect_failed"
+            );
+            e
+        })
+        .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::open_snapshot_filemap_db;
+    use super::{open_readonly_index_db, open_snapshot_filemap_db};
 
     #[tokio::test]
     async fn snapshot_filemap_defers_sync_and_auto_checkpoint() {
@@ -305,5 +338,22 @@ mod tests {
                 .iter()
                 .any(|name| name == "idx_files_snapshot_kind_file")
         );
+    }
+
+    #[tokio::test]
+    async fn readonly_index_open_preserves_the_filemap_journal_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("snapshot.sqlite");
+        let writer = open_snapshot_filemap_db(&path).await.unwrap();
+
+        let reader = open_readonly_index_db(&path).await.unwrap();
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&reader)
+            .await
+            .unwrap();
+
+        assert_eq!(journal_mode, "wal");
+        drop(reader);
+        drop(writer);
     }
 }

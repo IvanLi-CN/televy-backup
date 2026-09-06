@@ -67,13 +67,14 @@ impl IndexDownloadProgressSink for SnapshotMapProgressReporter {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct SnapshotInspectionService {
     config_root: PathBuf,
     data_root: PathBuf,
     settings: Arc<RwLock<Settings>>,
     status_state: Arc<std::sync::Mutex<crate::StatusRuntimeState>>,
-    cache: Mutex<PreparedSnapshots>,
-    source_preparations: Mutex<HashMap<String, String>>,
+    cache: Arc<Mutex<PreparedSnapshots>>,
+    source_preparations: Arc<Mutex<HashMap<String, String>>>,
     storage_index_preparations: Arc<Mutex<HashMap<String, StorageIndexPreparation>>>,
 }
 
@@ -102,12 +103,12 @@ impl SnapshotInspectionService {
             data_root,
             settings,
             status_state,
-            cache: Mutex::new(PreparedSnapshots {
+            cache: Arc::new(Mutex::new(PreparedSnapshots {
                 entries: HashMap::new(),
                 least_recently_used: VecDeque::new(),
                 preparing: HashMap::new(),
-            }),
-            source_preparations: Mutex::new(HashMap::new()),
+            })),
+            source_preparations: Arc::new(Mutex::new(HashMap::new())),
             storage_index_preparations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -176,6 +177,7 @@ impl SnapshotInspectionService {
             ));
         }
         let settings = self.settings.read().await.clone();
+        let preparation_service = self.clone();
         let operation_id = {
             let mut preparations = self.source_preparations.lock().await;
             if let Some(operation_id) = preparations.get(&params.snapshot_id)
@@ -189,6 +191,7 @@ impl SnapshotInspectionService {
                 let data_root = self.data_root.clone();
                 let snapshot_id = params.snapshot_id.clone();
                 let operation_for_task = operation_id.clone();
+                let preparation_service = preparation_service.clone();
                 spawn_operation(operation_id.clone(), async move {
                     operation_update_progress(
                         &operation_for_task,
@@ -209,6 +212,11 @@ impl SnapshotInspectionService {
                     )
                     .await
                     .map_err(|error| sanitized_prepare_error(&snapshot_id, error))?;
+                    operation_update_progress(
+                        &operation_for_task,
+                        snapshot_map_progress("preparingDetails", &snapshot_id, &snapshot_id),
+                    );
+                    preparation_service.session_for(&snapshot_id).await?;
                     operation_update_progress(
                         &operation_for_task,
                         snapshot_map_progress("ready", &snapshot_id, &snapshot_id),
@@ -527,7 +535,7 @@ async fn snapshot_inspector_for(
     )
     .await?;
 
-    let endpoint_pool = televy_backup_core::index_db::open_existing_index_db(&endpoint_db_path)
+    let endpoint_pool = televy_backup_core::index_db::open_readonly_index_db(&endpoint_db_path)
         .await
         .map_err(core_error)?;
     let base_snapshot_id =
@@ -594,7 +602,7 @@ async fn find_snapshot_endpoint_db(
     snapshot_id: &str,
 ) -> Result<PathBuf, ControlError> {
     for db_path in list_index_db_paths_for_read(data_root)? {
-        let pool = televy_backup_core::index_db::open_existing_index_db(&db_path)
+        let pool = televy_backup_core::index_db::open_readonly_index_db(&db_path)
             .await
             .map_err(core_error)?;
         let exists = sqlx::query("SELECT 1 FROM snapshots WHERE snapshot_id = ? LIMIT 1")
@@ -665,7 +673,7 @@ async fn snapshot_provider_for(
     endpoint_db_path: &Path,
     snapshot_id: &str,
 ) -> Result<Option<String>, ControlError> {
-    let pool = televy_backup_core::index_db::open_existing_index_db(endpoint_db_path)
+    let pool = televy_backup_core::index_db::open_readonly_index_db(endpoint_db_path)
         .await
         .map_err(core_error)?;
     sqlx::query("SELECT provider FROM remote_indexes WHERE snapshot_id = ? LIMIT 1")
@@ -722,7 +730,7 @@ async fn ensure_snapshot_filemap(
         );
     }
 
-    let pool = televy_backup_core::index_db::open_existing_index_db(endpoint_db_path)
+    let pool = televy_backup_core::index_db::open_readonly_index_db(endpoint_db_path)
         .await
         .map_err(core_error)?;
     let remote_index = sqlx::query(
@@ -858,7 +866,7 @@ async fn endpoint_has_snapshot_files(
     endpoint_db_path: &Path,
     snapshot_id: &str,
 ) -> Result<bool, ControlError> {
-    let pool = televy_backup_core::index_db::open_existing_index_db(endpoint_db_path)
+    let pool = televy_backup_core::index_db::open_readonly_index_db(endpoint_db_path)
         .await
         .map_err(core_error)?;
     sqlx::query("SELECT 1 FROM files WHERE snapshot_id = ? LIMIT 1")
@@ -1207,6 +1215,35 @@ mod tests {
         assert_eq!(
             files.result.unwrap()["entries"][0]["path"].as_str(),
             Some("docs")
+        );
+    }
+
+    #[tokio::test]
+    async fn source_preparation_populates_the_snapshot_session_cache() {
+        let (_temp, service, _current_path, _status_state) = service_fixture().await;
+        let response = service
+            .handle(&ControlRequest::new(
+                "prepare",
+                "snapshot.inspect.prepare",
+                serde_json::json!({ "snapshotId": "current" }),
+            ))
+            .await;
+        assert!(response.ok);
+        let operation_id = response.result.unwrap()["operationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        for _ in 0..100 {
+            if !operation_is_active(&operation_id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!operation_is_active(&operation_id));
+        assert!(
+            service.cache.lock().await.entries.contains_key("current"),
+            "a completed source preparation must leave a ready inspection session"
         );
     }
 
