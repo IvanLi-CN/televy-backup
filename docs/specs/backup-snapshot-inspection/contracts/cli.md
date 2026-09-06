@@ -22,6 +22,8 @@ televybackup --json snapshots inspect storage-blocks --snapshot-id <snapshot-id>
 - Tree responses in changes scope include unchanged ancestor context rows and their aggregate descendant change counts.
 - A cursor is opaque, scoped to the exact immutable query, and must not be reused after any snapshot, presentation, scope, parent, or query change.
 - Storage cursors are scoped to the exact snapshot, kind filter, opaque-ID query, object ID (for `storage-blocks`), and limit.
+- The daemon IPC variants return `state: ready|preparing|retrying|failed` for Storage requests. `ready` includes the page shape below; non-ready states include no entries and a bounded `pollAfterMs`. The terminal CLI keeps its direct invocation contract and prepares a missing local sidecar before emitting a ready page.
+- `snapshot.inspect.prepare` is a daemon operation start request. Its `operation.get` progress is sanitized and includes only `kind: snapshotFilemap`, requested/filemap snapshot IDs, a phase, optional payload byte counts, and optional part counts. It does not expose a provider, manifest pointer, part locator, chat, message, or document identifier.
 
 ## Summary Result
 
@@ -129,6 +131,18 @@ Rows are one per distinct logical chunk hash referenced by regular files. `refer
   ],
   "nextCursor": null
 }
+```
+
+The daemon wraps this value when it returns `state: "ready"`:
+
+```json
+{ "state": "ready", "page": { "entries": [], "nextCursor": null } }
+```
+
+While a local sidecar is being created it returns, for example:
+
+```json
+{ "state": "preparing", "pollAfterMs": 500 }
 ```
 
 `storageId` is a stable opaque identifier derived from the local provider/object mapping. `kind` is

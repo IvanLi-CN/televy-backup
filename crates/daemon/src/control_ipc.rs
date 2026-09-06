@@ -40,7 +40,7 @@ fn terminal_operation_id(operations: &HashMap<String, OperationStatusResult>) ->
         .map(|(id, _)| id.clone())
 }
 
-fn operation_start() -> Result<String, ControlError> {
+pub(crate) fn operation_start() -> Result<String, ControlError> {
     let operation_id = format!("op_{}", uuid::Uuid::new_v4());
     let mut operations = operation_store().lock().map_err(|_| {
         ControlError::unavailable("operation store unavailable", serde_json::json!({}))
@@ -99,7 +99,27 @@ fn operation_finish(operation_id: &str, outcome: Result<serde_json::Value, Contr
     }
 }
 
-fn spawn_operation<F>(operation_id: String, task: F)
+pub(crate) fn operation_update_progress(operation_id: &str, progress: serde_json::Value) {
+    if let Ok(mut operations) = operation_store().lock()
+        && let Some(status) = operations.get_mut(operation_id)
+    {
+        status.progress = Some(progress);
+    }
+}
+
+pub(crate) fn operation_is_active(operation_id: &str) -> bool {
+    operation_store()
+        .lock()
+        .ok()
+        .and_then(|operations| {
+            operations
+                .get(operation_id)
+                .map(|status| status.state.clone())
+        })
+        .is_some_and(|state| matches!(state.as_str(), "pending" | "running"))
+}
+
+pub(crate) fn spawn_operation<F>(operation_id: String, task: F)
 where
     F: Future<Output = Result<serde_json::Value, ControlError>> + Send + 'static,
 {
@@ -2813,7 +2833,7 @@ mod tests {
         ControlContext {
             config_root: config_root.to_path_buf(),
             settings: settings.clone(),
-            status_state,
+            status_state: status_state.clone(),
             backup_queue,
             backup_queue_notify,
             settings_reload_requested: Arc::new(AtomicBool::new(false)),
@@ -2827,6 +2847,7 @@ mod tests {
                     config_root.to_path_buf(),
                     data_root,
                     settings,
+                    status_state.clone(),
                 ),
             ),
         }
@@ -3020,7 +3041,7 @@ mod tests {
             ControlContext {
                 config_root: cfg_root,
                 settings: control_settings.clone(),
-                status_state,
+                status_state: status_state.clone(),
                 backup_queue: Arc::new(Mutex::new(crate::BackupQueue::default())),
                 backup_queue_notify: Arc::new(Notify::new()),
                 settings_reload_requested: Arc::new(AtomicBool::new(false)),
@@ -3032,6 +3053,7 @@ mod tests {
                         dir.path().join("cfg"),
                         data_root,
                         control_settings,
+                        status_state.clone(),
                     ),
                 ),
             },

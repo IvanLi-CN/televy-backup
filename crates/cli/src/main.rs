@@ -4683,34 +4683,58 @@ async fn snapshots_inspect(
             query,
             cursor,
             limit,
-        } => serde_json::to_value(
-            inspector
-                .storage(StorageInspectionRequest {
-                    snapshot_id,
-                    kind,
-                    query,
-                    cursor,
-                    limit,
-                })
-                .await
-                .map_err(map_snapshot_inspection_err)?,
-        ),
+        } => {
+            let request = StorageInspectionRequest {
+                snapshot_id: snapshot_id.clone(),
+                kind,
+                query,
+                cursor,
+                limit,
+            };
+            let page = match inspector.storage(request.clone()).await {
+                Ok(page) => page,
+                Err(SnapshotInspectionError::StorageIndexUnavailable { .. }) => {
+                    inspector
+                        .build_storage_index(&snapshot_id)
+                        .await
+                        .map_err(map_snapshot_inspection_err)?;
+                    inspector
+                        .storage(request)
+                        .await
+                        .map_err(map_snapshot_inspection_err)?
+                }
+                Err(error) => return Err(map_snapshot_inspection_err(error)),
+            };
+            serde_json::to_value(page)
+        }
         SnapshotInspectCmd::StorageBlocks {
             snapshot_id,
             storage_id,
             cursor,
             limit,
-        } => serde_json::to_value(
-            inspector
-                .storage_blocks(StorageBlocksInspectionRequest {
-                    snapshot_id,
-                    storage_id,
-                    cursor,
-                    limit,
-                })
-                .await
-                .map_err(map_snapshot_inspection_err)?,
-        ),
+        } => {
+            let request = StorageBlocksInspectionRequest {
+                snapshot_id: snapshot_id.clone(),
+                storage_id,
+                cursor,
+                limit,
+            };
+            let page = match inspector.storage_blocks(request.clone()).await {
+                Ok(page) => page,
+                Err(SnapshotInspectionError::StorageIndexUnavailable { .. }) => {
+                    inspector
+                        .build_storage_index(&snapshot_id)
+                        .await
+                        .map_err(map_snapshot_inspection_err)?;
+                    inspector
+                        .storage_blocks(request)
+                        .await
+                        .map_err(map_snapshot_inspection_err)?
+                }
+                Err(error) => return Err(map_snapshot_inspection_err(error)),
+            };
+            serde_json::to_value(page)
+        }
     }
     .map_err(|e| CliError::new("snapshot.inspect.invalid_argument", e.to_string()))?;
     println!(
@@ -4780,11 +4804,21 @@ async fn snapshot_inspector_for(
         .map(|endpoint_id| endpoint_dedupe_db_path(data_dir, endpoint_id))
         .filter(|path| path.is_file())
         .unwrap_or_else(|| endpoint_db_path.clone());
-    Ok(SnapshotInspector::new_with_storage_db(
-        endpoint_db_path,
-        filemap_dir,
-        storage_db_path,
-    ))
+    let inspector = match endpoint_id_from_provider(provider.as_deref())? {
+        Some(endpoint_id) => SnapshotInspector::new_with_storage_db_and_index_dir(
+            endpoint_db_path,
+            filemap_dir,
+            storage_db_path,
+            data_dir
+                .join("index")
+                .join("storage-inspection")
+                .join(endpoint_id),
+        ),
+        None => {
+            SnapshotInspector::new_with_storage_db(endpoint_db_path, filemap_dir, storage_db_path)
+        }
+    };
+    Ok(inspector)
 }
 
 async fn find_snapshot_endpoint_db(
@@ -5012,6 +5046,10 @@ fn map_snapshot_inspection_err(error: SnapshotInspectionError) -> CliError {
         SnapshotInspectionError::InvalidArgument { message } => {
             CliError::new("snapshot.inspect.invalid_argument", message)
         }
+        SnapshotInspectionError::StorageIndexUnavailable { .. } => CliError::retryable(
+            "snapshot.storage_index_preparing",
+            "the local Storage index is not ready yet",
+        ),
         SnapshotInspectionError::Core(error) => map_snapshot_filemap_core_err(error),
     }
 }

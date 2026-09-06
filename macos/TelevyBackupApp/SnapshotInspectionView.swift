@@ -128,6 +128,26 @@ private struct SnapshotStorageBlocksPage: Decodable {
     let nextCursor: String?
 }
 
+private struct SnapshotStorageResponse<Page: Decodable>: Decodable {
+    let state: String
+    let phase: String?
+    let page: Page?
+    let pollAfterMs: UInt64?
+    let error: ControlIPCError?
+}
+
+private struct SnapshotPrepareProgress: Decodable {
+    let kind: String
+    let requestedSnapshotId: String
+    let filemapSnapshotId: String
+    let phase: String
+    let bytesDownloaded: UInt64?
+    let bytesTotal: UInt64?
+    let partsDone: UInt64?
+    let partsTotal: UInt64?
+    let bytesWritten: UInt64?
+}
+
 struct SnapshotBlockRequestEpoch {
     private(set) var value = 0
 
@@ -165,10 +185,10 @@ enum SnapshotInspectionEligibility: Equatable {
 }
 
 private final class SnapshotInspectionStore: ObservableObject {
-    private static let storageRequestTimeoutSeconds: Double = 90
-
     @Published private(set) var summary: SnapshotInspectionSummary?
     @Published private(set) var summaryLoading = false
+    @Published private(set) var sourcePreparing = false
+    @Published private(set) var sourcePreparation: SnapshotPrepareProgress?
     @Published private(set) var issue: String?
     @Published private(set) var issueRetryable = false
     @Published private(set) var listEntries: [SnapshotFileEntry] = []
@@ -179,6 +199,8 @@ private final class SnapshotInspectionStore: ObservableObject {
     @Published private(set) var filesLoading = false
     @Published private(set) var blocksLoading = false
     @Published private(set) var storageLoading = false
+    @Published private(set) var storagePreparationState: String?
+    @Published private(set) var storagePreparationError: String?
 
     private var run: RunLogSummary?
     private weak var model: AppModel?
@@ -203,12 +225,15 @@ private final class SnapshotInspectionStore: ObservableObject {
     private var storageRequestEpoch = SnapshotBlockRequestEpoch()
     private var activeStorageKind: String?
     private var activeStorageQuery = ""
+    private var storageRetryRequested = false
 
     func start(run: RunLogSummary, model: AppModel) {
         self.run = run
         self.model = model
         requestToken += 1
         summary = nil
+        sourcePreparing = false
+        sourcePreparation = nil
         issue = nil
         issueRetryable = false
         activeBlockChangesOnly = false
@@ -224,7 +249,7 @@ private final class SnapshotInspectionStore: ObservableObject {
             installDemo(scene: MainWindowUIDemo.scene)
             return
         }
-        loadSummary()
+        startSourcePreparation()
     }
 
     func retry() {
@@ -323,6 +348,12 @@ private final class SnapshotInspectionStore: ObservableObject {
         loadStoragePage()
     }
 
+    func retryStorageIndex() {
+        storagePreparationError = nil
+        storageRetryRequested = true
+        loadStoragePage()
+    }
+
     func toggleStorage(_ entry: SnapshotStorageEntry) {
         if storageBlocks[entry.id] != nil {
             storageBlocks[entry.id] = nil
@@ -341,6 +372,38 @@ private final class SnapshotInspectionStore: ObservableObject {
 
     var blockChangesAvailable: Bool {
         summary?.availability.state != "baselineUnavailable"
+    }
+
+    var sourcePreparationTitle: String {
+        switch sourcePreparation?.phase {
+        case "checkingLocal": return "Checking local snapshot map"
+        case "fetchingManifest", "downloadingParts": return "Downloading snapshot map from remote storage"
+        case "verifying": return "Verifying snapshot map"
+        case "decompressing": return "Decompressing snapshot map"
+        case "writing": return "Writing local snapshot cache"
+        default: return "Preparing snapshot details"
+        }
+    }
+
+    var sourcePreparationDetail: String {
+        guard let preparation = sourcePreparation else {
+            return "Preparing the retained snapshot map."
+        }
+        if let total = preparation.bytesTotal, let downloaded = preparation.bytesDownloaded {
+            return "Snapshot \(preparation.filemapSnapshotId): \(formatBytes(Int64(clamping: downloaded))) of \(formatBytes(Int64(clamping: total)))"
+        }
+        if let downloaded = preparation.bytesDownloaded, downloaded > 0 {
+            return "Snapshot \(preparation.filemapSnapshotId): \(formatBytes(Int64(clamping: downloaded))) downloaded"
+        }
+        return "Snapshot \(preparation.filemapSnapshotId)"
+    }
+
+    var storagePreparationTitle: String {
+        switch storagePreparationState {
+        case "waitingForBackup": return "Waiting for backup activity to finish"
+        case "retrying": return "Retrying local Storage index"
+        default: return "Preparing local Storage index"
+        }
     }
 
     private func unavailableReason(for run: RunLogSummary) -> String {
@@ -371,6 +434,77 @@ private final class SnapshotInspectionStore: ObservableObject {
             case let .failure(failure):
                 self.issue = failure.message
                 self.issueRetryable = failure.retryable
+            }
+        }
+    }
+
+    private func startSourcePreparation() {
+        guard let snapshotId = run?.snapshotId, let model else { return }
+        sourcePreparing = true
+        sourcePreparation = SnapshotPrepareProgress(
+            kind: "snapshotFilemap",
+            requestedSnapshotId: snapshotId,
+            filemapSnapshotId: snapshotId,
+            phase: "checkingLocal",
+            bytesDownloaded: nil,
+            bytesTotal: nil,
+            partsDone: nil,
+            partsTotal: nil,
+            bytesWritten: nil
+        )
+        let token = requestToken
+        performControlRequest(
+            model: model,
+            method: "snapshot.inspect.prepare",
+            params: ["snapshotId": snapshotId]
+        ) { (result: Result<ControlOperationAccepted, ControlRequestFailure>) in
+            guard self.requestToken == token else { return }
+            switch result {
+            case let .success(accepted):
+                self.pollSourcePreparation(operationId: accepted.operationId, token: token)
+            case let .failure(failure):
+                self.sourcePreparing = false
+                self.issue = failure.message
+                self.issueRetryable = failure.retryable
+            }
+        }
+    }
+
+    private func pollSourcePreparation(operationId: String, token: Int) {
+        guard let model else { return }
+        let socketPath = model.controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = ControlIPCClient.operationStatus(socketPath: socketPath, operationId: operationId)
+            DispatchQueue.main.async {
+                guard self.requestToken == token else { return }
+                switch result {
+                case let .failure(failure):
+                    self.sourcePreparing = false
+                    self.issue = failure.message
+                    self.issueRetryable = failure.retryable
+                case let .success(status):
+                    if let progress = status.progress?.decoded(SnapshotPrepareProgress.self) {
+                        self.sourcePreparation = progress
+                    }
+                    switch status.state {
+                    case "pending", "running":
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            self.pollSourcePreparation(operationId: operationId, token: token)
+                        }
+                    case "succeeded":
+                        self.sourcePreparing = false
+                        self.loadSummary()
+                    case "failed":
+                        self.sourcePreparing = false
+                        let error = status.error
+                        self.issue = error?.message ?? "The snapshot map could not be prepared."
+                        self.issueRetryable = error?.retryable ?? true
+                    default:
+                        self.sourcePreparing = false
+                        self.issue = "The snapshot preparation returned an invalid state."
+                        self.issueRetryable = true
+                    }
+                }
             }
         }
     }
@@ -452,24 +586,44 @@ private final class SnapshotInspectionStore: ObservableObject {
     private func loadStoragePage() {
         guard !storageLoading, !storageReachedEnd, let snapshotId = run?.snapshotId, let model else { return }
         storageLoading = true
+        storagePreparationError = nil
         let token = storageRequestEpoch.issue()
         var params: [String: Any] = ["snapshotId": snapshotId, "limit": 200]
+        if storageRetryRequested {
+            params["retry"] = true
+            storageRetryRequested = false
+        }
         if let activeStorageKind { params["kind"] = activeStorageKind }
         if !activeStorageQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { params["query"] = activeStorageQuery }
         if let storageNextCursor { params["cursor"] = storageNextCursor }
         performControlRequest(
             model: model,
             method: "snapshot.inspect.storage",
-            params: params,
-            timeoutSeconds: Self.storageRequestTimeoutSeconds
-        ) { (result: Result<SnapshotStoragePage, ControlRequestFailure>) in
+            params: params
+        ) { (result: Result<SnapshotStorageResponse<SnapshotStoragePage>, ControlRequestFailure>) in
             guard self.storageRequestEpoch.accepts(token) else { return }
             self.storageLoading = false
             switch result {
-            case let .success(page):
-                self.storageEntries.append(contentsOf: page.entries)
-                self.storageNextCursor = page.nextCursor
-                self.storageReachedEnd = page.nextCursor == nil
+            case let .success(response):
+                switch response.state {
+                case "ready":
+                    guard let page = response.page else {
+                        self.storagePreparationError = "Storage returned an invalid page."
+                        return
+                    }
+                    self.storagePreparationState = nil
+                    self.storageEntries.append(contentsOf: page.entries)
+                    self.storageNextCursor = page.nextCursor
+                    self.storageReachedEnd = page.nextCursor == nil
+                case "preparing", "retrying":
+                    self.storagePreparationState = response.phase ?? response.state
+                    self.scheduleStoragePageRefresh(after: response.pollAfterMs, token: token)
+                case "failed":
+                    self.storagePreparationState = nil
+                    self.storagePreparationError = response.error?.message ?? "The local Storage index could not be prepared."
+                default:
+                    self.storagePreparationError = "Storage returned an invalid state."
+                }
             case let .failure(failure):
                 self.issue = failure.message
                 self.issueRetryable = failure.retryable
@@ -486,20 +640,51 @@ private final class SnapshotInspectionStore: ObservableObject {
         performControlRequest(
             model: model,
             method: "snapshot.inspect.storage-blocks",
-            params: params,
-            timeoutSeconds: Self.storageRequestTimeoutSeconds
-        ) { (result: Result<SnapshotStorageBlocksPage, ControlRequestFailure>) in
+            params: params
+        ) { (result: Result<SnapshotStorageResponse<SnapshotStorageBlocksPage>, ControlRequestFailure>) in
             guard self.storageRequestEpoch.accepts(token) else { return }
             self.storageBlockLoading.remove(storageId)
             switch result {
-            case let .success(page):
-                self.storageBlocks[storageId, default: []].append(contentsOf: page.entries)
-                self.storageBlockNextCursor[storageId] = page.nextCursor
-                if page.nextCursor == nil { self.storageBlockReachedEnd.insert(storageId) }
+            case let .success(response):
+                switch response.state {
+                case "ready":
+                    guard let page = response.page else {
+                        self.storagePreparationError = "Storage returned an invalid page."
+                        return
+                    }
+                    self.storagePreparationState = nil
+                    self.storageBlocks[storageId, default: []].append(contentsOf: page.entries)
+                    self.storageBlockNextCursor[storageId] = page.nextCursor
+                    if page.nextCursor == nil { self.storageBlockReachedEnd.insert(storageId) }
+                case "preparing", "retrying":
+                    self.storagePreparationState = response.phase ?? response.state
+                    self.scheduleStorageBlocksRefresh(storageId, after: response.pollAfterMs, token: token)
+                case "failed":
+                    self.storagePreparationState = nil
+                    self.storagePreparationError = response.error?.message ?? "The local Storage index could not be prepared."
+                default:
+                    self.storagePreparationError = "Storage returned an invalid state."
+                }
             case let .failure(failure):
                 self.issue = failure.message
                 self.issueRetryable = failure.retryable
             }
+        }
+    }
+
+    private func scheduleStoragePageRefresh(after milliseconds: UInt64?, token: Int) {
+        let delay = Double(milliseconds ?? 500) / 1_000
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard self.storageRequestEpoch.accepts(token) else { return }
+            self.loadStoragePage()
+        }
+    }
+
+    private func scheduleStorageBlocksRefresh(_ storageId: String, after milliseconds: UInt64?, token: Int) {
+        let delay = Double(milliseconds ?? 500) / 1_000
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard self.storageRequestEpoch.accepts(token) else { return }
+            self.loadStorageBlocks(storageId)
         }
     }
 
@@ -538,6 +723,9 @@ private final class SnapshotInspectionStore: ObservableObject {
         storageBlockReachedEnd = []
         storageBlockLoading = []
         storageLoading = false
+        storagePreparationState = nil
+        storagePreparationError = nil
+        storageRetryRequested = false
     }
 
     private func performControlRequest<Response: Decodable>(
@@ -564,6 +752,21 @@ private final class SnapshotInspectionStore: ObservableObject {
     }
 
     private func installDemo(scene: String) {
+        if scene == "main-window-snapshot-downloading" {
+            sourcePreparing = true
+            sourcePreparation = SnapshotPrepareProgress(
+                kind: "snapshotFilemap",
+                requestedSnapshotId: "s_demo_001",
+                filemapSnapshotId: "s_demo_001",
+                phase: "downloadingParts",
+                bytesDownloaded: 18 * 1_024 * 1_024,
+                bytesTotal: 64 * 1_024 * 1_024,
+                partsDone: 2,
+                partsTotal: 7,
+                bytesWritten: nil
+            )
+            return
+        }
         let unavailable = scene == "main-window-snapshot-baseline-unavailable"
         summary = SnapshotInspectionSummary(
             snapshot: .init(
@@ -626,6 +829,11 @@ private final class SnapshotInspectionStore: ObservableObject {
         treeReachedEnd = ["", "Albums"]
         blocksReachedEnd = true
         storageReachedEnd = true
+        if scene == "main-window-snapshot-storage-preparing" || scene == "main-window-snapshot-storage-waiting" {
+            storageEntries = []
+            storageBlocks = [:]
+            storagePreparationState = scene == "main-window-snapshot-storage-waiting" ? "waitingForBackup" : "preparing"
+        }
     }
 }
 
@@ -657,7 +865,7 @@ struct SnapshotRunDetailView: View {
         let scene = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
         return scene == "main-window-snapshot-changes" || scene == "main-window-snapshot-baseline-unavailable"
             ? .files
-            : scene == "main-window-snapshot-storage" ? .storage
+            : scene == "main-window-snapshot-storage" || scene == "main-window-snapshot-storage-preparing" || scene == "main-window-snapshot-storage-waiting" ? .storage
             : .summary
     }()
     @State private var presentation: SnapshotInspectionPresentation = .tree
@@ -937,7 +1145,14 @@ struct SnapshotRunDetailView: View {
 
     @ViewBuilder
     private var content: some View {
-        if store.summaryLoading {
+        if store.sourcePreparing {
+            SnapshotInspectionStateView(
+                icon: "arrow.down.circle",
+                title: store.sourcePreparationTitle,
+                detail: store.sourcePreparationDetail,
+                showsProgress: true
+            )
+        } else if store.summaryLoading {
             SnapshotInspectionStateView(icon: "arrow.triangle.2.circlepath", title: "Loading snapshot", detail: "Reading the retained file map.", showsProgress: true)
         } else if let issue = store.issue {
             VStack(alignment: .leading, spacing: 12) {
@@ -1107,7 +1322,19 @@ struct SnapshotRunDetailView: View {
 
     private func storage() -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            if store.storageEntries.isEmpty, !store.storageLoading {
+            if let state = store.storagePreparationState {
+                SnapshotInspectionStateView(
+                    icon: "externaldrive.badge.timemachine",
+                    title: store.storagePreparationTitle,
+                    detail: storagePreparationDetail(for: state),
+                    showsProgress: true
+                )
+            } else if let error = store.storagePreparationError {
+                SnapshotInspectionStateView(icon: "exclamationmark.triangle", title: "Storage index unavailable", detail: error, showsProgress: false) {
+                    Button("Retry") { store.retryStorageIndex() }
+                        .controlSize(.small)
+                }
+            } else if store.storageEntries.isEmpty, !store.storageLoading {
                 SnapshotInspectionStateView(icon: "externaldrive", title: "No storage objects", detail: "No Pack or Direct documents are referenced by this snapshot.", showsProgress: false)
             } else {
                 SnapshotStorageTable(
@@ -1128,6 +1355,17 @@ struct SnapshotRunDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear { reloadStorage() }
+    }
+
+    private func storagePreparationDetail(for state: String) -> String {
+        switch state {
+        case "waitingForBackup":
+            return "Storage indexing will start when active backup activity finishes."
+        case "retrying":
+            return "Waiting before the next local index attempt."
+        default:
+            return "Building a local index from this snapshot's retained map."
+        }
     }
 
     private func reloadFiles() {

@@ -615,6 +615,37 @@ async fn storage_groups_pack_slices_and_keeps_legacy_metadata_unknown() {
     drop(endpoint);
 
     let inspector = SnapshotInspector::new(&endpoint_path, &filemap_dir);
+    let sidecar_path = inspector.storage_index_path("current");
+    assert!(!sidecar_path.exists());
+    assert!(matches!(
+        inspector
+            .storage(StorageInspectionRequest {
+                snapshot_id: "current".to_string(),
+                kind: None,
+                query: None,
+                cursor: None,
+                limit: 10,
+            })
+            .await,
+        Err(SnapshotInspectionError::StorageIndexUnavailable { .. })
+    ));
+    inspector.build_storage_index("current").await.unwrap();
+    assert!(sidecar_path.is_file());
+
+    // Storage pages must keep using the published sidecar rather than regrouping mappings.
+    let endpoint = index_db::open_existing_index_db(&endpoint_path)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM chunk_objects")
+        .execute(&endpoint)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM storage_objects")
+        .execute(&endpoint)
+        .await
+        .unwrap();
+    drop(endpoint);
+
     let page = inspector
         .storage(StorageInspectionRequest {
             snapshot_id: "current".to_string(),
@@ -704,6 +735,7 @@ async fn storage_uses_materialized_dedupe_mappings_when_configured() {
 
     let inspector =
         SnapshotInspector::new_with_storage_db(&endpoint_path, &filemap_dir, &dedupe_path);
+    inspector.build_storage_index("current").await.unwrap();
     let page = inspector
         .storage(StorageInspectionRequest {
             snapshot_id: "current".to_string(),

@@ -2222,6 +2222,7 @@ pub async fn run_backup_with<S: Storage>(
             }
         };
     cleanup_filemap_cache_best_effort(&config.filemap_dir, &pruned_preflight);
+    cleanup_storage_inspection_cache_best_effort(&config.filemap_dir, &pruned_preflight);
     compact_index_db_if_needed(&mut conn, &config.endpoint_db_path).await;
 
     let scan_future = {
@@ -3913,6 +3914,7 @@ pub async fn run_backup_with<S: Storage>(
             }
         };
     cleanup_filemap_cache_best_effort(&config.filemap_dir, &pruned_final);
+    cleanup_storage_inspection_cache_best_effort(&config.filemap_dir, &pruned_final);
 
     // 2) Export+upload small endpoint DB (global/dedupe state, no file maps).
     let endpoint_index_id = crate::bootstrap::endpoint_index_id_for_storage(storage)?;
@@ -4635,6 +4637,35 @@ fn cleanup_filemap_cache_best_effort(filemap_dir: &Path, snapshot_ids: &[String]
                     path = %path.display(),
                     error = %e,
                     "filemap_cache.delete_failed"
+                );
+            }
+        }
+    }
+}
+
+fn cleanup_storage_inspection_cache_best_effort(filemap_dir: &Path, snapshot_ids: &[String]) {
+    if snapshot_ids.is_empty() {
+        return;
+    }
+    let endpoint_id = filemap_dir.file_name().unwrap_or_default();
+    let direct_parent = filemap_dir.parent().unwrap_or(filemap_dir);
+    let index_root = (direct_parent.file_name().and_then(|name| name.to_str()) == Some("filemaps"))
+        .then(|| direct_parent.parent())
+        .flatten()
+        .unwrap_or(direct_parent);
+    let storage_index_dir = index_root.join("storage-inspection").join(endpoint_id);
+    for snapshot_id in snapshot_ids {
+        let path = storage_index_dir.join(format!("{snapshot_id}.sqlite"));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                warn!(
+                    event = "storage_inspection_cache.delete_failed",
+                    snapshot_id,
+                    path = %path.display(),
+                    error = %e,
+                    "storage_inspection_cache.delete_failed"
                 );
             }
         }

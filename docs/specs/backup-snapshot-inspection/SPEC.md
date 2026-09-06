@@ -45,6 +45,8 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 ## Related ADRs
 
 - [0001-snapshot-inspection-retention](../../adr/0001-snapshot-inspection-retention.md)
+- [0005-offline-storage-object-inspection](../../adr/0005-offline-storage-object-inspection.md)
+- [0006-snapshot-storage-inspection-sidecar](../../adr/0006-snapshot-storage-inspection-sidecar.md)
 
 ## Requirements
 
@@ -62,6 +64,10 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 - `REQ-SI-010`: File paths, block hashes, and filemap contents stay local to the configured storage/cache path and must not be written to normal run logs or status snapshots.
 - `REQ-SI-011`: Storage rows expose only a stable opaque storage ID, `pack|direct` kind, optional recorded document size/time, reference counts, and logical bytes. Raw Telegram chat, message, and document locator fields are never returned.
 - `REQ-SI-012`: Storage object grouping is derived only from the selected snapshot's ordinary file block mappings. A missing legacy `storage_objects` row returns unknown physical size/time and is never inferred from logical or slice bytes.
+- `REQ-SI-013`: Storage paging and object expansion read a complete local, snapshot-scoped sidecar index. They must not materialize all selected-snapshot mappings, all catalog metadata, or all object slices at request time.
+- `REQ-SI-014`: A new snapshot schedules local Storage-sidecar preparation after its successful backup; an older missing sidecar is prepared after Storage is selected. The service returns a typed preparing, retrying, or failed state without partial rows, defers preparation while backup activity is active, and atomically publishes a complete sidecar before it becomes queryable.
+- `REQ-SI-015`: A retained snapshot filemap remains automatically materialized on demand. The App must distinguish local checking, remote snapshot-map download, verification, decompression, cache writing, and Storage-index preparation; it must never present these preparation phases as snapshot expiry or unavailability.
+- `REQ-SI-016`: The Storage sidecar is local-only at `index/storage-inspection/<endpoint-id>/<snapshot-id>.sqlite`, contains opaque object IDs and block/slice membership only, and is deleted with its retained snapshot. It is neither uploaded nor synchronized and must not persist Telegram locator fields.
 
 ### SHOULD
 
@@ -81,10 +87,10 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 
 1. The App activates a target-scoped run-history row and navigates the detail pane to that run.
 2. The App immediately renders run-log information. For an eligible successful run, it requests snapshot summary in the background.
-3. The inspector resolves the snapshot from the retained endpoint index and opens its local filemap, downloading the snapshot filemap through the existing index resolver only when it is absent locally.
+3. The inspector resolves the snapshot from the retained endpoint index and opens its local filemap, downloading TelevyBackup's encrypted snapshot map through the existing index resolver only when it is absent locally. The App starts or joins this shared preparation work and displays the remote-storage download stage honestly.
 4. Summary returns snapshot totals and direct-baseline availability. Files and Blocks fetch bounded pages only after their view is selected.
 5. Files in tree mode request direct children as folders expand. List mode requests a flat cursor page. Changes-only requests change rows and required ancestor context.
-6. Storage requests a bounded object page only after its tab is selected. Filters and opaque-ID search reset the cursor. Expanding a row requests only that object's selected-snapshot block slices.
+6. Storage requests a bounded object page only after its tab is selected. A missing sidecar starts one snapshot-scoped background build and returns an explicit non-ready state until its atomic publication. Filters and opaque-ID search reset the cursor. Expanding a row requests only that object's selected-snapshot block slices.
 7. The App renders result rows through a virtualized table/tree surface and cancels or discards obsolete page work when the user changes run, presentation, query, or filter.
 
 ### Edge cases and errors
@@ -95,6 +101,8 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 - Missing, corrupted, undecryptable, or unreachable filemaps show a retryable inspection error without changing backup/restore state.
 - Empty snapshots, empty block sets, and snapshots with no direct changes have distinct empty states.
 - A snapshot containing only legacy object mappings shows a coherent `not recorded` physical-size/time state; it does not substitute logical bytes.
+- A missing filemap and a missing Storage sidecar are independent conditions. Filemap preparation can require a remote download; Storage sidecar preparation only reads local snapshot and endpoint/dedupe indexes after the filemap is ready.
+- Interrupted, incompatible, or failed Storage sidecars are discarded and rebuilt as a new temporary file. No partial sidecar is inspected.
 - A row with legacy/missing target identity remains in the existing Unknown target grouping; it must not be reassigned by the inspector.
 
 ## Interfaces and Contracts
@@ -106,6 +114,7 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 | `snapshots inspect` | CLI JSON | internal | New | [CLI contract](./contracts/cli.md) | CLI/core | terminal users | Read-only paged snapshot inspector |
 | `snapshot.inspect.summary/files/blocks` | daemon control IPC | internal | New | This specification | daemon/core | macOS App | Read-only JSON requests over the existing local authenticated control socket |
 | `snapshot.inspect.storage/storage-blocks` | daemon control IPC | internal | New | This specification | daemon/core | macOS App | Snapshot-scoped physical object pages |
+| `snapshot.inspect.prepare` | daemon control IPC | internal | New | This specification | daemon/core | macOS App | Shared snapshot-map preparation operation with sanitized progress |
 | Snapshot filemap resolver | Core API | internal | Modify | [CLI contract](./contracts/cli.md) | core | CLI, daemon | Reuses retained-snapshot materialization semantics |
 | Run detail route and views | Swift API | internal | New | This specification | macOS App | Main Window | Summary, Files, Blocks, Storage |
 
@@ -133,14 +142,14 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 
 ## Verification
 
-- `VER-SI-001`: Core tests cover retained snapshots, baseline semantics, block aggregation, cursor binding, physical-object persistence, Storage grouping, legacy unknown metadata, and materialized dedupe mappings; covers: REQ-SI-001, REQ-SI-004, REQ-SI-005, REQ-SI-006, REQ-SI-007, REQ-SI-008, REQ-SI-009, REQ-SI-010, REQ-SI-012.
-- `VER-SI-002`: CLI JSON and daemon IPC tests cover paged `storage` and `storage-blocks` responses, opaque-only IDs, filter/query/limit-bound cursors, and selected-snapshot block expansion; covers: REQ-SI-002, REQ-SI-009, REQ-SI-011, REQ-SI-012.
-- `VER-SI-003`: Swift presentation tests and deterministic Main Window light/dark demos cover lazy loading, filter/search reset, expansion, loading/error/empty/legacy states, and distinct Document versus Logical columns; covers: REQ-SI-001, REQ-SI-002, REQ-SI-003, REQ-SI-009, REQ-SI-011, REQ-SI-012.
-- `VER-SI-004`: Formatting, clippy, workspace all-features tests, macOS unit tests, and app build must pass before delivery; covers: REQ-SI-009, REQ-SI-010.
+- `VER-SI-001`: Core tests cover retained snapshots, baseline semantics, block aggregation, cursor binding, physical-object persistence, Storage grouping, legacy unknown metadata, materialized dedupe mappings, atomic sidecar publication, and sidecar SQL paging; covers: REQ-SI-001, REQ-SI-004, REQ-SI-005, REQ-SI-006, REQ-SI-007, REQ-SI-008, REQ-SI-009, REQ-SI-010, REQ-SI-012, REQ-SI-013, REQ-SI-014, REQ-SI-016.
+- `VER-SI-002`: CLI JSON and daemon IPC tests cover paged `storage` and `storage-blocks` responses, opaque-only IDs, filter/query/limit-bound cursors, selected-snapshot block expansion, non-ready Storage states, and sanitized snapshot-map preparation progress; covers: REQ-SI-002, REQ-SI-009, REQ-SI-011, REQ-SI-012, REQ-SI-013, REQ-SI-014, REQ-SI-015.
+- `VER-SI-003`: Swift presentation tests and deterministic Main Window light/dark demos cover lazy loading, filter/search reset, expansion, remote-download and sidecar-preparing states, loading/error/empty/legacy states, and distinct Document versus Logical columns; covers: REQ-SI-001, REQ-SI-002, REQ-SI-003, REQ-SI-009, REQ-SI-011, REQ-SI-012, REQ-SI-014, REQ-SI-015.
+- `VER-SI-004`: Formatting, clippy, workspace all-features tests, macOS unit tests, app build, and the Storage query performance fixture must pass before delivery; covers: REQ-SI-009, REQ-SI-010, REQ-SI-013.
 
 ## Visual Evidence
 
-Deterministic light and dark Main Window Storage demos are required owner-facing evidence for this capability. They must include a recorded object, a legacy `Not recorded` object, distinct Document and Logical columns, and an expanded pack slice without Telegram locator fields.
+Deterministic light and dark Main Window Storage demos are required owner-facing evidence for this capability. They must include a recorded object, a legacy `Not recorded` object, distinct Document and Logical columns, and an expanded pack slice without Telegram locator fields. Separate deterministic states must show a remote snapshot-map download and local Storage-index preparation.
 
 ## References
 

@@ -25,7 +25,7 @@ func controlFailureMessage(_ failure: ControlRequestFailure) -> String {
     }
 }
 
-private struct ControlIPCError: Decodable {
+struct ControlIPCError: Decodable {
     let code: String
     let message: String
     let retryable: Bool
@@ -39,11 +39,11 @@ private struct ControlIPCResponse<Response: Decodable>: Decodable {
     let error: ControlIPCError?
 }
 
-private struct ControlOperationAccepted: Decodable {
+struct ControlOperationAccepted: Decodable {
     let operationId: String
 }
 
-private enum ControlJSONValue: Codable {
+enum ControlJSONValue: Codable {
     case object([String: ControlJSONValue])
     case array([ControlJSONValue])
     case string(String)
@@ -104,6 +104,11 @@ private enum ControlJSONValue: Codable {
             try container.encodeNil()
         }
     }
+
+    func decoded<T: Decodable>(_ type: T.Type) -> T? {
+        guard let data = try? JSONEncoder().encode(self) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
 }
 
 private struct DynamicCodingKey: CodingKey {
@@ -121,7 +126,7 @@ private struct DynamicCodingKey: CodingKey {
     }
 }
 
-private struct ControlOperationStatus: Decodable {
+struct ControlOperationStatus: Decodable {
     let operationId: String
     let state: String
     let progress: ControlJSONValue?
@@ -280,6 +285,19 @@ enum ControlIPCClient {
             }
         }
         return .failure(.init(code: "control.timeout", message: "Operation did not finish in time.", retryable: true))
+    }
+
+    static func operationStatus(
+        socketPath: String,
+        operationId: String,
+        timeoutSeconds: Double = requestTimeoutSeconds
+    ) -> Result<ControlOperationStatus, ControlRequestFailure> {
+        request(
+            socketPath: socketPath,
+            method: "operation.get",
+            params: ["operationId": operationId],
+            timeoutSeconds: timeoutSeconds
+        )
     }
 
     private static func setNonblocking(_ fd: Int32) -> Bool {

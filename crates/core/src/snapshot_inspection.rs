@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use base64::Engine;
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqliteConnection};
 
@@ -10,6 +13,9 @@ use crate::{Error, index_db};
 
 pub const MAX_PAGE_SIZE: u16 = 500;
 const CURSOR_VERSION: u8 = 1;
+const STORAGE_INDEX_SCHEMA_VERSION: i64 = 1;
+const STORAGE_INDEX_BUILD_BATCH_SIZE: usize = 256;
+const STORAGE_INDEX_TEMP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotInspectionError {
@@ -28,6 +34,8 @@ pub enum SnapshotInspectionError {
     InvalidArgument { message: String },
     #[error("invalid snapshot inspection cursor: {message}")]
     InvalidCursor { message: String },
+    #[error("storage inspection index is not ready: {snapshot_id}")]
+    StorageIndexUnavailable { snapshot_id: String },
     #[error(transparent)]
     Core(#[from] Error),
 }
@@ -45,14 +53,17 @@ pub struct SnapshotInspector {
     endpoint_db_path: PathBuf,
     filemap_dir: PathBuf,
     storage_db_path: PathBuf,
+    storage_index_dir: PathBuf,
 }
 
 impl SnapshotInspector {
     pub fn new(endpoint_db_path: impl Into<PathBuf>, filemap_dir: impl Into<PathBuf>) -> Self {
         let endpoint_db_path = endpoint_db_path.into();
+        let filemap_dir = filemap_dir.into();
         Self {
             endpoint_db_path: endpoint_db_path.clone(),
-            filemap_dir: filemap_dir.into(),
+            storage_index_dir: default_storage_index_dir(&filemap_dir),
+            filemap_dir,
             storage_db_path: endpoint_db_path,
         }
     }
@@ -62,10 +73,26 @@ impl SnapshotInspector {
         filemap_dir: impl Into<PathBuf>,
         storage_db_path: impl Into<PathBuf>,
     ) -> Self {
+        let filemap_dir = filemap_dir.into();
+        Self {
+            endpoint_db_path: endpoint_db_path.into(),
+            storage_index_dir: default_storage_index_dir(&filemap_dir),
+            filemap_dir,
+            storage_db_path: storage_db_path.into(),
+        }
+    }
+
+    pub fn new_with_storage_db_and_index_dir(
+        endpoint_db_path: impl Into<PathBuf>,
+        filemap_dir: impl Into<PathBuf>,
+        storage_db_path: impl Into<PathBuf>,
+        storage_index_dir: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             endpoint_db_path: endpoint_db_path.into(),
             filemap_dir: filemap_dir.into(),
             storage_db_path: storage_db_path.into(),
+            storage_index_dir: storage_index_dir.into(),
         }
     }
 
@@ -75,6 +102,10 @@ impl SnapshotInspector {
 
     pub fn filemap_path(&self, snapshot_id: &str) -> PathBuf {
         self.filemap_dir.join(format!("{snapshot_id}.sqlite"))
+    }
+
+    pub fn storage_index_path(&self, snapshot_id: &str) -> PathBuf {
+        self.storage_index_dir.join(format!("{snapshot_id}.sqlite"))
     }
 
     pub async fn summary(&self, snapshot_id: &str) -> Result<SnapshotSummary> {
@@ -358,25 +389,51 @@ impl SnapshotInspector {
     pub async fn storage(&self, request: StorageInspectionRequest) -> Result<StoragePage> {
         request.validate()?;
         let after = decode_storage_cursor(&request)?;
-        let context = self.resolve_context(&request.snapshot_id).await?;
-        let groups = self
-            .collect_storage_objects(&context, request.snapshot_id.as_str())
-            .await?;
+        self.resolve_context(&request.snapshot_id).await?;
+        let sidecar_path = self.storage_index_path(&request.snapshot_id);
+        if !storage_index_is_complete(&sidecar_path, &request.snapshot_id).await? {
+            return Err(SnapshotInspectionError::StorageIndexUnavailable {
+                snapshot_id: request.snapshot_id,
+            });
+        }
+        let pool = index_db::open_existing_index_db(&sidecar_path).await?;
         let query = normalize_query(request.query.as_deref());
         let after = after.as_deref().unwrap_or_default();
-        let mut entries = groups
-            .into_iter()
-            .filter(|entry| {
-                request
-                    .kind
-                    .as_deref()
-                    .is_none_or(|kind| kind == entry.kind)
-            })
-            .filter(|entry| query.is_empty() || entry.storage_id.starts_with(&query))
-            .filter(|entry| entry.storage_id.as_bytes() > after.as_bytes())
-            .take(request.limit as usize + 1)
-            .map(StorageObjectAggregate::into_entry)
-            .collect::<Vec<_>>();
+        let kind = request.kind.as_deref().unwrap_or_default();
+        let mut entries = sqlx::query(
+            r#"
+            SELECT storage_id, kind, document_bytes, recorded_at, referenced_blocks, logical_bytes
+            FROM storage_inspection_objects
+            WHERE (? = '' OR kind = ?)
+              AND (? = '' OR storage_id LIKE ? || '%')
+              AND storage_id > ? COLLATE BINARY
+            ORDER BY storage_id COLLATE BINARY
+            LIMIT ?
+            "#,
+        )
+        .bind(kind)
+        .bind(kind)
+        .bind(&query)
+        .bind(&query)
+        .bind(after)
+        .bind(i64::from(request.limit) + 1)
+        .fetch_all(&pool)
+        .await?
+        .into_iter()
+        .map(|row| StorageObjectEntry {
+            storage_id: row.get("storage_id"),
+            kind: row.get("kind"),
+            document_bytes: row
+                .try_get::<Option<i64>, _>("document_bytes")
+                .unwrap_or(None)
+                .map(|value| value.max(0) as u64),
+            recorded_at: row
+                .try_get::<Option<String>, _>("recorded_at")
+                .unwrap_or(None),
+            referenced_blocks: non_negative_u64(&row, "referenced_blocks"),
+            logical_bytes: non_negative_u64(&row, "logical_bytes"),
+        })
+        .collect::<Vec<_>>();
         let has_more = entries.len() > request.limit as usize;
         if has_more {
             entries.pop();
@@ -397,25 +454,73 @@ impl SnapshotInspector {
     ) -> Result<StorageBlocksPage> {
         request.validate()?;
         let after = decode_storage_blocks_cursor(&request)?;
-        let context = self.resolve_context(&request.snapshot_id).await?;
-        let groups = self
-            .collect_storage_objects(&context, request.snapshot_id.as_str())
-            .await?;
-        let Some(group) = groups
-            .into_iter()
-            .find(|entry| entry.storage_id == request.storage_id)
+        self.resolve_context(&request.snapshot_id).await?;
+        let sidecar_path = self.storage_index_path(&request.snapshot_id);
+        if !storage_index_is_complete(&sidecar_path, &request.snapshot_id).await? {
+            return Err(SnapshotInspectionError::StorageIndexUnavailable {
+                snapshot_id: request.snapshot_id,
+            });
+        }
+        let pool = index_db::open_existing_index_db(&sidecar_path).await?;
+        let Some((after_hash, after_offset, after_length)) = after
+            .as_deref()
+            .map(parse_storage_block_cursor_key)
+            .transpose()?
         else {
+            return self
+                .storage_blocks_from_index(&pool, &request, "", 0, 0)
+                .await;
+        };
+        self.storage_blocks_from_index(&pool, &request, &after_hash, after_offset, after_length)
+            .await
+    }
+
+    async fn storage_blocks_from_index(
+        &self,
+        pool: &sqlx::SqlitePool,
+        request: &StorageBlocksInspectionRequest,
+        after_hash: &str,
+        after_offset: u64,
+        after_length: u64,
+    ) -> Result<StorageBlocksPage> {
+        let rows = sqlx::query(
+            r#"
+            SELECT b.hash, b.size, b.offset, b.length
+            FROM storage_inspection_blocks b
+            JOIN storage_inspection_objects o ON o.object_key = b.object_key
+            WHERE o.storage_id = ?
+              AND (
+                   b.hash > ? COLLATE BINARY
+                   OR (b.hash = ? AND b.offset > ?)
+                   OR (b.hash = ? AND b.offset = ? AND b.length > ?)
+              )
+            ORDER BY b.hash COLLATE BINARY, b.offset, b.length
+            LIMIT ?
+            "#,
+        )
+        .bind(&request.storage_id)
+        .bind(after_hash)
+        .bind(after_hash)
+        .bind(after_offset as i64)
+        .bind(after_hash)
+        .bind(after_offset as i64)
+        .bind(after_length as i64)
+        .bind(i64::from(request.limit) + 1)
+        .fetch_all(pool)
+        .await?;
+        if rows.is_empty() && !storage_object_exists(pool, &request.storage_id).await? {
             return Err(SnapshotInspectionError::InvalidArgument {
                 message: "storage_id is not referenced by the selected snapshot".to_string(),
             });
-        };
-        let after = after.as_deref().unwrap_or_default();
-        let mut entries = group
-            .blocks
+        }
+        let mut entries = rows
             .into_iter()
-            .filter(|entry| entry.cursor_key().as_str() > after)
-            .take(request.limit as usize + 1)
-            .map(StorageBlockEntry::from)
+            .map(|row| StorageBlockEntry {
+                hash: row.get("hash"),
+                size: non_negative_u64(&row, "size"),
+                offset: non_negative_u64(&row, "offset"),
+                length: non_negative_u64(&row, "length"),
+            })
             .collect::<Vec<_>>();
         let has_more = entries.len() > request.limit as usize;
         if has_more {
@@ -424,197 +529,151 @@ impl SnapshotInspector {
         let next_cursor = has_more
             .then(|| entries.last().map(StorageBlockEntry::cursor_key))
             .flatten()
-            .map(|after| encode_storage_blocks_cursor(&request, after));
+            .map(|after| encode_storage_blocks_cursor(request, after));
         Ok(StorageBlocksPage {
             entries,
             next_cursor,
         })
     }
 
-    async fn collect_storage_objects(
-        &self,
-        context: &InspectionContext,
-        snapshot_id: &str,
-    ) -> Result<Vec<StorageObjectAggregate>> {
-        let storage_pool = index_db::open_existing_index_db(&self.storage_db_path).await?;
-        // Storage inspection is a read-only view. Do not create or alter indexes here: a backup
-        // may be writing the same catalog, and request-time DDL would wait on its write lock.
-        // Current catalogs carry the reverse lookup index; older catalogs remain readable through
-        // the same query, with the expected slower fallback.
-        sqlx::query("PRAGMA cache_size = -65536")
-            .execute(&storage_pool)
-            .await?;
-        // The dedupe catalog can be much larger than the filemap. Mapping a bounded prefix keeps
-        // repeated indexed reads from issuing a syscall per B-tree page without reserving the
-        // full catalog in resident memory. Storage inspection never writes this connection.
-        sqlx::query("PRAGMA mmap_size = 1073741824")
-            .execute(&storage_pool)
-            .await?;
-        sqlx::query("PRAGMA temp_store = MEMORY")
-            .execute(&storage_pool)
-            .await?;
-        let has_storage_metadata = sqlx::query(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'storage_objects'",
-        )
-        .fetch_optional(&storage_pool)
-        .await?
-        .is_some();
+    /// Builds the local, snapshot-scoped Storage sidecar. The final path is never
+    /// opened until this complete temporary database has been committed and renamed.
+    pub async fn build_storage_index(&self, snapshot_id: &str) -> Result<()> {
+        let context = self.resolve_context(snapshot_id).await?;
+        let final_path = self.storage_index_path(snapshot_id);
+        if storage_index_is_complete(&final_path, snapshot_id).await? {
+            return Ok(());
+        }
+        let parent =
+            final_path
+                .parent()
+                .ok_or_else(|| SnapshotInspectionError::InvalidArgument {
+                    message: "storage inspection path has no parent".to_string(),
+                })?;
+        fs::create_dir_all(parent).map_err(Error::from)?;
+        cleanup_stale_storage_index_temps(parent, snapshot_id);
+        let temporary_path = parent.join(format!(
+            ".{snapshot_id}.{}.storage-index.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        if temporary_path.exists() {
+            fs::remove_file(&temporary_path).map_err(Error::from)?;
+        }
 
-        // The endpoint/filemap and dedupe catalogs are separate databases in the current
-        // layout. Attach the filemap to the storage connection so SQLite can use the
-        // chunk-hash index in one join instead of issuing one large IN query per batch.
-        let same_database = self.storage_db_path == context.current_path;
-        if !same_database {
-            let current_path = context.current_path.to_string_lossy().into_owned();
-            sqlx::query("ATTACH DATABASE ? AS snapshot_filemap")
-                .bind(current_path)
-                .execute(&storage_pool)
-                .await?;
-        }
-        let rows = if same_database {
-            sqlx::query(
-                r#"
-                SELECT fc.chunk_hash AS hash, c.size AS size, fc.len AS len,
-                       co.provider AS provider, co.object_id AS encoded
-                FROM file_chunks fc
-                JOIN files f ON f.file_id = fc.file_id
-                JOIN chunks c ON c.chunk_hash = fc.chunk_hash
-                JOIN chunk_objects co ON co.chunk_hash = fc.chunk_hash
-                WHERE f.snapshot_id = ? AND f.kind = 'file'
-                "#,
-            )
-            .bind(snapshot_id)
-            .fetch_all(&storage_pool)
-            .await?
-        } else {
-            sqlx::query(
-                r#"
-                SELECT fc.chunk_hash AS hash, c.size AS size, fc.len AS len,
-                       co.provider AS provider, co.object_id AS encoded
-                FROM snapshot_filemap.file_chunks fc
-                JOIN snapshot_filemap.files f ON f.file_id = fc.file_id
-                JOIN snapshot_filemap.chunks c ON c.chunk_hash = fc.chunk_hash
-                JOIN chunk_objects co ON co.chunk_hash = fc.chunk_hash
-                WHERE f.snapshot_id = ? AND f.kind = 'file'
-                "#,
-            )
-            .bind(snapshot_id)
-            .fetch_all(&storage_pool)
-            .await?
-        };
-        if !same_database {
-            sqlx::query("DETACH DATABASE snapshot_filemap")
-                .execute(&storage_pool)
-                .await?;
-        }
-        if rows.is_empty() {
-            return Ok(Vec::new());
-        }
-        let chunk_rows = rows
-            .into_iter()
-            .map(|row| StorageChunkRow {
-                hash: row.get("hash"),
-                size: non_negative_u64(&row, "size"),
-                len: non_negative_u64(&row, "len"),
-                provider: row.get("provider"),
-                encoded: row.get("encoded"),
-            })
-            .collect::<Vec<_>>();
+        let build = async {
+            let sidecar_pool = index_db::open_index_db(&temporary_path).await?;
+            ensure_storage_index_schema(&sidecar_pool).await?;
 
-        let storage_metadata = if has_storage_metadata {
-            sqlx::query(
-                "SELECT provider, object_id, document_bytes, recorded_at FROM storage_objects",
+            let storage_pool = index_db::open_existing_index_db(&self.storage_db_path).await?;
+            let metadata_pool = index_db::open_existing_index_db(&self.storage_db_path).await?;
+            let has_storage_metadata = sqlx::query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'storage_objects'",
             )
-            .fetch_all(&storage_pool)
+            .fetch_optional(&metadata_pool)
             .await?
-            .into_iter()
-            .map(|row| {
-                (
-                    (
-                        row.get::<String, _>("provider"),
-                        row.get::<String, _>("object_id"),
-                    ),
-                    (
-                        row.try_get::<i64, _>("document_bytes")
-                            .ok()
-                            .map(|value| value.max(0) as u64),
-                        row.try_get::<String, _>("recorded_at").ok(),
-                    ),
+            .is_some();
+            let same_database = self.storage_db_path == context.current_path;
+            let mut source_connection = storage_pool.acquire().await?;
+            if !same_database {
+                sqlx::query("ATTACH DATABASE ? AS snapshot_filemap")
+                    .bind(context.current_path.to_string_lossy().into_owned())
+                    .execute(&mut *source_connection)
+                    .await?;
+            }
+            let source_sql = if same_database {
+                r#"
+                WITH snapshot_chunks AS (
+                    SELECT fc.chunk_hash AS hash, MAX(c.size) AS size, MAX(fc.len) AS len
+                    FROM file_chunks fc
+                    JOIN files f ON f.file_id = fc.file_id
+                    JOIN chunks c ON c.chunk_hash = fc.chunk_hash
+                    WHERE f.snapshot_id = ? AND f.kind = 'file'
+                    GROUP BY fc.chunk_hash
                 )
-            })
-            .collect::<HashMap<_, _>>()
-        } else {
-            HashMap::new()
-        };
-
-        let mut groups = HashMap::<String, StorageObjectAggregate>::new();
-        let mut metadata =
-            HashMap::<(String, String), (String, Option<u64>, Option<String>)>::new();
-        for chunk in chunk_rows {
-            let provider = chunk.provider;
-            let (kind, object_id, slice_offset, slice_len) =
-                match parse_chunk_object_ref(&chunk.encoded)? {
-                    ChunkObjectRef::Direct { object_id } => ("direct", object_id, 0, chunk.len),
-                    ChunkObjectRef::PackSlice {
-                        pack_object_id,
-                        offset,
-                        len,
-                    } => ("pack", pack_object_id, offset, len),
-                };
-            let key = storage_object_id(&provider, &object_id);
-            let entry = groups
-                .entry(key.clone())
-                .or_insert_with(|| StorageObjectAggregate {
-                    storage_id: key,
-                    kind: kind.to_string(),
-                    provider: provider.clone(),
-                    object_id: object_id.clone(),
-                    document_bytes: None,
-                    recorded_at: None,
-                    referenced_blocks: 0,
-                    logical_bytes: 0,
-                    blocks: Vec::new(),
-                    seen_hashes: HashSet::new(),
-                });
-            if entry.seen_hashes.insert(chunk.hash.clone()) {
-                entry.logical_bytes = entry.logical_bytes.saturating_add(chunk.size);
-                entry.referenced_blocks = entry.referenced_blocks.saturating_add(1);
-            }
-            let block = StorageBlockAggregate {
-                hash: chunk.hash.clone(),
-                size: chunk.size,
-                offset: slice_offset,
-                length: slice_len,
+                SELECT sc.hash, sc.size, sc.len, co.provider, co.object_id AS encoded
+                FROM snapshot_chunks sc
+                JOIN chunk_objects co ON co.chunk_hash = sc.hash
+                ORDER BY sc.hash COLLATE BINARY
+                "#
+            } else {
+                r#"
+                WITH snapshot_chunks AS (
+                    SELECT fc.chunk_hash AS hash, MAX(c.size) AS size, MAX(fc.len) AS len
+                    FROM snapshot_filemap.file_chunks fc
+                    JOIN snapshot_filemap.files f ON f.file_id = fc.file_id
+                    JOIN snapshot_filemap.chunks c ON c.chunk_hash = fc.chunk_hash
+                    WHERE f.snapshot_id = ? AND f.kind = 'file'
+                    GROUP BY fc.chunk_hash
+                )
+                SELECT sc.hash, sc.size, sc.len, co.provider, co.object_id AS encoded
+                FROM snapshot_chunks sc
+                JOIN chunk_objects co ON co.chunk_hash = sc.hash
+                ORDER BY sc.hash COLLATE BINARY
+                "#
             };
-            if !entry.blocks.iter().any(|item| item == &block) {
-                entry.blocks.push(block);
+            let mut rows = sqlx::query(source_sql)
+                .bind(snapshot_id)
+                .fetch(&mut *source_connection);
+            let mut pending = Vec::with_capacity(STORAGE_INDEX_BUILD_BATCH_SIZE);
+            let mut metadata_cache = HashMap::new();
+            while let Some(row) = rows.try_next().await? {
+                pending.push(StorageChunkRow {
+                    hash: row.get("hash"),
+                    size: non_negative_u64(&row, "size"),
+                    len: non_negative_u64(&row, "len"),
+                    provider: row.get("provider"),
+                    encoded: row.get("encoded"),
+                });
+                if pending.len() >= STORAGE_INDEX_BUILD_BATCH_SIZE {
+                    write_storage_index_batch(
+                        &sidecar_pool,
+                        &metadata_pool,
+                        has_storage_metadata,
+                        &mut metadata_cache,
+                        &mut pending,
+                    )
+                    .await?;
+                }
             }
-            if let std::collections::hash_map::Entry::Vacant(slot) =
-                metadata.entry((provider.clone(), object_id.clone()))
-            {
-                slot.insert((
-                    kind.to_string(),
-                    storage_metadata
-                        .get(&(provider.clone(), object_id.clone()))
-                        .and_then(|(document_bytes, _)| *document_bytes),
-                    storage_metadata
-                        .get(&(provider.clone(), object_id.clone()))
-                        .and_then(|(_, recorded_at)| recorded_at.clone()),
-                ));
+            write_storage_index_batch(
+                &sidecar_pool,
+                &metadata_pool,
+                has_storage_metadata,
+                &mut metadata_cache,
+                &mut pending,
+            )
+            .await?;
+            drop(rows);
+            if !same_database {
+                sqlx::query("DETACH DATABASE snapshot_filemap")
+                    .execute(&mut *source_connection)
+                    .await?;
+            }
+            sqlx::query(
+                "INSERT INTO storage_inspection_meta (schema_version, snapshot_id) VALUES (?, ?)",
+            )
+            .bind(STORAGE_INDEX_SCHEMA_VERSION)
+            .bind(snapshot_id)
+            .execute(&sidecar_pool)
+            .await?;
+            drop(source_connection);
+            drop(metadata_pool);
+            drop(storage_pool);
+            drop(sidecar_pool);
+            Ok::<(), SnapshotInspectionError>(())
+        }
+        .await;
+
+        match build {
+            Ok(()) => {
+                fs::rename(&temporary_path, &final_path).map_err(Error::from)?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temporary_path);
+                Err(error)
             }
         }
-        for entry in groups.values_mut() {
-            if let Some((_, bytes, recorded_at)) =
-                metadata.get(&(entry.provider.clone(), entry.object_id.clone()))
-            {
-                entry.document_bytes = *bytes;
-                entry.recorded_at = recorded_at.clone();
-            }
-            entry.blocks.sort_by_key(|left| left.cursor_key());
-        }
-        let mut groups = groups.into_values().collect::<Vec<_>>();
-        groups.sort_by(|left, right| left.storage_id.cmp(&right.storage_id));
-        Ok(groups)
     }
 
     async fn blocks_page(&self, request: BlockInspectionRequest) -> Result<BlockPage> {
@@ -1121,47 +1180,6 @@ pub struct StorageBlocksPage {
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StorageBlockAggregate {
-    hash: String,
-    size: u64,
-    offset: u64,
-    length: u64,
-}
-
-impl StorageBlockAggregate {
-    fn cursor_key(&self) -> String {
-        format!("{}:{:020}:{:020}", self.hash, self.offset, self.length)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct StorageObjectAggregate {
-    storage_id: String,
-    kind: String,
-    provider: String,
-    object_id: String,
-    document_bytes: Option<u64>,
-    recorded_at: Option<String>,
-    referenced_blocks: u64,
-    logical_bytes: u64,
-    blocks: Vec<StorageBlockAggregate>,
-    seen_hashes: HashSet<String>,
-}
-
-impl StorageObjectAggregate {
-    fn into_entry(self) -> StorageObjectEntry {
-        StorageObjectEntry {
-            storage_id: self.storage_id,
-            kind: self.kind,
-            document_bytes: self.document_bytes,
-            recorded_at: self.recorded_at,
-            referenced_blocks: self.referenced_blocks,
-            logical_bytes: self.logical_bytes,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageBlockEntry {
@@ -1169,17 +1187,6 @@ pub struct StorageBlockEntry {
     pub size: u64,
     pub offset: u64,
     pub length: u64,
-}
-
-impl From<StorageBlockAggregate> for StorageBlockEntry {
-    fn from(value: StorageBlockAggregate) -> Self {
-        Self {
-            hash: value.hash,
-            size: value.size,
-            offset: value.offset,
-            length: value.length,
-        }
-    }
 }
 
 impl StorageBlockEntry {
@@ -1195,6 +1202,263 @@ struct StorageChunkRow {
     len: u64,
     provider: String,
     encoded: String,
+}
+
+#[derive(Clone)]
+struct StorageObjectMetadata {
+    document_bytes: Option<i64>,
+    recorded_at: Option<String>,
+}
+
+fn default_storage_index_dir(filemap_dir: &Path) -> PathBuf {
+    let endpoint_id = filemap_dir.file_name().unwrap_or_default();
+    let direct_parent = filemap_dir.parent().unwrap_or(filemap_dir);
+    let index_root = (direct_parent.file_name().and_then(|name| name.to_str()) == Some("filemaps"))
+        .then(|| direct_parent.parent())
+        .flatten()
+        .unwrap_or(direct_parent);
+    index_root.join("storage-inspection").join(endpoint_id)
+}
+
+fn cleanup_stale_storage_index_temps(parent: &Path, snapshot_id: &str) {
+    let prefix = format!(".{snapshot_id}.");
+    let suffix = ".storage-index.sqlite";
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(&prefix) || !name.ends_with(suffix) {
+            continue;
+        }
+        let is_stale = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age >= STORAGE_INDEX_TEMP_MAX_AGE);
+        if is_stale {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+async fn ensure_storage_index_schema(pool: &sqlx::SqlitePool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS storage_inspection_meta (
+            schema_version INTEGER NOT NULL,
+            snapshot_id TEXT NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS storage_inspection_objects (
+            object_key INTEGER PRIMARY KEY,
+            storage_id TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL CHECK (kind IN ('pack', 'direct')),
+            document_bytes INTEGER NULL,
+            recorded_at TEXT NULL,
+            referenced_blocks INTEGER NOT NULL,
+            logical_bytes INTEGER NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS storage_inspection_blocks (
+            object_key INTEGER NOT NULL REFERENCES storage_inspection_objects(object_key),
+            hash TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            offset INTEGER NOT NULL,
+            length INTEGER NOT NULL,
+            PRIMARY KEY (object_key, hash, offset, length)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_storage_inspection_objects_page ON storage_inspection_objects(kind, storage_id)",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_storage_inspection_blocks_page ON storage_inspection_blocks(object_key, hash, offset, length)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn storage_index_is_complete(path: &Path, snapshot_id: &str) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let pool = match index_db::open_existing_index_db(path).await {
+        Ok(pool) => pool,
+        Err(_) => return Ok(false),
+    };
+    let row = match sqlx::query(
+        "SELECT 1 FROM storage_inspection_meta WHERE schema_version = ? AND snapshot_id = ? LIMIT 1",
+    )
+    .bind(STORAGE_INDEX_SCHEMA_VERSION)
+    .bind(snapshot_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(_) => return Ok(false),
+    };
+    Ok(row.is_some())
+}
+
+async fn storage_object_exists(pool: &sqlx::SqlitePool, storage_id: &str) -> Result<bool> {
+    Ok(
+        sqlx::query("SELECT 1 FROM storage_inspection_objects WHERE storage_id = ? LIMIT 1")
+            .bind(storage_id)
+            .fetch_optional(pool)
+            .await?
+            .is_some(),
+    )
+}
+
+fn parse_storage_block_cursor_key(value: &str) -> Result<(String, u64, u64)> {
+    let mut parts = value.split(':');
+    let hash = parts.next().unwrap_or_default();
+    let offset = parts.next();
+    let length = parts.next();
+    if hash.is_empty() || parts.next().is_some() {
+        return Err(SnapshotInspectionError::InvalidCursor {
+            message: "storage block cursor payload is invalid".to_string(),
+        });
+    }
+    let offset = offset
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| SnapshotInspectionError::InvalidCursor {
+            message: "storage block cursor payload is invalid".to_string(),
+        })?;
+    let length = length
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| SnapshotInspectionError::InvalidCursor {
+            message: "storage block cursor payload is invalid".to_string(),
+        })?;
+    Ok((hash.to_string(), offset, length))
+}
+
+async fn write_storage_index_batch(
+    sidecar_pool: &sqlx::SqlitePool,
+    metadata_pool: &sqlx::SqlitePool,
+    has_storage_metadata: bool,
+    metadata_cache: &mut HashMap<(String, String), StorageObjectMetadata>,
+    rows: &mut Vec<StorageChunkRow>,
+) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut transaction = sidecar_pool.begin().await?;
+    for row in rows.drain(..) {
+        let (kind, object_id, offset, length) = match parse_chunk_object_ref(&row.encoded)? {
+            ChunkObjectRef::Direct { object_id } => ("direct", object_id, 0, row.len),
+            ChunkObjectRef::PackSlice {
+                pack_object_id,
+                offset,
+                len,
+            } => ("pack", pack_object_id, offset, len),
+        };
+        let metadata_key = (row.provider.clone(), object_id.clone());
+        let metadata = if let Some(metadata) = metadata_cache.get(&metadata_key) {
+            metadata.clone()
+        } else {
+            let metadata = if has_storage_metadata {
+                sqlx::query(
+                    "SELECT document_bytes, recorded_at FROM storage_objects WHERE provider = ? AND object_id = ? LIMIT 1",
+                )
+                .bind(&row.provider)
+                .bind(&object_id)
+                .fetch_optional(metadata_pool)
+                .await?
+                .map(|metadata| StorageObjectMetadata {
+                    document_bytes: metadata
+                        .try_get::<Option<i64>, _>("document_bytes")
+                        .unwrap_or(None),
+                    recorded_at: metadata
+                        .try_get::<Option<String>, _>("recorded_at")
+                        .unwrap_or(None),
+                })
+                .unwrap_or(StorageObjectMetadata {
+                    document_bytes: None,
+                    recorded_at: None,
+                })
+            } else {
+                StorageObjectMetadata {
+                    document_bytes: None,
+                    recorded_at: None,
+                }
+            };
+            metadata_cache.insert(metadata_key, metadata.clone());
+            metadata
+        };
+        let storage_id = storage_object_id(&row.provider, &object_id);
+        let logical_bytes =
+            i64::try_from(row.size).map_err(|_| SnapshotInspectionError::InvalidArgument {
+                message: "logical block size exceeds SQLite range".to_string(),
+            })?;
+        sqlx::query(
+            r#"
+            INSERT INTO storage_inspection_objects
+              (storage_id, kind, document_bytes, recorded_at, referenced_blocks, logical_bytes)
+            VALUES (?, ?, ?, ?, 1, ?)
+            ON CONFLICT(storage_id) DO UPDATE SET
+              referenced_blocks = referenced_blocks + 1,
+              logical_bytes = logical_bytes + excluded.logical_bytes
+            "#,
+        )
+        .bind(&storage_id)
+        .bind(kind)
+        .bind(metadata.document_bytes)
+        .bind(metadata.recorded_at)
+        .bind(logical_bytes)
+        .execute(&mut *transaction)
+        .await?;
+        let object_key: i64 = sqlx::query_scalar(
+            "SELECT object_key FROM storage_inspection_objects WHERE storage_id = ?",
+        )
+        .bind(&storage_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO storage_inspection_blocks (object_key, hash, size, offset, length)
+            VALUES (?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(object_key)
+        .bind(&row.hash)
+        .bind(logical_bytes)
+        .bind(
+            i64::try_from(offset).map_err(|_| SnapshotInspectionError::InvalidArgument {
+                message: "storage slice offset exceeds SQLite range".to_string(),
+            })?,
+        )
+        .bind(
+            i64::try_from(length).map_err(|_| SnapshotInspectionError::InvalidArgument {
+                message: "storage slice length exceeds SQLite range".to_string(),
+            })?,
+        )
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
 }
 
 #[derive(Clone)]

@@ -20,6 +20,21 @@ pub struct DownloadedIndexDbStats {
     pub bytes_written: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct IndexDownloadProgress {
+    pub phase: String,
+    pub bytes_downloaded: Option<u64>,
+    pub bytes_total: Option<u64>,
+    pub net_bytes_downloaded: Option<u64>,
+    pub parts_done: Option<u64>,
+    pub parts_total: Option<u64>,
+    pub bytes_written: Option<u64>,
+}
+
+pub trait IndexDownloadProgressSink: Send + Sync {
+    fn on_index_download_progress(&self, progress: IndexDownloadProgress);
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn download_and_write_index_db_atomic<S: Storage>(
     storage: &S,
@@ -31,12 +46,48 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
     normalize_provider: Option<&str>,
     progress: Option<&dyn ProgressSink>,
 ) -> Result<DownloadedIndexDbStats> {
+    download_and_write_index_db_atomic_with_progress(
+        storage,
+        snapshot_id,
+        manifest_object_id,
+        master_key,
+        index_db_path,
+        cancel,
+        normalize_provider,
+        progress,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn download_and_write_index_db_atomic_with_progress<S: Storage>(
+    storage: &S,
+    snapshot_id: &str,
+    manifest_object_id: &str,
+    master_key: &[u8; 32],
+    index_db_path: &Path,
+    cancel: Option<&CancellationToken>,
+    normalize_provider: Option<&str>,
+    progress: Option<&dyn ProgressSink>,
+    index_progress: Option<&dyn IndexDownloadProgressSink>,
+) -> Result<DownloadedIndexDbStats> {
     if let Some(cancel) = cancel
         && cancel.is_cancelled()
     {
         return Err(Error::Cancelled);
     }
 
+    emit_index_progress(
+        index_progress,
+        "fetchingManifest",
+        Some(0),
+        None,
+        None,
+        Some(0),
+        None,
+        None,
+    );
     let mut bytes_downloaded = 0u64;
     let mut net_bytes_downloaded = 0u64;
     let mut have_net_bytes = false;
@@ -70,6 +121,16 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
                         ..TaskProgress::default()
                     });
                 }
+                emit_index_progress(
+                    index_progress,
+                    "fetchingManifest",
+                    Some(n),
+                    None,
+                    p.net_bytes,
+                    Some(0),
+                    None,
+                    None,
+                );
             })),
         )
         .await
@@ -103,6 +164,16 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
             ..TaskProgress::default()
         });
     }
+    emit_index_progress(
+        index_progress,
+        "fetchingManifest",
+        Some(actual),
+        None,
+        (streamed_net != u64::MAX).then_some(net_bytes_downloaded),
+        Some(0),
+        None,
+        None,
+    );
 
     let manifest_json = decrypt_framed(master_key, snapshot_id.as_bytes(), &manifest_enc).map_err(
         |e| Error::Crypto {
@@ -140,8 +211,24 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
 
     let mut parts = manifest.parts.clone();
     parts.sort_by_key(|p| p.no);
+    let parts_total = parts.len() as u64;
+    let parts_bytes_total = parts
+        .iter()
+        .fold(0u64, |total, part| total.saturating_add(part.size as u64));
+    emit_index_progress(
+        index_progress,
+        "downloadingParts",
+        Some(0),
+        Some(parts_bytes_total),
+        None,
+        Some(0),
+        Some(parts_total),
+        None,
+    );
 
     let mut compressed = Vec::new();
+    let mut part_bytes_downloaded = 0u64;
+    let mut parts_done = 0u64;
     for part in parts {
         if let Some(cancel) = cancel
             && cancel.is_cancelled()
@@ -151,6 +238,7 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
 
         let base_total = bytes_downloaded;
         let base_net_total = net_bytes_downloaded;
+        let part_base = part_bytes_downloaded;
         // Use a sentinel so "0 bytes downloaded" (e.g. fully satisfied from cache) is
         // distinguishable from "no progress callbacks were ever emitted".
         let latest = Arc::new(AtomicU64::new(u64::MAX));
@@ -176,6 +264,16 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
                             ..TaskProgress::default()
                         });
                     }
+                    emit_index_progress(
+                        index_progress,
+                        "downloadingParts",
+                        Some(part_base.saturating_add(n)),
+                        Some(parts_bytes_total),
+                        p.net_bytes,
+                        Some(parts_done),
+                        Some(parts_total),
+                        None,
+                    );
                 })),
             )
             .await
@@ -213,6 +311,7 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
             part_enc.len() as u64
         };
         bytes_downloaded = base_total.saturating_add(actual);
+        part_bytes_downloaded = part_base.saturating_add(actual);
         let streamed_net = latest_net.load(Ordering::Relaxed);
         if streamed_net != u64::MAX {
             net_bytes_downloaded = base_net_total.saturating_add(streamed_net);
@@ -226,6 +325,17 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
                 ..TaskProgress::default()
             });
         }
+        parts_done = parts_done.saturating_add(1);
+        emit_index_progress(
+            index_progress,
+            "verifying",
+            Some(part_bytes_downloaded),
+            Some(parts_bytes_total),
+            (streamed_net != u64::MAX).then_some(net_bytes_downloaded),
+            Some(parts_done),
+            Some(parts_total),
+            None,
+        );
 
         if part_enc.len() != part.size {
             return Err(Error::Integrity {
@@ -260,9 +370,29 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
         compressed.extend_from_slice(&part_plain);
     }
 
+    emit_index_progress(
+        index_progress,
+        "decompressing",
+        Some(part_bytes_downloaded),
+        Some(parts_bytes_total),
+        have_net_bytes.then_some(net_bytes_downloaded),
+        Some(parts_done),
+        Some(parts_total),
+        None,
+    );
     let sqlite_bytes = zstd::stream::decode_all(compressed.as_slice())?;
     let bytes_written = sqlite_bytes.len() as u64;
 
+    emit_index_progress(
+        index_progress,
+        "writing",
+        Some(part_bytes_downloaded),
+        Some(parts_bytes_total),
+        have_net_bytes.then_some(net_bytes_downloaded),
+        Some(parts_done),
+        Some(parts_total),
+        Some(0),
+    );
     write_index_db_atomic(index_db_path, &sqlite_bytes, normalize_provider).await?;
     if let Some(sink) = progress {
         sink.on_progress(TaskProgress {
@@ -272,12 +402,46 @@ pub async fn download_and_write_index_db_atomic<S: Storage>(
             ..TaskProgress::default()
         });
     }
+    emit_index_progress(
+        index_progress,
+        "ready",
+        Some(part_bytes_downloaded),
+        Some(parts_bytes_total),
+        have_net_bytes.then_some(net_bytes_downloaded),
+        Some(parts_done),
+        Some(parts_total),
+        Some(bytes_written),
+    );
 
     Ok(DownloadedIndexDbStats {
         bytes_downloaded,
         net_bytes_downloaded: have_net_bytes.then_some(net_bytes_downloaded),
         bytes_written,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_index_progress(
+    sink: Option<&dyn IndexDownloadProgressSink>,
+    phase: &str,
+    bytes_downloaded: Option<u64>,
+    bytes_total: Option<u64>,
+    net_bytes_downloaded: Option<u64>,
+    parts_done: Option<u64>,
+    parts_total: Option<u64>,
+    bytes_written: Option<u64>,
+) {
+    if let Some(sink) = sink {
+        sink.on_index_download_progress(IndexDownloadProgress {
+            phase: phase.to_string(),
+            bytes_downloaded,
+            bytes_total,
+            net_bytes_downloaded,
+            parts_done,
+            parts_total,
+            bytes_written,
+        });
+    }
 }
 
 async fn write_index_db_atomic(
@@ -387,8 +551,20 @@ mod tests {
     use super::*;
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Mutex;
 
     use sqlx::Row;
+
+    #[derive(Default)]
+    struct IndexProgressRecorder {
+        entries: Mutex<Vec<IndexDownloadProgress>>,
+    }
+
+    impl IndexDownloadProgressSink for IndexProgressRecorder {
+        fn on_index_download_progress(&self, progress: IndexDownloadProgress) {
+            self.entries.lock().unwrap().push(progress);
+        }
+    }
 
     struct FailOnDownload {
         inner: crate::InMemoryStorage,
@@ -482,7 +658,8 @@ mod tests {
             .await
             .unwrap();
 
-        let stats = download_and_write_index_db_atomic(
+        let recorder = IndexProgressRecorder::default();
+        let stats = download_and_write_index_db_atomic_with_progress(
             &storage,
             snapshot_id,
             &manifest_object_id,
@@ -491,6 +668,7 @@ mod tests {
             None,
             None,
             None,
+            Some(&recorder),
         )
         .await
         .unwrap();
@@ -500,6 +678,27 @@ mod tests {
 
         let out_bytes = fs::read(&out_db).unwrap();
         assert_eq!(out_bytes, sqlite_bytes);
+
+        let progress = recorder.entries.lock().unwrap();
+        let phases = progress
+            .iter()
+            .map(|entry| entry.phase.as_str())
+            .collect::<Vec<_>>();
+        for phase in [
+            "fetchingManifest",
+            "downloadingParts",
+            "verifying",
+            "decompressing",
+            "writing",
+            "ready",
+        ] {
+            assert!(phases.contains(&phase), "missing {phase} progress");
+        }
+        assert!(progress.iter().any(|entry| {
+            entry.phase == "downloadingParts"
+                && entry.bytes_total.is_some()
+                && entry.parts_total == Some(1)
+        }));
     }
 
     #[tokio::test]

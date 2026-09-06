@@ -4,7 +4,7 @@
 
 ## Current Status
 
-- Implementation: complete; Storage object inspection is available end to end
+- Implementation: active; Storage inspection uses an on-demand local sidecar index and exposes source-preparation progress end to end
 - Lifecycle: active
 - Catalog note: implemented
 
@@ -17,6 +17,8 @@
 - Files use a native `NSOutlineView` for lazy tree expansion and `NSTableView` for list/block pages. New, deleted, and changed states have SF Symbol icons and text labels. Blocks expose changed-file and referenced-file columns plus a baseline-aware changes-only toggle.
 - Rust covers current/legacy, first, direct-baseline-unavailable, empty legacy, logical block aggregation, cursor binding, and retention's preserved direct-baseline reference. Swift covers history eligibility and the app's existing UI isolation checks.
 - Storage coverage adds persistent physical-object metadata on successful uploads, snapshot-scoped Pack/Direct grouping, opaque-ID object-block paging, legacy unknown-size/time semantics, and daemon/CLI parity.
+- The Storage tab reads a complete local sidecar index instead of regrouping every snapshot mapping for each page or row expansion. Successful daemon backups schedule a local build without delaying their run result; an older missing sidecar is built when Storage is selected. Both use the selected snapshot's local filemap and the same endpoint/dedupe catalog, defer while backup activity is active, and atomically publish before pages become available.
+- Source-filemap preparation and Storage-index preparation are intentionally separate. The App displays local checks, remote snapshot-map download, verification, decompression, cache writing, and local Storage indexing as distinct states.
 
 ## Implementation Boundaries
 
@@ -25,6 +27,7 @@
 - The implementation does not expand the retention window or retain independent file history. It preserves a pruned direct `base_snapshot_id` solely so retained descendants can report `baselineUnavailable` instead of becoming indistinguishable from first snapshots.
 - The direct baseline remains the only comparison authority.
 - Physical object metadata is a local write-time directory only. It is read from the endpoint index or materialized remote-dedupe index; no Telegram inventory or metadata query is performed.
+- The Storage sidecar is a disposable local cache at `index/storage-inspection/<endpoint-id>/<snapshot-id>.sqlite`. It contains no raw Telegram locator fields, is neither uploaded nor synchronized, and follows snapshot retention cleanup.
 
 ## Remaining Gaps
 
