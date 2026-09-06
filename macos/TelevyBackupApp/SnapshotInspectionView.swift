@@ -1203,6 +1203,7 @@ private enum SnapshotNativeColumns {
         static let document = NSUserInterfaceItemIdentifier("snapshot-storage-document")
         static let logical = NSUserInterfaceItemIdentifier("snapshot-storage-logical")
         static let references = NSUserInterfaceItemIdentifier("snapshot-storage-references")
+        static let offset = NSUserInterfaceItemIdentifier("snapshot-storage-offset")
         static let recorded = NSUserInterfaceItemIdentifier("snapshot-storage-recorded")
 
         static func install(on table: NSTableView) {
@@ -1213,6 +1214,7 @@ private enum SnapshotNativeColumns {
             table.addTableColumn(column(title: "Document", identifier: document, width: 90, minWidth: 84, expands: false, alignment: .right))
             table.addTableColumn(column(title: "Logical", identifier: logical, width: 88, minWidth: 80, expands: false, alignment: .right))
             table.addTableColumn(column(title: "Blocks", identifier: references, width: 52, minWidth: 48, expands: false, alignment: .right))
+            table.addTableColumn(column(title: "Offset", identifier: offset, width: 116, minWidth: 104, expands: false, alignment: .right))
             table.addTableColumn(column(title: "Recorded", identifier: recorded, width: 110, minWidth: 96, expands: false, alignment: .right))
         }
     }
@@ -1553,6 +1555,7 @@ private struct SnapshotStorageTable: NSViewRepresentable {
                 case SnapshotNativeColumns.Storage.document: return SnapshotNativeRowView.storageDocument(entry: entry)
                 case SnapshotNativeColumns.Storage.logical: return SnapshotNativeRowView.storageLogical(entry: entry)
                 case SnapshotNativeColumns.Storage.references: return SnapshotNativeRowView.storageReferences(entry: entry)
+                case SnapshotNativeColumns.Storage.offset: return SnapshotNativeRowView.empty()
                 case SnapshotNativeColumns.Storage.recorded: return SnapshotNativeRowView.storageRecorded(entry: entry)
                 default: return nil
                 }
@@ -1562,7 +1565,8 @@ private struct SnapshotStorageTable: NSViewRepresentable {
                 case SnapshotNativeColumns.Storage.kind: return SnapshotNativeRowView.storageSliceType(entry: entry)
                 case SnapshotNativeColumns.Storage.document: return SnapshotNativeRowView.storageSliceLength(entry: entry)
                 case SnapshotNativeColumns.Storage.logical: return SnapshotNativeRowView.storageBlockSize(entry: entry)
-                case SnapshotNativeColumns.Storage.references: return SnapshotNativeRowView.storageSliceOffset(entry: entry)
+                case SnapshotNativeColumns.Storage.references: return SnapshotNativeRowView.empty()
+                case SnapshotNativeColumns.Storage.offset: return SnapshotNativeRowView.storageSliceOffset(entry: entry)
                 case SnapshotNativeColumns.Storage.recorded: return SnapshotNativeRowView.empty()
                 default: return nil
                 }
@@ -1841,7 +1845,8 @@ private enum SnapshotNativeRowView {
     }
 
     static func storageSliceOffset(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
-        textCell(text: "offset \(formatBytes(Int64(entry.offset)))", font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Slice offset: \(formatBytes(Int64(entry.offset)))")
+        let text = "\(entry.offset) B"
+        return textCell(text: text, font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Slice offset: \(text)")
     }
 
     static func empty() -> NSTableCellView {
