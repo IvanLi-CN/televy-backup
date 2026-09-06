@@ -4,6 +4,8 @@ import Darwin
 import Foundation
 import SwiftUI
 
+private let snapshotTableSurfaceCornerRadius: CGFloat = 10
+
 private struct SnapshotInspectionSummary: Decodable {
     struct Snapshot: Decodable {
         let snapshotId: String
@@ -970,10 +972,12 @@ struct SnapshotRunDetailView: View {
                 SnapshotInspectionStateView(icon: "folder", title: "No files", detail: "No retained paths match this view.", showsProgress: false)
             } else if presentation == .tree {
                 SnapshotOutlineTable(entriesByParent: store.treeEntries, onExpand: { store.loadTreeChildren(parent: $0) })
+                    .clipShape(RoundedRectangle(cornerRadius: snapshotTableSurfaceCornerRadius, style: .continuous))
             } else if store.listEntries.isEmpty, !store.filesLoading {
                 SnapshotInspectionStateView(icon: "doc", title: "No files", detail: "No retained paths match this view.", showsProgress: false)
             } else {
                 SnapshotFileTable(entries: store.listEntries, onReachedBottom: { store.loadMoreList() })
+                    .clipShape(RoundedRectangle(cornerRadius: snapshotTableSurfaceCornerRadius, style: .continuous))
             }
             if store.filesLoading {
                 HStack(spacing: 6) {
@@ -1085,6 +1089,7 @@ struct SnapshotRunDetailView: View {
                 SnapshotInspectionStateView(icon: "square.stack.3d.up", title: "No blocks", detail: "This snapshot has no regular-file blocks.", showsProgress: false)
             } else {
                 SnapshotBlockTable(entries: store.blocks, onReachedBottom: { store.loadMoreBlocks() })
+                    .clipShape(RoundedRectangle(cornerRadius: snapshotTableSurfaceCornerRadius, style: .continuous))
             }
             if store.blocksLoading {
                 HStack(spacing: 6) {
@@ -1112,6 +1117,7 @@ struct SnapshotRunDetailView: View {
                     onReachedBottom: { store.loadMoreStorage() },
                     onToggle: { store.toggleStorage($0) }
                 )
+                .clipShape(RoundedRectangle(cornerRadius: snapshotTableSurfaceCornerRadius, style: .continuous))
             }
             if store.storageLoading {
                 HStack(spacing: 6) {
