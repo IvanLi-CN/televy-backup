@@ -990,7 +990,7 @@ struct SnapshotRunDetailView: View {
     }
 
     private func fileControls(summary: SnapshotInspectionSummary) -> some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .center, spacing: 8) {
             filePresentationPicker
             changesOnlyToggle
             fileSearchField
@@ -1042,6 +1042,8 @@ struct SnapshotRunDetailView: View {
             .controlSize(.small)
             .font(.system(size: 11, weight: .medium))
             .disabled(!store.changesAvailable)
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(minHeight: 22, alignment: .center)
     }
 
     private var compactChangesOnlyToggle: some View {
