@@ -639,6 +639,15 @@ struct SnapshotRunDetailView: View {
         case storage = "Storage"
 
         var id: String { rawValue }
+
+        var systemImage: String {
+            switch self {
+            case .summary: return "list.bullet.rectangle"
+            case .files: return "folder"
+            case .blocks: return "square.stack.3d.up"
+            case .storage: return "externaldrive"
+            }
+        }
     }
 
     @StateObject private var store = SnapshotInspectionStore()
@@ -686,8 +695,8 @@ struct SnapshotRunDetailView: View {
         if tab == .files, let summary = store.summary, store.issue == nil {
             ViewThatFits(in: .horizontal) {
                 wideFileToolbar(summary: summary)
-                stackedFileToolbar(summary: summary)
                 compactFileToolbar(summary: summary)
+                stackedFileToolbar(summary: summary)
             }
         } else if tab == .blocks, let summary = store.summary, store.issue == nil {
             ViewThatFits(in: .horizontal) {
@@ -697,6 +706,7 @@ struct SnapshotRunDetailView: View {
         } else if tab == .storage, store.issue == nil {
             ViewThatFits(in: .horizontal) {
                 wideStorageToolbar
+                compactStorageToolbar
                 stackedStorageToolbar
             }
         } else {
@@ -705,9 +715,8 @@ struct SnapshotRunDetailView: View {
     }
 
     private func wideFileToolbar(summary: SnapshotInspectionSummary) -> some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 10) {
             tabPicker
-            Spacer(minLength: 24)
             fileControls(summary: summary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -715,9 +724,9 @@ struct SnapshotRunDetailView: View {
 
     private func stackedFileToolbar(summary: SnapshotInspectionSummary) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            tabPicker
+            compactTabPicker
             HStack(spacing: 8) {
-                fileControls(summary: summary)
+                compactFileControls(summary: summary)
                 Spacer(minLength: 0)
             }
         }
@@ -725,23 +734,16 @@ struct SnapshotRunDetailView: View {
     }
 
     private func compactFileToolbar(summary: SnapshotInspectionSummary) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            tabPicker
-            HStack(spacing: 8) {
-                filePresentationPicker
-                changesOnlyToggle
-                Spacer(minLength: 0)
-            }
-            fileSearchField.frame(maxWidth: .infinity)
-            availabilityNotice(summary: summary)
+        HStack(spacing: 8) {
+            compactTabPicker
+            compactFileControls(summary: summary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func wideBlockToolbar(summary: SnapshotInspectionSummary) -> some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 10) {
             tabPicker
-            Spacer(minLength: 24)
             blockControls(summary: summary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -763,18 +765,25 @@ struct SnapshotRunDetailView: View {
     }
 
     private var wideStorageToolbar: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 10) {
             tabPicker
-            Spacer(minLength: 24)
             storageControls
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var compactStorageToolbar: some View {
+        HStack(spacing: 8) {
+            compactTabPicker
+            compactStorageControls
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var stackedStorageToolbar: some View {
         VStack(alignment: .leading, spacing: 8) {
-            tabPicker
-            storageControls
+            compactTabPicker
+            compactStorageControls
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -789,10 +798,49 @@ struct SnapshotRunDetailView: View {
             .labelsHidden()
             .pickerStyle(.segmented)
             .controlSize(.small)
-            .frame(width: 158)
+            .frame(minWidth: 132, idealWidth: 144, maxWidth: 144)
             TextField("Search object ID", text: $storageQuery)
                 .textFieldStyle(.roundedBorder)
-                .frame(minWidth: 150, idealWidth: 210, maxWidth: 260)
+                .frame(minWidth: 110, idealWidth: 190, maxWidth: .infinity)
+                .layoutPriority(1)
+        }
+    }
+
+    private var compactStorageControls: some View {
+        HStack(spacing: 8) {
+            Picker("Storage kind", selection: $storageKind) {
+                Image(systemName: "square.grid.2x2")
+                    .accessibilityLabel("All")
+                    .help("All storage objects")
+                    .tag(String?.none)
+                Image(systemName: "shippingbox")
+                    .accessibilityLabel("Pack")
+                    .help("Pack objects")
+                    .tag(String?.some("pack"))
+                Image(systemName: "doc")
+                    .accessibilityLabel("Direct")
+                    .help("Direct objects")
+                    .tag(String?.some("direct"))
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .frame(width: 86)
+            .accessibilityLabel("Storage kind")
+            .accessibilityValue(storageKindLabel)
+            TextField("Search object ID", text: $storageQuery)
+                .textFieldStyle(.roundedBorder)
+                .frame(minWidth: 100, idealWidth: 170, maxWidth: .infinity)
+                .layoutPriority(1)
+        }
+    }
+
+    private var storageKindLabel: String {
+        switch storageKind {
+        case nil: return "All"
+        case .some("pack"): return "Pack"
+        case .some("direct"): return "Direct"
+        default: return "All"
         }
     }
 
@@ -823,7 +871,24 @@ struct SnapshotRunDetailView: View {
         }
         .pickerStyle(.segmented)
         .controlSize(.small)
-        .frame(width: 280)
+        .frame(minWidth: 208, idealWidth: 238, maxWidth: 238)
+    }
+
+    private var compactTabPicker: some View {
+        Picker("Snapshot section", selection: $tab) {
+            ForEach(Tab.allCases) { tab in
+                Image(systemName: tab.systemImage)
+                    .accessibilityLabel(tab.rawValue)
+                    .help(tab.rawValue)
+                    .tag(tab)
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .controlSize(.small)
+        .frame(width: 184)
+        .accessibilityLabel("Snapshot section")
+        .accessibilityValue(tab.rawValue)
     }
 
     private var header: some View {
@@ -933,6 +998,15 @@ struct SnapshotRunDetailView: View {
         }
     }
 
+    private func compactFileControls(summary: SnapshotInspectionSummary) -> some View {
+        HStack(spacing: 8) {
+            compactFilePresentationPicker
+            compactChangesOnlyToggle
+            fileSearchField
+            availabilityNotice(summary: summary)
+        }
+    }
+
     private var filePresentationPicker: some View {
         Picker("File presentation", selection: $presentation) {
             ForEach(SnapshotInspectionPresentation.allCases) { item in Text(item.rawValue).tag(item) }
@@ -943,6 +1017,25 @@ struct SnapshotRunDetailView: View {
         .frame(width: 98)
     }
 
+    private var compactFilePresentationPicker: some View {
+        Picker("File presentation", selection: $presentation) {
+            Image(systemName: "rectangle.split.3x1")
+                .accessibilityLabel("Tree")
+                .help("Tree")
+                .tag(SnapshotInspectionPresentation.tree)
+            Image(systemName: "list.bullet")
+                .accessibilityLabel("List")
+                .help("List")
+                .tag(SnapshotInspectionPresentation.list)
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .controlSize(.small)
+        .frame(width: 64)
+        .accessibilityLabel("File presentation")
+        .accessibilityValue(presentation.rawValue)
+    }
+
     private var changesOnlyToggle: some View {
         Toggle("Changes only", isOn: $changesOnly)
             .toggleStyle(.checkbox)
@@ -951,10 +1044,25 @@ struct SnapshotRunDetailView: View {
             .disabled(!store.changesAvailable)
     }
 
+    private var compactChangesOnlyToggle: some View {
+        Toggle(isOn: $changesOnly) {
+            Image(systemName: changesOnly ? "checkmark.square.fill" : "square")
+        }
+        .toggleStyle(.button)
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .frame(width: 24, height: 24)
+        .disabled(!store.changesAvailable)
+        .help("Changes only")
+        .accessibilityLabel("Changes only")
+        .accessibilityValue(changesOnly ? "On" : "Off")
+    }
+
     private var fileSearchField: some View {
         TextField("Search paths", text: $query)
             .textFieldStyle(.roundedBorder)
-            .frame(minWidth: 125, idealWidth: 180, maxWidth: 250)
+            .frame(minWidth: 100, idealWidth: 170, maxWidth: .infinity)
+            .layoutPriority(1)
     }
 
     @ViewBuilder
