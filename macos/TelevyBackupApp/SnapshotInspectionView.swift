@@ -292,6 +292,10 @@ private final class SnapshotInspectionStore: ObservableObject {
         loadListPage()
     }
 
+    func loadMoreTreeChildren(parent: String) {
+        loadTreeChildren(parent: parent)
+    }
+
     func loadTreeChildren(parent: String) {
         guard activePresentation == .tree,
               !treeReachedEnd.contains(parent),
@@ -354,6 +358,11 @@ private final class SnapshotInspectionStore: ObservableObject {
         loadStoragePage()
     }
 
+    func loadMoreStorageBlocks(_ storageId: String) {
+        guard storageBlocks[storageId] != nil else { return }
+        loadStorageBlocks(storageId)
+    }
+
     func retryStorageIndex() {
         storagePreparationError = nil
         storageRetryRequested = true
@@ -371,6 +380,16 @@ private final class SnapshotInspectionStore: ObservableObject {
     }
 
     var loadingStorageObjectIDs: Set<String> { storageBlockLoading }
+
+    var treeParentsWithMorePages: Set<String> {
+        Set(treeNextCursor.compactMap { parent, cursor in cursor == nil ? nil : parent })
+    }
+
+    var storageHasMorePages: Bool { !storageReachedEnd }
+
+    var storageBlockIDsWithMorePages: Set<String> {
+        Set(storageBlockNextCursor.compactMap { storageId, cursor in cursor == nil ? nil : storageId })
+    }
 
     var changesAvailable: Bool {
         summary?.availability.state != "baselineUnavailable"
@@ -1192,7 +1211,12 @@ struct SnapshotRunDetailView: View {
             if presentation == .tree, store.treeEntries["", default: []].isEmpty, !store.filesLoading {
                 SnapshotInspectionStateView(icon: "folder", title: "No files", detail: "No retained paths match this view.", showsProgress: false)
             } else if presentation == .tree {
-                SnapshotOutlineTable(entriesByParent: store.treeEntries, onExpand: { store.loadTreeChildren(parent: $0) })
+                SnapshotOutlineTable(
+                    entriesByParent: store.treeEntries,
+                    parentsWithMorePages: store.treeParentsWithMorePages,
+                    onExpand: { store.loadTreeChildren(parent: $0) },
+                    onReachedBottom: { store.loadMoreTreeChildren(parent: $0) }
+                )
                     .clipShape(RoundedRectangle(cornerRadius: snapshotTableSurfaceCornerRadius, style: .continuous))
             } else if store.listEntries.isEmpty, !store.filesLoading {
                 SnapshotInspectionStateView(icon: "doc", title: "No files", detail: "No retained paths match this view.", showsProgress: false)
@@ -1347,7 +1371,10 @@ struct SnapshotRunDetailView: View {
                     entries: store.storageEntries,
                     expandedBlocks: store.storageBlocks,
                     loadingObjectIDs: store.loadingStorageObjectIDs,
-                    onReachedBottom: { store.loadMoreStorage() },
+                    hasMoreStoragePages: store.storageHasMorePages,
+                    storageBlockIDsWithMorePages: store.storageBlockIDsWithMorePages,
+                    onReachedStorageBottom: { store.loadMoreStorage() },
+                    onReachedStorageBlocksBottom: { store.loadMoreStorageBlocks($0) },
                     onToggle: { store.toggleStorage($0) }
                 )
                 .clipShape(RoundedRectangle(cornerRadius: snapshotTableSurfaceCornerRadius, style: .continuous))
@@ -1533,6 +1560,45 @@ enum SnapshotOutlineExpansion {
     }
 }
 
+enum SnapshotOutlinePagination {
+    static func nextParent(
+        afterVisiblePath path: String?,
+        parentPathByEntry: [String: String],
+        parentsWithMorePages: Set<String>
+    ) -> String? {
+        guard !parentsWithMorePages.isEmpty else { return nil }
+
+        var candidate = path.flatMap { parentPathByEntry[$0] } ?? ""
+        while true {
+            if parentsWithMorePages.contains(candidate) { return candidate }
+            guard !candidate.isEmpty, let parent = parentPathByEntry[candidate] else {
+                return parentsWithMorePages.contains("") ? "" : nil
+            }
+            candidate = parent
+        }
+    }
+}
+
+enum SnapshotStoragePaginationTarget: Equatable {
+    case objects
+    case blocks(String)
+}
+
+enum SnapshotStoragePagination {
+    static func target(
+        lastVisibleBlockStorageID: String?,
+        hasMoreStoragePages: Bool,
+        storageBlockIDsWithMorePages: Set<String>
+    ) -> SnapshotStoragePaginationTarget? {
+        if let storageId = lastVisibleBlockStorageID,
+           storageBlockIDsWithMorePages.contains(storageId)
+        {
+            return .blocks(storageId)
+        }
+        return hasMoreStoragePages ? .objects : nil
+    }
+}
+
 private final class SnapshotOutlineNode: NSObject {
     let entry: SnapshotFileEntry
     var children: [SnapshotOutlineNode]
@@ -1615,7 +1681,9 @@ private enum SnapshotNativeColumns {
 
 private struct SnapshotOutlineTable: NSViewRepresentable {
     let entriesByParent: [String: [SnapshotFileEntry]]
+    let parentsWithMorePages: Set<String>
     let onExpand: (String) -> Void
+    let onReachedBottom: (String) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -1627,30 +1695,38 @@ private struct SnapshotOutlineTable: NSViewRepresentable {
         SnapshotNativeColumns.File.install(on: outline)
         outline.outlineTableColumn = outline.tableColumn(withIdentifier: SnapshotNativeColumns.File.name)
         outline.setAccessibilityLabel("Snapshot file tree")
-        let scroll = SnapshotNativeTable.scrollView(table: outline)
+        let scroll = SnapshotNativeTable.scrollView(table: outline, coordinator: context.coordinator)
         context.coordinator.outline = outline
         context.coordinator.onExpand = onExpand
+        context.coordinator.onReachedBottom = onReachedBottom
         context.coordinator.entriesByParent = entriesByParent
+        context.coordinator.parentsWithMorePages = parentsWithMorePages
         context.coordinator.reload()
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.onExpand = onExpand
+        context.coordinator.onReachedBottom = onReachedBottom
         context.coordinator.entriesByParent = entriesByParent
+        context.coordinator.parentsWithMorePages = parentsWithMorePages
         context.coordinator.reload()
     }
 
-    final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
+    final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, SnapshotNativeTableObserver {
         weak var outline: NSOutlineView?
         var entriesByParent: [String: [SnapshotFileEntry]] = [:]
         var rootNodes: [SnapshotOutlineNode] = []
         var onExpand: ((String) -> Void)?
+        var onReachedBottom: ((String) -> Void)?
+        var parentsWithMorePages = Set<String>()
+        private var parentPathByEntry: [String: String] = [:]
         private var isRestoringExpansion = false
 
         func reload() {
             let previouslyExpanded = expandedPaths()
-            rootNodes = makeNodes(entriesByParent[""] ?? [])
+            parentPathByEntry = [:]
+            rootNodes = makeNodes(entriesByParent[""] ?? [], parentPath: "")
             guard let outline else { return }
             let pathsToRestore = SnapshotOutlineExpansion.pathsToRestore(
                 previouslyExpanded: previouslyExpanded,
@@ -1660,9 +1736,13 @@ private struct SnapshotOutlineTable: NSViewRepresentable {
             restoreExpansion(paths: pathsToRestore, in: outline)
         }
 
-        private func makeNodes(_ entries: [SnapshotFileEntry]) -> [SnapshotOutlineNode] {
+        private func makeNodes(_ entries: [SnapshotFileEntry], parentPath: String) -> [SnapshotOutlineNode] {
             entries.map { entry in
-                SnapshotOutlineNode(entry: entry, children: makeNodes(entriesByParent[entry.path] ?? []))
+                parentPathByEntry[entry.path] = parentPath
+                return SnapshotOutlineNode(
+                    entry: entry,
+                    children: makeNodes(entriesByParent[entry.path] ?? [], parentPath: entry.path)
+                )
             }
         }
 
@@ -1733,13 +1813,28 @@ private struct SnapshotOutlineTable: NSViewRepresentable {
             switch tableColumn.identifier {
             case SnapshotNativeColumns.File.name:
                 let inset = CGFloat(outlineView.level(forItem: node)) * outlineView.indentationPerLevel
-                return SnapshotNativeRowView.fileName(entry: node.entry, leadingInset: inset, usesOutlineLayout: true)
+                return SnapshotNativeRowView.fileName(in: outlineView, entry: node.entry, leadingInset: inset, usesOutlineLayout: true)
             case SnapshotNativeColumns.File.change:
-                return SnapshotNativeRowView.fileChange(entry: node.entry)
+                return SnapshotNativeRowView.fileChange(in: outlineView, entry: node.entry)
             case SnapshotNativeColumns.File.size:
-                return SnapshotNativeRowView.fileSize(entry: node.entry)
+                return SnapshotNativeRowView.fileSize(in: outlineView, entry: node.entry)
             default:
                 return nil
+            }
+        }
+
+        func visibleRowsApproachEnd() {
+            guard let outline else { return }
+            let visibleRows = outline.rows(in: outline.visibleRect)
+            guard visibleRows.length > 0 else { return }
+            let lastVisibleRow = visibleRows.location + visibleRows.length - 1
+            let path = (outline.item(atRow: lastVisibleRow) as? SnapshotOutlineNode)?.entry.path
+            if let parent = SnapshotOutlinePagination.nextParent(
+                afterVisiblePath: path,
+                parentPathByEntry: parentPathByEntry,
+                parentsWithMorePages: parentsWithMorePages
+            ) {
+                onReachedBottom?(parent)
             }
         }
     }
@@ -1778,16 +1873,16 @@ private struct SnapshotFileTable: NSViewRepresentable {
 
         func numberOfRows(in _: NSTableView) -> Int { entries.count }
 
-        func tableView(_: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard let tableColumn else { return nil }
             let entry = entries[row]
             switch tableColumn.identifier {
             case SnapshotNativeColumns.File.name:
-                return SnapshotNativeRowView.fileName(entry: entry, leadingInset: 0, usesOutlineLayout: false)
+                return SnapshotNativeRowView.fileName(in: tableView, entry: entry, leadingInset: 0, usesOutlineLayout: false)
             case SnapshotNativeColumns.File.change:
-                return SnapshotNativeRowView.fileChange(entry: entry)
+                return SnapshotNativeRowView.fileChange(in: tableView, entry: entry)
             case SnapshotNativeColumns.File.size:
-                return SnapshotNativeRowView.fileSize(entry: entry)
+                return SnapshotNativeRowView.fileSize(in: tableView, entry: entry)
             default:
                 return nil
             }
@@ -1830,18 +1925,18 @@ private struct SnapshotBlockTable: NSViewRepresentable {
 
         func numberOfRows(in _: NSTableView) -> Int { entries.count }
 
-        func tableView(_: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard let tableColumn else { return nil }
             let entry = entries[row]
             switch tableColumn.identifier {
             case SnapshotNativeColumns.Block.hash:
-                return SnapshotNativeRowView.blockHash(entry: entry)
+                return SnapshotNativeRowView.blockHash(in: tableView, entry: entry)
             case SnapshotNativeColumns.Block.size:
-                return SnapshotNativeRowView.blockSize(entry: entry)
+                return SnapshotNativeRowView.blockSize(in: tableView, entry: entry)
             case SnapshotNativeColumns.Block.changedFiles:
-                return SnapshotNativeRowView.blockChangedFiles(entry: entry)
+                return SnapshotNativeRowView.blockChangedFiles(in: tableView, entry: entry)
             case SnapshotNativeColumns.Block.referencedFiles:
-                return SnapshotNativeRowView.blockReferencedFiles(entry: entry)
+                return SnapshotNativeRowView.blockReferencedFiles(in: tableView, entry: entry)
             default:
                 return nil
             }
@@ -1855,7 +1950,10 @@ private struct SnapshotStorageTable: NSViewRepresentable {
     let entries: [SnapshotStorageEntry]
     let expandedBlocks: [String: [SnapshotStorageBlockEntry]]
     let loadingObjectIDs: Set<String>
-    let onReachedBottom: () -> Void
+    let hasMoreStoragePages: Bool
+    let storageBlockIDsWithMorePages: Set<String>
+    let onReachedStorageBottom: () -> Void
+    let onReachedStorageBlocksBottom: (String) -> Void
     let onToggle: (SnapshotStorageEntry) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -1869,22 +1967,36 @@ private struct SnapshotStorageTable: NSViewRepresentable {
         table.setAccessibilityLabel("Snapshot storage objects")
         let scroll = SnapshotNativeTable.scrollView(table: table, coordinator: context.coordinator)
         context.coordinator.table = table
-        context.coordinator.onReachedBottom = onReachedBottom
+        context.coordinator.onReachedStorageBottom = onReachedStorageBottom
+        context.coordinator.onReachedStorageBlocksBottom = onReachedStorageBlocksBottom
         context.coordinator.onToggle = onToggle
-        context.coordinator.update(entries: entries, expandedBlocks: expandedBlocks, loadingObjectIDs: loadingObjectIDs)
+        context.coordinator.update(
+            entries: entries,
+            expandedBlocks: expandedBlocks,
+            loadingObjectIDs: loadingObjectIDs,
+            hasMoreStoragePages: hasMoreStoragePages,
+            storageBlockIDsWithMorePages: storageBlockIDsWithMorePages
+        )
         return scroll
     }
 
     func updateNSView(_: NSScrollView, context: Context) {
-        context.coordinator.onReachedBottom = onReachedBottom
+        context.coordinator.onReachedStorageBottom = onReachedStorageBottom
+        context.coordinator.onReachedStorageBlocksBottom = onReachedStorageBlocksBottom
         context.coordinator.onToggle = onToggle
-        context.coordinator.update(entries: entries, expandedBlocks: expandedBlocks, loadingObjectIDs: loadingObjectIDs)
+        context.coordinator.update(
+            entries: entries,
+            expandedBlocks: expandedBlocks,
+            loadingObjectIDs: loadingObjectIDs,
+            hasMoreStoragePages: hasMoreStoragePages,
+            storageBlockIDsWithMorePages: storageBlockIDsWithMorePages
+        )
     }
 
     final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, SnapshotNativeTableObserver {
         enum Row {
             case object(SnapshotStorageEntry)
-            case block(SnapshotStorageBlockEntry)
+            case block(storageId: String, entry: SnapshotStorageBlockEntry)
         }
 
         weak var table: NSTableView?
@@ -1892,19 +2004,33 @@ private struct SnapshotStorageTable: NSViewRepresentable {
         var storageEntriesByID: [String: SnapshotStorageEntry] = [:]
         var expandedStorageIDs: Set<String> = []
         var loadingStorageIDs: Set<String> = []
-        var onReachedBottom: (() -> Void)?
+        var hasMoreStoragePages = false
+        var storageBlockIDsWithMorePages = Set<String>()
+        var onReachedStorageBottom: (() -> Void)?
+        var onReachedStorageBlocksBottom: ((String) -> Void)?
         var onToggle: ((SnapshotStorageEntry) -> Void)?
 
-        func update(entries: [SnapshotStorageEntry], expandedBlocks: [String: [SnapshotStorageBlockEntry]], loadingObjectIDs: Set<String>) {
+        func update(
+            entries: [SnapshotStorageEntry],
+            expandedBlocks: [String: [SnapshotStorageBlockEntry]],
+            loadingObjectIDs: Set<String>,
+            hasMoreStoragePages: Bool,
+            storageBlockIDsWithMorePages: Set<String>
+        ) {
             storageEntriesByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
             expandedStorageIDs = Set(expandedBlocks.keys)
             loadingStorageIDs = loadingObjectIDs
+            self.hasMoreStoragePages = hasMoreStoragePages
+            self.storageBlockIDsWithMorePages = storageBlockIDsWithMorePages
             rows = entries.flatMap { entry -> [Row] in
                 var result: [Row] = [.object(entry)]
                 if let blocks = expandedBlocks[entry.id] {
-                    result.append(contentsOf: blocks.map(Row.block))
+                    result.append(contentsOf: blocks.map { .block(storageId: entry.id, entry: $0) })
                 } else if loadingObjectIDs.contains(entry.id) {
-                    result.append(.block(SnapshotStorageBlockEntry(hash: "Loading slices...", size: 0, offset: 0, length: 0)))
+                    result.append(.block(
+                        storageId: entry.id,
+                        entry: SnapshotStorageBlockEntry(hash: "Loading slices...", size: 0, offset: 0, length: 0)
+                    ))
                 }
                 return result
             }
@@ -1921,26 +2047,27 @@ private struct SnapshotStorageTable: NSViewRepresentable {
                 case SnapshotNativeColumns.Storage.object:
                     let isExpanded = expandedStorageIDs.contains(entry.id) || loadingStorageIDs.contains(entry.id)
                     return SnapshotNativeRowView.storageObject(
+                        in: tableView,
                         entry: entry,
                         isExpanded: isExpanded,
                         target: self,
                         action: #selector(toggleStorageObject(_:))
                     )
-                case SnapshotNativeColumns.Storage.kind: return SnapshotNativeRowView.storageKind(entry: entry)
-                case SnapshotNativeColumns.Storage.document: return SnapshotNativeRowView.storageDocument(entry: entry)
-                case SnapshotNativeColumns.Storage.logical: return SnapshotNativeRowView.storageLogical(entry: entry)
-                case SnapshotNativeColumns.Storage.references: return SnapshotNativeRowView.storageReferences(entry: entry)
-                case SnapshotNativeColumns.Storage.recorded: return SnapshotNativeRowView.storageRecorded(entry: entry)
+                case SnapshotNativeColumns.Storage.kind: return SnapshotNativeRowView.storageKind(in: tableView, entry: entry)
+                case SnapshotNativeColumns.Storage.document: return SnapshotNativeRowView.storageDocument(in: tableView, entry: entry)
+                case SnapshotNativeColumns.Storage.logical: return SnapshotNativeRowView.storageLogical(in: tableView, entry: entry)
+                case SnapshotNativeColumns.Storage.references: return SnapshotNativeRowView.storageReferences(in: tableView, entry: entry)
+                case SnapshotNativeColumns.Storage.recorded: return SnapshotNativeRowView.storageRecorded(in: tableView, entry: entry)
                 default: return nil
                 }
-            case let .block(entry):
+            case let .block(_, entry):
                 switch tableColumn.identifier {
-                case SnapshotNativeColumns.Storage.object: return SnapshotNativeRowView.storageBlock(entry: entry)
-                case SnapshotNativeColumns.Storage.kind: return SnapshotNativeRowView.storageSliceType(entry: entry)
-                case SnapshotNativeColumns.Storage.document: return SnapshotNativeRowView.storageSliceLength(entry: entry)
-                case SnapshotNativeColumns.Storage.logical: return SnapshotNativeRowView.storageBlockSize(entry: entry)
-                case SnapshotNativeColumns.Storage.references: return SnapshotNativeRowView.empty()
-                case SnapshotNativeColumns.Storage.recorded: return SnapshotNativeRowView.empty()
+                case SnapshotNativeColumns.Storage.object: return SnapshotNativeRowView.storageBlock(in: tableView, entry: entry)
+                case SnapshotNativeColumns.Storage.kind: return SnapshotNativeRowView.storageSliceType(in: tableView, entry: entry)
+                case SnapshotNativeColumns.Storage.document: return SnapshotNativeRowView.storageSliceLength(in: tableView, entry: entry)
+                case SnapshotNativeColumns.Storage.logical: return SnapshotNativeRowView.storageBlockSize(in: tableView, entry: entry)
+                case SnapshotNativeColumns.Storage.references: return SnapshotNativeRowView.empty(in: tableView)
+                case SnapshotNativeColumns.Storage.recorded: return SnapshotNativeRowView.empty(in: tableView)
                 default: return nil
                 }
             }
@@ -1957,7 +2084,28 @@ private struct SnapshotStorageTable: NSViewRepresentable {
             onToggle?(entry)
         }
 
-        func visibleRowsApproachEnd() { onReachedBottom?() }
+        func visibleRowsApproachEnd() {
+            guard let table else { return }
+            let visibleRows = table.rows(in: table.visibleRect)
+            guard visibleRows.length > 0 else { return }
+            let lastVisibleRow = visibleRows.location + visibleRows.length - 1
+            guard rows.indices.contains(lastVisibleRow) else { return }
+            let lastVisibleBlockStorageID: String?
+            if case let .block(storageId, _) = rows[lastVisibleRow] {
+                lastVisibleBlockStorageID = storageId
+            } else {
+                lastVisibleBlockStorageID = nil
+            }
+            switch SnapshotStoragePagination.target(
+                lastVisibleBlockStorageID: lastVisibleBlockStorageID,
+                hasMoreStoragePages: hasMoreStoragePages,
+                storageBlockIDsWithMorePages: storageBlockIDsWithMorePages
+            ) {
+            case let .blocks(storageId): onReachedStorageBlocksBottom?(storageId)
+            case .objects: onReachedStorageBottom?()
+            case nil: break
+            }
+        }
     }
 }
 
@@ -2051,14 +2199,170 @@ private enum SnapshotNativeTable {
     }
 }
 
+private enum SnapshotNativeCellIdentifier {
+    static let name = NSUserInterfaceItemIdentifier("snapshot-inspection-name-cell")
+    static let text = NSUserInterfaceItemIdentifier("snapshot-inspection-text-cell")
+    static let storageObject = NSUserInterfaceItemIdentifier("snapshot-inspection-storage-object-cell")
+}
+
+private final class SnapshotNameCellView: NSTableCellView {
+    private let symbolImageView = NSImageView()
+    private let valueLabel = NSTextField(labelWithString: "")
+    private var leadingConstraint: NSLayoutConstraint!
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        installSubviews()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        installSubviews()
+    }
+
+    func configure(
+        name: String,
+        icon: String,
+        tint: NSColor,
+        accessibility: String,
+        leadingInset: CGFloat,
+        usesOutlineLayout: Bool,
+        font: NSFont
+    ) {
+        symbolImageView.image = NSImage(systemSymbolName: icon, accessibilityDescription: accessibility) ?? NSImage()
+        symbolImageView.contentTintColor = tint
+        valueLabel.stringValue = name
+        valueLabel.font = font
+        leadingConstraint.constant = leadingInset + 4
+        imageView = usesOutlineLayout ? nil : symbolImageView
+        textField = usesOutlineLayout ? nil : valueLabel
+        setAccessibilityLabel(accessibility)
+    }
+
+    private func installSubviews() {
+        identifier = SnapshotNativeCellIdentifier.name
+        symbolImageView.translatesAutoresizingMaskIntoConstraints = false
+        symbolImageView.imageScaling = .scaleProportionallyDown
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+        valueLabel.lineBreakMode = .byTruncatingMiddle
+        addSubview(symbolImageView)
+        addSubview(valueLabel)
+        leadingConstraint = symbolImageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4)
+        NSLayoutConstraint.activate([
+            leadingConstraint,
+            symbolImageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            symbolImageView.widthAnchor.constraint(equalToConstant: 16),
+            symbolImageView.heightAnchor.constraint(equalToConstant: 16),
+            valueLabel.leadingAnchor.constraint(equalTo: symbolImageView.trailingAnchor, constant: 6),
+            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+}
+
+private final class SnapshotTextCellView: NSTableCellView {
+    private let valueLabel = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        installSubviews()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        installSubviews()
+    }
+
+    func configure(text: String, font: NSFont, color: NSColor, alignment: NSTextAlignment, accessibility: String) {
+        valueLabel.stringValue = text
+        valueLabel.font = font
+        valueLabel.textColor = color
+        valueLabel.alignment = alignment
+        setAccessibilityLabel(accessibility)
+    }
+
+    private func installSubviews() {
+        identifier = SnapshotNativeCellIdentifier.text
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+        valueLabel.lineBreakMode = .byTruncatingMiddle
+        addSubview(valueLabel)
+        NSLayoutConstraint.activate([
+            valueLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        textField = valueLabel
+    }
+}
+
+private final class SnapshotStorageObjectCellView: NSTableCellView {
+    private let disclosure = NSButton(title: "", target: nil, action: nil)
+    private let symbolImageView = NSImageView()
+    private let valueLabel = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        installSubviews()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        installSubviews()
+    }
+
+    func configure(entry: SnapshotStorageEntry, isExpanded: Bool, target: AnyObject, action: Selector) {
+        disclosure.identifier = NSUserInterfaceItemIdentifier(entry.id)
+        disclosure.target = target
+        disclosure.action = action
+        disclosure.state = isExpanded ? .on : .off
+        disclosure.setAccessibilityLabel(isExpanded ? "Collapse storage object \(entry.shortId)" : "Expand storage object \(entry.shortId)")
+        symbolImageView.image = NSImage(systemSymbolName: entry.kind == "pack" ? "shippingbox" : "doc", accessibilityDescription: "Storage object") ?? NSImage()
+        symbolImageView.contentTintColor = entry.kind == "pack" ? .controlAccentColor : .secondaryLabelColor
+        valueLabel.stringValue = entry.shortId
+        setAccessibilityLabel("Storage object \(entry.shortId)")
+    }
+
+    private func installSubviews() {
+        identifier = SnapshotNativeCellIdentifier.storageObject
+        disclosure.bezelStyle = .disclosure
+        disclosure.setButtonType(.pushOnPushOff)
+        disclosure.translatesAutoresizingMaskIntoConstraints = false
+        symbolImageView.translatesAutoresizingMaskIntoConstraints = false
+        symbolImageView.imageScaling = .scaleProportionallyDown
+        valueLabel.translatesAutoresizingMaskIntoConstraints = false
+        valueLabel.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+        valueLabel.lineBreakMode = .byTruncatingMiddle
+        addSubview(disclosure)
+        addSubview(symbolImageView)
+        addSubview(valueLabel)
+        NSLayoutConstraint.activate([
+            disclosure.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
+            disclosure.centerYAnchor.constraint(equalTo: centerYAnchor),
+            disclosure.widthAnchor.constraint(equalToConstant: 16),
+            disclosure.heightAnchor.constraint(equalToConstant: 16),
+            symbolImageView.leadingAnchor.constraint(equalTo: disclosure.trailingAnchor, constant: 2),
+            symbolImageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            symbolImageView.widthAnchor.constraint(equalToConstant: 16),
+            symbolImageView.heightAnchor.constraint(equalToConstant: 16),
+            valueLabel.leadingAnchor.constraint(equalTo: symbolImageView.trailingAnchor, constant: 6),
+            valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        imageView = symbolImageView
+        textField = valueLabel
+    }
+}
+
 private enum SnapshotNativeRowView {
     static func fileName(
+        in table: NSTableView,
         entry: SnapshotFileEntry,
         leadingInset: CGFloat,
         usesOutlineLayout: Bool
     ) -> NSTableCellView {
         let status = status(for: entry)
         return nameCell(
+            in: table,
             name: entry.name,
             icon: icon(for: entry),
             tint: status.tint,
@@ -2068,9 +2372,10 @@ private enum SnapshotNativeRowView {
         )
     }
 
-    static func fileChange(entry: SnapshotFileEntry) -> NSTableCellView {
+    static func fileChange(in table: NSTableView, entry: SnapshotFileEntry) -> NSTableCellView {
         let status = status(for: entry)
         return textCell(
+            in: table,
             text: status.title,
             font: .systemFont(ofSize: 10, weight: .semibold),
             color: status.tint,
@@ -2079,8 +2384,9 @@ private enum SnapshotNativeRowView {
         )
     }
 
-    static func fileSize(entry: SnapshotFileEntry) -> NSTableCellView {
+    static func fileSize(in table: NSTableView, entry: SnapshotFileEntry) -> NSTableCellView {
         textCell(
+            in: table,
             text: formatBytes(Int64(entry.size)),
             font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
             color: .secondaryLabelColor,
@@ -2089,8 +2395,9 @@ private enum SnapshotNativeRowView {
         )
     }
 
-    static func blockHash(entry: SnapshotBlockEntry) -> NSTableCellView {
+    static func blockHash(in table: NSTableView, entry: SnapshotBlockEntry) -> NSTableCellView {
         nameCell(
+            in: table,
             name: entry.hash,
             icon: "square.stack.3d.up",
             tint: .secondaryLabelColor,
@@ -2101,8 +2408,9 @@ private enum SnapshotNativeRowView {
         )
     }
 
-    static func blockSize(entry: SnapshotBlockEntry) -> NSTableCellView {
+    static func blockSize(in table: NSTableView, entry: SnapshotBlockEntry) -> NSTableCellView {
         textCell(
+            in: table,
             text: formatBytes(Int64(entry.size)),
             font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
             color: .secondaryLabelColor,
@@ -2111,8 +2419,9 @@ private enum SnapshotNativeRowView {
         )
     }
 
-    static func blockChangedFiles(entry: SnapshotBlockEntry) -> NSTableCellView {
+    static func blockChangedFiles(in table: NSTableView, entry: SnapshotBlockEntry) -> NSTableCellView {
         textCell(
+            in: table,
             text: "\(entry.changedFiles)",
             font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
             color: entry.changedFiles > 0 ? .controlAccentColor : .secondaryLabelColor,
@@ -2121,8 +2430,9 @@ private enum SnapshotNativeRowView {
         )
     }
 
-    static func blockReferencedFiles(entry: SnapshotBlockEntry) -> NSTableCellView {
+    static func blockReferencedFiles(in table: NSTableView, entry: SnapshotBlockEntry) -> NSTableCellView {
         textCell(
+            in: table,
             text: "\(entry.referencingFiles)",
             font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium),
             color: .secondaryLabelColor,
@@ -2132,96 +2442,62 @@ private enum SnapshotNativeRowView {
     }
 
     static func storageObject(
+        in table: NSTableView,
         entry: SnapshotStorageEntry,
         isExpanded: Bool,
         target: AnyObject,
         action: Selector
     ) -> NSTableCellView {
-        let cell = NSTableCellView()
-        let disclosure = NSButton(title: "", target: target, action: action)
-        disclosure.identifier = NSUserInterfaceItemIdentifier(entry.id)
-        disclosure.bezelStyle = .disclosure
-        disclosure.setButtonType(.pushOnPushOff)
-        disclosure.state = isExpanded ? .on : .off
-        disclosure.setAccessibilityLabel(isExpanded ? "Collapse storage object \(entry.shortId)" : "Expand storage object \(entry.shortId)")
-        disclosure.translatesAutoresizingMaskIntoConstraints = false
-
-        let image = NSImageView(image: NSImage(systemSymbolName: entry.kind == "pack" ? "shippingbox" : "doc", accessibilityDescription: "Storage object") ?? NSImage())
-        image.translatesAutoresizingMaskIntoConstraints = false
-        image.imageScaling = .scaleProportionallyDown
-        image.contentTintColor = entry.kind == "pack" ? .controlAccentColor : .secondaryLabelColor
-
-        let label = NSTextField(labelWithString: entry.shortId)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
-        label.lineBreakMode = .byTruncatingMiddle
-
-        cell.addSubview(disclosure)
-        cell.addSubview(image)
-        cell.addSubview(label)
-        NSLayoutConstraint.activate([
-            disclosure.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 3),
-            disclosure.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            disclosure.widthAnchor.constraint(equalToConstant: 16),
-            disclosure.heightAnchor.constraint(equalToConstant: 16),
-            image.leadingAnchor.constraint(equalTo: disclosure.trailingAnchor, constant: 2),
-            image.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            image.widthAnchor.constraint(equalToConstant: 16),
-            image.heightAnchor.constraint(equalToConstant: 16),
-            label.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 6),
-            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
-        cell.imageView = image
-        cell.textField = label
-        cell.setAccessibilityLabel("Storage object \(entry.shortId)")
+        let cell = reusableStorageObjectCell(in: table)
+        cell.configure(entry: entry, isExpanded: isExpanded, target: target, action: action)
         return cell
     }
 
-    static func storageKind(entry: SnapshotStorageEntry) -> NSTableCellView {
-        textCell(text: entry.kind.capitalized, font: .systemFont(ofSize: 10, weight: .semibold), color: entry.kind == "pack" ? .controlAccentColor : .secondaryLabelColor, alignment: .left, accessibility: "Type: \(entry.kind)")
+    static func storageKind(in table: NSTableView, entry: SnapshotStorageEntry) -> NSTableCellView {
+        textCell(in: table, text: entry.kind.capitalized, font: .systemFont(ofSize: 10, weight: .semibold), color: entry.kind == "pack" ? .controlAccentColor : .secondaryLabelColor, alignment: .left, accessibility: "Type: \(entry.kind)")
     }
 
-    static func storageDocument(entry: SnapshotStorageEntry) -> NSTableCellView {
+    static func storageDocument(in table: NSTableView, entry: SnapshotStorageEntry) -> NSTableCellView {
         let text = entry.documentBytes.map { formatBytes(Int64($0)) } ?? "Not recorded"
-        return textCell(text: text, font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: entry.documentBytes == nil ? .secondaryLabelColor : .labelColor, alignment: .right, accessibility: "Telegram document size: \(text)")
+        return textCell(in: table, text: text, font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: entry.documentBytes == nil ? .secondaryLabelColor : .labelColor, alignment: .right, accessibility: "Telegram document size: \(text)")
     }
 
-    static func storageLogical(entry: SnapshotStorageEntry) -> NSTableCellView {
-        textCell(text: formatBytes(Int64(entry.logicalBytes)), font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Logical bytes: \(formatBytes(Int64(entry.logicalBytes)))")
+    static func storageLogical(in table: NSTableView, entry: SnapshotStorageEntry) -> NSTableCellView {
+        textCell(in: table, text: formatBytes(Int64(entry.logicalBytes)), font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Logical bytes: \(formatBytes(Int64(entry.logicalBytes)))")
     }
 
-    static func storageReferences(entry: SnapshotStorageEntry) -> NSTableCellView {
-        textCell(text: "\(entry.referencedBlocks)", font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "\(entry.referencedBlocks) referenced blocks")
+    static func storageReferences(in table: NSTableView, entry: SnapshotStorageEntry) -> NSTableCellView {
+        textCell(in: table, text: "\(entry.referencedBlocks)", font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "\(entry.referencedBlocks) referenced blocks")
     }
 
-    static func storageRecorded(entry: SnapshotStorageEntry) -> NSTableCellView {
+    static func storageRecorded(in table: NSTableView, entry: SnapshotStorageEntry) -> NSTableCellView {
         let rawRecorded = entry.recordedAt
         let recorded = rawRecorded.map { String($0.prefix(16)).replacingOccurrences(of: "T", with: " ") } ?? "Not recorded"
-        return textCell(text: recorded, font: .systemFont(ofSize: 10, weight: .medium), color: rawRecorded == nil ? .secondaryLabelColor : .labelColor, alignment: .right, accessibility: "Recorded: \(rawRecorded ?? recorded)")
+        return textCell(in: table, text: recorded, font: .systemFont(ofSize: 10, weight: .medium), color: rawRecorded == nil ? .secondaryLabelColor : .labelColor, alignment: .right, accessibility: "Recorded: \(rawRecorded ?? recorded)")
     }
 
-    static func storageBlock(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
-        nameCell(name: entry.hash, icon: "square.stack.3d.up", tint: .secondaryLabelColor, accessibility: "Block slice \(entry.hash)", leadingInset: 22, usesOutlineLayout: false, font: .monospacedSystemFont(ofSize: 10, weight: .medium))
+    static func storageBlock(in table: NSTableView, entry: SnapshotStorageBlockEntry) -> NSTableCellView {
+        nameCell(in: table, name: entry.hash, icon: "square.stack.3d.up", tint: .secondaryLabelColor, accessibility: "Block slice \(entry.hash)", leadingInset: 22, usesOutlineLayout: false, font: .monospacedSystemFont(ofSize: 10, weight: .medium))
     }
 
-    static func storageSliceType(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
-        textCell(text: "Slice", font: .systemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .left, accessibility: "Physical slice")
+    static func storageSliceType(in table: NSTableView, entry: SnapshotStorageBlockEntry) -> NSTableCellView {
+        textCell(in: table, text: "Slice", font: .systemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .left, accessibility: "Physical slice")
     }
 
-    static func storageSliceLength(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
-        textCell(text: formatBytes(Int64(entry.length)), font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Slice length: \(formatBytes(Int64(entry.length)))")
+    static func storageSliceLength(in table: NSTableView, entry: SnapshotStorageBlockEntry) -> NSTableCellView {
+        textCell(in: table, text: formatBytes(Int64(entry.length)), font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Slice length: \(formatBytes(Int64(entry.length)))")
     }
 
-    static func storageBlockSize(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
-        textCell(text: formatBytes(Int64(entry.size)), font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Logical block size: \(formatBytes(Int64(entry.size)))")
+    static func storageBlockSize(in table: NSTableView, entry: SnapshotStorageBlockEntry) -> NSTableCellView {
+        textCell(in: table, text: formatBytes(Int64(entry.size)), font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Logical block size: \(formatBytes(Int64(entry.size)))")
     }
 
-    static func empty() -> NSTableCellView {
-        textCell(text: "", font: .systemFont(ofSize: 10), color: .secondaryLabelColor, alignment: .right, accessibility: "")
+    static func empty(in table: NSTableView) -> NSTableCellView {
+        textCell(in: table, text: "", font: .systemFont(ofSize: 10), color: .secondaryLabelColor, alignment: .right, accessibility: "")
     }
 
     private static func nameCell(
+        in table: NSTableView,
         name: String,
         icon: String,
         tint: NSColor,
@@ -2230,59 +2506,45 @@ private enum SnapshotNativeRowView {
         usesOutlineLayout: Bool,
         font: NSFont = .systemFont(ofSize: 11, weight: .medium)
     ) -> NSTableCellView {
-        let cell = NSTableCellView()
-        let image = NSImageView(image: NSImage(systemSymbolName: icon, accessibilityDescription: accessibility) ?? NSImage())
-        image.translatesAutoresizingMaskIntoConstraints = false
-        image.imageScaling = .scaleProportionallyDown
-        image.contentTintColor = tint
-
-        let label = NSTextField(labelWithString: name)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = font
-        label.lineBreakMode = .byTruncatingMiddle
-
-        cell.addSubview(image)
-        cell.addSubview(label)
-        NSLayoutConstraint.activate([
-            image.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: leadingInset + 4),
-            image.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            image.widthAnchor.constraint(equalToConstant: 16),
-            image.heightAnchor.constraint(equalToConstant: 16),
-            label.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 6),
-            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
-            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
-        if !usesOutlineLayout {
-            cell.imageView = image
-            cell.textField = label
-        }
-        cell.setAccessibilityLabel(accessibility)
+        let cell = reusableNameCell(in: table)
+        cell.configure(
+            name: name,
+            icon: icon,
+            tint: tint,
+            accessibility: accessibility,
+            leadingInset: leadingInset,
+            usesOutlineLayout: usesOutlineLayout,
+            font: font
+        )
         return cell
     }
 
     private static func textCell(
+        in table: NSTableView,
         text: String,
         font: NSFont,
         color: NSColor,
         alignment: NSTextAlignment,
         accessibility: String
     ) -> NSTableCellView {
-        let cell = NSTableCellView()
-        let label = NSTextField(labelWithString: text)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = font
-        label.textColor = color
-        label.alignment = alignment
-        label.lineBreakMode = .byTruncatingMiddle
-        cell.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
-        cell.textField = label
-        cell.setAccessibilityLabel(accessibility)
+        let cell = reusableTextCell(in: table)
+        cell.configure(text: text, font: font, color: color, alignment: alignment, accessibility: accessibility)
         return cell
+    }
+
+    private static func reusableNameCell(in table: NSTableView) -> SnapshotNameCellView {
+        (table.makeView(withIdentifier: SnapshotNativeCellIdentifier.name, owner: nil) as? SnapshotNameCellView)
+            ?? SnapshotNameCellView()
+    }
+
+    private static func reusableTextCell(in table: NSTableView) -> SnapshotTextCellView {
+        (table.makeView(withIdentifier: SnapshotNativeCellIdentifier.text, owner: nil) as? SnapshotTextCellView)
+            ?? SnapshotTextCellView()
+    }
+
+    private static func reusableStorageObjectCell(in table: NSTableView) -> SnapshotStorageObjectCellView {
+        (table.makeView(withIdentifier: SnapshotNativeCellIdentifier.storageObject, owner: nil) as? SnapshotStorageObjectCellView)
+            ?? SnapshotStorageObjectCellView()
     }
 
     private static func status(for entry: SnapshotFileEntry) -> (title: String, tint: NSColor) {

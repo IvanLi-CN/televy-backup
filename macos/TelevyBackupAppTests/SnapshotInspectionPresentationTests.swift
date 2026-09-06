@@ -103,6 +103,49 @@ private func testTreeExpansionSurvivesAsyncReload() {
     )
 }
 
+private func testOutlinePaginationChoosesNearestRemainingParent() {
+    let parentPathByEntry = [
+        "Projects": "",
+        "Projects/app": "Projects",
+        "Projects/app/file.swift": "Projects/app",
+    ]
+    expect(
+        SnapshotOutlinePagination.nextParent(
+            afterVisiblePath: "Projects/app/file.swift",
+            parentPathByEntry: parentPathByEntry,
+            parentsWithMorePages: ["Projects/app", ""]
+        ) == "Projects/app",
+        "the tree should continue the nearest visible directory before an ancestor page"
+    )
+    expect(
+        SnapshotOutlinePagination.nextParent(
+            afterVisiblePath: "Projects/app/file.swift",
+            parentPathByEntry: parentPathByEntry,
+            parentsWithMorePages: [""]
+        ) == "",
+        "the tree should fall back to the root page when a visible branch is complete"
+    )
+}
+
+private func testStoragePaginationPrioritizesExpandedSlices() {
+    expect(
+        SnapshotStoragePagination.target(
+            lastVisibleBlockStorageID: "sto_pack",
+            hasMoreStoragePages: true,
+            storageBlockIDsWithMorePages: ["sto_pack"]
+        ) == .blocks("sto_pack"),
+        "scrolling past a partial expanded Pack must request its next slice page first"
+    )
+    expect(
+        SnapshotStoragePagination.target(
+            lastVisibleBlockStorageID: "sto_pack",
+            hasMoreStoragePages: true,
+            storageBlockIDsWithMorePages: []
+        ) == .objects,
+        "once expanded slices are complete, the Storage object list should continue"
+    )
+}
+
 private func testBlockRequestEpochRejectsStaleResults() {
     var epoch = SnapshotBlockRequestEpoch()
     let unfilteredRequest = epoch.issue()
@@ -150,6 +193,8 @@ enum SnapshotInspectionPresentationTestsMain {
         testSnapshotInspectionEligibility()
         testTargetSelectionDismissesUnrelatedSnapshotDetail()
         testTreeExpansionSurvivesAsyncReload()
+        testOutlinePaginationChoosesNearestRemainingParent()
+        testStoragePaginationPrioritizesExpandedSlices()
         testBlockRequestEpochRejectsStaleResults()
         testStorageRequestEpochRejectsStaleExpansion()
         testStoragePreparationDoesNotShowPageLoader()
