@@ -1845,8 +1845,8 @@ private enum SnapshotNativeRowView {
     }
 
     static func storageSliceOffset(entry: SnapshotStorageBlockEntry) -> NSTableCellView {
-        let text = "\(entry.offset) B"
-        return textCell(text: text, font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Slice offset: \(text)")
+        let text = formatBytes(Int64(entry.offset))
+        return textCell(text: text, font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium), color: .secondaryLabelColor, alignment: .right, accessibility: "Slice offset: \(text), exact bytes: \(entry.offset)")
     }
 
     static func empty() -> NSTableCellView {
