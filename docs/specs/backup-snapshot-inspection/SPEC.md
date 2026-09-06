@@ -151,6 +151,16 @@ The Main Window groups run-log summaries by target, but a row cannot currently a
 
 Deterministic light and dark Main Window Storage demos are required owner-facing evidence for this capability. They must include a recorded object, a legacy `Not recorded` object, distinct Document and Logical columns, and an expanded pack slice without Telegram locator fields. Separate deterministic states must show a remote snapshot-map download and local Storage-index preparation.
 
+![Storage light](./assets/storage-light.png)
+
+![Storage dark](./assets/storage-dark.png)
+
+![Remote snapshot-map download](./assets/snapshot-map-downloading-light.png)
+
+![Local Storage-index preparation](./assets/storage-index-preparing-light.png)
+
+![Storage index waits for active backup](./assets/storage-index-waiting-light.png)
+
 ## References
 
 - [Two-level endpoint and snapshot indexes](../endpoint-two-level-index/SPEC.md)
