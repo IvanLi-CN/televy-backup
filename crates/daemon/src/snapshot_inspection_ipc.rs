@@ -32,6 +32,7 @@ pub(crate) struct SnapshotInspectionService {
 struct PreparedSnapshots {
     entries: HashMap<String, Arc<SnapshotInspectionSession>>,
     least_recently_used: VecDeque<String>,
+    preparing: HashMap<String, Arc<Mutex<()>>>,
 }
 
 impl SnapshotInspectionService {
@@ -47,6 +48,7 @@ impl SnapshotInspectionService {
             cache: Mutex::new(PreparedSnapshots {
                 entries: HashMap::new(),
                 least_recently_used: VecDeque::new(),
+                preparing: HashMap::new(),
             }),
         }
     }
@@ -145,8 +147,8 @@ impl SnapshotInspectionService {
     async fn storage(&self, request: &ControlRequest) -> Result<serde_json::Value, ControlError> {
         let params: SnapshotInspectStorageParams = decode_params(&request.params)?;
         let snapshot_id = params.snapshot_id.clone();
-        let session = self.session_for(&snapshot_id).await?;
-        let page = session
+        let inspector = self.inspector_for(&snapshot_id).await?;
+        let page = inspector
             .storage(StorageInspectionRequest {
                 snapshot_id,
                 kind: params.kind,
@@ -165,8 +167,8 @@ impl SnapshotInspectionService {
     ) -> Result<serde_json::Value, ControlError> {
         let params: SnapshotInspectStorageBlocksParams = decode_params(&request.params)?;
         let snapshot_id = params.snapshot_id.clone();
-        let session = self.session_for(&snapshot_id).await?;
-        let page = session
+        let inspector = self.inspector_for(&snapshot_id).await?;
+        let page = inspector
             .storage_blocks(StorageBlocksInspectionRequest {
                 snapshot_id,
                 storage_id: params.storage_id,
@@ -182,24 +184,40 @@ impl SnapshotInspectionService {
         &self,
         snapshot_id: &str,
     ) -> Result<Arc<SnapshotInspectionSession>, ControlError> {
-        // Preparing a difference is intentionally serialized. It avoids duplicating a large
-        // direct-baseline scan when the UI issues concurrent detail requests for one snapshot.
+        // Serialize preparation per snapshot, but never hold the global cache lock while doing
+        // database work. A large snapshot must not block inspection of another snapshot.
+        let preparation_lock = {
+            let mut cache = self.cache.lock().await;
+            if let Some(session) = cache.entries.get(snapshot_id).cloned() {
+                touch(&mut cache.least_recently_used, snapshot_id);
+                return Ok(session);
+            }
+            cache
+                .preparing
+                .entry(snapshot_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _preparing = preparation_lock.lock().await;
+
         let mut cache = self.cache.lock().await;
         if let Some(session) = cache.entries.get(snapshot_id).cloned() {
             touch(&mut cache.least_recently_used, snapshot_id);
             return Ok(session);
         }
+        drop(cache);
 
-        let settings = self.settings.read().await.clone();
-        let inspector =
-            snapshot_inspector_for(&self.config_root, &self.data_root, &settings, snapshot_id)
-                .await?;
-        let session = Arc::new(
+        let prepared = async {
+            let inspector = self.inspector_for(snapshot_id).await?;
             inspector
                 .prepare(snapshot_id)
                 .await
-                .map_err(map_inspection_error)?,
-        );
+                .map_err(map_inspection_error)
+        }
+        .await;
+        let mut cache = self.cache.lock().await;
+        cache.preparing.remove(snapshot_id);
+        let session = Arc::new(prepared?);
         cache
             .entries
             .insert(snapshot_id.to_string(), session.clone());
@@ -210,6 +228,11 @@ impl SnapshotInspectionService {
             }
         }
         Ok(session)
+    }
+
+    async fn inspector_for(&self, snapshot_id: &str) -> Result<SnapshotInspector, ControlError> {
+        let settings = self.settings.read().await.clone();
+        snapshot_inspector_for(&self.config_root, &self.data_root, &settings, snapshot_id).await
     }
 }
 
