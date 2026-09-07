@@ -206,3 +206,126 @@ async fn inspect_commands_emit_contract_json_and_reject_mismatched_cursors() {
             .all(|entry| entry["changedFiles"].as_u64().unwrap() > 0)
     );
 }
+
+#[tokio::test]
+async fn inspect_storage_emits_opaque_paged_objects_and_blocks() {
+    let temp = fixture().await;
+    let endpoint_path = temp.path().join("data/index/index.ep1.sqlite");
+    let endpoint = televy_backup_core::index_db::open_index_db(&endpoint_path)
+        .await
+        .unwrap();
+    for (hash, size, object_id) in [
+        ("current-chunk-0", 2_i64, "doc-a"),
+        ("current-chunk-1", 3_i64, "doc-b"),
+    ] {
+        sqlx::query(
+            "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES (?, ?, 'blake3', 'xchacha20poly1305', '2026-08-27T00:00:00Z')",
+        )
+        .bind(hash)
+        .bind(size)
+        .execute(&endpoint)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunk_objects (chunk_hash, provider, object_id, created_at) VALUES (?, 'test.mem', ?, '2026-08-27T00:00:00Z')",
+        )
+        .bind(hash)
+        .bind(format!("tgfile:{object_id}"))
+        .execute(&endpoint)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO storage_objects (provider, object_id, storage_id, kind, document_bytes, recorded_at) VALUES ('test.mem', 'doc-a', 'sto_a', 'direct', 42, '2026-08-27T00:00:01Z')",
+    )
+    .execute(&endpoint)
+    .await
+    .unwrap();
+    drop(endpoint);
+
+    let (status, page) = run_cli(
+        &temp,
+        &[
+            "snapshots",
+            "inspect",
+            "storage",
+            "--snapshot-id",
+            "current",
+            "--limit",
+            "1",
+        ],
+    );
+    assert!(status.success());
+    assert_eq!(page["entries"].as_array().unwrap().len(), 1);
+    let entry = &page["entries"][0];
+    let storage_id = entry["storageId"].as_str().unwrap().to_string();
+    let first_document_bytes = entry["documentBytes"].clone();
+    assert!(storage_id.starts_with("sto_"));
+    assert!(entry.get("objectId").is_none());
+    assert_eq!(entry["kind"], "direct");
+    assert!(page["nextCursor"].is_string());
+    let cursor = page["nextCursor"].as_str().unwrap();
+
+    let (status, next_page) = run_cli(
+        &temp,
+        &[
+            "snapshots",
+            "inspect",
+            "storage",
+            "--snapshot-id",
+            "current",
+            "--limit",
+            "1",
+            "--cursor",
+            cursor,
+        ],
+    );
+    assert!(status.success());
+    assert_eq!(next_page["entries"].as_array().unwrap().len(), 1);
+    let second_document_bytes = next_page["entries"][0]["documentBytes"].clone();
+    assert_ne!(first_document_bytes, second_document_bytes);
+    assert!(
+        first_document_bytes.as_u64() == Some(42) || second_document_bytes.as_u64() == Some(42)
+    );
+    assert!(first_document_bytes.is_null() || second_document_bytes.is_null());
+
+    let (status, error) = run_cli(
+        &temp,
+        &[
+            "snapshots",
+            "inspect",
+            "storage",
+            "--snapshot-id",
+            "current",
+            "--kind",
+            "pack",
+            "--limit",
+            "1",
+            "--cursor",
+            cursor,
+        ],
+    );
+    assert!(!status.success());
+    assert_eq!(error["code"], "snapshot.inspect.invalid_cursor");
+
+    let (status, blocks) = run_cli(
+        &temp,
+        &[
+            "snapshots",
+            "inspect",
+            "storage-blocks",
+            "--snapshot-id",
+            "current",
+            "--storage-id",
+            &storage_id,
+        ],
+    );
+    assert!(status.success());
+    assert_eq!(blocks["entries"].as_array().unwrap().len(), 1);
+    let expected_hash = if first_document_bytes.as_u64() == Some(42) {
+        "current-chunk-0"
+    } else {
+        "current-chunk-1"
+    };
+    assert_eq!(blocks["entries"][0]["hash"], expected_hash);
+}

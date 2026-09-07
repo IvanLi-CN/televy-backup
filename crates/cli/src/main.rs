@@ -21,7 +21,8 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::os::unix::process::CommandExt;
 use televy_backup_core::snapshot_inspection::{
     BlockInspectionRequest, FileInspectionRequest, FilePresentation, FileScope,
-    SnapshotInspectionError, SnapshotInspector,
+    SnapshotInspectionError, SnapshotInspector, StorageBlocksInspectionRequest,
+    StorageInspectionRequest,
 };
 use televy_backup_core::{
     APP_NAME, BackupConfig, BackupOptions, ChunkingConfig, ProgressSink, RestoreConfig,
@@ -264,6 +265,28 @@ enum SnapshotInspectCmd {
         changes_only: bool,
         #[arg(long)]
         query: Option<String>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
+    },
+    Storage {
+        #[arg(long)]
+        snapshot_id: String,
+        #[arg(long, value_parser = ["pack", "direct"])]
+        kind: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long)]
+        cursor: Option<String>,
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=500))]
+        limit: u16,
+    },
+    StorageBlocks {
+        #[arg(long)]
+        snapshot_id: String,
+        #[arg(long)]
+        storage_id: String,
         #[arg(long)]
         cursor: Option<String>,
         #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u16).range(1..=500))]
@@ -4580,7 +4603,9 @@ async fn snapshots_inspect(
     let snapshot_id = match &cmd {
         SnapshotInspectCmd::Summary { snapshot_id }
         | SnapshotInspectCmd::Files { snapshot_id, .. }
-        | SnapshotInspectCmd::Blocks { snapshot_id, .. } => snapshot_id,
+        | SnapshotInspectCmd::Blocks { snapshot_id, .. }
+        | SnapshotInspectCmd::Storage { snapshot_id, .. }
+        | SnapshotInspectCmd::StorageBlocks { snapshot_id, .. } => snapshot_id,
     };
     let inspector = snapshot_inspector_for(config_dir, data_dir, snapshot_id).await?;
     let output = match cmd {
@@ -4652,6 +4677,64 @@ async fn snapshots_inspect(
                 .await
                 .map_err(map_snapshot_inspection_err)?,
         ),
+        SnapshotInspectCmd::Storage {
+            snapshot_id,
+            kind,
+            query,
+            cursor,
+            limit,
+        } => {
+            let request = StorageInspectionRequest {
+                snapshot_id: snapshot_id.clone(),
+                kind,
+                query,
+                cursor,
+                limit,
+            };
+            let page = match inspector.storage(request.clone()).await {
+                Ok(page) => page,
+                Err(SnapshotInspectionError::StorageIndexUnavailable { .. }) => {
+                    inspector
+                        .build_storage_index(&snapshot_id)
+                        .await
+                        .map_err(map_snapshot_inspection_err)?;
+                    inspector
+                        .storage(request)
+                        .await
+                        .map_err(map_snapshot_inspection_err)?
+                }
+                Err(error) => return Err(map_snapshot_inspection_err(error)),
+            };
+            serde_json::to_value(page)
+        }
+        SnapshotInspectCmd::StorageBlocks {
+            snapshot_id,
+            storage_id,
+            cursor,
+            limit,
+        } => {
+            let request = StorageBlocksInspectionRequest {
+                snapshot_id: snapshot_id.clone(),
+                storage_id,
+                cursor,
+                limit,
+            };
+            let page = match inspector.storage_blocks(request.clone()).await {
+                Ok(page) => page,
+                Err(SnapshotInspectionError::StorageIndexUnavailable { .. }) => {
+                    inspector
+                        .build_storage_index(&snapshot_id)
+                        .await
+                        .map_err(map_snapshot_inspection_err)?;
+                    inspector
+                        .storage_blocks(request)
+                        .await
+                        .map_err(map_snapshot_inspection_err)?
+                }
+                Err(error) => return Err(map_snapshot_inspection_err(error)),
+            };
+            serde_json::to_value(page)
+        }
     }
     .map_err(|e| CliError::new("snapshot.inspect.invalid_argument", e.to_string()))?;
     println!(
@@ -4715,7 +4798,27 @@ async fn snapshot_inspector_for(
         }
     }
 
-    Ok(SnapshotInspector::new(endpoint_db_path, filemap_dir))
+    let storage_db_path = endpoint_id_from_provider(provider.as_deref())
+        .ok()
+        .flatten()
+        .map(|endpoint_id| endpoint_dedupe_db_path(data_dir, endpoint_id))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| endpoint_db_path.clone());
+    let inspector = match endpoint_id_from_provider(provider.as_deref())? {
+        Some(endpoint_id) => SnapshotInspector::new_with_storage_db_and_index_dir(
+            endpoint_db_path,
+            filemap_dir,
+            storage_db_path,
+            data_dir
+                .join("index")
+                .join("storage-inspection")
+                .join(endpoint_id),
+        ),
+        None => {
+            SnapshotInspector::new_with_storage_db(endpoint_db_path, filemap_dir, storage_db_path)
+        }
+    };
+    Ok(inspector)
 }
 
 async fn find_snapshot_endpoint_db(
@@ -4943,6 +5046,10 @@ fn map_snapshot_inspection_err(error: SnapshotInspectionError) -> CliError {
         SnapshotInspectionError::InvalidArgument { message } => {
             CliError::new("snapshot.inspect.invalid_argument", message)
         }
+        SnapshotInspectionError::StorageIndexUnavailable { .. } => CliError::retryable(
+            "snapshot.storage_index_preparing",
+            "the local Storage index is not ready yet",
+        ),
         SnapshotInspectionError::Core(error) => map_snapshot_filemap_core_err(error),
     }
 }

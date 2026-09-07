@@ -24,6 +24,7 @@ const MTPROTO_HELPER_READ_TIMEOUT_SECS: u64 = 600;
 const MTPROTO_HELPER_UPLOAD_EVENT_TIMEOUT_SECS: u64 = 45;
 const MTPROTO_HELPER_SHUTDOWN_TIMEOUT_SECS: u64 = 2;
 const MTPROTO_HELPER_STDERR_TAIL_MAX_BYTES: usize = 8 * 1024;
+const MTPROTO_HELPER_EXIT_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn spawn_helper_stderr_reader(
     stderr: ChildStderr,
@@ -767,6 +768,8 @@ while IFS= read -r line; do
       printf 'upload_start\n' >> "$EVENTS"
       if [ "$MODE" = "crash_on_upload" ]; then
         printf 'intentional helper crash\n' >&2
+        exec 1>&-
+        sleep 0.1
         exit 42
       fi
       printf '%s\n' '{{"ok":true,"event":"upload_progress","bytesUploaded":1}}'
@@ -1032,9 +1035,12 @@ printf 'eof\n' >> "$EVENTS"
             .expect_err("crashing helper should fail the upload");
         let message = error.to_string();
 
-        assert!(message.contains("mtproto helper closed stdout"));
-        assert!(message.contains("exit status: 42"));
-        assert!(message.contains("intentional helper crash"));
+        assert!(
+            message.contains("mtproto helper closed stdout"),
+            "{message}"
+        );
+        assert!(message.contains("exit status: 42"), "{message}");
+        assert!(message.contains("intentional helper crash"), "{message}");
     }
 
     #[cfg(unix)]
@@ -1292,7 +1298,22 @@ impl MtProtoHelper {
                 self.join_stderr_reader();
                 format!("helper exit status: {status}")
             }
-            Ok(None) => "helper process is still running".to_string(),
+            Ok(None) => {
+                if self.wait_for_exit_best_effort(MTPROTO_HELPER_EXIT_DIAGNOSTIC_TIMEOUT) {
+                    match self.child.try_wait() {
+                        Ok(Some(status)) => {
+                            self.join_stderr_reader();
+                            format!("helper exit status: {status}")
+                        }
+                        Ok(None) => "helper process is still running".to_string(),
+                        Err(wait_error) => {
+                            format!("helper exit status unavailable: {wait_error}")
+                        }
+                    }
+                } else {
+                    "helper process is still running".to_string()
+                }
+            }
             Err(wait_error) => format!("helper exit status unavailable: {wait_error}"),
         };
         let stderr_detail = self

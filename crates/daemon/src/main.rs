@@ -999,7 +999,7 @@ impl StatusRuntimeState {
         });
     }
 
-    fn has_running(&self) -> bool {
+    pub(crate) fn has_running(&self) -> bool {
         self.targets.values().any(|t| t.state == "running")
     }
 
@@ -2155,6 +2155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_root.clone(),
         data_root.clone(),
         control_ipc_settings.clone(),
+        status_state.clone(),
     ));
 
     let control_socket_path = televy_backup_core::control::control_ipc_socket_path(&data_root);
@@ -3222,6 +3223,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 res.bytes_uploaded,
                                 res.bytes_deduped,
                             );
+                            snapshot_inspection
+                                .clone()
+                                .schedule_storage_index_after_backup(res.snapshot_id.clone());
                         }
                         Err(e) => {
                             if matches!(&e, televy_backup_core::Error::Cancelled) {

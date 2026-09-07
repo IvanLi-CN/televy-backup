@@ -35,6 +35,18 @@ pub fn encode_tgpack_object_id(pack_object_id: &str, offset: u64, len: u64) -> S
     format!("tgpack:{pack_object_id}@{offset}+{len}")
 }
 
+/// Returns the stable identifier exposed by snapshot Storage inspection.
+///
+/// The provider and normalized physical object id are deliberately hashed so callers can page
+/// and expand an object without receiving Telegram locator fields.
+pub fn storage_object_id(provider: &str, object_id: &str) -> String {
+    let mut input = Vec::with_capacity(provider.len() + object_id.len() + 1);
+    input.extend_from_slice(provider.as_bytes());
+    input.push(0);
+    input.extend_from_slice(object_id.as_bytes());
+    format!("sto_{}", blake3::hash(&input).to_hex())
+}
+
 pub fn parse_chunk_object_ref(encoded: &str) -> Result<ChunkObjectRef> {
     if let Some(rest) = encoded.strip_prefix("tgfile:") {
         if rest.is_empty() {

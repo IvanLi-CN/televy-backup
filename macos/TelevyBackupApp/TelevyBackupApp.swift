@@ -2409,6 +2409,14 @@ final class AppModel {
 	                w.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
 	                w.isReleasedWhenClosed = false
 	                w.center()
+	                if UIDemo.isMainWindow, let screen = NSScreen.screens.first {
+	                    let visibleFrame = screen.visibleFrame
+	                    let origin = NSPoint(
+	                        x: visibleFrame.midX - (w.frame.width / 2),
+	                        y: visibleFrame.midY - (w.frame.height / 2)
+	                    )
+	                    w.setFrameOrigin(origin)
+	                }
 	                self.configureMainWindowIfNeeded(w)
 	                self.mainWindow = w
 	                window = w

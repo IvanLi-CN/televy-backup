@@ -161,7 +161,7 @@ async fn pack_enabled_by_count_reduces_upload_calls() {
     let res = run_backup(
         &storage,
         BackupConfig {
-            endpoint_db_path: db_path,
+            endpoint_db_path: db_path.clone(),
             filemap_dir: filemap_dir.clone(),
             dedupe_db_path: temp.path().join("dedupe.sqlite"),
             dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
@@ -184,6 +184,24 @@ async fn pack_enabled_by_count_reduces_upload_calls() {
 
     assert_eq!(res.chunks_uploaded, 11);
     assert_eq!(res.data_objects_uploaded, 1);
+
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", db_path.display()))
+        .await
+        .unwrap();
+    let row = sqlx::query(
+        "SELECT object_id, kind, document_bytes FROM storage_objects WHERE provider = 'test.mem'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let object_id: String = row.get("object_id");
+    let kind: String = row.get("kind");
+    let document_bytes: i64 = row.get("document_bytes");
+    assert_eq!(kind, "pack");
+    assert_eq!(
+        document_bytes as usize,
+        storage.get(&object_id).await.unwrap().len()
+    );
 
     let uploads = storage.uploaded.load(Ordering::Relaxed) as u64;
     // Two-level index uploads: filemap manifest + endpoint manifest.
@@ -229,6 +247,30 @@ async fn small_batch_does_not_enable_pack() {
 
     assert_eq!(res.chunks_uploaded, 10);
     assert_eq!(res.data_objects_uploaded, 10);
+
+    let pool = sqlx::SqlitePool::connect(&format!(
+        "sqlite:{}",
+        temp.path().join("index.sqlite").display()
+    ))
+    .await
+    .unwrap();
+    let rows = sqlx::query(
+        "SELECT object_id, kind, document_bytes FROM storage_objects WHERE provider = 'test.mem' ORDER BY object_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 10);
+    for row in rows {
+        let object_id: String = row.get("object_id");
+        let kind: String = row.get("kind");
+        let document_bytes: i64 = row.get("document_bytes");
+        assert_eq!(kind, "direct");
+        assert_eq!(
+            document_bytes as usize,
+            storage.get(&object_id).await.unwrap().len()
+        );
+    }
 }
 
 #[tokio::test]
