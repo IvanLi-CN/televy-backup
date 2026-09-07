@@ -328,6 +328,7 @@ fn fail_backup_queue_target(
     complete_backup_queue_target(queue, status_state, target_id);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn backup_task_succeeded(
     status_state: &Arc<Mutex<StatusRuntimeState>>,
     target_id: &str,
@@ -899,6 +900,7 @@ impl StatusRuntimeState {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn mark_run_finish_success(
         &mut self,
         target_id: &str,
