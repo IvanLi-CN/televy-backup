@@ -324,13 +324,15 @@ fn fail_backup_queue_target(
     target_id: &str,
     error_code: &str,
 ) {
-    backup_task_failed(status_state, target_id, 0.0, error_code);
+    backup_task_failed(status_state, target_id, None, 0.0, error_code);
     complete_backup_queue_target(queue, status_state, target_id);
 }
 
 fn backup_task_succeeded(
     status_state: &Arc<Mutex<StatusRuntimeState>>,
     target_id: &str,
+    run_id: &str,
+    snapshot_id: &str,
     duration_seconds: f64,
     files_indexed: u64,
     bytes_uploaded: u64,
@@ -339,6 +341,8 @@ fn backup_task_succeeded(
     if let Ok(mut status) = status_state.lock() {
         status.mark_run_finish_success(
             target_id,
+            Some(run_id),
+            Some(snapshot_id),
             duration_seconds,
             files_indexed,
             bytes_uploaded,
@@ -350,21 +354,23 @@ fn backup_task_succeeded(
 fn backup_task_failed(
     status_state: &Arc<Mutex<StatusRuntimeState>>,
     target_id: &str,
+    run_id: Option<&str>,
     duration_seconds: f64,
     error_code: &str,
 ) {
     if let Ok(mut status) = status_state.lock() {
-        status.mark_run_finish_failure(target_id, duration_seconds, error_code.to_string());
+        status.mark_run_finish_failure(target_id, run_id, duration_seconds, error_code.to_string());
     }
 }
 
 fn backup_task_cancelled(
     status_state: &Arc<Mutex<StatusRuntimeState>>,
     target_id: &str,
+    run_id: Option<&str>,
     duration_seconds: f64,
 ) {
     if let Ok(mut status) = status_state.lock() {
-        status.mark_run_finish_cancelled(target_id, duration_seconds);
+        status.mark_run_finish_cancelled(target_id, run_id, duration_seconds);
     }
 }
 
@@ -585,23 +591,23 @@ impl StatusRuntimeState {
 
     #[cfg(test)]
     fn mark_run_start(&mut self, target_id: &str) {
-        self.mark_run_start_with_phase(target_id, "running");
+        self.mark_run_start_with_phase(target_id, "running", "test-backup-run");
     }
 
     #[cfg(test)]
     fn mark_backup_run_start(&mut self, target_id: &str) {
-        self.mark_run_start_with_phase(target_id, "connecting");
+        self.mark_run_start_with_phase(target_id, "connecting", "test-backup-run");
     }
 
-    fn try_mark_backup_run_start(&mut self, target_id: &str, phase: &str) -> bool {
+    fn try_mark_backup_run_start(&mut self, target_id: &str, phase: &str, run_id: &str) -> bool {
         if self.target_is_busy(target_id) {
             return false;
         }
-        self.mark_run_start_with_phase(target_id, phase);
+        self.mark_run_start_with_phase(target_id, phase, run_id);
         true
     }
 
-    fn mark_run_start_with_phase(&mut self, target_id: &str, phase: &str) {
+    fn mark_run_start_with_phase(&mut self, target_id: &str, phase: &str, run_id: &str) {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
@@ -610,7 +616,10 @@ impl StatusRuntimeState {
         t.external_process_id = None;
         t.external_last_report_at = None;
         t.external_logging = None;
-        t.active_task = ActiveTask::for_kind("backup");
+        t.active_task = ActiveTask::for_kind("backup").map(|mut task| {
+            task.task_id = Some(run_id.to_string());
+            task
+        });
         t.state = "running".to_string();
         let now = now_unix_ms();
         t.running_since = Some(now);
@@ -648,8 +657,9 @@ impl StatusRuntimeState {
         process_id: Option<u32>,
         logging: Option<televy_backup_core::local_settings::ResolvedLogging>,
     ) -> Result<(), ExternalTaskAdmissionError> {
-        let activity =
+        let mut activity =
             ActiveTask::for_kind(kind).ok_or(ExternalTaskAdmissionError::UnsupportedKind)?;
+        activity.task_id = Some(task_id.to_string());
         let Some(t) = self.targets.get_mut(target_id) else {
             return Err(ExternalTaskAdmissionError::TargetNotFound);
         };
@@ -831,11 +841,14 @@ impl StatusRuntimeState {
         t.down_rate.reset(Instant::now(), 0);
         t.external_terminal = Some(terminal.clone());
         t.last_run = Some(TargetRunSummary {
+            run_id: Some(task_id.to_string()),
+            kind: Some(kind.to_string()),
+            snapshot_id: None,
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             ),
             duration_seconds,
-            status: Some(if failed { "failed" } else { "succeeded" }.to_string()),
+            status: Some(state.to_string()),
             error_code: terminal.error_code,
             files_indexed: None,
             bytes_uploaded,
@@ -888,6 +901,8 @@ impl StatusRuntimeState {
     fn mark_run_finish_success(
         &mut self,
         target_id: &str,
+        run_id: Option<&str>,
+        snapshot_id: Option<&str>,
         duration_seconds: f64,
         files_indexed: u64,
         bytes_uploaded: u64,
@@ -914,6 +929,9 @@ impl StatusRuntimeState {
         t.down_total_bytes = None;
         t.down_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
+            run_id: run_id.map(str::to_string),
+            kind: Some("backup".to_string()),
+            snapshot_id: snapshot_id.map(str::to_string),
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             ),
@@ -929,6 +947,7 @@ impl StatusRuntimeState {
     fn mark_run_finish_failure(
         &mut self,
         target_id: &str,
+        run_id: Option<&str>,
         duration_seconds: f64,
         error_code: String,
     ) {
@@ -953,6 +972,9 @@ impl StatusRuntimeState {
         t.down_total_bytes = None;
         t.down_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
+            run_id: run_id.map(str::to_string),
+            kind: Some("backup".to_string()),
+            snapshot_id: None,
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             ),
@@ -965,7 +987,12 @@ impl StatusRuntimeState {
         });
     }
 
-    fn mark_run_finish_cancelled(&mut self, target_id: &str, duration_seconds: f64) {
+    fn mark_run_finish_cancelled(
+        &mut self,
+        target_id: &str,
+        run_id: Option<&str>,
+        duration_seconds: f64,
+    ) {
         let Some(t) = self.targets.get_mut(target_id) else {
             return;
         };
@@ -987,6 +1014,9 @@ impl StatusRuntimeState {
         t.down_total_bytes = None;
         t.down_rate = ByteRateWindow::default();
         t.last_run = Some(TargetRunSummary {
+            run_id: run_id.map(str::to_string),
+            kind: Some("backup".to_string()),
+            snapshot_id: None,
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             ),
@@ -1608,6 +1638,18 @@ mod tests {
     }
 
     #[test]
+    fn backup_terminal_run_preserves_active_run_identity() {
+        let mut st = state_one_target();
+        st.mark_run_start_with_phase("t1", "uploading", "backup-1");
+        st.mark_run_finish_success("t1", Some("backup-1"), Some("snapshot-1"), 1.0, 2, 3, 4);
+
+        let run = st.targets["t1"].last_run.as_ref().expect("terminal run");
+        assert_eq!(run.run_id.as_deref(), Some("backup-1"));
+        assert_eq!(run.kind.as_deref(), Some("backup"));
+        assert_eq!(run.snapshot_id.as_deref(), Some("snapshot-1"));
+    }
+
+    #[test]
     fn external_task_activity_and_failure_are_live_only() {
         let mut st = state_one_target();
         st.mark_external_run_start("t1", "restore-1", "restore", None, None)
@@ -1615,6 +1657,7 @@ mod tests {
 
         let active = st.targets["t1"].active_task.as_ref().expect("active task");
         assert_eq!(active.kind, "restore");
+        assert_eq!(active.task_id.as_deref(), Some("restore-1"));
         assert_eq!(active.directions, vec!["down"]);
 
         assert!(matches!(
@@ -1639,6 +1682,17 @@ mod tests {
         let target = &st.targets["t1"];
         assert!(target.active_task.is_none());
         assert_eq!(target.state, "failed");
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.run_id.as_deref()),
+            Some("restore-1")
+        );
+        assert_eq!(
+            target.last_run.as_ref().and_then(|run| run.kind.as_deref()),
+            Some("restore")
+        );
         assert_eq!(
             target
                 .last_run
@@ -1700,6 +1754,20 @@ mod tests {
     }
 
     #[test]
+    fn external_cancelled_run_preserves_its_identity() {
+        let mut st = state_one_target();
+        st.mark_external_run_start("t1", "verify-1", "verify", None, None)
+            .expect("verify should start");
+        st.mark_external_run_finish("t1", "verify-1", "verify", "cancelled", None)
+            .expect("matching external task should finish");
+
+        let run = st.targets["t1"].last_run.as_ref().expect("terminal run");
+        assert_eq!(run.run_id.as_deref(), Some("verify-1"));
+        assert_eq!(run.kind.as_deref(), Some("verify"));
+        assert_eq!(run.status.as_deref(), Some("cancelled"));
+    }
+
+    #[test]
     fn external_tasks_can_run_on_different_targets() {
         let mut st = state_one_target();
         let mut second = st.targets["t1"].clone();
@@ -1726,7 +1794,14 @@ mod tests {
     #[test]
     fn daemon_backup_claim_excludes_external_tasks_on_the_same_target() {
         let mut st = state_one_target();
-        assert!(st.try_mark_backup_run_start("t1", "connecting"));
+        assert!(st.try_mark_backup_run_start("t1", "connecting", "backup-1"));
+        assert_eq!(
+            st.targets["t1"]
+                .active_task
+                .as_ref()
+                .and_then(|task| task.task_id.as_deref()),
+            Some("backup-1")
+        );
 
         assert!(matches!(
             st.mark_external_run_start("t1", "restore-1", "restore", None, None)
@@ -1741,9 +1816,9 @@ mod tests {
         st.mark_external_run_start("t1", "restore-1", "restore", None, None)
             .expect("restore should start");
 
-        st.mark_run_finish_cancelled("t1", 0.0);
-        st.mark_run_finish_failure("t1", 0.0, "backup.failed".to_string());
-        st.mark_run_finish_success("t1", 0.0, 0, 0, 0);
+        st.mark_run_finish_cancelled("t1", Some("backup-1"), 0.0);
+        st.mark_run_finish_failure("t1", Some("backup-1"), 0.0, "backup.failed".to_string());
+        st.mark_run_finish_success("t1", Some("backup-1"), Some("snapshot-1"), 0.0, 0, 0, 0);
 
         let target = &st.targets["t1"];
         assert_eq!(target.state, "running");
@@ -2637,9 +2712,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 lifecycle.begin_task()
             };
 
+            let task_id = format!("tsk_{}", Uuid::new_v4());
             let claimed = status_state
                 .lock()
-                .map(|mut status| status.try_mark_backup_run_start(&target.id, "connecting"))
+                .map(|mut status| {
+                    status.try_mark_backup_run_start(&target.id, "connecting", &task_id)
+                })
                 .unwrap_or(false);
             if !claimed {
                 lifecycle.finish_task();
@@ -2662,7 +2740,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
-            let task_id = format!("tsk_{}", Uuid::new_v4());
             if task_cancel.is_cancelled() {
                 tracing::warn!(
                     event = "run.finish",
@@ -2673,7 +2750,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     target_id = %target.id,
                     "run.finish"
                 );
-                backup_task_cancelled(&status_state, &target.id, 0.0);
+                backup_task_cancelled(&status_state, &target.id, Some(&task_id), 0.0);
                 lifecycle.finish_task();
                 if is_queued_target {
                     complete_backup_queue_target(&backup_queue, &status_state, &target.id);
@@ -2705,7 +2782,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         target_id = %target.id,
                         "run.finish"
                     );
-                    backup_task_failed(&status_state, &target.id, 0.0, "run_log.init_failed");
+                    backup_task_failed(
+                        &status_state,
+                        &target.id,
+                        Some(&task_id),
+                        0.0,
+                        "run_log.init_failed",
+                    );
                     lifecycle.finish_task();
                     if is_queued_target {
                         complete_backup_queue_target(&backup_queue, &status_state, &target.id);
@@ -2749,6 +2832,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 backup_task_failed(
                     &status_state,
                     &target.id,
+                    Some(&task_id),
                     started.elapsed().as_secs_f64(),
                     "config.invalid",
                 );
@@ -2775,6 +2859,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 backup_task_failed(
                     &status_state,
                     &target.id,
+                    Some(&task_id),
                     started.elapsed().as_secs_f64(),
                     "config.invalid",
                 );
@@ -2804,6 +2889,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 backup_task_failed(
                     &status_state,
                     &target.id,
+                    Some(&task_id),
                     started.elapsed().as_secs_f64(),
                     "telegram.unauthorized",
                 );
@@ -2837,6 +2923,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 backup_task_failed(
                                     &status_state,
                                     &target.id,
+                                    Some(&task_id),
                                     started.elapsed().as_secs_f64(),
                                     "telegram.mtproto.session_invalid",
                                 );
@@ -2871,6 +2958,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     backup_task_failed(
                         &status_state,
                         &target.id,
+                        Some(&task_id),
                         started.elapsed().as_secs_f64(),
                         "config.write_failed",
                     );
@@ -2918,12 +3006,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             backup_task_cancelled(
                                 &status_state,
                                 &target.id,
+                                Some(&task_id),
                                 started.elapsed().as_secs_f64(),
                             );
                         } else {
                             backup_task_failed(
                                 &status_state,
                                 &target.id,
+                                Some(&task_id),
                                 started.elapsed().as_secs_f64(),
                                 error.code(),
                             );
@@ -2960,6 +3050,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     backup_task_failed(
                         &status_state,
                         &target.id,
+                        Some(&task_id),
                         started.elapsed().as_secs_f64(),
                         "telegram.storage_unavailable",
                     );
@@ -3218,6 +3309,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             backup_task_succeeded(
                                 &status_state,
                                 &target.id,
+                                &task_id,
+                                &res.snapshot_id,
                                 duration_seconds,
                                 res.files_indexed,
                                 res.bytes_uploaded,
@@ -3239,7 +3332,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     target_id = %target.id,
                                     "run.finish"
                                 );
-                                backup_task_cancelled(&status_state, &target.id, duration_seconds);
+                                backup_task_cancelled(
+                                    &status_state,
+                                    &target.id,
+                                    Some(&task_id),
+                                    duration_seconds,
+                                );
                             } else {
                                 tracing::error!(
                                     event = "bootstrap.update_failed",
@@ -3263,6 +3361,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 backup_task_failed(
                                     &status_state,
                                     &target.id,
+                                    Some(&task_id),
                                     duration_seconds,
                                     e.code(),
                                 );
@@ -3282,7 +3381,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             target_id = %target.id,
                             "run.finish"
                         );
-                        backup_task_cancelled(&status_state, &target.id, duration_seconds);
+                        backup_task_cancelled(
+                            &status_state,
+                            &target.id,
+                            Some(&task_id),
+                            duration_seconds,
+                        );
                     } else {
                         tracing::error!(
                             event = "run.finish",
@@ -3296,7 +3400,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "run.finish"
                         );
 
-                        backup_task_failed(&status_state, &target.id, duration_seconds, e.code());
+                        backup_task_failed(
+                            &status_state,
+                            &target.id,
+                            Some(&task_id),
+                            duration_seconds,
+                            e.code(),
+                        );
                     }
                 }
             }

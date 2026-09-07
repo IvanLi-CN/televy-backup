@@ -6,6 +6,7 @@ private let rateEstimateFreshnessSeconds: TimeInterval = 3.0
 
 struct RunLogSummary: Identifiable {
     let id: String
+    let runId: String?
     let kind: String
     let targetId: String?
     let endpointId: String?
@@ -48,8 +49,13 @@ struct MainWindowRootView: View {
     @EnvironmentObject var taskStore: TaskPresentationStore
     @EnvironmentObject var diagnosticsStore: DiagnosticsStore
     @EnvironmentObject var statusStore: StatusStore
+    @EnvironmentObject var navigationStore: MainWindowNavigationStore
     @State private var selection: String?
     @State private var selectedRun: RunLogSummary?
+    @State private var snapshotTab: SnapshotInspectionTab = .summary
+    @State private var lastNavigationRevision = 0
+    @State private var pendingNavigation: MainWindowDestination?
+    @State private var didRefreshPendingRunHistory = false
 
     private enum Selection {
         static let unknownTarget = "__unknown_target__"
@@ -81,11 +87,27 @@ struct MainWindowRootView: View {
                     selectedRun = MainWindowUIDemo.scene == "main-window-snapshot-failed-unavailable"
                         ? runHistoryStore.runs.first(where: { $0.status == "failed" })
                         : runHistoryStore.runs.first(where: { $0.kind == "backup" })
+                    snapshotTab = {
+                        switch MainWindowUIDemo.scene {
+                        case "main-window-snapshot-changes", "main-window-snapshot-baseline-unavailable":
+                            return .files
+                        case "main-window-snapshot-storage", "main-window-snapshot-storage-preparing", "main-window-snapshot-storage-waiting":
+                            return .storage
+                        default:
+                            return .summary
+                        }
+                    }()
                 }
             } else {
                 model.refreshRunHistory()
             }
+            consumeNavigationRequest()
         }
+        .onReceive(navigationStore.$request) { _ in consumeNavigationRequest() }
+        .onReceive(runHistoryStore.$runs) { _ in resolvePendingNavigation() }
+        .onReceive(runHistoryStore.$refreshInFlight) { _ in resolvePendingNavigation() }
+        .onReceive(statusStore.$state) { _ in resolvePendingNavigation() }
+        .onReceive(taskStore.$activeTask) { _ in resolvePendingNavigation() }
         .onChange(of: selection) { _, newSelection in
             guard let selectedRun else { return }
             guard !SnapshotRunDetailSelection.shouldKeepDetail(
@@ -148,6 +170,97 @@ struct MainWindowRootView: View {
 
     private func toggleSidebar() {
         NSApp.keyWindow?.firstResponder?.tryToPerform(#selector(NSSplitViewController.toggleSidebar(_:)), with: nil)
+    }
+
+    private func consumeNavigationRequest() {
+        guard let request = navigationStore.request,
+              request.revision > lastNavigationRevision
+        else {
+            return
+        }
+        lastNavigationRevision = request.revision
+        pendingNavigation = request.destination
+        didRefreshPendingRunHistory = false
+
+        let wasShowingRun = selectedRun != nil
+        selection = request.destination.targetId
+        selectedRun = nil
+        if !wasShowingRun {
+            snapshotTab = .summary
+        }
+        resolvePendingNavigation()
+    }
+
+    private func resolvePendingNavigation() {
+        guard let destination = pendingNavigation else { return }
+
+        switch destination {
+        case .target:
+            pendingNavigation = nil
+
+        case let .completedRun(targetId, runId):
+            if let snapshot = statusStore.snapshot,
+               !snapshot.targets.contains(where: { $0.targetId == targetId })
+            {
+                pendingNavigation = nil
+                return
+            }
+            guard let run = MainWindowNavigationResolver.exactRun(
+                targetId: targetId,
+                runId: runId,
+                runs: runHistoryStore.runs
+            ) else {
+                if !runHistoryStore.refreshInFlight {
+                    pendingNavigation = nil
+                }
+                return
+            }
+            selectedRun = run
+            pendingNavigation = nil
+
+        case let .activeRun(targetId, taskId):
+            if activeTaskId(for: targetId) == taskId {
+                return
+            }
+            guard let target = statusStore.snapshot?.targets.first(where: { $0.targetId == targetId }),
+                  target.lastRun?.runId == taskId
+            else {
+                if !runHistoryStore.refreshInFlight {
+                    pendingNavigation = nil
+                }
+                return
+            }
+            if let run = MainWindowNavigationResolver.exactRun(
+                targetId: targetId,
+                runId: taskId,
+                runs: runHistoryStore.runs
+            ) {
+                selectedRun = run
+                pendingNavigation = nil
+            } else if runHistoryStore.refreshInFlight {
+                return
+            } else if !didRefreshPendingRunHistory {
+                didRefreshPendingRunHistory = true
+                model.refreshRunHistory()
+            } else {
+                pendingNavigation = nil
+            }
+        }
+    }
+
+    private func activeTaskId(for targetId: String) -> String? {
+        if let localTask = taskStore.activeTask,
+           localTask.state == "running",
+           localTask.targetId == targetId
+        {
+            return localTask.id
+        }
+        return statusStore.snapshot?.targets.first(where: { $0.targetId == targetId })?.activeTask?.taskId
+    }
+
+    private func openRunDetail(_ run: RunLogSummary) {
+        snapshotTab = .summary
+        selectedRun = run
     }
 
     private var sidebar: some View {
@@ -257,15 +370,15 @@ struct MainWindowRootView: View {
     private var detail: some View {
         let targets = statusStore.snapshot?.targets ?? []
         if let selectedRun {
-            SnapshotRunDetailView(run: selectedRun) {
+            SnapshotRunDetailView(run: selectedRun, tab: $snapshotTab) {
                 self.selectedRun = nil
             }
         } else if selection == Selection.unknownTarget {
-            UnknownTargetDetailView(onOpenRun: { selectedRun = $0 })
+            UnknownTargetDetailView(onOpenRun: openRunDetail)
         } else if let selection,
            let target = targets.first(where: { $0.targetId == selection })
         {
-            TargetDetailView(target: target, onOpenRun: { selectedRun = $0 })
+            TargetDetailView(target: target, onOpenRun: openRunDetail)
         } else {
             VStack(spacing: 12) {
                 Image(systemName: "sidebar.left")

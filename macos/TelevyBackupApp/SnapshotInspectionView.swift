@@ -862,37 +862,31 @@ private final class SnapshotInspectionStore: ObservableObject {
     }
 }
 
+enum SnapshotInspectionTab: String, CaseIterable, Identifiable {
+    case summary = "Summary"
+    case files = "Files"
+    case blocks = "Blocks"
+    case storage = "Storage"
+
+    var id: String { rawValue }
+
+    var systemImage: String {
+        switch self {
+        case .summary: return "list.bullet.rectangle"
+        case .files: return "folder"
+        case .blocks: return "square.stack.3d.up"
+        case .storage: return "externaldrive"
+        }
+    }
+}
+
 struct SnapshotRunDetailView: View {
     @Environment(\.appRuntime) private var model
     let run: RunLogSummary
+    @Binding var tab: SnapshotInspectionTab
     let onBack: () -> Void
 
-    private enum Tab: String, CaseIterable, Identifiable {
-        case summary = "Summary"
-        case files = "Files"
-        case blocks = "Blocks"
-        case storage = "Storage"
-
-        var id: String { rawValue }
-
-        var systemImage: String {
-            switch self {
-            case .summary: return "list.bullet.rectangle"
-            case .files: return "folder"
-            case .blocks: return "square.stack.3d.up"
-            case .storage: return "externaldrive"
-            }
-        }
-    }
-
     @StateObject private var store = SnapshotInspectionStore()
-    @State private var tab: Tab = {
-        let scene = ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO_SCENE"] ?? ""
-        return scene == "main-window-snapshot-changes" || scene == "main-window-snapshot-baseline-unavailable"
-            ? .files
-            : scene == "main-window-snapshot-storage" || scene == "main-window-snapshot-storage-preparing" || scene == "main-window-snapshot-storage-waiting" ? .storage
-            : .summary
-    }()
     @State private var presentation: SnapshotInspectionPresentation = .tree
     @State private var changesOnly = true
     @State private var blockChangesOnly = false
@@ -1102,7 +1096,7 @@ struct SnapshotRunDetailView: View {
 
     private var tabPicker: some View {
         Picker("", selection: $tab) {
-            ForEach(Tab.allCases) { tab in Text(tab.rawValue).tag(tab) }
+            ForEach(SnapshotInspectionTab.allCases) { tab in Text(tab.rawValue).tag(tab) }
         }
         .pickerStyle(.segmented)
         .controlSize(.small)
@@ -1111,7 +1105,7 @@ struct SnapshotRunDetailView: View {
 
     private var compactTabPicker: some View {
         Picker("Snapshot section", selection: $tab) {
-            ForEach(Tab.allCases) { tab in
+            ForEach(SnapshotInspectionTab.allCases) { tab in
                 Image(systemName: tab.systemImage)
                     .accessibilityLabel(tab.rawValue)
                     .help(tab.rawValue)

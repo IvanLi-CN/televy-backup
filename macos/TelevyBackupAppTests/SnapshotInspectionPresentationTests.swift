@@ -12,6 +12,7 @@ private func expect(_ ok: @autoclosure () -> Bool, _ message: String) -> Bool {
 private func run(kind: String, status: String?, snapshotId: String?) -> RunLogSummary {
     RunLogSummary(
         id: "run",
+        runId: "run",
         kind: kind,
         targetId: "target",
         endpointId: "endpoint",

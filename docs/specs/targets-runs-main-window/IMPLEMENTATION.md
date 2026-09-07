@@ -26,3 +26,9 @@
 
 - Canonical topic established from the legacy plan.
 - Legacy source retained pending delete approval: `docs/plan/kaa5e:targets-runs-main-window/PLAN.md`.
+
+## Direct Navigation Coverage
+
+- Status identity fields are additive and optional for old daemon compatibility.
+- Menu-bar navigation is keyed by target plus run/task identity; missing identity or matching logs deliberately falls back to the selected Target overview.
+- Deterministic `ui_demo` capture remains the visual evidence source; live application windows are not captured.

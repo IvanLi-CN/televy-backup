@@ -408,7 +408,7 @@ pub struct StatusTaskFinishParams {
     pub task_id: String,
     pub kind: String, // "backup" | "restore" | "verify" | "sync"
     pub target_id: String,
-    pub state: String, // "succeeded" | "failed"
+    pub state: String, // "succeeded" | "failed" | "cancelled"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
 }

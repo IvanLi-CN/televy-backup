@@ -7,6 +7,8 @@
 
 ## Durable Rationale and Change Record
 
+- 2026-09-07: Added the menu-bar direct-navigation contract. Identity is explicit and optional (`runId`/`taskId`) so missing status fields or delayed logs cannot select an unrelated historical run.
+
 ## 文档更新（Docs to Update）
 
 - `README.md`：补充“从主界面触发 restore/verify（latest）”的简要说明（如需要）。

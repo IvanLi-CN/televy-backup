@@ -8759,6 +8759,12 @@ mod control_ipc_tests {
     }
 
     #[test]
+    fn cancelled_data_plane_error_reports_cancelled_terminal_state() {
+        assert_eq!(terminal_state_for_error("task.cancelled"), "cancelled");
+        assert_eq!(terminal_state_for_error("integrity"), "failed");
+    }
+
+    #[test]
     fn control_ipc_method_not_found_maps_code() {
         let dir = tempfile::tempdir().unwrap();
         let ipc_dir = dir.path().join("ipc");
@@ -9167,12 +9173,13 @@ fn preserve_data_plane_failure(
     target_id: &str,
     operation_error: CliError,
 ) -> CliError {
+    let terminal_state = terminal_state_for_error(operation_error.code);
     if let Err(terminal_error) = daemon_control_status_task_finish(
         data_dir,
         task_id,
         kind,
         target_id,
-        "failed",
+        terminal_state,
         Some(operation_error.code),
     ) {
         tracing::warn!(
@@ -9188,6 +9195,14 @@ fn preserve_data_plane_failure(
         );
     }
     operation_error
+}
+
+fn terminal_state_for_error(error_code: &str) -> &'static str {
+    if error_code == "task.cancelled" {
+        "cancelled"
+    } else {
+        "failed"
+    }
 }
 
 fn daemon_keychain_get_secret(data_dir: &Path, key: &str) -> Result<Option<String>, CliError> {
