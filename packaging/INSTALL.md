@@ -8,6 +8,6 @@
    ```
 
 3. The controlled distribution is ad-hoc signed. macOS may show a Gatekeeper warning. After verifying the checksum, open the app from Finder and use **Open** in the confirmation dialog. Do not remove quarantine before checksum verification.
-4. The tool archive contains `televybackup`, `televybackupd`, `televybackup-mtproto-helper`, and a LaunchAgent template. Install the managed service explicitly with `televybackup daemon install-service`; uninstalling the service does not remove configuration or backup data.
+4. The tool archive contains `televybackup`, `televybackupd`, `televybackup-mtproto-helper`, the root-only `televybackup-snapshot-helper`, and LaunchAgent/LaunchDaemon templates. Install the managed service explicitly with `televybackup daemon install-service`; install the APFS helper explicitly with `televybackup snapshot-helper install` from an administrator-authorized installer. Scheduled backups do not authenticate. Uninstalling either service does not remove configuration or backup data.
 
 Developer ID signing, notarization, automatic updates, and Homebrew formula updates are not part of this distribution.

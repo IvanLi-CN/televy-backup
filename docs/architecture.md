@@ -16,6 +16,10 @@
   - Intended to be managed by `brew services` as a user-level LaunchAgent.
   - Owns all secrets access (Keychain / `vault.key` / `secrets.enc`). Other components must use daemon IPC.
   - Supports a local `daemon.stop` control request. App and CLI use it for graceful cancellation and shutdown; the caller waits for IPC disappearance before treating shutdown as complete.
+- **APFS snapshot helper**: `televybackup-snapshot-helper` (`crates/snapshot-helper/`).
+  - Runs as a separately installed root LaunchDaemon (`com.ivan.televybackup.snapshot-helper`) and exposes only versioned `Status`, `Probe`, `AcquireLease`, and `ReleaseLease` requests over a peer-UID checked Unix socket.
+  - It creates and mounts an APFS snapshot, journals the exact snapshot UUID and private mount root, and deletes only journal-owned UUIDs. It never reads, encrypts, or uploads backup data.
+  - Installation, update, and uninstall are explicit administrator transactions. Scheduled backups use the already installed helper and never prompt for a password.
 
 ## Status snapshots (Popover / Developer dashboard)
 
@@ -65,6 +69,12 @@ daemon-only boundary:
 - Purpose: allow other components to request “vault key get-or-create” and limited Keychain actions without directly
   linking to Keychain APIs.
 - Security posture: must not expose the vault key plaintext; access is scoped by Unix socket file permissions.
+
+## APFS snapshot consistency
+
+Snapshot consistency is opt-in per APFS Volume UUID (`snapshot_volumes.<uuid>.enabled`). When enabled, a backup fails closed if the helper cannot probe, create, uniquely identify, or mount the snapshot; it never falls back to the live source directory. The core keeps the logical source path in historical indexes and reads file bytes from the temporary physical snapshot read root. The lease is released immediately after the scan has read all source bytes into the encrypted upload queue.
+
+The user daemon remains the scheduler, Keychain boundary, scanner, encryptor, and uploader. The helper is only a privileged filesystem transaction boundary. Non-APFS volumes, nested mounted volumes, ambiguous `tmutil` ownership, and pending cleanup are reported as unsupported/blocking states rather than silently producing a best-effort backup. See [the APFS snapshot consistency spec](specs/apfs-snapshot-consistency/SPEC.md) and [ADR 0007](adr/0007-apfs-snapshot-privileged-helper.md).
 
 ## Data locations
 
@@ -308,6 +318,6 @@ described above.
 
 ## Known limitations (MVP)
 
-- No APFS snapshot: backups are best-effort consistent at scan time.
+- Snapshot consistency is opt-in per APFS volume; disabled volumes retain the existing live-directory behavior. Enabled volumes never fall back to a live scan after a snapshot precondition fails.
 - Restore is not a full remote “search”: cross-device restore depends on the pinned bootstrap catalog, and only provides `latest` pointers recorded there.
 - No remote chunk GC: Telegram chat storage can grow over time.

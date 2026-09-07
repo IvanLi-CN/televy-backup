@@ -935,6 +935,67 @@ final class AppModel {
         }
     }
 
+    func fetchSnapshotStatus(completion: @escaping (SnapshotControlStatus?, String?) -> Void) {
+        let socketPath = controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<SnapshotControlStatus, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.status"
+            )
+            DispatchQueue.main.async {
+                switch result {
+                case let .success(status): completion(status, nil)
+                case let .failure(error): completion(nil, controlFailureMessage(error))
+                }
+            }
+        }
+    }
+
+    func probeSnapshotVolume(path: String, completion: @escaping (SnapshotProbeResponse?, String?) -> Void) {
+        let socketPath = controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<SnapshotProbeResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.probe",
+                params: ["sourcePath": path]
+            )
+            DispatchQueue.main.async {
+                switch result {
+                case let .success(probe): completion(probe, probe.snapshotSupported ? nil : (probe.reason ?? "Snapshot is not supported for this volume"))
+                case let .failure(error): completion(nil, controlFailureMessage(error))
+                }
+            }
+        }
+    }
+
+    func performSnapshotHelperAction(_ action: String, completion: @escaping (Bool, String?) -> Void) {
+        guard action == "install" || action == "uninstall" else {
+            completion(false, "Unsupported snapshot helper operation")
+            return
+        }
+        guard let cli = cliPath() else {
+            DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let command = "\(self.shellQuote(cli)) snapshot-helper \(self.shellQuote(action))"
+            let script = "do shell script \(self.appleScriptQuote(command)) with administrator privileges"
+            let result = self.runCommandCapture(exe: "/usr/bin/osascript", args: ["-e", script], timeoutSeconds: 60)
+            let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(300).description
+            DispatchQueue.main.async { completion(result.status == 0, result.status == 0 ? nil : output) }
+        }
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func appleScriptQuote(_ value: String) -> String {
+        "\"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
     func daemonPath() -> String? {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents")

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::de::Error as _;
@@ -24,6 +25,14 @@ pub struct SettingsV2 {
     pub telegram_endpoints: Vec<TelegramEndpoint>,
     #[serde(default)]
     pub targets: Vec<Target>,
+    #[serde(default)]
+    pub snapshot_volumes: BTreeMap<String, SnapshotVolumeSetting>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SnapshotVolumeSetting {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +184,7 @@ impl Default for SettingsV2 {
             telegram: TelegramGlobal::default(),
             telegram_endpoints: Vec::new(),
             targets: Vec::new(),
+            snapshot_volumes: BTreeMap::new(),
         }
     }
 }
@@ -320,6 +330,24 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
                 settings.version
             ),
         });
+    }
+
+    for volume_uuid in settings.snapshot_volumes.keys() {
+        let valid = volume_uuid.len() == 36
+            && volume_uuid.chars().enumerate().all(|(index, ch)| {
+                if matches!(index, 8 | 13 | 18 | 23) {
+                    ch == '-'
+                } else {
+                    ch.is_ascii_hexdigit()
+                }
+            });
+        if !valid {
+            return Err(Error::InvalidConfig {
+                message: format!(
+                    "snapshot_volumes contains invalid APFS Volume UUID: {volume_uuid}"
+                ),
+            });
+        }
     }
 
     if settings.telegram.mode.trim() != "mtproto" {
@@ -659,6 +687,7 @@ fn migrate_v1_to_v2(v1: SettingsV1) -> SettingsV2 {
         },
         telegram_endpoints: endpoints,
         targets,
+        snapshot_volumes: BTreeMap::new(),
     }
 }
 
@@ -694,6 +723,30 @@ source_path = "/tmp"
 endpoint_id = "e1"
 "#;
         parse_settings_v2(input).unwrap()
+    }
+
+    #[test]
+    fn snapshot_volume_preferences_round_trip_and_default_empty() {
+        let mut settings = base_settings_v2();
+        assert!(settings.snapshot_volumes.is_empty());
+        settings.snapshot_volumes.insert(
+            "A1B2C3D4-E5F6-47A8-9012-ABCDEF123456".into(),
+            SnapshotVolumeSetting { enabled: true },
+        );
+        let toml = to_toml_v2(&settings).unwrap();
+        let decoded = parse_settings_v2(&toml).unwrap();
+        assert_eq!(decoded.snapshot_volumes, settings.snapshot_volumes);
+    }
+
+    #[test]
+    fn snapshot_volume_preferences_reject_invalid_uuid() {
+        let mut settings = base_settings_v2();
+        settings.snapshot_volumes.insert(
+            "not-a-volume-uuid".into(),
+            SnapshotVolumeSetting { enabled: true },
+        );
+        let error = validate_settings_schema_v2(&settings).unwrap_err();
+        assert!(error.to_string().contains("invalid APFS Volume UUID"));
     }
 
     #[test]
