@@ -6,7 +6,7 @@
 
 ## Context and Scope
 
-This topic owns the macOS distribution surface for TelevyBackup: three GUI DMGs, native arm64 and x86_64 tool archives, Universal 2 binaries, checksums, build manifests, and the product-managed per-user daemon service.
+This topic owns the macOS distribution surface for TelevyBackup: three GUI DMGs, native arm64 and x86_64 tool archives, Universal 2 binaries, checksums, build manifests, the product-managed per-user daemon service, and the separately installed root APFS snapshot helper.
 
 It does not own backup formats, Telegram protocol behavior, Apple Developer ID signing, notarization, App Store delivery, automatic updates, or Homebrew formula maintenance.
 
@@ -15,6 +15,7 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 - **Release version**: the complete semver-like version shown to users, including an RC suffix.
 - **Build number**: a deterministic numeric `CFBundleVersion` derived from the source history.
 - **Managed service**: the single user LaunchAgent labeled `com.ivan.televybackup.daemon`.
+- **Snapshot helper**: the root LaunchDaemon labeled `com.ivan.televybackup.snapshot-helper`; it is installed only by an explicit administrator transaction.
 - **Environment**: the exact config and data directory pair passed to the daemon.
 - **Universal 2**: a Mach-O binary containing both arm64 and x86_64 slices.
 - **Brand bundle**: the compiled `Assets.car` App Icon catalog, the `TelevyBackup.icns` compatibility fallback, and the three runtime SVGs under `Contents/Resources/Brand`.
@@ -27,11 +28,11 @@ Every stable or RC release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBac
 
 ### REQ-MRD-002: Native build matrix
 
-arm64 assets MUST be built on `macos-15`; x86_64 assets MUST be built on `macos-15-intel`. Universal 2 assembly MUST combine those native slices and verify all four embedded executables.
+arm64 assets MUST be built on `macos-15`; x86_64 assets MUST be built on `macos-15-intel`. Universal 2 assembly MUST combine those native slices and verify all five embedded executables, including the snapshot helper.
 
 ### REQ-MRD-003: Version observability
 
-The App MUST use a numeric `CFBundleShortVersionString`, deterministic numeric `CFBundleVersion`, and a full `TelevyBackupReleaseVersion` key. `televybackup`, `televybackupd`, and `televybackup-mtproto-helper` MUST expose `--version` with release version and source commit.
+The App MUST use a numeric `CFBundleShortVersionString`, deterministic numeric `CFBundleVersion`, and a full `TelevyBackupReleaseVersion` key. `televybackup`, `televybackupd`, `televybackup-mtproto-helper`, and `televybackup-snapshot-helper` MUST expose `--version` with release version and source commit.
 
 ### REQ-MRD-004: Controlled signing
 
@@ -48,6 +49,10 @@ Managed binaries live under a versioned directory in the user's TelevyBackup App
 ### REQ-MRD-007: GUI lifecycle
 
 The Settings Schedule page MUST default the service switch to off, display installed/update/conflict/failure states, prevent duplicate operations, and invoke the same CLI service contract. Daemon business operations continue to use the authenticated control IPC boundary.
+
+### REQ-MRD-010: Snapshot helper packaging
+
+The app and tool archive MUST contain `televybackup-snapshot-helper` and a LaunchDaemon template. The CLI MUST expose explicit `snapshot-helper install`, `snapshot-helper uninstall`, and `snapshot-helper status` operations. Install/update/uninstall MUST require administrator authorization and MUST refuse to run while the helper reports an active lease or pending cleanup. Scheduled backups MUST use the installed root helper without prompting.
 
 ### REQ-MRD-008: Release atomicity and backfill
 
@@ -98,6 +103,7 @@ Covers: REQ-MRD-007. Swift unit tests and isolated Settings snapshots provide th
 | REQ-MRD-005, 006 | CLI service tests; transaction fixture |
 | REQ-MRD-007 | Swift unit tests; isolated Settings snapshots |
 | REQ-MRD-009 | app build; brand and App Icon asset verifiers; bundle inspection |
+| REQ-MRD-010 | package verifier; CLI helper transaction tests; LaunchDaemon plist inspection |
 
 ## Related ADRs
 

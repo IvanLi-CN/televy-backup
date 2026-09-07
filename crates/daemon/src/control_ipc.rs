@@ -24,6 +24,8 @@ use televy_backup_core::{
     Storage, TaskProgress, TelegramMtProtoStorage, TelegramMtProtoStorageConfig,
 };
 
+use crate::snapshot_client::SnapshotClient;
+
 type Settings = televy_backup_core::config::SettingsV2;
 
 static SETTINGS_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -409,6 +411,109 @@ async fn handle_control_ipc_client(
     if req.method == "operation.get" {
         let response = operation_get(&req);
         write_json_line(&mut w, &response).await?;
+        return Ok(());
+    }
+
+    if req.method == "snapshot.probe" {
+        let source_path = match req
+            .params
+            .get("sourcePath")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(path) if !path.trim().is_empty() => path,
+            _ => {
+                write_json_line(
+                    &mut w,
+                    &ControlResponse::err(
+                        req.id.clone(),
+                        ControlError::invalid_request(
+                            "snapshot.probe requires sourcePath",
+                            serde_json::json!({}),
+                        ),
+                    ),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        match SnapshotClient::default()
+            .probe(std::path::Path::new(source_path), None)
+            .await
+        {
+            Ok(probe) => {
+                write_json_line(
+                    &mut w,
+                    &ControlResponse::ok(
+                        req.id.clone(),
+                        serde_json::json!({
+                            "volumeUuid": probe.volume_uuid,
+                            "filesystem": probe.filesystem,
+                            "freeBytes": probe.free_bytes,
+                            "snapshotSupported": probe.snapshot_supported,
+                            "reason": probe.reason,
+                        }),
+                    ),
+                )
+                .await?;
+            }
+            Err(error) => {
+                write_json_line(
+                    &mut w,
+                    &ControlResponse::err(
+                        req.id.clone(),
+                        ControlError::unavailable(
+                            "snapshot probe failed",
+                            serde_json::json!({"error": error.to_string()}),
+                        ),
+                    ),
+                )
+                .await?;
+            }
+        }
+        return Ok(());
+    }
+
+    if req.method == "snapshot.status" {
+        let settings = context.settings.read().await.clone();
+        let helper = SnapshotClient::default().status().await;
+        let (helper_available, helper_error, active_leases, pending_cleanup, helper_version) =
+            match helper {
+                Ok(status) => (
+                    true,
+                    None,
+                    status.active_leases,
+                    status.pending_cleanup,
+                    Some(status.helper_version),
+                ),
+                Err(error) => (false, Some(error.to_string()), 0, 0, None),
+            };
+        let volumes = settings
+            .snapshot_volumes
+            .iter()
+            .map(|(uuid, setting)| {
+                serde_json::json!({
+                    "volumeUuid": uuid,
+                    "enabled": setting.enabled,
+                    "mode": if setting.enabled { "strict" } else { "disabled" },
+                })
+            })
+            .collect::<Vec<_>>();
+        write_json_line(
+            &mut w,
+            &ControlResponse::ok(
+                req.id.clone(),
+                serde_json::json!({
+                    "consistencyMode": if volumes.iter().any(|volume| volume.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(false)) { "strict" } else { "live" },
+                    "helperAvailable": helper_available,
+                    "helperVersion": helper_version,
+                    "helperError": helper_error,
+                    "activeLeases": active_leases,
+                    "pendingCleanup": pending_cleanup,
+                    "volumes": volumes,
+                }),
+            ),
+        )
+        .await?;
         return Ok(());
     }
 

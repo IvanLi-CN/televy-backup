@@ -37,6 +37,7 @@ use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
 mod service;
+mod snapshot_service;
 
 const BUILD_VERSION: &str = env!("TELEVYBACKUP_BUILD_VERSION");
 const BUILD_LONG_VERSION: &str = env!("TELEVYBACKUP_BUILD_LONG_VERSION");
@@ -114,6 +115,10 @@ enum Command {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
+    SnapshotHelper {
+        #[command(subcommand)]
+        cmd: SnapshotHelperCmd,
+    },
     Gui {
         #[command(subcommand)]
         cmd: GuiCmd,
@@ -131,6 +136,13 @@ enum DaemonCmd {
     },
     UninstallService,
     ServiceStatus,
+}
+
+#[derive(Subcommand)]
+enum SnapshotHelperCmd {
+    Install,
+    Uninstall,
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -945,6 +957,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             DaemonCmd::UninstallService => service::uninstall_service(&config_dir, cli.json),
             DaemonCmd::ServiceStatus => service::service_status(&config_dir, &data_dir, cli.json),
+        },
+        Command::SnapshotHelper { cmd } => match cmd {
+            SnapshotHelperCmd::Install => snapshot_service::install(cli.json),
+            SnapshotHelperCmd::Uninstall => snapshot_service::uninstall(cli.json),
+            SnapshotHelperCmd::Status => snapshot_service::status(cli.json),
         },
         Command::Gui { cmd } => match cmd {
             GuiCmd::Quit => gui_quit(&gui_data_dir, cli.json),

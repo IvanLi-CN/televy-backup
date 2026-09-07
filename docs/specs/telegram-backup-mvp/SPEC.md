@@ -96,7 +96,7 @@
 
 ### Non-goals（明确不做）
 
-- 更强一致性：对源目录生成一致性视图（APFS snapshot / 时间点冻结）。
+- 应用事务一致性：APFS 文件系统快照不保证被备份应用内部事务的原子性；需要应用级事务语义的场景仍由被备份应用自行保证。APFS 快照一致性由独立的 `apfs-snapshot-consistency` 主题 Spec 定义，不在本 MVP 的 Telegram 数据模型中重复定义。
 
 
 ## 技术选型（Tech Stack, frozen）

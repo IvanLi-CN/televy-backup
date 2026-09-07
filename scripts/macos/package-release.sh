@@ -45,7 +45,7 @@ cp -R "$app_source" "$app_dest"
 
 staging="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-package.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
-mkdir -p "$staging/TelevyBackup" "$staging/TelevyBackup Tools/bin" "$staging/TelevyBackup Tools/LaunchAgents"
+mkdir -p "$staging/TelevyBackup" "$staging/TelevyBackup Tools/bin" "$staging/TelevyBackup Tools/LaunchAgents" "$staging/TelevyBackup Tools/LaunchDaemons"
 cp -R "$app_dest" "$staging/TelevyBackup/"
 ln -s /Applications "$staging/TelevyBackup/Applications"
 hdiutil create -quiet -volname "TelevyBackup $version" -srcfolder "$staging/TelevyBackup" -format UDZO -ov "$output_dir/$dmg_name"
@@ -53,6 +53,7 @@ hdiutil create -quiet -volname "TelevyBackup $version" -srcfolder "$staging/Tele
 cp "$app_dest/Contents/MacOS/televybackup-cli" "$staging/TelevyBackup Tools/bin/televybackup"
 cp "$app_dest/Contents/MacOS/televybackupd" "$staging/TelevyBackup Tools/bin/televybackupd"
 cp "$app_dest/Contents/MacOS/televybackup-mtproto-helper" "$staging/TelevyBackup Tools/bin/televybackup-mtproto-helper"
+cp "$app_dest/Contents/MacOS/televybackup-snapshot-helper" "$staging/TelevyBackup Tools/bin/televybackup-snapshot-helper"
 chmod 755 "$staging/TelevyBackup Tools/bin/"*
 cat > "$staging/TelevyBackup Tools/LaunchAgents/com.ivan.televybackup.daemon.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -60,6 +61,15 @@ cat > "$staging/TelevyBackup Tools/LaunchAgents/com.ivan.televybackup.daemon.pli
 <plist version="1.0"><dict>
   <key>Label</key><string>com.ivan.televybackup.daemon</string>
   <key>ProgramArguments</key><array><string>REPLACE_WITH_INSTALLED_DAEMON</string></array>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+</dict></plist>
+PLIST
+cat > "$staging/TelevyBackup Tools/LaunchDaemons/com.ivan.televybackup.snapshot-helper.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.ivan.televybackup.snapshot-helper</string>
+  <key>ProgramArguments</key><array><string>/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-helper</string></array>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 </dict></plist>
 PLIST

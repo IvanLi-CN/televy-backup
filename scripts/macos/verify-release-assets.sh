@@ -61,7 +61,7 @@ for app in "$asset_dir"/*.app; do
       exit 1
     }
   done
-  for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper; do
+  for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-helper; do
     info="$(lipo -info "$app/Contents/MacOS/$binary")"
     [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "universal binary missing slice: $binary" >&2; exit 1; }
   done
