@@ -165,6 +165,7 @@ final class AppModel {
     private let fileLogQueue = DispatchQueue(label: "TelevyBackup.uiLog", qos: .utility)
     private var didWriteStartupLog: Bool = false
     private var didShowUiLogWriteErrorToast: Bool = false
+    private var didReportWindowActivationPolicyFailure: Bool = false
     private var settingsWindow: NSWindow? = nil
     private var mainWindow: NSWindow? = nil
     var closePopoverForTargetNavigation: (() -> Void)?
@@ -250,6 +251,7 @@ final class AppModel {
     private let guiOwnedProcessLock = NSLock()
     private var guiOwnedProcesses: [ObjectIdentifier: Process] = [:]
     var menuQuickActionFailureHandler: ((String) -> Void)? = nil
+    var persistentWindowPresentationHandler: ((NSWindow, String) -> Void)? = nil
 
     func hasEnabledSchedule() -> Bool {
         scheduleEnabled
@@ -306,6 +308,27 @@ final class AppModel {
         appendLog("ERROR: menu quick action failed: \(message)")
         showToast(message, isError: true)
         menuQuickActionFailureHandler?(message)
+    }
+
+    func reportWindowActivationPolicyFailure(_ message: String) {
+        appendLog("ERROR: window activation policy failed: \(message)")
+        guard !didReportWindowActivationPolicyFailure else { return }
+        didReportWindowActivationPolicyFailure = true
+        showToast("\(message) (see ui.log)", isError: true)
+    }
+
+    private func presentPersistentWindow(_ window: NSWindow, id: String) {
+        if let handler = persistentWindowPresentationHandler {
+            handler(window, id)
+            return
+        }
+
+        // Keep window actions usable during early app setup and in isolated model tests.
+        NSApp.activate(ignoringOtherApps: true)
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.makeKeyAndOrderFront(nil)
     }
 
     func beginDaemonShutdownPresentation() {
@@ -2354,8 +2377,7 @@ final class AppModel {
 	            }
 
 	            self.configureSettingsWindowIfNeeded(window)
-	            NSApp.activate(ignoringOtherApps: true)
-	            window.makeKeyAndOrderFront(nil)
+	            self.presentPersistentWindow(window, id: "settings")
 	            NotificationCenter.default.post(name: .settingsWindowRequested, object: nil)
 	        }
 	    }
@@ -2466,8 +2488,7 @@ final class AppModel {
 	            }
 
 	            self.configureMainWindowIfNeeded(window)
-	            NSApp.activate(ignoringOtherApps: true)
-	            window.makeKeyAndOrderFront(nil)
+	            self.presentPersistentWindow(window, id: "main")
 	        }
 	    }
 
@@ -4641,6 +4662,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let menuBarStatusItemImageStore = MenuBarStatusItemImageStore()
     private var popoverHost: NSHostingController<AnyView>? = nil
     private var popoverResizeScheduled: Bool = false
+    private var persistentWindowCoordinator: PersistentWindowActivationCoordinator?
     private let appearanceOverride = ModelStore.shared.appearanceOverride
     private var terminationInProgress = false
     private let lifecycleGate = GuiLifecycleGate()
@@ -4815,6 +4837,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appearanceOverride.apply(to: NSApp)
         ModelStore.shared.closePopoverForTargetNavigation = { [weak self] in
             self?.closePopover(nil)
+        }
+
+        let coordinator = PersistentWindowActivationCoordinator(
+            application: NSApp,
+            closePopover: { [weak self] in self?.closePopover(nil) },
+            reportFailure: { message in
+                ModelStore.shared.reportWindowActivationPolicyFailure(message)
+            }
+        )
+        persistentWindowCoordinator = coordinator
+        ModelStore.shared.persistentWindowPresentationHandler = { [weak self] window, id in
+            guard let self, let coordinator = self.persistentWindowCoordinator else {
+                NSApp.activate(ignoringOtherApps: true)
+                if window.isMiniaturized {
+                    window.deminiaturize(nil)
+                }
+                window.makeKeyAndOrderFront(nil)
+                return
+            }
+            coordinator.present(window, id: id)
         }
 
         if !guiControlRegistrationIsDisabled() {
@@ -5062,12 +5104,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guiControlServer?.markStopped()
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        persistentWindowCoordinator?.applicationDidBecomeActive()
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if persistentWindowCoordinator?.handleDockReopen(hasVisibleWindows: flag) == true {
+            return true
+        }
         showPopover(nil)
         return true
     }
 
     @objc private func handleStatusItemClick(_ sender: Any?) {
+        persistentWindowCoordinator?.noteStatusItemActivation()
         if NSApp.currentEvent?.type == .rightMouseUp {
             closePopover(sender)
             showQuickActionMenu()
@@ -5109,6 +5159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPopover(_ sender: Any?) {
         guard let button = statusItem?.button else { return }
+        persistentWindowCoordinator?.noteStatusItemActivation()
         if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] != "1" {
             ModelStore.shared.ensureDaemonRunning()
             ModelStore.shared.ensureStatusStreamRunning()
