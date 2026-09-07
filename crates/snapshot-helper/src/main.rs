@@ -654,7 +654,11 @@ fn available_bytes(path: &Path) -> Result<u64, HelperError> {
     if result != 0 {
         return Err(HelperError::Io(std::io::Error::last_os_error()));
     }
-    Ok((stat.f_bavail as u64).saturating_mul(stat.f_bsize as u64))
+    #[cfg(target_os = "linux")]
+    let available = stat.f_bavail.saturating_mul(stat.f_bsize);
+    #[cfg(not(target_os = "linux"))]
+    let available = (stat.f_bavail as u64).saturating_mul(stat.f_bsize as u64);
+    Ok(available)
 }
 
 fn nested_mount_under(
