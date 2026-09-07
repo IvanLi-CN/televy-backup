@@ -655,7 +655,7 @@ fn available_bytes(path: &Path) -> Result<u64, HelperError> {
         return Err(HelperError::Io(std::io::Error::last_os_error()));
     }
     #[cfg(target_os = "linux")]
-    let available = stat.f_bavail.saturating_mul(stat.f_bsize);
+    let available = stat.f_bavail.saturating_mul(stat.f_bsize as u64);
     #[cfg(not(target_os = "linux"))]
     let available = (stat.f_bavail as u64).saturating_mul(stat.f_bsize as u64);
     Ok(available)
