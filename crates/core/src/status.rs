@@ -68,6 +68,12 @@ pub struct Progress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetRunSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
     pub finished_at: Option<String>,
     pub duration_seconds: Option<f64>,
     pub status: Option<String>,
@@ -87,6 +93,8 @@ pub struct BackupQueueMembership {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveTask {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     pub kind: String,
     pub directions: Vec<String>,
 }
@@ -101,6 +109,7 @@ impl ActiveTask {
             _ => return None,
         };
         Some(Self {
+            task_id: None,
             kind: kind.to_string(),
             directions: directions.into_iter().map(str::to_string).collect(),
         })
@@ -342,6 +351,43 @@ mod tests {
         let json = serde_json::to_value(&activity).unwrap();
         assert_eq!(json["kind"], "sync");
         assert_eq!(json["directions"], serde_json::json!(["up", "down"]));
+        assert!(json.get("taskId").is_none());
         assert!(ActiveTask::for_kind("other").is_none());
+    }
+
+    #[test]
+    fn run_identity_fields_are_additive_and_old_json_still_decodes() {
+        let run = TargetRunSummary {
+            run_id: Some("run-1".to_string()),
+            kind: Some("backup".to_string()),
+            snapshot_id: Some("snapshot-1".to_string()),
+            finished_at: None,
+            duration_seconds: None,
+            status: Some("succeeded".to_string()),
+            error_code: None,
+            files_indexed: None,
+            bytes_uploaded: None,
+            bytes_deduped: None,
+        };
+        let json = serde_json::to_value(&run).unwrap();
+        assert_eq!(json["runId"], "run-1");
+        assert_eq!(json["kind"], "backup");
+        assert_eq!(json["snapshotId"], "snapshot-1");
+
+        let old: TargetRunSummary = serde_json::from_value(serde_json::json!({
+            "finishedAt": "2024-01-01T00:00:00Z",
+            "status": "succeeded"
+        }))
+        .unwrap();
+        assert!(old.run_id.is_none());
+        assert!(old.kind.is_none());
+        assert!(old.snapshot_id.is_none());
+
+        let old_activity: ActiveTask = serde_json::from_value(serde_json::json!({
+            "kind": "backup",
+            "directions": ["up"]
+        }))
+        .unwrap();
+        assert!(old_activity.task_id.is_none());
     }
 }

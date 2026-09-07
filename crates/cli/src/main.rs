@@ -614,7 +614,7 @@ fn emit_task_state_failed(
     );
     obj.insert(
         "state".to_string(),
-        serde_json::Value::String("failed".to_string()),
+        serde_json::Value::String(terminal_state_for_error(e.code).to_string()),
     );
     if let Some(t) = target_id {
         obj.insert(
@@ -666,6 +666,7 @@ fn emit_preflight_failed(
     );
 
     let duration_seconds = started.elapsed().as_secs_f64();
+    let terminal_state = terminal_state_for_error(e.code);
     tracing::error!(
         event = "run.finish",
         kind,
@@ -675,7 +676,7 @@ fn emit_preflight_failed(
         endpoint_id = ctx.endpoint_id.unwrap_or(""),
         source_path = ctx.source_path.unwrap_or(""),
         snapshot_id = ctx.snapshot_id.unwrap_or(""),
-        status = "failed",
+        status = terminal_state,
         duration_seconds,
         error_code = e.code,
         error_message = %e.message,
@@ -5775,12 +5776,13 @@ async fn backup_run(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(res) => {
-            daemon_control_status_task_finish(
+            daemon_control_status_task_finish_with_snapshot(
                 data_dir,
                 &task_id,
                 "backup",
                 ctx_target_id.as_str(),
                 "succeeded",
+                Some(&res.snapshot_id),
                 None,
             )?;
 
@@ -5853,6 +5855,7 @@ async fn backup_run(
             Ok(())
         }
         Err(e) => {
+            let terminal_state = terminal_state_for_error(e.code);
             tracing::error!(
                 event = "run.finish",
                 kind = "backup",
@@ -5861,7 +5864,7 @@ async fn backup_run(
                 target_id = %ctx_target_id,
                 endpoint_id = %ctx_endpoint_id,
                 source_path = %ctx_source_path,
-                status = "failed",
+                status = terminal_state,
                 duration_seconds,
                 error_code = e.code,
                 error_message = %e.message,
@@ -5873,7 +5876,7 @@ async fn backup_run(
                     "type": "task.state",
                     "taskId": task_id,
                     "kind": "backup",
-                    "state": "failed",
+                    "state": terminal_state,
                     "targetId": ctx_target_id.clone(),
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
@@ -6394,12 +6397,13 @@ async fn restore_run(
     match result {
         Ok(res) => {
             if let Some(target_id) = admitted_target_id.as_deref() {
-                daemon_control_status_task_finish(
+                daemon_control_status_task_finish_with_snapshot(
                     data_dir,
                     &task_id,
                     "restore",
                     target_id,
                     "succeeded",
+                    Some(&snapshot_id),
                     None,
                 )?;
             }
@@ -6447,13 +6451,14 @@ async fn restore_run(
             Ok(())
         }
         Err(e) => {
+            let terminal_state = terminal_state_for_error(e.code);
             tracing::error!(
                 event = "run.finish",
                 kind = "restore",
                 run_id = %task_id,
                 task_id = %task_id,
                 snapshot_id = %snapshot_id,
-                status = "failed",
+                status = terminal_state,
                 duration_seconds,
                 error_code = e.code,
                 error_message = %e.message,
@@ -6465,7 +6470,7 @@ async fn restore_run(
                     "type": "task.state",
                     "taskId": task_id,
                     "kind": "restore",
-                    "state": "failed",
+                    "state": terminal_state,
                     "snapshotId": snapshot_id,
                     "error": { "code": e.code, "message": e.message.clone() },
                 });
@@ -6475,8 +6480,13 @@ async fn restore_run(
                 emit_event_stdout(event);
             }
             if let Some(target_id) = admitted_target_id.as_deref() {
-                return Err(preserve_data_plane_failure(
-                    data_dir, &task_id, "restore", target_id, e,
+                return Err(preserve_data_plane_failure_with_snapshot(
+                    data_dir,
+                    &task_id,
+                    "restore",
+                    target_id,
+                    Some(&snapshot_id),
+                    e,
                 ));
             }
             Err(e)
@@ -6957,12 +6967,13 @@ async fn restore_latest(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok((snapshot_id, res)) => {
-            daemon_control_status_task_finish(
+            daemon_control_status_task_finish_with_snapshot(
                 data_dir,
                 &task_id,
                 "restore",
                 t.id.as_str(),
                 "succeeded",
+                Some(&snapshot_id),
                 None,
             )?;
 
@@ -7012,6 +7023,7 @@ async fn restore_latest(
             Ok(())
         }
         Err(e) => {
+            let terminal_state = terminal_state_for_error(e.code);
             tracing::error!(
                 event = "run.finish",
                 kind = "restore",
@@ -7021,7 +7033,7 @@ async fn restore_latest(
                 endpoint_id = %ep.id,
                 source_path = %t.source_path,
                 snapshot_id = "latest",
-                status = "failed",
+                status = terminal_state,
                 duration_seconds,
                 error_code = e.code,
                 error_message = %e.message,
@@ -7033,7 +7045,7 @@ async fn restore_latest(
                     "type": "task.state",
                     "taskId": task_id,
                     "kind": "restore",
-                    "state": "failed",
+                    "state": terminal_state,
                     "targetId": t.id.clone(),
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
@@ -7400,12 +7412,13 @@ async fn verify_latest(
     let duration_seconds = started.elapsed().as_secs_f64();
     match result {
         Ok((snapshot_id, res)) => {
-            daemon_control_status_task_finish(
+            daemon_control_status_task_finish_with_snapshot(
                 data_dir,
                 &task_id,
                 "verify",
                 t.id.as_str(),
                 "succeeded",
+                Some(&snapshot_id),
                 None,
             )?;
 
@@ -7453,6 +7466,7 @@ async fn verify_latest(
             Ok(())
         }
         Err(e) => {
+            let terminal_state = terminal_state_for_error(e.code);
             tracing::error!(
                 event = "run.finish",
                 kind = "verify",
@@ -7462,7 +7476,7 @@ async fn verify_latest(
                 endpoint_id = %ep.id,
                 source_path = %t.source_path,
                 snapshot_id = "latest",
-                status = "failed",
+                status = terminal_state,
                 duration_seconds,
                 error_code = e.code,
                 error_message = %e.message,
@@ -7474,7 +7488,7 @@ async fn verify_latest(
                     "type": "task.state",
                     "taskId": task_id,
                     "kind": "verify",
-                    "state": "failed",
+                    "state": terminal_state,
                     "targetId": t.id.clone(),
                     "error": { "code": e.code, "message": e.message.clone() },
                 }));
@@ -7713,12 +7727,13 @@ async fn verify_run(
     match result {
         Ok(res) => {
             if let Some(target_id) = admitted_target_id.as_deref() {
-                daemon_control_status_task_finish(
+                daemon_control_status_task_finish_with_snapshot(
                     data_dir,
                     &task_id,
                     "verify",
                     target_id,
                     "succeeded",
+                    Some(&snapshot_id),
                     None,
                 )?;
             }
@@ -7764,13 +7779,14 @@ async fn verify_run(
             Ok(())
         }
         Err(e) => {
+            let terminal_state = terminal_state_for_error(e.code);
             tracing::error!(
                 event = "run.finish",
                 kind = "verify",
                 run_id = %task_id,
                 task_id = %task_id,
                 snapshot_id = %snapshot_id,
-                status = "failed",
+                status = terminal_state,
                 duration_seconds,
                 error_code = e.code,
                 error_message = %e.message,
@@ -7782,7 +7798,7 @@ async fn verify_run(
                     "type": "task.state",
                     "taskId": task_id,
                     "kind": "verify",
-                    "state": "failed",
+                    "state": terminal_state,
                     "snapshotId": snapshot_id,
                     "error": { "code": e.code, "message": e.message.clone() },
                 });
@@ -7792,8 +7808,13 @@ async fn verify_run(
                 emit_event_stdout(event);
             }
             if let Some(target_id) = admitted_target_id.as_deref() {
-                return Err(preserve_data_plane_failure(
-                    data_dir, &task_id, "verify", target_id, e,
+                return Err(preserve_data_plane_failure_with_snapshot(
+                    data_dir,
+                    &task_id,
+                    "verify",
+                    target_id,
+                    Some(&snapshot_id),
+                    e,
                 ));
             }
             Err(e)
@@ -8759,6 +8780,12 @@ mod control_ipc_tests {
     }
 
     #[test]
+    fn cancelled_data_plane_error_reports_cancelled_terminal_state() {
+        assert_eq!(terminal_state_for_error("task.cancelled"), "cancelled");
+        assert_eq!(terminal_state_for_error("integrity"), "failed");
+    }
+
+    #[test]
     fn control_ipc_method_not_found_maps_code() {
         let dir = tempfile::tempdir().unwrap();
         let ipc_dir = dir.path().join("ipc");
@@ -9097,11 +9124,27 @@ fn daemon_control_status_task_finish(
     state: &str,
     error_code: Option<&str>,
 ) -> Result<(), CliError> {
+    daemon_control_status_task_finish_with_snapshot(
+        data_dir, task_id, kind, target_id, state, None, error_code,
+    )
+}
+
+#[cfg(unix)]
+fn daemon_control_status_task_finish_with_snapshot(
+    data_dir: &Path,
+    task_id: &str,
+    kind: &str,
+    target_id: &str,
+    state: &str,
+    snapshot_id: Option<&str>,
+    error_code: Option<&str>,
+) -> Result<(), CliError> {
     let params = televy_backup_core::control::StatusTaskFinishParams {
         task_id: task_id.to_string(),
         kind: kind.to_string(),
         target_id: target_id.to_string(),
         state: state.to_string(),
+        snapshot_id: snapshot_id.map(str::to_string),
         error_code: error_code.map(str::to_string),
     };
     let params = serde_json::to_value(params).unwrap_or_else(|_| serde_json::json!({}));
@@ -9160,6 +9203,19 @@ fn daemon_control_status_task_finish(
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn daemon_control_status_task_finish_with_snapshot(
+    _data_dir: &Path,
+    _task_id: &str,
+    _kind: &str,
+    _target_id: &str,
+    _state: &str,
+    _snapshot_id: Option<&str>,
+    _error_code: Option<&str>,
+) -> Result<(), CliError> {
+    Ok(())
+}
+
 fn preserve_data_plane_failure(
     data_dir: &Path,
     task_id: &str,
@@ -9167,14 +9223,45 @@ fn preserve_data_plane_failure(
     target_id: &str,
     operation_error: CliError,
 ) -> CliError {
-    if let Err(terminal_error) = daemon_control_status_task_finish(
+    preserve_data_plane_failure_with_snapshot(
         data_dir,
         task_id,
         kind,
         target_id,
-        "failed",
-        Some(operation_error.code),
-    ) {
+        None,
+        operation_error,
+    )
+}
+
+fn preserve_data_plane_failure_with_snapshot(
+    data_dir: &Path,
+    task_id: &str,
+    kind: &str,
+    target_id: &str,
+    snapshot_id: Option<&str>,
+    operation_error: CliError,
+) -> CliError {
+    let terminal_state = terminal_state_for_error(operation_error.code);
+    let finish_result = match snapshot_id {
+        Some(snapshot_id) => daemon_control_status_task_finish_with_snapshot(
+            data_dir,
+            task_id,
+            kind,
+            target_id,
+            terminal_state,
+            Some(snapshot_id),
+            Some(operation_error.code),
+        ),
+        None => daemon_control_status_task_finish(
+            data_dir,
+            task_id,
+            kind,
+            target_id,
+            terminal_state,
+            Some(operation_error.code),
+        ),
+    };
+    if let Err(terminal_error) = finish_result {
         tracing::warn!(
             event = "status.task_finish_unacknowledged",
             task_id,
@@ -9188,6 +9275,14 @@ fn preserve_data_plane_failure(
         );
     }
     operation_error
+}
+
+fn terminal_state_for_error(error_code: &str) -> &'static str {
+    if error_code == "task.cancelled" {
+        "cancelled"
+    } else {
+        "failed"
+    }
 }
 
 fn daemon_keychain_get_secret(data_dir: &Path, key: &str) -> Result<Option<String>, CliError> {

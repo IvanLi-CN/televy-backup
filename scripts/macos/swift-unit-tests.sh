@@ -170,6 +170,18 @@ bin_snapshot_inspection="$out_dir/snapshot-inspection-presentation-tests"
   "$root_dir/macos/TelevyBackupAppTests/SnapshotInspectionPresentationTests.swift"
 "$bin_snapshot_inspection"
 
+bin_main_window_navigation="$out_dir/main-window-navigation-tests"
+"$swiftc" \
+  -sdk "$sdk_path" \
+  -O \
+  -D TELEVYBACKUP_TESTING \
+  -framework SwiftUI \
+  -framework AppKit \
+  -o "$bin_main_window_navigation" \
+  "$root_dir/macos/TelevyBackupApp"/*.swift \
+  "$root_dir/macos/TelevyBackupAppTests/MainWindowNavigationTests.swift"
+"$bin_main_window_navigation"
+
 bin_diagnostics="$out_dir/diagnostics-settings-tests"
 "$swiftc" \
   -sdk "$sdk_path" \

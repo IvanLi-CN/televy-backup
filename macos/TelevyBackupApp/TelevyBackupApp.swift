@@ -93,6 +93,7 @@ final class AppModel {
     let runHistoryStore = RunHistoryStore()
     let taskPresentationStore = TaskPresentationStore()
     let diagnosticsStore = DiagnosticsStore()
+    let mainWindowNavigationStore = MainWindowNavigationStore()
     enum ShutdownPresentation {
         case stopping
         case failed(String)
@@ -166,6 +167,7 @@ final class AppModel {
     private var didShowUiLogWriteErrorToast: Bool = false
     private var settingsWindow: NSWindow? = nil
     private var mainWindow: NSWindow? = nil
+    var closePopoverForTargetNavigation: (() -> Void)?
     private var lastTaskKind: String? = nil
     private var lastTaskState: String? = nil
     private let launchOverrides: LaunchOverrides = .parse(CommandLine.arguments)
@@ -523,6 +525,9 @@ final class AppModel {
                             bytesDeduped: connectingQueued ? nil : 11_800_000
                         ),
                         lastRun: StatusTargetRunSummary(
+                            runId: "r_demo_backup",
+                            kind: "backup",
+                            snapshotId: "s_demo_001",
                             finishedAt: "2026-02-01T06:12:00Z",
                             durationSeconds: 723.4,
                             status: "succeeded",
@@ -548,6 +553,9 @@ final class AppModel {
                         upTotal: StatusCounter(bytes: 98_765_432),
                         progress: nil,
                         lastRun: StatusTargetRunSummary(
+                            runId: "r_demo_verify",
+                            kind: "verify",
+                            snapshotId: "s_demo_001",
                             finishedAt: "2026-02-01T06:25:00Z",
                             durationSeconds: 152.0,
                             status: "failed",
@@ -593,6 +601,7 @@ final class AppModel {
             runHistory = [
                 RunLogSummary(
                     id: "r_demo_backup",
+                    runId: "r_demo_backup",
                     kind: "backup",
                     targetId: "t_demo_a",
                     endpointId: "ep_demo_a",
@@ -616,6 +625,7 @@ final class AppModel {
                 ),
                 RunLogSummary(
                     id: "r_demo_verify",
+                    runId: "r_demo_verify",
                     kind: "verify",
                     targetId: "t_demo_b",
                     endpointId: "ep_demo_a",
@@ -639,6 +649,7 @@ final class AppModel {
                 ),
                 RunLogSummary(
                     id: "r_demo_unknown",
+                    runId: "r_demo_unknown",
                     kind: "restore",
                     targetId: nil,
                     endpointId: "ep_demo_a",
@@ -1964,7 +1975,8 @@ final class AppModel {
         }
     }
 
-    private func parseRunLogSummary(url: URL) -> RunLogSummary? {
+    func parseRunLogSummary(url: URL) -> RunLogSummary? {
+        var runId: String?
         var kind: String?
         var targetId: String?
         var endpointId: String?
@@ -1999,6 +2011,7 @@ final class AppModel {
             let event = fields?["event"] as? String
             if event == "run.start" {
                 sawStart = true
+                runId = (fields?["run_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? runId
                 kind = fields?["kind"] as? String ?? kind
                 targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
                 endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
@@ -2012,6 +2025,7 @@ final class AppModel {
 
             if event == "run.finish" {
                 sawFinish = true
+                runId = (fields?["run_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? runId
                 kind = fields?["kind"] as? String ?? kind
                 targetId = (fields?["target_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? targetId
                 endpointId = (fields?["endpoint_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? endpointId
@@ -2058,6 +2072,7 @@ final class AppModel {
 
         return RunLogSummary(
             id: url.lastPathComponent,
+            runId: runId,
             kind: kind,
             targetId: targetId,
             endpointId: endpointId,
@@ -2372,7 +2387,34 @@ final class AppModel {
 	        }
 	    }
 
-	    func openMainWindow() {
+	    func mainWindowDestination(for target: StatusTarget) -> MainWindowDestination {
+            if let task = activeTask,
+               task.state == "running",
+               task.targetId == target.targetId
+            {
+                return .activeRun(targetId: target.targetId, taskId: task.id)
+            }
+            if target.state == "running", let taskId = target.activeTask?.taskId {
+                return .activeRun(targetId: target.targetId, taskId: taskId)
+            }
+            if let runId = target.lastRun?.runId {
+                return .completedRun(targetId: target.targetId, runId: runId)
+            }
+            return .target(targetId: target.targetId)
+        }
+
+	    func openMainWindow(destination: MainWindowDestination? = nil) {
+	        if let destination {
+                // Prime the data source before publishing the request so an existing window
+                // cannot consume a missing-log request before refresh has entered flight.
+                if UIDemo.isMainWindow {
+                    installUIDemoDataIfNeeded()
+                } else {
+                    refreshRunHistory()
+                }
+                mainWindowNavigationStore.submit(destination)
+                closePopoverForTargetNavigation?()
+            }
 	        DispatchQueue.main.async {
 	            if UIDemo.isMainWindow {
 	                self.installUIDemoDataIfNeeded()
@@ -2393,6 +2435,7 @@ final class AppModel {
                     .environmentObject(self.runHistoryStore)
                     .environmentObject(self.taskPresentationStore)
                     .environmentObject(self.diagnosticsStore)
+                    .environmentObject(self.mainWindowNavigationStore)
                     .appAppearanceOverride(self.appearanceOverride)
                 let controller = NSHostingController(rootView: root)
                 controller.view.wantsLayer = true
@@ -4054,20 +4097,28 @@ private struct TargetRowView: View {
             (target.state == "running") && !disconnected && (isDaemon && staleAgeMs <= StatusFreshness.disconnectedMs)
         let running = cliRunning || daemonRunning
 
-        return VStack(alignment: .leading, spacing: 0) {
-            if running {
-                runningRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(theme.runningRowBackground)
-            } else {
-                idleRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        return Button {
+            model.openMainWindow(destination: model.mainWindowDestination(for: target))
+        } label: {
+            VStack(alignment: .leading, spacing: 0) {
+                if running {
+                    runningRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(theme.runningRowBackground)
+                } else {
+                    idleRow(nowMs: nowMs, staleAgeMs: staleAgeMs, isDaemon: isDaemon, disconnected: disconnected)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .accessibilityLabel("Open \(displayLabel()) in main window")
+        .accessibilityHint("Open target details")
     }
 
     private func displayLabel() -> String {
@@ -4762,6 +4813,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         exitIfSecondaryInstance()
         appearanceOverride.apply(to: NSApp)
+        ModelStore.shared.closePopoverForTargetNavigation = { [weak self] in
+            self?.closePopover(nil)
+        }
 
         if !guiControlRegistrationIsDisabled() {
             let server = GuiControlServer(

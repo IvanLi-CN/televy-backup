@@ -27,6 +27,9 @@ struct StatusProgress: Codable {
 }
 
 struct StatusTargetRunSummary: Codable {
+    var runId: String? = nil
+    var kind: String? = nil
+    var snapshotId: String? = nil
     var finishedAt: String?
     var durationSeconds: Double?
     var status: String?
@@ -43,24 +46,29 @@ struct StatusBackupQueue: Codable, Equatable {
 
 struct StatusActiveTask: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
+        case taskId
         case kind
         case directions
     }
 
+    var taskId: String?
     var kind: String
     var directions: [String]
 
-    init(kind: String, directions: [String]) {
+    init(taskId: String? = nil, kind: String, directions: [String]) {
+        self.taskId = taskId
         self.kind = kind
         self.directions = directions
     }
 
     init(from decoder: Decoder) throws {
         guard let container = try? decoder.container(keyedBy: CodingKeys.self) else {
+            taskId = nil
             kind = ""
             directions = []
             return
         }
+        taskId = try? container.decode(String.self, forKey: .taskId)
         kind = (try? container.decode(String.self, forKey: .kind)) ?? ""
         directions = (try? container.decode([String].self, forKey: .directions)) ?? []
     }

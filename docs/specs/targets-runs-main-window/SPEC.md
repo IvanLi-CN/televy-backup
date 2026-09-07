@@ -3,6 +3,10 @@
 > Canonical topic spec migrated from `docs/plan/kaa5e:targets-runs-main-window/PLAN.md`.
 > Legacy source retained pending delete approval.
 
+## Related ADRs
+
+None
+
 ## 背景 / 问题陈述
 
 - 当前 macOS app 只有菜单栏浮窗（popover）与 Settings window，缺少一个可以按 Target 浏览/追溯执行记录（备份/恢复/校验）的主界面。
@@ -20,6 +24,7 @@
 - 菜单栏浮窗的设置按钮改为“进入主界面”按钮。
 - 主界面提供 Settings 入口，并支持快捷键打开 Settings（沿用 `⌘,`）。
 - `restore/verify` 的 run log 补齐 `target_id`，保证“按目标显示执行记录”可用且一致。
+- 菜单栏 Target 条目可直达主窗口中同一条运行记录；终态通过 `(target_id, run_id)` 关联，活动任务通过 `(target_id, task_id)` 关联。
 
 ### Non-goals
 
@@ -76,6 +81,14 @@
 - Targets 列表每行显示该 target 最近一次 `backup/restore/verify` 的简要状态（若可得）。
 - 历史记录列表提供“打开日志文件”动作，便于排障。
 
+### 菜单栏直达运行合同
+
+- status snapshot 的 `lastRun` 可选携带 `runId`、`kind`、`snapshotId`；`activeTask` 可选携带 `taskId`。缺失这些字段的旧 daemon 快照仍必须解码。
+- run log 的 `run.start` / `run.finish` 使用同一个 `run_id`；macOS 仅在 `target_id` 与 `run_id` 同时匹配时选择终态 `RunLogSummary`。不得按时间、日志顺序或“最新一条”替代缺失身份。
+- 菜单栏活动条目先选择对应 Target 并展示现有实时详情；任务完成后，仅当同一 Target 的同一身份终态日志出现时才切换到 `SnapshotRunDetailView`。
+- 点击条目提交可重放导航请求：主窗口复用并前置，Popover 收起；重复点击同一条目也必须重新处理最新请求。首次进入终态详情默认使用 Summary，已有主窗口保留当前详情标签。
+- 缺少运行身份、日志尚未生成、取消发生在建日志之前、Target 已消失或本地没有匹配日志时，保留 Target 概览/空态，不得选中其他历史运行。
+
 
 ## 验收标准（Acceptance Criteria）
 
@@ -98,6 +111,20 @@
 - Given 主界面可见，
   When 用户按下 `⌘,`，
   Then Settings window 打开（或聚焦到已有 Settings window）。
+
+- Given 菜单栏浮窗展示某个 Target 的终态运行或活动任务，
+  When 用户点击该 Target 卡片，
+  Then Popover 收起并前置唯一主窗口；终态打开同一 `target_id/run_id` 的 Summary，活动任务选择同一 Target 并展示实时详情。
+
+- Given status 或本地日志缺少运行身份，
+  When 用户点击菜单栏 Target 卡片，
+  Then 主窗口只展示该 Target 的概览/空态，不跳转到任何其他历史运行。
+
+## Visual Evidence
+
+- Deterministic `ui_demo` target detail: [assets/main-window-target-detail-navigation.png](assets/main-window-target-detail-navigation.png)
+- Deterministic `ui_demo` snapshot detail: [assets/main-window-snapshot-changes-navigation.png](assets/main-window-snapshot-changes-navigation.png)
+- Source: `scripts/macos/capture-main-window.sh`; captures are scoped to the mock main window and do not use a live application run.
 
 
 ## 风险与开放问题

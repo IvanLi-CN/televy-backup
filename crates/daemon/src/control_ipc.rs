@@ -2210,7 +2210,7 @@ fn handle_request(
                     ),
                 );
             }
-            if !matches!(params.state.as_str(), "succeeded" | "failed") {
+            if !matches!(params.state.as_str(), "succeeded" | "failed" | "cancelled") {
                 return ControlResponse::err(
                     req.id.clone(),
                     ControlError::invalid_request(
@@ -2237,6 +2237,7 @@ fn handle_request(
                 &params.task_id,
                 &params.kind,
                 &params.state,
+                params.snapshot_id.as_deref(),
                 params.error_code,
             ) {
                 Ok(crate::ExternalTaskFinishOutcome::Applied) => ControlResponse::ok(
@@ -3547,7 +3548,7 @@ mod tests {
     }
 
     #[test]
-    fn status_task_finish_rejects_unknown_terminal_state_without_releasing_target() {
+    fn status_task_finish_accepts_cancelled_terminal_state() {
         let config_root = std::path::Path::new("/tmp");
         let status_state = Arc::new(Mutex::new(crate::StatusRuntimeState::from_settings(
             &settings(),
@@ -3591,19 +3592,38 @@ mod tests {
                     "taskId": "restore-1",
                     "kind": "restore",
                     "targetId": "t1",
-                    "state": "cancelled"
+                    "state": "cancelled",
+                    "snapshotId": "snapshot-1"
                 }),
             ),
             &context,
             &settings(),
             &logging,
         );
-        assert!(!finished.ok);
+        assert!(finished.ok);
+        let target = &status_state.lock().unwrap().targets["t1"];
+        assert_eq!(target.state, "idle");
         assert_eq!(
-            finished.error.expect("invalid state error").code,
-            "control.invalid_request"
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.run_id.as_deref()),
+            Some("restore-1")
         );
-        assert_eq!(status_state.lock().unwrap().targets["t1"].state, "running");
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.status.as_deref()),
+            Some("cancelled")
+        );
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.snapshot_id.as_deref()),
+            Some("snapshot-1")
+        );
     }
 
     #[test]
@@ -3818,7 +3838,7 @@ mod tests {
             televy_backup_core::local_settings::resolve_from(&config_root, Some("debug"), None);
         {
             let mut status = status_state.lock().unwrap();
-            status.mark_run_finish_success("t1", 0.0, 0, 0, 0);
+            status.mark_run_finish_success("t1", None, None, 0.0, 0, 0, 0);
             status
                 .mark_external_run_start("t1", "cli-task", "restore", None, Some(external_logging))
                 .unwrap();
@@ -3841,7 +3861,7 @@ mod tests {
         status_state
             .lock()
             .unwrap()
-            .mark_external_run_finish("t1", "cli-task", "restore", "succeeded", None)
+            .mark_external_run_finish("t1", "cli-task", "restore", "succeeded", None, None)
             .unwrap();
         status_state.lock().unwrap().mark_run_start("t1");
 

@@ -408,7 +408,9 @@ pub struct StatusTaskFinishParams {
     pub task_id: String,
     pub kind: String, // "backup" | "restore" | "verify" | "sync"
     pub target_id: String,
-    pub state: String, // "succeeded" | "failed"
+    pub state: String, // "succeeded" | "failed" | "cancelled"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
 }
@@ -437,6 +439,24 @@ mod tests {
             "state": "failed"
         }))
         .unwrap();
+        assert!(params.snapshot_id.is_none());
         assert!(params.error_code.is_none());
+    }
+
+    #[test]
+    fn task_finish_snapshot_id_round_trips() {
+        let params: StatusTaskFinishParams = serde_json::from_value(serde_json::json!({
+            "taskId": "task-1",
+            "kind": "restore",
+            "targetId": "target-1",
+            "state": "succeeded",
+            "snapshotId": "snapshot-1"
+        }))
+        .unwrap();
+        assert_eq!(params.snapshot_id.as_deref(), Some("snapshot-1"));
+        assert_eq!(
+            serde_json::to_value(params).unwrap()["snapshotId"],
+            "snapshot-1"
+        );
     }
 }
