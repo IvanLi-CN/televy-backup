@@ -791,6 +791,7 @@ impl StatusRuntimeState {
         task_id: &str,
         kind: &str,
         state: &str,
+        snapshot_id: Option<&str>,
         error_code: Option<String>,
     ) -> Result<ExternalTaskFinishOutcome, ExternalTaskFinishError> {
         let Some(t) = self.targets.get_mut(target_id) else {
@@ -843,7 +844,7 @@ impl StatusRuntimeState {
         t.last_run = Some(TargetRunSummary {
             run_id: Some(task_id.to_string()),
             kind: Some(kind.to_string()),
-            snapshot_id: None,
+            snapshot_id: snapshot_id.map(str::to_string),
             finished_at: Some(
                 chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             ),
@@ -1070,6 +1071,7 @@ impl StatusRuntimeState {
                 &task_id,
                 &kind,
                 "failed",
+                None,
                 Some("task.reporter_lost".to_string()),
             );
         }
@@ -1676,6 +1678,7 @@ mod tests {
             "restore-1",
             "restore",
             "failed",
+            Some("snapshot-1"),
             Some("restore.network_failed".to_string()),
         )
         .expect("matching external task should finish");
@@ -1697,6 +1700,13 @@ mod tests {
             target
                 .last_run
                 .as_ref()
+                .and_then(|run| run.snapshot_id.as_deref()),
+            Some("snapshot-1")
+        );
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
                 .and_then(|run| run.error_code.as_deref()),
             Some("restore.network_failed")
         );
@@ -1707,12 +1717,13 @@ mod tests {
                 "restore-1",
                 "restore",
                 "failed",
+                Some("snapshot-1"),
                 Some("restore.network_failed".to_string()),
             ),
             Ok(ExternalTaskFinishOutcome::IdempotentReplay)
         );
         assert_eq!(
-            st.mark_external_run_finish("t1", "restore-1", "restore", "succeeded", None),
+            st.mark_external_run_finish("t1", "restore-1", "restore", "succeeded", None, None),
             Err(ExternalTaskFinishError::TaskNotOwned)
         );
 
@@ -1724,6 +1735,7 @@ mod tests {
                 "restore-1",
                 "restore",
                 "failed",
+                None,
                 Some("restore.network_failed".to_string()),
             ),
             Err(ExternalTaskFinishError::TaskNotOwned)
@@ -1742,7 +1754,7 @@ mod tests {
 
         st.mark_external_run_start("t1", "restore-1", "restore", None, None)
             .expect("restore should start");
-        st.mark_external_run_finish("t1", "restore-1", "restore", "succeeded", None)
+        st.mark_external_run_finish("t1", "restore-1", "restore", "succeeded", None, None)
             .expect("matching external task should finish");
         st.on_external_progress("t1", "restore-1", "restore", progress(456));
 
@@ -1758,13 +1770,21 @@ mod tests {
         let mut st = state_one_target();
         st.mark_external_run_start("t1", "verify-1", "verify", None, None)
             .expect("verify should start");
-        st.mark_external_run_finish("t1", "verify-1", "verify", "cancelled", None)
-            .expect("matching external task should finish");
+        st.mark_external_run_finish(
+            "t1",
+            "verify-1",
+            "verify",
+            "cancelled",
+            Some("snapshot-verify"),
+            None,
+        )
+        .expect("matching external task should finish");
 
         let run = st.targets["t1"].last_run.as_ref().expect("terminal run");
         assert_eq!(run.run_id.as_deref(), Some("verify-1"));
         assert_eq!(run.kind.as_deref(), Some("verify"));
         assert_eq!(run.status.as_deref(), Some("cancelled"));
+        assert_eq!(run.snapshot_id.as_deref(), Some("snapshot-verify"));
     }
 
     #[test]

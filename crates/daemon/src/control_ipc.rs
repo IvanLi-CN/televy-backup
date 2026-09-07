@@ -2237,6 +2237,7 @@ fn handle_request(
                 &params.task_id,
                 &params.kind,
                 &params.state,
+                params.snapshot_id.as_deref(),
                 params.error_code,
             ) {
                 Ok(crate::ExternalTaskFinishOutcome::Applied) => ControlResponse::ok(
@@ -3591,7 +3592,8 @@ mod tests {
                     "taskId": "restore-1",
                     "kind": "restore",
                     "targetId": "t1",
-                    "state": "cancelled"
+                    "state": "cancelled",
+                    "snapshotId": "snapshot-1"
                 }),
             ),
             &context,
@@ -3614,6 +3616,13 @@ mod tests {
                 .as_ref()
                 .and_then(|run| run.status.as_deref()),
             Some("cancelled")
+        );
+        assert_eq!(
+            target
+                .last_run
+                .as_ref()
+                .and_then(|run| run.snapshot_id.as_deref()),
+            Some("snapshot-1")
         );
     }
 
@@ -3852,7 +3861,7 @@ mod tests {
         status_state
             .lock()
             .unwrap()
-            .mark_external_run_finish("t1", "cli-task", "restore", "succeeded", None)
+            .mark_external_run_finish("t1", "cli-task", "restore", "succeeded", None, None)
             .unwrap();
         status_state.lock().unwrap().mark_run_start("t1");
 

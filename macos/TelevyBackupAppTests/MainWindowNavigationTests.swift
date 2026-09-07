@@ -53,6 +53,43 @@ private func testTerminalNavigationMatchesBothTargetAndRunIdentity() {
     )
 }
 
+private func testTerminalNavigationIgnoresInProgressLog() {
+    var inProgress = navigationRun(targetId: "photos", runId: "run-current")
+    inProgress = RunLogSummary(
+        id: inProgress.id,
+        runId: inProgress.runId,
+        kind: inProgress.kind,
+        targetId: inProgress.targetId,
+        endpointId: inProgress.endpointId,
+        sourcePath: inProgress.sourcePath,
+        snapshotId: inProgress.snapshotId,
+        status: "running",
+        errorCode: inProgress.errorCode,
+        durationSeconds: inProgress.durationSeconds,
+        startedAt: inProgress.startedAt,
+        finishedAt: inProgress.finishedAt,
+        logURL: inProgress.logURL,
+        bytesUploaded: inProgress.bytesUploaded,
+        bytesDeduped: inProgress.bytesDeduped,
+        bytesWritten: inProgress.bytesWritten,
+        bytesChecked: inProgress.bytesChecked,
+        filesRestored: inProgress.filesRestored,
+        chunksDownloaded: inProgress.chunksDownloaded,
+        chunksChecked: inProgress.chunksChecked,
+        ignoreRuleFiles: inProgress.ignoreRuleFiles,
+        ignoreInvalidRules: inProgress.ignoreInvalidRules
+    )
+
+    expectNavigation(
+        MainWindowNavigationResolver.exactRun(
+            targetId: "photos",
+            runId: "run-current",
+            runs: [inProgress]
+        ) == nil,
+        "an in-progress log must not replace the active target detail"
+    )
+}
+
 private func testNavigationStoreReplaysRepeatedClicks() {
     let store = MainWindowNavigationStore()
     store.submit(.target(targetId: "photos"))
@@ -112,6 +149,7 @@ private func testRunLogParserRetainsRunID() {
 enum MainWindowNavigationTestsMain {
     static func main() {
         testTerminalNavigationMatchesBothTargetAndRunIdentity()
+        testTerminalNavigationIgnoresInProgressLog()
         testNavigationStoreReplaysRepeatedClicks()
         testOptionalStatusIdentityDecodesWithLegacyFallback()
         testRunLogParserRetainsRunID()

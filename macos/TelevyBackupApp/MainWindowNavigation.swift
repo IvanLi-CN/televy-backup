@@ -37,6 +37,10 @@ enum MainWindowNavigationResolver {
         runId: String,
         runs: [RunLogSummary]
     ) -> RunLogSummary? {
-        runs.first { $0.targetId == targetId && $0.runId == runId }
+        runs.first {
+            $0.targetId == targetId
+                && $0.runId == runId
+                && $0.status.map { ["succeeded", "failed", "cancelled"].contains($0) } == true
+        }
     }
 }
