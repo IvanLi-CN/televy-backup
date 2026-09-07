@@ -759,13 +759,42 @@ fn run_command_output<const N: usize, S: AsRef<OsStr>>(
 }
 
 fn peer_uid(fd: RawFd) -> Result<u32, HelperError> {
-    let mut euid = 0_u32;
-    let mut egid = 0_u32;
-    let result = unsafe { libc::getpeereid(fd, &mut euid, &mut egid) };
-    if result != 0 {
-        return Err(HelperError::Io(std::io::Error::last_os_error()));
+    #[cfg(target_os = "macos")]
+    {
+        let mut euid = 0_u32;
+        let mut egid = 0_u32;
+        let result = unsafe { libc::getpeereid(fd, &mut euid, &mut egid) };
+        if result != 0 {
+            return Err(HelperError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(euid)
     }
-    Ok(euid)
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut credentials = unsafe { std::mem::zeroed::<libc::ucred>() };
+        let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut credentials as *mut libc::ucred).cast(),
+                &mut length,
+            )
+        };
+        if result != 0 {
+            return Err(HelperError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(credentials.uid)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = fd;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    Err(HelperError::Message(
+        "peer UID lookup is unsupported on this platform".into(),
+    ))
 }
 
 #[cfg(test)]
