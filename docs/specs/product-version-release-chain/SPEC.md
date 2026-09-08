@@ -34,7 +34,7 @@ Covers: G3, A3.
 
 ### REQ-PVR-005: Release follows normal merge and supports same-identity recovery
 
-Release completion MUST validate source checks, preparation ancestry, merge structure, VERSION, and tag ownership. The normal release workflow reads the committed merge SHA and VERSION, builds and verifies all macOS assets, and creates the immutable tag/release. Manual dispatch MUST accept only `recover` for the same merge SHA and VERSION. Snapshot, queue, arbitrary SHA backfill, and retagging are forbidden.
+Release completion MUST validate source checks, preparation ancestry, merge structure, VERSION, and tag ownership. The normal release workflow reads the committed merge SHA and VERSION, builds and verifies all macOS assets, and creates the immutable tag/release. The release-owning agent MUST report successful publication directly to the owner, and Release Product MUST NOT create or update a result comment on the source PR. Manual dispatch MUST accept only `recover` for the same merge SHA and VERSION. Snapshot, queue, arbitrary SHA backfill, and retagging are forbidden.
 
 Covers: G4, A3, A4.
 

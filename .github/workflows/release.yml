@@ -24,8 +24,6 @@ concurrency:
 
 permissions:
   contents: write
-  issues: write
-  pull-requests: read
 
 jobs:
   resolve:
@@ -37,7 +35,6 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       channel: ${{ steps.release.outputs.channel }}
-      pr_number: ${{ steps.release.outputs.pr_number }}
       reason: ${{ steps.release.outputs.reason }}
     steps:
       - name: Checkout main history
@@ -50,7 +47,6 @@ jobs:
       - name: Resolve immutable merged identity
         id: release
         env:
-          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion || 'success' }}
           WORKFLOW_EVENT: ${{ github.event.workflow_run.event || 'workflow_dispatch' }}
@@ -83,14 +79,12 @@ jobs:
           tag="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag"])')"
           channel="$(python3 scripts/product-version.py --mode release --source-sha "${TARGET_INPUT}" --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["channel"])')"
           test "${version}" = "$(python3 scripts/product-version.py --mode release --source-sha "${TARGET_INPUT}")"
-          pr_number="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TARGET_INPUT}/pulls" --jq '.[0].number // empty' || true)"
           {
             echo "enabled=true"
             echo "source_sha=${TARGET_INPUT}"
             echo "version=${version}"
             echo "tag=${tag}"
             echo "channel=${channel}"
-            echo "pr_number=${pr_number}"
             echo "reason=product_merge"
           } >> "$GITHUB_OUTPUT"
           echo "RELEASE_TARGET_SHA=${TARGET_INPUT} RELEASE_VERSION=${version} RELEASE_TAG=${tag}"
@@ -183,15 +177,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      issues: write
-      pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
       PRODUCT_TAG: ${{ needs.resolve.outputs.tag }}
       PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
       PRODUCT_CHANNEL: ${{ needs.resolve.outputs.channel }}
       RELEASE_SHA: ${{ needs.resolve.outputs.source_sha }}
-      PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
       OPERATION: ${{ inputs.operation || 'publish' }}
     steps:
       - uses: actions/checkout@v4
@@ -231,21 +222,6 @@ jobs:
             [[ "${PRODUCT_CHANNEL}" == rc ]] && flags+=(--prerelease)
             gh release create "${PRODUCT_TAG}" "${release_files[@]}" "${flags[@]}"
           fi
-      - name: Upsert PR release version comment
-        if: env.PR_NUMBER != ''
-        run: |
-          set -euo pipefail
-          marker='<!-- televybackup-release-version-comment -->'
-          body="${marker}
-          Released TelevyBackup ${PRODUCT_VERSION} (${PRODUCT_CHANNEL}) from merge ${RELEASE_SHA}.
-          Tag: ${PRODUCT_TAG}"
-          comment_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --jq '.[] | select(.body | contains("<!-- televybackup-release-version-comment -->")) | .id' | head -n 1 || true)"
-          if [[ -n "${comment_id}" ]]; then
-            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -f body="${body}"
-          else
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="${body}"
-          fi
-
   skipped:
     name: Release skipped
     needs: resolve
