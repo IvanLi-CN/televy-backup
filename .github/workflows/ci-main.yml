@@ -98,7 +98,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Verify merged VERSION preparation
         run: python3 .github/scripts/release_chain.py verify-merged --commit HEAD
