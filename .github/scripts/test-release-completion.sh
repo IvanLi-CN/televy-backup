@@ -20,8 +20,23 @@ python3 - "$tmp_dir/checks.json" <<'PY'
 import json
 import sys
 names = ["Release intent label gate", "quality", "macOS Swift tests", "arm64 native package", "x86_64 native package", "Universal 2 assembly"]
+rows = [{"name": name, "conclusion": "success"} for name in names]
+rows.extend([
+    {
+        "name": "Release intent label gate",
+        "conclusion": "success",
+        "started_at": "2026-09-07T11:29:15Z",
+        "completed_at": "2026-09-07T11:29:21Z",
+    },
+    {
+        "name": "Release intent label gate",
+        "conclusion": "failure",
+        "started_at": "2026-09-07T11:07:02Z",
+        "completed_at": "2026-09-07T11:07:09Z",
+    },
+])
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
-    json.dump({"check_runs": [{"name": name, "conclusion": "success"} for name in names]}, handle)
+    json.dump({"check_runs": rows}, handle)
 PY
 python3 "$root_dir/.github/scripts/release_preparation.py" \
   --repo-root "$repo_dir" --source-sha "$source_sha" --base-sha "$source_sha" \

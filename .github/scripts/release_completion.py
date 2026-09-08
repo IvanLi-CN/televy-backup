@@ -36,8 +36,15 @@ def labels(path: Path) -> dict[str, str]:
 def checks_ready(path: Path) -> bool:
     payload = json.loads(path.read_text(encoding="utf-8"))
     rows = payload.get("check_runs", []) if isinstance(payload, dict) else []
-    outcomes = {row.get("name"): row.get("conclusion") for row in rows if isinstance(row, dict)}
-    return all(outcomes.get(name) == "success" for name in REQUIRED_SOURCE_CHECKS)
+    latest: dict[str, tuple[str, str | None]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("name"):
+            continue
+        timestamp = row.get("completed_at") or row.get("started_at") or ""
+        previous = latest.get(row["name"])
+        if previous is None or timestamp > previous[0]:
+            latest[row["name"]] = (timestamp, row.get("conclusion"))
+    return all(latest.get(name, ("", None))[1] == "success" for name in REQUIRED_SOURCE_CHECKS)
 
 
 def verify_migration(commit: str, base: str, version: str) -> None:

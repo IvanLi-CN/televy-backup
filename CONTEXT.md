@@ -77,6 +77,18 @@ _Avoid_: Upload attempt, pack
 The macOS app instance that presents and controls one local backup environment. It is separate from the daemon that executes scheduled and queued work.
 _Avoid_: Daemon, backup worker
 
+**Menu-bar Agent**:
+The default macOS application identity while TelevyBackup has no persistent top-level window. It keeps `LSUIElement=true` semantics: the app remains available from the status item without appearing in the Dock or `Cmd-Tab`.
+_Avoid_: Hidden application, daemon
+
+**Persistent Top-level Window**:
+A main or settings window, plus a future window explicitly registered with the window activation coordinator. Popovers, sheets, file panels, and alerts do not change application identity or count toward this window set.
+_Avoid_: Any visible panel, popover
+
+**Persistent Window Activation**:
+The runtime policy that changes the app from `.accessory` to `.regular` before a persistent window is shown, keeps `.regular` while a persistent window is minimized, and returns to `.accessory` after the last persistent window closes.
+_Avoid_: Window focus, daemon activation
+
 **GUI-only Exit**:
 An orderly end of a GUI Controller for one backup environment while its daemon, scheduled work, and daemon-owned queue remain available.
 _Avoid_: Complete exit, stop backup

@@ -27,6 +27,10 @@ verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
   echo "AppIcon bundle contract is not wired into build-app.sh" >&2
   exit 1
 }
+[[ "$build_text" == *'LSUIElement'* && "$build_text" == *'<true/>'* ]] || {
+  echo "LSUIElement menu-bar agent contract is missing from build-app.sh" >&2
+  exit 1
+}
 icon_text="$(<"$root_dir/scripts/macos/generate-app-icon-assets.sh")"
 [[ "$icon_text" == *'icon_512x512@2x.png:1024'* && "$icon_text" == *'iconutil -c icns'* && "$icon_text" == *'AppIcon-dark-'* ]] || {
   echo "AppIcon generation contract is incomplete" >&2
