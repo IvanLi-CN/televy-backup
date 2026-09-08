@@ -55,9 +55,27 @@ assert_not_contains "source PR release comment marker" "$release_text" "televyba
 assert_not_contains "source PR release comment API" "$release_text" "gh api"
 assert_not_contains "source PR lookup" "$release_text" "/commits/\${TARGET_INPUT}/pulls"
 assert_not_contains "source PR number output" "$release_text" "pr_number"
-assert_not_contains "issues write permission" "$release_text" "issues: write"
-assert_not_contains "pull requests read permission" "$release_text" "pull-requests: read"
-assert_not_contains "pull requests write permission" "$release_text" "pull-requests: write"
+ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'
+release = YAML.load_file(ARGV.fetch(0))
+expected_permissions = {"contents" => "write"}
+abort "release workflow permissions are broader than contents: write" unless release.fetch("permissions") == expected_permissions
+abort "publish job permissions are broader than contents: write" unless release.fetch("jobs").fetch("publish").fetch("permissions") == expected_permissions
+
+notify = YAML.load_file(ARGV.fetch(1))
+workflow_run = notify.fetch(true).fetch("workflow_run")
+abort "failure notifier must watch Release Product" unless workflow_run.fetch("workflows") == ["Release Product"]
+abort "failure notifier must run on completed main workflow runs" unless workflow_run.fetch("types") == ["completed"] && workflow_run.fetch("branches") == ["main"]
+expected_failure = "${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}"
+%w[resolve_release_context notify_failure].each do |job_name|
+  abort "#{job_name} must keep the release failure condition" unless notify.fetch("jobs").fetch(job_name).fetch("if") == expected_failure
+end
+notifier = notify.fetch("jobs").fetch("notify_failure")
+abort "failure notifier must call the pinned Oidrune workflow" unless notifier.fetch("uses") == "IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b"
+summary = notifier.fetch("with").fetch("summary")
+%w[target_sha recovery].each do |field|
+  abort "failure notification summary must include #{field}" unless summary.include?("#{field}:")
+end
+RUBY
 quality_gates_text="$(<"$root_dir/docs/quality-gates.md")"
 assert_contains "release owner confirmation boundary" "$quality_gates_text" "Successful publication is reported directly to the owner by the release-owning agent; Release Product does not write a result comment to the source PR."
 release_spec_text="$(<"$root_dir/docs/specs/product-version-release-chain/SPEC.md")"
