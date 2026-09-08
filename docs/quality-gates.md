@@ -18,7 +18,7 @@ The exact workflow mapping is declared in `.github/quality-gates.json` and is va
 
 `Label Gate` enforces exactly one `type:*` and one `channel:*` label. Source PR heads run the full Rust, Swift, and native package matrix. A trusted preparation run adds only `VERSION` to the PR branch and then the same required check names run structural verification against that preparation commit. `Release completion` is the required PR-local contract for ancestry, VERSION, labels, source checks, and migration handling.
 
-After a normal merge, `Release Product` reads only the committed merge SHA and VERSION. Its manual entry is restricted to same-identity `recover`. Failed releases are handled by `Notify failed release`, which reports the resolved SHA, VERSION, tag, and recovery command.
+After a normal merge, `Release Product` reads only the committed merge SHA and VERSION. Its manual entry is restricted to same-identity `recover`. Successful publication is reported directly to the owner by the release-owning agent; Release Product does not write a result comment to the source PR. Failed releases are handled by `Notify failed release`, which reports the resolved SHA, VERSION, tag, and recovery command.
 
 ## Remote alignment
 
