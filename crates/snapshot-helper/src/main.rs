@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Read;
+#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -1087,7 +1088,7 @@ fn filesystem_mount_point(path: &Path) -> Result<PathBuf, HelperError> {
         // The APFS volume probe is only operational on macOS. Keep non-macOS
         // builds portable for CI and return the caller's path without touching
         // platform-specific statfs fields.
-        return Ok(path.to_path_buf());
+        Ok(path.to_path_buf())
     }
 
     #[cfg(target_os = "macos")]
