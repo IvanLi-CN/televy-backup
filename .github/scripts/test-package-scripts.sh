@@ -52,6 +52,15 @@ package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" == *'app_dest="$output_dir/TelevyBackup.app"'* ]]
 [[ "$package_text" == *'access_dest="$output_dir/TelevyBackup Snapshot Access.app"'* ]]
 [[ "$package_text" != *'--version'* ]]
+assemble_text="$(<"$root_dir/scripts/macos/assemble-universal.sh")"
+grep -F 'chmod 755 "$universal_app/Contents/MacOS/"*' <<<"$assemble_text" >/dev/null || {
+  echo "Universal main binaries must remain executable after lipo" >&2
+  exit 1
+}
+grep -F 'chmod 755 "$universal_access_app/Contents/MacOS/televybackup-snapshot-access"' <<<"$assemble_text" >/dev/null || {
+  echo "Universal Snapshot Access binary must remain executable after lipo" >&2
+  exit 1
+}
 
 version="$(tr -d '\n' < "$root_dir/VERSION")"
 for asset in \
