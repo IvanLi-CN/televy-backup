@@ -8,6 +8,8 @@
 
 ## Index
 
+| APFS 严格快照一致性 | active | in-progress | apfs-snapshot-consistency/SPEC.md | - | FDA Access App + minimal root mount helper |
+
 | Topic | Lifecycle | Implementation | Spec | Successor | Notes |
 | --- | --- | --- | --- | --- | --- |
 | 开发期绕过 Keychain（codesign + vault key） | active | implemented | avoid-keychain-in-dev/SPEC.md | - | legacy plan nvr79; pending delete approval=docs/plan/nvr79:avoid-keychain-in-dev/PLAN.md |

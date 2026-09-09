@@ -16,6 +16,16 @@
   - Intended to be managed by `brew services` as a user-level LaunchAgent.
   - Owns all secrets access (Keychain / `vault.key` / `secrets.enc`). Other components must use daemon IPC.
   - Supports a local `daemon.stop` control request. App and CLI use it for graceful cancellation and shutdown; the caller waits for IPC disappearance before treating shutdown as complete.
+- **Snapshot Access app**: a separate user-level `LSUIElement` app with FDA.
+  - Creates APFS snapshots and exposes only configured-target directory pages and bounded file streams over private IPC.
+  - Never exposes its private mount path to the daemon or CLI.
+- **Snapshot mount helper**: a product-managed root LaunchDaemon with FDA.
+  - Mounts, unmounts, and UUID-cleans only the journaled snapshot lease.
+  - Has no Keychain, vault, backup-file, encryption, upload, or network access.
+
+Strict targets use this brokered source for all scan metadata, hashes and file
+bytes. Any snapshot prerequisite, broker read, or cleanup failure is terminal
+for that volume; strict mode never reads the live directory as a fallback.
 
 ## Status snapshots (Popover / Developer dashboard)
 
