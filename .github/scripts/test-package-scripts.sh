@@ -50,6 +50,7 @@ package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" == *'--mode release|development'* ]]
 [[ "$package_text" == *'product-version.py'* ]]
 [[ "$package_text" == *'app_dest="$output_dir/TelevyBackup.app"'* ]]
+[[ "$package_text" == *'access_dest="$output_dir/TelevyBackup Snapshot Access.app"'* ]]
 [[ "$package_text" != *'--version'* ]]
 
 version="$(tr -d '\n' < "$root_dir/VERSION")"

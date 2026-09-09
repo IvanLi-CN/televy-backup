@@ -44,6 +44,9 @@ tools_name="televybackup-tools-${version}-${arch}.tar.gz"
 app_dest="$output_dir/TelevyBackup.app"
 rm -rf "$app_dest"
 cp -R "$app_source" "$app_dest"
+access_dest="$output_dir/TelevyBackup Snapshot Access.app"
+rm -rf "$access_dest"
+cp -R "$access_source" "$access_dest"
 
 staging="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-package.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
