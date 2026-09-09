@@ -43,7 +43,54 @@ jobs:
           if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then
             verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
           fi
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
+          deadline=$((SECONDS + 540))
+          while :; do
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
+            state="$(python3 - "${RUNNER_TEMP}/source-checks.json" <<'PY'
+          import json
+          import sys
+
+          required = {
+              "Release intent label gate",
+              "quality",
+              "macOS Swift tests",
+              "arm64 native package",
+              "x86_64 native package",
+              "Universal 2 assembly",
+          }
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          latest = {}
+          for row in payload.get("check_runs", []):
+              name = row.get("name")
+              if not name:
+                  continue
+              timestamp = row.get("completed_at") or row.get("started_at") or ""
+              if name not in latest or timestamp > latest[name][0]:
+                  latest[name] = (timestamp, row)
+          missing = sorted(name for name in required if name not in latest)
+          pending = sorted(name for name in required if name in latest and latest[name][1].get("status") != "completed")
+          failed = sorted(name for name in required if name in latest and latest[name][1].get("status") == "completed" and latest[name][1].get("conclusion") != "success")
+          if failed:
+              print("failed:" + ",".join(failed))
+          elif missing or pending:
+              print("pending:" + ",".join(missing + pending))
+          else:
+              print("ready")
+          PY
+          )"
+            case "${state}" in
+              ready) break ;;
+              failed:*) echo "source PR checks failed: ${state#failed:}" >&2; exit 1 ;;
+              pending:*)
+                if (( SECONDS >= deadline )); then
+                  echo "timed out waiting for source PR checks: ${state#pending:}" >&2
+                  exit 1
+                fi
+                sleep 10
+                ;;
+              *) echo "unexpected source check state: ${state}" >&2; exit 1 ;;
+            esac
+          done
           python3 .github/scripts/release_completion.py \
             --repo-root . \
             --commit "${HEAD_SHA}" \
