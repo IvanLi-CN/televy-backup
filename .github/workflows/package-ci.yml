@@ -119,8 +119,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/final
-          arm_app="$(find dist/arm64 -maxdepth 1 -type d -name '*.app' -print -quit)"
-          x86_app="$(find dist/x86_64 -maxdepth 1 -type d -name '*.app' -print -quit)"
+          arm_app="dist/arm64/TelevyBackup.app"
+          x86_app="dist/x86_64/TelevyBackup.app"
           bash scripts/macos/assemble-universal.sh --mode development --arm64-app "$arm_app" --x86_64-app "$x86_app" --output-dir dist/final
           cp dist/arm64/TelevyBackup-*-arm64.dmg dist/final/
           cp dist/x86_64/TelevyBackup-*-x86_64.dmg dist/final/
