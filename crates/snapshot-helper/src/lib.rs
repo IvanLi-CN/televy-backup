@@ -87,7 +87,11 @@ pub struct StatusResult {
     pub active_leases: u32,
     pub pending_cleanup: u32,
     pub access_app_version: String,
+    #[serde(default)]
+    pub access_app_path: Option<String>,
     pub fda_ready: bool,
+    #[serde(default)]
+    pub fda_check_error: Option<String>,
     #[serde(default)]
     pub mount_helper_reachable: bool,
     #[serde(default)]

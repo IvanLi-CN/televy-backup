@@ -419,13 +419,16 @@ async fn status_result(state: &HelperState) -> Result<StatusResult, HelperError>
             .fetch_one(&state.journal)
             .await? as u32;
     let mount_helper_status = mount_helper::status();
+    let fda_check_error = refresh_fda_readiness(state);
     Ok(StatusResult {
         active_leases,
         pending_cleanup,
         access_app_version: option_env!("TELEVYBACKUP_BUILD_VERSION")
             .unwrap_or(ACCESS_APP_VERSION)
             .to_string(),
+        access_app_path: current_access_app_path(),
         fda_ready: state.fda_ready.load(Ordering::Relaxed),
+        fda_check_error,
         mount_helper_reachable: mount_helper_status.is_ok(),
         mount_helper_version: mount_helper_status
             .as_ref()
@@ -447,6 +450,71 @@ struct ConfigTarget {
     source_path: String,
 }
 
+fn current_access_app_path() -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| access_app_path_from_executable(&path))
+}
+
+fn access_app_path_from_executable(executable: &Path) -> Option<String> {
+    executable
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+fn configured_sources(config_dir: &Path) -> Result<Vec<PathBuf>, HelperError> {
+    let settings_path = config_dir.join("config.toml");
+    let contents = fs::read_to_string(&settings_path).map_err(|error| {
+        HelperError::Message(format!("cannot read configured backup targets: {error}"))
+    })?;
+    let settings: ConfigFile = toml::from_str(&contents)
+        .map_err(|error| HelperError::Message(format!("invalid backup settings: {error}")))?;
+    settings
+        .targets
+        .into_iter()
+        .map(|target| canonical_configured_source(&target.source_path))
+        .collect()
+}
+
+fn canonical_configured_source(source_path: &str) -> Result<PathBuf, HelperError> {
+    let source = PathBuf::from(source_path);
+    if !source.is_absolute() {
+        return Err(HelperError::Message(
+            "configured source path must be absolute".into(),
+        ));
+    }
+    source
+        .canonicalize()
+        .map_err(|error| HelperError::Message(format!("source path is unavailable: {error}")))
+}
+
+fn refresh_fda_readiness(state: &HelperState) -> Option<String> {
+    let sources = match configured_sources(&state.config_dir) {
+        Ok(sources) if !sources.is_empty() => sources,
+        Ok(_) => {
+            state.fda_ready.store(false, Ordering::Relaxed);
+            return Some("no configured backup sources are available to verify access".into());
+        }
+        Err(_) => {
+            state.fda_ready.store(false, Ordering::Relaxed);
+            return Some("configured backup sources could not be checked".into());
+        }
+    };
+
+    let readable = sources.into_iter().all(|source| {
+        let Ok(mut entries) = fs::read_dir(source) else {
+            return false;
+        };
+        match entries.next() {
+            Some(Err(_)) => false,
+            Some(Ok(_)) | None => true,
+        }
+    });
+    state.fda_ready.store(readable, Ordering::Relaxed);
+    (!readable).then_some("Snapshot Access cannot read every configured backup source".into())
+}
+
 fn configured_source(config_dir: &Path, target_id: &str) -> Result<PathBuf, HelperError> {
     if target_id.is_empty() || target_id.len() > 128 {
         return Err(HelperError::Message("invalid target id".into()));
@@ -462,15 +530,7 @@ fn configured_source(config_dir: &Path, target_id: &str) -> Result<PathBuf, Help
         .into_iter()
         .find(|target| target.id == target_id)
         .ok_or_else(|| HelperError::Message("target is not configured".into()))?;
-    let source = PathBuf::from(target.source_path);
-    if !source.is_absolute() {
-        return Err(HelperError::Message(
-            "configured source path must be absolute".into(),
-        ));
-    }
-    source
-        .canonicalize()
-        .map_err(|error| HelperError::Message(format!("source path is unavailable: {error}")))
+    canonical_configured_source(&target.source_path)
 }
 
 fn lease_for(uid: u32, lease_id: &str, state: &HelperState) -> Result<Lease, HelperError> {
@@ -1272,6 +1332,7 @@ mod tests {
 
     async fn scan_test_state(temp: &tempfile::TempDir, uid: u32) -> HelperState {
         let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
         let lease = Lease {
             lease_id: "lease-1".into(),
             uid,
@@ -1427,6 +1488,39 @@ mod tests {
         assert_eq!(
             configured_source(dir.path(), "target-1").unwrap(),
             source.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn access_app_path_uses_the_containing_bundle() {
+        assert_eq!(
+            access_app_path_from_executable(Path::new(
+                "/test/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access"
+            )),
+            Some("/test/TelevyBackup Snapshot Access.app".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn status_refresh_rechecks_configured_source_readability() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            format!(
+                "version = 2\n\n[[targets]]\nid = \"target-1\"\nsource_path = \"{}\"\n",
+                source.display()
+            ),
+        )
+        .unwrap();
+        let state = scan_test_state(&dir, unsafe { libc::geteuid() }).await;
+
+        let status = status_result(&state).await.unwrap();
+
+        assert!(
+            status.fda_ready,
+            "status refresh must recheck source readability"
         );
     }
 }

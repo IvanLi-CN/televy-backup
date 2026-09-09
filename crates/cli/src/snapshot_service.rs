@@ -240,7 +240,7 @@ pub fn status(
         .map(|dir| PathBuf::from(dir).join("snapshot-access/access.sock"))
         .unwrap_or_else(|| data_dir.join("snapshot-access/access.sock"));
     let helper = status_from_socket(&socket).ok();
-    let payload = json!({"installed": manifest.is_some() && plist_path().is_file(), "label": ACCESS_LABEL, "appPath": manifest.as_ref().and_then(|value| value.get("appPath")), "executablePath": manifest.as_ref().and_then(|value| value.get("executablePath")), "plistPath": plist_path(), "serviceReachable": helper.is_some(), "activeLeases": helper.as_ref().map(|value| value.active_leases).unwrap_or(0), "pendingCleanup": helper.as_ref().map(|value| value.pending_cleanup).unwrap_or(0), "accessAppVersion": helper.as_ref().map(|value| value.access_app_version.clone()), "fdaReady": helper.as_ref().map(|value| value.fda_ready).unwrap_or(false), "mountHelperPath": MOUNT_HELPER_INSTALL_PATH, "mountHelperReachable": helper.as_ref().map(|value| value.mount_helper_reachable).unwrap_or(false), "mountHelperVersion": helper.as_ref().and_then(|value| value.mount_helper_version.clone()), "mountHelperError": helper.as_ref().and_then(|value| value.mount_helper_error.clone())});
+    let payload = status_payload(manifest.as_ref(), helper.as_ref(), &plist_path());
     if json_output {
         println!("{payload}");
     } else {
@@ -254,6 +254,22 @@ pub fn status(
         );
     }
     Ok(payload)
+}
+
+fn status_payload(
+    manifest: Option<&serde_json::Value>,
+    helper: Option<&StatusResult>,
+    plist: &Path,
+) -> serde_json::Value {
+    let registered_app_path = manifest
+        .and_then(|value| value.get("appPath"))
+        .and_then(serde_json::Value::as_str);
+    let running_app_path = helper.and_then(|value| value.access_app_path.as_deref());
+    let registration_mismatch = matches!(
+        (running_app_path, registered_app_path),
+        (Some(running), Some(registered)) if running != registered
+    );
+    json!({"installed": manifest.is_some() && plist.is_file(), "label": ACCESS_LABEL, "appPath": running_app_path.or(registered_app_path), "registeredAppPath": registered_app_path, "accessAppRegistrationMismatch": registration_mismatch, "executablePath": manifest.and_then(|value| value.get("executablePath")), "plistPath": plist, "serviceReachable": helper.is_some(), "activeLeases": helper.map(|value| value.active_leases).unwrap_or(0), "pendingCleanup": helper.map(|value| value.pending_cleanup).unwrap_or(0), "accessAppVersion": helper.map(|value| value.access_app_version.clone()), "fdaReady": helper.map(|value| value.fda_ready).unwrap_or(false), "fdaCheckError": helper.and_then(|value| value.fda_check_error.clone()), "mountHelperPath": MOUNT_HELPER_INSTALL_PATH, "mountHelperReachable": helper.map(|value| value.mount_helper_reachable).unwrap_or(false), "mountHelperVersion": helper.and_then(|value| value.mount_helper_version.clone()), "mountHelperError": helper.and_then(|value| value.mount_helper_error.clone())})
 }
 
 #[cfg(test)]
@@ -293,6 +309,25 @@ mod tests {
         assert_eq!(
             user_service_target("gui/501"),
             "gui/501/com.ivan.televybackup.snapshot-access"
+        );
+    }
+
+    #[test]
+    fn reachable_access_service_path_overrides_stale_launch_registration() {
+        let manifest = json!({
+            "appPath": "/old/TelevyBackup Snapshot Access.app",
+            "executablePath": "/old/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access",
+        });
+        let status = StatusResult {
+            access_app_path: Some("/live/TelevyBackup Snapshot Access.app".into()),
+            ..Default::default()
+        };
+
+        let payload = status_payload(Some(&manifest), Some(&status), Path::new("/missing.plist"));
+
+        assert_eq!(
+            payload["appPath"], "/live/TelevyBackup Snapshot Access.app",
+            "the FDA path must identify the reachable process, not a stale registration"
         );
     }
 }

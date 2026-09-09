@@ -23,7 +23,7 @@ use televy_backup_core::control::{
 use televy_backup_core::{
     Storage, TaskProgress, TelegramMtProtoStorage, TelegramMtProtoStorageConfig,
 };
-use televybackup_snapshot_access::MOUNT_HELPER_INSTALL_PATH;
+use televybackup_snapshot_access::{MOUNT_HELPER_INSTALL_PATH, StatusResult};
 
 use crate::snapshot_client::SnapshotClient;
 
@@ -151,6 +151,22 @@ pub(crate) struct ControlContext {
     pub(crate) runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
     pub(crate) data_root: PathBuf,
     pub(crate) snapshot_inspection: Arc<crate::snapshot_inspection_ipc::SnapshotInspectionService>,
+}
+
+fn snapshot_access_paths(
+    live_status: Option<&StatusResult>,
+    registered_path: Option<String>,
+) -> (Option<String>, Option<String>, bool) {
+    let running_path = live_status.and_then(|status| status.access_app_path.clone());
+    let registration_mismatch = matches!(
+        (running_path.as_deref(), registered_path.as_deref()),
+        (Some(running), Some(registered)) if running != registered
+    );
+    (
+        running_path.or_else(|| registered_path.clone()),
+        registered_path,
+        registration_mismatch,
+    )
 }
 
 pub struct ControlIpcServerHandle {
@@ -496,20 +512,22 @@ async fn handle_control_ipc_client(
             pending_cleanup,
             access_app_version,
             fda_ready,
+            fda_check_error,
             mount_helper_reachable,
             mount_helper_version,
             mount_helper_error,
-        ) = match helper {
+        ) = match &helper {
             Ok(status) => (
                 true,
                 None,
                 status.active_leases,
                 status.pending_cleanup,
-                Some(status.access_app_version),
+                Some(status.access_app_version.clone()),
                 status.fda_ready,
+                status.fda_check_error.clone(),
                 status.mount_helper_reachable,
-                status.mount_helper_version,
-                status.mount_helper_error,
+                status.mount_helper_version.clone(),
+                status.mount_helper_error.clone(),
             ),
             Err(error) => (
                 false,
@@ -518,6 +536,7 @@ async fn handle_control_ipc_client(
                 0,
                 None,
                 false,
+                None,
                 false,
                 None,
                 None,
@@ -534,7 +553,7 @@ async fn handle_control_ipc_client(
                 })
             })
             .collect::<Vec<_>>();
-        let access_app_path =
+        let registered_access_app_path =
             std::fs::read(context.config_root.join("snapshot-access/service.json"))
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
@@ -545,6 +564,8 @@ async fn handle_control_ipc_client(
                         .map(str::to_string)
                 })
                 .or_else(|| std::env::var("TELEVYBACKUP_SNAPSHOT_ACCESS_APP").ok());
+        let (access_app_path, registered_access_app_path, access_app_registration_mismatch) =
+            snapshot_access_paths(helper.as_ref().ok(), registered_access_app_path);
         write_json_line(
             &mut w,
             &ControlResponse::ok(
@@ -553,8 +574,11 @@ async fn handle_control_ipc_client(
                     "consistencyMode": if volumes.iter().any(|volume| volume.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(false)) { "strict" } else { "live" },
                     "serviceReachable": helper_available,
                     "accessAppPath": access_app_path,
+                    "registeredAccessAppPath": registered_access_app_path,
+                    "accessAppRegistrationMismatch": access_app_registration_mismatch,
                     "accessAppVersion": access_app_version,
                     "fdaReady": fda_ready,
+                    "fdaCheckError": fda_check_error,
                     "accessAppError": helper_error,
                     "mountHelperPath": MOUNT_HELPER_INSTALL_PATH,
                     "mountHelperReachable": mount_helper_reachable,
@@ -2928,6 +2952,29 @@ mod tests {
             schedule: None,
         });
         s
+    }
+
+    #[test]
+    fn snapshot_status_prefers_the_reachable_access_app_path() {
+        let live = StatusResult {
+            access_app_path: Some("/live/TelevyBackup Snapshot Access.app".into()),
+            ..Default::default()
+        };
+
+        let (display_path, registered_path, mismatch) = snapshot_access_paths(
+            Some(&live),
+            Some("/old/TelevyBackup Snapshot Access.app".into()),
+        );
+
+        assert_eq!(
+            display_path.as_deref(),
+            Some("/live/TelevyBackup Snapshot Access.app")
+        );
+        assert_eq!(
+            registered_path.as_deref(),
+            Some("/old/TelevyBackup Snapshot Access.app")
+        );
+        assert!(mismatch);
     }
 
     #[test]

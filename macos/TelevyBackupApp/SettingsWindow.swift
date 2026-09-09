@@ -278,7 +278,10 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let serviceReachable: Bool
     let accessAppVersion: String?
     let accessAppPath: String?
+    let registeredAccessAppPath: String?
+    let accessAppRegistrationMismatch: Bool
     let fdaReady: Bool
+    let fdaCheckError: String?
     let accessAppError: String?
     let mountHelperPath: String?
     let mountHelperReachable: Bool
@@ -289,7 +292,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let volumes: [SnapshotVolumeStatus]
 
     private enum CodingKeys: String, CodingKey {
-        case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, fdaReady, accessAppError
+        case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, registeredAccessAppPath, accessAppRegistrationMismatch, fdaReady, fdaCheckError, accessAppError
         case mountHelperPath, mountHelperReachable, mountHelperVersion, mountHelperError
         case helperAvailable, helperVersion, helperError
         case activeLeases, pendingCleanup, volumes
@@ -300,7 +303,10 @@ struct SnapshotControlStatus: Decodable, Equatable {
         serviceReachable: Bool,
         accessAppVersion: String?,
         accessAppPath: String?,
+        registeredAccessAppPath: String? = nil,
+        accessAppRegistrationMismatch: Bool = false,
         fdaReady: Bool,
+        fdaCheckError: String? = nil,
         accessAppError: String?,
         mountHelperPath: String? = nil,
         mountHelperReachable: Bool = false,
@@ -314,7 +320,10 @@ struct SnapshotControlStatus: Decodable, Equatable {
         self.serviceReachable = serviceReachable
         self.accessAppVersion = accessAppVersion
         self.accessAppPath = accessAppPath
+        self.registeredAccessAppPath = registeredAccessAppPath
+        self.accessAppRegistrationMismatch = accessAppRegistrationMismatch
         self.fdaReady = fdaReady
+        self.fdaCheckError = fdaCheckError
         self.accessAppError = accessAppError
         self.mountHelperPath = mountHelperPath
         self.mountHelperReachable = mountHelperReachable
@@ -334,7 +343,10 @@ struct SnapshotControlStatus: Decodable, Equatable {
         accessAppVersion = try values.decodeIfPresent(String.self, forKey: .accessAppVersion)
             ?? (try values.decodeIfPresent(String.self, forKey: .helperVersion))
         accessAppPath = try values.decodeIfPresent(String.self, forKey: .accessAppPath)
+        registeredAccessAppPath = try values.decodeIfPresent(String.self, forKey: .registeredAccessAppPath)
+        accessAppRegistrationMismatch = try values.decodeIfPresent(Bool.self, forKey: .accessAppRegistrationMismatch) ?? false
         fdaReady = try values.decodeIfPresent(Bool.self, forKey: .fdaReady) ?? false
+        fdaCheckError = try values.decodeIfPresent(String.self, forKey: .fdaCheckError)
         accessAppError = try values.decodeIfPresent(String.self, forKey: .accessAppError)
             ?? (try values.decodeIfPresent(String.self, forKey: .helperError))
         mountHelperPath = try values.decodeIfPresent(String.self, forKey: .mountHelperPath)
@@ -967,6 +979,18 @@ struct SettingsWindowRootView: View {
                             if let version = snapshotStatus.accessAppVersion {
                                 Text("Version \(version)").font(.system(size: 11)).foregroundStyle(.secondary)
                             }
+                            if let error = snapshotStatus.fdaCheckError, !snapshotStatus.fdaReady {
+                                Text(error)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                            if snapshotStatus.accessAppRegistrationMismatch {
+                                Text("The running Access App differs from its registered launch path. Update Snapshot Access before restarting.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.orange)
+                                    .lineLimit(2)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1052,7 +1076,9 @@ struct SettingsWindowRootView: View {
             )
             return
         }
+        snapshotBusy = true
         model.fetchSnapshotStatus { status, error in
+            snapshotBusy = false
             snapshotStatus = status
             snapshotError = error
         }
