@@ -29,6 +29,7 @@ for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-h
   x86_binary="$x86_app/Contents/MacOS/$binary"
   [[ -f "$arm_binary" && -f "$x86_binary" ]] || { echo "missing binary: $binary" >&2; exit 1; }
   lipo -create "$arm_binary" "$x86_binary" -output "$universal_app/Contents/MacOS/$binary"
+  chmod 755 "$universal_app/Contents/MacOS/$binary"
 done
 
 # The copied arm64 bundle carries a thin-binary CodeResources seal. Remove it
@@ -51,6 +52,7 @@ rm -rf "$universal_access_app"
 cp -R "$arm_access_app" "$universal_access_app"
 lipo -create "$arm_access_app/Contents/MacOS/televybackup-snapshot-access" "$x86_access_app/Contents/MacOS/televybackup-snapshot-access" \
   -output "$universal_access_app/Contents/MacOS/televybackup-snapshot-access"
+chmod 755 "$universal_access_app/Contents/MacOS/televybackup-snapshot-access"
 rm -rf "$universal_access_app/Contents/_CodeSignature"
 codesign --force --deep --sign - "$universal_access_app"
 codesign --verify --deep --strict "$universal_access_app"
