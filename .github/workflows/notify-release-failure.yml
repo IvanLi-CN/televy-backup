@@ -25,7 +25,7 @@ jobs:
       extra_details: ${{ steps.resolve.outputs.extra_details }}
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
-      recovery: ${{ steps.resolve.outputs.recovery }}
+      recovery_candidate: ${{ steps.resolve.outputs.recovery_candidate }}
     steps:
       - name: Resolve failed release metadata
         id: resolve
@@ -125,6 +125,7 @@ jobs:
           extra_details = ''
           version = ''
           tag = ''
+          superseded = False
 
           try:
               jobs = list_jobs()
@@ -138,11 +139,14 @@ jobs:
                   if not isinstance(job_id, int):
                       continue
                   log_text = load_job_log(job_id)
+                  if 'superseded_by_product_tag' in log_text:
+                      superseded = True
                   candidate = match_sha(actual_patterns, log_text)
                   if candidate:
-                      resolved_sha = candidate
-                      resolved_from = job_name
-                      break
+                      if not resolved_from:
+                          resolved_sha = candidate
+                          resolved_from = job_name
+                      continue
                   if not requested_sha:
                       requested_sha = match_sha(requested_patterns, log_text)
                       if requested_sha:
@@ -185,8 +189,16 @@ jobs:
               handle.write('\nEOF\n')
               handle.write(f'version={version}\n')
               handle.write(f'tag={tag}\n')
-              recovery = f'workflow_dispatch operation=recover commit_sha={resolved_sha}' if resolved_sha and version else 'recovery identity unavailable'
-              handle.write(f'recovery={recovery}\n')
+              recovery_candidate = (
+                  'not-applicable: superseded_by_product_tag; no Release was created'
+                  if superseded
+                  else
+                  f'workflow_dispatch operation=recover commit_sha={resolved_sha} '
+                  'precondition=recheck-current-product-tag-watermark-and-same-sha'
+                  if resolved_sha and version
+                  else 'unavailable-until-release-identity-is-resolved'
+              )
+              handle.write(f'recovery_candidate={recovery_candidate}\n')
           PYCODE
 
   notify_failure:
@@ -211,7 +223,7 @@ jobs:
         note: ${{ needs.resolve_release_context.outputs.extra_details }}
         version: ${{ needs.resolve_release_context.outputs.version }}
         tag: ${{ needs.resolve_release_context.outputs.tag }}
-        recovery: ${{ needs.resolve_release_context.outputs.recovery }}
+        recovery_candidate: ${{ needs.resolve_release_context.outputs.recovery_candidate }}
 
   smoke_test:
     if: ${{ github.event_name == 'workflow_dispatch' }}

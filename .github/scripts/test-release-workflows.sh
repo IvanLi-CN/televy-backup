@@ -43,8 +43,20 @@ if [[ "$notify_text" == *"Release exact-tag backfill"* ]]; then
   printf 'legacy backfill notifier trigger remains\n' >&2
   exit 1
 fi
-assert_contains "notifier recovery output" "$notify_text" "recovery:"
+assert_contains "notifier recovery candidate output" "$notify_text" "recovery_candidate:"
+assert_contains "notifier superseded handling" "$notify_text" "not-applicable: superseded_by_product_tag"
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
+assert_contains "release full history checkout" "$release_text" "fetch-depth: 0"
+assert_contains "release full tag fetch" "$release_text" "git fetch --force origin main --tags"
+assert_contains "release sequence gate" "$release_text" "verify-release-sequence"
+assert_contains "release publish recheck" "$release_text" "Create or verify immutable tag"
+assert_contains "release state fail closed" "$release_text" "unable to resolve GitHub Release state"
+assert_contains "draft release publish" "$release_text" "gh release edit \"\${PRODUCT_TAG}\" --draft=false"
+assert_contains "draft-only asset overwrite" "$release_text" '[[ "${runtime_state}" == draft ]]'
+if (( $(printf '%s' "$release_text" | grep -Fc 'git fetch --force origin main --tags') < 2 )); then
+  printf 'release workflow must re-fetch tags before publication\n' >&2
+  exit 1
+fi
 if [[ "$release_text" == *"gh release upload \"\${PRODUCT_TAG}\" release-assets/*"* || "$release_text" == *"gh release create \"\${PRODUCT_TAG}\" release-assets/*"* ]]; then
   printf 'release workflow must not pass app bundle directories to gh release\n' >&2
   exit 1
@@ -72,7 +84,7 @@ end
 notifier = notify.fetch("jobs").fetch("notify_failure")
 abort "failure notifier must call the pinned Oidrune workflow" unless notifier.fetch("uses") == "IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b"
 summary = notifier.fetch("with").fetch("summary")
-%w[target_sha recovery].each do |field|
+%w[target_sha recovery_candidate].each do |field|
   abort "failure notification summary must include #{field}" unless summary.include?("#{field}:")
 end
 RUBY

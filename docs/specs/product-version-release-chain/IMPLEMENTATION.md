@@ -25,6 +25,11 @@ The initial root `VERSION` value is `0.9.2`, matching the existing published `v0
 `contents: write`; successful publication is reported directly to the owner by
 the release-owning agent rather than written to the source PR.
 
+Release Product resolves the remote product-tag waterline before packaging. A
+superseded VERSION exits without creating a tag or Release; a matching draft is
+completed explicitly, while a matching published Release is treated as an
+idempotent terminal state.
+
 ## Verification
 
 Local verification runs the resolver unit tests, release-chain fixtures, package manifest fixture, shell syntax checks, YAML parsing, Rust checks, and the quality-gates checker. macOS native package and Swift matrix jobs remain the authoritative hosted checks.

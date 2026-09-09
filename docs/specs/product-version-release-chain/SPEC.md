@@ -32,15 +32,19 @@ After all source PR checks succeed, trusted preparation MAY create one single-pa
 
 Covers: G3, A3.
 
-### REQ-PVR-005: Release follows normal merge and supports same-identity recovery
+### REQ-PVR-005: Release follows normal merge and supports ordered same-identity recovery
 
 Release completion MUST validate source checks, preparation ancestry, merge structure, VERSION, and tag ownership. The normal release workflow reads the committed merge SHA and VERSION, builds and verifies all macOS assets, and creates the immutable tag/release. The release-owning agent MUST report successful publication directly to the owner, and Release Product MUST NOT create or update a result comment on the source PR. Manual dispatch MUST accept only `recover` for the same merge SHA and VERSION. Snapshot, queue, arbitrary SHA backfill, and retagging are forbidden.
+
+Before either automatic publication or `recover`, Release Product MUST enumerate the remote product tags matching `vX.Y.Z` and `vX.Y.Z-rc.N` and compare the candidate with the highest full-SemVer tag. A lower candidate MUST fail before build, tag, or asset work with `superseded_by_product_tag`. An equal candidate MUST prove that the existing tag targets the same merge SHA. A higher candidate is the only candidate eligible for a new tag. If the matching tag already has a draft Release, the workflow MAY replace its assets and MUST publish it explicitly; a published matching Release is an idempotent success and MUST NOT rebuild or overwrite assets.
 
 Covers: G4, A3, A4.
 
 ### REQ-PVR-006: Quality and notification contracts are explicit
 
-`.github/quality-gates.json` MUST declare exact required check names and workflow mappings. Source heads run the complete Rust, Swift, and native package matrix; preparation heads run structural fast paths with the same required check names. Failed releases MUST notify with the locked merge/version/tag identity and same-SHA recovery command.
+`.github/quality-gates.json` MUST declare exact required check names and workflow mappings. Source heads run the complete Rust, Swift, and native package matrix; preparation heads run structural fast paths with the same required check names. Eligible failed releases MUST notify with the locked merge/version/tag identity and a same-SHA recovery candidate.
+
+Failure notifications MUST label any command as `recovery_candidate` and include the condition that the current product-tag waterline and same-SHA identity must be rechecked. A superseded candidate MUST state that no Release was created and MUST NOT advertise recovery.
 
 Covers: G5, A5, A6.
 
