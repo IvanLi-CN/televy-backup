@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() { echo "usage: verify-release-assets.sh --mode release|development --asset-dir DIR" >&2; exit 2; }
-mode=""; asset_dir=""
+usage() { echo "usage: verify-release-assets.sh --mode release|development --asset-dir DIR [--skip-bundle-checks]" >&2; exit 2; }
+mode=""; asset_dir=""; skip_bundle_checks=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) mode="${2:-}"; shift 2 ;;
     --asset-dir) asset_dir="${2:-}"; shift 2 ;;
+    --skip-bundle-checks) skip_bundle_checks=true; shift ;;
     *) usage ;;
   esac
 done
@@ -29,8 +30,13 @@ assert manifest["signing"] == "ad-hoc"
 assert {"arm64", "x86_64", "universal2"}.issubset(set(manifest["architectures"]))
 assert manifest["assets"]
 PY
-for app in "$asset_dir"/*.app; do
-  [[ -d "$app" ]] || continue
+if [[ "$skip_bundle_checks" == true ]]; then
+  echo "release metadata verified (bundle checks skipped)"
+  exit 0
+fi
+app="$asset_dir/TelevyBackup.app"
+[[ -d "$app" ]] || { echo "missing main app bundle: $app" >&2; exit 1; }
+if [[ -d "$app" ]]; then
   codesign --verify --deep --strict "$app"
   [[ -s "$app/Contents/Resources/TelevyBackup.icns" ]] || {
     echo "app bundle missing TelevyBackup.icns: $app" >&2
@@ -61,9 +67,19 @@ for app in "$asset_dir"/*.app; do
       exit 1
     }
   done
-  for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-helper; do
+  for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
     info="$(lipo -info "$app/Contents/MacOS/$binary")"
     [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "universal binary missing slice: $binary" >&2; exit 1; }
   done
-done
+  [[ -x "$app/Contents/MacOS/televybackup-snapshot-mount-helper" ]] || { echo "snapshot mount helper missing" >&2; exit 1; }
+fi
+access_app="$asset_dir/TelevyBackup Snapshot Access.app"
+[[ -d "$access_app" ]] || { echo "missing Snapshot Access app bundle: $access_app" >&2; exit 1; }
+if [[ -d "$access_app" ]]; then
+  codesign --verify --deep --strict "$access_app"
+  bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$access_app/Contents/Info.plist")"
+  [[ "$bundle_id" == "com.ivan.televybackup.snapshot-access" ]] || { echo "unexpected Snapshot Access bundle id: $bundle_id" >&2; exit 1; }
+  [[ -x "$access_app/Contents/MacOS/televybackup-snapshot-access" ]] || { echo "Snapshot Access executable missing" >&2; exit 1; }
+  [[ "$(( $(stat -f '%Lp' "$access_app/Contents/MacOS/televybackup-snapshot-access") & 022 ))" -eq 0 ]] || { echo "Snapshot Access executable is writable by group/other" >&2; exit 1; }
+fi
 echo "release assets verified: ${#required[@]} files"

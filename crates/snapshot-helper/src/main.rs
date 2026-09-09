@@ -1,23 +1,34 @@
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine;
+use ignore::WalkBuilder;
 use plist::Value;
-use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
-use televybackup_snapshot_helper::{
-    DEFAULT_JOURNAL_PATH, DEFAULT_SOCKET_PATH, LeaseResult, MIN_FREE_BYTES, Method, ProbeResult,
-    ReleaseResult, Request, Response, ResponseResult, StatusResult, validate_request,
+use serde::Deserialize;
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
+use televybackup_snapshot_access::mount_helper;
+use televybackup_snapshot_access::{
+    CONFIG_DIR_ENV, DATA_DIR_ENV, DEFAULT_JOURNAL_PATH, LeaseResult, MIN_FREE_BYTES, Method,
+    MountSnapshotRef, ProbeResult, ReadStreamResult, ReleaseResult, Request, Response,
+    ResponseResult, ScanPageResult, SourceEntry, StatusResult, validate_request,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::{UnixListener, UnixStream};
 use uuid::Uuid;
 
-const HELPER_VERSION: &str = "0.1.0";
+const ACCESS_APP_VERSION: &str = "0.2.0";
 
 #[derive(Debug, thiserror::Error)]
 enum HelperError {
@@ -49,6 +60,21 @@ struct Lease {
     mount_root: PathBuf,
     source_relative_path: PathBuf,
     source_mount_point: PathBuf,
+    snapshot_manifest: Vec<SnapshotRef>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SnapshotRef {
+    device_identifier: String,
+    uuid: String,
+    name: String,
+    created_at: String,
+}
+
+struct ReadStream {
+    uid: u32,
+    lease_id: String,
+    file: fs::File,
 }
 
 #[derive(Clone)]
@@ -57,6 +83,10 @@ struct HelperState {
     leases: Arc<Mutex<HashMap<String, Lease>>>,
     socket_path: PathBuf,
     journal_path: PathBuf,
+    config_dir: PathBuf,
+    data_dir: PathBuf,
+    streams: Arc<Mutex<HashMap<String, ReadStream>>>,
+    fda_ready: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,51 +102,72 @@ struct VolumeInfo {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!(
-            "televybackup-snapshot-helper {} ({})",
-            option_env!("TELEVYBACKUP_BUILD_VERSION").unwrap_or(HELPER_VERSION),
+            "televybackup-snapshot-access {} ({})",
+            option_env!("TELEVYBACKUP_BUILD_VERSION").unwrap_or(ACCESS_APP_VERSION),
             option_env!("TELEVYBACKUP_BUILD_COMMIT").unwrap_or("unknown")
         );
         return Ok(());
     }
-    let socket_path = std::env::var_os("TELEVYBACKUP_SNAPSHOT_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH));
+    let owner_uid = unsafe { libc::geteuid() };
+    if owner_uid == 0 {
+        return Err(HelperError::Message(
+            "snapshot access app must run in the user session, not as root".into(),
+        )
+        .into());
+    }
     let journal_path = std::env::var_os("TELEVYBACKUP_SNAPSHOT_JOURNAL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_JOURNAL_PATH));
+        .unwrap_or_else(|| default_user_path(DEFAULT_JOURNAL_PATH));
+    let config_dir = std::env::var_os(CONFIG_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_user_path("~/Library/Application Support/TelevyBackup"));
+    let data_dir = std::env::var_os(DATA_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_user_path("~/Library/Application Support/TelevyBackup"));
+    let socket_path = std::env::var_os("TELEVYBACKUP_SNAPSHOT_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("snapshot-access/access.sock"));
+
+    ensure_private_directory(&data_dir, owner_uid)?;
 
     let parent = journal_path
         .parent()
         .ok_or_else(|| HelperError::Message("journal has no parent".to_string()))?;
-    fs::create_dir_all(parent)?;
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-    verify_secure_path(parent, true)?;
+    ensure_private_directory(parent, owner_uid)?;
 
     let connect_options = SqliteConnectOptions::new()
         .filename(&journal_path)
         .create_if_missing(true);
-    let journal = SqlitePool::connect_with(connect_options).await?;
-    verify_root_owned_file(&journal_path)?;
+    // The journal is serialized by the lease state machine. A single connection
+    // avoids concurrent SQLite initialization when launchd starts this agent.
+    let journal = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(connect_options)
+        .await?;
+    verify_private_file(&journal_path, owner_uid)?;
     init_journal(&journal).await?;
     recover_journal(&journal).await?;
 
     if socket_path.exists() {
-        verify_secure_path(&socket_path, false)?;
+        verify_private_path(&socket_path, false, owner_uid)?;
         fs::remove_file(&socket_path)?;
     }
     let socket_parent = socket_path
         .parent()
         .ok_or_else(|| HelperError::Message("socket has no parent".to_string()))?;
-    fs::create_dir_all(socket_parent)?;
-    verify_secure_path(socket_parent, true)?;
+    ensure_private_directory(socket_parent, owner_uid)?;
     let listener = UnixListener::bind(&socket_path)?;
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))?;
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))?;
 
     let state = HelperState {
         journal,
         leases: Arc::new(Mutex::new(HashMap::new())),
         socket_path,
         journal_path,
+        config_dir,
+        data_dir,
+        streams: Arc::new(Mutex::new(HashMap::new())),
+        fda_ready: Arc::new(AtomicBool::new(false)),
     };
     tracing_log_start(&state);
 
@@ -125,50 +176,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_connection(stream, state).await {
-                eprintln!("snapshot helper connection failed: {error}");
+                eprintln!("snapshot access connection failed: {error}");
             }
         });
     }
 }
 
-fn verify_secure_path(path: &Path, directory: bool) -> Result<(), HelperError> {
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(HelperError::Message(
-            "snapshot helper must run as root".into(),
-        ));
+fn default_user_path(raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
+    PathBuf::from(raw)
+}
+
+fn verify_private_path(path: &Path, directory: bool, owner_uid: u32) -> Result<(), HelperError> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.uid() != 0 {
+    if metadata.uid() != owner_uid {
         return Err(HelperError::Message(format!(
-            "unsafe snapshot helper asset owner: {}",
+            "unsafe snapshot access asset owner: {}",
             path.display()
         )));
     }
     if (directory && !metadata.is_dir()) || (!directory && !metadata.file_type().is_socket()) {
         return Err(HelperError::Message(format!(
-            "unsafe snapshot helper asset type: {}",
+            "unsafe snapshot access asset type: {}",
             path.display()
         )));
     }
-    if directory && metadata.mode() & 0o022 != 0 {
+    if metadata.mode() & 0o022 != 0 {
         return Err(HelperError::Message(format!(
-            "unsafe snapshot helper asset mode: {}",
+            "unsafe snapshot access asset mode: {}",
             path.display()
         )));
     }
     Ok(())
 }
 
-fn verify_root_owned_file(path: &Path) -> Result<(), HelperError> {
-    if unsafe { libc::geteuid() } != 0 {
-        return Err(HelperError::Message(
-            "snapshot helper must run as root".into(),
-        ));
+fn ensure_private_directory(path: &Path, owner_uid: u32) -> Result<(), HelperError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => verify_private_path(path, true, owner_uid),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            verify_private_path(path, true, owner_uid)
+        }
+        Err(error) => Err(HelperError::Io(error)),
     }
+}
+
+fn verify_private_file(path: &Path, owner_uid: u32) -> Result<(), HelperError> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.uid() != 0 || !metadata.is_file() || metadata.mode() & 0o022 != 0 {
+    if metadata.uid() != owner_uid || !metadata.is_file() || metadata.mode() & 0o022 != 0 {
         return Err(HelperError::Message(format!(
-            "unsafe snapshot helper journal ownership or mode: {}",
+            "unsafe snapshot access journal ownership or mode: {}",
             path.display()
         )));
     }
@@ -177,7 +239,7 @@ fn verify_root_owned_file(path: &Path) -> Result<(), HelperError> {
 
 fn tracing_log_start(state: &HelperState) {
     eprintln!(
-        "snapshot helper started socket={} journal={}",
+        "snapshot access started socket={} journal={}",
         state.socket_path.display(),
         state.journal_path.display()
     );
@@ -196,6 +258,7 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), HelperError> {
             mount_root TEXT NOT NULL,
             source_relative_path TEXT NOT NULL,
             source_mount_point TEXT NOT NULL,
+            snapshot_manifest TEXT NOT NULL DEFAULT '[]',
             state TEXT NOT NULL,
             created_at TEXT NOT NULL
         )",
@@ -206,24 +269,23 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), HelperError> {
     let _ = sqlx::query("ALTER TABLE leases ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")
         .execute(pool)
         .await;
+    let _ =
+        sqlx::query("ALTER TABLE leases ADD COLUMN snapshot_manifest TEXT NOT NULL DEFAULT '[]'")
+            .execute(pool)
+            .await;
     Ok(())
 }
 
 async fn recover_journal(pool: &SqlitePool) -> Result<(), HelperError> {
-    let rows = sqlx::query("SELECT lease_id, mount_root, snapshot_uuid, device_identifier FROM leases WHERE state != 'released'")
+    let rows = sqlx::query("SELECT lease_id, uid FROM leases WHERE state != 'released'")
         .fetch_all(pool)
         .await?;
     for row in rows {
         let lease_id: String = sqlx::Row::try_get(&row, "lease_id")?;
-        let mount_root: String = sqlx::Row::try_get(&row, "mount_root")?;
-        let snapshot_uuid: String = sqlx::Row::try_get(&row, "snapshot_uuid")?;
-        let device_identifier: String = sqlx::Row::try_get(&row, "device_identifier")?;
-        let unmount_ok = unmount_path(Path::new(&mount_root)).is_ok();
-        let delete_ok = delete_snapshot(&device_identifier, &snapshot_uuid).is_ok();
-        let state = if unmount_ok && delete_ok {
-            "released"
-        } else {
-            "cleanup_pending"
+        let uid: i64 = sqlx::Row::try_get(&row, "uid")?;
+        let state = match mount_helper::release(uid as u32, &lease_id) {
+            Ok(result) if result.cleanup_state == "released" => "released",
+            _ => "cleanup_pending",
         };
         sqlx::query("UPDATE leases SET state = ? WHERE lease_id = ?")
             .bind(state)
@@ -259,30 +321,67 @@ async fn handle_request(request: Request, uid: u32, state: &HelperState) -> Resp
     if let Err(error) = validate_request(&request) {
         return Response::error(request_id, "invalid_request", error);
     }
-    let result = match request.method {
-        Method::Status => status_result(state).await.map(ResponseResult::Status),
-        Method::Probe {
-            source_path,
-            expected_volume_uuid,
-        } => probe_source(Path::new(&source_path), expected_volume_uuid.as_deref())
-            .map(ResponseResult::Probe),
-        Method::AcquireLease {
-            source_path,
-            expected_volume_uuid,
-            run_id,
-        } => acquire_lease(
-            uid,
-            Path::new(&source_path),
-            &expected_volume_uuid,
-            &run_id,
-            state,
-        )
-        .await
-        .map(ResponseResult::Lease),
-        Method::ReleaseLease { lease_id } => release_lease(uid, &lease_id, state)
-            .await
-            .map(ResponseResult::Released),
-    };
+    let result =
+        match request.method {
+            Method::Status => status_result(state).await.map(ResponseResult::Status),
+            Method::ProbeVolume { target_id } => {
+                let result = configured_source(&state.config_dir, &target_id).and_then(|source| {
+                    let probe = probe_source(&source, None)?;
+                    if probe.snapshot_supported {
+                        match fs::read_dir(&source) {
+                            Ok(mut entries) => {
+                                let readable = !matches!(
+                                    entries.next(),
+                                    Some(Err(error))
+                                        if error.kind() == std::io::ErrorKind::PermissionDenied
+                                );
+                                state.fda_ready.store(readable, Ordering::Relaxed);
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                                state.fda_ready.store(false, Ordering::Relaxed);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    Ok(probe)
+                });
+                result.map(ResponseResult::Probe)
+            }
+            Method::AcquireLease {
+                target_id,
+                expected_volume_uuid,
+                run_id,
+            } => {
+                let result = match configured_source(&state.config_dir, &target_id) {
+                    Ok(source) => {
+                        acquire_lease(uid, &source, &expected_volume_uuid, &run_id, state).await
+                    }
+                    Err(error) => Err(error),
+                };
+                result.map(ResponseResult::Lease)
+            }
+            Method::ScanPage {
+                lease_id,
+                cursor,
+                limit,
+            } => scan_page(uid, &lease_id, cursor.as_deref(), limit, state)
+                .map(ResponseResult::ScanPage),
+            Method::OpenReadStream {
+                lease_id,
+                relative_path,
+            } => open_read_stream(uid, &lease_id, &relative_path, state)
+                .map(ResponseResult::ReadStream),
+            Method::ReadStream {
+                stream_id,
+                max_bytes,
+            } => read_stream(uid, &stream_id, max_bytes, state).map(ResponseResult::ReadStream),
+            Method::CloseReadStream { stream_id } => {
+                close_read_stream(uid, &stream_id, state).map(|_| ResponseResult::Closed)
+            }
+            Method::ReleaseLease { lease_id } => release_lease(uid, &lease_id, state)
+                .await
+                .map(ResponseResult::Released),
+        };
     match result {
         Ok(result) => Response::ok(request_id, result),
         Err(error) => Response::error(request_id, error_code(&error), error.to_string()),
@@ -310,11 +409,274 @@ async fn status_result(state: &HelperState) -> Result<StatusResult, HelperError>
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM leases WHERE state = 'cleanup_pending'")
             .fetch_one(&state.journal)
             .await? as u32;
+    let mount_helper_status = mount_helper::status();
     Ok(StatusResult {
         active_leases,
         pending_cleanup,
-        helper_version: HELPER_VERSION.to_string(),
+        access_app_version: option_env!("TELEVYBACKUP_BUILD_VERSION")
+            .unwrap_or(ACCESS_APP_VERSION)
+            .to_string(),
+        fda_ready: state.fda_ready.load(Ordering::Relaxed),
+        mount_helper_reachable: mount_helper_status.is_ok(),
+        mount_helper_version: mount_helper_status
+            .as_ref()
+            .ok()
+            .map(|status| status.helper_version.clone()),
+        mount_helper_error: mount_helper_status.err().map(|error| error.to_string()),
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigFile {
+    #[serde(default)]
+    targets: Vec<ConfigTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigTarget {
+    id: String,
+    source_path: String,
+}
+
+fn configured_source(config_dir: &Path, target_id: &str) -> Result<PathBuf, HelperError> {
+    if target_id.is_empty() || target_id.len() > 128 {
+        return Err(HelperError::Message("invalid target id".into()));
+    }
+    let settings_path = config_dir.join("config.toml");
+    let contents = fs::read_to_string(&settings_path).map_err(|error| {
+        HelperError::Message(format!("cannot read configured backup targets: {error}"))
+    })?;
+    let settings: ConfigFile = toml::from_str(&contents)
+        .map_err(|error| HelperError::Message(format!("invalid backup settings: {error}")))?;
+    let target = settings
+        .targets
+        .into_iter()
+        .find(|target| target.id == target_id)
+        .ok_or_else(|| HelperError::Message("target is not configured".into()))?;
+    let source = PathBuf::from(target.source_path);
+    if !source.is_absolute() {
+        return Err(HelperError::Message(
+            "configured source path must be absolute".into(),
+        ));
+    }
+    source
+        .canonicalize()
+        .map_err(|error| HelperError::Message(format!("source path is unavailable: {error}")))
+}
+
+fn lease_for(uid: u32, lease_id: &str, state: &HelperState) -> Result<Lease, HelperError> {
+    let lease = state
+        .leases
+        .lock()
+        .map_err(|_| HelperError::Message("lease lock poisoned".into()))?
+        .get(lease_id)
+        .cloned()
+        .ok_or_else(|| HelperError::Message("lease not found".into()))?;
+    if lease.uid != uid {
+        return Err(HelperError::Message("lease belongs to another user".into()));
+    }
+    Ok(lease)
+}
+
+fn lease_source_root(lease: &Lease) -> PathBuf {
+    lease.mount_root.join(&lease.source_relative_path)
+}
+
+fn scan_page(
+    uid: u32,
+    lease_id: &str,
+    cursor: Option<&str>,
+    limit: u16,
+    state: &HelperState,
+) -> Result<ScanPageResult, HelperError> {
+    let lease = lease_for(uid, lease_id, state)?;
+    let root = lease_source_root(&lease);
+    let root_metadata = fs::symlink_metadata(&root)?;
+    let root_device = root_metadata.dev();
+    let mut entries = Vec::new();
+    let mut ignore_rule_files = 0_u64;
+    let ignore_invalid_rules = 0_u64;
+    let walker = WalkBuilder::new(&root)
+        .follow_links(false)
+        .hidden(false)
+        .parents(false)
+        .ignore(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .add_custom_ignore_filename(".televyignore")
+        .build();
+    for item in walker {
+        let item =
+            item.map_err(|error| HelperError::Message(format!("snapshot walk failed: {error}")))?;
+        let path = item.path();
+        if path == root {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.dev() != root_device {
+            return Err(HelperError::Message(format!(
+                "source contains nested mounted volume: {}",
+                path.display()
+            )));
+        }
+        let relative_path = path
+            .strip_prefix(&root)
+            .map_err(|_| HelperError::Message("snapshot path escaped source root".into()))?;
+        let relative_path = relative_path
+            .to_str()
+            .ok_or_else(|| HelperError::Message("snapshot path is not UTF-8".into()))?
+            .to_string();
+        let kind = if metadata.file_type().is_symlink() {
+            "symlink"
+        } else if metadata.is_dir() {
+            if path.file_name().is_some_and(|name| name == ".televyignore") {
+                ignore_rule_files = ignore_rule_files.saturating_add(1);
+            }
+            "dir"
+        } else if metadata.is_file() {
+            if path.file_name().is_some_and(|name| name == ".televyignore") {
+                ignore_rule_files = ignore_rule_files.saturating_add(1);
+            }
+            "file"
+        } else {
+            continue;
+        };
+        let (size, mtime_ms, mode) = if kind == "file" {
+            let mtime_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as i64)
+                .unwrap_or(0);
+            (metadata.len() as i64, mtime_ms, metadata.mode() as i64)
+        } else {
+            (0, 0, 0)
+        };
+        entries.push(SourceEntry {
+            relative_path,
+            kind: kind.to_string(),
+            size,
+            mtime_ms,
+            mode,
+        });
+    }
+    let start = cursor
+        .unwrap_or("0")
+        .parse::<usize>()
+        .map_err(|_| HelperError::Message("invalid scan cursor".into()))?;
+    if start > entries.len() {
+        return Err(HelperError::Message("scan cursor is out of range".into()));
+    }
+    let take = usize::from(limit.clamp(1, 512));
+    let end = start.saturating_add(take).min(entries.len());
+    let next_cursor = (end < entries.len()).then(|| end.to_string());
+    Ok(ScanPageResult {
+        entries: entries.into_iter().skip(start).take(end - start).collect(),
+        next_cursor,
+        ignore_rule_files,
+        ignore_invalid_rules,
+    })
+}
+
+fn open_read_stream(
+    uid: u32,
+    lease_id: &str,
+    relative_path: &str,
+    state: &HelperState,
+) -> Result<ReadStreamResult, HelperError> {
+    let lease = lease_for(uid, lease_id, state)?;
+    let relative = Path::new(relative_path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        })
+        || relative_path.is_empty()
+    {
+        return Err(HelperError::Message(
+            "invalid snapshot relative path".into(),
+        ));
+    }
+    let root = lease_source_root(&lease);
+    let path = root.join(relative);
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(HelperError::Message(
+            "snapshot path is not a regular file".into(),
+        ));
+    }
+    let canonical = path.canonicalize()?;
+    if !canonical.starts_with(&root) {
+        return Err(HelperError::Message(
+            "snapshot path escaped source root".into(),
+        ));
+    }
+    let stream_id = Uuid::new_v4().to_string();
+    state
+        .streams
+        .lock()
+        .map_err(|_| HelperError::Message("stream lock poisoned".into()))?
+        .insert(
+            stream_id.clone(),
+            ReadStream {
+                uid,
+                lease_id: lease_id.to_string(),
+                file: fs::File::open(canonical)?,
+            },
+        );
+    Ok(ReadStreamResult {
+        stream_id,
+        eof: false,
+        bytes_base64: String::new(),
+    })
+}
+
+fn read_stream(
+    uid: u32,
+    stream_id: &str,
+    max_bytes: u32,
+    state: &HelperState,
+) -> Result<ReadStreamResult, HelperError> {
+    let mut streams = state
+        .streams
+        .lock()
+        .map_err(|_| HelperError::Message("stream lock poisoned".into()))?;
+    let stream = streams
+        .get_mut(stream_id)
+        .ok_or_else(|| HelperError::Message("read stream not found".into()))?;
+    if stream.uid != uid {
+        return Err(HelperError::Message(
+            "read stream belongs to another user".into(),
+        ));
+    }
+    let mut buffer = vec![0_u8; usize::try_from(max_bytes.clamp(1, 1024 * 1024)).unwrap_or(1024)];
+    let read = stream.file.read(&mut buffer)?;
+    buffer.truncate(read);
+    Ok(ReadStreamResult {
+        stream_id: stream_id.to_string(),
+        eof: read == 0,
+        bytes_base64: base64::engine::general_purpose::STANDARD.encode(buffer),
+    })
+}
+
+fn close_read_stream(uid: u32, stream_id: &str, state: &HelperState) -> Result<(), HelperError> {
+    let mut streams = state
+        .streams
+        .lock()
+        .map_err(|_| HelperError::Message("stream lock poisoned".into()))?;
+    let stream = streams
+        .get(stream_id)
+        .ok_or_else(|| HelperError::Message("read stream not found".into()))?;
+    if stream.uid != uid {
+        return Err(HelperError::Message(
+            "read stream belongs to another user".into(),
+        ));
+    }
+    streams.remove(stream_id);
+    Ok(())
 }
 
 fn probe_source(path: &Path, expected_uuid: Option<&str>) -> Result<ProbeResult, HelperError> {
@@ -363,6 +725,11 @@ async fn acquire_lease(
             "APFS container has less than {MIN_FREE_BYTES} free bytes"
         )));
     }
+    if let Err(error) = mount_helper::status() {
+        return Err(HelperError::Message(format!(
+            "snapshot mount helper unavailable: {error}"
+        )));
+    }
     if let Some(nested_mount) = nested_mount_under(source_path, &info.mount_point)? {
         return Err(HelperError::Message(format!(
             "source contains nested mounted volume: {}",
@@ -395,34 +762,75 @@ async fn acquire_lease(
         ));
     }
 
-    let before = snapshot_inventory_all(&info.device_identifier)?;
+    let before = source_snapshot_inventory(&info.device_identifier)?;
     run_command("/usr/bin/tmutil", ["localsnapshot"])?;
-    let after = snapshot_inventory_all(&info.device_identifier)?;
+    let after = source_snapshot_inventory(&info.device_identifier)?;
     let new_snapshots: Vec<_> = after
         .into_iter()
-        .filter_map(|(key, snapshot)| (!before.contains_key(&key)).then_some(snapshot))
+        .filter_map(|(key, snapshot)| (!before.contains_key(&key)).then_some((key.0, snapshot)))
         .collect();
-    if new_snapshots.len() != 1 {
-        return Err(HelperError::Message(
-            "snapshot ownership could not be uniquely confirmed".into(),
-        ));
-    }
-    let snapshot = &new_snapshots[0];
-    let relative = source_path.strip_prefix(&info.mount_point).map_err(|_| {
-        HelperError::Message("source path is outside its volume mount point".into())
-    })?;
+    let snapshot = match source_snapshot(&new_snapshots, &info.device_identifier) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let manifest = new_snapshots
+                .iter()
+                .map(|(device, snapshot)| MountSnapshotRef {
+                    device_identifier: device.clone(),
+                    uuid: snapshot.uuid.clone(),
+                })
+                .collect::<Vec<_>>();
+            if !manifest.is_empty() {
+                let _ = mount_helper::cleanup(uid, &Uuid::new_v4().to_string(), &manifest);
+            }
+            return Err(error);
+        }
+    };
+    let snapshot_manifest: Vec<SnapshotRef> = new_snapshots
+        .iter()
+        .map(|(device, snapshot)| SnapshotRef {
+            device_identifier: device.clone(),
+            uuid: snapshot.uuid.clone(),
+            name: snapshot.name.clone(),
+            created_at: snapshot.created_at.clone(),
+        })
+        .collect();
     let lease_id = Uuid::new_v4().to_string();
-    let mount_root = PathBuf::from(format!(
-        "/private/var/run/televybackup-snapshot/{uid}/{lease_id}"
-    ));
+    let mount_root = state
+        .data_dir
+        .join("snapshot-access/mounts")
+        .join(uid.to_string())
+        .join(&lease_id);
     fs::create_dir_all(&mount_root)?;
     fs::set_permissions(&mount_root, fs::Permissions::from_mode(0o700))?;
-    let mount_root_string = mount_root.to_string_lossy().into_owned();
-    if let Err(error) = mount_snapshot(&snapshot.name, &info.mount_point, &mount_root) {
+    let mount_manifest: Vec<MountSnapshotRef> = snapshot_manifest
+        .iter()
+        .map(|snapshot| MountSnapshotRef {
+            device_identifier: snapshot.device_identifier.clone(),
+            uuid: snapshot.uuid.clone(),
+        })
+        .collect();
+    if let Err(error) = mount_helper::mount(
+        uid,
+        &lease_id,
+        &info.uuid,
+        &info.device_identifier,
+        &snapshot.uuid,
+        &snapshot.name,
+        &info.mount_point,
+        &mount_root,
+        &mount_manifest,
+    ) {
         let _ = fs::remove_dir(&mount_root);
-        let _ = delete_snapshot(&info.device_identifier, &snapshot.uuid);
-        return Err(error);
+        return Err(HelperError::Message(error.to_string()));
     }
+    let relative = match source_relative_path(source_path, &info.mount_point, &mount_root) {
+        Ok(relative) => relative,
+        Err(error) => {
+            let _ = mount_helper::release(uid, &lease_id);
+            let _ = fs::remove_dir(&mount_root);
+            return Err(error);
+        }
+    };
 
     let lease = Lease {
         lease_id: lease_id.clone(),
@@ -435,9 +843,10 @@ async fn acquire_lease(
         mount_root: mount_root.clone(),
         source_relative_path: relative.to_path_buf(),
         source_mount_point: info.mount_point.clone(),
+        snapshot_manifest: snapshot_manifest.clone(),
     };
     if let Err(error) = sqlx::query(
-        "INSERT INTO leases (lease_id, uid, run_id, volume_uuid, device_identifier, snapshot_uuid, snapshot_name, mount_root, source_relative_path, source_mount_point, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'))",
+        "INSERT INTO leases (lease_id, uid, run_id, volume_uuid, device_identifier, snapshot_uuid, snapshot_name, mount_root, source_relative_path, source_mount_point, snapshot_manifest, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'))",
     )
     .bind(&lease.lease_id)
     .bind(i64::from(uid))
@@ -449,11 +858,11 @@ async fn acquire_lease(
     .bind(lease.mount_root.to_string_lossy().as_ref())
     .bind(lease.source_relative_path.to_string_lossy().as_ref())
     .bind(lease.source_mount_point.to_string_lossy().as_ref())
+    .bind(serde_json::to_string(&lease.snapshot_manifest)?)
     .execute(&state.journal)
     .await
     {
-        let _ = unmount_path(&lease.mount_root);
-        let _ = delete_snapshot(&lease.device_identifier, &lease.snapshot_uuid);
+        let _ = mount_helper::release(uid, &lease.lease_id);
         return Err(HelperError::Sqlx(error));
     }
     state
@@ -468,10 +877,57 @@ async fn acquire_lease(
         volume_uuid: info.uuid,
         snapshot_uuid: snapshot.uuid.clone(),
         snapshot_name: snapshot.name.clone(),
-        mount_root: mount_root_string,
-        source_relative_path: relative.to_string_lossy().into_owned(),
+        source_path: source_path.to_string_lossy().into_owned(),
         snapshot_created_at: snapshot.created_at.clone(),
     })
+}
+
+fn source_snapshot<'a>(
+    snapshots: &'a [(String, SnapshotInfo)],
+    source_device_identifier: &str,
+) -> Result<&'a SnapshotInfo, HelperError> {
+    let source_snapshots = snapshots
+        .iter()
+        .filter(|(device, _)| device == source_device_identifier)
+        .collect::<Vec<_>>();
+    if source_snapshots.len() != 1 {
+        return Err(HelperError::Message(
+            "snapshot ownership could not be uniquely confirmed for the source volume".into(),
+        ));
+    }
+    Ok(&source_snapshots[0].1)
+}
+
+fn source_relative_path(
+    source_path: &Path,
+    mount_point: &Path,
+    mounted_snapshot_root: &Path,
+) -> Result<PathBuf, HelperError> {
+    if let Ok(relative) = source_path.strip_prefix(mount_point) {
+        return Ok(relative.to_path_buf());
+    }
+    // macOS exposes the Data volume through firmlinks such as `/Users`, which are not
+    // lexical descendants of `/System/Volumes/Data`. Prefer the full logical path, then
+    // progressively drop synthetic leading components until the snapshot contains it.
+    let components = source_path
+        .strip_prefix(Path::new("/"))
+        .map_err(|_| HelperError::Message("source path must be absolute".into()))?
+        .components()
+        .collect::<Vec<_>>();
+    for start in 0..components.len() {
+        let relative = components[start..]
+            .iter()
+            .fold(PathBuf::new(), |mut path, component| {
+                path.push(component.as_os_str());
+                path
+            });
+        if mounted_snapshot_root.join(&relative).exists() {
+            return Ok(relative);
+        }
+    }
+    Err(HelperError::Message(
+        "source path is not present in the mounted snapshot".into(),
+    ))
 }
 
 async fn release_lease(
@@ -493,31 +949,24 @@ async fn release_lease(
         }
         lease
     };
-    let unmount_result = unmount_path(&lease.mount_root);
-    let delete_result = unmount_result
-        .as_ref()
-        .map(|_| delete_snapshot(&lease.device_identifier, &lease.snapshot_uuid));
-    let cleanup_state = if unmount_result.is_ok() && delete_result.as_ref().is_ok_and(Result::is_ok)
-    {
-        let _ = fs::remove_dir(&lease.mount_root);
-        "released"
-    } else {
-        "cleanup_pending"
+    if let Ok(mut streams) = state.streams.lock() {
+        streams.retain(|_, stream| stream.lease_id != lease_id);
+    }
+    let cleanup_state = match mount_helper::release(uid, &lease.lease_id) {
+        Ok(result) => result.cleanup_state,
+        Err(_) => "cleanup_pending".to_string(),
     };
+    if cleanup_state == "released" {
+        let _ = fs::remove_dir(&lease.mount_root);
+    }
     sqlx::query("UPDATE leases SET state = ? WHERE lease_id = ?")
-        .bind(cleanup_state)
+        .bind(&cleanup_state)
         .bind(lease_id)
         .execute(&state.journal)
         .await?;
-    if cleanup_state == "cleanup_pending" {
-        return Ok(ReleaseResult {
-            lease_id: lease_id.to_string(),
-            cleanup_state: cleanup_state.to_string(),
-        });
-    }
     Ok(ReleaseResult {
         lease_id: lease_id.to_string(),
-        cleanup_state: cleanup_state.to_string(),
+        cleanup_state,
     })
 }
 
@@ -528,48 +977,28 @@ struct SnapshotInfo {
     created_at: String,
 }
 
-fn snapshot_inventory_all(
+fn source_snapshot_inventory(
     target_device_identifier: &str,
 ) -> Result<BTreeMap<(String, String), SnapshotInfo>, HelperError> {
-    let output = run_command_output("/usr/sbin/diskutil", ["apfs", "list", "-plist"])?;
-    let value = Value::from_reader_xml(output.as_slice())
-        .map_err(|error| HelperError::Message(format!("invalid diskutil APFS plist: {error}")))?;
-    let mut devices = Vec::new();
-    collect_apfs_devices(&value, &mut devices);
-    devices.push(target_device_identifier.to_string());
-    devices.sort();
-    devices.dedup();
-
-    let mut inventory = BTreeMap::new();
-    for device in devices {
-        for (uuid, snapshot) in snapshot_inventory(&device)? {
-            inventory.insert((device.clone(), uuid), snapshot);
-        }
-    }
-    Ok(inventory)
+    // `tmutil localsnapshot` can coexist with arbitrary mounted APFS images.
+    // Only the configured source volume contributes to this backup lease; probing
+    // unrelated system assets can hang and must never block source consistency.
+    let snapshots = snapshot_inventory(target_device_identifier).map_err(|error| {
+        HelperError::Message(format!(
+            "snapshot inventory failed for source device {target_device_identifier}: {error}"
+        ))
+    })?;
+    Ok(tag_snapshot_inventory(target_device_identifier, snapshots))
 }
 
-fn collect_apfs_devices(value: &Value, devices: &mut Vec<String>) {
-    match value {
-        Value::Dictionary(dict) => {
-            if let Some(device) = dict.get("DeviceIdentifier").and_then(Value::as_string)
-                && (dict.contains_key("APFSVolumeUUID")
-                    || dict.contains_key("VolumeUUID")
-                    || dict.contains_key("MountPoint"))
-            {
-                devices.push(device.to_string());
-            }
-            for child in dict.values() {
-                collect_apfs_devices(child, devices);
-            }
-        }
-        Value::Array(array) => {
-            for child in array {
-                collect_apfs_devices(child, devices);
-            }
-        }
-        _ => {}
-    }
+fn tag_snapshot_inventory(
+    device_identifier: &str,
+    snapshots: BTreeMap<String, SnapshotInfo>,
+) -> BTreeMap<(String, String), SnapshotInfo> {
+    snapshots
+        .into_iter()
+        .map(|(uuid, snapshot)| ((device_identifier.to_string(), uuid), snapshot))
+        .collect()
 }
 
 fn snapshot_inventory(
@@ -618,9 +1047,10 @@ fn snapshot_inventory(
 }
 
 fn volume_info(path: &Path) -> Result<VolumeInfo, HelperError> {
+    let mount_point = filesystem_mount_point(path)?;
     let output = run_command_output(
         "/usr/sbin/diskutil",
-        ["info", "-plist", path.to_string_lossy().as_ref()],
+        ["info", "-plist", mount_point.to_string_lossy().as_ref()],
     )?;
     let value = Value::from_reader_xml(output.as_slice())
         .map_err(|error| HelperError::Message(format!("invalid diskutil volume plist: {error}")))?;
@@ -628,7 +1058,12 @@ fn volume_info(path: &Path) -> Result<VolumeInfo, HelperError> {
         .as_dictionary()
         .ok_or_else(|| HelperError::Message("diskutil volume info is not a dictionary".into()))?;
     let get = |key: &str| dict.get(key).and_then(Value::as_string).map(str::to_string);
-    let uuid = get("DiskUUID")
+    // `DiskUUID` can identify a partition/container; APFS settings must bind to the
+    // mounted volume UUID specifically. Keep the older key only as a compatibility fallback
+    // for synthetic test plists and older macOS output.
+    let uuid = get("APFSVolumeUUID")
+        .or_else(|| get("VolumeUUID"))
+        .or_else(|| get("DiskUUID"))
         .ok_or_else(|| HelperError::Message("diskutil did not return a volume UUID".into()))?;
     let device_identifier = get("DeviceIdentifier").ok_or_else(|| {
         HelperError::Message("diskutil did not return a device identifier".into())
@@ -644,6 +1079,28 @@ fn volume_info(path: &Path) -> Result<VolumeInfo, HelperError> {
         filesystem,
         free_bytes,
     })
+}
+
+fn filesystem_mount_point(path: &Path) -> Result<PathBuf, HelperError> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|_| HelperError::Message("invalid source path".into()))?;
+    let mut stat = unsafe { std::mem::zeroed::<libc::statfs>() };
+    let result = unsafe { libc::statfs(c_path.as_ptr(), &mut stat) };
+    if result != 0 {
+        return Err(HelperError::Io(std::io::Error::last_os_error()));
+    }
+    let bytes = stat
+        .f_mntonname
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
+    if bytes.is_empty() {
+        return Err(HelperError::Message(
+            "filesystem mount point is unavailable".into(),
+        ));
+    }
+    Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
 }
 
 fn available_bytes(path: &Path) -> Result<u64, HelperError> {
@@ -695,41 +1152,6 @@ fn nested_mount_under(
         }
     }
     Ok(None)
-}
-
-fn mount_snapshot(
-    snapshot_name: &str,
-    source_mount: &Path,
-    mount_root: &Path,
-) -> Result<(), HelperError> {
-    let source = source_mount.to_string_lossy();
-    run_command(
-        "/sbin/mount_apfs",
-        [
-            "-s",
-            snapshot_name,
-            source.as_ref(),
-            mount_root.to_string_lossy().as_ref(),
-        ],
-    )
-}
-
-fn unmount_path(path: &Path) -> Result<(), HelperError> {
-    run_command("/sbin/umount", ["-f", path.to_string_lossy().as_ref()])
-}
-
-fn delete_snapshot(device_identifier: &str, snapshot_uuid: &str) -> Result<(), HelperError> {
-    run_command(
-        "/usr/sbin/diskutil",
-        [
-            "apfs",
-            "deleteSnapshot",
-            device_identifier,
-            "-uuid",
-            snapshot_uuid,
-            "-wait",
-        ],
-    )
 }
 
 fn run_command<const N: usize, S: AsRef<OsStr>>(
@@ -834,7 +1256,82 @@ mod tests {
             mount_root: PathBuf::from("/tmp/m"),
             source_relative_path: PathBuf::from("a"),
             source_mount_point: PathBuf::from("/tmp"),
+            snapshot_manifest: vec![],
         };
         assert_ne!(lease.uid, 11);
+    }
+
+    #[test]
+    fn source_snapshot_allows_related_snapshots_on_other_volumes() {
+        let source = SnapshotInfo {
+            uuid: "source".into(),
+            name: "source-snapshot".into(),
+            created_at: "now".into(),
+        };
+        let other = SnapshotInfo {
+            uuid: "other".into(),
+            name: "other-snapshot".into(),
+            created_at: "now".into(),
+        };
+        let manifest = vec![("disk5s1".into(), source), ("disk9s1".into(), other)];
+
+        assert_eq!(
+            source_snapshot(&manifest, "disk5s1").unwrap().uuid,
+            "source"
+        );
+    }
+
+    #[test]
+    fn source_snapshot_rejects_ambiguous_source_volume() {
+        let snapshot = || SnapshotInfo {
+            uuid: "source".into(),
+            name: "source-snapshot".into(),
+            created_at: "now".into(),
+        };
+        let manifest = vec![
+            ("disk5s1".into(), snapshot()),
+            ("disk5s1".into(), snapshot()),
+        ];
+
+        assert!(source_snapshot(&manifest, "disk5s1").is_err());
+    }
+
+    #[test]
+    fn source_inventory_tags_only_the_configured_source_device() {
+        let mut snapshots = BTreeMap::new();
+        snapshots.insert(
+            "snapshot-1".to_string(),
+            SnapshotInfo {
+                uuid: "snapshot-1".into(),
+                name: "source-snapshot".into(),
+                created_at: "now".into(),
+            },
+        );
+
+        let inventory = tag_snapshot_inventory("disk5s1", snapshots);
+
+        assert_eq!(inventory.len(), 1);
+        assert!(inventory.contains_key(&("disk5s1".into(), "snapshot-1".into())));
+        assert!(!inventory.keys().any(|(device, _)| device == "disk13s1"));
+    }
+
+    #[test]
+    fn configured_source_reads_the_project_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            format!(
+                "version = 2\n\n[[targets]]\nid = \"target-1\"\nsource_path = \"{}\"\n",
+                source.display()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            configured_source(dir.path(), "target-1").unwrap(),
+            source.canonicalize().unwrap()
+        );
     }
 }

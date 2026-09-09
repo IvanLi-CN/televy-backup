@@ -11,7 +11,7 @@ use std::time::{Instant, SystemTime};
 
 use base64::Engine;
 use chrono::{Datelike, Timelike};
-use snapshot_client::SnapshotClient;
+use snapshot_client::{BrokeredSnapshotSource, SnapshotClient};
 use sqlx::Row;
 use televy_backup_core::status::{
     ActiveTask, BackupQueueMembership, Counter, GlobalStatus, Progress, Rate, StatusSnapshot,
@@ -19,8 +19,8 @@ use televy_backup_core::status::{
     status_ipc_socket_path, status_json_path, write_status_snapshot_json_atomic_with_options,
 };
 use televy_backup_core::{
-    BackupConfig, BackupOptions, ChunkingConfig, SourceQuickStats, TelegramMtProtoStorage,
-    TelegramMtProtoStorageConfig,
+    BackupConfig, BackupOptions, BackupSource, ChunkingConfig, SourceQuickStats,
+    TelegramMtProtoStorage, TelegramMtProtoStorageConfig,
 };
 use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
@@ -3104,16 +3104,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let snapshot_client = SnapshotClient::default();
+            let snapshot_client = SnapshotClient::for_data_root(&data_root);
             let enabled_snapshot_volumes = settings
                 .snapshot_volumes
                 .iter()
                 .filter(|(_, setting)| setting.enabled)
                 .map(|(volume_uuid, _)| volume_uuid.to_ascii_lowercase())
                 .collect::<HashSet<_>>();
-            let mut snapshot_read_root: Option<PathBuf> = None;
+            let mut snapshot_source: Option<BrokeredSnapshotSource> = None;
             let snapshot_lease_state: Arc<
-                Mutex<Option<televybackup_snapshot_helper::LeaseResult>>,
+                Mutex<Option<televybackup_snapshot_access::LeaseResult>>,
             > = Arc::new(Mutex::new(None));
             if !enabled_snapshot_volumes.is_empty() {
                 if !Path::new(&target.source_path).exists() {
@@ -3126,6 +3126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     backup_task_failed(
                         &status_state,
                         &target.id,
+                        Some(&task_id),
                         started.elapsed().as_secs_f64(),
                         "snapshot.source_unavailable",
                     );
@@ -3135,27 +3136,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     lifecycle.finish_task();
                     continue;
                 }
-                match snapshot_client
-                    .probe(Path::new(&target.source_path), None)
-                    .await
-                {
+                match snapshot_client.probe_volume(&target.id).await {
                     Ok(probe)
                         if enabled_snapshot_volumes
                             .contains(&probe.volume_uuid.to_ascii_lowercase()) =>
                     {
                         match snapshot_client
-                            .acquire_lease(
-                                Path::new(&target.source_path),
-                                &probe.volume_uuid,
-                                &task_id,
-                            )
+                            .acquire_lease(&target.id, &probe.volume_uuid, &task_id)
                             .await
                         {
                             Ok(lease) => {
-                                snapshot_read_root = Some(
-                                    PathBuf::from(&lease.mount_root)
-                                        .join(&lease.source_relative_path),
-                                );
+                                snapshot_source = Some(BrokeredSnapshotSource::new(
+                                    snapshot_client.clone(),
+                                    lease.lease_id.clone(),
+                                    PathBuf::from(&target.source_path),
+                                ));
                                 if let Ok(mut slot) = snapshot_lease_state.lock() {
                                     *slot = Some(lease);
                                 }
@@ -3171,6 +3166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 backup_task_failed(
                                     &status_state,
                                     &target.id,
+                                    Some(&task_id),
                                     started.elapsed().as_secs_f64(),
                                     "snapshot.acquire_failed",
                                 );
@@ -3205,6 +3201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         backup_task_failed(
                             &status_state,
                             &target.id,
+                            Some(&task_id),
                             started.elapsed().as_secs_f64(),
                             "snapshot.probe_failed",
                         );
@@ -3277,47 +3274,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state: status_state.clone(),
             };
             let progress_sink = Some(&sink as &dyn ProgressSink);
-            let quick_stats_cancel = task_cancel.clone();
-            let quick_stats_cancel_for_task = quick_stats_cancel.clone();
-            let quick_stats_source = snapshot_read_root
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(&target.source_path));
-            let prepare_res = tokio::try_join!(
-                preflight_remote_first_index_sync_daemon(
-                    storage,
-                    &master_key,
-                    &target.id,
-                    &target.source_path,
-                    &db_path,
-                    &filemap_dir,
-                    &dedupe_db_path,
-                    is_likely_private_chat_id(&ep.chat_id),
-                    progress_sink,
-                    &task_cancel,
-                ),
-                async {
-                    match preflight_local_quick_stats_daemon(
-                        &quick_stats_source,
-                        progress_sink,
-                        Some(quick_stats_cancel_for_task),
-                    )
-                    .await
-                    {
-                        Ok(stats) => Ok(Some(stats)),
-                        Err(e) => {
-                            tracing::warn!(
-                                event = "prepare.local_quick_stats_failed",
-                                target_id = %target.id,
-                                source_path = %target.source_path,
-                                error_code = e.code(),
-                                error_message = %e,
-                                "prepare.local_quick_stats_failed"
-                            );
-                            Ok(None)
-                        }
+            let prepare_remote = preflight_remote_first_index_sync_daemon(
+                storage,
+                &master_key,
+                &target.id,
+                &target.source_path,
+                &db_path,
+                &filemap_dir,
+                &dedupe_db_path,
+                is_likely_private_chat_id(&ep.chat_id),
+                progress_sink,
+                &task_cancel,
+            )
+            .await;
+            let quick_stats = if let Some(source) = snapshot_source.as_ref() {
+                match source.entries(Some(&task_cancel)) {
+                    Ok(entries) => Some(SourceQuickStats {
+                        files_total: entries.iter().filter(|entry| entry.kind == "file").count()
+                            as u64,
+                        bytes_total: entries
+                            .iter()
+                            .filter(|entry| entry.kind == "file")
+                            .map(|entry| entry.size.max(0) as u64)
+                            .sum(),
+                    }),
+                    Err(error) => {
+                        tracing::warn!(event = "prepare.snapshot_quick_stats_failed", target_id = %target.id, error = %error, "prepare.snapshot_quick_stats_failed");
+                        None
                     }
                 }
-            );
+            } else {
+                match preflight_local_quick_stats_daemon(
+                    Path::new(&target.source_path),
+                    progress_sink,
+                    Some(task_cancel.clone()),
+                )
+                .await
+                {
+                    Ok(stats) => Some(stats),
+                    Err(error) => {
+                        tracing::warn!(event = "prepare.local_quick_stats_failed", target_id = %target.id, error_code = error.code(), error_message = %error, "prepare.local_quick_stats_failed");
+                        None
+                    }
+                }
+            };
+            let prepare_res = prepare_remote.map(|remote_dedupe| (remote_dedupe, quick_stats));
 
             let release_handles: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> =
                 Arc::new(Mutex::new(None));
@@ -3378,21 +3379,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         progress: progress_sink,
                         source_quick_stats: quick_stats,
                     };
-                    televy_backup_core::run_backup_with_read_root(
-                        storage,
-                        cfg,
-                        opts,
-                        snapshot_read_root.as_deref(),
-                        snapshot_read_root
-                            .as_ref()
-                            .map(|_| &release_callback as &(dyn Fn() + Send + Sync)),
-                    )
-                    .await
+                    if let Some(source) = snapshot_source.as_ref() {
+                        televy_backup_core::run_backup_with_source(
+                            storage,
+                            cfg,
+                            opts,
+                            source,
+                            Some(&release_callback as &(dyn Fn() + Send + Sync)),
+                        )
+                        .await
+                    } else {
+                        televy_backup_core::run_backup_with_read_root(
+                            storage, cfg, opts, None, None,
+                        )
+                        .await
+                    }
                 }
-                Err(e) => {
-                    quick_stats_cancel.cancel();
-                    Err(e)
-                }
+                Err(e) => Err(e),
             };
 
             if let Some(handle) = release_handles.lock().ok().and_then(|mut slot| slot.take()) {

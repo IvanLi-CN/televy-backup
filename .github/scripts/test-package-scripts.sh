@@ -31,6 +31,10 @@ verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
   echo "LSUIElement menu-bar agent contract is missing from build-app.sh" >&2
   exit 1
 }
+[[ "$build_text" == *'TelevyBackupReleaseVersion'* && "$build_text" == *'TelevyBackupSourceCommit'* ]] || {
+  echo "Snapshot Access bundle is missing the full product identity metadata" >&2
+  exit 1
+}
 icon_text="$(<"$root_dir/scripts/macos/generate-app-icon-assets.sh")"
 [[ "$icon_text" == *'icon_512x512@2x.png:1024'* && "$icon_text" == *'iconutil -c icns'* && "$icon_text" == *'AppIcon-dark-'* ]] || {
   echo "AppIcon generation contract is incomplete" >&2
@@ -73,7 +77,9 @@ bash "$root_dir/scripts/macos/generate-release-manifest.sh" \
   --source-commit "$(git -C "$tmp_dir" rev-parse HEAD)" \
   --packaging-commit "$(git -C "$root_dir" rev-parse HEAD)" \
   --output "$tmp_dir/BUILD-MANIFEST.json"
-bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir"
+# This contract fixture runs on Linux and deliberately verifies metadata only;
+# macOS package/release jobs run the default bundle checks.
+bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir" --skip-bundle-checks
 
 python3 - "$tmp_dir/BUILD-MANIFEST.json" "$version" <<'PY'
 import json

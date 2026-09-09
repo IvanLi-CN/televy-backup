@@ -19,7 +19,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 serde_json = "1"
 libc = "0.2"
 thiserror = "2"
-televybackup-snapshot-helper = { path = "../snapshot-helper" }
+televybackup-snapshot-access = { path = "../snapshot-helper" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.5.1"
