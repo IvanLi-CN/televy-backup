@@ -591,12 +591,12 @@ fn scan_page(
 }
 
 fn build_scan_inventory(root: &Path) -> Result<ScanInventory, HelperError> {
-    let root_metadata = fs::symlink_metadata(&root)?;
+    let root_metadata = fs::symlink_metadata(root)?;
     let root_device = root_metadata.dev();
     let mut entries = Vec::new();
     let mut ignore_rule_files = 0_u64;
     let ignore_invalid_rules = 0_u64;
-    let walker = WalkBuilder::new(&root)
+    let walker = WalkBuilder::new(root)
         .follow_links(false)
         .hidden(false)
         .parents(false)
@@ -621,7 +621,7 @@ fn build_scan_inventory(root: &Path) -> Result<ScanInventory, HelperError> {
             )));
         }
         let relative_path = path
-            .strip_prefix(&root)
+            .strip_prefix(root)
             .map_err(|_| HelperError::Message("snapshot path escaped source root".into()))?;
         let relative_path = relative_path
             .to_str()
