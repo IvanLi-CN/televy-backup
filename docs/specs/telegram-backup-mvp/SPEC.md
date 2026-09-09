@@ -96,7 +96,7 @@
 
 ### Non-goals（明确不做）
 
-- 更强一致性：对源目录生成一致性视图（APFS snapshot / 时间点冻结）。
+- 应用事务一致性：APFS 文件系统快照不保证被备份应用内部事务的原子性；需要应用级事务语义的场景仍由被备份应用自行保证。APFS 快照一致性由独立的 `apfs-snapshot-consistency` 主题 Spec 定义，不在本 MVP 的 Telegram 数据模型中重复定义。
 
 
 ## 技术选型（Tech Stack, frozen）
@@ -152,7 +152,7 @@
 - Given chunk hash 不一致（密钥不匹配或数据损坏），When 执行 verify，Then 报错并标记为不可重试。
 
 
-## 调度设计（Scheduling, draft）
+## 调度设计（Scheduling）
 
 目标：支持 hourly/daily 触发，并且在 brew 安装后可被用户可靠启用/停用。
 
@@ -200,3 +200,7 @@ None（本计划的关键决策已冻结，可进入实现阶段）。
 
 - Telegram Bot API “Sending files” / `file_id` 复用与上传限制（用于 chunk/索引体积约束）：https://core.telegram.org/bots/api#sending-files
 - Homebrew `brew services`（用于 `launchd` / `LaunchAgents` 的调度与常驻管理）：https://docs.brew.sh/Manpage#services-subcommand
+
+## Related ADRs
+
+None

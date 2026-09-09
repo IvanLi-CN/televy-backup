@@ -26,8 +26,9 @@ mod storage;
 pub const APP_NAME: &str = "TelevyBackup";
 
 pub use backup::{
-    BackupConfig, BackupOptions, BackupResult, ChunkingConfig, RemoteDedupeMode, SourceQuickStats,
-    compute_source_quick_stats, run_backup, run_backup_with,
+    BackupConfig, BackupOptions, BackupResult, BackupSource, BackupSourceEntry, ChunkingConfig,
+    RemoteDedupeMode, SourceQuickStats, compute_source_quick_stats, run_backup, run_backup_with,
+    run_backup_with_read_root, run_backup_with_source,
 };
 pub use error::{Error, Result, is_transient_telegram_message};
 pub use progress::{ProgressSink, TaskProgress};

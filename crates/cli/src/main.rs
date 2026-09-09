@@ -37,6 +37,8 @@ use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
 mod service;
+mod snapshot_mount_service;
+mod snapshot_service;
 
 const BUILD_VERSION: &str = env!("TELEVYBACKUP_BUILD_VERSION");
 const BUILD_LONG_VERSION: &str = env!("TELEVYBACKUP_BUILD_LONG_VERSION");
@@ -114,6 +116,14 @@ enum Command {
         #[command(subcommand)]
         cmd: DaemonCmd,
     },
+    SnapshotAccess {
+        #[command(subcommand)]
+        cmd: SnapshotAccessCmd,
+    },
+    SnapshotMountHelper {
+        #[command(subcommand)]
+        cmd: SnapshotMountHelperCmd,
+    },
     Gui {
         #[command(subcommand)]
         cmd: GuiCmd,
@@ -131,6 +141,23 @@ enum DaemonCmd {
     },
     UninstallService,
     ServiceStatus,
+}
+
+#[derive(Subcommand)]
+enum SnapshotAccessCmd {
+    Install {
+        #[arg(long)]
+        app: PathBuf,
+    },
+    Uninstall,
+    Status,
+}
+
+#[derive(Subcommand)]
+enum SnapshotMountHelperCmd {
+    Install,
+    Uninstall,
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -946,6 +973,22 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             DaemonCmd::UninstallService => service::uninstall_service(&config_dir, cli.json),
             DaemonCmd::ServiceStatus => service::service_status(&config_dir, &data_dir, cli.json),
+        },
+        Command::SnapshotAccess { cmd } => match cmd {
+            SnapshotAccessCmd::Install { app } => {
+                snapshot_service::install(app, &config_dir, &data_dir, cli.json)
+            }
+            SnapshotAccessCmd::Uninstall => {
+                snapshot_service::uninstall(&config_dir, &data_dir, cli.json)
+            }
+            SnapshotAccessCmd::Status => {
+                snapshot_service::status(&config_dir, &data_dir, cli.json).map(|_| ())
+            }
+        },
+        Command::SnapshotMountHelper { cmd } => match cmd {
+            SnapshotMountHelperCmd::Install => snapshot_mount_service::install(cli.json),
+            SnapshotMountHelperCmd::Uninstall => snapshot_mount_service::uninstall(cli.json),
+            SnapshotMountHelperCmd::Status => snapshot_mount_service::status(cli.json),
         },
         Command::Gui { cmd } => match cmd {
             GuiCmd::Quit => gui_quit(&gui_data_dir, cli.json),

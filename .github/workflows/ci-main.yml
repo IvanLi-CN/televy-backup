@@ -28,8 +28,17 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt update
-          sudo apt install -y \
+          # GitHub's Ubuntu image may include a rotating Chrome repository. It
+          # is unrelated to this Rust build and can make apt fail on stale CDN
+          # metadata, so keep dependency resolution on the Ubuntu sources.
+          chrome_sources="$(grep -lR 'dl.google.com/linux/chrome' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true)"
+          if [[ -n "$chrome_sources" ]]; then
+            while IFS= read -r source; do
+              [[ -n "$source" ]] && sudo rm -f "$source"
+            done <<< "$chrome_sources"
+          fi
+          sudo apt-get update
+          sudo apt-get install -y \
             build-essential \
             libsqlite3-dev \
             pkg-config \

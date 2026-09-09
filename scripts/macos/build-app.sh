@@ -32,6 +32,10 @@ case "$build_mode" in
   development|release) ;;
   *) echo "ERROR: invalid TELEVYBACKUP_BUILD_MODE=$build_mode (expected: development|release)" >&2; exit 2 ;;
 esac
+if [[ "$variant" == "dev" && "$build_mode" != "development" ]]; then
+  echo "ERROR: the dev app must use the development product identity (got $build_mode)" >&2
+  exit 2
+fi
 release_version="$(python3 "$root_dir/scripts/product-version.py" --mode "$build_mode" --source-sha "$source_commit")"
 build_number="${TELEVYBACKUP_BUILD_NUMBER:-$(git rev-list --count "$source_commit" 2>/dev/null || printf '0')}"
 cargo_target="${TELEVYBACKUP_CARGO_TARGET:-}"
@@ -82,7 +86,9 @@ cp "$brand_source_dir/televybackup-logo-dark.svg" "$resources_dir/Brand/televyba
 cp "$brand_source_dir/televybackup-logo-dark-compact.svg" "$resources_dir/Brand/televybackup-logo-dark-compact.svg"
 cp "$brand_source_dir/televybackup-logo-template.svg" "$resources_dir/Brand/televybackup-logo-template.svg"
 
-rm -f "$resources_dir/televybackup" "$resources_dir/televybackup-mtproto-helper" 2>/dev/null || true
+rm -f "$resources_dir/televybackup" "$resources_dir/televybackup-mtproto-helper" \
+  "$macos_dir/televybackup-snapshot-helper" \
+  "$macos_dir/televybackup-snapshot-mount-helper" 2>/dev/null || true
 
 binary_dir="$root_dir/target/release"
 if [[ -n "$cargo_target" ]]; then
@@ -96,6 +102,13 @@ cp "$binary_dir/televybackup" "$macos_dir/televybackup-cli"
 echo "Building daemon..."
 if [[ -n "$cargo_target" ]]; then cargo build -p televybackupd --release --target "$cargo_target"; else cargo build -p televybackupd --release; fi
 cp "$binary_dir/televybackupd" "$macos_dir/televybackupd"
+
+echo "Building APFS Snapshot Access..."
+if [[ -n "$cargo_target" ]]; then cargo build -p televybackup-snapshot-access --release --target "$cargo_target"; else cargo build -p televybackup-snapshot-access --release; fi
+snapshot_access_binary="$binary_dir/televybackup-snapshot-access"
+snapshot_mount_helper_binary="$binary_dir/televybackup-snapshot-mount-helper"
+cp "$snapshot_mount_helper_binary" "$macos_dir/televybackup-snapshot-mount-helper"
+chmod 755 "$macos_dir/televybackup-snapshot-mount-helper"
 
 echo "Building MTProto helper..."
 if [[ -n "$cargo_target" ]]; then cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release --target "$cargo_target"; else cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release; fi
@@ -182,10 +195,14 @@ if [[ -n "$codesign_identity" ]]; then
     || echo "WARN: codesign CLI failed"
   codesign --force --sign "$codesign_identity" -i "$bundle_id.mtproto-helper" "$macos_dir/televybackup-mtproto-helper" \
     || echo "WARN: codesign helper failed"
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper" \
+    || echo "WARN: codesign snapshot mount helper failed"
   codesign --force --deep --sign "$codesign_identity" "$app_dir" \
     || echo "WARN: codesign app failed"
 else
   echo "No codesign identity found; applying ad-hoc signature for local runs"
+  codesign --force --sign - -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper" \
+    || echo "WARN: ad-hoc codesign snapshot mount helper failed"
   codesign --force --deep --sign - "$app_dir" \
     || echo "WARN: ad-hoc codesign app failed"
 fi
@@ -193,4 +210,35 @@ fi
 codesign -vvv --deep --strict "$app_dir" >/dev/null 2>&1 \
   || echo "WARN: codesign verification failed (embedded CLI may be killed by macOS)"
 
+# Snapshot Access is a separate LSUIElement bundle. FDA is granted to this exact
+# bundle, so it must remain independent from the main GUI identity and contents.
+access_app_dir="$out_root/TelevyBackup Snapshot Access.app"
+access_contents_dir="$access_app_dir/Contents"
+access_macos_dir="$access_contents_dir/MacOS"
+mkdir -p "$access_macos_dir"
+cp "$snapshot_access_binary" "$access_macos_dir/televybackup-snapshot-access"
+chmod 755 "$access_macos_dir/televybackup-snapshot-access"
+cat > "$access_contents_dir/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>TelevyBackup Snapshot Access</string>
+  <key>CFBundleDisplayName</key><string>TelevyBackup Snapshot Access</string>
+  <key>CFBundleIdentifier</key><string>com.ivan.televybackup.snapshot-access</string>
+  <key>CFBundleVersion</key><string>$build_number</string>
+  <key>CFBundleShortVersionString</key><string>$short_version</string>
+  <key>TelevyBackupReleaseVersion</key><string>$release_version</string>
+  <key>TelevyBackupSourceCommit</key><string>$source_commit</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleExecutable</key><string>televybackup-snapshot-access</string>
+  <key>LSMinimumSystemVersion</key><string>15.0</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+PLIST
+codesign --force --deep --sign "$codesign_identity" -i "com.ivan.televybackup.snapshot-access" "$access_app_dir" \
+  || echo "WARN: codesign Snapshot Access app failed"
+codesign -vvv --deep --strict "$access_app_dir" >/dev/null 2>&1 \
+  || echo "WARN: codesign verification failed for Snapshot Access app"
+
 echo "Built ($variant): $app_dir"
+echo "Built Snapshot Access: $access_app_dir"

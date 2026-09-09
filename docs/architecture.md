@@ -7,6 +7,8 @@
   - SettingsWindow daemon business calls use the versioned `control.sock` contract exclusively;
     it never launches the CLI or falls back to a second transport. The status dashboard may still
     consume the existing CLI status stream for task progress.
+  - Runs as the logged-in user. It has neither root privilege nor Full Disk Access (FDA), and it
+    never reads Keychain secrets directly.
 - **Core library**: `televy_backup_core` (`crates/core/`).
   - Implements scan → CDC chunking → hash → encrypt framing → enqueue uploads → worker uploads → SQLite index. Filemap statements are bounded to 512 entries and the scan transaction commits once; unchanged-file baseline metadata is resolved once per batch.
   - Backup pipeline is phase-split (scan/upload/index); scan enqueues jobs into a bounded queue and upload workers honor endpoint rate limits.
@@ -15,7 +17,35 @@
   - Runs scheduled backups (hourly/daily) and applies retention policy.
   - Intended to be managed by `brew services` as a user-level LaunchAgent.
   - Owns all secrets access (Keychain / `vault.key` / `secrets.enc`). Other components must use daemon IPC.
+  - Runs as the logged-in user and has neither root privilege nor FDA.
   - Supports a local `daemon.stop` control request. App and CLI use it for graceful cancellation and shutdown; the caller waits for IPC disappearance before treating shutdown as complete.
+- **APFS Snapshot Access**: `televybackup-snapshot-access` (`crates/snapshot-helper/`).
+  - Runs as a separate user-session `LSUIElement` app (`com.ivan.televybackup.snapshot-access`). The user grants FDA to this exact bundle. Its peer-UID checked Unix socket exposes only configured target IDs, opaque leases, metadata pages, and bounded read streams.
+  - It creates snapshots and reads their metadata/content, journaling the exact snapshot UUID and private mount root. It never encrypts or uploads backup data.
+  - Installation, update, and uninstall are explicit user LaunchAgent transactions. Scheduled backups use the already installed Access app and never prompt for a password.
+- **APFS Snapshot Mount Helper**: `televybackup-snapshot-mount-helper` (`crates/snapshot-helper/src/bin/`).
+  - Runs as root under `com.ivan.televybackup.snapshot-mount-helper`. Its restricted IPC only mounts,
+    unmounts, and UUID-cleans leases presented by the Access app; it never opens source files or
+    touches Keychain, backup indexes, or network storage.
+  - The current validated strict-mode baseline also requires FDA for this exact installed helper
+    identity. It requires one administrator-authorized installation/update/uninstall transaction;
+    normal and scheduled backups use the already loaded helper without prompts.
+
+## macOS authority model
+
+Strict APFS snapshot mode is the only feature that needs FDA or root. Live-mode backups need neither.
+
+| Component | Runtime authority | Setup action | Prohibited authority |
+| --- | --- | --- | --- |
+| GUI app | Logged-in user | None | root, FDA, direct Keychain reads |
+| CLI | Logged-in user | `sudo` only when explicitly installing, updating, or removing the mount helper | FDA, background root operation |
+| `televybackupd` | Logged-in-user LaunchAgent; Keychain in production-like mode | None | root, FDA, direct snapshot mount access |
+| Snapshot Access.app | Logged-in user with FDA for the exact installed app identity | Manual FDA grant after install or identity/path change | root, Keychain, encryption, network upload |
+| Snapshot Mount Helper | root LaunchDaemon with FDA for the exact installed helper identity | Administrator transaction plus manual FDA grant after identity/path change | source file reads, Keychain, indexes, network |
+
+FDA cannot be inferred from service reachability. Settings identifies the two exact paths and reports
+the Access app's observed file-access readiness; strict backups fail closed whenever either
+required component cannot complete its operation.
 
 ## Status snapshots (Popover / Developer dashboard)
 
@@ -65,6 +95,12 @@ daemon-only boundary:
 - Purpose: allow other components to request “vault key get-or-create” and limited Keychain actions without directly
   linking to Keychain APIs.
 - Security posture: must not expose the vault key plaintext; access is scoped by Unix socket file permissions.
+
+## APFS snapshot consistency
+
+Snapshot consistency is opt-in per APFS Volume UUID (`snapshot_volumes.<uuid>.enabled`). When enabled, a backup fails closed if Snapshot Access cannot probe, create, uniquely identify, or mount the snapshot; it never falls back to the live source directory. The core keeps the logical source path in historical indexes and receives file bytes through bounded Snapshot Access streams. The lease is released immediately after the scan has read all source bytes into the encrypted upload queue.
+
+The user daemon remains the scheduler, Keychain boundary, scanner, encryptor, and uploader. Snapshot Access is the FDA/file-read boundary; the mount helper is a mount-only privileged boundary. Non-APFS volumes, nested mounted volumes, ambiguous `tmutil` ownership, unavailable helper, and pending cleanup are reported as unsupported/blocking states rather than silently producing a best-effort backup. See [the APFS snapshot consistency spec](specs/apfs-snapshot-consistency/SPEC.md), [ADR 0008](adr/0008-apfs-snapshot-access-app.md), and [ADR 0009](adr/0009-apfs-snapshot-mount-helper.md).
 
 ## Data locations
 
@@ -308,6 +344,6 @@ described above.
 
 ## Known limitations (MVP)
 
-- No APFS snapshot: backups are best-effort consistent at scan time.
+- Snapshot consistency is opt-in per APFS volume; disabled volumes retain the existing live-directory behavior. Enabled volumes never fall back to a live scan after a snapshot precondition fails.
 - Restore is not a full remote “search”: cross-device restore depends on the pinned bootstrap catalog, and only provides `latest` pointers recorded there.
 - No remote chunk GC: Telegram chat storage can grow over time.

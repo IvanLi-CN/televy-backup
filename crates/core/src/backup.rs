@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -176,8 +175,8 @@ impl ChunkingConfig {
     }
 }
 
-fn file_chunker(
-    file: File,
+fn file_chunker<R: Read + 'static>(
+    file: R,
     chunking: &ChunkingConfig,
 ) -> Box<dyn Iterator<Item = CdcResult<ChunkData>>> {
     if chunking.max_bytes <= V2020_MAXIMUM_MAX {
@@ -392,6 +391,152 @@ pub struct SourceQuickStats {
     pub bytes_total: u64,
 }
 
+/// A source entry returned by a backup source adapter. Paths are always relative to
+/// `BackupSource::logical_path`; adapters must not expose a physical staging or mount root.
+#[derive(Debug, Clone)]
+pub struct BackupSourceEntry {
+    pub relative_path: String,
+    pub kind: String,
+    pub size: i64,
+    pub mtime_ms: i64,
+    pub mode: i64,
+}
+
+/// Read boundary used by strict snapshot backups. Implementations may enumerate and open files
+/// from a brokered service; the core never needs access to the physical snapshot mount.
+pub trait BackupSource: Send + Sync {
+    fn logical_path(&self) -> &Path;
+    fn entries(&self, cancel: Option<&CancellationToken>) -> Result<Vec<BackupSourceEntry>>;
+    fn open(&self, relative_path: &str) -> Result<Box<dyn Read + Send>>;
+    fn is_brokered(&self) -> bool {
+        false
+    }
+    fn ignore_rule_files(&self) -> u64 {
+        0
+    }
+    fn ignore_invalid_rules(&self) -> u64 {
+        0
+    }
+}
+
+struct LocalBackupSource {
+    root: PathBuf,
+    ignore_rule_files: AtomicU64,
+    ignore_invalid_rules: AtomicU64,
+}
+
+impl BackupSource for LocalBackupSource {
+    fn logical_path(&self) -> &Path {
+        &self.root
+    }
+
+    fn entries(&self, _cancel: Option<&CancellationToken>) -> Result<Vec<BackupSourceEntry>> {
+        let mut entries = Vec::new();
+        let mut warned_ignore_errors = HashSet::<String>::new();
+        self.ignore_rule_files
+            .store(count_ignore_files_recursive(&self.root), Ordering::Relaxed);
+        for entry in build_source_walk(&self.root) {
+            // Cancellation is checked by the backup loop after recording the walk interval;
+            // keeping that ordering preserves performance telemetry for failed scans.
+            let entry = match entry {
+                Ok(value) => value,
+                Err(error) if ignore_error_is_rule_parse_only(&error) => {
+                    self.ignore_invalid_rules.fetch_add(1, Ordering::Relaxed);
+                    warn_invalid_televyignore_rule_once(
+                        &mut warned_ignore_errors,
+                        &error,
+                        &self.root,
+                        "scan",
+                    );
+                    continue;
+                }
+                Err(error) if ignore_error_is_non_root_not_found(&error, &self.root) => continue,
+                Err(error) => return Err(map_ignore_error(error, &self.root)),
+            };
+            if let Some(error) = entry.error() {
+                if ignore_error_is_rule_parse_only(error) {
+                    self.ignore_invalid_rules.fetch_add(1, Ordering::Relaxed);
+                    warn_invalid_televyignore_rule_once(
+                        &mut warned_ignore_errors,
+                        error,
+                        &self.root,
+                        "scan",
+                    );
+                    continue;
+                }
+                if ignore_error_is_not_found(error) && entry.path() != self.root {
+                    continue;
+                }
+                return Err(map_ignore_error(error.clone(), &self.root));
+            }
+            let path = entry.path();
+            if path == self.root {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if ignore_error_is_not_found(&error) => continue,
+                Err(error) => return Err(map_ignore_error(error, &self.root)),
+            };
+            let kind = if metadata.is_dir() {
+                "dir"
+            } else if metadata.is_file() {
+                "file"
+            } else if metadata.is_symlink() {
+                "symlink"
+            } else {
+                continue;
+            };
+            let relative_path =
+                path_to_utf8(
+                    path.strip_prefix(&self.root)
+                        .map_err(|_| Error::InvalidConfig {
+                            message: "path strip_prefix failed".into(),
+                        })?,
+                )?;
+            let (size, mtime_ms, mode) = if kind == "file" {
+                let mtime_ms = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis() as i64)
+                    .unwrap_or(0);
+                #[cfg(unix)]
+                let mode = {
+                    use std::os::unix::fs::MetadataExt;
+                    metadata.mode() as i64
+                };
+                #[cfg(not(unix))]
+                let mode = 0;
+                (metadata.len() as i64, mtime_ms, mode)
+            } else {
+                (0, 0, 0)
+            };
+            entries.push(BackupSourceEntry {
+                relative_path,
+                kind: kind.into(),
+                size,
+                mtime_ms,
+                mode,
+            });
+        }
+        Ok(entries)
+    }
+
+    fn open(&self, relative_path: &str) -> Result<Box<dyn Read + Send>> {
+        let path = self.root.join(relative_path);
+        Ok(Box::new(File::open(path)?))
+    }
+
+    fn ignore_rule_files(&self) -> u64 {
+        self.ignore_rule_files.load(Ordering::Relaxed)
+    }
+
+    fn ignore_invalid_rules(&self) -> u64 {
+        self.ignore_invalid_rules.load(Ordering::Relaxed)
+    }
+}
+
 pub async fn run_backup<S: Storage>(storage: &S, config: BackupConfig) -> Result<BackupResult> {
     run_backup_with(storage, config, BackupOptions::default()).await
 }
@@ -514,19 +659,29 @@ fn ignore_error_is_non_root_not_found(err: &IgnoreError, source_path: &Path) -> 
     ignore_error_path(err).map_or_else(|| source_path.exists(), |path| path != source_path)
 }
 
-fn count_ignore_file_for_dir(seen: &mut HashSet<PathBuf>, dir_path: &Path) -> u64 {
-    let ignore_path = dir_path.join(TELEVYIGNORE_FILE_NAME);
-    if seen.contains(&ignore_path) {
-        return 0;
+fn count_ignore_files_recursive(root: &Path) -> u64 {
+    let mut total = 0_u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                stack.push(path.clone());
+            }
+            if path.file_name() == Some(std::ffi::OsStr::new(TELEVYIGNORE_FILE_NAME))
+                && metadata.is_file()
+            {
+                total = total.saturating_add(1);
+            }
+        }
     }
-    let is_file = std::fs::metadata(&ignore_path)
-        .map(|meta| meta.is_file())
-        .unwrap_or(false);
-    if !is_file {
-        return 0;
-    }
-    seen.insert(ignore_path);
-    1
+    total
 }
 
 fn map_ignore_error(err: IgnoreError, source_path: &Path) -> Error {
@@ -1973,6 +2128,46 @@ pub async fn run_backup_with<S: Storage>(
     config: BackupConfig,
     options: BackupOptions<'_>,
 ) -> Result<BackupResult> {
+    run_backup_with_read_root(storage, config, options, None, None).await
+}
+
+pub async fn run_backup_with_read_root<S: Storage>(
+    storage: &S,
+    config: BackupConfig,
+    options: BackupOptions<'_>,
+    read_root: Option<&Path>,
+    source_read_complete: Option<&(dyn Fn() + Send + Sync)>,
+) -> Result<BackupResult> {
+    let root = read_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| config.source_path.clone());
+    let source = LocalBackupSource {
+        root,
+        ignore_rule_files: AtomicU64::new(0),
+        ignore_invalid_rules: AtomicU64::new(0),
+    };
+    run_backup_with_source_internal(storage, config, options, &source, source_read_complete).await
+}
+
+/// Run a backup against a brokered source. The logical source path remains the configured path;
+/// all enumeration and reads are delegated to the adapter.
+pub async fn run_backup_with_source<S: Storage>(
+    storage: &S,
+    config: BackupConfig,
+    options: BackupOptions<'_>,
+    source: &dyn BackupSource,
+    source_read_complete: Option<&(dyn Fn() + Send + Sync)>,
+) -> Result<BackupResult> {
+    run_backup_with_source_internal(storage, config, options, source, source_read_complete).await
+}
+
+async fn run_backup_with_source_internal<S: Storage>(
+    storage: &S,
+    config: BackupConfig,
+    options: BackupOptions<'_>,
+    source: &dyn BackupSource,
+    source_read_complete: Option<&(dyn Fn() + Send + Sync)>,
+) -> Result<BackupResult> {
     debug!(
         event = "backup.prepare",
         db_path = %config.endpoint_db_path.display(),
@@ -1991,9 +2186,11 @@ pub async fn run_backup_with<S: Storage>(
             message: "keep_last_snapshots must be >= 1".to_string(),
         });
     }
-    if !config.source_path.is_dir() {
+    let scan_source_path = source.logical_path().to_path_buf();
+    let logical_source_path = config.source_path.clone();
+    if !source.is_brokered() && !scan_source_path.is_dir() {
         return Err(Error::InvalidConfig {
-            message: "source_path must be an existing directory".to_string(),
+            message: "source read root must be an existing directory".to_string(),
         });
     }
 
@@ -2051,7 +2248,6 @@ pub async fn run_backup_with<S: Storage>(
     let queue_wait_sequence = Arc::new(AtomicU64::new(1));
     let scan_queue_blocked_ms = Arc::new(AtomicU64::new(0));
 
-    let scan_source_path = config.source_path.clone();
     let snapshot_id = config
         .snapshot_id
         .clone()
@@ -2259,10 +2455,10 @@ pub async fn run_backup_with<S: Storage>(
             let res = async {
                 let sqlite_started = Instant::now();
                 let base_snapshot_id =
-                    latest_snapshot_for_source(conn, &scan_source_path, provider).await?;
+                    latest_snapshot_for_source(conn, &logical_source_path, provider).await?;
                 scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
                 let snapshot_id = snapshot_id.clone();
-                let source_path_utf8 = path_to_utf8(&scan_source_path)?;
+                let source_path_utf8 = path_to_utf8(&logical_source_path)?;
 
                 let sqlite_started = Instant::now();
                 let (_, retry_waits) = execute_scan_sqlite_with_busy_retry!(
@@ -2393,9 +2589,6 @@ pub async fn run_backup_with<S: Storage>(
                 let mut pending_base_chunk_copies: Vec<BaseFileChunkCopyRow> = Vec::new();
                 let mut base_chunks_seeded = false;
                 let mut base_copy_map_initialized = false;
-                let mut warned_ignore_errors = HashSet::<String>::new();
-                let mut seen_ignore_files = HashSet::<PathBuf>::new();
-                let mut ignore_rule_files = 0u64;
 
                 if let Some(sink) = options.progress {
                     sink.on_progress(TaskProgress {
@@ -2423,150 +2616,49 @@ pub async fn run_backup_with<S: Storage>(
                     });
                 }
 
-                let mut source_walk = build_source_walk(&scan_source_path);
+                let source_entries_started = Instant::now();
+                let source_entries = match source.entries(options.cancel) {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        scan_performance.record(ScanWorkKind::Walk, source_entries_started);
+                        return Err(error);
+                    }
+                };
+                let ignore_rule_files = source.ignore_rule_files();
+                // Account for adapter enumeration in diagnostics.
+                scan_performance.record(ScanWorkKind::Walk, source_entries_started);
+                let mut source_entry_index = 0usize;
                 loop {
                     let mut pending_scan_entries =
                         Vec::with_capacity(SCAN_FILE_METADATA_BATCH_SIZE);
                     while pending_scan_entries.len() < SCAN_FILE_METADATA_BATCH_SIZE {
                         let walk_started = Instant::now();
-                        let Some(entry) = source_walk.next() else {
+                        let Some(source_entry) = source_entries.get(source_entry_index) else {
                             break;
                         };
+                        source_entry_index += 1;
                         scan_performance.record(ScanWorkKind::Walk, walk_started);
                         if let Some(cancel) = options.cancel
                             && cancel.is_cancelled()
                         {
                             return Err(Error::Cancelled);
                         }
-
-                        let entry = match entry {
-                            Ok(v) => v,
-                            Err(e) => {
-                                if ignore_error_is_rule_parse_only(&e) {
-                                    warn_invalid_televyignore_rule_once(
-                                        &mut warned_ignore_errors,
-                                        &e,
-                                        &scan_source_path,
-                                        "scan",
-                                    );
-                                    continue;
-                                }
-                                if ignore_error_is_non_root_not_found(&e, &scan_source_path) {
-                                    debug!(
-                                        event = "scan.walkdir.not_found",
-                                        error = %e,
-                                        "scan.walkdir.not_found"
-                                    );
-                                    continue;
-                                }
-                                return Err(map_ignore_error(e, &scan_source_path));
-                            }
+                        let kind = match source_entry.kind.as_str() {
+                            "dir" => "dir",
+                            "file" => "file",
+                            "symlink" => "symlink",
+                            _ => continue,
                         };
-
-                        if let Some(err) = entry.error() {
-                            if ignore_error_is_rule_parse_only(err) {
-                                warn_invalid_televyignore_rule_once(
-                                    &mut warned_ignore_errors,
-                                    err,
-                                    &scan_source_path,
-                                    "scan",
-                                );
-                            } else if ignore_error_is_not_found(err)
-                                && entry.path() != scan_source_path
-                            {
-                                debug!(
-                                    event = "scan.walkdir.not_found",
-                                    path = %entry.path().display(),
-                                    error = %err,
-                                    "scan.walkdir.not_found"
-                                );
-                                continue;
-                            } else {
-                                return Err(map_ignore_error(err.clone(), &scan_source_path));
-                            }
-                        }
-
-                        let path = entry.path();
-                        let metadata_started = Instant::now();
-                        let metadata_result = entry.metadata();
-                        scan_performance.record(ScanWorkKind::Metadata, metadata_started);
-                        let metadata = match metadata_result {
-                            Ok(v) => v,
-                            Err(e) => {
-                                if ignore_error_is_not_found(&e) {
-                                    debug!(
-                                        event = "scan.entry_not_found",
-                                        path = %path.display(),
-                                        error = %e,
-                                        "scan.entry_not_found"
-                                    );
-                                    continue;
-                                }
-                                return Err(map_ignore_error(e, &scan_source_path));
-                            }
-                        };
-
-                        if metadata.is_dir() {
-                            ignore_rule_files = ignore_rule_files.saturating_add(
-                                count_ignore_file_for_dir(&mut seen_ignore_files, path),
-                            );
-                        }
-
-                        if metadata.is_file()
-                            && path.file_name() == Some(OsStr::new(TELEVYIGNORE_FILE_NAME))
-                            && seen_ignore_files.insert(path.to_path_buf())
-                        {
-                            ignore_rule_files = ignore_rule_files.saturating_add(1);
-                        }
-
-                        if path == scan_source_path {
+                        if source_entry.relative_path.is_empty() {
                             continue;
                         }
-
-                        let rel_path = path.strip_prefix(&scan_source_path).map_err(|_| {
-                            Error::InvalidConfig {
-                                message: "path strip_prefix failed".to_string(),
-                            }
-                        })?;
-                        let rel_path = path_to_utf8(rel_path)?;
-
-                        let kind = if metadata.is_dir() {
-                            "dir"
-                        } else if metadata.is_file() {
-                            "file"
-                        } else if metadata.is_symlink() {
-                            "symlink"
-                        } else {
-                            continue;
-                        };
-
-                        let (size, mtime_ms, mode) = if kind == "file" {
-                            let size = metadata.len() as i64;
-                            let mtime_ms = metadata
-                                .modified()
-                                .ok()
-                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|d| d.as_millis() as i64)
-                                .unwrap_or(0);
-                            #[cfg(unix)]
-                            let mode = {
-                                use std::os::unix::fs::MetadataExt;
-                                metadata.mode() as i64
-                            };
-                            #[cfg(not(unix))]
-                            let mode = 0i64;
-                            (size, mtime_ms, mode)
-                        } else {
-                            (0i64, 0i64, 0i64)
-                        };
-
                         pending_scan_entries.push(PendingScanEntry {
-                            path: path.to_path_buf(),
-                            rel_path,
+                            path: scan_source_path.join(&source_entry.relative_path),
+                            rel_path: source_entry.relative_path.clone(),
                             kind,
-                            size,
-                            mtime_ms,
-                            mode,
+                            size: source_entry.size,
+                            mtime_ms: source_entry.mtime_ms,
+                            mode: source_entry.mode,
                             file_id: format!("f_{}", uuid::Uuid::new_v4()),
                         });
                     }
@@ -2633,6 +2725,7 @@ pub async fn run_backup_with<S: Storage>(
                         let mut copied_from_base = false;
                         let base_row = base_rows.remove(&rel_path);
                         if let Some(base_row) = base_row
+                            && !source.is_brokered()
                             && base_row.size == size
                             && base_row.mtime_ms == mtime_ms
                             && base_row.mode == mode
@@ -2771,16 +2864,23 @@ pub async fn run_backup_with<S: Storage>(
                             }
                         }
 
-                        let file = match File::open(&path) {
+                        let file = match source.open(&rel_path) {
                             Ok(f) => f,
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            Err(e) => {
+                                if source.is_brokered() {
+                                    return Err(Error::InvalidConfig {
+                                        message: format!(
+                                            "strict snapshot read failed for {}: {}",
+                                            rel_path, e
+                                        ),
+                                    });
+                                }
                                 let sqlite_started = Instant::now();
-                                let retry_waits =
-                                    delete_transient_scan_file_in_tx(
-                                        &mut filemap_scan_tx,
-                                        &file_id,
-                                    )
-                                    .await?;
+                                let retry_waits = delete_transient_scan_file_in_tx(
+                                    &mut filemap_scan_tx,
+                                    &file_id,
+                                )
+                                .await?;
                                 scan_performance.record_sqlite(
                                     "files.transient_delete",
                                     sqlite_started,
@@ -2794,7 +2894,6 @@ pub async fn run_backup_with<S: Storage>(
                                 );
                                 continue;
                             }
-                            Err(e) => return Err(e.into()),
                         };
                         let chunker = file_chunker(file, &scan_chunking);
                         let mut file_chunk_rows: Vec<FileChunkRow> = Vec::new();
@@ -3033,7 +3132,7 @@ pub async fn run_backup_with<S: Storage>(
                 }
 
                 result.ignore_rule_files = ignore_rule_files;
-                result.ignore_invalid_rules = warned_ignore_errors.len() as u64;
+                result.ignore_invalid_rules = source.ignore_invalid_rules();
                 if result.ignore_invalid_rules > 0 {
                     warn!(
                         event = "source.ignore.summary",
@@ -3106,6 +3205,10 @@ pub async fn run_backup_with<S: Storage>(
                     }
                 }
                 drop(upload_tx);
+
+                if let Some(callback) = source_read_complete {
+                    callback();
+                }
 
                 Ok((snapshot_id, result, upload_started))
             }

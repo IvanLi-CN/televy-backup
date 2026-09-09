@@ -935,6 +935,69 @@ final class AppModel {
         }
     }
 
+    func fetchSnapshotStatus(completion: @escaping (SnapshotControlStatus?, String?) -> Void) {
+        let socketPath = controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<SnapshotControlStatus, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.status"
+            )
+            DispatchQueue.main.async {
+                switch result {
+                case let .success(status): completion(status, nil)
+                case let .failure(error): completion(nil, controlFailureMessage(error))
+                }
+            }
+        }
+    }
+
+    func installSnapshotMountHelper(completion: @escaping (Bool, String?) -> Void) {
+        guard let cli = cliPath() else {
+            DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
+            return
+        }
+        let config = configTomlPath().deletingLastPathComponent().path
+        let data = guiControlDataDirURL().path
+        let command = [cli, "--json", "--config-dir", config, "--data-dir", data, "snapshot-mount-helper", "install"]
+            .map(shellQuote)
+            .joined(separator: " ")
+        let script = "do shell script \(appleScriptQuote(command)) with administrator privileges"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = self.runCommandCapture(exe: "/usr/bin/osascript", args: ["-e", script], timeoutSeconds: 180)
+            let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(400).description
+            DispatchQueue.main.async { completion(result.status == 0, result.status == 0 ? nil : output) }
+        }
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func appleScriptQuote(_ value: String) -> String {
+        "\"" + value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    func probeSnapshotVolume(path: String, completion: @escaping (SnapshotProbeResponse?, String?) -> Void) {
+        let socketPath = controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<SnapshotProbeResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.probe",
+                params: ["sourcePath": path]
+            )
+            DispatchQueue.main.async {
+                switch result {
+                case let .success(probe): completion(probe, probe.snapshotSupported ? nil : (probe.reason ?? "Snapshot is not supported for this volume"))
+                case let .failure(error): completion(nil, controlFailureMessage(error))
+                }
+            }
+        }
+    }
+
     func daemonPath() -> String? {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents")

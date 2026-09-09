@@ -31,6 +31,10 @@ verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
   echo "LSUIElement menu-bar agent contract is missing from build-app.sh" >&2
   exit 1
 }
+[[ "$build_text" == *'TelevyBackupReleaseVersion'* && "$build_text" == *'TelevyBackupSourceCommit'* ]] || {
+  echo "Snapshot Access bundle is missing the full product identity metadata" >&2
+  exit 1
+}
 icon_text="$(<"$root_dir/scripts/macos/generate-app-icon-assets.sh")"
 [[ "$icon_text" == *'icon_512x512@2x.png:1024'* && "$icon_text" == *'iconutil -c icns'* && "$icon_text" == *'AppIcon-dark-'* ]] || {
   echo "AppIcon generation contract is incomplete" >&2
@@ -41,12 +45,27 @@ verify_icon_text="$(<"$root_dir/scripts/macos/verify-app-icon-assets.sh")"
   echo "AppIcon verification contract is incomplete" >&2
   exit 1
 }
+verify_release_text="$(<"$root_dir/scripts/macos/verify-release-assets.sh")"
+[[ "$verify_release_text" == *'0$access_mode & 022'* ]] || {
+  echo "Snapshot Access mode check must parse stat output as octal" >&2
+  exit 1
+}
 
 package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" == *'--mode release|development'* ]]
 [[ "$package_text" == *'product-version.py'* ]]
 [[ "$package_text" == *'app_dest="$output_dir/TelevyBackup.app"'* ]]
+[[ "$package_text" == *'access_dest="$output_dir/TelevyBackup Snapshot Access.app"'* ]]
 [[ "$package_text" != *'--version'* ]]
+assemble_text="$(<"$root_dir/scripts/macos/assemble-universal.sh")"
+grep -F 'chmod 755 "$universal_app/Contents/MacOS/"*' <<<"$assemble_text" >/dev/null || {
+  echo "Universal main binaries must remain executable after lipo" >&2
+  exit 1
+}
+grep -F 'chmod 755 "$universal_access_app/Contents/MacOS/televybackup-snapshot-access"' <<<"$assemble_text" >/dev/null || {
+  echo "Universal Snapshot Access binary must remain executable after lipo" >&2
+  exit 1
+}
 
 version="$(tr -d '\n' < "$root_dir/VERSION")"
 for asset in \
@@ -73,7 +92,9 @@ bash "$root_dir/scripts/macos/generate-release-manifest.sh" \
   --source-commit "$(git -C "$tmp_dir" rev-parse HEAD)" \
   --packaging-commit "$(git -C "$root_dir" rev-parse HEAD)" \
   --output "$tmp_dir/BUILD-MANIFEST.json"
-bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir"
+# This contract fixture runs on Linux and deliberately verifies metadata only;
+# macOS package/release jobs run the default bundle checks.
+bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir" --skip-bundle-checks
 
 python3 - "$tmp_dir/BUILD-MANIFEST.json" "$version" <<'PY'
 import json

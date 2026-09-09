@@ -266,6 +266,22 @@ televybackup daemon uninstall-service
 
 `daemon start` returns after the local IPC service is ready. `daemon stop` cancels an active scheduled backup and waits up to 10 seconds for graceful shutdown. `install-service` explicitly installs the single product-managed per-user LaunchAgent; a different config/data directory requires `--replace`. Uninstall removes only managed service files and preserves user data. In the macOS app, quitting with schedules enabled offers a choice between quitting the app only and fully stopping the daemon; a full stop unloads the product-managed LaunchAgent (or the legacy Homebrew service) so its keep-alive setting cannot restart the process.
 
+### Strict APFS snapshot permissions
+
+Live-mode backups need neither Full Disk Access (FDA) nor root. Strict APFS snapshot mode has a
+deliberately narrow two-component permission boundary:
+
+| Component | Required authority | When the user acts |
+| --- | --- | --- |
+| `TelevyBackup Snapshot Access.app` | FDA for the exact installed app identity | After install or an identity/path change |
+| `televybackup-snapshot-mount-helper` | root LaunchDaemon plus FDA for `/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper` | Administrator authorization for install/update/uninstall; FDA after install or an identity/path change |
+
+The GUI app, CLI, and `televybackupd` stay non-root and do not need FDA; the daemon is the only
+component that uses Keychain in production-like mode. Normal and scheduled strict backups do not
+prompt after setup. Service reachability does not itself prove that the helper has FDA, so strict
+mode fails closed if either component cannot complete its operation. See
+[the macOS installation guide](packaging/INSTALL.md) for the exact setup steps.
+
 Release DMGs and native tool archives are built by the macOS package workflow. Verify `SHA256SUMS` before following the ad-hoc Gatekeeper instructions in [`packaging/INSTALL.md`](packaging/INSTALL.md). Homebrew templates under `packaging/homebrew/` are legacy compatibility artifacts and are not maintained by the release flow.
 
 ## Docs

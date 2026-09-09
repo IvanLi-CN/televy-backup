@@ -23,6 +23,9 @@ use televy_backup_core::control::{
 use televy_backup_core::{
     Storage, TaskProgress, TelegramMtProtoStorage, TelegramMtProtoStorageConfig,
 };
+use televybackup_snapshot_access::{MOUNT_HELPER_INSTALL_PATH, StatusResult};
+
+use crate::snapshot_client::SnapshotClient;
 
 type Settings = televy_backup_core::config::SettingsV2;
 
@@ -148,6 +151,22 @@ pub(crate) struct ControlContext {
     pub(crate) runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
     pub(crate) data_root: PathBuf,
     pub(crate) snapshot_inspection: Arc<crate::snapshot_inspection_ipc::SnapshotInspectionService>,
+}
+
+fn snapshot_access_paths(
+    live_status: Option<&StatusResult>,
+    registered_path: Option<String>,
+) -> (Option<String>, Option<String>, bool) {
+    let running_path = live_status.and_then(|status| status.access_app_path.clone());
+    let registration_mismatch = matches!(
+        (running_path.as_deref(), registered_path.as_deref()),
+        (Some(running), Some(registered)) if running != registered
+    );
+    (
+        running_path.or_else(|| registered_path.clone()),
+        registered_path,
+        registration_mismatch,
+    )
 }
 
 pub struct ControlIpcServerHandle {
@@ -409,6 +428,169 @@ async fn handle_control_ipc_client(
     if req.method == "operation.get" {
         let response = operation_get(&req);
         write_json_line(&mut w, &response).await?;
+        return Ok(());
+    }
+
+    if req.method == "snapshot.probe" {
+        let settings = context.settings.read().await.clone();
+        let target_id = req
+            .params
+            .get("targetId")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                req.params
+                    .get("sourcePath")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|source| {
+                        settings
+                            .targets
+                            .iter()
+                            .find(|target| target.source_path == source)
+                            .map(|target| target.id.as_str())
+                    })
+            });
+        let Some(target_id) = target_id.filter(|id| !id.trim().is_empty()) else {
+            write_json_line(
+                &mut w,
+                &ControlResponse::err(
+                    req.id.clone(),
+                    ControlError::invalid_request(
+                        "snapshot.probe requires configured targetId",
+                        serde_json::json!({}),
+                    ),
+                ),
+            )
+            .await?;
+            return Ok(());
+        };
+        match SnapshotClient::for_data_root(&context.data_root)
+            .probe_volume(target_id)
+            .await
+        {
+            Ok(probe) => {
+                write_json_line(
+                    &mut w,
+                    &ControlResponse::ok(
+                        req.id.clone(),
+                        serde_json::json!({
+                            "volumeUuid": probe.volume_uuid,
+                            "filesystem": probe.filesystem,
+                            "freeBytes": probe.free_bytes,
+                            "snapshotSupported": probe.snapshot_supported,
+                            "reason": probe.reason,
+                        }),
+                    ),
+                )
+                .await?;
+            }
+            Err(error) => {
+                write_json_line(
+                    &mut w,
+                    &ControlResponse::err(
+                        req.id.clone(),
+                        ControlError::unavailable(
+                            "snapshot probe failed",
+                            serde_json::json!({"error": error.to_string()}),
+                        ),
+                    ),
+                )
+                .await?;
+            }
+        }
+        return Ok(());
+    }
+
+    if req.method == "snapshot.status" {
+        let settings = context.settings.read().await.clone();
+        let helper = SnapshotClient::for_data_root(&context.data_root)
+            .status()
+            .await;
+        let (
+            helper_available,
+            helper_error,
+            active_leases,
+            pending_cleanup,
+            access_app_version,
+            fda_ready,
+            fda_check_error,
+            mount_helper_reachable,
+            mount_helper_version,
+            mount_helper_error,
+        ) = match &helper {
+            Ok(status) => (
+                true,
+                None,
+                status.active_leases,
+                status.pending_cleanup,
+                Some(status.access_app_version.clone()),
+                status.fda_ready,
+                status.fda_check_error.clone(),
+                status.mount_helper_reachable,
+                status.mount_helper_version.clone(),
+                status.mount_helper_error.clone(),
+            ),
+            Err(error) => (
+                false,
+                Some(error.to_string()),
+                0,
+                0,
+                None,
+                false,
+                None,
+                false,
+                None,
+                None,
+            ),
+        };
+        let volumes = settings
+            .snapshot_volumes
+            .iter()
+            .map(|(uuid, setting)| {
+                serde_json::json!({
+                    "volumeUuid": uuid,
+                    "enabled": setting.enabled,
+                    "mode": if setting.enabled { "strict" } else { "disabled" },
+                })
+            })
+            .collect::<Vec<_>>();
+        let registered_access_app_path =
+            std::fs::read(context.config_root.join("snapshot-access/service.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| {
+                    value
+                        .get("appPath")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .or_else(|| std::env::var("TELEVYBACKUP_SNAPSHOT_ACCESS_APP").ok());
+        let (access_app_path, registered_access_app_path, access_app_registration_mismatch) =
+            snapshot_access_paths(helper.as_ref().ok(), registered_access_app_path);
+        write_json_line(
+            &mut w,
+            &ControlResponse::ok(
+                req.id.clone(),
+                serde_json::json!({
+                    "consistencyMode": if volumes.iter().any(|volume| volume.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(false)) { "strict" } else { "live" },
+                    "serviceReachable": helper_available,
+                    "accessAppPath": access_app_path,
+                    "registeredAccessAppPath": registered_access_app_path,
+                    "accessAppRegistrationMismatch": access_app_registration_mismatch,
+                    "accessAppVersion": access_app_version,
+                    "fdaReady": fda_ready,
+                    "fdaCheckError": fda_check_error,
+                    "accessAppError": helper_error,
+                    "mountHelperPath": MOUNT_HELPER_INSTALL_PATH,
+                    "mountHelperReachable": mount_helper_reachable,
+                    "mountHelperVersion": mount_helper_version,
+                    "mountHelperError": mount_helper_error,
+                    "activeLeases": active_leases,
+                    "pendingCleanup": pending_cleanup,
+                    "volumes": volumes,
+                }),
+            ),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -2770,6 +2952,29 @@ mod tests {
             schedule: None,
         });
         s
+    }
+
+    #[test]
+    fn snapshot_status_prefers_the_reachable_access_app_path() {
+        let live = StatusResult {
+            access_app_path: Some("/live/TelevyBackup Snapshot Access.app".into()),
+            ..Default::default()
+        };
+
+        let (display_path, registered_path, mismatch) = snapshot_access_paths(
+            Some(&live),
+            Some("/old/TelevyBackup Snapshot Access.app".into()),
+        );
+
+        assert_eq!(
+            display_path.as_deref(),
+            Some("/live/TelevyBackup Snapshot Access.app")
+        );
+        assert_eq!(
+            registered_path.as_deref(),
+            Some("/old/TelevyBackup Snapshot Access.app")
+        );
+        assert!(mismatch);
     }
 
     #[test]

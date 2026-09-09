@@ -5,6 +5,7 @@ __pycache__/
 
 # Local dev artifacts
 .dev/
+.snapshot-workspace-app/
 
 # OS
 .DS_Store
