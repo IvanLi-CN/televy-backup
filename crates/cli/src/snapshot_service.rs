@@ -5,7 +5,8 @@ use std::process::Command;
 
 use serde_json::json;
 use televybackup_snapshot_access::{
-    Method, PROTOCOL_VERSION, Request, Response, ResponseResult, StatusResult,
+    MOUNT_HELPER_INSTALL_PATH, Method, PROTOCOL_VERSION, Request, Response, ResponseResult,
+    StatusResult,
 };
 use uuid::Uuid;
 
@@ -239,7 +240,7 @@ pub fn status(
         .map(|dir| PathBuf::from(dir).join("snapshot-access/access.sock"))
         .unwrap_or_else(|| data_dir.join("snapshot-access/access.sock"));
     let helper = status_from_socket(&socket).ok();
-    let payload = json!({"installed": manifest.is_some() && plist_path().is_file(), "label": ACCESS_LABEL, "appPath": manifest.as_ref().and_then(|value| value.get("appPath")), "executablePath": manifest.as_ref().and_then(|value| value.get("executablePath")), "plistPath": plist_path(), "serviceReachable": helper.is_some(), "activeLeases": helper.as_ref().map(|value| value.active_leases).unwrap_or(0), "pendingCleanup": helper.as_ref().map(|value| value.pending_cleanup).unwrap_or(0), "accessAppVersion": helper.as_ref().map(|value| value.access_app_version.clone()), "fdaReady": helper.as_ref().map(|value| value.fda_ready).unwrap_or(false), "mountHelperReachable": helper.as_ref().map(|value| value.mount_helper_reachable).unwrap_or(false), "mountHelperVersion": helper.as_ref().and_then(|value| value.mount_helper_version.clone()), "mountHelperError": helper.as_ref().and_then(|value| value.mount_helper_error.clone())});
+    let payload = json!({"installed": manifest.is_some() && plist_path().is_file(), "label": ACCESS_LABEL, "appPath": manifest.as_ref().and_then(|value| value.get("appPath")), "executablePath": manifest.as_ref().and_then(|value| value.get("executablePath")), "plistPath": plist_path(), "serviceReachable": helper.is_some(), "activeLeases": helper.as_ref().map(|value| value.active_leases).unwrap_or(0), "pendingCleanup": helper.as_ref().map(|value| value.pending_cleanup).unwrap_or(0), "accessAppVersion": helper.as_ref().map(|value| value.access_app_version.clone()), "fdaReady": helper.as_ref().map(|value| value.fda_ready).unwrap_or(false), "mountHelperPath": MOUNT_HELPER_INSTALL_PATH, "mountHelperReachable": helper.as_ref().map(|value| value.mount_helper_reachable).unwrap_or(false), "mountHelperVersion": helper.as_ref().and_then(|value| value.mount_helper_version.clone()), "mountHelperError": helper.as_ref().and_then(|value| value.mount_helper_error.clone())});
     if json_output {
         println!("{payload}");
     } else {

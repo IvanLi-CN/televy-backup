@@ -7,13 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::json;
-use televybackup_snapshot_access::mount_helper;
+use televybackup_snapshot_access::{MOUNT_HELPER_INSTALL_PATH, mount_helper};
 
 use super::CliError;
 
 pub const MOUNT_HELPER_LABEL: &str = "com.ivan.televybackup.snapshot-mount-helper";
-const MOUNT_HELPER_INSTALL_PATH: &str =
-    "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper";
 const MOUNT_HELPER_PLIST_PATH: &str =
     "/Library/LaunchDaemons/com.ivan.televybackup.snapshot-mount-helper.plist";
 

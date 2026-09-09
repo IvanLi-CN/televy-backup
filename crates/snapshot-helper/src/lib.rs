@@ -5,6 +5,8 @@ pub mod mount_helper;
 pub const PROTOCOL_VERSION: u32 = 2;
 pub const MOUNT_HELPER_PROTOCOL_VERSION: u32 = 1;
 pub const MOUNT_HELPER_LABEL: &str = "com.ivan.televybackup.snapshot-mount-helper";
+pub const MOUNT_HELPER_INSTALL_PATH: &str =
+    "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper";
 pub const DEFAULT_MOUNT_HELPER_SOCKET: &str =
     "/private/var/run/televybackup/snapshot-mount-helper.sock";
 pub const DEFAULT_MOUNT_HELPER_JOURNAL: &str =

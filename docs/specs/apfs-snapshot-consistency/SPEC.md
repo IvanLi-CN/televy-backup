@@ -14,9 +14,10 @@ formats.
 
 ### Goals
 
-- Provide a separate, windowless `TelevyBackup Snapshot Access.app` as the only process that needs
-  Full Disk Access (FDA), plus a narrowly-scoped root mount helper because macOS mount(2)
-  privilege is not granted by FDA.
+- Provide a separate, windowless `TelevyBackup Snapshot Access.app` and a narrowly-scoped root
+  mount helper. The current validated strict-mode baseline grants FDA to each exact installed
+  identity; the helper additionally needs root because macOS mount(2) privilege is not granted by
+  FDA.
 - Address sources by configured target ID and APFS Volume UUID, never by an arbitrary IPC path.
 - Stream directory metadata and file bytes through an opaque lease without exposing the snapshot
   mount path to the daemon.
@@ -56,9 +57,10 @@ free-space threshold, nested mounts, and relative paths MUST be checked before a
   manifest-recorded snapshots; ambiguous ownership or failed cleanup MUST block the volume's next
   strict backup.
 
-The mount helper MUST run as a root LaunchDaemon, expose a separate peer-UID-checked Unix socket,
-and accept only `Status`, `Mount`, `Release`, and UUID-scoped `Cleanup`. It MUST NOT read source files, configuration,
-Keychain material, backup indexes, or network data. Its root-owned journal records lease, mount root,
+The mount helper MUST run as a root LaunchDaemon with FDA manually granted to its exact installed
+identity, expose a separate peer-UID-checked Unix socket, and accept only `Status`, `Mount`,
+`Release`, and UUID-scoped `Cleanup`. It MUST NOT read source files, configuration, Keychain
+material, backup indexes, or network data. Its root-owned journal records lease, mount root,
 volume/device identity, and the exact snapshot UUID manifest.
 
 ### REQ-APFS-004: Brokered strict reads
@@ -80,18 +82,20 @@ lease.
 ### REQ-APFS-006: User installation and observability
 
 The CLI MUST provide `snapshot-access install --app <path>`, `status`, and `uninstall` using the
-user's `gui/<uid>` LaunchAgent domain. Settings MUST show the exact canonical app path, version,
-service reachability, FDA readiness, active leases, pending cleanup, and a link to System Settings.
-Access App install, update, and uninstall MUST remain user-level. Mount helper install, update, and
-uninstall are explicit administrator-authorized transactions and are the only privileged setup
-operation; scheduled backup requests never authenticate.
+user's `gui/<uid>` LaunchAgent domain. Settings MUST show the exact canonical Access app and mount
+helper paths, versions, service reachability, active leases, pending cleanup, and a link to System
+Settings. It MUST identify both paths as FDA requirements for strict mode, report only observable
+FDA evidence, and never present service reachability as proof of a helper TCC grant. Access App
+install, update, and uninstall MUST remain user-level. Mount helper install, update, and uninstall
+are explicit administrator-authorized transactions and are the only privileged setup operation;
+scheduled backup requests never authenticate.
 
 ## Compatibility
 
-The Access app is started by a per-user LaunchAgent and can be used without the GUI. Ad-hoc
-updates may change the code identity; after such an update the UI must ask the user to grant FDA
-again to the exact displayed app path. Existing settings without `snapshot_volumes` remain valid
-and default to live mode until a volume is verified and enabled.
+The Access app is started by a per-user LaunchAgent and can be used without the GUI. Ad-hoc updates
+may change the code identity; after an Access app or mount-helper update the UI must ask the user to
+grant FDA again to each exact displayed identity. Existing settings without `snapshot_volumes`
+remain valid and default to live mode until a volume is verified and enabled.
 
 ## Verification
 

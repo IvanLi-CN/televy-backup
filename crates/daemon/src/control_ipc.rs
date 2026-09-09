@@ -23,6 +23,7 @@ use televy_backup_core::control::{
 use televy_backup_core::{
     Storage, TaskProgress, TelegramMtProtoStorage, TelegramMtProtoStorageConfig,
 };
+use televybackup_snapshot_access::MOUNT_HELPER_INSTALL_PATH;
 
 use crate::snapshot_client::SnapshotClient;
 
@@ -555,6 +556,7 @@ async fn handle_control_ipc_client(
                     "accessAppVersion": access_app_version,
                     "fdaReady": fda_ready,
                     "accessAppError": helper_error,
+                    "mountHelperPath": MOUNT_HELPER_INSTALL_PATH,
                     "mountHelperReachable": mount_helper_reachable,
                     "mountHelperVersion": mount_helper_version,
                     "mountHelperError": mount_helper_error,
