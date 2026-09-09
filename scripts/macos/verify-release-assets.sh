@@ -80,6 +80,7 @@ if [[ -d "$access_app" ]]; then
   bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$access_app/Contents/Info.plist")"
   [[ "$bundle_id" == "com.ivan.televybackup.snapshot-access" ]] || { echo "unexpected Snapshot Access bundle id: $bundle_id" >&2; exit 1; }
   [[ -x "$access_app/Contents/MacOS/televybackup-snapshot-access" ]] || { echo "Snapshot Access executable missing" >&2; exit 1; }
-  [[ "$(( $(stat -f '%Lp' "$access_app/Contents/MacOS/televybackup-snapshot-access") & 022 ))" -eq 0 ]] || { echo "Snapshot Access executable is writable by group/other" >&2; exit 1; }
+  access_mode="$(stat -f '%Lp' "$access_app/Contents/MacOS/televybackup-snapshot-access")"
+  [[ "$(( 0$access_mode & 022 ))" -eq 0 ]] || { echo "Snapshot Access executable is writable by group/other" >&2; exit 1; }
 fi
 echo "release assets verified: ${#required[@]} files"

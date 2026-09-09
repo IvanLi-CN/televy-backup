@@ -45,6 +45,11 @@ verify_icon_text="$(<"$root_dir/scripts/macos/verify-app-icon-assets.sh")"
   echo "AppIcon verification contract is incomplete" >&2
   exit 1
 }
+verify_release_text="$(<"$root_dir/scripts/macos/verify-release-assets.sh")"
+[[ "$verify_release_text" == *'0$access_mode & 022'* ]] || {
+  echo "Snapshot Access mode check must parse stat output as octal" >&2
+  exit 1
+}
 
 package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" == *'--mode release|development'* ]]
