@@ -57,6 +57,10 @@ if (( $(printf '%s' "$release_text" | grep -Fc 'git fetch --force origin main --
   printf 'release workflow must re-fetch tags before publication\n' >&2
   exit 1
 fi
+if (( $(printf '%s' "$release_text" | grep -Fc 'verify-release-sequence') < 2 )); then
+  printf 'release workflow must verify sequence before and during publication\n' >&2
+  exit 1
+fi
 if [[ "$release_text" == *"gh release upload \"\${PRODUCT_TAG}\" release-assets/*"* || "$release_text" == *"gh release create \"\${PRODUCT_TAG}\" release-assets/*"* ]]; then
   printf 'release workflow must not pass app bundle directories to gh release\n' >&2
   exit 1
