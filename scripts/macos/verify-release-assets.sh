@@ -82,6 +82,7 @@ if [[ -d "$access_app" ]]; then
   [[ -x "$access_app/Contents/MacOS/televybackup-snapshot-access" ]] || { echo "Snapshot Access executable missing" >&2; exit 1; }
   info="$(lipo -info "$access_app/Contents/MacOS/televybackup-snapshot-access")"
   [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "Snapshot Access app is not universal" >&2; exit 1; }
-  [[ "$(( $(stat -f '%Lp' "$access_app/Contents/MacOS/televybackup-snapshot-access") & 022 ))" -eq 0 ]] || { echo "Snapshot Access executable is writable by group/other" >&2; exit 1; }
+  access_mode="$(stat -f '%Lp' "$access_app/Contents/MacOS/televybackup-snapshot-access")"
+  [[ "$(( 8#${access_mode} & 8#022 ))" -eq 0 ]] || { echo "Snapshot Access executable is writable by group/other" >&2; exit 1; }
 fi
 echo "release assets verified: ${#required[@]} files"
