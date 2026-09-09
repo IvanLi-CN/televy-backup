@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Read;
+#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -1183,6 +1184,7 @@ fn volume_info(path: &Path) -> Result<VolumeInfo, HelperError> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn filesystem_mount_point(path: &Path) -> Result<PathBuf, HelperError> {
     let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| HelperError::Message("invalid source path".into()))?;
@@ -1203,6 +1205,11 @@ fn filesystem_mount_point(path: &Path) -> Result<PathBuf, HelperError> {
         ));
     }
     Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn filesystem_mount_point(path: &Path) -> Result<PathBuf, HelperError> {
+    path.canonicalize().map_err(HelperError::Io)
 }
 
 fn available_bytes(path: &Path) -> Result<u64, HelperError> {
