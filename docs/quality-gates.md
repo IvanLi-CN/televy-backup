@@ -14,6 +14,8 @@ TelevyBackup treats pull request checks as an explicit merge contract. The canon
 
 The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks.
 
+Release Product also treats the highest remote product tag as the release sequence waterline. Candidates below that full-SemVer waterline fail before packaging; same-version recovery requires the tag to target the same merge SHA. A matching published Release is terminal and is not rebuilt or overwritten. Failure alerts use `recovery_candidate` only after this condition is rechecked.
+
 ## Release checks
 
 `Label Gate` enforces exactly one `type:*` and one `channel:*` label. Source PR heads run the full Rust, Swift, and native package matrix. A trusted preparation run adds only `VERSION` to the PR branch and then the same required check names run structural verification against that preparation commit. `Release completion` is the required PR-local contract for ancestry, VERSION, labels, source checks, and migration handling.

@@ -36,6 +36,8 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       channel: ${{ steps.release.outputs.channel }}
       reason: ${{ steps.release.outputs.reason }}
+      release_state: ${{ steps.release.outputs.release_state }}
+      tag_status: ${{ steps.release.outputs.tag_status }}
     steps:
       - name: Checkout main history
         uses: actions/checkout@v4
@@ -52,6 +54,7 @@ jobs:
           WORKFLOW_EVENT: ${{ github.event.workflow_run.event || 'workflow_dispatch' }}
           TARGET_INPUT: ${{ github.event.workflow_run.head_sha || inputs.commit_sha }}
           OPERATION: ${{ inputs.operation || 'publish' }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -79,6 +82,42 @@ jobs:
           tag="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag"])')"
           channel="$(python3 scripts/product-version.py --mode release --source-sha "${TARGET_INPUT}" --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["channel"])')"
           test "${version}" = "$(python3 scripts/product-version.py --mode release --source-sha "${TARGET_INPUT}")"
+          sequence_json="$(python3 .github/scripts/release_chain.py verify-release-sequence --version "${version}" --expected-sha "${TARGET_INPUT}")"
+          tag_status="$(printf '%s' "${sequence_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
+          release_state=missing
+          release_output=""
+          if release_output="$(gh release view "${tag}" --json isDraft 2>&1)"; then
+            if [[ "${tag_status}" != matching ]]; then
+              echo "release_state_conflict: Release exists without a matching product tag" >&2
+              exit 1
+            fi
+            is_draft="$(printf '%s' "${release_output}" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isDraft"]).lower())')"
+            case "${is_draft}" in
+              true) release_state=draft ;;
+              false) release_state=published ;;
+              *) echo "release_state_conflict: invalid GitHub Release state" >&2; exit 1 ;;
+            esac
+          else
+            if ! printf '%s' "${release_output}" | grep -qiE '404|not found'; then
+              printf '%s\n' "${release_output}" >&2
+              echo "release_state_conflict: unable to resolve GitHub Release state" >&2
+              exit 1
+            fi
+          fi
+          if [[ "${release_state}" == published ]]; then
+            {
+              echo "enabled=false"
+              echo "source_sha=${TARGET_INPUT}"
+              echo "version=${version}"
+              echo "tag=${tag}"
+              echo "channel=${channel}"
+              echo "reason=already_published"
+              echo "release_state=published"
+              echo "tag_status=${tag_status}"
+            } >> "$GITHUB_OUTPUT"
+            echo "Product release already published for ${tag}; no rebuild or asset overwrite"
+            exit 0
+          fi
           {
             echo "enabled=true"
             echo "source_sha=${TARGET_INPUT}"
@@ -86,11 +125,10 @@ jobs:
             echo "tag=${tag}"
             echo "channel=${channel}"
             echo "reason=product_merge"
+            echo "release_state=${release_state}"
+            echo "tag_status=${tag_status}"
           } >> "$GITHUB_OUTPUT"
           echo "RELEASE_TARGET_SHA=${TARGET_INPUT} RELEASE_VERSION=${version} RELEASE_TAG=${tag}"
-          tag_args=(verify-tag --version "${version}" --expected-sha "${TARGET_INPUT}")
-          [[ "${OPERATION}" == recover ]] && tag_args+=(--allow-existing)
-          python3 .github/scripts/release_chain.py "${tag_args[@]}"
 
   build-arm64:
     name: Build arm64 package
@@ -183,7 +221,7 @@ jobs:
       PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
       PRODUCT_CHANNEL: ${{ needs.resolve.outputs.channel }}
       RELEASE_SHA: ${{ needs.resolve.outputs.source_sha }}
-      OPERATION: ${{ inputs.operation || 'publish' }}
+      RELEASE_STATE: ${{ needs.resolve.outputs.release_state }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -196,8 +234,9 @@ jobs:
       - name: Create or verify immutable tag
         run: |
           set -euo pipefail
-          tag_args=(verify-tag --version "${PRODUCT_VERSION}" --expected-sha "${RELEASE_SHA}")
-          [[ "${OPERATION}" == recover ]] && tag_args+=(--allow-existing)
+          git fetch --force origin main --tags
+          python3 .github/scripts/release_chain.py verify-release-sequence --version "${PRODUCT_VERSION}" --expected-sha "${RELEASE_SHA}"
+          tag_args=(verify-tag --version "${PRODUCT_VERSION}" --expected-sha "${RELEASE_SHA}" --allow-existing)
           tag_json="$(python3 .github/scripts/release_chain.py "${tag_args[@]}")"
           status="$(printf '%s' "${tag_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
           if [[ "${status}" == available ]]; then
@@ -210,14 +249,36 @@ jobs:
       - name: Create or update GitHub Release
         run: |
           set -euo pipefail
+          runtime_state="${RELEASE_STATE}"
+          release_output=""
+          if release_output="$(gh release view "${PRODUCT_TAG}" --json isDraft 2>&1)"; then
+            is_draft="$(printf '%s' "${release_output}" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isDraft"]).lower())')"
+            case "${is_draft}" in
+              true) runtime_state=draft ;;
+              false) runtime_state=published ;;
+              *) echo "release_state_conflict: invalid GitHub Release state" >&2; exit 1 ;;
+            esac
+          else
+            if ! printf '%s' "${release_output}" | grep -qiE '404|not found'; then
+              printf '%s\n' "${release_output}" >&2
+              echo "release_state_conflict: unable to resolve GitHub Release state" >&2
+              exit 1
+            fi
+          fi
+          if [[ "${runtime_state}" == published ]]; then
+            echo "Product release became published for ${PRODUCT_TAG}; no asset overwrite"
+            exit 0
+          fi
           release_files=()
           while IFS= read -r -d '' asset; do
             release_files+=("$asset")
           done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
           ((${#release_files[@]} > 0))
-          if gh release view "${PRODUCT_TAG}" >/dev/null 2>&1; then
+          if [[ "${runtime_state}" == draft ]]; then
             gh release upload "${PRODUCT_TAG}" "${release_files[@]}" --clobber
+            gh release edit "${PRODUCT_TAG}" --draft=false
           else
+            test "${runtime_state}" = missing
             flags=(--verify-tag --title "${PRODUCT_TAG}" --generate-notes)
             [[ "${PRODUCT_CHANNEL}" == rc ]] && flags+=(--prerelease)
             gh release create "${PRODUCT_TAG}" "${release_files[@]}" "${flags[@]}"

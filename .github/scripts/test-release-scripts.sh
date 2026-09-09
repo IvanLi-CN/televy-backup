@@ -3,8 +3,8 @@ set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
 
-bash -n \
-  "$root_dir/.github/scripts/label-gate.sh" \
+bash -n "$root_dir/.github/scripts/label-gate.sh"
+python3 -m py_compile \
   "$root_dir/.github/scripts/release_chain.py" \
   "$root_dir/.github/scripts/release_preparation.py" \
   "$root_dir/.github/scripts/release_completion.py"
@@ -36,6 +36,9 @@ assert contract["preparation"]["write_api"] == "createCommitOnBranch"
 assert contract["preparation"]["expected_head_oid"] is True
 assert contract["preparation"]["no_gpg_secrets"] is True
 assert contract["recovery"]["backfill"] is False
+assert contract["recovery"]["sequence_guard"] == "candidate must not be below the highest remote product tag"
+assert contract["release_sequence"]["source"] == "remote product tags"
+assert contract["release_states"]["published"] == "idempotent-success-without-build-or-overwrite"
 
 workflow_text = "\n".join(
     (root / ".github/workflows" / name).read_text(encoding="utf-8")
@@ -46,6 +49,7 @@ for forbidden in ("GPG", "release-backfill", "backfill", "snapshot", "queue"):
 assert "createCommitOnBranch" in workflow_text
 assert "expectedHeadOid" in workflow_text
 assert ".commit.verification.verified" in workflow_text
+assert "verify-release-sequence" in workflow_text
 release_workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 assert "options: [recover]" in release_workflow
 PY

@@ -43,9 +43,23 @@
   "recovery": {
     "operation": "recover",
     "identity": "same merge SHA and VERSION",
+    "sequence_guard": "candidate must not be below the highest remote product tag",
+    "superseded_reason": "superseded_by_product_tag",
     "backfill": false,
     "snapshot": false,
     "queue": false
+  },
+  "release_sequence": {
+    "source": "remote product tags",
+    "tag_grammar": ["vX.Y.Z", "vX.Y.Z-rc.N"],
+    "ordering": "full-semver-rc-before-stable",
+    "lower_candidate": "reject-before-build",
+    "equal_candidate": "require-tag-target-equals-merge-sha"
+  },
+  "release_states": {
+    "missing": "build-and-create",
+    "draft": "build-upload-and-publish",
+    "published": "idempotent-success-without-build-or-overwrite"
   },
   "merge_policy": {
     "normal_merge_only": true,

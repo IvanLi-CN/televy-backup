@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib.util
 import json
 import re
@@ -23,6 +24,7 @@ SPEC.loader.exec_module(PRODUCT_VERSION)
 VALID_TYPES = {"type:patch", "type:minor", "type:major", "type:docs", "type:skip"}
 PRODUCT_TYPES = VALID_TYPES - {"type:docs", "type:skip"}
 VALID_CHANNELS = {"channel:stable", "channel:rc"}
+PRODUCT_TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-rc\.\d+)?)$")
 
 
 class ReleaseChainError(RuntimeError):
@@ -212,16 +214,71 @@ def next_available_patch(current: str) -> str:
 
 
 def strictly_newer(candidate: str, current: str) -> bool:
-    left = PRODUCT_VERSION.parse_version(candidate)
-    right = PRODUCT_VERSION.parse_version(current)
-    left_core = tuple(int(left[key]) for key in ("major", "minor", "patch"))
-    right_core = tuple(int(right[key]) for key in ("major", "minor", "patch"))
+    return compare_versions(candidate, current) > 0
+
+
+def compare_versions(left: str, right: str) -> int:
+    """Compare the restricted product SemVer grammar, including RC ordering."""
+    left_parsed = PRODUCT_VERSION.parse_version(left)
+    right_parsed = PRODUCT_VERSION.parse_version(right)
+    left_core = tuple(int(left_parsed[key]) for key in ("major", "minor", "patch"))
+    right_core = tuple(int(right_parsed[key]) for key in ("major", "minor", "patch"))
     if left_core != right_core:
-        return left_core > right_core
-    left_rc, right_rc = left["rc"], right["rc"]
-    if left_rc is None:
-        return right_rc is not None
-    return right_rc is not None and int(left_rc) > int(right_rc)
+        return (left_core > right_core) - (left_core < right_core)
+    left_rc, right_rc = left_parsed["rc"], right_parsed["rc"]
+    if left_rc is None or right_rc is None:
+        return (left_rc is None) - (right_rc is None)
+    return (int(left_rc) > int(right_rc)) - (int(left_rc) < int(right_rc))
+
+
+def product_tags() -> list[dict[str, str]]:
+    """Return valid product tags and their peeled commit targets."""
+    values: list[dict[str, str]] = []
+    for tag in git("tag", "--list", "v*").splitlines():
+        match = PRODUCT_TAG_RE.fullmatch(tag)
+        if match is None:
+            continue
+        version = match.group("version")
+        values.append({"tag": tag, "version": version, "target": tag_target(tag) or ""})
+    return values
+
+
+def verify_release_sequence(version: str, expected_sha: str) -> dict[str, str]:
+    """Enforce the product-tag high-water mark before release work starts."""
+    PRODUCT_VERSION.parse_version(version)
+    expected = git("rev-parse", f"{expected_sha}^{{commit}}")
+    candidate_tag = f"v{version}"
+    candidate_target = tag_target(candidate_tag)
+    tags = product_tags()
+    highest = max(
+        tags,
+        key=functools.cmp_to_key(
+            lambda left, right: compare_versions(left["version"], right["version"])
+        ),
+        default=None,
+    )
+    if highest is not None:
+        relation = compare_versions(version, highest["version"])
+        if relation < 0:
+            raise ReleaseChainError(
+                f"superseded_by_product_tag: {candidate_tag} is below {highest['tag']}"
+            )
+        if relation == 0 and candidate_target != expected:
+            raise ReleaseChainError(
+                f"product_tag_conflict: {candidate_tag} points to {candidate_target or 'no commit'}, expected {expected}"
+            )
+    if candidate_target is not None and candidate_target != expected:
+        raise ReleaseChainError(
+            f"product_tag_conflict: {candidate_tag} points to {candidate_target}, expected {expected}"
+        )
+    return {
+        "status": "matching" if candidate_target is not None else "available",
+        "tag": candidate_tag,
+        "version": version,
+        "expectedSha": expected,
+        "highestTag": highest["tag"] if highest else "",
+        "highestVersion": highest["version"] if highest else "",
+    }
 
 
 def stage(args: argparse.Namespace) -> None:
@@ -276,6 +333,9 @@ def main(argv: list[str] | None = None) -> int:
     tag.add_argument("--version", required=True)
     tag.add_argument("--expected-sha")
     tag.add_argument("--allow-existing", action="store_true")
+    sequence = sub.add_parser("verify-release-sequence")
+    sequence.add_argument("--version", required=True)
+    sequence.add_argument("--expected-sha", required=True)
     stage_parser = sub.add_parser("stage")
     stage_parser.add_argument("--source-sha", required=True)
     stage_parser.add_argument("--mode", choices=("automatic", "exact"), required=True)
@@ -293,6 +353,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(verify_merged(args.commit), sort_keys=True))
         elif args.command == "verify-tag":
             print(json.dumps(verify_tag(args.version, args.expected_sha, args.allow_existing), sort_keys=True))
+        elif args.command == "verify-release-sequence":
+            print(json.dumps(verify_release_sequence(args.version, args.expected_sha), sort_keys=True))
         else:
             stage(args)
         return 0
