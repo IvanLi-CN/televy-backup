@@ -55,6 +55,7 @@ lipo -create "$arm_access_app/Contents/MacOS/televybackup-snapshot-access" "$x86
 chmod 755 "$universal_access_app/Contents/MacOS/televybackup-snapshot-access"
 rm -rf "$universal_access_app/Contents/_CodeSignature"
 codesign --force --deep --sign - "$universal_access_app"
+chmod 755 "$universal_access_app/Contents/MacOS/televybackup-snapshot-access"
 codesign --verify --deep --strict "$universal_access_app"
 
 staging="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-universal.XXXXXX")"
