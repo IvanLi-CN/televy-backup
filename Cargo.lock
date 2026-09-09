@@ -1948,12 +1948,13 @@ dependencies = [
  "clap",
  "getrandom 0.2.17",
  "libc",
+ "plist",
  "serde",
  "serde_json",
  "sha2",
  "sqlx",
  "televy_backup_core",
- "televybackup-snapshot-helper",
+ "televybackup-snapshot-access",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1963,9 +1964,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "televybackup-snapshot-helper"
+name = "televybackup-snapshot-access"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "ignore",
  "libc",
  "plist",
  "serde",
@@ -1974,6 +1977,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "uuid",
 ]
 
@@ -1985,12 +1989,13 @@ dependencies = [
  "chrono",
  "getrandom 0.2.17",
  "libc",
+ "plist",
  "security-framework",
  "serde",
  "serde_json",
  "sqlx",
  "televy_backup_core",
- "televybackup-snapshot-helper",
+ "televybackup-snapshot-access",
  "tempfile",
  "thiserror",
  "tokio",

@@ -4,6 +4,7 @@ use std::io::{ErrorKind, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -11,7 +12,8 @@ use std::time::{Instant, SystemTime};
 
 use base64::Engine;
 use chrono::{Datelike, Timelike};
-use snapshot_client::SnapshotClient;
+use plist::Value;
+use snapshot_client::{BrokeredSnapshotSource, SnapshotClient};
 use sqlx::Row;
 use televy_backup_core::status::{
     ActiveTask, BackupQueueMembership, Counter, GlobalStatus, Progress, Rate, StatusSnapshot,
@@ -19,8 +21,8 @@ use televy_backup_core::status::{
     status_ipc_socket_path, status_json_path, write_status_snapshot_json_atomic_with_options,
 };
 use televy_backup_core::{
-    BackupConfig, BackupOptions, ChunkingConfig, SourceQuickStats, TelegramMtProtoStorage,
-    TelegramMtProtoStorageConfig,
+    BackupConfig, BackupOptions, BackupSource, ChunkingConfig, SourceQuickStats,
+    TelegramMtProtoStorage, TelegramMtProtoStorageConfig,
 };
 use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
@@ -3104,16 +3106,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let snapshot_client = SnapshotClient::default();
+            let snapshot_client = SnapshotClient::for_data_root(&data_root);
             let enabled_snapshot_volumes = settings
                 .snapshot_volumes
                 .iter()
                 .filter(|(_, setting)| setting.enabled)
                 .map(|(volume_uuid, _)| volume_uuid.to_ascii_lowercase())
                 .collect::<HashSet<_>>();
-            let mut snapshot_read_root: Option<PathBuf> = None;
+            let mut snapshot_source: Option<BrokeredSnapshotSource> = None;
             let snapshot_lease_state: Arc<
-                Mutex<Option<televybackup_snapshot_helper::LeaseResult>>,
+                Mutex<Option<televybackup_snapshot_access::LeaseResult>>,
             > = Arc::new(Mutex::new(None));
             if !enabled_snapshot_volumes.is_empty() {
                 if !Path::new(&target.source_path).exists() {
@@ -3126,6 +3128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     backup_task_failed(
                         &status_state,
                         &target.id,
+                        Some(&task_id),
                         started.elapsed().as_secs_f64(),
                         "snapshot.source_unavailable",
                     );
@@ -3135,78 +3138,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     lifecycle.finish_task();
                     continue;
                 }
-                match snapshot_client
-                    .probe(Path::new(&target.source_path), None)
-                    .await
-                {
-                    Ok(probe)
-                        if enabled_snapshot_volumes
-                            .contains(&probe.volume_uuid.to_ascii_lowercase()) =>
-                    {
-                        match snapshot_client
-                            .acquire_lease(
-                                Path::new(&target.source_path),
-                                &probe.volume_uuid,
-                                &task_id,
-                            )
-                            .await
-                        {
-                            Ok(lease) => {
-                                snapshot_read_root = Some(
-                                    PathBuf::from(&lease.mount_root)
-                                        .join(&lease.source_relative_path),
-                                );
-                                if let Ok(mut slot) = snapshot_lease_state.lock() {
-                                    *slot = Some(lease);
-                                }
-                            }
-                            Err(error) => {
-                                tracing::error!(
-                                    event = "snapshot.acquire_failed",
-                                    target_id = %target.id,
-                                    source_path = %target.source_path,
-                                    error = %error,
-                                    "snapshot.acquire_failed"
-                                );
-                                backup_task_failed(
-                                    &status_state,
-                                    &target.id,
-                                    started.elapsed().as_secs_f64(),
-                                    "snapshot.acquire_failed",
-                                );
-                                if is_queued_target {
-                                    complete_backup_queue_target(
-                                        &backup_queue,
-                                        &status_state,
-                                        &target.id,
-                                    );
-                                }
-                                lifecycle.finish_task();
-                                continue;
-                            }
-                        }
-                    }
-                    Ok(probe) => {
-                        tracing::debug!(
-                            event = "snapshot.disabled_for_volume",
-                            target_id = %target.id,
-                            volume_uuid = %probe.volume_uuid,
-                            "snapshot.disabled_for_volume"
-                        );
-                    }
-                    Err(error) => {
+                let target_volume_uuid = target_volume_uuid(Path::new(&target.source_path));
+                let strict_for_target = match target_volume_uuid.as_deref() {
+                    Some(volume_uuid) => enabled_snapshot_volumes.contains(volume_uuid),
+                    None => {
                         tracing::error!(
-                            event = "snapshot.probe_failed",
+                            event = "snapshot.volume_identity_failed",
                             target_id = %target.id,
-                            source_path = %target.source_path,
-                            error = %error,
-                            "snapshot.probe_failed"
+                            error_code = "snapshot.volume_identity_failed",
+                            "snapshot.volume_identity_failed"
                         );
                         backup_task_failed(
                             &status_state,
                             &target.id,
+                            Some(&task_id),
                             started.elapsed().as_secs_f64(),
-                            "snapshot.probe_failed",
+                            "snapshot.volume_identity_failed",
                         );
                         if is_queued_target {
                             complete_backup_queue_target(&backup_queue, &status_state, &target.id);
@@ -3214,6 +3161,112 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         lifecycle.finish_task();
                         continue;
                     }
+                };
+                if strict_for_target {
+                    match snapshot_client.probe_volume(&target.id).await {
+                        Ok(probe)
+                            if enabled_snapshot_volumes
+                                .contains(&probe.volume_uuid.to_ascii_lowercase()) =>
+                        {
+                            match snapshot_client
+                                .acquire_lease(&target.id, &probe.volume_uuid, &task_id)
+                                .await
+                            {
+                                Ok(lease) => {
+                                    snapshot_source = Some(BrokeredSnapshotSource::new(
+                                        snapshot_client.clone(),
+                                        lease.lease_id.clone(),
+                                        PathBuf::from(&target.source_path),
+                                    ));
+                                    if let Ok(mut slot) = snapshot_lease_state.lock() {
+                                        *slot = Some(lease);
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::error!(
+                                        event = "snapshot.acquire_failed",
+                                        target_id = %target.id,
+                                        source_path = %target.source_path,
+                                        error = %error,
+                                        "snapshot.acquire_failed"
+                                    );
+                                    backup_task_failed(
+                                        &status_state,
+                                        &target.id,
+                                        Some(&task_id),
+                                        started.elapsed().as_secs_f64(),
+                                        "snapshot.acquire_failed",
+                                    );
+                                    if is_queued_target {
+                                        complete_backup_queue_target(
+                                            &backup_queue,
+                                            &status_state,
+                                            &target.id,
+                                        );
+                                    }
+                                    lifecycle.finish_task();
+                                    continue;
+                                }
+                            }
+                        }
+                        Ok(_probe) => {
+                            tracing::error!(
+                                event = "snapshot.volume_identity_changed",
+                                target_id = %target.id,
+                                error_code = "snapshot.volume_identity_changed",
+                                "snapshot.volume_identity_changed"
+                            );
+                            backup_task_failed(
+                                &status_state,
+                                &target.id,
+                                Some(&task_id),
+                                started.elapsed().as_secs_f64(),
+                                "snapshot.volume_identity_changed",
+                            );
+                            if is_queued_target {
+                                complete_backup_queue_target(
+                                    &backup_queue,
+                                    &status_state,
+                                    &target.id,
+                                );
+                            }
+                            lifecycle.finish_task();
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                event = "snapshot.probe_failed",
+                                target_id = %target.id,
+                                source_path = %target.source_path,
+                                error = %error,
+                                "snapshot.probe_failed"
+                            );
+                            backup_task_failed(
+                                &status_state,
+                                &target.id,
+                                Some(&task_id),
+                                started.elapsed().as_secs_f64(),
+                                "snapshot.probe_failed",
+                            );
+                            if is_queued_target {
+                                complete_backup_queue_target(
+                                    &backup_queue,
+                                    &status_state,
+                                    &target.id,
+                                );
+                            }
+                            lifecycle.finish_task();
+                            continue;
+                        }
+                    }
+                } else {
+                    // A target whose current volume is not enabled is explicitly in live mode.
+                    tracing::debug!(
+                        event = "snapshot.disabled_for_volume",
+                        target_id = %target.id,
+                        volume_uuid = %target_volume_uuid.as_deref().unwrap_or("unknown"),
+                        "snapshot.disabled_for_volume"
+                    );
                 }
             }
 
@@ -3277,47 +3330,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state: status_state.clone(),
             };
             let progress_sink = Some(&sink as &dyn ProgressSink);
-            let quick_stats_cancel = task_cancel.clone();
-            let quick_stats_cancel_for_task = quick_stats_cancel.clone();
-            let quick_stats_source = snapshot_read_root
-                .clone()
-                .unwrap_or_else(|| PathBuf::from(&target.source_path));
-            let prepare_res = tokio::try_join!(
-                preflight_remote_first_index_sync_daemon(
-                    storage,
-                    &master_key,
-                    &target.id,
-                    &target.source_path,
-                    &db_path,
-                    &filemap_dir,
-                    &dedupe_db_path,
-                    is_likely_private_chat_id(&ep.chat_id),
-                    progress_sink,
-                    &task_cancel,
-                ),
-                async {
-                    match preflight_local_quick_stats_daemon(
-                        &quick_stats_source,
-                        progress_sink,
-                        Some(quick_stats_cancel_for_task),
-                    )
-                    .await
-                    {
-                        Ok(stats) => Ok(Some(stats)),
-                        Err(e) => {
-                            tracing::warn!(
-                                event = "prepare.local_quick_stats_failed",
-                                target_id = %target.id,
-                                source_path = %target.source_path,
-                                error_code = e.code(),
-                                error_message = %e,
-                                "prepare.local_quick_stats_failed"
-                            );
-                            Ok(None)
-                        }
+            let prepare_remote = preflight_remote_first_index_sync_daemon(
+                storage,
+                &master_key,
+                &target.id,
+                &target.source_path,
+                &db_path,
+                &filemap_dir,
+                &dedupe_db_path,
+                is_likely_private_chat_id(&ep.chat_id),
+                progress_sink,
+                &task_cancel,
+            )
+            .await;
+            let quick_stats = if let Some(source) = snapshot_source.as_ref() {
+                match source.entries(Some(&task_cancel)) {
+                    Ok(entries) => Some(SourceQuickStats {
+                        files_total: entries.iter().filter(|entry| entry.kind == "file").count()
+                            as u64,
+                        bytes_total: entries
+                            .iter()
+                            .filter(|entry| entry.kind == "file")
+                            .map(|entry| entry.size.max(0) as u64)
+                            .sum(),
+                    }),
+                    Err(error) => {
+                        tracing::warn!(event = "prepare.snapshot_quick_stats_failed", target_id = %target.id, error = %error, "prepare.snapshot_quick_stats_failed");
+                        None
                     }
                 }
-            );
+            } else {
+                match preflight_local_quick_stats_daemon(
+                    Path::new(&target.source_path),
+                    progress_sink,
+                    Some(task_cancel.clone()),
+                )
+                .await
+                {
+                    Ok(stats) => Some(stats),
+                    Err(error) => {
+                        tracing::warn!(event = "prepare.local_quick_stats_failed", target_id = %target.id, error_code = error.code(), error_message = %error, "prepare.local_quick_stats_failed");
+                        None
+                    }
+                }
+            };
+            let prepare_res = prepare_remote.map(|remote_dedupe| (remote_dedupe, quick_stats));
 
             let release_handles: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> =
                 Arc::new(Mutex::new(None));
@@ -3378,21 +3435,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         progress: progress_sink,
                         source_quick_stats: quick_stats,
                     };
-                    televy_backup_core::run_backup_with_read_root(
-                        storage,
-                        cfg,
-                        opts,
-                        snapshot_read_root.as_deref(),
-                        snapshot_read_root
-                            .as_ref()
-                            .map(|_| &release_callback as &(dyn Fn() + Send + Sync)),
-                    )
-                    .await
+                    if let Some(source) = snapshot_source.as_ref() {
+                        televy_backup_core::run_backup_with_source(
+                            storage,
+                            cfg,
+                            opts,
+                            source,
+                            Some(&release_callback as &(dyn Fn() + Send + Sync)),
+                        )
+                        .await
+                    } else {
+                        televy_backup_core::run_backup_with_read_root(
+                            storage, cfg, opts, None, None,
+                        )
+                        .await
+                    }
                 }
-                Err(e) => {
-                    quick_stats_cancel.cancel();
-                    Err(e)
-                }
+                Err(e) => Err(e),
             };
 
             if let Some(handle) = release_handles.lock().ok().and_then(|mut slot| slot.take()) {
@@ -4009,6 +4068,25 @@ fn parse_hhmm(s: &str) -> Result<(u8, u8), Box<dyn std::error::Error>> {
     let hh: u8 = hh.parse()?;
     let mm: u8 = mm.parse()?;
     Ok((hh, mm))
+}
+
+// Volume UUID lookup is metadata-only and does not grant the daemon access to source bytes.
+// It lets disabled volumes stay on the existing live adapter when Snapshot Access is offline,
+// while an enabled volume fails closed if its identity cannot be established.
+fn target_volume_uuid(source_path: &Path) -> Option<String> {
+    let output = Command::new("/usr/sbin/diskutil")
+        .args(["info", "-plist", source_path.to_string_lossy().as_ref()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = Value::from_reader_xml(output.stdout.as_slice()).ok()?;
+    let dict = value.as_dictionary()?;
+    dict.get("APFSVolumeUUID")
+        .or_else(|| dict.get("VolumeUUID"))
+        .and_then(Value::as_string)
+        .map(|uuid| uuid.to_ascii_lowercase())
 }
 
 fn default_config_dir() -> PathBuf {

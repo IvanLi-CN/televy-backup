@@ -275,12 +275,76 @@ struct SnapshotVolumeStatus: Decodable, Identifiable, Equatable {
 
 struct SnapshotControlStatus: Decodable, Equatable {
     let consistencyMode: String
-    let helperAvailable: Bool
-    let helperVersion: String?
-    let helperError: String?
+    let serviceReachable: Bool
+    let accessAppVersion: String?
+    let accessAppPath: String?
+    let fdaReady: Bool
+    let accessAppError: String?
+    let mountHelperPath: String?
+    let mountHelperReachable: Bool
+    let mountHelperVersion: String?
+    let mountHelperError: String?
     let activeLeases: UInt32
     let pendingCleanup: UInt32
     let volumes: [SnapshotVolumeStatus]
+
+    private enum CodingKeys: String, CodingKey {
+        case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, fdaReady, accessAppError
+        case mountHelperPath, mountHelperReachable, mountHelperVersion, mountHelperError
+        case helperAvailable, helperVersion, helperError
+        case activeLeases, pendingCleanup, volumes
+    }
+
+    init(
+        consistencyMode: String,
+        serviceReachable: Bool,
+        accessAppVersion: String?,
+        accessAppPath: String?,
+        fdaReady: Bool,
+        accessAppError: String?,
+        mountHelperPath: String? = nil,
+        mountHelperReachable: Bool = false,
+        mountHelperVersion: String? = nil,
+        mountHelperError: String? = nil,
+        activeLeases: UInt32,
+        pendingCleanup: UInt32,
+        volumes: [SnapshotVolumeStatus]
+    ) {
+        self.consistencyMode = consistencyMode
+        self.serviceReachable = serviceReachable
+        self.accessAppVersion = accessAppVersion
+        self.accessAppPath = accessAppPath
+        self.fdaReady = fdaReady
+        self.accessAppError = accessAppError
+        self.mountHelperPath = mountHelperPath
+        self.mountHelperReachable = mountHelperReachable
+        self.mountHelperVersion = mountHelperVersion
+        self.mountHelperError = mountHelperError
+        self.activeLeases = activeLeases
+        self.pendingCleanup = pendingCleanup
+        self.volumes = volumes
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        consistencyMode = try values.decodeIfPresent(String.self, forKey: .consistencyMode) ?? "live"
+        serviceReachable = try values.decodeIfPresent(Bool.self, forKey: .serviceReachable)
+            ?? (try values.decodeIfPresent(Bool.self, forKey: .helperAvailable))
+            ?? false
+        accessAppVersion = try values.decodeIfPresent(String.self, forKey: .accessAppVersion)
+            ?? (try values.decodeIfPresent(String.self, forKey: .helperVersion))
+        accessAppPath = try values.decodeIfPresent(String.self, forKey: .accessAppPath)
+        fdaReady = try values.decodeIfPresent(Bool.self, forKey: .fdaReady) ?? false
+        accessAppError = try values.decodeIfPresent(String.self, forKey: .accessAppError)
+            ?? (try values.decodeIfPresent(String.self, forKey: .helperError))
+        mountHelperReachable = try values.decodeIfPresent(Bool.self, forKey: .mountHelperReachable) ?? false
+        mountHelperPath = try values.decodeIfPresent(String.self, forKey: .mountHelperPath)
+        mountHelperVersion = try values.decodeIfPresent(String.self, forKey: .mountHelperVersion)
+        mountHelperError = try values.decodeIfPresent(String.self, forKey: .mountHelperError)
+        activeLeases = try values.decodeIfPresent(UInt32.self, forKey: .activeLeases) ?? 0
+        pendingCleanup = try values.decodeIfPresent(UInt32.self, forKey: .pendingCleanup) ?? 0
+        volumes = try values.decodeIfPresent([SnapshotVolumeStatus].self, forKey: .volumes) ?? []
+    }
 }
 
 struct SnapshotProbeResponse: Decodable {
@@ -289,6 +353,15 @@ struct SnapshotProbeResponse: Decodable {
     let freeBytes: UInt64
     let snapshotSupported: Bool
     let reason: String?
+}
+
+struct SnapshotVerificationResponse: Decodable {
+    let volumeUuid: String
+    let verified: Bool
+    let snapshotReadPreMutation: Bool
+    let liveMutationObserved: Bool
+    let leasesReleased: Bool
+    let cleanupComplete: Bool
 }
 
 struct ScheduleV2: Codable {
@@ -779,12 +852,12 @@ struct SettingsWindowRootView: View {
 
     private var snapshotsView: some View {
         let configured = settings?.snapshot_volumes ?? [:]
-        let targetPaths = settings?.targets.map(\.source_path) ?? []
+        let targets = settings?.targets ?? []
         return ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 Text("APFS snapshots")
                     .font(.system(size: 18, weight: .bold))
-                Text("Enabled volumes use a strict filesystem snapshot. If the helper cannot create or mount one, that backup fails instead of reading the live directory.")
+                Text("Enabled volumes use a strict filesystem snapshot. If Snapshot Access or the mount helper cannot create or mount one, that backup fails instead of reading the live directory.")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: 620, alignment: .leading)
@@ -844,14 +917,14 @@ struct SettingsWindowRootView: View {
 
                 GroupBox {
                     VStack(alignment: .leading, spacing: 8) {
-                        ForEach(targetPaths, id: \.self) { path in
+                        ForEach(targets, id: \.id) { target in
                             HStack {
-                                Text(path)
+                                Text(target.source_path)
                                     .font(.system(size: 12, design: .monospaced))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                                 Spacer()
-                                Button("Verify volume") { discoverSnapshotVolume(path) }
+                                Button("Verify volume") { discoverSnapshotVolume(target.id) }
                                     .buttonStyle(.bordered)
                                     .disabled(snapshotBusy)
                             }
@@ -863,8 +936,8 @@ struct SettingsWindowRootView: View {
                         .font(.system(size: 13, weight: .semibold))
                 }
 
-                if let snapshotStatus, !snapshotStatus.helperAvailable {
-                    Label(snapshotStatus.helperError ?? "The snapshot helper is not installed", systemImage: "exclamationmark.triangle")
+                if let snapshotStatus, !snapshotStatus.serviceReachable {
+                    Label(snapshotStatus.accessAppError ?? "Snapshot Access service is unavailable", systemImage: "exclamationmark.triangle")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.orange)
                 }
@@ -874,7 +947,7 @@ struct SettingsWindowRootView: View {
                         .foregroundStyle(.red)
                 }
 
-                snapshotHelperView
+                snapshotAccessView
             }
             .frame(maxWidth: 700, alignment: .leading)
             .padding(.horizontal, 24)
@@ -882,21 +955,72 @@ struct SettingsWindowRootView: View {
             .frame(maxWidth: .infinity, alignment: .center)
         }
         .onAppear { refreshSnapshotStatus() }
+        .task(id: section) {
+            guard section == .snapshots else { return }
+            while !Task.isCancelled {
+                refreshSnapshotStatus()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
     }
 
-    private var snapshotHelperView: some View {
+    private var snapshotAccessView: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                Text("The helper is installed once with administrator approval. Scheduled backups never ask for a password.")
+                if let snapshotStatus {
+                    let accessState: (String, String, Color) = if !snapshotStatus.serviceReachable && snapshotStatus.accessAppPath == nil {
+                        ("Not installed", "xmark.circle", .secondary)
+                    } else if !snapshotStatus.fdaReady {
+                        ("Blocked: Full Disk Access required", "exclamationmark.shield.fill", .orange)
+                    } else if !snapshotStatus.mountHelperReachable {
+                        ("Blocked: mount helper unavailable", "exclamationmark.triangle.fill", .orange)
+                    } else {
+                        ("Validated", "checkmark.shield.fill", .green)
+                    }
+                    Label("Snapshot Access · \(accessState.0)", systemImage: accessState.1)
+                        .foregroundStyle(accessState.2)
+                    if let path = snapshotStatus.accessAppPath {
+                        Text(path).font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                    }
+                    if let version = snapshotStatus.accessAppVersion { Text("Version \(version)").font(.system(size: 11)).foregroundStyle(.secondary) }
+                    if let path = snapshotStatus.mountHelperPath {
+                        Text(path).font(.system(size: 11, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                    }
+                    Label(
+                        snapshotStatus.mountHelperReachable ? "Snapshot mount helper installed" : "Snapshot mount helper required",
+                        systemImage: snapshotStatus.mountHelperReachable ? "checkmark.circle.fill" : "exclamationmark.circle"
+                    )
+                    .foregroundStyle(snapshotStatus.mountHelperReachable ? .green : .orange)
+                    if let version = snapshotStatus.mountHelperVersion {
+                        Text("Mount helper version \(version)").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    if let error = snapshotStatus.mountHelperError, !snapshotStatus.mountHelperReachable {
+                        Text(error).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+                        Text("Install once from Terminal: sudo televybackup snapshot-mount-helper install")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+                Text("Snapshot Access is a separate user app. Grant Full Disk Access to the exact path shown above. If macOS lists the installed mount helper separately, grant access to that exact helper path too. Strict APFS backups also require the separately installed mount helper.")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 HStack {
-                    Button("Install / update") { performSnapshotHelperAction("install") }
+                    Button("Open Privacy Settings") { openSnapshotPrivacySettings() }
                         .buttonStyle(.bordered)
-                        .disabled(snapshotBusy)
-                    Button("Uninstall") { performSnapshotHelperAction("uninstall") }
-                        .buttonStyle(.borderless)
-                        .disabled(snapshotBusy)
+                    .disabled(snapshotBusy)
+                    if let snapshotStatus, !snapshotStatus.mountHelperReachable {
+                        Button("Install mount helper") {
+                            snapshotBusy = true
+                            model.installSnapshotMountHelper { success, error in
+                                snapshotBusy = false
+                                if !success { snapshotError = error ?? "The mount helper could not be installed" }
+                                refreshSnapshotStatus()
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(snapshotBusy || SettingsUIDemo.enabled)
+                    }
                     Button("Refresh") { refreshSnapshotStatus() }
                         .buttonStyle(.borderless)
                         .disabled(snapshotBusy)
@@ -904,7 +1028,7 @@ struct SettingsWindowRootView: View {
             }
             .padding(14)
         } label: {
-            Text("Snapshot helper")
+            Text("Snapshot Access")
                 .font(.system(size: 13, weight: .semibold))
         }
     }
@@ -912,11 +1036,19 @@ struct SettingsWindowRootView: View {
     private func refreshSnapshotStatus() {
         if SettingsUIDemo.enabled {
             let strict = SettingsUIDemo.scene != "snapshots-disabled"
+            let accessMissing = SettingsUIDemo.scene == "snapshots-helper-missing"
+            let mountHelperMissing = SettingsUIDemo.scene == "snapshots-mount-helper-missing"
             snapshotStatus = SnapshotControlStatus(
                 consistencyMode: strict ? "strict" : "live",
-                helperAvailable: SettingsUIDemo.scene != "snapshots-helper-missing",
-                helperVersion: "0.1.0",
-                helperError: SettingsUIDemo.scene == "snapshots-helper-missing" ? "Snapshot helper is not installed" : nil,
+                serviceReachable: !accessMissing,
+                accessAppVersion: accessMissing ? nil : "0.2.0",
+                accessAppPath: accessMissing ? nil : "~/Applications/TelevyBackup Snapshot Access.app",
+                fdaReady: !accessMissing && SettingsUIDemo.scene != "snapshots-fda-required",
+                accessAppError: accessMissing ? "Snapshot Access is not installed" : (SettingsUIDemo.scene == "snapshots-fda-required" ? "Full Disk Access is required" : nil),
+                mountHelperPath: "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
+                mountHelperReachable: !accessMissing && !mountHelperMissing,
+                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.1.0" : nil,
+                mountHelperError: mountHelperMissing ? "Snapshot mount helper is not installed" : nil,
                 activeLeases: 0,
                 pendingCleanup: SettingsUIDemo.scene == "snapshots-cleanup-pending" ? 1 : 0,
                 volumes: (settings?.snapshot_volumes ?? [:]).map { SnapshotVolumeStatus(volumeUuid: $0.key, enabled: $0.value.enabled, mode: $0.value.enabled ? "strict" : "disabled") }
@@ -938,29 +1070,24 @@ struct SettingsWindowRootView: View {
         refreshSnapshotStatus()
     }
 
-    private func discoverSnapshotVolume(_ path: String) {
+    private func discoverSnapshotVolume(_ targetId: String) {
         snapshotBusy = true
         snapshotError = nil
-        model.probeSnapshotVolume(path: path) { probe, error in
+        model.verifySnapshotVolume(targetId: targetId) { verification, error in
             snapshotBusy = false
-            if let probe {
-                settings?.snapshot_volumes[probe.volumeUuid] = SnapshotVolumeSettingV2(enabled: probe.snapshotSupported)
+            if let verification, verification.verified {
+                settings?.snapshot_volumes[verification.volumeUuid] = SnapshotVolumeSettingV2(enabled: true)
                 queueAutoSave()
                 refreshSnapshotStatus()
             } else {
-                snapshotError = error ?? "The volume could not be verified"
+                snapshotError = error ?? "The snapshot timepoint could not be verified"
             }
         }
     }
 
-    private func performSnapshotHelperAction(_ action: String) {
-        snapshotBusy = true
-        snapshotError = nil
-        model.performSnapshotHelperAction(action) { success, error in
-            snapshotBusy = false
-            if !success { snapshotError = error ?? "Snapshot helper operation failed" }
-            refreshSnapshotStatus()
-        }
+    private func openSnapshotPrivacySettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private var diagnosticsView: some View {

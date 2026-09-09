@@ -6,7 +6,7 @@
 
 ## Context and Scope
 
-This topic owns the macOS distribution surface for TelevyBackup: three GUI DMGs, native arm64 and x86_64 tool archives, Universal 2 binaries, checksums, build manifests, and the product-managed per-user daemon service.
+This topic owns the macOS distribution surface for TelevyBackup: three GUI DMGs, native arm64 and x86_64 tool archives, Universal 2 binaries, checksums, build manifests, the product-managed per-user daemon service, the separate FDA Snapshot Access app, and the minimal root mount helper.
 
 It does not own backup formats, Telegram protocol behavior, Apple Developer ID signing, notarization, App Store delivery, automatic updates, or Homebrew formula maintenance.
 
@@ -15,6 +15,8 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 - **Release version**: the complete semver-like version shown to users, including an RC suffix.
 - **Build number**: a deterministic numeric `CFBundleVersion` derived from the source history.
 - **Managed service**: the single user LaunchAgent labeled `com.ivan.televybackup.daemon`.
+- **Snapshot Access app**: the standalone `TelevyBackup Snapshot Access.app`; FDA applies to this exact bundle path.
+- **Mount helper**: the root LaunchDaemon labeled `com.ivan.televybackup.snapshot-mount-helper`; it only mounts, unmounts, and UUID-cleans snapshots.
 - **Environment**: the exact config and data directory pair passed to the daemon.
 - **Universal 2**: a Mach-O binary containing both arm64 and x86_64 slices.
 - **Brand bundle**: the compiled `Assets.car` App Icon catalog, the `TelevyBackup.icns` compatibility fallback, and the three runtime SVGs under `Contents/Resources/Brand`.
@@ -23,15 +25,15 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 
 ### REQ-MRD-001: Traceable release assets
 
-Every stable or RC release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBackup-<version>-arm64.dmg`, `TelevyBackup-<version>-x86_64.dmg`, `televybackup-tools-<version>-arm64.tar.gz`, `televybackup-tools-<version>-x86_64.tar.gz`, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after all asset checks pass. Each DMG MUST contain one installable app entry named `TelevyBackup.app`; version and architecture belong in the downloadable DMG filename, not the app entry name.
+Every stable or RC release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBackup-<version>-arm64.dmg`, `TelevyBackup-<version>-x86_64.dmg`, `televybackup-tools-<version>-arm64.tar.gz`, `televybackup-tools-<version>-x86_64.tar.gz`, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after all asset checks pass. Each DMG MUST contain the installable `TelevyBackup.app` and its separately identified `TelevyBackup Snapshot Access.app`; version and architecture belong in the downloadable DMG filename, not the app entry names.
 
 ### REQ-MRD-002: Native build matrix
 
-arm64 assets MUST be built on `macos-15`; x86_64 assets MUST be built on `macos-15-intel`. Universal 2 assembly MUST combine those native slices and verify all four embedded executables.
+arm64 assets MUST be built on `macos-15`; x86_64 assets MUST be built on `macos-15-intel`. Universal 2 assembly MUST combine those native slices and verify the main app executables and the standalone Snapshot Access executable.
 
 ### REQ-MRD-003: Version observability
 
-The App MUST use a numeric `CFBundleShortVersionString`, deterministic numeric `CFBundleVersion`, and a full `TelevyBackupReleaseVersion` key. `televybackup`, `televybackupd`, and `televybackup-mtproto-helper` MUST expose `--version` with release version and source commit.
+The App and Snapshot Access bundle MUST use numeric short versions and deterministic build numbers. `televybackup`, `televybackupd`, `televybackup-mtproto-helper`, `televybackup-snapshot-access`, and `televybackup-snapshot-mount-helper` MUST expose `--version` with release version and source commit.
 
 ### REQ-MRD-004: Controlled signing
 
@@ -61,6 +63,10 @@ Every GUI app bundle MUST contain `TelevyBackup.icns`, declare it through
 include the light UI, dark UI, and monochrome template SVGs under
 `Contents/Resources/Brand`. The iconset, asset catalog, and runtime SVGs MUST be
 generated from the selected Graphite Azure geometry without embedded raster data.
+
+### REQ-MRD-010: Strict snapshot packaging
+
+The app and tool archive MUST contain a separate Snapshot Access app, the mount-helper executable, and a LaunchDaemon template. The CLI MUST expose `snapshot-access install --app`, `snapshot-access status`, `snapshot-access verify`, `snapshot-access uninstall`, plus explicit mount-helper transactions. Mount-helper install/update/uninstall MUST require administrator authorization and MUST refuse to run while an active mount or pending cleanup exists. Scheduled backups MUST use the installed components without prompting.
 
 ## Compatibility
 
@@ -98,6 +104,7 @@ Covers: REQ-MRD-007. Swift unit tests and isolated Settings snapshots provide th
 | REQ-MRD-005, 006 | CLI service tests; transaction fixture |
 | REQ-MRD-007 | Swift unit tests; isolated Settings snapshots |
 | REQ-MRD-009 | app build; brand and App Icon asset verifiers; bundle inspection |
+| REQ-MRD-010 | package verifier; Access bundle inspection; helper transaction tests |
 
 ## Related ADRs
 

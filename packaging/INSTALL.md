@@ -8,22 +8,6 @@
    ```
 
 3. The controlled distribution is ad-hoc signed. macOS may show a Gatekeeper warning. After verifying the checksum, open the app from Finder and use **Open** in the confirmation dialog. Do not remove quarantine before checksum verification.
-4. The tool archive contains `televybackup`, `televybackupd`, `televybackup-mtproto-helper`, and a LaunchAgent template. Install the managed service explicitly with `televybackup daemon install-service`; uninstalling the service does not remove configuration or backup data.
-
-## Strict APFS snapshots
-
-The package also contains `TelevyBackup Snapshot Access.app` and the separately
-installed root mount-helper artifact. Install the Access app at a user-selected
-stable path, then run:
-
-```sh
-televybackup snapshot-access install --app "/path/to/TelevyBackup Snapshot Access.app"
-```
-
-The command creates the user LaunchAgent and performs the one-time administrator
-transaction for the mount helper. Grant Full Disk Access manually to the exact
-Access App and helper paths shown by `televybackup snapshot-access status`.
-Normal and scheduled backups do not ask for a password. Strict mode remains
-disabled until an explicit time-point verification succeeds.
+4. The tool archive contains `televybackup`, `televybackupd`, `televybackup-mtproto-helper`, the separate `TelevyBackup Snapshot Access.app`, and the narrowly-scoped `televybackup-snapshot-mount-helper`. Install the user services with `televybackup daemon install-service` and `televybackup snapshot-access install --app <path>`. Install the mount helper once from an administrator-authorized shell with `sudo televybackup snapshot-mount-helper install`; this is only needed for strict APFS snapshot backups. Grant Full Disk Access to the exact Snapshot Access app path and, when macOS lists it separately, the installed mount-helper path. Scheduled backups do not authenticate. Uninstalling either service does not remove configuration or backup data.
 
 Developer ID signing, notarization, automatic updates, and Homebrew formula updates are not part of this distribution.

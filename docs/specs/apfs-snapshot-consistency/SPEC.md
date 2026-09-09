@@ -42,10 +42,13 @@ configured target remains disabled after import.
 
 Snapshot Access exposes a versioned private Unix IPC protocol with these
 operations: `Status`, `ProbeVolume`, `AcquireLease`, `ScanPage`,
-`OpenReadStream`, `ReleaseLease`, and `VerifyTimepoint`.
+`OpenReadStream`, `ReadStream`, `CloseReadStream`, `ReleaseLease`, and
+`VerifyTimepoint`.
 
-Requests use configured target IDs, never arbitrary paths. One lease may include
-multiple targets only when all targets resolve to the same validated volume.
+Requests use configured target IDs, never arbitrary paths. The daemon coalesces
+same-volume work before admission and each active lease is bound to one
+configured target and its validated volume; a second lease for that volume is
+rejected until cleanup completes.
 The stream protocol uses bounded frames and backpressure; no response exposes a
 mount point or snapshot UUID.
 

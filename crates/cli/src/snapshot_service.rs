@@ -1,49 +1,80 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixStream;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use plist::Value;
 use serde_json::json;
-use televybackup_snapshot_helper::{
-    DEFAULT_SOCKET_PATH, Method, PROTOCOL_VERSION, Request, Response, ResponseResult, StatusResult,
+use televybackup_snapshot_access::{
+    Method, PROTOCOL_VERSION, Request, Response, ResponseResult, StatusResult,
 };
 use uuid::Uuid;
 
 use super::CliError;
 
-pub const HELPER_LABEL: &str = "com.ivan.televybackup.snapshot-helper";
-const HELPER_INSTALL_PATH: &str =
-    "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-helper";
-const HELPER_PLIST_PATH: &str =
-    "/Library/LaunchDaemons/com.ivan.televybackup.snapshot-helper.plist";
+pub const ACCESS_LABEL: &str = "com.ivan.televybackup.snapshot-access";
+const MANIFEST_FILE: &str = "snapshot-access/service.json";
 
-fn current_executable_sibling() -> Result<PathBuf, CliError> {
-    let executable = std::env::current_exe().map_err(|error| {
-        CliError::new("snapshot_helper.executable_unavailable", error.to_string())
-    })?;
-    let parent = executable.parent().ok_or_else(|| {
-        CliError::new(
-            "snapshot_helper.executable_unavailable",
-            "CLI has no parent directory",
-        )
-    })?;
-    let helper = parent.join("televybackup-snapshot-helper");
-    if !helper.is_file() {
-        return Err(CliError::new(
-            "snapshot_helper.executable_unavailable",
-            format!("snapshot helper binary not found: {}", helper.display()),
-        ));
-    }
-    Ok(helper)
+fn user_service_target(domain: &str) -> String {
+    format!("{domain}/{ACCESS_LABEL}")
 }
 
-fn require_root() -> Result<(), CliError> {
-    if unsafe { libc::geteuid() } != 0 {
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+fn plist_path() -> PathBuf {
+    std::env::var_os("TELEVYBACKUP_SNAPSHOT_ACCESS_PLIST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            home_dir()
+                .join("Library/LaunchAgents")
+                .join(format!("{ACCESS_LABEL}.plist"))
+        })
+}
+fn manifest_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(MANIFEST_FILE)
+}
+
+fn validate_access_bundle(app: &Path, executable: &Path) -> Result<(), CliError> {
+    if app.extension().and_then(|value| value.to_str()) != Some("app") {
         return Err(CliError::new(
-            "snapshot_helper.admin_required",
-            "snapshot helper installation must be run as root",
+            "snapshot_access.app_invalid",
+            "--app must point to a Snapshot Access .app bundle",
+        ));
+    }
+    let info_path = app.join("Contents/Info.plist");
+    let value = Value::from_file(&info_path).map_err(|error| {
+        CliError::new(
+            "snapshot_access.app_invalid",
+            format!("cannot read Snapshot Access Info.plist: {error}"),
+        )
+    })?;
+    let dictionary = value.as_dictionary().ok_or_else(|| {
+        CliError::new(
+            "snapshot_access.app_invalid",
+            "Snapshot Access Info.plist is not a dictionary",
+        )
+    })?;
+    let bundle_id = dictionary
+        .get("CFBundleIdentifier")
+        .and_then(Value::as_string)
+        .unwrap_or_default();
+    let executable_name = dictionary
+        .get("CFBundleExecutable")
+        .and_then(Value::as_string)
+        .unwrap_or_default();
+    if bundle_id != ACCESS_LABEL || executable_name != "televybackup-snapshot-access" {
+        return Err(CliError::new(
+            "snapshot_access.app_invalid",
+            "the selected app is not TelevyBackup Snapshot Access.app",
+        ));
+    }
+    if !executable.is_file() {
+        return Err(CliError::new(
+            "snapshot_access.app_invalid",
+            "Snapshot Access executable is missing from the selected bundle",
         ));
     }
     Ok(())
@@ -54,14 +85,14 @@ fn launchctl(args: &[&str]) -> Result<(), CliError> {
         .args(args)
         .output()
         .map_err(|error| {
-            CliError::retryable("snapshot_helper.launchctl_failed", error.to_string())
+            CliError::retryable("snapshot_access.launchctl_failed", error.to_string())
         })?;
     if output.status.success() {
         return Ok(());
     }
     let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Err(CliError::retryable(
-        "snapshot_helper.launchctl_failed",
+        "snapshot_access.launchctl_failed",
         if message.is_empty() {
             format!("launchctl {} failed", args.join(" "))
         } else {
@@ -70,191 +101,292 @@ fn launchctl(args: &[&str]) -> Result<(), CliError> {
     ))
 }
 
-fn helper_status() -> Result<StatusResult, CliError> {
-    let mut stream = UnixStream::connect(DEFAULT_SOCKET_PATH).map_err(|error| {
-        CliError::retryable(
-            "snapshot_helper.unavailable",
-            format!("connect helper: {error}"),
-        )
-    })?;
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError::new("snapshot_access.install_failed", "path has no parent"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| CliError::new("snapshot_access.install_failed", error.to_string()))?;
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temp)
+        .map_err(|error| CliError::new("snapshot_access.install_failed", error.to_string()))?;
+    file.write_all(contents)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| CliError::new("snapshot_access.install_failed", error.to_string()))?;
+    fs::rename(temp, path)
+        .map_err(|error| CliError::new("snapshot_access.install_failed", error.to_string()))
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+fn plist_contents(app: &Path, config_dir: &Path, data_dir: &Path) -> String {
+    let socket = data_dir.join("snapshot-access/access.sock");
+    let journal = data_dir.join("snapshot-access/journal.sqlite");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>{ACCESS_LABEL}</string>
+<key>ProgramArguments</key><array><string>{}</string></array><key>EnvironmentVariables</key><dict>
+<key>TELEVYBACKUP_CONFIG_DIR</key><string>{}</string><key>TELEVYBACKUP_DATA_DIR</key><string>{}</string>
+<key>TELEVYBACKUP_SNAPSHOT_SOCKET</key><string>{}</string><key>TELEVYBACKUP_SNAPSHOT_JOURNAL</key><string>{}</string>
+</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+</dict></plist>
+"#,
+        xml_escape(&app.to_string_lossy()),
+        xml_escape(&config_dir.to_string_lossy()),
+        xml_escape(&data_dir.to_string_lossy()),
+        xml_escape(&socket.to_string_lossy()),
+        xml_escape(&journal.to_string_lossy())
+    )
+}
+
+fn status_from_socket(socket: &Path) -> Result<StatusResult, CliError> {
+    use std::io::{BufRead, Write};
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket)
+        .map_err(|error| CliError::retryable("snapshot_access.unavailable", error.to_string()))?;
     let request = Request {
         version: PROTOCOL_VERSION,
         request_id: Uuid::new_v4().to_string(),
         method: Method::Status,
     };
-    let mut encoded = serde_json::to_vec(&request)
-        .map_err(|error| CliError::new("snapshot_helper.protocol", error.to_string()))?;
-    encoded.push(b'\n');
+    let mut bytes = serde_json::to_vec(&request)
+        .map_err(|error| CliError::new("snapshot_access.protocol", error.to_string()))?;
+    bytes.push(b'\n');
     stream
-        .write_all(&encoded)
-        .map_err(|error| CliError::retryable("snapshot_helper.unavailable", error.to_string()))?;
+        .write_all(&bytes)
+        .map_err(|error| CliError::retryable("snapshot_access.unavailable", error.to_string()))?;
+    // Status includes a bounded round trip to the mount helper. The Access App
+    // uses its SQLite journal on that path, so three seconds can falsely report
+    // a healthy service as unavailable on a busy machine.
     stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .set_read_timeout(Some(std::time::Duration::from_secs(12)))
         .ok();
-    let mut response_line = String::new();
+    let mut line = String::new();
     std::io::BufReader::new(stream)
-        .read_line(&mut response_line)
-        .map_err(|error| CliError::retryable("snapshot_helper.unavailable", error.to_string()))?;
-    let response: Response = serde_json::from_str(response_line.trim())
-        .map_err(|error| CliError::new("snapshot_helper.protocol", error.to_string()))?;
+        .read_line(&mut line)
+        .map_err(|error| CliError::retryable("snapshot_access.unavailable", error.to_string()))?;
+    let response: Response = serde_json::from_str(line.trim())
+        .map_err(|error| CliError::new("snapshot_access.protocol", error.to_string()))?;
     if !response.ok {
         return Err(CliError::new(
-            "snapshot_helper.rejected",
-            response
-                .message
-                .unwrap_or_else(|| "helper rejected status request".into()),
+            "snapshot_access.rejected",
+            response.message.unwrap_or_else(|| "status rejected".into()),
         ));
     }
     match response.result {
         Some(ResponseResult::Status(status)) => Ok(status),
         _ => Err(CliError::new(
-            "snapshot_helper.protocol",
-            "status response was missing",
+            "snapshot_access.protocol",
+            "status response missing",
         )),
     }
 }
 
-fn reject_if_busy(operation: &str) -> Result<(), CliError> {
-    match helper_status() {
-        Ok(status) if status.active_leases > 0 || status.pending_cleanup > 0 => Err(
-            CliError::new(
-                "snapshot_helper.busy",
-                format!(
-                    "cannot {operation} while helper has {} active lease(s) and {} pending cleanup item(s)",
-                    status.active_leases, status.pending_cleanup
-                ),
-            )
-            .with_details(json!({
-                "activeLeases": status.active_leases,
-                "pendingCleanup": status.pending_cleanup,
-            })),
-        ),
-        Ok(_) => Ok(()),
-        Err(error) if error.code == "snapshot_helper.unavailable" => Ok(()),
-        Err(error) => Err(error),
+pub fn install(
+    app: PathBuf,
+    config_dir: &Path,
+    data_dir: &Path,
+    json_output: bool,
+) -> Result<(), CliError> {
+    if let Ok(payload) = status_payload(config_dir, data_dir)
+        && (payload["activeLeases"].as_u64().unwrap_or(0) > 0
+            || payload["pendingCleanup"].as_u64().unwrap_or(0) > 0)
+    {
+        return Err(CliError::new(
+            "snapshot_access.busy",
+            "cannot install or update while a snapshot lease or pending cleanup exists",
+        ));
     }
-}
-
-fn plist_contents() -> &'static str {
-    r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.ivan.televybackup.snapshot-helper</string>
-  <key>ProgramArguments</key><array><string>/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-helper</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Background</string>
-  <key>StandardOutPath</key><string>/var/log/com.ivan.televybackup.snapshot-helper.log</string>
-  <key>StandardErrorPath</key><string>/var/log/com.ivan.televybackup.snapshot-helper.log</string>
-</dict></plist>
-"#
-}
-
-fn atomic_copy(source: &Path, destination: &Path) -> Result<(), CliError> {
-    let parent = destination.parent().ok_or_else(|| {
-        CliError::new(
-            "snapshot_helper.install_failed",
-            "helper destination has no parent",
-        )
-    })?;
-    fs::create_dir_all(parent)
-        .map_err(|error| CliError::new("snapshot_helper.install_failed", error.to_string()))?;
-    let staged = destination.with_extension(format!("tmp-{}", std::process::id()));
-    fs::copy(source, &staged)
-        .map_err(|error| CliError::new("snapshot_helper.install_failed", error.to_string()))?;
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))
-        .map_err(|error| CliError::new("snapshot_helper.install_failed", error.to_string()))?;
-    fs::rename(&staged, destination)
-        .map_err(|error| CliError::new("snapshot_helper.install_failed", error.to_string()))
-}
-
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), CliError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| CliError::new("snapshot_helper.install_failed", "plist has no parent"))?;
-    fs::create_dir_all(parent)
-        .map_err(|error| CliError::new("snapshot_helper.install_failed", error.to_string()))?;
-    let staged = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&staged)
-        .map_err(|error| CliError::new("snapshot_helper.install_failed", error.to_string()))?;
-    file.write_all(contents)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| CliError::new("snapshot_helper.install_failed", error.to_string()))?;
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o644))
-        .map_err(|error| CliError::new("snapshot_helper.install_failed", error.to_string()))?;
-    fs::rename(staged, path)
-        .map_err(|error| CliError::new("snapshot_helper.install_failed", error.to_string()))
-}
-
-pub fn install(json_output: bool) -> Result<(), CliError> {
-    require_root()?;
-    reject_if_busy("install or update the snapshot helper")?;
-    let source = current_executable_sibling()?;
-    atomic_copy(&source, Path::new(HELPER_INSTALL_PATH))?;
-    atomic_write(Path::new(HELPER_PLIST_PATH), plist_contents().as_bytes())?;
-    let _ = launchctl(&["bootout", "system", HELPER_LABEL]);
-    launchctl(&["bootstrap", "system", HELPER_PLIST_PATH])?;
+    let app = app
+        .canonicalize()
+        .map_err(|error| CliError::new("snapshot_access.app_invalid", error.to_string()))?;
+    let executable = app.join("Contents/MacOS/televybackup-snapshot-access");
+    validate_access_bundle(&app, &executable)?;
+    let plist = plist_path();
+    atomic_write(
+        &plist,
+        plist_contents(&executable, config_dir, data_dir).as_bytes(),
+    )?;
+    let domain = format!("gui/{}", unsafe { libc::geteuid() });
+    let service = user_service_target(&domain);
+    let _ = launchctl(&["bootout", &service]);
+    launchctl(&["bootstrap", &domain, plist.to_string_lossy().as_ref()])?;
+    let manifest = json!({"schemaVersion": 1, "label": ACCESS_LABEL, "appPath": app, "executablePath": executable, "plistPath": plist, "configDir": config_dir, "dataDir": data_dir});
+    atomic_write(
+        &manifest_path(config_dir),
+        serde_json::to_string_pretty(&manifest).unwrap().as_bytes(),
+    )?;
     if json_output {
         println!(
             "{}",
-            json!({"installed": true, "label": HELPER_LABEL, "binary": HELPER_INSTALL_PATH, "plist": HELPER_PLIST_PATH})
+            json!({"installed": true, "label": ACCESS_LABEL, "appPath": app, "plistPath": plist})
         );
     } else {
-        println!("snapshot helper installed");
+        println!("snapshot access installed for {}", app.display());
     }
     Ok(())
 }
 
-pub fn uninstall(json_output: bool) -> Result<(), CliError> {
-    require_root()?;
-    reject_if_busy("uninstall the snapshot helper")?;
-    let _ = launchctl(&["bootout", "system", HELPER_LABEL]);
-    if Path::new(HELPER_PLIST_PATH).exists() {
-        fs::remove_file(HELPER_PLIST_PATH).map_err(|error| {
-            CliError::new("snapshot_helper.uninstall_failed", error.to_string())
-        })?;
+pub fn uninstall(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
+    if let Ok(payload) = status_payload(config_dir, data_dir)
+        && (payload["activeLeases"].as_u64().unwrap_or(0) > 0
+            || payload["pendingCleanup"].as_u64().unwrap_or(0) > 0)
+    {
+        return Err(CliError::new(
+            "snapshot_access.busy",
+            "cannot uninstall while a snapshot lease or pending cleanup exists",
+        ));
     }
-    if Path::new(HELPER_INSTALL_PATH).exists() {
-        fs::remove_file(HELPER_INSTALL_PATH).map_err(|error| {
-            CliError::new("snapshot_helper.uninstall_failed", error.to_string())
+    let domain = format!("gui/{}", unsafe { libc::geteuid() });
+    let service = user_service_target(&domain);
+    let _ = launchctl(&["bootout", &service]);
+    let plist = plist_path();
+    if plist.exists() {
+        fs::remove_file(plist).map_err(|error| {
+            CliError::new("snapshot_access.uninstall_failed", error.to_string())
         })?;
     }
     if json_output {
         println!(
             "{}",
-            json!({"uninstalled": true, "label": HELPER_LABEL, "journalPreserved": true})
+            json!({"uninstalled": true, "label": ACCESS_LABEL, "journalPreserved": true})
         );
     } else {
-        println!("snapshot helper uninstalled; journal preserved");
+        println!("snapshot access uninstalled; journal preserved");
     }
     Ok(())
 }
 
-pub fn status(json_output: bool) -> Result<(), CliError> {
-    let loaded = Command::new("/bin/launchctl")
-        .args(["print", &format!("system/{HELPER_LABEL}")])
-        .output()
-        .is_ok_and(|output| output.status.success());
-    let helper = helper_status().ok();
-    let payload = json!({
-        "installed": Path::new(HELPER_INSTALL_PATH).is_file() && Path::new(HELPER_PLIST_PATH).is_file(),
-        "launchdLoaded": loaded,
-        "label": HELPER_LABEL,
-        "activeLeases": helper.as_ref().map(|status| status.active_leases),
-        "pendingCleanup": helper.as_ref().map(|status| status.pending_cleanup),
-        "helperVersion": helper.as_ref().map(|status| status.helper_version.clone()),
-    });
+fn status_payload(config_dir: &Path, data_dir: &Path) -> Result<serde_json::Value, CliError> {
+    let manifest = fs::read(manifest_path(config_dir))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let socket = manifest
+        .as_ref()
+        .and_then(|value| value.get("dataDir"))
+        .and_then(serde_json::Value::as_str)
+        .map(|dir| PathBuf::from(dir).join("snapshot-access/access.sock"))
+        .unwrap_or_else(|| data_dir.join("snapshot-access/access.sock"));
+    let helper = status_from_socket(&socket).ok();
+    Ok(
+        json!({"installed": manifest.is_some() && plist_path().is_file(), "label": ACCESS_LABEL, "appPath": manifest.as_ref().and_then(|value| value.get("appPath")), "executablePath": manifest.as_ref().and_then(|value| value.get("executablePath")), "plistPath": plist_path(), "serviceReachable": helper.is_some(), "activeLeases": helper.as_ref().map(|value| value.active_leases).unwrap_or(0), "pendingCleanup": helper.as_ref().map(|value| value.pending_cleanup).unwrap_or(0), "accessAppVersion": helper.as_ref().map(|value| value.access_app_version.clone()), "fdaReady": helper.as_ref().map(|value| value.fda_ready).unwrap_or(false), "mountHelperPath": televybackup_snapshot_access::DEFAULT_MOUNT_HELPER_PATH, "mountHelperReachable": helper.as_ref().map(|value| value.mount_helper_reachable).unwrap_or(false), "mountHelperVersion": helper.as_ref().and_then(|value| value.mount_helper_version.clone()), "mountHelperError": helper.as_ref().and_then(|value| value.mount_helper_error.clone())}),
+    )
+}
+
+pub fn status(
+    config_dir: &Path,
+    data_dir: &Path,
+    json_output: bool,
+) -> Result<serde_json::Value, CliError> {
+    let payload = status_payload(config_dir, data_dir)?;
     if json_output {
         println!("{payload}");
     } else {
         println!(
-            "snapshot helper: {}",
-            if loaded { "loaded" } else { "not loaded" }
+            "snapshot access: {}",
+            if payload["serviceReachable"].as_bool() == Some(true) {
+                "running"
+            } else {
+                "unavailable"
+            }
         );
+    }
+    Ok(payload)
+}
+
+pub fn verify(
+    config_dir: &Path,
+    data_dir: &Path,
+    target_id: String,
+    sanitized: bool,
+    confirm_probe_write: bool,
+    json_output: bool,
+) -> Result<(), CliError> {
+    if !sanitized {
+        return Err(CliError::new(
+            "snapshot_access.sanitized_required",
+            "verification output must be explicitly sanitized",
+        ));
+    }
+    if !confirm_probe_write {
+        return Err(CliError::new(
+            "snapshot_access.probe_confirmation_required",
+            "verification requires --confirm-probe-write",
+        ));
+    }
+    let manifest = fs::read(manifest_path(config_dir))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let socket = manifest
+        .as_ref()
+        .and_then(|value| value.get("dataDir"))
+        .and_then(serde_json::Value::as_str)
+        .map(|dir| PathBuf::from(dir).join("snapshot-access/access.sock"))
+        .unwrap_or_else(|| data_dir.join("snapshot-access/access.sock"));
+    use std::io::{BufRead, Write};
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(&socket)
+        .map_err(|error| CliError::retryable("snapshot_access.unavailable", error.to_string()))?;
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10 * 60)))
+        .ok();
+    let request = Request {
+        version: PROTOCOL_VERSION,
+        request_id: Uuid::new_v4().to_string(),
+        method: Method::VerifyTimepoint {
+            target_id,
+            confirm_probe_write,
+        },
+    };
+    let mut bytes = serde_json::to_vec(&request)
+        .map_err(|error| CliError::new("snapshot_access.protocol", error.to_string()))?;
+    bytes.push(b'\n');
+    stream
+        .write_all(&bytes)
+        .map_err(|error| CliError::retryable("snapshot_access.unavailable", error.to_string()))?;
+    let mut line = String::new();
+    std::io::BufReader::new(stream)
+        .read_line(&mut line)
+        .map_err(|error| CliError::retryable("snapshot_access.unavailable", error.to_string()))?;
+    let response: Response = serde_json::from_str(line.trim())
+        .map_err(|error| CliError::new("snapshot_access.protocol", error.to_string()))?;
+    if !response.ok {
+        return Err(CliError::retryable(
+            "snapshot_access.verify_failed",
+            response
+                .message
+                .unwrap_or_else(|| "snapshot verification failed".into()),
+        ));
+    }
+    let Some(ResponseResult::Verification(result)) = response.result else {
+        return Err(CliError::new(
+            "snapshot_access.protocol",
+            "verification response missing result",
+        ));
+    };
+    let payload = json!({
+        "verified": result.snapshot_read_pre_mutation
+            && result.live_mutation_observed
+            && result.leases_released
+            && result.cleanup_complete,
+        "snapshotReadPreMutation": result.snapshot_read_pre_mutation,
+        "liveMutationObserved": result.live_mutation_observed,
+        "leasesReleased": result.leases_released,
+        "cleanupComplete": result.cleanup_complete,
+    });
+    if json_output || sanitized {
+        println!("{payload}");
+    } else {
+        println!("snapshot access verification: {}", payload["verified"]);
     }
     Ok(())
 }
@@ -264,10 +396,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plist_uses_fixed_root_owned_paths() {
-        let plist = plist_contents();
-        assert!(plist.contains(HELPER_LABEL));
-        assert!(plist.contains(HELPER_INSTALL_PATH));
-        assert!(plist.contains("<key>KeepAlive</key><true/>"));
+    fn launch_agent_plist_points_at_user_access_app() {
+        let plist = plist_contents(
+            Path::new(
+                "/Users/test/Applications/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access",
+            ),
+            Path::new("/Users/test/Library/Application Support/TelevyBackup"),
+            Path::new("/Users/test/Library/Application Support/TelevyBackup"),
+        );
+        assert!(plist.contains(ACCESS_LABEL));
+        assert!(plist.contains("RunAtLoad"));
+        assert!(plist.contains("TELEVYBACKUP_SNAPSHOT_SOCKET"));
+        assert!(!plist.contains("LaunchDaemons"));
+        assert!(!plist.contains("PrivilegedHelper"));
+        assert!(!plist.contains("administrator privileges"));
+    }
+
+    #[test]
+    fn plist_escapes_paths_as_xml() {
+        let plist = plist_contents(
+            Path::new("/Users/test/A&B.app/Contents/MacOS/access"),
+            Path::new("/Users/test/config<one>"),
+            Path::new("/Users/test/data"),
+        );
+        assert!(plist.contains("A&amp;B.app"));
+        assert!(plist.contains("config&lt;one&gt;"));
+    }
+
+    #[test]
+    fn launchctl_uses_a_fully_qualified_user_service_target() {
+        assert_eq!(
+            user_service_target("gui/501"),
+            "gui/501/com.ivan.televybackup.snapshot-access"
+        );
     }
 }

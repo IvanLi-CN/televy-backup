@@ -415,29 +415,26 @@ async fn handle_control_ipc_client(
     }
 
     if req.method == "snapshot.probe" {
-        let source_path = match req
+        let target_id = req
             .params
-            .get("sourcePath")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some(path) if !path.trim().is_empty() => path,
-            _ => {
-                write_json_line(
-                    &mut w,
-                    &ControlResponse::err(
-                        req.id.clone(),
-                        ControlError::invalid_request(
-                            "snapshot.probe requires sourcePath",
-                            serde_json::json!({}),
-                        ),
+            .get("targetId")
+            .and_then(serde_json::Value::as_str);
+        let Some(target_id) = target_id.filter(|id| !id.trim().is_empty()) else {
+            write_json_line(
+                &mut w,
+                &ControlResponse::err(
+                    req.id.clone(),
+                    ControlError::invalid_request(
+                        "snapshot.probe requires configured targetId",
+                        serde_json::json!({}),
                     ),
-                )
-                .await?;
-                return Ok(());
-            }
+                ),
+            )
+            .await?;
+            return Ok(());
         };
-        match SnapshotClient::default()
-            .probe(std::path::Path::new(source_path), None)
+        match SnapshotClient::for_data_root(&context.data_root)
+            .probe_volume(target_id)
             .await
         {
             Ok(probe) => {
@@ -473,20 +470,106 @@ async fn handle_control_ipc_client(
         return Ok(());
     }
 
+    if req.method == "snapshot.verify" {
+        let target_id = req
+            .params
+            .get("targetId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty());
+        let Some(target_id) = target_id else {
+            write_json_line(
+                &mut w,
+                &ControlResponse::err(
+                    req.id.clone(),
+                    ControlError::invalid_request(
+                        "snapshot.verify requires configured targetId",
+                        serde_json::json!({}),
+                    ),
+                ),
+            )
+            .await?;
+            return Ok(());
+        };
+        match SnapshotClient::for_data_root(&context.data_root)
+            .verify_timepoint(target_id, true)
+            .await
+        {
+            Ok(result) => {
+                write_json_line(
+                    &mut w,
+                    &ControlResponse::ok(
+                        req.id.clone(),
+                        serde_json::json!({
+                            "volumeUuid": result.volume_uuid,
+                            "verified": result.snapshot_read_pre_mutation
+                                && result.live_mutation_observed
+                                && result.leases_released
+                                && result.cleanup_complete,
+                            "snapshotReadPreMutation": result.snapshot_read_pre_mutation,
+                            "liveMutationObserved": result.live_mutation_observed,
+                            "leasesReleased": result.leases_released,
+                            "cleanupComplete": result.cleanup_complete,
+                        }),
+                    ),
+                )
+                .await?;
+            }
+            Err(error) => {
+                write_json_line(
+                    &mut w,
+                    &ControlResponse::err(
+                        req.id.clone(),
+                        ControlError::unavailable(
+                            "snapshot verification failed",
+                            serde_json::json!({"error": error.to_string()}),
+                        ),
+                    ),
+                )
+                .await?;
+            }
+        }
+        return Ok(());
+    }
+
     if req.method == "snapshot.status" {
         let settings = context.settings.read().await.clone();
-        let helper = SnapshotClient::default().status().await;
-        let (helper_available, helper_error, active_leases, pending_cleanup, helper_version) =
-            match helper {
-                Ok(status) => (
-                    true,
-                    None,
-                    status.active_leases,
-                    status.pending_cleanup,
-                    Some(status.helper_version),
-                ),
-                Err(error) => (false, Some(error.to_string()), 0, 0, None),
-            };
+        let helper = SnapshotClient::for_data_root(&context.data_root)
+            .status()
+            .await;
+        let (
+            helper_available,
+            helper_error,
+            active_leases,
+            pending_cleanup,
+            access_app_version,
+            fda_ready,
+            mount_helper_reachable,
+            mount_helper_version,
+            mount_helper_error,
+        ) = match helper {
+            Ok(status) => (
+                true,
+                None,
+                status.active_leases,
+                status.pending_cleanup,
+                Some(status.access_app_version),
+                status.fda_ready,
+                status.mount_helper_reachable,
+                status.mount_helper_version,
+                status.mount_helper_error,
+            ),
+            Err(error) => (
+                false,
+                Some(error.to_string()),
+                0,
+                0,
+                None,
+                false,
+                false,
+                None,
+                None,
+            ),
+        };
         let volumes = settings
             .snapshot_volumes
             .iter()
@@ -498,15 +581,32 @@ async fn handle_control_ipc_client(
                 })
             })
             .collect::<Vec<_>>();
+        let access_app_path =
+            std::fs::read(context.config_root.join("snapshot-access/service.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|value| {
+                    value
+                        .get("appPath")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .or_else(|| std::env::var("TELEVYBACKUP_SNAPSHOT_ACCESS_APP").ok());
         write_json_line(
             &mut w,
             &ControlResponse::ok(
                 req.id.clone(),
                 serde_json::json!({
                     "consistencyMode": if volumes.iter().any(|volume| volume.get("enabled").and_then(serde_json::Value::as_bool).unwrap_or(false)) { "strict" } else { "live" },
-                    "helperAvailable": helper_available,
-                    "helperVersion": helper_version,
-                    "helperError": helper_error,
+                    "serviceReachable": helper_available,
+                    "accessAppPath": access_app_path,
+                    "accessAppVersion": access_app_version,
+                    "fdaReady": fda_ready,
+                    "accessAppError": helper_error,
+                    "mountHelperPath": televybackup_snapshot_access::DEFAULT_MOUNT_HELPER_PATH,
+                    "mountHelperReachable": mount_helper_reachable,
+                    "mountHelperVersion": mount_helper_version,
+                    "mountHelperError": mount_helper_error,
                     "activeLeases": active_leases,
                     "pendingCleanup": pending_cleanup,
                     "volumes": volumes,

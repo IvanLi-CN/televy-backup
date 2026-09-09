@@ -951,13 +951,43 @@ final class AppModel {
         }
     }
 
-    func probeSnapshotVolume(path: String, completion: @escaping (SnapshotProbeResponse?, String?) -> Void) {
+    func installSnapshotMountHelper(completion: @escaping (Bool, String?) -> Void) {
+        guard let cli = cliPath() else {
+            DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
+            return
+        }
+        let config = configTomlPath().deletingLastPathComponent().path
+        let data = guiControlDataDirURL().path
+        let command = [cli, "--json", "--config-dir", config, "--data-dir", data, "snapshot-mount-helper", "install"]
+            .map(shellQuote)
+            .joined(separator: " ")
+        let script = "do shell script \(appleScriptQuote(command)) with administrator privileges"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = self.runCommandCapture(exe: "/usr/bin/osascript", args: ["-e", script], timeoutSeconds: 180)
+            let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .prefix(400).description
+            DispatchQueue.main.async { completion(result.status == 0, result.status == 0 ? nil : output) }
+        }
+    }
+
+    private func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func appleScriptQuote(_ value: String) -> String {
+        "\"" + value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+
+    func probeSnapshotVolume(targetId: String, completion: @escaping (SnapshotProbeResponse?, String?) -> Void) {
         let socketPath = controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
             let result: Result<SnapshotProbeResponse, ControlRequestFailure> = ControlIPCClient.request(
                 socketPath: socketPath,
                 method: "snapshot.probe",
-                params: ["sourcePath": path]
+                params: ["targetId": targetId]
             )
             DispatchQueue.main.async {
                 switch result {
@@ -968,32 +998,21 @@ final class AppModel {
         }
     }
 
-    func performSnapshotHelperAction(_ action: String, completion: @escaping (Bool, String?) -> Void) {
-        guard action == "install" || action == "uninstall" else {
-            completion(false, "Unsupported snapshot helper operation")
-            return
-        }
-        guard let cli = cliPath() else {
-            DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
-            return
-        }
+    func verifySnapshotVolume(targetId: String, completion: @escaping (SnapshotVerificationResponse?, String?) -> Void) {
+        let socketPath = controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
-            let command = "\(self.shellQuote(cli)) snapshot-helper \(self.shellQuote(action))"
-            let script = "do shell script \(self.appleScriptQuote(command)) with administrator privileges"
-            let result = self.runCommandCapture(exe: "/usr/bin/osascript", args: ["-e", script], timeoutSeconds: 60)
-            let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .prefix(300).description
-            DispatchQueue.main.async { completion(result.status == 0, result.status == 0 ? nil : output) }
+            let result: Result<SnapshotVerificationResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.verify",
+                params: ["targetId": targetId]
+            )
+            DispatchQueue.main.async {
+                switch result {
+                case let .success(verification): completion(verification, verification.verified ? nil : "Snapshot timepoint verification failed")
+                case let .failure(error): completion(nil, controlFailureMessage(error))
+                }
+            }
         }
-    }
-
-    private func shellQuote(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    private func appleScriptQuote(_ value: String) -> String {
-        "\"" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
 
     func daemonPath() -> String? {
