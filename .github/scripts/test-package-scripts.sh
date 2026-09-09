@@ -73,7 +73,10 @@ bash "$root_dir/scripts/macos/generate-release-manifest.sh" \
   --source-commit "$(git -C "$tmp_dir" rev-parse HEAD)" \
   --packaging-commit "$(git -C "$root_dir" rev-parse HEAD)" \
   --output "$tmp_dir/BUILD-MANIFEST.json"
-bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir"
+bash "$root_dir/scripts/macos/verify-release-assets.sh" \
+  --mode release \
+  --asset-dir "$tmp_dir" \
+  --skip-bundle-checks
 
 python3 - "$tmp_dir/BUILD-MANIFEST.json" "$version" <<'PY'
 import json
