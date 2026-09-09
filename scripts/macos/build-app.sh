@@ -82,7 +82,7 @@ cp "$brand_source_dir/televybackup-logo-dark.svg" "$resources_dir/Brand/televyba
 cp "$brand_source_dir/televybackup-logo-dark-compact.svg" "$resources_dir/Brand/televybackup-logo-dark-compact.svg"
 cp "$brand_source_dir/televybackup-logo-template.svg" "$resources_dir/Brand/televybackup-logo-template.svg"
 
-rm -f "$resources_dir/televybackup" "$resources_dir/televybackup-mtproto-helper" 2>/dev/null || true
+rm -f "$resources_dir/televybackup" "$resources_dir/televybackup-mtproto-helper" "$resources_dir/televybackup-snapshot-helper" 2>/dev/null || true
 
 binary_dir="$root_dir/target/release"
 if [[ -n "$cargo_target" ]]; then
@@ -96,6 +96,10 @@ cp "$binary_dir/televybackup" "$macos_dir/televybackup-cli"
 echo "Building daemon..."
 if [[ -n "$cargo_target" ]]; then cargo build -p televybackupd --release --target "$cargo_target"; else cargo build -p televybackupd --release; fi
 cp "$binary_dir/televybackupd" "$macos_dir/televybackupd"
+
+echo "Building APFS snapshot helper..."
+if [[ -n "$cargo_target" ]]; then cargo build -p televybackup-snapshot-helper --release --target "$cargo_target"; else cargo build -p televybackup-snapshot-helper --release; fi
+cp "$binary_dir/televybackup-snapshot-helper" "$macos_dir/televybackup-snapshot-helper"
 
 echo "Building MTProto helper..."
 if [[ -n "$cargo_target" ]]; then cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release --target "$cargo_target"; else cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release; fi
@@ -180,6 +184,8 @@ if [[ -n "$codesign_identity" ]]; then
   echo "Codesigning with controlled identity: $codesign_identity"
   codesign --force --sign "$codesign_identity" -i "$bundle_id.cli" "$macos_dir/televybackup-cli" \
     || echo "WARN: codesign CLI failed"
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.snapshot-helper" "$macos_dir/televybackup-snapshot-helper" \
+    || echo "WARN: codesign snapshot helper failed"
   codesign --force --sign "$codesign_identity" -i "$bundle_id.mtproto-helper" "$macos_dir/televybackup-mtproto-helper" \
     || echo "WARN: codesign helper failed"
   codesign --force --deep --sign "$codesign_identity" "$app_dir" \

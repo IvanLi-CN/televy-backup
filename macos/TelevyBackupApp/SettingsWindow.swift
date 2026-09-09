@@ -258,6 +258,37 @@ struct SettingsV2: Codable {
     var telegram: TelegramGlobalV2
     var telegram_endpoints: [TelegramEndpointV2]
     var targets: [TargetV2]
+    var snapshot_volumes: [String: SnapshotVolumeSettingV2]
+}
+
+struct SnapshotVolumeSettingV2: Codable, Equatable {
+    var enabled: Bool
+}
+
+struct SnapshotVolumeStatus: Decodable, Identifiable, Equatable {
+    let volumeUuid: String
+    let enabled: Bool
+    let mode: String
+
+    var id: String { volumeUuid }
+}
+
+struct SnapshotControlStatus: Decodable, Equatable {
+    let consistencyMode: String
+    let helperAvailable: Bool
+    let helperVersion: String?
+    let helperError: String?
+    let activeLeases: UInt32
+    let pendingCleanup: UInt32
+    let volumes: [SnapshotVolumeStatus]
+}
+
+struct SnapshotProbeResponse: Decodable {
+    let volumeUuid: String
+    let filesystem: String
+    let freeBytes: UInt64
+    let snapshotSupported: Bool
+    let reason: String?
 }
 
 struct ScheduleV2: Codable {
@@ -329,6 +360,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case recoveryKey = "Backup Config"
     case schedule = "Schedule"
     case diagnostics = "Diagnostics"
+    case snapshots = "Snapshots"
 
     var id: String { rawValue }
 }
@@ -496,6 +528,7 @@ private enum SettingsUIDemo {
         if enabled && scene.hasPrefix("backup-config") { return .recoveryKey }
         if scene == "schedule" || scene.hasPrefix("service-") { return .schedule }
         if scene.hasPrefix("endpoints") { return .endpoints }
+        if scene.hasPrefix("snapshots") { return .snapshots }
         return .targets
     }
 
@@ -572,7 +605,10 @@ private enum SettingsUIDemo {
             chunking: ChunkingV2(min_bytes: 1024 * 1024, avg_bytes: 8 * 1024 * 1024, max_bytes: 64 * 1024 * 1024),
             telegram: TelegramGlobalV2(mode: "mtproto", mtproto: TelegramMtprotoGlobalV2(api_id: 0, api_hash_key: "telegram.mtproto.api_hash")),
             telegram_endpoints: endpoints,
-            targets: targets
+            targets: targets,
+            snapshot_volumes: [
+                "A1B2C3D4-E5F6-47A8-9012-ABCDEF123456": SnapshotVolumeSettingV2(enabled: scene != "snapshots-disabled")
+            ]
         )
     }
 }
@@ -609,6 +645,9 @@ struct SettingsWindowRootView: View {
     @State private var managedServiceStatus: ManagedServiceStatus?
     @State private var managedServiceError: String?
     @State private var managedServiceBusy = false
+    @State private var snapshotStatus: SnapshotControlStatus?
+    @State private var snapshotError: String?
+    @State private var snapshotBusy = false
 
     private struct ImportConfigBundleSheetRequest: Identifiable {
         let id = UUID()
@@ -717,6 +756,8 @@ struct SettingsWindowRootView: View {
             scheduleView
         case .diagnostics:
             diagnosticsView
+        case .snapshots:
+            snapshotsView
         }
     }
 
@@ -734,6 +775,192 @@ struct SettingsWindowRootView: View {
         .padding(.horizontal, 24)
         .padding(.vertical, 22)
         .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    private var snapshotsView: some View {
+        let configured = settings?.snapshot_volumes ?? [:]
+        let targetPaths = settings?.targets.map(\.source_path) ?? []
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("APFS snapshots")
+                    .font(.system(size: 18, weight: .bold))
+                Text("Enabled volumes use a strict filesystem snapshot. If the helper cannot create or mount one, that backup fails instead of reading the live directory.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 620, alignment: .leading)
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Label(snapshotStatus?.consistencyMode == "strict" ? "Strict mode" : "Live mode", systemImage: snapshotStatus?.consistencyMode == "strict" ? "checkmark.shield" : "shield")
+                                .font(.system(size: 13, weight: .semibold))
+                            Spacer()
+                            Button("Enable all") { setAllSnapshotVolumes(enabled: true) }
+                                .buttonStyle(.bordered)
+                                .disabled(configured.isEmpty || snapshotBusy)
+                            Button("Disable all") { setAllSnapshotVolumes(enabled: false) }
+                                .buttonStyle(.borderless)
+                                .disabled(configured.isEmpty || snapshotBusy)
+                        }
+
+                        if configured.isEmpty {
+                            Text("No APFS volumes have been verified yet. Use a target below to discover its volume.")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(configured.keys.sorted(), id: \.self) { uuid in
+                                HStack(spacing: 10) {
+                                    Image(systemName: "internaldrive")
+                                        .foregroundStyle(.secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(uuid)
+                                            .font(.system(size: 12, design: .monospaced))
+                                        if let volume = snapshotStatus?.volumes.first(where: { $0.volumeUuid.caseInsensitiveCompare(uuid) == .orderedSame }) {
+                                            Text(volume.enabled ? "Strict consistency enabled" : "Disabled")
+                                                .font(.system(size: 11))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    Toggle("", isOn: Binding(
+                                        get: { settings?.snapshot_volumes[uuid]?.enabled ?? false },
+                                        set: { enabled in
+                                            settings?.snapshot_volumes[uuid] = SnapshotVolumeSettingV2(enabled: enabled)
+                                            queueAutoSave()
+                                        }
+                                    ))
+                                    .labelsHidden()
+                                    .disabled(snapshotBusy)
+                                }
+                                .padding(.vertical, 3)
+                            }
+                        }
+                    }
+                    .padding(14)
+                } label: {
+                    Text("Verified APFS volumes")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(targetPaths, id: \.self) { path in
+                            HStack {
+                                Text(path)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Button("Verify volume") { discoverSnapshotVolume(path) }
+                                    .buttonStyle(.bordered)
+                                    .disabled(snapshotBusy)
+                            }
+                        }
+                    }
+                    .padding(14)
+                } label: {
+                    Text("Target volumes")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+
+                if let snapshotStatus, !snapshotStatus.helperAvailable {
+                    Label(snapshotStatus.helperError ?? "The snapshot helper is not installed", systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.orange)
+                }
+                if let snapshotError {
+                    Label(snapshotError, systemImage: "xmark.octagon")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.red)
+                }
+
+                snapshotHelperView
+            }
+            .frame(maxWidth: 700, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 22)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .onAppear { refreshSnapshotStatus() }
+    }
+
+    private var snapshotHelperView: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("The helper is installed once with administrator approval. Scheduled backups never ask for a password.")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Install / update") { performSnapshotHelperAction("install") }
+                        .buttonStyle(.bordered)
+                        .disabled(snapshotBusy)
+                    Button("Uninstall") { performSnapshotHelperAction("uninstall") }
+                        .buttonStyle(.borderless)
+                        .disabled(snapshotBusy)
+                    Button("Refresh") { refreshSnapshotStatus() }
+                        .buttonStyle(.borderless)
+                        .disabled(snapshotBusy)
+                }
+            }
+            .padding(14)
+        } label: {
+            Text("Snapshot helper")
+                .font(.system(size: 13, weight: .semibold))
+        }
+    }
+
+    private func refreshSnapshotStatus() {
+        if SettingsUIDemo.enabled {
+            let strict = SettingsUIDemo.scene != "snapshots-disabled"
+            snapshotStatus = SnapshotControlStatus(
+                consistencyMode: strict ? "strict" : "live",
+                helperAvailable: SettingsUIDemo.scene != "snapshots-helper-missing",
+                helperVersion: "0.1.0",
+                helperError: SettingsUIDemo.scene == "snapshots-helper-missing" ? "Snapshot helper is not installed" : nil,
+                activeLeases: 0,
+                pendingCleanup: SettingsUIDemo.scene == "snapshots-cleanup-pending" ? 1 : 0,
+                volumes: (settings?.snapshot_volumes ?? [:]).map { SnapshotVolumeStatus(volumeUuid: $0.key, enabled: $0.value.enabled, mode: $0.value.enabled ? "strict" : "disabled") }
+            )
+            return
+        }
+        model.fetchSnapshotStatus { status, error in
+            snapshotStatus = status
+            snapshotError = error
+        }
+    }
+
+    private func setAllSnapshotVolumes(enabled: Bool) {
+        guard settings != nil else { return }
+        for uuid in settings!.snapshot_volumes.keys {
+            settings?.snapshot_volumes[uuid] = SnapshotVolumeSettingV2(enabled: enabled)
+        }
+        queueAutoSave()
+        refreshSnapshotStatus()
+    }
+
+    private func discoverSnapshotVolume(_ path: String) {
+        snapshotBusy = true
+        snapshotError = nil
+        model.probeSnapshotVolume(path: path) { probe, error in
+            snapshotBusy = false
+            if let probe {
+                settings?.snapshot_volumes[probe.volumeUuid] = SnapshotVolumeSettingV2(enabled: probe.snapshotSupported)
+                queueAutoSave()
+                refreshSnapshotStatus()
+            } else {
+                snapshotError = error ?? "The volume could not be verified"
+            }
+        }
+    }
+
+    private func performSnapshotHelperAction(_ action: String) {
+        snapshotBusy = true
+        snapshotError = nil
+        model.performSnapshotHelperAction(action) { success, error in
+            snapshotBusy = false
+            if !success { snapshotError = error ?? "Snapshot helper operation failed" }
+            refreshSnapshotStatus()
+        }
     }
 
     private var diagnosticsView: some View {

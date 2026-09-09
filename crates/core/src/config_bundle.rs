@@ -422,6 +422,7 @@ mod tests {
                 enabled: true,
                 schedule: None,
             }],
+            snapshot_volumes: std::collections::BTreeMap::new(),
         }
     }
 

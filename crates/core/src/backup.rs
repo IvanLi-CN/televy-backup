@@ -1973,6 +1973,16 @@ pub async fn run_backup_with<S: Storage>(
     config: BackupConfig,
     options: BackupOptions<'_>,
 ) -> Result<BackupResult> {
+    run_backup_with_read_root(storage, config, options, None, None).await
+}
+
+pub async fn run_backup_with_read_root<S: Storage>(
+    storage: &S,
+    config: BackupConfig,
+    options: BackupOptions<'_>,
+    read_root: Option<&Path>,
+    source_read_complete: Option<&(dyn Fn() + Send + Sync)>,
+) -> Result<BackupResult> {
     debug!(
         event = "backup.prepare",
         db_path = %config.endpoint_db_path.display(),
@@ -1991,9 +2001,13 @@ pub async fn run_backup_with<S: Storage>(
             message: "keep_last_snapshots must be >= 1".to_string(),
         });
     }
-    if !config.source_path.is_dir() {
+    let scan_source_path = read_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| config.source_path.clone());
+    let logical_source_path = config.source_path.clone();
+    if !scan_source_path.is_dir() {
         return Err(Error::InvalidConfig {
-            message: "source_path must be an existing directory".to_string(),
+            message: "source read root must be an existing directory".to_string(),
         });
     }
 
@@ -2051,7 +2065,6 @@ pub async fn run_backup_with<S: Storage>(
     let queue_wait_sequence = Arc::new(AtomicU64::new(1));
     let scan_queue_blocked_ms = Arc::new(AtomicU64::new(0));
 
-    let scan_source_path = config.source_path.clone();
     let snapshot_id = config
         .snapshot_id
         .clone()
@@ -2259,10 +2272,10 @@ pub async fn run_backup_with<S: Storage>(
             let res = async {
                 let sqlite_started = Instant::now();
                 let base_snapshot_id =
-                    latest_snapshot_for_source(conn, &scan_source_path, provider).await?;
+                    latest_snapshot_for_source(conn, &logical_source_path, provider).await?;
                 scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
                 let snapshot_id = snapshot_id.clone();
-                let source_path_utf8 = path_to_utf8(&scan_source_path)?;
+                let source_path_utf8 = path_to_utf8(&logical_source_path)?;
 
                 let sqlite_started = Instant::now();
                 let (_, retry_waits) = execute_scan_sqlite_with_busy_retry!(
@@ -3106,6 +3119,10 @@ pub async fn run_backup_with<S: Storage>(
                     }
                 }
                 drop(upload_tx);
+
+                if let Some(callback) = source_read_complete {
+                    callback();
+                }
 
                 Ok((snapshot_id, result, upload_started))
             }
