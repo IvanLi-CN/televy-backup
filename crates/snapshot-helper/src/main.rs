@@ -1082,25 +1082,36 @@ fn volume_info(path: &Path) -> Result<VolumeInfo, HelperError> {
 }
 
 fn filesystem_mount_point(path: &Path) -> Result<PathBuf, HelperError> {
-    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
-        .map_err(|_| HelperError::Message("invalid source path".into()))?;
-    let mut stat = unsafe { std::mem::zeroed::<libc::statfs>() };
-    let result = unsafe { libc::statfs(c_path.as_ptr(), &mut stat) };
-    if result != 0 {
-        return Err(HelperError::Io(std::io::Error::last_os_error()));
+    #[cfg(not(target_os = "macos"))]
+    {
+        // The APFS volume probe is only operational on macOS. Keep non-macOS
+        // builds portable for CI and return the caller's path without touching
+        // platform-specific statfs fields.
+        return Ok(path.to_path_buf());
     }
-    let bytes = stat
-        .f_mntonname
-        .iter()
-        .take_while(|byte| **byte != 0)
-        .map(|byte| *byte as u8)
-        .collect::<Vec<_>>();
-    if bytes.is_empty() {
-        return Err(HelperError::Message(
-            "filesystem mount point is unavailable".into(),
-        ));
+
+    #[cfg(target_os = "macos")]
+    {
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+            .map_err(|_| HelperError::Message("invalid source path".into()))?;
+        let mut stat = unsafe { std::mem::zeroed::<libc::statfs>() };
+        let result = unsafe { libc::statfs(c_path.as_ptr(), &mut stat) };
+        if result != 0 {
+            return Err(HelperError::Io(std::io::Error::last_os_error()));
+        }
+        let bytes = stat
+            .f_mntonname
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect::<Vec<_>>();
+        if bytes.is_empty() {
+            return Err(HelperError::Message(
+                "filesystem mount point is unavailable".into(),
+            ));
+        }
+        Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
     }
-    Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
 }
 
 fn available_bytes(path: &Path) -> Result<u64, HelperError> {
