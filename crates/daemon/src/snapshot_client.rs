@@ -15,6 +15,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use uuid::Uuid;
 
+const SNAPSHOT_SCAN_PAGE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const SNAPSHOT_STREAM_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const SNAPSHOT_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Error)]
 pub enum SnapshotClientError {
     #[error("snapshot access service unavailable: {0}")]
@@ -245,6 +249,7 @@ impl SnapshotClient {
     }
 
     fn request_blocking(&self, method: Method) -> Result<Response, SnapshotClientError> {
+        let timeout = request_timeout(&method);
         let request = Request {
             version: PROTOCOL_VERSION,
             request_id: Uuid::new_v4().to_string(),
@@ -252,14 +257,27 @@ impl SnapshotClient {
         };
         let mut stream = std::os::unix::net::UnixStream::connect(&self.socket_path)
             .map_err(|error| SnapshotClientError::Unavailable(error.to_string()))?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
         let mut encoded = serde_json::to_vec(&request)?;
         encoded.push(b'\n');
         stream.write_all(&encoded)?;
         let mut line = String::new();
         std::io::BufReader::new(stream).read_line(&mut line)?;
         decode_response(line.trim())
+    }
+}
+
+fn request_timeout(method: &Method) -> Duration {
+    match method {
+        Method::ScanPage { .. } => SNAPSHOT_SCAN_PAGE_TIMEOUT,
+        Method::OpenReadStream { .. }
+        | Method::ReadStream { .. }
+        | Method::CloseReadStream { .. } => SNAPSHOT_STREAM_TIMEOUT,
+        Method::Status
+        | Method::ProbeVolume { .. }
+        | Method::AcquireLease { .. }
+        | Method::ReleaseLease { .. } => SNAPSHOT_CONTROL_TIMEOUT,
     }
 }
 
@@ -304,22 +322,24 @@ impl BackupSource for BrokeredSnapshotSource {
                     })
                     .collect()
             })
-            .map_err(|error| CoreError::InvalidConfig {
-                message: format!("snapshot access scan failed: {error}"),
-            })
+            .map_err(|error| snapshot_access_error("scan", error))
     }
 
     fn open(&self, relative_path: &str) -> CoreResult<Box<dyn Read + Send>> {
         self.client
             .open_read_stream_blocking(&self.lease_id, relative_path)
             .map(|stream| Box::new(stream) as Box<dyn Read + Send>)
-            .map_err(|error| CoreError::InvalidConfig {
-                message: format!("snapshot access read failed: {error}"),
-            })
+            .map_err(|error| snapshot_access_error("read", error))
     }
 
     fn is_brokered(&self) -> bool {
         true
+    }
+}
+
+fn snapshot_access_error(operation: &str, error: SnapshotClientError) -> CoreError {
+    CoreError::SnapshotAccess {
+        message: format!("snapshot access {operation} failed: {error}"),
     }
 }
 
@@ -385,4 +405,35 @@ fn decode_response(line: &str) -> Result<Response, SnapshotClientError> {
         });
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brokered_source_reports_snapshot_access_failures_without_invalidating_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = BrokeredSnapshotSource::new(
+            SnapshotClient::with_socket_path(temp.path().join("missing.sock")),
+            "lease-1",
+            temp.path().join("logical-source"),
+        );
+
+        let error = source.entries(None).unwrap_err();
+
+        assert_eq!(error.code(), "snapshot.access_failed");
+    }
+
+    #[test]
+    fn scan_page_allows_a_full_snapshot_inventory_walk() {
+        assert_eq!(
+            request_timeout(&Method::ScanPage {
+                lease_id: "lease-1".into(),
+                cursor: None,
+                limit: 512,
+            }),
+            SNAPSHOT_SCAN_PAGE_TIMEOUT
+        );
+    }
 }

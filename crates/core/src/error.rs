@@ -7,6 +7,9 @@ pub enum Error {
     #[error("invalid config: {message}")]
     InvalidConfig { message: String },
 
+    #[error("snapshot access failed: {message}")]
+    SnapshotAccess { message: String },
+
     #[error("bootstrap missing: {message}")]
     BootstrapMissing { message: String },
 
@@ -73,6 +76,7 @@ impl Error {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidConfig { .. } => "config.invalid",
+            Self::SnapshotAccess { .. } => "snapshot.access_failed",
             Self::BootstrapMissing { .. } => "bootstrap.missing",
             Self::BootstrapDecryptFailed { .. } => "bootstrap.decrypt_failed",
             Self::Io(_) => "io",

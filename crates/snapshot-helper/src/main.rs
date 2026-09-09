@@ -78,6 +78,12 @@ struct ReadStream {
     file: fs::File,
 }
 
+struct ScanInventory {
+    entries: Vec<SourceEntry>,
+    ignore_rule_files: u64,
+    ignore_invalid_rules: u64,
+}
+
 #[derive(Clone)]
 struct HelperState {
     journal: SqlitePool,
@@ -87,6 +93,7 @@ struct HelperState {
     config_dir: PathBuf,
     data_dir: PathBuf,
     streams: Arc<Mutex<HashMap<String, ReadStream>>>,
+    scan_inventories: Arc<Mutex<HashMap<String, Arc<ScanInventory>>>>,
     fda_ready: Arc<AtomicBool>,
 }
 
@@ -168,6 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_dir,
         data_dir,
         streams: Arc::new(Mutex::new(HashMap::new())),
+        scan_inventories: Arc::new(Mutex::new(HashMap::new())),
         fda_ready: Arc::new(AtomicBool::new(false)),
     };
     tracing_log_start(&state);
@@ -491,7 +499,38 @@ fn scan_page(
     state: &HelperState,
 ) -> Result<ScanPageResult, HelperError> {
     let lease = lease_for(uid, lease_id, state)?;
-    let root = lease_source_root(&lease);
+    let inventory = {
+        let mut inventories = state
+            .scan_inventories
+            .lock()
+            .map_err(|_| HelperError::Message("scan inventory lock poisoned".into()))?;
+        if let Some(inventory) = inventories.get(lease_id) {
+            Arc::clone(inventory)
+        } else {
+            let inventory = Arc::new(build_scan_inventory(&lease_source_root(&lease))?);
+            inventories.insert(lease_id.to_string(), Arc::clone(&inventory));
+            inventory
+        }
+    };
+    let start = cursor
+        .unwrap_or("0")
+        .parse::<usize>()
+        .map_err(|_| HelperError::Message("invalid scan cursor".into()))?;
+    if start > inventory.entries.len() {
+        return Err(HelperError::Message("scan cursor is out of range".into()));
+    }
+    let take = usize::from(limit.clamp(1, 512));
+    let end = start.saturating_add(take).min(inventory.entries.len());
+    let next_cursor = (end < inventory.entries.len()).then(|| end.to_string());
+    Ok(ScanPageResult {
+        entries: inventory.entries[start..end].to_vec(),
+        next_cursor,
+        ignore_rule_files: inventory.ignore_rule_files,
+        ignore_invalid_rules: inventory.ignore_invalid_rules,
+    })
+}
+
+fn build_scan_inventory(root: &Path) -> Result<ScanInventory, HelperError> {
     let root_metadata = fs::symlink_metadata(&root)?;
     let root_device = root_metadata.dev();
     let mut entries = Vec::new();
@@ -562,19 +601,8 @@ fn scan_page(
             mode,
         });
     }
-    let start = cursor
-        .unwrap_or("0")
-        .parse::<usize>()
-        .map_err(|_| HelperError::Message("invalid scan cursor".into()))?;
-    if start > entries.len() {
-        return Err(HelperError::Message("scan cursor is out of range".into()));
-    }
-    let take = usize::from(limit.clamp(1, 512));
-    let end = start.saturating_add(take).min(entries.len());
-    let next_cursor = (end < entries.len()).then(|| end.to_string());
-    Ok(ScanPageResult {
-        entries: entries.into_iter().skip(start).take(end - start).collect(),
-        next_cursor,
+    Ok(ScanInventory {
+        entries,
         ignore_rule_files,
         ignore_invalid_rules,
     })
@@ -953,6 +981,9 @@ async fn release_lease(
     if let Ok(mut streams) = state.streams.lock() {
         streams.retain(|_, stream| stream.lease_id != lease_id);
     }
+    if let Ok(mut inventories) = state.scan_inventories.lock() {
+        inventories.remove(lease_id);
+    }
     let cleanup_state = match mount_helper::release(uid, &lease.lease_id) {
         Ok(result) => result.cleanup_state,
         Err(_) => "cleanup_pending".to_string(),
@@ -1238,6 +1269,58 @@ fn peer_uid(fd: RawFd) -> Result<u32, HelperError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn scan_test_state(temp: &tempfile::TempDir, uid: u32) -> HelperState {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let lease = Lease {
+            lease_id: "lease-1".into(),
+            uid,
+            run_id: "run-1".into(),
+            volume_uuid: "volume-1".into(),
+            device_identifier: "disk1s1".into(),
+            snapshot_uuid: "snapshot-1".into(),
+            snapshot_name: "snapshot-1".into(),
+            mount_root: temp.path().to_path_buf(),
+            source_relative_path: PathBuf::from("source"),
+            source_mount_point: temp.path().to_path_buf(),
+            snapshot_manifest: vec![],
+        };
+        HelperState {
+            journal,
+            leases: Arc::new(Mutex::new(HashMap::from([(lease.lease_id.clone(), lease)]))),
+            socket_path: temp.path().join("access.sock"),
+            journal_path: temp.path().join("journal.sqlite"),
+            config_dir: temp.path().to_path_buf(),
+            data_dir: temp.path().to_path_buf(),
+            streams: Arc::new(Mutex::new(HashMap::new())),
+            scan_inventories: Arc::new(Mutex::new(HashMap::new())),
+            fda_ready: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_pages_reuse_the_inventory_bound_to_one_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        for index in 0..513 {
+            fs::write(source.join(format!("entry-{index:04}")), b"x").unwrap();
+        }
+        let uid = unsafe { libc::geteuid() };
+        let state = scan_test_state(&temp, uid).await;
+
+        let first = scan_page(uid, "lease-1", None, 512, &state).unwrap();
+        assert_eq!(first.entries.len(), 512);
+        assert_eq!(first.next_cursor.as_deref(), Some("512"));
+
+        // A lease represents a fixed snapshot inventory. A later page must not restart a
+        // filesystem walk after the first page has established that inventory.
+        fs::remove_dir_all(&source).unwrap();
+        let second = scan_page(uid, "lease-1", first.next_cursor.as_deref(), 512, &state).unwrap();
+
+        assert_eq!(second.entries.len(), 1);
+        assert!(second.next_cursor.is_none());
+    }
 
     #[test]
     fn snapshot_inventory_accepts_empty_diskutil_plist() {
