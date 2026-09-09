@@ -68,6 +68,16 @@ probe, reads the old bytes through Snapshot Access, and removes the probe and
 snapshot. The shipped CLI and Settings UI use this same operation. Sanitized
 output contains only boolean assertions and generic error codes.
 
+## Visual Evidence
+
+The Settings Snapshot Access surface is covered by deterministic mock-state
+captures for the two product-critical states:
+
+- `assets/snapshots-validated.png` shows a reachable, validated Access App and
+  mount helper with the exact component paths and versions visible.
+- `assets/snapshots-fda-required.png` shows the same layout with the explicit
+  Full Disk Access blocking state and recovery action.
+
 ## Compatibility
 
 The application supports macOS 15 and APFS. No `fs_snapshot_*` entitlement,
