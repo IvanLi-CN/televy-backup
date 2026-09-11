@@ -27,6 +27,28 @@ pub struct SettingsV2 {
     pub targets: Vec<Target>,
     #[serde(default)]
     pub snapshot_volumes: BTreeMap<String, SnapshotVolumeSetting>,
+    #[serde(default)]
+    pub snapshot_browsing: SnapshotBrowsing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotBrowsing {
+    #[serde(default = "default_snapshot_browse_cache_max_bytes")]
+    pub cache_max_bytes: u64,
+}
+
+pub const DEFAULT_SNAPSHOT_BROWSE_CACHE_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
+fn default_snapshot_browse_cache_max_bytes() -> u64 {
+    DEFAULT_SNAPSHOT_BROWSE_CACHE_MAX_BYTES
+}
+
+impl Default for SnapshotBrowsing {
+    fn default() -> Self {
+        Self {
+            cache_max_bytes: DEFAULT_SNAPSHOT_BROWSE_CACHE_MAX_BYTES,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -185,6 +207,7 @@ impl Default for SettingsV2 {
             telegram_endpoints: Vec::new(),
             targets: Vec::new(),
             snapshot_volumes: BTreeMap::new(),
+            snapshot_browsing: SnapshotBrowsing::default(),
         }
     }
 }
@@ -359,6 +382,12 @@ pub fn validate_settings_schema_v2(settings: &SettingsV2) -> Result<()> {
     if settings.retention.keep_last_snapshots < 1 {
         return Err(Error::InvalidConfig {
             message: "retention.keep_last_snapshots must be >= 1".to_string(),
+        });
+    }
+
+    if settings.snapshot_browsing.cache_max_bytes == 0 {
+        return Err(Error::InvalidConfig {
+            message: "snapshot_browsing.cache_max_bytes must be > 0".to_string(),
         });
     }
 
@@ -688,6 +717,7 @@ fn migrate_v1_to_v2(v1: SettingsV1) -> SettingsV2 {
         telegram_endpoints: endpoints,
         targets,
         snapshot_volumes: BTreeMap::new(),
+        snapshot_browsing: SnapshotBrowsing::default(),
     }
 }
 

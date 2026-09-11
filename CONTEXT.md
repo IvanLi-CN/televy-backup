@@ -118,6 +118,28 @@ A new, non-empty PR that changes only VERSION to create a new merged identity fo
 merge that never acquired a release identity. It is not recovery of the old merge SHA.
 _Avoid_: empty PR, historical backfill, release queue
 
+## Snapshot Browsing
+
+**Backup Target**:
+The configured local source and remote storage binding whose backup runs produce one sequence of Backup Snapshots.
+_Avoid_: Folder, backup job
+
+**Backup Target Browse Volume**:
+A Finder-visible, read-only projection of the Backup Snapshots currently retained for one Backup Target. It is not a remote share and it is not itself a Backup Snapshot.
+_Avoid_: Network disk, mounted snapshot
+
+**Snapshot Directory**:
+The time-named top-level directory in a Backup Target Browse Volume that represents exactly one Backup Snapshot. Its display name is session-local; its embedded short snapshot ID disambiguates it.
+_Avoid_: Backup folder, snapshot mount
+
+**Snapshot Browse Session**:
+The temporary local access session that owns one Backup Target Browse Volume and ends when it is explicitly unmounted or reclaimed during application recovery.
+_Avoid_: Restore session, mount lease
+
+**Loopback Snapshot Browsing Service**:
+The local-only WebDAV representation of one Snapshot Browse Session. It is reached only through a one-time capability URL on the current Mac.
+_Avoid_: Remote WebDAV server, shared WebDAV service
+
 ## GUI Lifecycle
 
 **GUI Controller**:
