@@ -280,6 +280,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let accessAppPath: String?
     let registeredAccessAppPath: String?
     let accessAppRegistrationMismatch: Bool
+    let managedBy: String?
+    let migrationState: String?
+    let legacyRegistrationPath: String?
     let fdaReady: Bool
     let fdaCheckError: String?
     let accessAppError: String?
@@ -292,7 +295,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let volumes: [SnapshotVolumeStatus]
 
     private enum CodingKeys: String, CodingKey {
-        case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, registeredAccessAppPath, accessAppRegistrationMismatch, fdaReady, fdaCheckError, accessAppError
+        case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, registeredAccessAppPath, accessAppRegistrationMismatch, managedBy, migrationState, legacyRegistrationPath, fdaReady, fdaCheckError, accessAppError
         case mountHelperPath, mountHelperReachable, mountHelperVersion, mountHelperError
         case helperAvailable, helperVersion, helperError
         case activeLeases, pendingCleanup, volumes
@@ -305,6 +308,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
         accessAppPath: String?,
         registeredAccessAppPath: String? = nil,
         accessAppRegistrationMismatch: Bool = false,
+        managedBy: String? = nil,
+        migrationState: String? = nil,
+        legacyRegistrationPath: String? = nil,
         fdaReady: Bool,
         fdaCheckError: String? = nil,
         accessAppError: String?,
@@ -322,6 +328,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
         self.accessAppPath = accessAppPath
         self.registeredAccessAppPath = registeredAccessAppPath
         self.accessAppRegistrationMismatch = accessAppRegistrationMismatch
+        self.managedBy = managedBy
+        self.migrationState = migrationState
+        self.legacyRegistrationPath = legacyRegistrationPath
         self.fdaReady = fdaReady
         self.fdaCheckError = fdaCheckError
         self.accessAppError = accessAppError
@@ -345,6 +354,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
         accessAppPath = try values.decodeIfPresent(String.self, forKey: .accessAppPath)
         registeredAccessAppPath = try values.decodeIfPresent(String.self, forKey: .registeredAccessAppPath)
         accessAppRegistrationMismatch = try values.decodeIfPresent(Bool.self, forKey: .accessAppRegistrationMismatch) ?? false
+        managedBy = try values.decodeIfPresent(String.self, forKey: .managedBy)
+        migrationState = try values.decodeIfPresent(String.self, forKey: .migrationState)
+        legacyRegistrationPath = try values.decodeIfPresent(String.self, forKey: .legacyRegistrationPath)
         fdaReady = try values.decodeIfPresent(Bool.self, forKey: .fdaReady) ?? false
         fdaCheckError = try values.decodeIfPresent(String.self, forKey: .fdaCheckError)
         accessAppError = try values.decodeIfPresent(String.self, forKey: .accessAppError)
@@ -986,7 +998,13 @@ struct SettingsWindowRootView: View {
                                     .lineLimit(2)
                             }
                             if snapshotStatus.accessAppRegistrationMismatch {
-                                Text("The running Access App differs from its registered launch path. Update Snapshot Access before restarting.")
+                                Text("Snapshot Access is using a legacy registration. Restart TelevyBackup to retry migration.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.orange)
+                                    .lineLimit(2)
+                            }
+                            if snapshotStatus.migrationState == "pending" {
+                                Text("Snapshot Access migration is waiting for the embedded helper to start.")
                                     .font(.system(size: 11))
                                     .foregroundStyle(.orange)
                                     .lineLimit(2)
@@ -1063,7 +1081,9 @@ struct SettingsWindowRootView: View {
                 consistencyMode: strict ? "strict" : "live",
                 serviceReachable: !accessMissing,
                 accessAppVersion: accessMissing ? nil : "0.2.0",
-                accessAppPath: accessMissing ? nil : "~/Applications/TelevyBackup Snapshot Access.app",
+                accessAppPath: accessMissing ? nil : "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+                managedBy: accessMissing ? nil : "smappservice",
+                migrationState: accessMissing ? nil : "ready",
                 fdaReady: !accessMissing && SettingsUIDemo.scene != "snapshots-fda-required",
                 accessAppError: accessMissing ? "Snapshot Access is not installed" : (SettingsUIDemo.scene == "snapshots-fda-required" ? "Full Disk Access is required" : nil),
                 mountHelperPath: "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",

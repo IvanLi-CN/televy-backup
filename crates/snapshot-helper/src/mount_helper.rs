@@ -384,9 +384,7 @@ async fn status_result(pool: &SqlitePool) -> Result<MountStatusResult, MountHelp
     .fetch_one(pool)
     .await? as u32;
     Ok(MountStatusResult {
-        helper_version: option_env!("TELEVYBACKUP_BUILD_VERSION")
-            .unwrap_or(ROOT_MOUNT_HELPER_VERSION)
-            .to_string(),
+        helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
         active_mounts,
     })
 }

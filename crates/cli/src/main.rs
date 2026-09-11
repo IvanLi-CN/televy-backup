@@ -145,11 +145,12 @@ enum DaemonCmd {
 
 #[derive(Subcommand)]
 enum SnapshotAccessCmd {
-    Install {
-        #[arg(long)]
-        app: PathBuf,
-    },
-    Uninstall,
+    #[command(hide = true)]
+    PrepareMigration,
+    #[command(hide = true)]
+    CommitMigration,
+    #[command(hide = true)]
+    RollbackMigration,
     Status,
 }
 
@@ -975,11 +976,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             DaemonCmd::ServiceStatus => service::service_status(&config_dir, &data_dir, cli.json),
         },
         Command::SnapshotAccess { cmd } => match cmd {
-            SnapshotAccessCmd::Install { app } => {
-                snapshot_service::install(app, &config_dir, &data_dir, cli.json)
+            SnapshotAccessCmd::PrepareMigration => {
+                snapshot_service::prepare_migration(&config_dir, &data_dir, cli.json)
             }
-            SnapshotAccessCmd::Uninstall => {
-                snapshot_service::uninstall(&config_dir, &data_dir, cli.json)
+            SnapshotAccessCmd::CommitMigration => {
+                snapshot_service::commit_migration(&config_dir, &data_dir, cli.json)
+            }
+            SnapshotAccessCmd::RollbackMigration => {
+                snapshot_service::rollback_migration(&config_dir, &data_dir, cli.json)
             }
             SnapshotAccessCmd::Status => {
                 snapshot_service::status(&config_dir, &data_dir, cli.json).map(|_| ())

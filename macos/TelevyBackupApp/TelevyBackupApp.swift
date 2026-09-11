@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Darwin
 import Foundation
+import ServiceManagement
 import SwiftUI
 
 // Popover size is driven by real SwiftUI fitting height (sizeThatFits) and then clamped.
@@ -932,6 +933,137 @@ final class AppModel {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .prefix(300).description
             DispatchQueue.main.async { completion(result.status == 0, result.status == 0 ? nil : output) }
+        }
+    }
+
+    // The migration commands only prepare/commit the data contract. SMAppService
+    // is the sole owner of the installed LaunchAgent registration.
+    func ensureSnapshotAccessRegistration(completion: @escaping (Bool, String?) -> Void) {
+        guard !UIDemo.enabled else {
+            completion(true, nil)
+            return
+        }
+        guard let cli = cliPath() else {
+            DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
+            return
+        }
+        let config = effectiveConfigDirURL().path
+        let data = effectiveDataDirURL().path
+        DispatchQueue.global(qos: .userInitiated).async {
+            let prepare = self.runCommandCapture(
+                exe: cli,
+                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "prepare-migration"],
+                timeoutSeconds: 20
+            )
+            guard prepare.status == 0 else {
+                let output = (prepare.stderr.isEmpty ? prepare.stdout : prepare.stderr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(400).description
+                DispatchQueue.main.async { completion(false, output.isEmpty ? "Snapshot Access migration could not be prepared" : output) }
+                return
+            }
+            DispatchQueue.main.async {
+                let agent = SMAppService.agent(plistName: "com.ivan.televybackup.snapshot-access.plist")
+                do {
+                    if agent.status != .enabled {
+                        try agent.register()
+                    }
+                    self.commitSnapshotAccessRegistration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        agent: agent,
+                        attempt: 0,
+                        completion: completion
+                    )
+                } catch {
+                    self.finishSnapshotAccessMigration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        agent: agent,
+                        success: false,
+                        message: error.localizedDescription,
+                        completion: completion
+                    )
+                }
+            }
+        }
+    }
+
+    private func commitSnapshotAccessRegistration(
+        cli: String,
+        config: String,
+        data: String,
+        agent: SMAppService,
+        attempt: Int,
+        completion: @escaping (Bool, String?) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let commit = self.runCommandCapture(
+                exe: cli,
+                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "commit-migration"],
+                timeoutSeconds: 20
+            )
+            if commit.status == 0 {
+                DispatchQueue.main.async { completion(true, nil) }
+                return
+            }
+            guard attempt < 10 else {
+                let output = (commit.stderr.isEmpty ? commit.stdout : commit.stderr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(400).description
+                self.finishSnapshotAccessMigration(
+                    cli: cli,
+                    config: config,
+                    data: data,
+                    agent: agent,
+                    success: false,
+                    message: output.isEmpty ? "Snapshot Access did not start with the embedded identity" : output,
+                    completion: completion
+                )
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.commitSnapshotAccessRegistration(
+                    cli: cli,
+                    config: config,
+                    data: data,
+                    agent: agent,
+                    attempt: attempt + 1,
+                    completion: completion
+                )
+            }
+        }
+    }
+
+    private func finishSnapshotAccessMigration(
+        cli: String,
+        config: String,
+        data: String,
+        agent: SMAppService?,
+        success: Bool,
+        message: String?,
+        completion: @escaping (Bool, String?) -> Void
+    ) {
+        guard !success else {
+            DispatchQueue.main.async { completion(true, nil) }
+            return
+        }
+        if let agent {
+            do {
+                try agent.unregister()
+            } catch {
+                appendLog("WARN: Snapshot Access SMAppService rollback failed: \(error.localizedDescription)")
+            }
+        }
+        DispatchQueue.global(qos: .utility).async {
+            _ = self.runCommandCapture(
+                exe: cli,
+                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "rollback-migration"],
+                timeoutSeconds: 20
+            )
+            DispatchQueue.main.async { completion(false, message) }
         }
     }
 
@@ -2563,6 +2695,10 @@ final class AppModel {
 	            window.backgroundColor = .windowBackgroundColor
 	        }
         appearanceOverride.apply(to: window)
+    }
+
+    func reportSnapshotAccessRegistrationFailure(_ message: String) {
+        appendLog("WARN: Snapshot Access registration unavailable: \(message)")
     }
 
     private func appendLog(_ line: String) {
@@ -4980,6 +5116,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // UI demo (used for scripted screenshots) should not depend on daemon/keychain.
             if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1" {
                 return
+            }
+            ModelStore.shared.ensureSnapshotAccessRegistration { success, error in
+                if !success, let error {
+                    ModelStore.shared.reportSnapshotAccessRegistrationFailure(error)
+                }
             }
             ModelStore.shared.ensureDaemonRunning()
             ModelStore.shared.ensureStatusStreamRunning()
