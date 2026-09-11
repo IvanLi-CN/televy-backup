@@ -24,6 +24,7 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - `bash scripts/macos/swift-unit-tests.sh`
 - native macOS package matrix and Universal 2 verification in GitHub Actions
 - `scripts/macos/verify-app-icon-assets.sh`, asset catalog `actool` compilation, and bundle `Info.plist`/resource inspection
+- nested helper component lock, SHA-256/CDHash/designated-requirement comparison, and RC artifact reuse inspection
 - shared testbox full-feature Rust validation
 
 ## Visual Evidence

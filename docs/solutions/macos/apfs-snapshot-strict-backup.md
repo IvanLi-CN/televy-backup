@@ -216,7 +216,7 @@ must provide its own documented backup/export mechanism.
 | Protocol/unit tests | Request allowlists, peer UID binding, private mount validation, UUID-only cleanup | Test names and pass/fail counts |
 | Brokered core tests | The daemon uses streams rather than a mount path; strict errors fail closed | Test names and pass/fail counts |
 | Sanitized APFS integration | `PRE` survives in snapshot while live file is `POST`; cleanup completes | Sanitized JSON assertion report |
-| Package verification | Separate Access bundle and mount-helper artifact are present | Artifact names and checksums, if desired |
+| Package verification | One product bundle contains the independent Access helper and the mount-helper artifact | Artifact names, component hashes, and identity fields, if desired |
 | Product backup smoke test | Existing upload pipeline can consume brokered bytes | Private local result; never publish target or remote metadata |
 
 The first three levels establish feasibility without disclosing user data or machine topology. The
@@ -225,9 +225,10 @@ operation because backup history and remote metadata are sensitive.
 
 ## Operational Procedure
 
-1. Build the main app, separate Snapshot Access app, and mount-helper from one source revision.
-2. Install the Access app through its user LaunchAgent. Install the root helper through the explicit
-   administrator transaction; do not run the daemon as root.
+1. Build the main app and mount-helper from one source revision; embed Snapshot Access inside the
+   main app and register it through `SMAppService`.
+2. Let the main app migrate the old external registration transactionally. Install the root helper
+   through the explicit administrator transaction; do not run the daemon as root.
 3. Grant FDA only through System Settings to the exact displayed identity or identities required by
    the validated deployment baseline.
 4. Probe each configured target. Enable strict mode only after the target reports APFS support and
@@ -249,8 +250,9 @@ operation because backup history and remote metadata are sensitive.
 - Do not clean by snapshot name alone or use a global "delete all local snapshots" operation.
 - Keep per-volume serialization. Snapshot creation is volume-scoped, even when several configured
   roots lie on the same volume.
-- Revalidate the exact release artifact after a signing identity change. This verifies TCC binding;
-  it does not reopen the architecture decision.
+- Revalidate the exact release artifact after a signing identity change. For ordinary main-app
+  updates, compare the embedded helper SHA-256, CodeDirectory hash, and designated requirement;
+  this verifies TCC binding without asking the user to re-authorize an unchanged helper.
 
 ## References
 

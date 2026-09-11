@@ -6,7 +6,7 @@
 
 ## Context and Scope
 
-This topic owns the macOS distribution surface for TelevyBackup: three GUI DMGs, native arm64 and x86_64 tool archives, Universal 2 binaries, checksums, build manifests, the product-managed per-user daemon service, and the separately shipped user APFS Snapshot Access app.
+This topic owns the macOS distribution surface for TelevyBackup: three GUI DMGs, native arm64 and x86_64 tool archives, Universal 2 binaries, checksums, build manifests, the product-managed per-user daemon service, and the private user APFS Snapshot Access helper embedded in the product app.
 
 It does not own backup formats, Telegram protocol behavior, Apple Developer ID signing, notarization, App Store delivery, automatic updates, or Homebrew formula maintenance.
 
@@ -16,6 +16,8 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 - **Build number**: a deterministic numeric `CFBundleVersion` derived from the source history.
 - **Managed service**: the single user LaunchAgent labeled `com.ivan.televybackup.daemon`.
 - **Snapshot Access app**: the user `LSUIElement` bundle labeled `com.ivan.televybackup.snapshot-access`; the user grants FDA to its exact path.
+- **Private Access helper**: the Snapshot Access app at `TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app`; it is not a second user-installable product.
+- **Authorization-stable helper artifact**: a helper bundle reused byte-for-byte across ordinary main-app releases, including its SHA-256, CodeDirectory hash, and designated requirement.
 - **Snapshot mount helper**: the separate root-only `televybackup-snapshot-mount-helper` installed as a system LaunchDaemon; it only mounts/unmounts and UUID-cleans APFS leases.
 - **Environment**: the exact config and data directory pair passed to the daemon.
 - **Universal 2**: a Mach-O binary containing both arm64 and x86_64 slices.
@@ -25,11 +27,11 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 
 ### REQ-MRD-001: Traceable release assets
 
-Every stable or RC release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBackup-<version>-arm64.dmg`, `TelevyBackup-<version>-x86_64.dmg`, `televybackup-tools-<version>-arm64.tar.gz`, `televybackup-tools-<version>-x86_64.tar.gz`, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after all asset checks pass. Each DMG MUST contain the installable `TelevyBackup.app` plus the separate `TelevyBackup Snapshot Access.app`; version and architecture belong in the downloadable DMG filename, not the app entry names.
+Every stable or RC release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBackup-<version>-arm64.dmg`, `TelevyBackup-<version>-x86_64.dmg`, `televybackup-tools-<version>-arm64.tar.gz`, `televybackup-tools-<version>-x86_64.tar.gz`, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after all asset checks pass. Each DMG MUST contain exactly one top-level installable `TelevyBackup.app` with the private Snapshot Access helper embedded inside it. The tools archive MUST NOT contain or install Snapshot Access. Version and architecture belong in the downloadable filenames.
 
 ### REQ-MRD-002: Native build matrix
 
-arm64 assets MUST be built on `macos-15`; x86_64 assets MUST be built on `macos-15-intel`. Universal 2 assembly MUST combine those native slices and verify all four main embedded executables plus the separate Snapshot Access app.
+arm64 assets MUST be built on `macos-15`; x86_64 assets MUST be built on `macos-15-intel`. Universal 2 assembly MUST combine those native slices and verify all five main embedded executables plus the nested Snapshot Access app.
 
 ### REQ-MRD-003: Version observability
 
@@ -53,7 +55,15 @@ The Settings Schedule page MUST default the service switch to off, display insta
 
 ### REQ-MRD-010: Snapshot Access packaging
 
-The app and tool archive MUST contain a separate `TelevyBackup Snapshot Access.app`, the mount-helper binary, and user/system service templates. The CLI MUST expose `snapshot-access install --app <path>`, `snapshot-access uninstall`, `snapshot-access status`, and `snapshot-mount-helper install|uninstall|status`. Only mount-helper install/update/uninstall requires administrator authorization; scheduled backups MUST use the installed services without prompting; FDA is an explicit System Settings action.
+The app MUST contain `TelevyBackup Snapshot Access.app` at the fixed nested path and a
+`Contents/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist` using `BundleProgram`.
+The CLI MUST expose read-only `snapshot-access status` and internal transactional migration
+operations, but MUST NOT accept `snapshot-access install --app <path>` or ship an external helper
+installer. RC1 MUST build and sign the Universal helper once; later RCs and stable MUST extract,
+verify, and embed that exact artifact without rebuilding, `lipo`, or re-signing it. The mount-helper
+binary and system service templates remain available for its explicit administrator transaction;
+the installed root helper is compatibility-checked only and not automatically updated. FDA is an
+explicit System Settings action.
 
 ### REQ-MRD-008: Release atomicity and backfill
 
@@ -110,6 +120,7 @@ Covers: REQ-MRD-007. Swift unit tests and isolated Settings snapshots provide th
 
 - [0002-settings-window-ipc-only](../../adr/0002-settings-window-ipc-only.md)
 - [0003-product-managed-daemon-launchagent](../../adr/0003-product-managed-daemon-launchagent.md)
+- [0010-identity-stable-single-product-release](../../adr/0010-identity-stable-single-product-release.md)
 
 ## Visual Evidence
 

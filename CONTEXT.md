@@ -77,6 +77,28 @@ _Avoid_: Upload attempt, pack
 The macOS app instance that presents and controls one local backup environment. It is separate from the daemon that executes scheduled and queued work.
 _Avoid_: Daemon, backup worker
 
+## Installation And Privilege Model
+
+**User-Visible Product**:
+The single `TelevyBackup.app` bundle a person downloads, moves, and updates. No second top-level companion application is presented as a separate installation or update task.
+_Avoid_: Two-app installation, standalone companion app
+
+**Private Access Helper**:
+A nested application bundle shipped inside the User-Visible Product. It runs only to perform the Full Disk Access-scoped snapshot operation, has no Finder-facing installation workflow, and remains a distinct macOS authorization identity from the GUI Controller.
+_Avoid_: Second product, GUI Controller
+
+**Authorization-Stable Helper Artifact**:
+The exact previously authorized Private Access Helper bundle, including its ad-hoc signature. A product-only release reuses its bytes unchanged so its macOS code identity remains unchanged.
+_Avoid_: Rebuilt helper, product-versioned helper
+
+**Helper Migration**:
+The one-time move from the legacy externally installed Snapshot Access application to the Private Access Helper's stable path inside the User-Visible Product. It can require the person to grant Full Disk Access once to the new authorization identity.
+_Avoid_: Routine product update
+
+**System Mount Helper**:
+The root-only mount component installed at its stable system path as part of the User-Visible Product's setup. It is not a separate user product; changing it remains an explicit administrator-authorized and, when required, Full Disk Access migration.
+_Avoid_: User-installed second app, user-session file reader
+
 **Menu-bar Agent**:
 The default macOS application identity while TelevyBackup has no persistent top-level window. It keeps `LSUIElement=true` semantics: the app remains available from the status item without appearing in the Dock or `Cmd-Tab`.
 _Avoid_: Hidden application, daemon

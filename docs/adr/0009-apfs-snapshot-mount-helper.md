@@ -22,5 +22,5 @@ making the backup daemon or file reader privileged.
 Installing, updating, or removing the mount helper requires one administrator-authorized transaction.
 Normal and scheduled backups do not authenticate. The helper stores a root-owned journal and can
 recover mounts after a crash. It never reads user files, Keychain data, backup indexes, or network
-data. Access App or helper identity updates may require FDA to be re-granted to each exact displayed
-path.
+data. Its existing system install path and version remain stable during an ordinary product app
+update; this release performs compatibility checks only and never updates it automatically.
