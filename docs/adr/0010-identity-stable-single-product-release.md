@@ -9,8 +9,9 @@ user-session process and Full Disk Access identity, but embed it at
 an absolute workspace or installation path.
 
 The first RC that introduces this layout builds and ad-hoc signs a Universal Snapshot Access
-bundle. Later RCs and the stable release reuse that exact helper artifact from the previous RC
-Universal DMG. Reuse forbids rebuilding, `lipo`, deep signing, or any other mutation of the helper.
+bundle. Later RCs and the stable release for that product version reuse that exact helper artifact
+from `v<product-version>-rc.1`'s Universal DMG. Reuse forbids rebuilding, `lipo`, deep signing,
+or any other mutation of the helper.
 The outer app is signed from the inside out. The helper's component version, IPC protocol version,
 source policy, SHA-256, CodeDirectory hash, and designated requirement are recorded in the release
 manifest.

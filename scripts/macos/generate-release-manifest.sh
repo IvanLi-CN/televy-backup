@@ -59,7 +59,12 @@ if os.path.isfile(helper_binary):
             helper['cdhash'] = line.split('=', 1)[1]
     requirement = subprocess.run(['codesign', '-d', '-r-', bundle], capture_output=True, text=True)
     helper['designated_requirement'] = next(
-        (line for line in requirement.stdout.splitlines() if 'designated =>' in line), None
+        (
+            line
+            for line in (requirement.stdout + requirement.stderr).splitlines()
+            if 'designated =>' in line
+        ),
+        None,
     )
 
 components = {

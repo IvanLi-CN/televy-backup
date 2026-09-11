@@ -584,14 +584,11 @@ async fn handle_control_ipc_client(
         });
         let (access_app_path, registered_access_app_path, path_mismatch) =
             snapshot_access_paths(helper.as_ref().ok(), registered_access_app_path);
+        let manifest_present = snapshot_manifest.is_some();
         let access_app_registration_mismatch =
-            path_mismatch || managed_by.as_deref() != Some("smappservice");
-        let migration_state = migration_state.or_else(|| {
-            managed_by
-                .as_deref()
-                .filter(|value| *value != "smappservice")
-                .map(|_| "legacy-detected".to_string())
-        });
+            manifest_present && (path_mismatch || managed_by.as_deref() != Some("smappservice"));
+        let migration_state =
+            migration_state.or_else(|| manifest_present.then(|| "legacy-detected".to_string()));
         write_json_line(
             &mut w,
             &ControlResponse::ok(

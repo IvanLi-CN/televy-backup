@@ -2,19 +2,22 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: verify-component-identity.sh --reference BUNDLE --candidate BUNDLE" >&2
+  echo "usage: verify-component-identity.sh --reference BUNDLE --candidate BUNDLE [--manifest FILE]" >&2
   exit 2
 }
 reference=""
 candidate=""
+manifest=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --reference) reference="${2:-}"; shift 2 ;;
     --candidate) candidate="${2:-}"; shift 2 ;;
+    --manifest) manifest="${2:-}"; shift 2 ;;
     *) usage ;;
   esac
 done
 [[ -d "$reference" && -d "$candidate" ]] || usage
+[[ -z "$manifest" || -s "$manifest" ]] || usage
 reference_binary="$reference/Contents/MacOS/televybackup-snapshot-access"
 candidate_binary="$candidate/Contents/MacOS/televybackup-snapshot-access"
 [[ -f "$reference_binary" && -f "$candidate_binary" ]] || {
@@ -47,6 +50,20 @@ candidate_requirement="$(codesign -d -r- "$candidate" 2>&1 | sed -n '/designated
   echo "Snapshot Access designated requirement changed" >&2
   exit 1
 }
+
+if [[ -n "$manifest" ]]; then
+  reference_cdhash="$(printf '%s\n' "$reference_signature" | awk -F= '/^cdhash=/{print $2}')"
+  reference_sha256="$reference_sha"
+  python3 - "$manifest" "$reference_sha256" "$reference_cdhash" "$reference_requirement" <<'PY'
+import json
+import sys
+
+component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
+assert component["sha256"] == sys.argv[2]
+assert component["cdhash"] == sys.argv[3]
+assert component["designated_requirement"] == sys.argv[4]
+PY
+fi
 
 echo "Snapshot Access component identity is unchanged"
 echo "sha256=$candidate_sha"
