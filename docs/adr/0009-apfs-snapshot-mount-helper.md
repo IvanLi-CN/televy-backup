@@ -2,7 +2,8 @@
 
 ## Decision
 
-Keep `TelevyBackup Snapshot Access.app` as the user-facing FDA and file-reading process, and add a
+Keep Snapshot Access as a private embedded user-session FDA and file-reading helper inside
+`TelevyBackup.app`, and add a
 separate root `com.ivan.televybackup.snapshot-mount-helper` LaunchDaemon. Its only IPC methods are
 `Status`, `Mount`, `Release`, and UUID-scoped `Cleanup`; `Mount` validates the caller UID, APFS volume/device identity,
 private mount directory, and UUID manifest before invoking `mount_apfs`; `Release` unmounts and

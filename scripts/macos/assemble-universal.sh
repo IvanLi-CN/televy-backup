@@ -18,6 +18,16 @@ done
 [[ -n "$mode" && -d "$arm_app" && -d "$x86_app" && -n "$output_dir" ]] || usage
 [[ "$mode" == "release" || "$mode" == "development" ]] || usage
 root_dir="$(git rev-parse --show-toplevel)"
+arm_app_real="$(cd "$arm_app" && pwd -P)"
+x86_app_real="$(cd "$x86_app" && pwd -P)"
+output_parent_real="$(cd "$(dirname "$output_dir")" && pwd -P)"
+output_dir_real="$output_parent_real/$(basename "$output_dir")"
+for input_parent in "$(dirname "$arm_app_real")" "$(dirname "$x86_app_real")"; do
+  if [[ "$output_dir_real" == "$input_parent" || "$output_dir_real" == "$input_parent/"* ]]; then
+    echo "Universal output directory must not overlap a native app input directory: $output_dir" >&2
+    exit 1
+  fi
+done
 source_commit="$(git rev-parse HEAD)"
 version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
 mkdir -p "$output_dir"

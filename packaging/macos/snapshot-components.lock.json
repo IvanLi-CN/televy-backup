@@ -13,6 +13,7 @@
       "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign",
       "identity": {
         "sha256": "BUILD-MANIFEST.json#/components/snapshot_access/sha256",
+        "artifact_sha256": "BUILD-MANIFEST.json#/components/snapshot_access/artifact_sha256",
         "cdhash": "BUILD-MANIFEST.json#/components/snapshot_access/cdhash",
         "designated_requirement": "BUILD-MANIFEST.json#/components/snapshot_access/designated_requirement"
       }
@@ -24,9 +25,12 @@
       "component_version": "0.1.0",
       "protocol_version": 1,
       "source": "release-bundled-compatibility-reference",
+      "identity_source": "bundled-release-artifact",
+      "installed_observation": "manual-rc-acceptance-required",
       "update_policy": "compatibility-check-only",
       "identity": {
         "sha256": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/sha256",
+        "artifact_sha256": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/artifact_sha256",
         "cdhash": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/cdhash",
         "designated_requirement": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/designated_requirement"
       }

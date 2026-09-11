@@ -58,6 +58,17 @@ access_contents_dir="$access_app_dir/Contents"
 access_macos_dir="$access_contents_dir/MacOS"
 access_agent_plist="$launch_agents_dir/com.ivan.televybackup.snapshot-access.plist"
 
+if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
+  reuse_bundle="${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE}"
+  [[ -d "$reuse_bundle" ]] || { echo "missing reusable Snapshot Access bundle: $reuse_bundle" >&2; exit 1; }
+  reuse_bundle_real="$(cd "$reuse_bundle" && pwd -P)"
+  app_parent_real="$(cd "$(dirname "$app_dir")" && pwd -P)"
+  app_dir_real="$app_parent_real/$(basename "$app_dir")"
+  if [[ "$reuse_bundle_real" == "$app_dir_real" || "$reuse_bundle_real" == "$app_dir_real/"* ]]; then
+    echo "reusable Snapshot Access bundle must not be inside the output app" >&2
+    exit 1
+  fi
+fi
 rm -rf "$app_dir" "$out_root/TelevyBackup Snapshot Access.app"
 mkdir -p "$macos_dir"
 mkdir -p "$resources_dir"
@@ -232,6 +243,8 @@ else
   <key>CFBundleShortVersionString</key><string>$short_version</string>
   <key>TelevyBackupReleaseVersion</key><string>$release_version</string>
   <key>TelevyBackupSourceCommit</key><string>$source_commit</string>
+  <key>TelevyBackupComponentVersion</key><string>0.2.0</string>
+  <key>TelevyBackupProtocolVersion</key><integer>2</integer>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>televybackup-snapshot-access</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>

@@ -133,13 +133,17 @@ assert access["protocol_version"] == 2
 assert access["reuse_policy"] == "byte-identical-no-rebuild-no-lipo-no-resign"
 identity = access["identity"]
 assert identity["sha256"].startswith("BUILD-MANIFEST.json#/")
+assert identity["artifact_sha256"].startswith("BUILD-MANIFEST.json#/")
 assert identity["cdhash"].startswith("BUILD-MANIFEST.json#/")
 assert identity["designated_requirement"].startswith("BUILD-MANIFEST.json#/")
 mount_identity = lock["components"]["snapshot_mount_helper"]["identity"]
 assert mount_identity["sha256"].startswith("BUILD-MANIFEST.json#/")
+assert mount_identity["artifact_sha256"].startswith("BUILD-MANIFEST.json#/")
 assert mount_identity["cdhash"].startswith("BUILD-MANIFEST.json#/")
 assert mount_identity["designated_requirement"].startswith("BUILD-MANIFEST.json#/")
 mount = lock["components"]["snapshot_mount_helper"]
+assert mount["identity_source"] == "bundled-release-artifact"
+assert mount["installed_observation"] == "manual-rc-acceptance-required"
 assert mount["update_policy"] == "compatibility-check-only"
 PY
 

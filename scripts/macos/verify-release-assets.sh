@@ -16,6 +16,38 @@ done
 root_dir="$(git rev-parse --show-toplevel)"
 source_commit="$(git rev-parse HEAD)"
 version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
+
+artifact_sha256() {
+  python3 - "$1" <<'PY'
+import hashlib, os, sys
+path = sys.argv[1]
+digest = hashlib.sha256()
+if os.path.isfile(path):
+    with open(path, 'rb') as handle:
+        digest.update(handle.read())
+else:
+    for root, directories, files in os.walk(path, followlinks=False):
+        directories.sort()
+        files.sort()
+        relative_root = os.path.relpath(root, path)
+        if relative_root == '.':
+            relative_root = ''
+        for name in directories + files:
+            entry = os.path.join(root, name)
+            relative = os.path.join(relative_root, name)
+            stat = os.lstat(entry)
+            digest.update(b'entry\0' + relative.encode() + b'\0')
+            digest.update(str(stat.st_mode).encode() + b'\0')
+            if os.path.islink(entry):
+                digest.update(b'link\0' + os.readlink(entry).encode() + b'\0')
+            elif os.path.isfile(entry):
+                with open(entry, 'rb') as handle:
+                    digest.update(b'file\0' + handle.read())
+            else:
+                digest.update(b'other\0')
+print(digest.hexdigest())
+PY
+}
 required=("TelevyBackup-${version}.dmg" "TelevyBackup-${version}-arm64.dmg" "TelevyBackup-${version}-x86_64.dmg" "televybackup-tools-${version}-arm64.tar.gz" "televybackup-tools-${version}-x86_64.tar.gz" "SHA256SUMS" "BUILD-MANIFEST.json")
 for name in "${required[@]}"; do
   [[ -s "$asset_dir/$name" ]] || { echo "missing or empty asset: $name" >&2; exit 1; }
@@ -58,6 +90,7 @@ assert component["component_version"] == locked["component_version"]
 assert component["protocol_version"] == 2
 assert component["reuse_policy"] == locked["reuse_policy"]
 assert locked["identity"]["sha256"] == "BUILD-MANIFEST.json#/components/snapshot_access/sha256"
+assert locked["identity"]["artifact_sha256"] == "BUILD-MANIFEST.json#/components/snapshot_access/artifact_sha256"
 assert locked["identity"]["cdhash"] == "BUILD-MANIFEST.json#/components/snapshot_access/cdhash"
 assert locked["identity"]["designated_requirement"] == "BUILD-MANIFEST.json#/components/snapshot_access/designated_requirement"
 mount_component = manifest["components"]["snapshot_mount_helper"]
@@ -68,8 +101,11 @@ assert mount_component["component_version"] == locked_mount_component["component
 assert mount_component["protocol_version"] == locked_mount_component["protocol_version"]
 assert mount_component["binary"] == locked_mount_component["binary"]
 assert mount_component["source"] == locked_mount_component["source"]
+assert mount_component["identity_source"] == locked_mount_component["identity_source"]
+assert mount_component["installed_observation"] == locked_mount_component["installed_observation"]
 assert mount_component["update_policy"] == locked_mount_component["update_policy"]
 assert locked_mount_component["identity"]["sha256"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/sha256"
+assert locked_mount_component["identity"]["artifact_sha256"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/artifact_sha256"
 assert locked_mount_component["identity"]["cdhash"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/cdhash"
 assert locked_mount_component["identity"]["designated_requirement"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/designated_requirement"
 if sys.argv[5] != "true":
@@ -130,16 +166,18 @@ if [[ -d "$app" ]]; then
   root_helper_sha256="$(shasum -a 256 "$root_helper_binary" | awk '{print $1}')"
   root_helper_cdhash="$(printf '%s\n' "$root_helper_signature" | awk -F= '/^CDHash=/{print $2}')"
   root_helper_requirement="$(codesign -d -r- "$root_helper_binary" 2>&1 | sed -n '/designated =>/p')"
+  root_helper_artifact_sha256="$(artifact_sha256 "$root_helper_binary")"
   [[ -n "$root_helper_cdhash" && -n "$root_helper_requirement" ]] || {
     echo "snapshot mount helper signature identity is incomplete" >&2
     exit 1
   }
-  python3 - "$asset_dir/BUILD-MANIFEST.json" "$root_helper_sha256" "$root_helper_cdhash" "$root_helper_requirement" <<'PY'
+  python3 - "$asset_dir/BUILD-MANIFEST.json" "$root_helper_sha256" "$root_helper_artifact_sha256" "$root_helper_cdhash" "$root_helper_requirement" <<'PY'
 import json, sys
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_mount_helper"]
 assert component["sha256"] == sys.argv[2]
-assert component["cdhash"] == sys.argv[3]
-assert component["designated_requirement"] == sys.argv[4]
+assert component["artifact_sha256"] == sys.argv[3]
+assert component["cdhash"] == sys.argv[4]
+assert component["designated_requirement"] == sys.argv[5]
 PY
   launch_agent="$app/Contents/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist"
   [[ -s "$launch_agent" ]] || { echo "embedded Snapshot Access LaunchAgent missing" >&2; exit 1; }
@@ -169,14 +207,22 @@ if [[ -d "$access_app" ]]; then
   signature="$(codesign -dvvv "$access_app" 2>&1 || true)"
   [[ "$signature" == *"Signature=adhoc"* ]] || { echo "Snapshot Access must use an ad-hoc signature" >&2; exit 1; }
   actual_sha256="$(shasum -a 256 "$access_app/Contents/MacOS/televybackup-snapshot-access" | awk '{print $1}')"
+  actual_artifact_sha256="$(artifact_sha256 "$access_app")"
   actual_cdhash="$(printf '%s\n' "$signature" | awk -F= '/^CDHash=/{print $2}')"
   actual_requirement="$(codesign -d -r- "$access_app" 2>&1 | sed -n '/designated =>/p')"
-  python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_cdhash" "$actual_requirement" <<'PY'
+  access_metadata="$("$access_app/Contents/MacOS/televybackup-snapshot-access" --component-metadata)"
+  python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_artifact_sha256" "$actual_cdhash" "$actual_requirement" "$access_metadata" <<'PY'
 import json, sys
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
 assert component["sha256"] == sys.argv[2]
-assert component["cdhash"] == sys.argv[3]
-assert component["designated_requirement"] == sys.argv[4]
+assert component["artifact_sha256"] == sys.argv[3]
+assert component["cdhash"] == sys.argv[4]
+assert component["designated_requirement"] == sys.argv[5]
+metadata = json.loads(sys.argv[6])
+assert component["bundle_id"] == metadata["bundleId"]
+assert component["relative_path"] == metadata["relativePath"]
+assert component["component_version"] == metadata["componentVersion"]
+assert component["protocol_version"] == metadata["protocolVersion"]
 PY
 fi
 verify_dmg_helper_identity() (
@@ -194,6 +240,22 @@ verify_dmg_helper_identity() (
   trap cleanup EXIT
   hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$local_dmg" >/dev/null
   mounted=true
+  app="$mount_point/TelevyBackup.app"
+  [[ -d "$app" ]] || { echo "DMG is missing TelevyBackup.app: $local_dmg" >&2; exit 1; }
+  codesign --verify --deep --strict "$app"
+  app_arches="$(lipo -info "$app/Contents/MacOS/TelevyBackup")"
+  case "$(basename "$local_dmg")" in
+    TelevyBackup-*-arm64.dmg)
+      [[ "$app_arches" == *arm64* && "$app_arches" != *x86_64* ]] || { echo "arm64 DMG contains a non-arm64 main app: $local_dmg" >&2; exit 1; }
+      ;;
+    TelevyBackup-*-x86_64.dmg)
+      [[ "$app_arches" == *x86_64* && "$app_arches" != *arm64* ]] || { echo "x86_64 DMG contains a non-x86_64 main app: $local_dmg" >&2; exit 1; }
+      ;;
+    TelevyBackup-*.dmg)
+      [[ "$app_arches" == *arm64* && "$app_arches" == *x86_64* ]] || { echo "Universal DMG main app is missing a slice: $local_dmg" >&2; exit 1; }
+      ;;
+    *) echo "unexpected TelevyBackup DMG name: $local_dmg" >&2; exit 1 ;;
+  esac
   helper="$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
   [[ -d "$helper" ]] || { echo "DMG is missing embedded Snapshot Access: $local_dmg" >&2; exit 1; }
   codesign --verify --strict "$helper"
@@ -208,19 +270,27 @@ verify_dmg_helper_identity() (
     exit 1
   }
   actual_sha256="$(shasum -a 256 "$helper/Contents/MacOS/televybackup-snapshot-access" | awk '{print $1}')"
+  actual_artifact_sha256="$(artifact_sha256 "$helper")"
   actual_cdhash="$(printf '%s\n' "$signature" | awk -F= '/^CDHash=/{print $2}')"
   actual_requirement="$(codesign -d -r- "$helper" 2>&1 | sed -n '/designated =>/p')"
+  access_metadata="$("$helper/Contents/MacOS/televybackup-snapshot-access" --component-metadata)"
   [[ -n "$actual_cdhash" && -n "$actual_requirement" ]] || {
     echo "DMG Snapshot Access signature identity is incomplete: $local_dmg" >&2
     exit 1
   }
   if [[ "$require_manifest_identity" == true ]]; then
-    python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_cdhash" "$actual_requirement" <<'PY'
+    python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_artifact_sha256" "$actual_cdhash" "$actual_requirement" "$access_metadata" <<'PY'
 import json, sys
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
 assert component["sha256"] == sys.argv[2]
-assert component["cdhash"] == sys.argv[3]
-assert component["designated_requirement"] == sys.argv[4]
+assert component["artifact_sha256"] == sys.argv[3]
+assert component["cdhash"] == sys.argv[4]
+assert component["designated_requirement"] == sys.argv[5]
+metadata = json.loads(sys.argv[6])
+assert component["bundle_id"] == metadata["bundleId"]
+assert component["relative_path"] == metadata["relativePath"]
+assert component["component_version"] == metadata["componentVersion"]
+assert component["protocol_version"] == metadata["protocolVersion"]
 PY
   fi
   mounted=false

@@ -18,6 +18,7 @@ use super::CliError;
 pub const ACCESS_LABEL: &str = "com.ivan.televybackup.snapshot-access";
 const MANIFEST_FILE: &str = "snapshot-access/service.json";
 const MIGRATION_BACKUP_DIR: &str = "snapshot-access/migrations";
+const MIGRATION_OWNER_TTL_SECONDS: u64 = 120;
 
 fn user_service_target(domain: &str) -> String {
     format!("{domain}/{ACCESS_LABEL}")
@@ -213,6 +214,8 @@ fn manifest_value(
     data_dir: &Path,
     migration_state: &str,
     migration_id: &str,
+    migration_owner: &str,
+    migration_owner_expires_at: u64,
 ) -> Value {
     json!({
         "schemaVersion": 2,
@@ -230,6 +233,8 @@ fn manifest_value(
         "source": "embedded-bundle",
         "migrationState": migration_state,
         "migrationId": migration_id,
+        "migrationOwner": migration_owner,
+        "migrationOwnerExpiresAt": migration_owner_expires_at,
     })
 }
 
@@ -297,6 +302,57 @@ fn migration_id() -> String {
         .map(|value| value.as_nanos())
         .unwrap_or(0);
     format!("legacy-{nanos}-{}", std::process::id())
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0)
+}
+
+fn migration_owner() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn migration_owner_expiry() -> u64 {
+    unix_seconds().saturating_add(MIGRATION_OWNER_TTL_SECONDS)
+}
+
+fn migration_owner_from_manifest(manifest: &Value) -> Result<&str, CliError> {
+    manifest
+        .get("migrationOwner")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CliError::new(
+                "snapshot_access.migration_failed",
+                "Snapshot Access migration has no owner token",
+            )
+        })
+}
+
+fn migration_owner_is_active(manifest: &Value) -> bool {
+    manifest
+        .get("migrationOwner")
+        .and_then(Value::as_str)
+        .is_some_and(|owner| !owner.is_empty())
+        && manifest
+            .get("migrationOwnerExpiresAt")
+            .and_then(Value::as_u64)
+            .is_some_and(|expires_at| expires_at > unix_seconds())
+}
+
+fn pending_response(access_app: &Path, manifest: &Value) -> Value {
+    json!({
+        "prepared": true,
+        "managedBy": "smappservice",
+        "appPath": access_app,
+        "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
+        "migrationState": "pending",
+        "migrationId": manifest.get("migrationId"),
+        "migrationOwner": manifest.get("migrationOwner"),
+    })
 }
 
 fn is_pending_migration(manifest: Option<&Value>) -> bool {
@@ -426,24 +482,44 @@ pub fn prepare_migration(
     }
 
     if pending_migration && !legacy_plist.exists() {
+        let existing = existing.as_ref().expect("pending migration has a manifest");
+        if migration_owner_is_active(existing) {
+            return Err(CliError::retryable(
+                "snapshot_access.busy",
+                "another TelevyBackup instance owns the Snapshot Access migration",
+            ));
+        }
+        let owner = migration_owner();
+        let expiry = migration_owner_expiry();
+        let mut claimed = existing.clone();
+        claimed["migrationOwner"] = Value::String(owner.clone());
+        claimed["migrationOwnerExpiresAt"] = json!(expiry);
+        write_manifest(config_dir, &claimed)?;
         if json_output {
-            println!(
-                "{}",
-                json!({
-                    "prepared": true,
-                    "managedBy": "smappservice",
-                    "appPath": access_app,
-                    "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
-                    "migrationState": "pending",
-                    "migrationId": existing.as_ref().and_then(|value| value.get("migrationId")),
-                })
-            );
+            println!("{}", pending_response(&access_app, &claimed));
         }
         return Ok(());
     }
 
     if pending_migration {
-        let leases = active_legacy_leases(existing.as_ref(), data_dir).map_err(|error| {
+        let existing = existing.as_ref().expect("pending migration has a manifest");
+        if migration_owner_is_active(existing) {
+            return Err(CliError::retryable(
+                "snapshot_access.busy",
+                "another TelevyBackup instance owns the Snapshot Access migration",
+            ));
+        }
+        // A crash may leave the legacy plist on disk after launchctl bootout.
+        // Re-bootstrap it before probing leases so recovery remains retryable.
+        let domain = format!("gui/{}", unsafe { libc::geteuid() });
+        if legacy_plist.exists() {
+            let _ = launchctl(&[
+                "bootstrap",
+                &domain,
+                legacy_plist.to_string_lossy().as_ref(),
+            ]);
+        }
+        let leases = active_legacy_leases(Some(existing), data_dir).map_err(|error| {
             CliError::retryable(
                 "snapshot_access.busy",
                 format!(
@@ -458,7 +534,6 @@ pub fn prepare_migration(
                 "cannot migrate Snapshot Access while a snapshot lease is active",
             ));
         }
-        let domain = format!("gui/{}", unsafe { libc::geteuid() });
         let service = user_service_target(&domain);
         let _ = launchctl(&["bootout", &service]);
         if legacy_plist.exists() {
@@ -466,18 +541,19 @@ pub fn prepare_migration(
                 CliError::new("snapshot_access.migration_failed", error.to_string())
             })?;
         }
+        let owner = migration_owner();
+        let expiry = migration_owner_expiry();
+        let mut claimed = existing.clone();
+        claimed["migrationOwner"] = Value::String(owner);
+        claimed["migrationOwnerExpiresAt"] = json!(expiry);
+        if let Err(error) = write_manifest(config_dir, &claimed) {
+            if let Some(backup) = existing.get("legacyBackup") {
+                let _ = restore_legacy_registration(config_dir, data_dir, backup);
+            }
+            return Err(error);
+        }
         if json_output {
-            println!(
-                "{}",
-                json!({
-                    "prepared": true,
-                    "managedBy": "smappservice",
-                    "appPath": access_app,
-                    "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
-                    "migrationState": "pending",
-                    "migrationId": migration_id_from_manifest(existing.as_ref().unwrap())?,
-                })
-            );
+            println!("{}", pending_response(&access_app, &claimed));
         }
         return Ok(());
     }
@@ -503,7 +579,17 @@ pub fn prepare_migration(
 
     let backup = backup_legacy_registration(config_dir, &manifest_file, &legacy_plist)?;
     let migration_id = migration_id();
-    let mut manifest = manifest_value(&access_app, config_dir, data_dir, "pending", &migration_id);
+    let migration_owner = migration_owner();
+    let migration_owner_expires_at = migration_owner_expiry();
+    let mut manifest = manifest_value(
+        &access_app,
+        config_dir,
+        data_dir,
+        "pending",
+        &migration_id,
+        &migration_owner,
+        migration_owner_expires_at,
+    );
     if let Some(backup) = backup {
         manifest["legacyBackup"] = backup;
     }
@@ -541,6 +627,7 @@ pub fn prepare_migration(
                 "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
                 "migrationState": "pending",
                 "migrationId": migration_id,
+                "migrationOwner": migration_owner,
             })
         );
     } else {
@@ -556,6 +643,7 @@ pub fn commit_migration(
     config_dir: &Path,
     data_dir: &Path,
     expected_migration_id: &str,
+    expected_migration_owner: &str,
     json_output: bool,
 ) -> Result<(), CliError> {
     let _migration_lock = acquire_migration_lock(config_dir)?;
@@ -578,6 +666,12 @@ pub fn commit_migration(
                 return Err(CliError::retryable(
                     "snapshot_access.busy",
                     "Snapshot Access migration belongs to another transaction",
+                ));
+            }
+            if migration_owner_from_manifest(&manifest)? != expected_migration_owner {
+                return Err(CliError::retryable(
+                    "snapshot_access.busy",
+                    "Snapshot Access migration is owned by another instance",
                 ));
             }
         }
@@ -609,6 +703,10 @@ pub fn commit_migration(
         ));
     }
     manifest["migrationState"] = Value::String("ready".into());
+    if let Some(object) = manifest.as_object_mut() {
+        object.remove("migrationOwner");
+        object.remove("migrationOwnerExpiresAt");
+    }
     write_manifest(config_dir, &manifest)?;
     if json_output {
         println!("{}", json!({"committed": true, "migrationState": "ready"}));
@@ -621,7 +719,8 @@ pub fn commit_migration(
 pub fn rollback_migration(
     config_dir: &Path,
     data_dir: &Path,
-    expected_migration_id: Option<&str>,
+    expected_migration_id: &str,
+    expected_migration_owner: &str,
     json_output: bool,
 ) -> Result<(), CliError> {
     let _migration_lock = acquire_migration_lock(config_dir)?;
@@ -631,13 +730,17 @@ pub fn rollback_migration(
     if manifest.get("migrationState").and_then(Value::as_str) != Some("pending") {
         return Ok(());
     }
-    if let Some(expected_migration_id) = expected_migration_id {
-        if migration_id_from_manifest(&manifest)? != expected_migration_id {
-            return Err(CliError::retryable(
-                "snapshot_access.busy",
-                "Snapshot Access migration belongs to another transaction",
-            ));
-        }
+    if migration_id_from_manifest(&manifest)? != expected_migration_id {
+        return Err(CliError::retryable(
+            "snapshot_access.busy",
+            "Snapshot Access migration belongs to another transaction",
+        ));
+    }
+    if migration_owner_from_manifest(&manifest)? != expected_migration_owner {
+        return Err(CliError::retryable(
+            "snapshot_access.busy",
+            "Snapshot Access migration is owned by another instance",
+        ));
     }
     let Some(backup) = manifest.get("legacyBackup") else {
         fs::remove_file(manifest_path(config_dir))
@@ -697,6 +800,7 @@ fn status_payload(manifest: Option<&Value>, helper: Option<&StatusResult>, socke
         "bundleId": ACCESS_BUNDLE_ID,
         "managedBy": managed_by,
         "appPath": running_app_path.or(registered_app_path),
+        "accessAppPath": running_app_path,
         "registeredAppPath": registered_app_path,
         "relativeAppPath": manifest.and_then(|value| value.get("relativeAppPath")),
         "accessAppRegistrationMismatch": registration_mismatch,
@@ -765,6 +869,22 @@ mod tests {
         );
         assert_eq!(payload["accessAppRegistrationMismatch"], false);
         assert_eq!(payload["appPath"], manifest["appPath"]);
+        assert_eq!(payload["accessAppPath"], manifest["appPath"]);
+    }
+
+    #[test]
+    fn status_does_not_claim_a_registered_path_is_a_running_identity() {
+        let manifest = json!({
+            "appPath": "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+            "managedBy": "smappservice",
+        });
+        let payload = status_payload(
+            Some(&manifest),
+            Some(&StatusResult::default()),
+            Path::new("/tmp/access.sock"),
+        );
+        assert_eq!(payload["appPath"], manifest["appPath"]);
+        assert!(payload["accessAppPath"].is_null());
     }
 
     #[test]
@@ -826,5 +946,23 @@ mod tests {
         drop(first);
         let third = acquire_migration_lock(config_dir.path()).unwrap();
         drop(third);
+    }
+
+    #[test]
+    fn migration_owner_expiry_is_fail_closed() {
+        let active = json!({
+            "migrationOwner": "owner-a",
+            "migrationOwnerExpiresAt": unix_seconds() + 1,
+        });
+        assert!(migration_owner_is_active(&active));
+
+        let expired = json!({
+            "migrationOwner": "owner-a",
+            "migrationOwnerExpiresAt": unix_seconds().saturating_sub(1),
+        });
+        assert!(!migration_owner_is_active(&expired));
+        assert!(!migration_owner_is_active(
+            &json!({"migrationOwner": "owner-a"})
+        ));
     }
 }
