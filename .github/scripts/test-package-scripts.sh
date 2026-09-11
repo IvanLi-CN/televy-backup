@@ -11,6 +11,7 @@ bash -n \
   "$root_dir/scripts/macos/assemble-universal.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
+  "$root_dir/scripts/macos/verify-component-identity.sh" \
   "$root_dir/scripts/macos/generate-brand-variants.sh" \
   "$root_dir/scripts/macos/verify-brand-assets.sh" \
   "$root_dir/scripts/macos/generate-app-icon-assets.sh" \
@@ -55,15 +56,20 @@ package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" == *'--mode release|development'* ]]
 [[ "$package_text" == *'product-version.py'* ]]
 [[ "$package_text" == *'app_dest="$output_dir/TelevyBackup.app"'* ]]
-[[ "$package_text" == *'access_dest="$output_dir/TelevyBackup Snapshot Access.app"'* ]]
+[[ "$package_text" != *'access_dest="$output_dir/TelevyBackup Snapshot Access.app"'* ]]
+[[ "$package_text" != *'REPLACE_WITH_SNAPSHOT_ACCESS_APP'* ]]
 [[ "$package_text" != *'--version'* ]]
 assemble_text="$(<"$root_dir/scripts/macos/assemble-universal.sh")"
 grep -F 'chmod 755 "$universal_app/Contents/MacOS/"*' <<<"$assemble_text" >/dev/null || {
   echo "Universal main binaries must remain executable after lipo" >&2
   exit 1
 }
-grep -F 'chmod 755 "$universal_access_app/Contents/MacOS/televybackup-snapshot-access"' <<<"$assemble_text" >/dev/null || {
+grep -F 'chmod 755 "$universal_access_binary"' <<<"$assemble_text" >/dev/null || {
   echo "Universal Snapshot Access binary must remain executable after lipo" >&2
+  exit 1
+}
+grep -F 'access_relative_path="Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"' <<<"$assemble_text" >/dev/null || {
+  echo "Universal assembly must keep Snapshot Access nested in the main app" >&2
   exit 1
 }
 
@@ -104,6 +110,21 @@ payload = json.load(open(sys.argv[1], encoding="utf-8"))
 assert payload["release_version"] == sys.argv[2]
 assert payload["signing"] == "ad-hoc"
 assert len(payload["assets"]) == 5
+PY
+
+python3 - "$root_dir/packaging/macos/snapshot-components.lock.json" <<'PY'
+import json
+import sys
+
+lock = json.load(open(sys.argv[1], encoding="utf-8"))
+access = lock["components"]["snapshot_access"]
+assert lock["signing"] == "ad-hoc"
+assert access["bundle_id"] == "com.ivan.televybackup.snapshot-access"
+assert access["component_version"] == "0.2.0"
+assert access["protocol_version"] == 2
+assert access["reuse_policy"] == "byte-identical-no-rebuild-no-lipo-no-resign"
+mount = lock["components"]["snapshot_mount_helper"]
+assert mount["update_policy"] == "compatibility-check-only"
 PY
 
 echo "package script contract tests passed"

@@ -51,7 +51,14 @@ app_dir="$out_root/${bundle_display_name}.app"
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
+launch_agents_dir="$contents_dir/Library/LaunchAgents"
+login_items_dir="$contents_dir/Library/LoginItems"
+access_app_dir="$login_items_dir/TelevyBackup Snapshot Access.app"
+access_contents_dir="$access_app_dir/Contents"
+access_macos_dir="$access_contents_dir/MacOS"
+access_agent_plist="$launch_agents_dir/com.ivan.televybackup.snapshot-access.plist"
 
+rm -rf "$app_dir" "$out_root/TelevyBackup Snapshot Access.app"
 mkdir -p "$macos_dir"
 mkdir -p "$resources_dir"
 
@@ -104,7 +111,19 @@ if [[ -n "$cargo_target" ]]; then cargo build -p televybackupd --release --targe
 cp "$binary_dir/televybackupd" "$macos_dir/televybackupd"
 
 echo "Building APFS Snapshot Access..."
-if [[ -n "$cargo_target" ]]; then cargo build -p televybackup-snapshot-access --release --target "$cargo_target"; else cargo build -p televybackup-snapshot-access --release; fi
+if [[ -n "$cargo_target" ]]; then
+  if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
+    cargo build -p televybackup-snapshot-access --bin televybackup-snapshot-mount-helper --release --target "$cargo_target"
+  else
+    cargo build -p televybackup-snapshot-access --release --target "$cargo_target"
+  fi
+else
+  if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
+    cargo build -p televybackup-snapshot-access --bin televybackup-snapshot-mount-helper --release
+  else
+    cargo build -p televybackup-snapshot-access --release
+  fi
+fi
 snapshot_access_binary="$binary_dir/televybackup-snapshot-access"
 snapshot_mount_helper_binary="$binary_dir/televybackup-snapshot-mount-helper"
 cp "$snapshot_mount_helper_binary" "$macos_dir/televybackup-snapshot-mount-helper"
@@ -126,6 +145,7 @@ swiftc_args=(
   -O \
   -framework SwiftUI \
   -framework AppKit \
+  -framework ServiceManagement \
 )
 if [[ "${TELEVYBACKUP_GUI_LIFECYCLE_TESTING:-0}" == "1" ]]; then
   swiftc_args+=(-D TELEVYBACKUP_GUI_LIFECYCLE_TESTING)
@@ -189,36 +209,19 @@ rm -f "$actool_partial_plist" "$resources_dir/AppIcon.icns"
 
 codesign_identity="${TELEVYBACKUP_CODESIGN_IDENTITY:--}"
 
-if [[ -n "$codesign_identity" ]]; then
-  echo "Codesigning with controlled identity: $codesign_identity"
-  codesign --force --sign "$codesign_identity" -i "$bundle_id.cli" "$macos_dir/televybackup-cli" \
-    || echo "WARN: codesign CLI failed"
-  codesign --force --sign "$codesign_identity" -i "$bundle_id.mtproto-helper" "$macos_dir/televybackup-mtproto-helper" \
-    || echo "WARN: codesign helper failed"
-  codesign --force --sign "$codesign_identity" -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper" \
-    || echo "WARN: codesign snapshot mount helper failed"
-  codesign --force --deep --sign "$codesign_identity" "$app_dir" \
-    || echo "WARN: codesign app failed"
+# Snapshot Access owns the independent FDA identity. The RC reuse path is a
+# previously verified Universal bundle and must remain byte-for-byte unchanged.
+if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
+  reuse_bundle="${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE}"
+  [[ -d "$reuse_bundle" ]] || { echo "missing reusable Snapshot Access bundle: $reuse_bundle" >&2; exit 1; }
+  mkdir -p "$login_items_dir"
+  cp -R "$reuse_bundle" "$access_app_dir"
+  codesign --verify --strict "$access_app_dir"
 else
-  echo "No codesign identity found; applying ad-hoc signature for local runs"
-  codesign --force --sign - -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper" \
-    || echo "WARN: ad-hoc codesign snapshot mount helper failed"
-  codesign --force --deep --sign - "$app_dir" \
-    || echo "WARN: ad-hoc codesign app failed"
-fi
-
-codesign -vvv --deep --strict "$app_dir" >/dev/null 2>&1 \
-  || echo "WARN: codesign verification failed (embedded CLI may be killed by macOS)"
-
-# Snapshot Access is a separate LSUIElement bundle. FDA is granted to this exact
-# bundle, so it must remain independent from the main GUI identity and contents.
-access_app_dir="$out_root/TelevyBackup Snapshot Access.app"
-access_contents_dir="$access_app_dir/Contents"
-access_macos_dir="$access_contents_dir/MacOS"
-mkdir -p "$access_macos_dir"
-cp "$snapshot_access_binary" "$access_macos_dir/televybackup-snapshot-access"
-chmod 755 "$access_macos_dir/televybackup-snapshot-access"
-cat > "$access_contents_dir/Info.plist" <<PLIST
+  mkdir -p "$access_macos_dir" "$launch_agents_dir"
+  cp "$snapshot_access_binary" "$access_macos_dir/televybackup-snapshot-access"
+  chmod 755 "$access_macos_dir/televybackup-snapshot-access"
+  cat > "$access_contents_dir/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -235,10 +238,43 @@ cat > "$access_contents_dir/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
 </dict></plist>
 PLIST
-codesign --force --deep --sign "$codesign_identity" -i "com.ivan.televybackup.snapshot-access" "$access_app_dir" \
-  || echo "WARN: codesign Snapshot Access app failed"
-codesign -vvv --deep --strict "$access_app_dir" >/dev/null 2>&1 \
-  || echo "WARN: codesign verification failed for Snapshot Access app"
+  codesign --force --sign "$codesign_identity" -i "com.ivan.televybackup.snapshot-access" "$access_app_dir" \
+    || echo "WARN: codesign Snapshot Access app failed"
+  codesign --verify --strict "$access_app_dir" \
+    || echo "WARN: codesign verification failed for Snapshot Access app"
+fi
+
+mkdir -p "$launch_agents_dir"
+cat > "$access_agent_plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.ivan.televybackup.snapshot-access</string>
+  <key>BundleProgram</key><string>Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access</string>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+</dict></plist>
+PLIST
+
+if [[ -n "$codesign_identity" ]]; then
+  echo "Codesigning main app with controlled identity: $codesign_identity"
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.cli" "$macos_dir/televybackup-cli" \
+    || echo "WARN: codesign CLI failed"
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.mtproto-helper" "$macos_dir/televybackup-mtproto-helper" \
+    || echo "WARN: codesign helper failed"
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper" \
+    || echo "WARN: codesign snapshot mount helper failed"
+  codesign --force --sign "$codesign_identity" "$app_dir" \
+    || echo "WARN: codesign app failed"
+else
+  echo "No codesign identity found; applying ad-hoc signature for local runs"
+  codesign --force --sign - -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper" \
+    || echo "WARN: ad-hoc codesign snapshot mount helper failed"
+  codesign --force --sign - "$app_dir" \
+    || echo "WARN: ad-hoc codesign app failed"
+fi
+
+codesign -vvv --deep --strict "$app_dir" >/dev/null 2>&1 \
+  || echo "WARN: codesign verification failed (embedded CLI may be killed by macOS)"
 
 echo "Built ($variant): $app_dir"
-echo "Built Snapshot Access: $access_app_dir"
+echo "Embedded Snapshot Access: $access_app_dir"

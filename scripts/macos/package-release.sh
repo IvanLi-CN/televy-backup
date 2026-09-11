@@ -36,23 +36,18 @@ export TELEVYBACKUP_CODESIGN_IDENTITY="-"
 bash "$root_dir/scripts/macos/build-app.sh"
 app_source="$root_dir/target/macos-app/TelevyBackup.app"
 [[ -d "$app_source" ]] || { echo "missing app bundle: $app_source" >&2; exit 1; }
-access_source="$root_dir/target/macos-app/TelevyBackup Snapshot Access.app"
-[[ -d "$access_source" ]] || { echo "missing Snapshot Access bundle: $access_source" >&2; exit 1; }
 
 dmg_name="TelevyBackup-${version}-${arch}.dmg"
 tools_name="televybackup-tools-${version}-${arch}.tar.gz"
 app_dest="$output_dir/TelevyBackup.app"
 rm -rf "$app_dest"
 cp -R "$app_source" "$app_dest"
-access_dest="$output_dir/TelevyBackup Snapshot Access.app"
-rm -rf "$access_dest"
-cp -R "$access_source" "$access_dest"
+rm -rf "$output_dir/TelevyBackup Snapshot Access.app"
 
 staging="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-package.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/TelevyBackup" "$staging/TelevyBackup Tools/bin" "$staging/TelevyBackup Tools/LaunchAgents"
 cp -R "$app_dest" "$staging/TelevyBackup/"
-cp -R "$access_source" "$staging/TelevyBackup/"
 ln -s /Applications "$staging/TelevyBackup/Applications"
 hdiutil create -quiet -volname "TelevyBackup $version" -srcfolder "$staging/TelevyBackup" -format UDZO -ov "$output_dir/$dmg_name"
 
@@ -60,7 +55,6 @@ cp "$app_dest/Contents/MacOS/televybackup-cli" "$staging/TelevyBackup Tools/bin/
 cp "$app_dest/Contents/MacOS/televybackupd" "$staging/TelevyBackup Tools/bin/televybackupd"
 cp "$app_dest/Contents/MacOS/televybackup-mtproto-helper" "$staging/TelevyBackup Tools/bin/televybackup-mtproto-helper"
 cp "$app_dest/Contents/MacOS/televybackup-snapshot-mount-helper" "$staging/TelevyBackup Tools/bin/televybackup-snapshot-mount-helper"
-cp -R "$access_source" "$staging/TelevyBackup Tools/"
 chmod 755 "$staging/TelevyBackup Tools/bin/"*
 cat > "$staging/TelevyBackup Tools/LaunchAgents/com.ivan.televybackup.daemon.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -68,15 +62,6 @@ cat > "$staging/TelevyBackup Tools/LaunchAgents/com.ivan.televybackup.daemon.pli
 <plist version="1.0"><dict>
   <key>Label</key><string>com.ivan.televybackup.daemon</string>
   <key>ProgramArguments</key><array><string>REPLACE_WITH_INSTALLED_DAEMON</string></array>
-  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-</dict></plist>
-PLIST
-cat > "$staging/TelevyBackup Tools/LaunchAgents/com.ivan.televybackup.snapshot-access.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.ivan.televybackup.snapshot-access</string>
-  <key>ProgramArguments</key><array><string>REPLACE_WITH_SNAPSHOT_ACCESS_APP/Contents/MacOS/televybackup-snapshot-access</string></array>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 </dict></plist>
 PLIST
