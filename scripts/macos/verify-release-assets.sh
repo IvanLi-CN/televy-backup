@@ -22,14 +22,33 @@ for name in "${required[@]}"; do
 done
 grep -F "TelevyBackup-${version}.dmg" "$asset_dir/SHA256SUMS" >/dev/null
 grep -F "televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/SHA256SUMS" >/dev/null
-python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" <<'PY'
-import json, sys
+(
+  cd "$asset_dir"
+  shasum -a 256 -c SHA256SUMS
+)
+python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" <<'PY'
+import hashlib, json, os, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 lock = json.load(open(sys.argv[3], encoding="utf-8"))
+asset_dir = sys.argv[4]
 assert manifest["release_version"] == sys.argv[2]
 assert manifest["signing"] == "ad-hoc"
 assert {"arm64", "x86_64", "universal2"}.issubset(set(manifest["architectures"]))
 assert manifest["assets"]
+expected_asset_names = {
+    f"TelevyBackup-{sys.argv[2]}.dmg",
+    f"TelevyBackup-{sys.argv[2]}-arm64.dmg",
+    f"TelevyBackup-{sys.argv[2]}-x86_64.dmg",
+    f"televybackup-tools-{sys.argv[2]}-arm64.tar.gz",
+    f"televybackup-tools-{sys.argv[2]}-x86_64.tar.gz",
+}
+asset_records = {asset["name"]: asset for asset in manifest["assets"]}
+assert set(asset_records) == expected_asset_names
+for name in expected_asset_names:
+    with open(os.path.join(asset_dir, name), "rb") as handle:
+        data = handle.read()
+    assert asset_records[name]["sha256"] == hashlib.sha256(data).hexdigest()
+    assert asset_records[name]["bytes"] == len(data)
 component = manifest["components"]["snapshot_access"]
 locked = lock["components"]["snapshot_access"]
 assert component["bundle_id"] == "com.ivan.televybackup.snapshot-access"
@@ -135,6 +154,54 @@ assert component["cdhash"] == sys.argv[3]
 assert component["designated_requirement"] == sys.argv[4]
 PY
 fi
+verify_dmg_helper_identity() (
+  set -euo pipefail
+  local_dmg="$1"
+  require_manifest_identity="$2"
+  mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-helper-verify.XXXXXX")"
+  mounted=false
+  cleanup() {
+    if [[ "$mounted" == true ]]; then
+      hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+    fi
+    rmdir "$mount_point" >/dev/null 2>&1 || true
+  }
+  trap cleanup EXIT
+  hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$local_dmg" >/dev/null
+  mounted=true
+  helper="$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+  [[ -d "$helper" ]] || { echo "DMG is missing embedded Snapshot Access: $local_dmg" >&2; exit 1; }
+  codesign --verify --strict "$helper"
+  bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$helper/Contents/Info.plist")"
+  [[ "$bundle_id" == "com.ivan.televybackup.snapshot-access" ]] || {
+    echo "DMG contains an unexpected Snapshot Access bundle id: $local_dmg" >&2
+    exit 1
+  }
+  signature="$(codesign -dvvv "$helper" 2>&1 || true)"
+  [[ "$signature" == *"Signature=adhoc"* ]] || {
+    echo "DMG Snapshot Access is not ad-hoc signed: $local_dmg" >&2
+    exit 1
+  }
+  actual_sha256="$(shasum -a 256 "$helper/Contents/MacOS/televybackup-snapshot-access" | awk '{print $1}')"
+  actual_cdhash="$(printf '%s\n' "$signature" | awk -F= '/^CDHash=/{print $2}')"
+  actual_requirement="$(codesign -d -r- "$helper" 2>&1 | sed -n '/designated =>/p')"
+  [[ -n "$actual_cdhash" && -n "$actual_requirement" ]] || {
+    echo "DMG Snapshot Access signature identity is incomplete: $local_dmg" >&2
+    exit 1
+  }
+  if [[ "$require_manifest_identity" == true ]]; then
+    python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_cdhash" "$actual_requirement" <<'PY'
+import json, sys
+component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
+assert component["sha256"] == sys.argv[2]
+assert component["cdhash"] == sys.argv[3]
+assert component["designated_requirement"] == sys.argv[4]
+PY
+  fi
+  mounted=false
+  hdiutil detach "$mount_point" >/dev/null
+  echo "DMG Snapshot Access verified: $local_dmg"
+)
 check_dmg_layout() {
   local dmg="$1"
   local mount_point
@@ -161,6 +228,11 @@ check_dmg_layout() {
 }
 for dmg in "$asset_dir/TelevyBackup-${version}.dmg" "$asset_dir/TelevyBackup-${version}-arm64.dmg" "$asset_dir/TelevyBackup-${version}-x86_64.dmg"; do
   check_dmg_layout "$dmg"
+  if [[ "$dmg" == "$asset_dir/TelevyBackup-${version}.dmg" ]]; then
+    verify_dmg_helper_identity "$dmg" true
+  else
+    verify_dmg_helper_identity "$dmg" false
+  fi
 done
 for tools_archive in "$asset_dir/televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/televybackup-tools-${version}-x86_64.tar.gz"; do
   if tar -tzf "$tools_archive" | /usr/bin/grep -E '(^|/)(TelevyBackup Snapshot Access\.app|com\.ivan\.televybackup\.snapshot-access)' >/dev/null; then

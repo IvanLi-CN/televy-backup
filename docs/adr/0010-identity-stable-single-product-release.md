@@ -26,6 +26,11 @@ The root mount helper remains at its existing privileged system path and is only
 checked in this release. It is not automatically installed, updated, or re-signed as part of a
 normal TelevyBackup app update.
 
+Development variants and custom config/data directory runs use the same embedded helper as a
+process-local child with explicit environment variables. They do not register the production
+SMAppService agent because its bundle-relative plist intentionally has no mutable directory
+configuration.
+
 All release signatures are ad-hoc. Developer ID, notarization, automatic updates, and TCC
 automation are explicitly out of scope.
 

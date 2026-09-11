@@ -133,6 +133,15 @@ root mount helper performs only the mount operation; the daemon receives no moun
 source roots can be sampled, and cleanup uses only the recorded manifest. FDA changes are performed
 manually by the owner and are not automated by tests.
 
+### VER-APFS-005: RC migration and authorization continuity
+
+On the controlled macOS 15 fixture, migrate the v0.9.8 external registration to RC1, grant FDA
+once to the embedded Snapshot Access app in System Settings, and prove a strict backup can read a
+protected source. Replace `/Applications/TelevyBackup.app` with RC2 from the same RC1 Universal
+helper artifact, compare the helper SHA-256/CDHash/designated requirement and repeat the strict
+backup without granting FDA again. Record that the root mount helper remains at its installed path
+and version. The result is a manual release artifact; tests MUST NOT modify TCC state.
+
 ## Related ADRs
 
 - [0008-apfs-snapshot-access-app](../../adr/0008-apfs-snapshot-access-app.md)

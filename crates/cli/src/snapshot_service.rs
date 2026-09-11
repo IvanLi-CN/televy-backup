@@ -196,6 +196,7 @@ fn manifest_value(
     config_dir: &Path,
     data_dir: &Path,
     migration_state: &str,
+    migration_id: &str,
 ) -> Value {
     json!({
         "schemaVersion": 2,
@@ -212,6 +213,7 @@ fn manifest_value(
         "protocolVersion": PROTOCOL_VERSION,
         "source": "embedded-bundle",
         "migrationState": migration_state,
+        "migrationId": migration_id,
     })
 }
 
@@ -360,12 +362,40 @@ pub fn prepare_migration(
             .as_ref()
             .and_then(|value| value.get("relativeAppPath"))
             .and_then(Value::as_str)
-            == Some(ACCESS_BUNDLE_RELATIVE_PATH);
+            == Some(ACCESS_BUNDLE_RELATIVE_PATH)
+        && existing
+            .as_ref()
+            .and_then(|value| value.get("migrationState"))
+            .and_then(Value::as_str)
+            == Some("ready");
     let legacy_registration = legacy_plist.exists() || (existing.is_some() && !existing_is_current);
 
     if existing_is_current && !legacy_plist.exists() {
         if json_output {
             println!("{}", json!({"prepared": false, "migrationState": "ready"}));
+        }
+        return Ok(());
+    }
+
+    let pending_migration = existing.as_ref().is_some_and(|value| {
+        value.get("managedBy").and_then(Value::as_str) == Some("smappservice")
+            && value.get("relativeAppPath").and_then(Value::as_str)
+                == Some(ACCESS_BUNDLE_RELATIVE_PATH)
+            && value.get("migrationState").and_then(Value::as_str) == Some("pending")
+    }) && !legacy_plist.exists();
+    if pending_migration {
+        if json_output {
+            println!(
+                "{}",
+                json!({
+                    "prepared": true,
+                    "managedBy": "smappservice",
+                    "appPath": access_app,
+                    "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
+                    "migrationState": "pending",
+                    "migrationId": existing.as_ref().and_then(|value| value.get("migrationId")),
+                })
+            );
         }
         return Ok(());
     }
@@ -406,7 +436,8 @@ pub fn prepare_migration(
         }
     }
 
-    let mut manifest = manifest_value(&access_app, config_dir, data_dir, "pending");
+    let migration_id = migration_id();
+    let mut manifest = manifest_value(&access_app, config_dir, data_dir, "pending", &migration_id);
     if let Some(backup) = backup {
         manifest["legacyBackup"] = backup;
     }
@@ -426,6 +457,7 @@ pub fn prepare_migration(
                 "appPath": access_app,
                 "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
                 "migrationState": "pending",
+                "migrationId": migration_id,
             })
         );
     } else {
@@ -456,6 +488,21 @@ pub fn commit_migration(
             "Snapshot Access manifest is not managed by SMAppService",
         ));
     }
+    match manifest.get("migrationState").and_then(Value::as_str) {
+        Some("pending") => {}
+        Some("ready") => {
+            if json_output {
+                println!("{}", json!({"committed": false, "migrationState": "ready"}));
+            }
+            return Ok(());
+        }
+        _ => {
+            return Err(CliError::new(
+                "snapshot_access.migration_failed",
+                "Snapshot Access manifest has no pending migration",
+            ));
+        }
+    }
     let socket = default_socket(&manifest_data_dir(Some(&manifest), data_dir));
     let status = status_from_socket(&socket)?;
     if status.access_app_path.as_deref() != Some(access_app.to_string_lossy().as_ref()) {
@@ -483,6 +530,9 @@ pub fn rollback_migration(
     let Some(manifest) = manifest_json(config_dir) else {
         return Ok(());
     };
+    if manifest.get("migrationState").and_then(Value::as_str) != Some("pending") {
+        return Ok(());
+    }
     let Some(backup) = manifest.get("legacyBackup") else {
         if manifest.get("migrationState").and_then(Value::as_str) == Some("pending") {
             fs::remove_file(manifest_path(config_dir)).map_err(|error| {

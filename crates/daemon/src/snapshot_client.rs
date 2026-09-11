@@ -245,7 +245,7 @@ impl SnapshotClient {
         stream.flush().await?;
         let mut line = String::new();
         BufReader::new(stream).read_line(&mut line).await?;
-        decode_response(line.trim())
+        decode_response(line.trim(), &request.request_id)
     }
 
     fn request_blocking(&self, method: Method) -> Result<Response, SnapshotClientError> {
@@ -264,7 +264,7 @@ impl SnapshotClient {
         stream.write_all(&encoded)?;
         let mut line = String::new();
         std::io::BufReader::new(stream).read_line(&mut line)?;
-        decode_response(line.trim())
+        decode_response(line.trim(), &request.request_id)
     }
 }
 
@@ -389,11 +389,16 @@ impl Drop for SnapshotReadStream {
     }
 }
 
-fn decode_response(line: &str) -> Result<Response, SnapshotClientError> {
+fn decode_response(line: &str, request_id: &str) -> Result<Response, SnapshotClientError> {
     let response: Response = serde_json::from_str(line)?;
     if response.version != PROTOCOL_VERSION {
         return Err(SnapshotClientError::Protocol(
             "unsupported access app response version".into(),
+        ));
+    }
+    if response.request_id != request_id {
+        return Err(SnapshotClientError::Protocol(
+            "snapshot access response request id does not match".into(),
         ));
     }
     if !response.ok {
@@ -435,5 +440,17 @@ mod tests {
             }),
             SNAPSHOT_SCAN_PAGE_TIMEOUT
         );
+    }
+
+    #[test]
+    fn response_validation_requires_the_request_id() {
+        let response = Response::ok("request-1", ResponseResult::Status(StatusResult::default()));
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert!(decode_response(&encoded, "request-1").is_ok());
+        assert!(matches!(
+            decode_response(&encoded, "request-2"),
+            Err(SnapshotClientError::Protocol(message))
+                if message.contains("request id")
+        ));
     }
 }

@@ -251,6 +251,7 @@ final class AppModel {
     private var statusStreamBackoffSeconds: Double = 0.5
     var onStatusStreamEnded: (() -> Void)?
     private var daemonTask: Process? = nil
+    private var snapshotAccessTask: Process? = nil
     private var daemonIpcRetryWork: DispatchWorkItem? = nil
     private var lastDaemonStartAttemptAt: Date? = nil
     private var lastRateSampleByTargetId: [String: RateSample] = [:]
@@ -470,6 +471,7 @@ final class AppModel {
             }
         }
         daemonTask = nil
+        stopLocalSnapshotAccessProcess()
         return nil
     }
 
@@ -827,6 +829,97 @@ final class AppModel {
             && effectiveDataDirURL().standardizedFileURL == defaultDataDir().standardizedFileURL
     }
 
+    private func embeddedSnapshotAccessExecutablePath() -> String? {
+        let path = Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Library")
+            .appendingPathComponent("LoginItems")
+            .appendingPathComponent("TelevyBackup Snapshot Access.app")
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("MacOS")
+            .appendingPathComponent("televybackup-snapshot-access")
+            .path
+        return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+    }
+
+    private func ensureLocalSnapshotAccessProcess(completion: @escaping (Bool, String?) -> Void) {
+        guard let executable = embeddedSnapshotAccessExecutablePath() else {
+            completion(false, "Embedded Snapshot Access helper is unavailable")
+            return
+        }
+        let dataDir = effectiveDataDirURL()
+        let socketPath = dataDir.appendingPathComponent("snapshot-access/access.sock").path
+        if let task = snapshotAccessTask, task.isRunning {
+            completion(true, nil)
+            return
+        }
+        if isUnixSocketConnectable(socketPath) {
+            completion(true, nil)
+            return
+        }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: executable)
+        task.currentDirectoryURL = URL(fileURLWithPath: executable).deletingLastPathComponent()
+        var environment = televybackupToolEnv()
+        environment["TELEVYBACKUP_SNAPSHOT_SOCKET"] = socketPath
+        environment["TELEVYBACKUP_SNAPSHOT_JOURNAL"] = dataDir
+            .appendingPathComponent("snapshot-access/journal.sqlite")
+            .path
+        task.environment = environment
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        task.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async {
+                guard let self, self.snapshotAccessTask === process else { return }
+                self.snapshotAccessTask = nil
+                self.appendLog("WARN: local Snapshot Access helper exited with status \(process.terminationStatus)")
+            }
+        }
+
+        do {
+            try task.run()
+            snapshotAccessTask = task
+        } catch {
+            completion(false, "Snapshot Access helper could not be started: \(error.localizedDescription)")
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak task] in
+            guard let self else { return }
+            let ready = self.waitForUnixSocket(socketPath, timeoutSeconds: 5)
+            let stillRunning = task?.isRunning ?? false
+            DispatchQueue.main.async {
+                if ready && stillRunning {
+                    completion(true, nil)
+                } else {
+                    completion(false, "Snapshot Access helper did not become ready")
+                }
+            }
+        }
+    }
+
+    private func waitForUnixSocket(_ path: String, timeoutSeconds: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if isUnixSocketConnectable(path) { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return isUnixSocketConnectable(path)
+    }
+
+    private func stopLocalSnapshotAccessProcess() {
+        guard let task = snapshotAccessTask else { return }
+        snapshotAccessTask = nil
+        guard task.isRunning else { return }
+        task.terminate()
+        let pid = task.processIdentifier
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            guard task.isRunning, task.processIdentifier == pid else { return }
+            _ = kill(pid_t(pid), SIGKILL)
+        }
+    }
+
     func controlSocketPath() -> String {
         effectiveDataDirURL()
             .appendingPathComponent("ipc")
@@ -955,7 +1048,7 @@ final class AppModel {
             return
         }
         guard shouldUseEmbeddedSnapshotAccessAgent else {
-            completion(true, nil)
+            ensureLocalSnapshotAccessProcess(completion: completion)
             return
         }
         guard let cli = cliPath() else {
@@ -1073,20 +1166,35 @@ final class AppModel {
             DispatchQueue.main.async { completion(true, nil) }
             return
         }
+        var rollbackFailure: String?
         if let agent {
             do {
                 try agent.unregister()
             } catch {
                 appendLog("WARN: Snapshot Access SMAppService rollback failed: \(error.localizedDescription)")
+                rollbackFailure = "SMAppService rollback failed: \(error.localizedDescription)"
             }
         }
         DispatchQueue.global(qos: .utility).async {
-            _ = self.runCommandCapture(
+            let rollback = self.runCommandCapture(
                 exe: cli,
                 args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "rollback-migration"],
                 timeoutSeconds: 20
             )
-            DispatchQueue.main.async { completion(false, message) }
+            var failures = [String]()
+            if let rollbackFailure { failures.append(rollbackFailure) }
+            if rollback.status != 0 {
+                let output = (rollback.stderr.isEmpty ? rollback.stdout : rollback.stderr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(300).description
+                failures.append(output.isEmpty ? "legacy registration rollback failed" : output)
+            }
+            var messages = failures
+            if let message { messages.insert(message, at: 0) }
+            let combinedMessage = messages.joined(separator: " ")
+            DispatchQueue.main.async {
+                completion(false, combinedMessage.isEmpty ? "Snapshot Access migration failed" : combinedMessage)
+            }
         }
     }
 
