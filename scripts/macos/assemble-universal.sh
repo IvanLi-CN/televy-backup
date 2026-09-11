@@ -73,6 +73,34 @@ else
   codesign --verify --strict "$universal_access_app"
 fi
 
+# Native DMGs are user-installable release assets too. Once the Universal helper
+# identity exists, embed that exact signed bundle in both native app copies so
+# installing any published DMG establishes the same FDA identity.
+repackage_native_app() {
+  local native_app="$1"
+  local arch="$2"
+  local native_access_app="$native_app/$access_relative_path"
+  rm -rf "$native_access_app"
+  mkdir -p "$(dirname "$native_access_app")"
+  ditto "$universal_access_app" "$native_access_app"
+  rm -rf "$native_app/Contents/_CodeSignature"
+  codesign --force --sign - "$native_app"
+  codesign --verify --deep --strict "$native_app"
+
+  local native_staging
+  native_staging="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-native-${arch}.XXXXXX")"
+  mkdir -p "$native_staging/TelevyBackup"
+  cp -R "$native_app" "$native_staging/TelevyBackup/"
+  ln -s /Applications "$native_staging/TelevyBackup/Applications"
+  hdiutil create -quiet -volname "TelevyBackup $version" \
+    -srcfolder "$native_staging/TelevyBackup" -format UDZO -ov \
+    "$(dirname "$native_app")/TelevyBackup-${version}-${arch}.dmg"
+  rm -rf "$native_staging"
+}
+
+repackage_native_app "$arm_app" arm64
+repackage_native_app "$x86_app" x86_64
+
 codesign --force --sign - "$universal_app"
 codesign --verify --deep --strict "$universal_app"
 

@@ -68,6 +68,11 @@ MUST launch the embedded helper as a process-local child with those directories 
 they MUST NOT register the production `SMAppService` agent, whose bundle plist has no mutable
 environment fields.
 
+Stable publication MUST wait for the `macos-release-acceptance` GitHub environment approval and a
+non-empty `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` environment value identifying the manual
+RC1-to-RC2 acceptance result. RC publication remains available so the real-device test can be
+performed before the stable gate.
+
 ### REQ-MRD-008: Release atomicity and backfill
 
 Normal release runs MUST build and validate all assets before creating a draft Release and MUST make it public only after upload and hash verification. Exact-tag backfill MUST default to build-only, use the tag's source commit without moving the tag or bumping its version, and reject an existing asset name with a different hash.

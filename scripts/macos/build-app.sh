@@ -238,10 +238,8 @@ else
   <key>LSUIElement</key><true/>
 </dict></plist>
 PLIST
-  codesign --force --sign "$codesign_identity" -i "com.ivan.televybackup.snapshot-access" "$access_app_dir" \
-    || echo "WARN: codesign Snapshot Access app failed"
-  codesign --verify --strict "$access_app_dir" \
-    || echo "WARN: codesign verification failed for Snapshot Access app"
+  codesign --force --sign "$codesign_identity" -i "com.ivan.televybackup.snapshot-access" "$access_app_dir"
+  codesign --verify --strict "$access_app_dir"
 fi
 
 mkdir -p "$launch_agents_dir"
@@ -257,24 +255,17 @@ PLIST
 
 if [[ -n "$codesign_identity" ]]; then
   echo "Codesigning main app with controlled identity: $codesign_identity"
-  codesign --force --sign "$codesign_identity" -i "$bundle_id.cli" "$macos_dir/televybackup-cli" \
-    || echo "WARN: codesign CLI failed"
-  codesign --force --sign "$codesign_identity" -i "$bundle_id.mtproto-helper" "$macos_dir/televybackup-mtproto-helper" \
-    || echo "WARN: codesign helper failed"
-  codesign --force --sign "$codesign_identity" -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper" \
-    || echo "WARN: codesign snapshot mount helper failed"
-  codesign --force --sign "$codesign_identity" "$app_dir" \
-    || echo "WARN: codesign app failed"
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.cli" "$macos_dir/televybackup-cli"
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.mtproto-helper" "$macos_dir/televybackup-mtproto-helper"
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper"
+  codesign --force --sign "$codesign_identity" "$app_dir"
 else
   echo "No codesign identity found; applying ad-hoc signature for local runs"
-  codesign --force --sign - -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper" \
-    || echo "WARN: ad-hoc codesign snapshot mount helper failed"
-  codesign --force --sign - "$app_dir" \
-    || echo "WARN: ad-hoc codesign app failed"
+  codesign --force --sign - -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper"
+  codesign --force --sign - "$app_dir"
 fi
 
-codesign -vvv --deep --strict "$app_dir" >/dev/null 2>&1 \
-  || echo "WARN: codesign verification failed (embedded CLI may be killed by macOS)"
+codesign -vvv --deep --strict "$app_dir" >/dev/null 2>&1
 
 echo "Built ($variant): $app_dir"
 echo "Embedded Snapshot Access: $access_app_dir"

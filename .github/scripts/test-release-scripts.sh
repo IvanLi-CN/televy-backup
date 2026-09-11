@@ -58,10 +58,15 @@ assert "verify-component-identity.sh" in release_workflow
 assert "stable release requires a previously published RC" in release_workflow
 assert 'helper_source_tag="v${core_version}-rc.1"' in release_workflow
 assert 'source_is_prerelease' in release_workflow
-assert 'BUILD-MANIFEST.json" --dir' in release_workflow
+assert '--pattern "BUILD-MANIFEST.json"' in release_workflow
+assert 'SHA256SUMS" --dir' in release_workflow
 assert '--manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"' in release_workflow
 assert 'source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"' in release_workflow
-assert 'manifest["source_commit"] == sys.argv[3]' in release_workflow
+assert 'manifest["source_commit"] == sys.argv[5]' in release_workflow
+assert "macos-release-acceptance" in release_workflow
+assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow
+assert "needs.macos-acceptance.result == 'success'" in release_workflow
+assert "needs.assemble.result == 'success'" in release_workflow
 assert "final assembly" in release_workflow
 PY
 

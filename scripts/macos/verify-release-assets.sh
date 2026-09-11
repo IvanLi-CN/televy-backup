@@ -26,7 +26,7 @@ grep -F "televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/SHA256SUMS" >/d
   cd "$asset_dir"
   shasum -a 256 -c SHA256SUMS
 )
-python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" <<'PY'
+python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" "$skip_bundle_checks" <<'PY'
 import hashlib, json, os, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 lock = json.load(open(sys.argv[3], encoding="utf-8"))
@@ -66,7 +66,16 @@ assert mount_component["label"] == locked_mount_component["label"]
 assert mount_component["install_path"] == locked_mount_component["install_path"]
 assert mount_component["component_version"] == locked_mount_component["component_version"]
 assert mount_component["protocol_version"] == locked_mount_component["protocol_version"]
+assert mount_component["binary"] == locked_mount_component["binary"]
+assert mount_component["source"] == locked_mount_component["source"]
 assert mount_component["update_policy"] == locked_mount_component["update_policy"]
+assert locked_mount_component["identity"]["sha256"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/sha256"
+assert locked_mount_component["identity"]["cdhash"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/cdhash"
+assert locked_mount_component["identity"]["designated_requirement"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/designated_requirement"
+if sys.argv[5] != "true":
+    assert mount_component["sha256"]
+    assert mount_component["cdhash"]
+    assert mount_component["designated_requirement"]
 expected_source = "fresh-rc1-build" if sys.argv[2].endswith("-rc.1") else "rc1-universal-artifact"
 assert component["source"] == expected_source
 PY
@@ -116,6 +125,22 @@ if [[ -d "$app" ]]; then
     [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "universal binary missing slice: $binary" >&2; exit 1; }
   done
   [[ -x "$app/Contents/MacOS/televybackup-snapshot-mount-helper" ]] || { echo "snapshot mount helper missing" >&2; exit 1; }
+  root_helper_binary="$app/Contents/MacOS/televybackup-snapshot-mount-helper"
+  root_helper_signature="$(codesign -dvvv "$root_helper_binary" 2>&1 || true)"
+  root_helper_sha256="$(shasum -a 256 "$root_helper_binary" | awk '{print $1}')"
+  root_helper_cdhash="$(printf '%s\n' "$root_helper_signature" | awk -F= '/^CDHash=/{print $2}')"
+  root_helper_requirement="$(codesign -d -r- "$root_helper_binary" 2>&1 | sed -n '/designated =>/p')"
+  [[ -n "$root_helper_cdhash" && -n "$root_helper_requirement" ]] || {
+    echo "snapshot mount helper signature identity is incomplete" >&2
+    exit 1
+  }
+  python3 - "$asset_dir/BUILD-MANIFEST.json" "$root_helper_sha256" "$root_helper_cdhash" "$root_helper_requirement" <<'PY'
+import json, sys
+component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_mount_helper"]
+assert component["sha256"] == sys.argv[2]
+assert component["cdhash"] == sys.argv[3]
+assert component["designated_requirement"] == sys.argv[4]
+PY
   launch_agent="$app/Contents/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist"
   [[ -s "$launch_agent" ]] || { echo "embedded Snapshot Access LaunchAgent missing" >&2; exit 1; }
   bundle_program="$(/usr/bin/plutil -extract BundleProgram raw -o - "$launch_agent")"
@@ -228,11 +253,7 @@ check_dmg_layout() {
 }
 for dmg in "$asset_dir/TelevyBackup-${version}.dmg" "$asset_dir/TelevyBackup-${version}-arm64.dmg" "$asset_dir/TelevyBackup-${version}-x86_64.dmg"; do
   check_dmg_layout "$dmg"
-  if [[ "$dmg" == "$asset_dir/TelevyBackup-${version}.dmg" ]]; then
-    verify_dmg_helper_identity "$dmg" true
-  else
-    verify_dmg_helper_identity "$dmg" false
-  fi
+  verify_dmg_helper_identity "$dmg" true
 done
 for tools_archive in "$asset_dir/televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/televybackup-tools-${version}-x86_64.tar.gz"; do
   if tar -tzf "$tools_archive" | /usr/bin/grep -E '(^|/)(TelevyBackup Snapshot Access\.app|com\.ivan\.televybackup\.snapshot-access)' >/dev/null; then

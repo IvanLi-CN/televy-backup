@@ -148,9 +148,15 @@ enum SnapshotAccessCmd {
     #[command(hide = true)]
     PrepareMigration,
     #[command(hide = true)]
-    CommitMigration,
+    CommitMigration {
+        #[arg(long)]
+        migration_id: String,
+    },
     #[command(hide = true)]
-    RollbackMigration,
+    RollbackMigration {
+        #[arg(long)]
+        migration_id: Option<String>,
+    },
     Status,
 }
 
@@ -979,11 +985,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             SnapshotAccessCmd::PrepareMigration => {
                 snapshot_service::prepare_migration(&config_dir, &data_dir, cli.json)
             }
-            SnapshotAccessCmd::CommitMigration => {
-                snapshot_service::commit_migration(&config_dir, &data_dir, cli.json)
+            SnapshotAccessCmd::CommitMigration { migration_id } => {
+                snapshot_service::commit_migration(&config_dir, &data_dir, &migration_id, cli.json)
             }
-            SnapshotAccessCmd::RollbackMigration => {
-                snapshot_service::rollback_migration(&config_dir, &data_dir, cli.json)
+            SnapshotAccessCmd::RollbackMigration { migration_id } => {
+                snapshot_service::rollback_migration(
+                    &config_dir,
+                    &data_dir,
+                    migration_id.as_deref(),
+                    cli.json,
+                )
             }
             SnapshotAccessCmd::Status => {
                 snapshot_service::status(&config_dir, &data_dir, cli.json).map(|_| ())

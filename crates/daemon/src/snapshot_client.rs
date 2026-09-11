@@ -7,8 +7,8 @@ use televy_backup_core::{
     BackupSource, BackupSourceEntry, Error as CoreError, Result as CoreResult,
 };
 use televybackup_snapshot_access::{
-    LeaseResult, Method, PROTOCOL_VERSION, ProbeResult, ReadStreamResult, Request, Response,
-    ResponseResult, ScanPageResult, StatusResult,
+    COMPONENT_VERSION, LeaseResult, Method, PROTOCOL_VERSION, ProbeResult, ReadStreamResult,
+    Request, Response, ResponseResult, ScanPageResult, StatusResult,
 };
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -78,7 +78,10 @@ impl SnapshotClient {
     pub async fn status(&self) -> Result<StatusResult, SnapshotClientError> {
         let response = self.request(Method::Status).await?;
         match response.result {
-            Some(ResponseResult::Status(result)) => Ok(result),
+            Some(ResponseResult::Status(result)) => {
+                validate_component_status(&result)?;
+                Ok(result)
+            }
             _ => Err(SnapshotClientError::Protocol(
                 "status response missing result".into(),
             )),
@@ -86,6 +89,7 @@ impl SnapshotClient {
     }
 
     pub async fn probe_volume(&self, target_id: &str) -> Result<ProbeResult, SnapshotClientError> {
+        self.ensure_compatible().await?;
         let response = self
             .request(Method::ProbeVolume {
                 target_id: target_id.to_string(),
@@ -105,6 +109,7 @@ impl SnapshotClient {
         expected_volume_uuid: &str,
         run_id: &str,
     ) -> Result<LeaseResult, SnapshotClientError> {
+        self.ensure_compatible().await?;
         let response = self
             .request(Method::AcquireLease {
                 target_id: target_id.to_string(),
@@ -118,6 +123,10 @@ impl SnapshotClient {
                 "lease response missing result".into(),
             )),
         }
+    }
+
+    async fn ensure_compatible(&self) -> Result<(), SnapshotClientError> {
+        self.status().await.map(|_| ())
     }
 
     #[allow(dead_code)]
@@ -266,6 +275,16 @@ impl SnapshotClient {
         std::io::BufReader::new(stream).read_line(&mut line)?;
         decode_response(line.trim(), &request.request_id)
     }
+}
+
+fn validate_component_status(status: &StatusResult) -> Result<(), SnapshotClientError> {
+    if status.access_app_version != COMPONENT_VERSION {
+        return Err(SnapshotClientError::Protocol(format!(
+            "incompatible Snapshot Access component version: {}",
+            status.access_app_version
+        )));
+    }
+    Ok(())
 }
 
 fn request_timeout(method: &Method) -> Duration {
@@ -451,6 +470,19 @@ mod tests {
             decode_response(&encoded, "request-2"),
             Err(SnapshotClientError::Protocol(message))
                 if message.contains("request id")
+        ));
+    }
+
+    #[test]
+    fn status_rejects_an_incompatible_component_version() {
+        let status = StatusResult {
+            access_app_version: "0.1.0".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_component_status(&status),
+            Err(SnapshotClientError::Protocol(message))
+                if message.contains("incompatible Snapshot Access component version")
         ));
     }
 }
