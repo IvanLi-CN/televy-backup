@@ -44,7 +44,7 @@ workflow_text = "\n".join(
     (root / ".github/workflows" / name).read_text(encoding="utf-8")
     for name in ("release-preparation.yml", "release-completion.yml", "release.yml")
 )
-for forbidden in ("GPG", "release-backfill", "backfill", "snapshot", "queue"):
+for forbidden in ("GPG", "release-backfill", "backfill", "queue"):
     assert forbidden not in workflow_text, forbidden
 assert "createCommitOnBranch" in workflow_text
 assert "expectedHeadOid" in workflow_text
@@ -52,6 +52,10 @@ assert ".commit.verification.verified" in workflow_text
 assert "verify-release-sequence" in workflow_text
 release_workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 assert "options: [recover]" in release_workflow
+assert "helper_source_tag" in release_workflow
+assert "hdiutil attach" in release_workflow
+assert "verify-component-identity.sh" in release_workflow
+assert "stable release requires a previously published RC" in release_workflow
 PY
 
 ruby -ryaml -e 'ARGV.each { |path| YAML.load_file(path) }' \

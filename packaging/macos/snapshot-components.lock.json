@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "product": "TelevyBackup",
+  "signing": "ad-hoc",
+  "components": {
+    "snapshot_access": {
+      "bundle_id": "com.ivan.televybackup.snapshot-access",
+      "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+      "binary": "Contents/MacOS/televybackup-snapshot-access",
+      "component_version": "0.2.0",
+      "protocol_version": 2,
+      "source": "rc1-universal-artifact",
+      "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign"
+    },
+    "snapshot_mount_helper": {
+      "label": "com.ivan.televybackup.snapshot-mount-helper",
+      "install_path": "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
+      "component_version": "0.1.0",
+      "protocol_version": 1,
+      "update_policy": "compatibility-check-only"
+    }
+  }
+}
