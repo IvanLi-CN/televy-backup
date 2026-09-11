@@ -2,9 +2,11 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::json;
+use serde_json::{Value, json};
 use televybackup_snapshot_access::{
+    ACCESS_AGENT_PLIST_NAME, ACCESS_BUNDLE_ID, ACCESS_BUNDLE_RELATIVE_PATH, COMPONENT_VERSION,
     MOUNT_HELPER_INSTALL_PATH, Method, PROTOCOL_VERSION, Request, Response, ResponseResult,
     StatusResult,
 };
@@ -14,6 +16,7 @@ use super::CliError;
 
 pub const ACCESS_LABEL: &str = "com.ivan.televybackup.snapshot-access";
 const MANIFEST_FILE: &str = "snapshot-access/service.json";
+const MIGRATION_BACKUP_DIR: &str = "snapshot-access/migrations";
 
 fn user_service_target(domain: &str) -> String {
     format!("{domain}/{ACCESS_LABEL}")
@@ -24,7 +27,10 @@ fn home_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
-fn plist_path() -> PathBuf {
+
+// This path is read only to discover and back up the v0.9.8 registration. New
+// registrations never write a user LaunchAgent plist.
+fn legacy_plist_path() -> PathBuf {
     std::env::var_os("TELEVYBACKUP_SNAPSHOT_ACCESS_PLIST")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -33,6 +39,7 @@ fn plist_path() -> PathBuf {
                 .join(format!("{ACCESS_LABEL}.plist"))
         })
 }
+
 fn manifest_path(config_dir: &Path) -> PathBuf {
     config_dir.join(MANIFEST_FILE)
 }
@@ -61,53 +68,71 @@ fn launchctl(args: &[&str]) -> Result<(), CliError> {
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), CliError> {
     let parent = path
         .parent()
-        .ok_or_else(|| CliError::new("snapshot_access.install_failed", "path has no parent"))?;
+        .ok_or_else(|| CliError::new("snapshot_access.migration_failed", "path has no parent"))?;
     fs::create_dir_all(parent)
-        .map_err(|error| CliError::new("snapshot_access.install_failed", error.to_string()))?;
+        .map_err(|error| CliError::new("snapshot_access.migration_failed", error.to_string()))?;
     let temp = path.with_extension(format!("tmp-{}", std::process::id()));
     let mut file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(&temp)
-        .map_err(|error| CliError::new("snapshot_access.install_failed", error.to_string()))?;
+        .map_err(|error| CliError::new("snapshot_access.migration_failed", error.to_string()))?;
     file.write_all(contents)
         .and_then(|_| file.sync_all())
-        .map_err(|error| CliError::new("snapshot_access.install_failed", error.to_string()))?;
+        .map_err(|error| CliError::new("snapshot_access.migration_failed", error.to_string()))?;
     fs::rename(temp, path)
-        .map_err(|error| CliError::new("snapshot_access.install_failed", error.to_string()))
+        .map_err(|error| CliError::new("snapshot_access.migration_failed", error.to_string()))
 }
 
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+fn main_app_path() -> Result<PathBuf, CliError> {
+    let executable = std::env::current_exe().map_err(|error| {
+        CliError::new(
+            "snapshot_access.app_invalid",
+            format!("cannot resolve the running CLI bundle: {error}"),
+        )
+    })?;
+    executable
+        .ancestors()
+        .find(|path| {
+            path.extension().is_some_and(|extension| extension == "app")
+                && path.file_name().is_some_and(|name| {
+                    name == "TelevyBackup.app" || name == "TelevyBackup Dev.app"
+                })
+        })
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            CliError::new(
+                "snapshot_access.app_invalid",
+                "Snapshot Access registration must be started by the installed TelevyBackup.app",
+            )
+        })
 }
-fn plist_contents(app: &Path, config_dir: &Path, data_dir: &Path) -> String {
-    let socket = data_dir.join("snapshot-access/access.sock");
-    let journal = data_dir.join("snapshot-access/journal.sqlite");
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>Label</key><string>{ACCESS_LABEL}</string>
-<key>ProgramArguments</key><array><string>{}</string></array><key>EnvironmentVariables</key><dict>
-<key>TELEVYBACKUP_CONFIG_DIR</key><string>{}</string><key>TELEVYBACKUP_DATA_DIR</key><string>{}</string>
-<key>TELEVYBACKUP_SNAPSHOT_SOCKET</key><string>{}</string><key>TELEVYBACKUP_SNAPSHOT_JOURNAL</key><string>{}</string>
-</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-</dict></plist>
-"#,
-        xml_escape(&app.to_string_lossy()),
-        xml_escape(&config_dir.to_string_lossy()),
-        xml_escape(&data_dir.to_string_lossy()),
-        xml_escape(&socket.to_string_lossy()),
-        xml_escape(&journal.to_string_lossy())
-    )
+
+fn embedded_access_app_path() -> Result<PathBuf, CliError> {
+    let app = main_app_path()?;
+    let access_app = app.join(ACCESS_BUNDLE_RELATIVE_PATH);
+    let executable = access_app.join("Contents/MacOS/televybackup-snapshot-access");
+    if !executable.is_file() {
+        return Err(CliError::new(
+            "snapshot_access.app_invalid",
+            format!(
+                "embedded Snapshot Access executable not found: {}",
+                executable.display()
+            ),
+        ));
+    }
+    Ok(access_app)
+}
+
+fn default_socket(data_dir: &Path) -> PathBuf {
+    data_dir.join("snapshot-access/access.sock")
 }
 
 fn status_from_socket(socket: &Path) -> Result<StatusResult, CliError> {
     use std::io::{BufRead, Write};
     use std::os::unix::net::UnixStream;
+
     let mut stream = UnixStream::connect(socket)
         .map_err(|error| CliError::retryable("snapshot_access.unavailable", error.to_string()))?;
     let request = Request {
@@ -121,9 +146,6 @@ fn status_from_socket(socket: &Path) -> Result<StatusResult, CliError> {
     stream
         .write_all(&bytes)
         .map_err(|error| CliError::retryable("snapshot_access.unavailable", error.to_string()))?;
-    // Status includes a bounded round trip to the mount helper. The Access App
-    // uses its SQLite journal on that path, so three seconds can falsely report
-    // a healthy service as unavailable on a busy machine.
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(12)))
         .ok();
@@ -148,99 +170,284 @@ fn status_from_socket(socket: &Path) -> Result<StatusResult, CliError> {
     }
 }
 
-pub fn install(
-    app: PathBuf,
+fn manifest_value(
+    access_app: &Path,
+    config_dir: &Path,
+    data_dir: &Path,
+    migration_state: &str,
+) -> Value {
+    json!({
+        "schemaVersion": 2,
+        "label": ACCESS_LABEL,
+        "bundleId": ACCESS_BUNDLE_ID,
+        "managedBy": "smappservice",
+        "plistName": ACCESS_AGENT_PLIST_NAME,
+        "appPath": access_app,
+        "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
+        "executablePath": access_app.join("Contents/MacOS/televybackup-snapshot-access"),
+        "configDir": config_dir,
+        "dataDir": data_dir,
+        "componentVersion": COMPONENT_VERSION,
+        "protocolVersion": PROTOCOL_VERSION,
+        "source": "embedded-bundle",
+        "migrationState": migration_state,
+    })
+}
+
+fn write_manifest(config_dir: &Path, manifest: &Value) -> Result<(), CliError> {
+    let bytes = serde_json::to_vec_pretty(manifest)
+        .map_err(|error| CliError::new("snapshot_access.migration_failed", error.to_string()))?;
+    atomic_write(&manifest_path(config_dir), &bytes)
+}
+
+fn manifest_json(config_dir: &Path) -> Option<Value> {
+    fs::read(manifest_path(config_dir))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+}
+
+fn manifest_data_dir(manifest: Option<&Value>, fallback: &Path) -> PathBuf {
+    manifest
+        .and_then(|value| value.get("dataDir"))
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fallback.to_path_buf())
+}
+
+fn active_leases(manifest: Option<&Value>, data_dir: &Path) -> u64 {
+    status_from_socket(&default_socket(&manifest_data_dir(manifest, data_dir)))
+        .map(|status| u64::from(status.active_leases))
+        .unwrap_or(0)
+}
+
+fn migration_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    format!("legacy-{nanos}-{}", std::process::id())
+}
+
+fn backup_legacy_registration(
+    config_dir: &Path,
+    manifest_file: &Path,
+    legacy_plist: &Path,
+) -> Result<Option<Value>, CliError> {
+    if !legacy_plist.exists() && !manifest_file.exists() {
+        return Ok(None);
+    }
+    let backup_dir = config_dir.join(MIGRATION_BACKUP_DIR).join(migration_id());
+    fs::create_dir_all(&backup_dir)
+        .map_err(|error| CliError::new("snapshot_access.migration_failed", error.to_string()))?;
+    let backup_plist = if legacy_plist.is_file() {
+        let destination = backup_dir.join("LaunchAgent.plist");
+        fs::copy(legacy_plist, &destination).map_err(|error| {
+            CliError::new("snapshot_access.migration_failed", error.to_string())
+        })?;
+        Some(destination)
+    } else {
+        None
+    };
+    let backup_manifest = if manifest_file.is_file() {
+        let destination = backup_dir.join("service.json");
+        fs::copy(manifest_file, &destination).map_err(|error| {
+            CliError::new("snapshot_access.migration_failed", error.to_string())
+        })?;
+        Some(destination)
+    } else {
+        None
+    };
+    Ok(Some(json!({
+        "originalPlistPath": legacy_plist,
+        "plistBackupPath": backup_plist,
+        "manifestBackupPath": backup_manifest,
+        "backupDirectory": backup_dir,
+    })))
+}
+
+fn restore_legacy_registration(
+    config_dir: &Path,
+    data_dir: &Path,
+    record: &Value,
+) -> Result<(), CliError> {
+    let domain = format!("gui/{}", unsafe { libc::geteuid() });
+    let service = user_service_target(&domain);
+    let _ = launchctl(&["bootout", &service]);
+    if let (Some(source), Some(destination)) = (
+        record.get("plistBackupPath").and_then(Value::as_str),
+        record.get("originalPlistPath").and_then(Value::as_str),
+    ) {
+        let destination = Path::new(destination);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                CliError::new("snapshot_access.rollback_failed", error.to_string())
+            })?;
+        }
+        fs::copy(source, destination)
+            .map_err(|error| CliError::new("snapshot_access.rollback_failed", error.to_string()))?;
+        launchctl(&["bootstrap", &domain, destination.to_string_lossy().as_ref()])?;
+    }
+    if let Some(source) = record.get("manifestBackupPath").and_then(Value::as_str) {
+        fs::copy(source, manifest_path(config_dir))
+            .map_err(|error| CliError::new("snapshot_access.rollback_failed", error.to_string()))?;
+    } else if manifest_path(config_dir).exists() {
+        fs::remove_file(manifest_path(config_dir))
+            .map_err(|error| CliError::new("snapshot_access.rollback_failed", error.to_string()))?;
+    }
+    let _ = data_dir;
+    Ok(())
+}
+
+pub fn prepare_migration(
     config_dir: &Path,
     data_dir: &Path,
     json_output: bool,
 ) -> Result<(), CliError> {
-    let app = app
-        .canonicalize()
-        .map_err(|error| CliError::new("snapshot_access.app_invalid", error.to_string()))?;
-    let executable = if app.extension().is_some_and(|extension| extension == "app") {
-        app.join("Contents/MacOS/televybackup-snapshot-access")
-    } else {
-        app.clone()
-    };
-    if !executable.is_file() {
-        return Err(CliError::new(
-            "snapshot_access.app_invalid",
-            format!(
-                "Snapshot Access executable not found: {}",
-                executable.display()
-            ),
-        ));
-    }
-    let plist = plist_path();
-    atomic_write(
-        &plist,
-        plist_contents(&executable, config_dir, data_dir).as_bytes(),
-    )?;
-    let domain = format!("gui/{}", unsafe { libc::geteuid() });
-    let service = user_service_target(&domain);
-    let _ = launchctl(&["bootout", &service]);
-    launchctl(&["bootstrap", &domain, plist.to_string_lossy().as_ref()])?;
-    let manifest = json!({"schemaVersion": 1, "label": ACCESS_LABEL, "appPath": app, "executablePath": executable, "plistPath": plist, "configDir": config_dir, "dataDir": data_dir});
-    atomic_write(
-        &manifest_path(config_dir),
-        serde_json::to_string_pretty(&manifest).unwrap().as_bytes(),
-    )?;
-    if json_output {
-        println!(
-            "{}",
-            json!({"installed": true, "label": ACCESS_LABEL, "appPath": app, "plistPath": plist})
-        );
-    } else {
-        println!("snapshot access installed for {}", app.display());
-    }
-    Ok(())
-}
+    let access_app = embedded_access_app_path()?;
+    let manifest_file = manifest_path(config_dir);
+    let existing = manifest_json(config_dir);
+    let legacy_plist = legacy_plist_path();
+    let existing_is_current = existing
+        .as_ref()
+        .and_then(|value| value.get("managedBy"))
+        .and_then(Value::as_str)
+        == Some("smappservice")
+        && existing
+            .as_ref()
+            .and_then(|value| value.get("relativeAppPath"))
+            .and_then(Value::as_str)
+            == Some(ACCESS_BUNDLE_RELATIVE_PATH);
+    let legacy_registration = legacy_plist.exists() || (existing.is_some() && !existing_is_current);
 
-pub fn uninstall(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
-    if let Ok(payload) = status(config_dir, data_dir, true)
-        && payload["activeLeases"].as_u64().unwrap_or(0) > 0
-    {
+    if existing_is_current && !legacy_plist.exists() {
+        if json_output {
+            println!("{}", json!({"prepared": false, "migrationState": "ready"}));
+        }
+        return Ok(());
+    }
+
+    if legacy_registration && active_leases(existing.as_ref(), data_dir) > 0 {
         return Err(CliError::new(
             "snapshot_access.busy",
-            "cannot uninstall while a snapshot lease is active",
+            "cannot migrate Snapshot Access while a snapshot lease is active",
         ));
     }
+
+    let backup = backup_legacy_registration(config_dir, &manifest_file, &legacy_plist)?;
     let domain = format!("gui/{}", unsafe { libc::geteuid() });
     let service = user_service_target(&domain);
-    let _ = launchctl(&["bootout", &service]);
-    let plist = plist_path();
-    if plist.exists() {
-        fs::remove_file(plist).map_err(|error| {
-            CliError::new("snapshot_access.uninstall_failed", error.to_string())
-        })?;
+    if legacy_registration {
+        let _ = launchctl(&["bootout", &service]);
+        if legacy_plist.exists() {
+            if let Err(error) = fs::remove_file(&legacy_plist) {
+                if let Some(backup) = backup.as_ref() {
+                    let _ = restore_legacy_registration(config_dir, data_dir, backup);
+                }
+                return Err(CliError::new(
+                    "snapshot_access.migration_failed",
+                    error.to_string(),
+                ));
+            }
+        }
     }
+
+    let mut manifest = manifest_value(&access_app, config_dir, data_dir, "pending");
+    if let Some(backup) = backup {
+        manifest["legacyBackup"] = backup;
+    }
+    if let Err(error) = write_manifest(config_dir, &manifest) {
+        if let Some(backup) = manifest.get("legacyBackup") {
+            let _ = restore_legacy_registration(config_dir, data_dir, backup);
+        }
+        return Err(error);
+    }
+
     if json_output {
         println!(
             "{}",
-            json!({"uninstalled": true, "label": ACCESS_LABEL, "journalPreserved": true})
+            json!({
+                "prepared": true,
+                "managedBy": "smappservice",
+                "appPath": access_app,
+                "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
+                "migrationState": "pending",
+            })
         );
     } else {
-        println!("snapshot access uninstalled; journal preserved");
+        println!(
+            "Snapshot Access migration prepared for {}",
+            access_app.display()
+        );
     }
     Ok(())
 }
 
-pub fn status(
+pub fn commit_migration(
     config_dir: &Path,
     data_dir: &Path,
     json_output: bool,
-) -> Result<serde_json::Value, CliError> {
-    let manifest = fs::read(manifest_path(config_dir))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-    let socket = manifest
-        .as_ref()
-        .and_then(|value| value.get("dataDir"))
-        .and_then(serde_json::Value::as_str)
-        .map(|dir| PathBuf::from(dir).join("snapshot-access/access.sock"))
-        .unwrap_or_else(|| data_dir.join("snapshot-access/access.sock"));
+) -> Result<(), CliError> {
+    let access_app = embedded_access_app_path()?;
+    let mut manifest = manifest_json(config_dir).ok_or_else(|| {
+        CliError::new(
+            "snapshot_access.migration_failed",
+            "Snapshot Access migration is not prepared",
+        )
+    })?;
+    if manifest.get("managedBy").and_then(Value::as_str) != Some("smappservice") {
+        return Err(CliError::new(
+            "snapshot_access.migration_failed",
+            "Snapshot Access manifest is not managed by SMAppService",
+        ));
+    }
+    let socket = default_socket(&manifest_data_dir(Some(&manifest), data_dir));
+    let status = status_from_socket(&socket)?;
+    if status.access_app_path.as_deref() != Some(access_app.to_string_lossy().as_ref()) {
+        return Err(CliError::new(
+            "snapshot_access.identity_mismatch",
+            "running Snapshot Access is not the embedded helper",
+        ));
+    }
+    manifest["migrationState"] = Value::String("ready".into());
+    write_manifest(config_dir, &manifest)?;
+    if json_output {
+        println!("{}", json!({"committed": true, "migrationState": "ready"}));
+    } else {
+        println!("Snapshot Access migration committed");
+    }
+    Ok(())
+}
+
+pub fn rollback_migration(
+    config_dir: &Path,
+    data_dir: &Path,
+    json_output: bool,
+) -> Result<(), CliError> {
+    let Some(manifest) = manifest_json(config_dir) else {
+        return Ok(());
+    };
+    let Some(backup) = manifest.get("legacyBackup") else {
+        if manifest.get("migrationState").and_then(Value::as_str) == Some("pending") {
+            fs::remove_file(manifest_path(config_dir)).map_err(|error| {
+                CliError::new("snapshot_access.rollback_failed", error.to_string())
+            })?;
+        }
+        return Ok(());
+    };
+    restore_legacy_registration(config_dir, data_dir, backup)?;
+    if json_output {
+        println!("{}", json!({"rolledBack": true}));
+    } else {
+        println!("Snapshot Access migration rolled back");
+    }
+    Ok(())
+}
+
+pub fn status(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<Value, CliError> {
+    let manifest = manifest_json(config_dir);
+    let socket = default_socket(&manifest_data_dir(manifest.as_ref(), data_dir));
     let helper = status_from_socket(&socket).ok();
-    let payload = status_payload(manifest.as_ref(), helper.as_ref(), &plist_path());
+    let payload = status_payload(manifest.as_ref(), helper.as_ref(), &socket);
     if json_output {
         println!("{payload}");
     } else {
@@ -256,20 +463,44 @@ pub fn status(
     Ok(payload)
 }
 
-fn status_payload(
-    manifest: Option<&serde_json::Value>,
-    helper: Option<&StatusResult>,
-    plist: &Path,
-) -> serde_json::Value {
+fn status_payload(manifest: Option<&Value>, helper: Option<&StatusResult>, socket: &Path) -> Value {
     let registered_app_path = manifest
         .and_then(|value| value.get("appPath"))
-        .and_then(serde_json::Value::as_str);
+        .and_then(Value::as_str);
     let running_app_path = helper.and_then(|value| value.access_app_path.as_deref());
-    let registration_mismatch = matches!(
-        (running_app_path, registered_app_path),
-        (Some(running), Some(registered)) if running != registered
-    );
-    json!({"installed": manifest.is_some() && plist.is_file(), "label": ACCESS_LABEL, "appPath": running_app_path.or(registered_app_path), "registeredAppPath": registered_app_path, "accessAppRegistrationMismatch": registration_mismatch, "executablePath": manifest.and_then(|value| value.get("executablePath")), "plistPath": plist, "serviceReachable": helper.is_some(), "activeLeases": helper.map(|value| value.active_leases).unwrap_or(0), "pendingCleanup": helper.map(|value| value.pending_cleanup).unwrap_or(0), "accessAppVersion": helper.map(|value| value.access_app_version.clone()), "fdaReady": helper.map(|value| value.fda_ready).unwrap_or(false), "fdaCheckError": helper.and_then(|value| value.fda_check_error.clone()), "mountHelperPath": MOUNT_HELPER_INSTALL_PATH, "mountHelperReachable": helper.map(|value| value.mount_helper_reachable).unwrap_or(false), "mountHelperVersion": helper.and_then(|value| value.mount_helper_version.clone()), "mountHelperError": helper.and_then(|value| value.mount_helper_error.clone())})
+    let managed_by = manifest
+        .and_then(|value| value.get("managedBy"))
+        .and_then(Value::as_str);
+    let registration_mismatch = managed_by != Some("smappservice")
+        || matches!(
+            (running_app_path, registered_app_path),
+            (Some(running), Some(registered)) if running != registered
+        );
+    json!({
+        "installed": manifest.is_some() && managed_by == Some("smappservice"),
+        "label": ACCESS_LABEL,
+        "bundleId": ACCESS_BUNDLE_ID,
+        "managedBy": managed_by,
+        "appPath": running_app_path.or(registered_app_path),
+        "registeredAppPath": registered_app_path,
+        "relativeAppPath": manifest.and_then(|value| value.get("relativeAppPath")),
+        "accessAppRegistrationMismatch": registration_mismatch,
+        "migrationState": manifest.and_then(|value| value.get("migrationState")),
+        "legacyRegistrationPath": manifest.and_then(|value| value.get("legacyBackup")).and_then(|value| value.get("originalPlistPath")),
+        "executablePath": manifest.and_then(|value| value.get("executablePath")),
+        "plistPath": manifest.and_then(|value| value.get("plistName")),
+        "socketPath": socket,
+        "serviceReachable": helper.is_some(),
+        "activeLeases": helper.map(|value| value.active_leases).unwrap_or(0),
+        "pendingCleanup": helper.map(|value| value.pending_cleanup).unwrap_or(0),
+        "accessAppVersion": helper.map(|value| value.access_app_version.clone()),
+        "fdaReady": helper.map(|value| value.fda_ready).unwrap_or(false),
+        "fdaCheckError": helper.and_then(|value| value.fda_check_error.clone()),
+        "mountHelperPath": MOUNT_HELPER_INSTALL_PATH,
+        "mountHelperReachable": helper.map(|value| value.mount_helper_reachable).unwrap_or(false),
+        "mountHelperVersion": helper.and_then(|value| value.mount_helper_version.clone()),
+        "mountHelperError": helper.and_then(|value| value.mount_helper_error.clone()),
+    })
 }
 
 #[cfg(test)]
@@ -277,57 +508,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn launch_agent_plist_points_at_user_access_app() {
-        let plist = plist_contents(
-            Path::new(
-                "/Users/test/Applications/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access",
-            ),
-            Path::new("/Users/test/Library/Application Support/TelevyBackup"),
-            Path::new("/Users/test/Library/Application Support/TelevyBackup"),
+    fn embedded_registration_uses_relative_bundle_program() {
+        let plist = format!(
+            "<key>Label</key><string>{ACCESS_LABEL}</string><key>BundleProgram</key><string>{ACCESS_BUNDLE_RELATIVE_PATH}/Contents/MacOS/televybackup-snapshot-access</string>"
         );
-        assert!(plist.contains(ACCESS_LABEL));
-        assert!(plist.contains("RunAtLoad"));
-        assert!(plist.contains("TELEVYBACKUP_SNAPSHOT_SOCKET"));
-        assert!(!plist.contains("LaunchDaemons"));
-        assert!(!plist.contains("PrivilegedHelper"));
-        assert!(!plist.contains("administrator privileges"));
+        assert!(plist.contains("BundleProgram"));
+        assert!(plist.contains(ACCESS_BUNDLE_RELATIVE_PATH));
+        assert!(!plist.contains("ProgramArguments"));
+        assert!(!plist.contains("target/macos-app"));
     }
 
     #[test]
-    fn plist_escapes_paths_as_xml() {
-        let plist = plist_contents(
-            Path::new("/Users/test/A&B.app/Contents/MacOS/access"),
-            Path::new("/Users/test/config<one>"),
-            Path::new("/Users/test/data"),
-        );
-        assert!(plist.contains("A&amp;B.app"));
-        assert!(plist.contains("config&lt;one&gt;"));
-    }
-
-    #[test]
-    fn launchctl_uses_a_fully_qualified_user_service_target() {
-        assert_eq!(
-            user_service_target("gui/501"),
-            "gui/501/com.ivan.televybackup.snapshot-access"
-        );
-    }
-
-    #[test]
-    fn reachable_access_service_path_overrides_stale_launch_registration() {
+    fn status_does_not_treat_legacy_registration_as_installed() {
         let manifest = json!({
-            "appPath": "/old/TelevyBackup Snapshot Access.app",
-            "executablePath": "/old/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access",
+            "appPath": "/Users/test/Projects/old/TelevyBackup Snapshot Access.app",
+            "managedBy": "legacy-launchagent",
+            "migrationState": "legacy-detected",
+        });
+        let payload = status_payload(Some(&manifest), None, Path::new("/tmp/access.sock"));
+        assert_eq!(payload["installed"], false);
+        assert_eq!(payload["managedBy"], "legacy-launchagent");
+        assert_eq!(payload["migrationState"], "legacy-detected");
+    }
+
+    #[test]
+    fn running_embedded_path_is_the_display_identity() {
+        let manifest = json!({
+            "appPath": "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+            "managedBy": "smappservice",
         });
         let status = StatusResult {
-            access_app_path: Some("/live/TelevyBackup Snapshot Access.app".into()),
+            access_app_path: Some(
+                "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app".into(),
+            ),
             ..Default::default()
         };
-
-        let payload = status_payload(Some(&manifest), Some(&status), Path::new("/missing.plist"));
-
-        assert_eq!(
-            payload["appPath"], "/live/TelevyBackup Snapshot Access.app",
-            "the FDA path must identify the reachable process, not a stale registration"
+        let payload = status_payload(
+            Some(&manifest),
+            Some(&status),
+            Path::new("/tmp/access.sock"),
         );
+        assert_eq!(payload["accessAppRegistrationMismatch"], false);
+        assert_eq!(payload["appPath"], manifest["appPath"]);
     }
 }

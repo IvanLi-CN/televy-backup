@@ -553,19 +553,45 @@ async fn handle_control_ipc_client(
                 })
             })
             .collect::<Vec<_>>();
-        let registered_access_app_path =
+        let snapshot_manifest =
             std::fs::read(context.config_root.join("snapshot-access/service.json"))
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| {
-                    value
-                        .get("appPath")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
-                .or_else(|| std::env::var("TELEVYBACKUP_SNAPSHOT_ACCESS_APP").ok());
-        let (access_app_path, registered_access_app_path, access_app_registration_mismatch) =
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let registered_access_app_path = snapshot_manifest.as_ref().and_then(|value| {
+            value
+                .get("appPath")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        let managed_by = snapshot_manifest.as_ref().and_then(|value| {
+            value
+                .get("managedBy")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        let migration_state = snapshot_manifest.as_ref().and_then(|value| {
+            value
+                .get("migrationState")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        let legacy_registration_path = snapshot_manifest.as_ref().and_then(|value| {
+            value
+                .get("legacyBackup")
+                .and_then(|backup| backup.get("originalPlistPath"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        let (access_app_path, registered_access_app_path, path_mismatch) =
             snapshot_access_paths(helper.as_ref().ok(), registered_access_app_path);
+        let access_app_registration_mismatch =
+            path_mismatch || managed_by.as_deref() != Some("smappservice");
+        let migration_state = migration_state.or_else(|| {
+            managed_by
+                .as_deref()
+                .filter(|value| *value != "smappservice")
+                .map(|_| "legacy-detected".to_string())
+        });
         write_json_line(
             &mut w,
             &ControlResponse::ok(
@@ -576,6 +602,9 @@ async fn handle_control_ipc_client(
                     "accessAppPath": access_app_path,
                     "registeredAccessAppPath": registered_access_app_path,
                     "accessAppRegistrationMismatch": access_app_registration_mismatch,
+                    "managedBy": managed_by,
+                    "migrationState": migration_state,
+                    "legacyRegistrationPath": legacy_registration_path,
                     "accessAppVersion": access_app_version,
                     "fdaReady": fda_ready,
                     "fdaCheckError": fda_check_error,
