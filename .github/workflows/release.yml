@@ -184,6 +184,13 @@ jobs:
           helper_version="${HELPER_SOURCE_TAG#v}"
           mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
           gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --dir "$RUNNER_TEMP/snapshot-helper"
+          source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"
+          python3 - "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" "$helper_version" "$source_tag_commit" <<'PY'
+          import json, sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["release_version"] == sys.argv[2]
+          assert manifest["source_commit"] == sys.argv[3]
+          PY
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
@@ -225,6 +232,13 @@ jobs:
           helper_version="${HELPER_SOURCE_TAG#v}"
           mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
           gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --dir "$RUNNER_TEMP/snapshot-helper"
+          source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"
+          python3 - "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" "$helper_version" "$source_tag_commit" <<'PY'
+          import json, sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["release_version"] == sys.argv[2]
+          assert manifest["source_commit"] == sys.argv[3]
+          PY
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
@@ -270,6 +284,13 @@ jobs:
           helper_version="${HELPER_SOURCE_TAG#v}"
           mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
           gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --dir "$RUNNER_TEMP/snapshot-helper"
+          source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"
+          python3 - "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" "$helper_version" "$source_tag_commit" <<'PY'
+          import json, sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["release_version"] == sys.argv[2]
+          assert manifest["source_commit"] == sys.argv[3]
+          PY
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"

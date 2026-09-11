@@ -63,7 +63,10 @@ installer. RC1 MUST build and sign the Universal helper once; later RCs and stab
 verify, and embed that exact artifact without rebuilding, `lipo`, or re-signing it. The mount-helper
 binary and system service templates remain available for its explicit administrator transaction;
 the installed root helper is compatibility-checked only and not automatically updated. FDA is an
-explicit System Settings action.
+explicit System Settings action. Development variants and runs with custom config/data directories
+MUST launch the embedded helper as a process-local child with those directories in its environment;
+they MUST NOT register the production `SMAppService` agent, whose bundle plist has no mutable
+environment fields.
 
 ### REQ-MRD-008: Release atomicity and backfill
 
@@ -104,6 +107,18 @@ Covers: REQ-MRD-005, REQ-MRD-006. CLI service tests and the transaction fixture 
 
 Covers: REQ-MRD-007. Swift unit tests and isolated Settings snapshots provide the evidence.
 
+### VER-MRD-006: Authorization continuity across RCs
+
+Covers: REQ-MRD-010 and the authorization-stability requirement. On a controlled macOS 15 APFS
+fixture, start from the v0.9.8 external registration, replace the app with RC1, confirm that the
+old registration is backed up and the embedded agent is running, then manually grant FDA to the
+exact embedded helper path and complete a strict backup of a protected source. Replace only the
+main app with RC2 from the same product-version RC1 helper artifact, record equal helper
+SHA-256/CDHash/designated-requirement values, confirm that Settings does not require a new FDA
+grant, and repeat the protected-source strict backup. Record the unchanged root helper path,
+version, and binary hash. This is a release-blocking manual acceptance result; no TCC database
+mutation or Developer ID/notarization step is permitted.
+
 ## Verification Map
 
 | Requirement | Verification |
@@ -115,6 +130,7 @@ Covers: REQ-MRD-007. Swift unit tests and isolated Settings snapshots provide th
 | REQ-MRD-007 | Swift unit tests; isolated Settings snapshots |
 | REQ-MRD-009 | app build; brand and App Icon asset verifiers; bundle inspection |
 | REQ-MRD-010 | package verifier; CLI Snapshot Access transaction tests; LaunchAgent plist inspection |
+| REQ-MRD-010 authorization continuity | controlled macOS 15 RC1/RC2 migration and protected-source FDA acceptance |
 
 ## Related ADRs
 
