@@ -14,10 +14,11 @@ formats.
 
 ### Goals
 
-- Provide a separate, windowless `TelevyBackup Snapshot Access.app` and a narrowly-scoped root
-  mount helper. The current validated strict-mode baseline grants FDA to each exact installed
-  identity; the helper additionally needs root because macOS mount(2) privilege is not granted by
-  FDA.
+- Provide a separate, windowless Snapshot Access process embedded inside the single visible
+  `TelevyBackup.app` at `Contents/Library/LoginItems/TelevyBackup Snapshot Access.app`, plus a
+  narrowly-scoped root mount helper. The current validated strict-mode baseline grants FDA to each
+  exact installed identity; the helper additionally needs root because macOS mount(2) privilege is
+  not granted by FDA.
 - Address sources by configured target ID and APFS Volume UUID, never by an arbitrary IPC path.
 - Stream directory metadata and file bytes through an opaque lease without exposing the snapshot
   mount path to the daemon.
@@ -37,8 +38,9 @@ formats.
 
 ### REQ-APFS-001: Access process boundary
 
-The package MUST include a separate `TelevyBackup Snapshot Access.app` with bundle identifier
-`com.ivan.televybackup.snapshot-access` and `LSUIElement=true`. It MUST run as the logged-in user,
+The package MUST include exactly one top-level `TelevyBackup.app`. It MUST contain a separate
+Snapshot Access app at `Contents/Library/LoginItems/TelevyBackup Snapshot Access.app` with bundle
+identifier `com.ivan.televybackup.snapshot-access` and `LSUIElement=true`. It MUST run as the logged-in user,
 reject root execution, keep its journal/socket/mount directories private to that user, and never
 read Keychain data, encrypt backup data, or upload files.
 
@@ -81,21 +83,24 @@ lease.
 
 ### REQ-APFS-006: User installation and observability
 
-The CLI MUST provide `snapshot-access install --app <path>`, `status`, and `uninstall` using the
-user's `gui/<uid>` LaunchAgent domain. Settings MUST show the exact canonical Access app and mount
-helper paths, versions, service reachability, active leases, pending cleanup, and a link to System
-Settings. It MUST identify both paths as FDA requirements for strict mode, report only observable
-FDA evidence, and never present service reachability as proof of a helper TCC grant. Access App
-install, update, and uninstall MUST remain user-level. Mount helper install, update, and uninstall
-are explicit administrator-authorized transactions and are the only privileged setup operation;
-scheduled backup requests never authenticate.
+The main app MUST register the embedded agent with `SMAppService.agent` and its plist MUST use a
+bundle-relative `BundleProgram`. The CLI MUST expose only read-only `snapshot-access status` plus
+internal migration operations; it MUST reject arbitrary external app paths and MUST NOT create a
+new user LaunchAgent plist. Settings MUST show the exact embedded Access app and mount helper paths,
+component versions, migration state, service reachability, active leases, pending cleanup, and a
+link to System Settings. It MUST identify both paths as FDA requirements for strict mode, report
+only observable FDA evidence, and never present service reachability as proof of a helper TCC grant.
+The first layout migration is user-level; mount helper install, update, and uninstall remain
+explicit administrator-authorized transactions and are the only privileged setup operation.
 
 ## Compatibility
 
-The Access app is started by a per-user LaunchAgent and can be used without the GUI. Ad-hoc updates
-may change the code identity; after an Access app or mount-helper update the UI must ask the user to
-grant FDA again to each exact displayed identity. Existing settings without `snapshot_volumes`
-remain valid and default to live mode until a volume is verified and enabled.
+The Access app is started by the main app's per-user `SMAppService` LaunchAgent and can be used
+without the GUI after registration. RC1 establishes the embedded helper identity; RC2 and stable
+reuse its exact Universal artifact, so ordinary main-app updates do not request FDA again. A real
+Access helper code or FDA behavior change creates a new component version and requires explicit
+migration and manual FDA review. Existing settings without `snapshot_volumes` remain valid and
+default to live mode until a volume is verified and enabled.
 
 ## Verification
 
@@ -132,6 +137,7 @@ manually by the owner and are not automated by tests.
 
 - [0008-apfs-snapshot-access-app](../../adr/0008-apfs-snapshot-access-app.md)
 - [0009-apfs-snapshot-mount-helper](../../adr/0009-apfs-snapshot-mount-helper.md)
+- [0010-identity-stable-single-product-release](../../adr/0010-identity-stable-single-product-release.md)
 
 ## Visual Evidence
 

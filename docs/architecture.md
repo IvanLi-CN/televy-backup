@@ -20,9 +20,9 @@
   - Runs as the logged-in user and has neither root privilege nor FDA.
   - Supports a local `daemon.stop` control request. App and CLI use it for graceful cancellation and shutdown; the caller waits for IPC disappearance before treating shutdown as complete.
 - **APFS Snapshot Access**: `televybackup-snapshot-access` (`crates/snapshot-helper/`).
-  - Runs as a separate user-session `LSUIElement` app (`com.ivan.televybackup.snapshot-access`). The user grants FDA to this exact bundle. Its peer-UID checked Unix socket exposes only configured target IDs, opaque leases, metadata pages, and bounded read streams.
+  - Runs as a separate user-session `LSUIElement` app (`com.ivan.televybackup.snapshot-access`) embedded inside the single visible `TelevyBackup.app` at `Contents/Library/LoginItems/`. The user grants FDA to this exact nested bundle. Its peer-UID checked Unix socket exposes only configured target IDs, opaque leases, metadata pages, and bounded read streams.
   - It creates snapshots and reads their metadata/content, journaling the exact snapshot UUID and private mount root. It never encrypts or uploads backup data.
-  - Installation, update, and uninstall are explicit user LaunchAgent transactions. Scheduled backups use the already installed Access app and never prompt for a password.
+  - Registration is owned by `SMAppService.agent` and uses `BundleProgram`; the CLI exposes status and a transactional migration from the old external registration. Scheduled backups use the already registered helper and never prompt for a password. Ordinary main-app releases reuse unchanged helper bytes.
 - **APFS Snapshot Mount Helper**: `televybackup-snapshot-mount-helper` (`crates/snapshot-helper/src/bin/`).
   - Runs as root under `com.ivan.televybackup.snapshot-mount-helper`. Its restricted IPC only mounts,
     unmounts, and UUID-cleans leases presented by the Access app; it never opens source files or
@@ -40,7 +40,7 @@ Strict APFS snapshot mode is the only feature that needs FDA or root. Live-mode 
 | GUI app | Logged-in user | None | root, FDA, direct Keychain reads |
 | CLI | Logged-in user | `sudo` only when explicitly installing, updating, or removing the mount helper | FDA, background root operation |
 | `televybackupd` | Logged-in-user LaunchAgent; Keychain in production-like mode | None | root, FDA, direct snapshot mount access |
-| Snapshot Access.app | Logged-in user with FDA for the exact installed app identity | Manual FDA grant after install or identity/path change | root, Keychain, encryption, network upload |
+| Snapshot Access.app | Logged-in user with FDA for the exact embedded app identity | Manual FDA grant after the first layout migration or helper identity change | root, Keychain, encryption, network upload |
 | Snapshot Mount Helper | root LaunchDaemon with FDA for the exact installed helper identity | Administrator transaction plus manual FDA grant after identity/path change | source file reads, Keychain, indexes, network |
 
 FDA cannot be inferred from service reachability. Settings identifies the two exact paths and reports
@@ -100,7 +100,7 @@ daemon-only boundary:
 
 Snapshot consistency is opt-in per APFS Volume UUID (`snapshot_volumes.<uuid>.enabled`). When enabled, a backup fails closed if Snapshot Access cannot probe, create, uniquely identify, or mount the snapshot; it never falls back to the live source directory. The core keeps the logical source path in historical indexes and receives file bytes through bounded Snapshot Access streams. The lease is released immediately after the scan has read all source bytes into the encrypted upload queue.
 
-The user daemon remains the scheduler, Keychain boundary, scanner, encryptor, and uploader. Snapshot Access is the FDA/file-read boundary; the mount helper is a mount-only privileged boundary. Non-APFS volumes, nested mounted volumes, ambiguous `tmutil` ownership, unavailable helper, and pending cleanup are reported as unsupported/blocking states rather than silently producing a best-effort backup. See [the APFS snapshot consistency spec](specs/apfs-snapshot-consistency/SPEC.md), [ADR 0008](adr/0008-apfs-snapshot-access-app.md), and [ADR 0009](adr/0009-apfs-snapshot-mount-helper.md).
+The user daemon remains the scheduler, Keychain boundary, scanner, encryptor, and uploader. Snapshot Access is the FDA/file-read boundary; the mount helper is a mount-only privileged boundary. Non-APFS volumes, nested mounted volumes, ambiguous `tmutil` ownership, unavailable helper, and pending cleanup are reported as unsupported/blocking states rather than silently producing a best-effort backup. See [the APFS snapshot consistency spec](specs/apfs-snapshot-consistency/SPEC.md), [ADR 0008](adr/0008-apfs-snapshot-access-app.md), [ADR 0009](adr/0009-apfs-snapshot-mount-helper.md), and [ADR 0010](adr/0010-identity-stable-single-product-release.md).
 
 ## Data locations
 
