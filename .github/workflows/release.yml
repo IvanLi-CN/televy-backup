@@ -360,16 +360,38 @@ jobs:
     environment:
       name: macos-release-acceptance
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          fetch-depth: 1
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
       - name: Verify manual RC1 to RC2 acceptance evidence
         env:
           ACCEPTANCE_EVIDENCE: ${{ vars.TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ -n "${ACCEPTANCE_EVIDENCE}" ]] || {
-            echo "stable publication requires TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE in the macos-release-acceptance environment" >&2
-            exit 1
-          }
-          echo "manual macOS RC1 to RC2 acceptance evidence: ${ACCEPTANCE_EVIDENCE}"
+          core_version="${{ needs.resolve.outputs.version }}"
+          rc1_tag="v${core_version}-rc.1"
+          rc2_tag="v${core_version}-rc.2"
+          rc1_json="$(gh release view "$rc1_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
+          rc2_json="$(gh release view "$rc2_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
+          python3 - "$rc1_json" "$rc2_json" <<'PY'
+          import json, sys
+          for raw in sys.argv[1:]:
+              state = json.loads(raw)
+              assert state["isDraft"] is False
+              assert state["isPrerelease"] is True
+          PY
+          python3 .github/scripts/verify-macos-rc-acceptance.py \
+            --evidence "$ACCEPTANCE_EVIDENCE" \
+            --manifest release-assets/BUILD-MANIFEST.json \
+            --stable-version "$core_version" \
+            --rc1-tag "$rc1_tag" \
+            --rc2-tag "$rc2_tag"
 
   publish:
     name: Publish GitHub Release

@@ -92,6 +92,8 @@ link to System Settings. It MUST identify both paths as FDA requirements for str
 only observable FDA evidence, and never present service reachability as proof of a helper TCC grant.
 The first layout migration is user-level; mount helper install, update, and uninstall remain
 explicit administrator-authorized transactions and are the only privileged setup operation.
+Migration commit and rollback MUST require the transaction id and a short-lived owner token from
+the same prepare operation; missing or mismatched transaction credentials MUST fail closed.
 
 ## Compatibility
 

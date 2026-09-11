@@ -31,7 +31,40 @@ with open(os.path.join(asset_dir, 'SHA256SUMS'), 'w', encoding='utf-8') as handl
     for asset in assets:
         handle.write(f"{asset['sha256']}  {asset['name']}\n")
 
-def signing_identity(path, hash_path=None):
+def artifact_digest(path):
+    digest = hashlib.sha256()
+    if os.path.isfile(path):
+        with open(path, 'rb') as handle:
+            digest.update(handle.read())
+        return digest.hexdigest()
+    for root, directories, files in os.walk(path, followlinks=False):
+        directories.sort()
+        files.sort()
+        relative_root = os.path.relpath(root, path)
+        if relative_root == '.':
+            relative_root = ''
+        for name in directories + files:
+            entry = os.path.join(root, name)
+            relative = os.path.join(relative_root, name)
+            stat = os.lstat(entry)
+            digest.update(b'entry\0' + relative.encode() + b'\0')
+            digest.update(str(stat.st_mode).encode() + b'\0')
+            if os.path.islink(entry):
+                digest.update(b'link\0' + os.readlink(entry).encode() + b'\0')
+            elif os.path.isfile(entry):
+                with open(entry, 'rb') as handle:
+                    digest.update(b'file\0' + handle.read())
+            else:
+                digest.update(b'other\0')
+    return digest.hexdigest()
+
+def component_metadata(binary):
+    result = subprocess.run([binary, '--component-metadata'], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f'component metadata failed for {binary}: {result.stderr.strip()}')
+    return json.loads(result.stdout)
+
+def signing_identity(path, hash_path=None, artifact_path=None):
     details = subprocess.run(['codesign', '-dvvv', path], capture_output=True, text=True)
     cdhash = next(
         (line.split('=', 1)[1] for line in (details.stdout + details.stderr).splitlines()
@@ -51,6 +84,7 @@ def signing_identity(path, hash_path=None):
         sha256 = hashlib.sha256(handle.read()).hexdigest()
     return {
         'sha256': sha256,
+        'artifact_sha256': artifact_digest(artifact_path or path),
         'cdhash': cdhash,
         'designated_requirement': designated_requirement,
     }
@@ -70,12 +104,18 @@ helper = {
     'source': 'fresh-rc1-build' if version.endswith('-rc.1') else 'rc1-universal-artifact',
     'reuse_policy': 'byte-identical-no-rebuild-no-lipo-no-resign',
     'sha256': None,
+    'artifact_sha256': None,
     'cdhash': None,
     'designated_requirement': None,
 }
 if os.path.isfile(helper_binary):
     bundle = os.path.dirname(os.path.dirname(os.path.dirname(helper_binary)))
-    helper.update(signing_identity(bundle, helper_binary))
+    metadata = component_metadata(helper_binary)
+    helper['bundle_id'] = metadata['bundleId']
+    helper['relative_path'] = metadata['relativePath']
+    helper['component_version'] = metadata['componentVersion']
+    helper['protocol_version'] = metadata['protocolVersion']
+    helper.update(signing_identity(bundle, helper_binary, bundle))
 
 root_helper_binary = os.path.join(
     asset_dir,
@@ -89,13 +129,16 @@ root_helper = {
     'component_version': '0.1.0',
     'protocol_version': 1,
     'source': 'release-bundled-compatibility-reference',
+    'identity_source': 'bundled-release-artifact',
+    'installed_observation': 'manual-rc-acceptance-required',
     'update_policy': 'compatibility-check-only',
     'sha256': None,
+    'artifact_sha256': None,
     'cdhash': None,
     'designated_requirement': None,
 }
 if os.path.isfile(root_helper_binary):
-    root_helper.update(signing_identity(root_helper_binary))
+    root_helper.update(signing_identity(root_helper_binary, root_helper_binary, root_helper_binary))
 
 components = {
     'snapshot_access': helper,

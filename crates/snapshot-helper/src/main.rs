@@ -22,8 +22,9 @@ use sqlx::{
 use televybackup_snapshot_access::mount_helper;
 use televybackup_snapshot_access::{
     COMPONENT_VERSION, CONFIG_DIR_ENV, DATA_DIR_ENV, DEFAULT_JOURNAL_PATH, LeaseResult,
-    MIN_FREE_BYTES, Method, MountSnapshotRef, ProbeResult, ReadStreamResult, ReleaseResult,
-    Request, Response, ResponseResult, ScanPageResult, SourceEntry, StatusResult, validate_request,
+    MIN_FREE_BYTES, Method, MountSnapshotRef, PROTOCOL_VERSION, ProbeResult, ReadStreamResult,
+    ReleaseResult, Request, Response, ResponseResult, ScanPageResult, SourceEntry, StatusResult,
+    validate_request,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -106,6 +107,18 @@ struct VolumeInfo {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|arg| arg == "--component-metadata") {
+        println!(
+            "{}",
+            serde_json::json!({
+                "componentVersion": COMPONENT_VERSION,
+                "protocolVersion": PROTOCOL_VERSION,
+                "bundleId": televybackup_snapshot_access::ACCESS_BUNDLE_ID,
+                "relativePath": televybackup_snapshot_access::ACCESS_BUNDLE_RELATIVE_PATH,
+            })
+        );
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!(
             "televybackup-snapshot-access {} ({})",

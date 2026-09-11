@@ -81,10 +81,17 @@ private struct SnapshotAccessMigrationPrepareResult: Decodable {
     let prepared: Bool
     let migrationState: String?
     let migrationId: String?
+    let migrationOwner: String?
 }
 
 private struct SnapshotAccessMigrationRollbackResult: Decodable {
     let rolledBack: Bool
+}
+
+private struct LocalSnapshotAccessStatus: Decodable {
+    let serviceReachable: Bool
+    let accessAppPath: String?
+    let accessAppVersion: String?
 }
 
 private struct AppRuntimeKey: EnvironmentKey {
@@ -834,12 +841,17 @@ final class AppModel {
             && effectiveDataDirURL().standardizedFileURL == defaultDataDir().standardizedFileURL
     }
 
-    private func embeddedSnapshotAccessExecutablePath() -> String? {
-        let path = Bundle.main.bundleURL
+    private func embeddedSnapshotAccessAppPath() -> String {
+        Bundle.main.bundleURL
             .appendingPathComponent("Contents")
             .appendingPathComponent("Library")
             .appendingPathComponent("LoginItems")
             .appendingPathComponent("TelevyBackup Snapshot Access.app")
+            .path
+    }
+
+    private func embeddedSnapshotAccessExecutablePath() -> String? {
+        let path = URL(fileURLWithPath: embeddedSnapshotAccessAppPath())
             .appendingPathComponent("Contents")
             .appendingPathComponent("MacOS")
             .appendingPathComponent("televybackup-snapshot-access")
@@ -847,19 +859,79 @@ final class AppModel {
         return FileManager.default.isExecutableFile(atPath: path) ? path : nil
     }
 
+    private func embeddedSnapshotAccessComponentVersion() -> String? {
+        Bundle(path: embeddedSnapshotAccessAppPath())?
+            .object(forInfoDictionaryKey: "TelevyBackupComponentVersion") as? String
+    }
+
+    private func localSnapshotAccessIsCurrent(
+        cli: String,
+        config: String,
+        data: String,
+        expectedPath: String,
+        expectedVersion: String
+    ) -> (isCurrent: Bool, message: String?) {
+        let result = runCommandCapture(
+            exe: cli,
+            args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "status"],
+            timeoutSeconds: 8
+        )
+        let output = result.stdout.isEmpty ? result.stderr : result.stdout
+        guard result.status == 0,
+              let status = try? JSONDecoder().decode(LocalSnapshotAccessStatus.self, from: Data(output.utf8)) else {
+            return (false, "Snapshot Access status could not be verified")
+        }
+        guard status.serviceReachable else {
+            return (false, "Snapshot Access service is not reachable")
+        }
+        let actualPath = status.accessAppPath.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        let normalizedExpectedPath = URL(fileURLWithPath: expectedPath).standardizedFileURL.path
+        guard actualPath == normalizedExpectedPath else {
+            return (false, "Snapshot Access socket is owned by another helper")
+        }
+        guard status.accessAppVersion == expectedVersion else {
+            return (false, "Snapshot Access helper version is incompatible")
+        }
+        return (true, nil)
+    }
+
     private func ensureLocalSnapshotAccessProcess(completion: @escaping (Bool, String?) -> Void) {
         guard let executable = embeddedSnapshotAccessExecutablePath() else {
             completion(false, "Embedded Snapshot Access helper is unavailable")
             return
         }
+        guard let cli = cliPath(), let expectedVersion = embeddedSnapshotAccessComponentVersion() else {
+            completion(false, "Embedded Snapshot Access identity metadata is unavailable")
+            return
+        }
         let dataDir = effectiveDataDirURL()
+        let configDir = effectiveConfigDirURL()
         let socketPath = dataDir.appendingPathComponent("snapshot-access/access.sock").path
+        let expectedPath = embeddedSnapshotAccessAppPath()
         if let task = snapshotAccessTask, task.isRunning {
-            completion(true, nil)
+            DispatchQueue.global(qos: .utility).async {
+                let state = self.localSnapshotAccessIsCurrent(
+                    cli: cli,
+                    config: configDir.path,
+                    data: dataDir.path,
+                    expectedPath: expectedPath,
+                    expectedVersion: expectedVersion
+                )
+                DispatchQueue.main.async { completion(state.isCurrent, state.message) }
+            }
             return
         }
         if isUnixSocketConnectable(socketPath) {
-            completion(true, nil)
+            DispatchQueue.global(qos: .utility).async {
+                let state = self.localSnapshotAccessIsCurrent(
+                    cli: cli,
+                    config: configDir.path,
+                    data: dataDir.path,
+                    expectedPath: expectedPath,
+                    expectedVersion: expectedVersion
+                )
+                DispatchQueue.main.async { completion(state.isCurrent, state.message) }
+            }
             return
         }
 
@@ -894,11 +966,20 @@ final class AppModel {
             guard let self else { return }
             let ready = self.waitForUnixSocket(socketPath, timeoutSeconds: 5)
             let stillRunning = task?.isRunning ?? false
+            let state = ready && stillRunning
+                ? self.localSnapshotAccessIsCurrent(
+                    cli: cli,
+                    config: configDir.path,
+                    data: dataDir.path,
+                    expectedPath: expectedPath,
+                    expectedVersion: expectedVersion
+                )
+                : (isCurrent: false, message: Optional("Snapshot Access helper did not become ready"))
             DispatchQueue.main.async {
-                if ready && stillRunning {
+                if state.isCurrent {
                     completion(true, nil)
                 } else {
-                    completion(false, "Snapshot Access helper did not become ready")
+                    completion(false, state.message ?? "Snapshot Access helper identity could not be verified")
                 }
             }
         }
@@ -1087,6 +1168,7 @@ final class AppModel {
                         config: config,
                         data: data,
                         migrationId: nil,
+                        migrationOwner: nil,
                         agent: agent,
                         success: false,
                         message: "Snapshot Access migration returned an invalid transaction record",
@@ -1095,7 +1177,28 @@ final class AppModel {
                     return
                 }
                 if !prepareState.prepared {
-                    completion(true, nil)
+                    guard prepareState.migrationState == "ready" else {
+                        self.finishSnapshotAccessMigration(
+                            cli: cli,
+                            config: config,
+                            data: data,
+                            migrationId: nil,
+                            migrationOwner: nil,
+                            agent: agent,
+                            success: false,
+                            message: "Snapshot Access migration is still pending",
+                            completion: completion
+                        )
+                        return
+                    }
+                    do {
+                        if agent.status != .enabled {
+                            try agent.register()
+                        }
+                        completion(true, nil)
+                    } catch {
+                        completion(false, error.localizedDescription)
+                    }
                     return
                 }
                 guard prepareState.migrationState == "pending" else {
@@ -1104,6 +1207,7 @@ final class AppModel {
                         config: config,
                         data: data,
                         migrationId: nil,
+                        migrationOwner: nil,
                         agent: agent,
                         success: false,
                         message: "Snapshot Access migration returned an invalid state",
@@ -1111,12 +1215,14 @@ final class AppModel {
                     )
                     return
                 }
-                guard let migrationId = prepareState.migrationId, !migrationId.isEmpty else {
+                guard let migrationId = prepareState.migrationId, !migrationId.isEmpty,
+                      let migrationOwner = prepareState.migrationOwner, !migrationOwner.isEmpty else {
                     self.finishSnapshotAccessMigration(
                         cli: cli,
                         config: config,
                         data: data,
                         migrationId: nil,
+                        migrationOwner: nil,
                         agent: agent,
                         success: false,
                         message: "Snapshot Access migration returned no transaction id",
@@ -1133,6 +1239,7 @@ final class AppModel {
                         config: config,
                         data: data,
                         migrationId: migrationId,
+                        migrationOwner: migrationOwner,
                         agent: agent,
                         attempt: 0,
                         completion: completion
@@ -1143,6 +1250,7 @@ final class AppModel {
                         config: config,
                         data: data,
                         migrationId: migrationId,
+                        migrationOwner: migrationOwner,
                         agent: agent,
                         success: false,
                         message: error.localizedDescription,
@@ -1158,6 +1266,7 @@ final class AppModel {
         config: String,
         data: String,
         migrationId: String,
+        migrationOwner: String,
         agent: SMAppService,
         attempt: Int,
         completion: @escaping (Bool, String?) -> Void
@@ -1165,7 +1274,7 @@ final class AppModel {
         DispatchQueue.global(qos: .userInitiated).async {
             let commit = self.runCommandCapture(
                 exe: cli,
-                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "commit-migration", "--migration-id", migrationId],
+                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "commit-migration", "--migration-id", migrationId, "--migration-owner", migrationOwner],
                 timeoutSeconds: 20
             )
             if commit.status == 0 {
@@ -1181,6 +1290,7 @@ final class AppModel {
                     config: config,
                     data: data,
                     migrationId: migrationId,
+                    migrationOwner: migrationOwner,
                     agent: agent,
                     success: false,
                     message: output.isEmpty ? "Snapshot Access did not start with the embedded identity" : output,
@@ -1194,6 +1304,7 @@ final class AppModel {
                     config: config,
                     data: data,
                     migrationId: migrationId,
+                    migrationOwner: migrationOwner,
                     agent: agent,
                     attempt: attempt + 1,
                     completion: completion
@@ -1207,6 +1318,7 @@ final class AppModel {
         config: String,
         data: String,
         migrationId: String?,
+        migrationOwner: String?,
         agent: SMAppService?,
         success: Bool,
         message: String?,
@@ -1216,37 +1328,56 @@ final class AppModel {
             DispatchQueue.main.async { completion(true, nil) }
             return
         }
-        DispatchQueue.global(qos: .utility).async {
-            var rollbackArgs = ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "rollback-migration"]
-            if let migrationId { rollbackArgs.append(contentsOf: ["--migration-id", migrationId]) }
-            let rollback = self.runCommandCapture(
-                exe: cli,
-                args: rollbackArgs,
-                timeoutSeconds: 20
-            )
-            let rollbackState = try? JSONDecoder().decode(
-                SnapshotAccessMigrationRollbackResult.self,
-                from: Data(rollback.stdout.utf8)
-            )
+        guard let migrationId, !migrationId.isEmpty,
+              let migrationOwner, !migrationOwner.isEmpty else {
             DispatchQueue.main.async {
-                var failures = [String]()
-                if rollback.status != 0 {
-                    let output = (rollback.stderr.isEmpty ? rollback.stdout : rollback.stderr)
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .prefix(300).description
-                    failures.append(output.isEmpty ? "legacy registration rollback failed" : output)
-                } else if rollbackState?.rolledBack == true, let agent {
-                    do {
-                        try agent.unregister()
-                    } catch {
-                        self.appendLog("WARN: Snapshot Access SMAppService rollback failed: \(error.localizedDescription)")
-                        failures.append("SMAppService rollback failed: \(error.localizedDescription)")
-                    }
+                completion(false, [message, "migration rollback skipped because the transaction owner is unknown"]
+                    .compactMap { $0 }
+                    .joined(separator: " "))
+            }
+            return
+        }
+        DispatchQueue.main.async {
+            var preRollbackFailures = [String]()
+            if let agent {
+                do {
+                    try agent.unregister()
+                } catch {
+                    self.appendLog("WARN: Snapshot Access SMAppService rollback failed: \(error.localizedDescription)")
+                    preRollbackFailures.append("SMAppService rollback failed: \(error.localizedDescription)")
                 }
-                var messages = failures
-                if let message { messages.insert(message, at: 0) }
-                let combinedMessage = messages.joined(separator: " ")
-                completion(false, combinedMessage.isEmpty ? "Snapshot Access migration failed" : combinedMessage)
+            }
+            DispatchQueue.global(qos: .utility).async {
+                let rollbackArgs = [
+                    "--json", "--config-dir", config, "--data-dir", data,
+                    "snapshot-access", "rollback-migration",
+                    "--migration-id", migrationId,
+                    "--migration-owner", migrationOwner,
+                ]
+                let rollback = self.runCommandCapture(
+                    exe: cli,
+                    args: rollbackArgs,
+                    timeoutSeconds: 20
+                )
+                let rollbackState = try? JSONDecoder().decode(
+                    SnapshotAccessMigrationRollbackResult.self,
+                    from: Data(rollback.stdout.utf8)
+                )
+                DispatchQueue.main.async {
+                    var failures = preRollbackFailures
+                    if rollback.status != 0 {
+                        let output = (rollback.stderr.isEmpty ? rollback.stdout : rollback.stderr)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .prefix(300).description
+                        failures.append(output.isEmpty ? "legacy registration rollback failed" : output)
+                    } else if rollbackState?.rolledBack != true {
+                        failures.append("legacy registration rollback did not confirm completion")
+                    }
+                    var messages = failures
+                    if let message { messages.insert(message, at: 0) }
+                    let combinedMessage = messages.joined(separator: " ")
+                    completion(false, combinedMessage.isEmpty ? "Snapshot Access migration failed" : combinedMessage)
+                }
             }
         }
     }

@@ -15,7 +15,7 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 - **Release version**: the complete semver-like version shown to users, including an RC suffix.
 - **Build number**: a deterministic numeric `CFBundleVersion` derived from the source history.
 - **Managed service**: the single user LaunchAgent labeled `com.ivan.televybackup.daemon`.
-- **Snapshot Access app**: the user `LSUIElement` bundle labeled `com.ivan.televybackup.snapshot-access`; the user grants FDA to its exact path.
+- **Snapshot Access app**: the private embedded user-session `LSUIElement` bundle labeled `com.ivan.televybackup.snapshot-access`; the user grants FDA to its exact path.
 - **Private Access helper**: the Snapshot Access app at `TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app`; it is not a second user-installable product.
 - **Authorization-stable helper artifact**: a helper bundle reused byte-for-byte across ordinary main-app releases, including its SHA-256, CodeDirectory hash, and designated requirement.
 - **Snapshot mount helper**: the separate root-only `televybackup-snapshot-mount-helper` installed as a system LaunchDaemon; it only mounts/unmounts and UUID-cleans APFS leases.
@@ -69,9 +69,21 @@ they MUST NOT register the production `SMAppService` agent, whose bundle plist h
 environment fields.
 
 Stable publication MUST wait for the `macos-release-acceptance` GitHub environment approval and a
-non-empty `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` environment value identifying the manual
-RC1-to-RC2 acceptance result. RC publication remains available so the real-device test can be
-performed before the stable gate.
+JSON `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` environment value identifying the exact manual
+RC1-to-RC2 acceptance result. The evidence MUST name the stable version and both RC tags, cover
+legacy registration migration, exactly one FDA grant, strict backup success on RC1 and RC2 without
+a second grant, and an unchanged root mount helper. Its Snapshot Access and root helper identity
+fields MUST match the final `BUILD-MANIFEST.json`; arbitrary or stale non-JSON values MUST fail.
+RC publication remains available so the real-device test can be performed before the stable gate.
+
+The protected evidence object MUST contain `schema_version: 1`, `product`, `stable_version`,
+`rc1_tag`, `rc2_tag`, `legacy_registration_migrated`, `strict_backup_rc1`,
+`strict_backup_rc2`, `fda_grants: 1`, `fda_regrant_requested: false`,
+`root_mount_helper_unchanged`, and `snapshot_access`/`root_mount_helper` identity objects. The
+Snapshot Access identity includes the SHA-256, complete artifact digest, CDHash, and designated
+requirement recorded in the final manifest. The root helper identity in that manifest is a bundled
+compatibility reference; the evidence MUST include `root_mount_helper.rc1` and `.rc2` observations
+from its stable system path and those two identities MUST be equal.
 
 ### REQ-MRD-008: Release atomicity and backfill
 
@@ -123,6 +135,11 @@ SHA-256/CDHash/designated-requirement values, confirm that Settings does not req
 grant, and repeat the protected-source strict backup. Record the unchanged root helper path,
 version, and binary hash. This is a release-blocking manual acceptance result; no TCC database
 mutation or Developer ID/notarization step is permitted.
+
+### VER-MRD-007
+
+Covers: REQ-MRD-009. The app build, brand asset verifier, App Icon verifier, and release bundle
+inspection provide the evidence for the required icon, catalog, and SVG resources.
 
 ## Verification Map
 

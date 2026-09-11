@@ -13,18 +13,20 @@ bundle. Later RCs and the stable release for that product version reuse that exa
 from `v<product-version>-rc.1`'s Universal DMG. Reuse forbids rebuilding, `lipo`, deep signing,
 or any other mutation of the helper.
 The outer app is signed from the inside out. The helper's component version, IPC protocol version,
-source policy, SHA-256, CodeDirectory hash, and designated requirement are recorded in the release
-manifest.
+source policy, executable SHA-256, complete artifact digest, CodeDirectory hash, and designated
+requirement are recorded in the release manifest.
 
 The main app performs a transactional migration from the old external LaunchAgent. It backs up the
 old plist and manifest, refuses to switch while a lease is active, unregisters the old service,
-registers the embedded agent, confirms the running helper identity, and then commits. Registration
-failure restores the old plist and manifest. The old external app is never deleted and TCC/FDA is
-never changed by the migration.
+registers the embedded agent, confirms the running helper identity, and then commits. A short-lived
+owner token prevents another app instance from committing or rolling back the transaction.
+Registration failure restores the old plist and manifest. The old external app is never deleted and
+TCC/FDA is never changed by the migration.
 
 The root mount helper remains at its existing privileged system path and is only compatibility
-checked in this release. It is not automatically installed, updated, or re-signed as part of a
-normal TelevyBackup app update.
+checked in this release. Its release manifest entry is a bundled compatibility reference, while
+the installed path and identity are confirmed by the manual RC acceptance evidence. It is not
+automatically installed, updated, or re-signed as part of a normal TelevyBackup app update.
 
 Development variants and custom config/data directory runs use the same embedded helper as a
 process-local child with explicit environment variables. They do not register the production

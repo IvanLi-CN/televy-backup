@@ -7,7 +7,8 @@ bash -n "$root_dir/.github/scripts/label-gate.sh"
 python3 -m py_compile \
   "$root_dir/.github/scripts/release_chain.py" \
   "$root_dir/.github/scripts/release_preparation.py" \
-  "$root_dir/.github/scripts/release_completion.py"
+  "$root_dir/.github/scripts/release_completion.py" \
+  "$root_dir/.github/scripts/verify-macos-rc-acceptance.py"
 
 python3 "$root_dir/scripts/test-product-version.py"
 
@@ -65,6 +66,12 @@ assert 'source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"
 assert 'manifest["source_commit"] == sys.argv[5]' in release_workflow
 assert "macos-release-acceptance" in release_workflow
 assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow
+assert "verify-macos-rc-acceptance.py" in release_workflow
+assert "actions/download-artifact@v4" in release_workflow
+assert 'rc1_json="$(gh release view "$rc1_tag"' in release_workflow
+assert 'rc2_json="$(gh release view "$rc2_tag"' in release_workflow
+assert "fda_regrant_requested" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
+assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
 assert "needs.macos-acceptance.result == 'success'" in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
 assert "final assembly" in release_workflow
