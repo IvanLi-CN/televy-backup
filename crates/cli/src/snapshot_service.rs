@@ -164,12 +164,28 @@ fn status_from_socket(socket: &Path) -> Result<StatusResult, CliError> {
         ));
     }
     match response.result {
-        Some(ResponseResult::Status(status)) => Ok(status),
+        Some(ResponseResult::Status(status)) => {
+            validate_component_status(&status)?;
+            Ok(status)
+        }
         _ => Err(CliError::new(
             "snapshot_access.protocol",
             "status response missing",
         )),
     }
+}
+
+fn validate_component_status(status: &StatusResult) -> Result<(), CliError> {
+    if status.access_app_version != COMPONENT_VERSION {
+        return Err(CliError::new(
+            "snapshot_access.protocol",
+            format!(
+                "incompatible Snapshot Access component version: {}",
+                status.access_app_version
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_status_response(response: &Response, request_id: &str) -> Result<(), CliError> {
@@ -242,6 +258,16 @@ fn active_leases(manifest: Option<&Value>, data_dir: &Path) -> Result<u64, CliEr
         .map(|status| u64::from(status.active_leases))
 }
 
+fn active_legacy_leases(existing: Option<&Value>, data_dir: &Path) -> Result<u64, CliError> {
+    let legacy_manifest = existing
+        .and_then(|value| value.get("legacyBackup"))
+        .and_then(|backup| backup.get("manifestBackupPath"))
+        .and_then(Value::as_str)
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    active_leases(legacy_manifest.as_ref().or(existing), data_dir)
+}
+
 fn acquire_migration_lock(config_dir: &Path) -> Result<std::fs::File, CliError> {
     let lock_path = config_dir.join("snapshot-access/migration.lock");
     if let Some(parent) = lock_path.parent() {
@@ -271,6 +297,28 @@ fn migration_id() -> String {
         .map(|value| value.as_nanos())
         .unwrap_or(0);
     format!("legacy-{nanos}-{}", std::process::id())
+}
+
+fn is_pending_migration(manifest: Option<&Value>) -> bool {
+    manifest.is_some_and(|value| {
+        value.get("managedBy").and_then(Value::as_str) == Some("smappservice")
+            && value.get("relativeAppPath").and_then(Value::as_str)
+                == Some(ACCESS_BUNDLE_RELATIVE_PATH)
+            && value.get("migrationState").and_then(Value::as_str) == Some("pending")
+    })
+}
+
+fn migration_id_from_manifest(manifest: &Value) -> Result<&str, CliError> {
+    manifest
+        .get("migrationId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CliError::new(
+                "snapshot_access.migration_failed",
+                "Snapshot Access migration has no transaction id",
+            )
+        })
 }
 
 fn backup_legacy_registration(
@@ -368,7 +416,7 @@ pub fn prepare_migration(
             .and_then(|value| value.get("migrationState"))
             .and_then(Value::as_str)
             == Some("ready");
-    let legacy_registration = legacy_plist.exists() || (existing.is_some() && !existing_is_current);
+    let pending_migration = is_pending_migration(existing.as_ref());
 
     if existing_is_current && !legacy_plist.exists() {
         if json_output {
@@ -377,13 +425,7 @@ pub fn prepare_migration(
         return Ok(());
     }
 
-    let pending_migration = existing.as_ref().is_some_and(|value| {
-        value.get("managedBy").and_then(Value::as_str) == Some("smappservice")
-            && value.get("relativeAppPath").and_then(Value::as_str)
-                == Some(ACCESS_BUNDLE_RELATIVE_PATH)
-            && value.get("migrationState").and_then(Value::as_str) == Some("pending")
-    }) && !legacy_plist.exists();
-    if pending_migration {
+    if pending_migration && !legacy_plist.exists() {
         if json_output {
             println!(
                 "{}",
@@ -400,6 +442,47 @@ pub fn prepare_migration(
         return Ok(());
     }
 
+    if pending_migration {
+        let leases = active_legacy_leases(existing.as_ref(), data_dir).map_err(|error| {
+            CliError::retryable(
+                "snapshot_access.busy",
+                format!(
+                    "cannot prove that Snapshot Access has no active lease: {}",
+                    error.message
+                ),
+            )
+        })?;
+        if leases > 0 {
+            return Err(CliError::retryable(
+                "snapshot_access.busy",
+                "cannot migrate Snapshot Access while a snapshot lease is active",
+            ));
+        }
+        let domain = format!("gui/{}", unsafe { libc::geteuid() });
+        let service = user_service_target(&domain);
+        let _ = launchctl(&["bootout", &service]);
+        if legacy_plist.exists() {
+            fs::remove_file(&legacy_plist).map_err(|error| {
+                CliError::new("snapshot_access.migration_failed", error.to_string())
+            })?;
+        }
+        if json_output {
+            println!(
+                "{}",
+                json!({
+                    "prepared": true,
+                    "managedBy": "smappservice",
+                    "appPath": access_app,
+                    "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
+                    "migrationState": "pending",
+                    "migrationId": migration_id_from_manifest(existing.as_ref().unwrap())?,
+                })
+            );
+        }
+        return Ok(());
+    }
+
+    let legacy_registration = legacy_plist.exists() || (existing.is_some() && !existing_is_current);
     if legacy_registration {
         let leases = active_leases(existing.as_ref(), data_dir).map_err(|error| {
             CliError::retryable(
@@ -419,23 +502,6 @@ pub fn prepare_migration(
     }
 
     let backup = backup_legacy_registration(config_dir, &manifest_file, &legacy_plist)?;
-    let domain = format!("gui/{}", unsafe { libc::geteuid() });
-    let service = user_service_target(&domain);
-    if legacy_registration {
-        let _ = launchctl(&["bootout", &service]);
-        if legacy_plist.exists() {
-            if let Err(error) = fs::remove_file(&legacy_plist) {
-                if let Some(backup) = backup.as_ref() {
-                    let _ = restore_legacy_registration(config_dir, data_dir, backup);
-                }
-                return Err(CliError::new(
-                    "snapshot_access.migration_failed",
-                    error.to_string(),
-                ));
-            }
-        }
-    }
-
     let migration_id = migration_id();
     let mut manifest = manifest_value(&access_app, config_dir, data_dir, "pending", &migration_id);
     if let Some(backup) = backup {
@@ -446,6 +512,23 @@ pub fn prepare_migration(
             let _ = restore_legacy_registration(config_dir, data_dir, backup);
         }
         return Err(error);
+    }
+
+    let domain = format!("gui/{}", unsafe { libc::geteuid() });
+    let service = user_service_target(&domain);
+    if legacy_registration {
+        let _ = launchctl(&["bootout", &service]);
+        if legacy_plist.exists() {
+            if let Err(error) = fs::remove_file(&legacy_plist) {
+                if let Some(backup) = manifest.get("legacyBackup") {
+                    let _ = restore_legacy_registration(config_dir, data_dir, backup);
+                }
+                return Err(CliError::new(
+                    "snapshot_access.migration_failed",
+                    error.to_string(),
+                ));
+            }
+        }
     }
 
     if json_output {
@@ -472,6 +555,7 @@ pub fn prepare_migration(
 pub fn commit_migration(
     config_dir: &Path,
     data_dir: &Path,
+    expected_migration_id: &str,
     json_output: bool,
 ) -> Result<(), CliError> {
     let _migration_lock = acquire_migration_lock(config_dir)?;
@@ -489,8 +573,21 @@ pub fn commit_migration(
         ));
     }
     match manifest.get("migrationState").and_then(Value::as_str) {
-        Some("pending") => {}
+        Some("pending") => {
+            if migration_id_from_manifest(&manifest)? != expected_migration_id {
+                return Err(CliError::retryable(
+                    "snapshot_access.busy",
+                    "Snapshot Access migration belongs to another transaction",
+                ));
+            }
+        }
         Some("ready") => {
+            if migration_id_from_manifest(&manifest)? != expected_migration_id {
+                return Err(CliError::retryable(
+                    "snapshot_access.busy",
+                    "Snapshot Access migration was completed by another transaction",
+                ));
+            }
             if json_output {
                 println!("{}", json!({"committed": false, "migrationState": "ready"}));
             }
@@ -524,6 +621,7 @@ pub fn commit_migration(
 pub fn rollback_migration(
     config_dir: &Path,
     data_dir: &Path,
+    expected_migration_id: Option<&str>,
     json_output: bool,
 ) -> Result<(), CliError> {
     let _migration_lock = acquire_migration_lock(config_dir)?;
@@ -533,11 +631,19 @@ pub fn rollback_migration(
     if manifest.get("migrationState").and_then(Value::as_str) != Some("pending") {
         return Ok(());
     }
+    if let Some(expected_migration_id) = expected_migration_id {
+        if migration_id_from_manifest(&manifest)? != expected_migration_id {
+            return Err(CliError::retryable(
+                "snapshot_access.busy",
+                "Snapshot Access migration belongs to another transaction",
+            ));
+        }
+    }
     let Some(backup) = manifest.get("legacyBackup") else {
-        if manifest.get("migrationState").and_then(Value::as_str) == Some("pending") {
-            fs::remove_file(manifest_path(config_dir)).map_err(|error| {
-                CliError::new("snapshot_access.rollback_failed", error.to_string())
-            })?;
+        fs::remove_file(manifest_path(config_dir))
+            .map_err(|error| CliError::new("snapshot_access.rollback_failed", error.to_string()))?;
+        if json_output {
+            println!("{}", json!({"rolledBack": true, "hadLegacy": false}));
         }
         return Ok(());
     };
@@ -695,6 +801,18 @@ mod tests {
             validate_status_response(&wrong_request, "request-1")
                 .unwrap_err()
                 .code,
+            "snapshot_access.protocol"
+        );
+    }
+
+    #[test]
+    fn status_rejects_an_incompatible_component_version() {
+        let status = StatusResult {
+            access_app_version: "0.1.0".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_component_status(&status).unwrap_err().code,
             "snapshot_access.protocol"
         );
     }

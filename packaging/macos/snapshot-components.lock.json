@@ -20,9 +20,16 @@
     "snapshot_mount_helper": {
       "label": "com.ivan.televybackup.snapshot-mount-helper",
       "install_path": "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
+      "binary": "Contents/MacOS/televybackup-snapshot-mount-helper",
       "component_version": "0.1.0",
       "protocol_version": 1,
-      "update_policy": "compatibility-check-only"
+      "source": "release-bundled-compatibility-reference",
+      "update_policy": "compatibility-check-only",
+      "identity": {
+        "sha256": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/sha256",
+        "cdhash": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/cdhash",
+        "designated_requirement": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/designated_requirement"
+      }
     }
   }
 }

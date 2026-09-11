@@ -72,6 +72,14 @@ grep -F 'access_relative_path="Contents/Library/LoginItems/TelevyBackup Snapshot
   echo "Universal assembly must keep Snapshot Access nested in the main app" >&2
   exit 1
 }
+grep -F 'repackage_native_app "$arm_app" arm64' <<<"$assemble_text" >/dev/null || {
+  echo "Native arm64 DMG must reuse the Universal Snapshot Access identity" >&2
+  exit 1
+}
+grep -F 'repackage_native_app "$x86_app" x86_64' <<<"$assemble_text" >/dev/null || {
+  echo "Native x86_64 DMG must reuse the Universal Snapshot Access identity" >&2
+  exit 1
+}
 
 version="$(tr -d '\n' < "$root_dir/VERSION")"
 for asset in \
@@ -127,6 +135,10 @@ identity = access["identity"]
 assert identity["sha256"].startswith("BUILD-MANIFEST.json#/")
 assert identity["cdhash"].startswith("BUILD-MANIFEST.json#/")
 assert identity["designated_requirement"].startswith("BUILD-MANIFEST.json#/")
+mount_identity = lock["components"]["snapshot_mount_helper"]["identity"]
+assert mount_identity["sha256"].startswith("BUILD-MANIFEST.json#/")
+assert mount_identity["cdhash"].startswith("BUILD-MANIFEST.json#/")
+assert mount_identity["designated_requirement"].startswith("BUILD-MANIFEST.json#/")
 mount = lock["components"]["snapshot_mount_helper"]
 assert mount["update_policy"] == "compatibility-check-only"
 PY

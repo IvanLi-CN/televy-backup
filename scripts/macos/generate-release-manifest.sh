@@ -31,6 +31,30 @@ with open(os.path.join(asset_dir, 'SHA256SUMS'), 'w', encoding='utf-8') as handl
     for asset in assets:
         handle.write(f"{asset['sha256']}  {asset['name']}\n")
 
+def signing_identity(path, hash_path=None):
+    details = subprocess.run(['codesign', '-dvvv', path], capture_output=True, text=True)
+    cdhash = next(
+        (line.split('=', 1)[1] for line in (details.stdout + details.stderr).splitlines()
+         if line.startswith('CDHash=')),
+        None,
+    )
+    requirement = subprocess.run(['codesign', '-d', '-r-', path], capture_output=True, text=True)
+    designated_requirement = next(
+        (
+            line
+            for line in (requirement.stdout + requirement.stderr).splitlines()
+            if 'designated =>' in line
+        ),
+        None,
+    )
+    with open(hash_path or path, 'rb') as handle:
+        sha256 = hashlib.sha256(handle.read()).hexdigest()
+    return {
+        'sha256': sha256,
+        'cdhash': cdhash,
+        'designated_requirement': designated_requirement,
+    }
+
 helper_binary = os.path.join(
     asset_dir,
     'TelevyBackup.app',
@@ -50,32 +74,32 @@ helper = {
     'designated_requirement': None,
 }
 if os.path.isfile(helper_binary):
-    with open(helper_binary, 'rb') as handle:
-        helper['sha256'] = hashlib.sha256(handle.read()).hexdigest()
     bundle = os.path.dirname(os.path.dirname(os.path.dirname(helper_binary)))
-    details = subprocess.run(['codesign', '-dvvv', bundle], capture_output=True, text=True)
-    for line in details.stderr.splitlines():
-        if line.startswith('CDHash='):
-            helper['cdhash'] = line.split('=', 1)[1]
-    requirement = subprocess.run(['codesign', '-d', '-r-', bundle], capture_output=True, text=True)
-    helper['designated_requirement'] = next(
-        (
-            line
-            for line in (requirement.stdout + requirement.stderr).splitlines()
-            if 'designated =>' in line
-        ),
-        None,
-    )
+    helper.update(signing_identity(bundle, helper_binary))
+
+root_helper_binary = os.path.join(
+    asset_dir,
+    'TelevyBackup.app',
+    'Contents/MacOS/televybackup-snapshot-mount-helper',
+)
+root_helper = {
+    'label': 'com.ivan.televybackup.snapshot-mount-helper',
+    'install_path': '/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper',
+    'binary': 'Contents/MacOS/televybackup-snapshot-mount-helper',
+    'component_version': '0.1.0',
+    'protocol_version': 1,
+    'source': 'release-bundled-compatibility-reference',
+    'update_policy': 'compatibility-check-only',
+    'sha256': None,
+    'cdhash': None,
+    'designated_requirement': None,
+}
+if os.path.isfile(root_helper_binary):
+    root_helper.update(signing_identity(root_helper_binary))
 
 components = {
     'snapshot_access': helper,
-    'snapshot_mount_helper': {
-        'label': 'com.ivan.televybackup.snapshot-mount-helper',
-        'install_path': '/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper',
-        'component_version': '0.1.0',
-        'protocol_version': 1,
-        'update_policy': 'compatibility-check-only',
-    },
+    'snapshot_mount_helper': root_helper,
 }
 manifest = {
     'schema_version': 1,

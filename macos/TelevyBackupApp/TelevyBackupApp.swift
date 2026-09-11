@@ -80,6 +80,11 @@ struct ManagedServiceStatus: Decodable, Equatable {
 private struct SnapshotAccessMigrationPrepareResult: Decodable {
     let prepared: Bool
     let migrationState: String?
+    let migrationId: String?
+}
+
+private struct SnapshotAccessMigrationRollbackResult: Decodable {
+    let rolledBack: Bool
 }
 
 private struct AppRuntimeKey: EnvironmentKey {
@@ -1076,18 +1081,58 @@ final class AppModel {
             )
             DispatchQueue.main.async {
                 let agent = SMAppService.agent(plistName: "com.ivan.televybackup.snapshot-access.plist")
+                guard let prepareState else {
+                    self.finishSnapshotAccessMigration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        migrationId: nil,
+                        agent: agent,
+                        success: false,
+                        message: "Snapshot Access migration returned an invalid transaction record",
+                        completion: completion
+                    )
+                    return
+                }
+                if !prepareState.prepared {
+                    completion(true, nil)
+                    return
+                }
+                guard prepareState.migrationState == "pending" else {
+                    self.finishSnapshotAccessMigration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        migrationId: nil,
+                        agent: agent,
+                        success: false,
+                        message: "Snapshot Access migration returned an invalid state",
+                        completion: completion
+                    )
+                    return
+                }
+                guard let migrationId = prepareState.migrationId, !migrationId.isEmpty else {
+                    self.finishSnapshotAccessMigration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        migrationId: nil,
+                        agent: agent,
+                        success: false,
+                        message: "Snapshot Access migration returned no transaction id",
+                        completion: completion
+                    )
+                    return
+                }
                 do {
                     if agent.status != .enabled {
                         try agent.register()
-                    }
-                    guard prepareState?.prepared ?? true else {
-                        completion(true, nil)
-                        return
                     }
                     self.commitSnapshotAccessRegistration(
                         cli: cli,
                         config: config,
                         data: data,
+                        migrationId: migrationId,
                         agent: agent,
                         attempt: 0,
                         completion: completion
@@ -1097,6 +1142,7 @@ final class AppModel {
                         cli: cli,
                         config: config,
                         data: data,
+                        migrationId: migrationId,
                         agent: agent,
                         success: false,
                         message: error.localizedDescription,
@@ -1111,6 +1157,7 @@ final class AppModel {
         cli: String,
         config: String,
         data: String,
+        migrationId: String,
         agent: SMAppService,
         attempt: Int,
         completion: @escaping (Bool, String?) -> Void
@@ -1118,7 +1165,7 @@ final class AppModel {
         DispatchQueue.global(qos: .userInitiated).async {
             let commit = self.runCommandCapture(
                 exe: cli,
-                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "commit-migration"],
+                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "commit-migration", "--migration-id", migrationId],
                 timeoutSeconds: 20
             )
             if commit.status == 0 {
@@ -1133,6 +1180,7 @@ final class AppModel {
                     cli: cli,
                     config: config,
                     data: data,
+                    migrationId: migrationId,
                     agent: agent,
                     success: false,
                     message: output.isEmpty ? "Snapshot Access did not start with the embedded identity" : output,
@@ -1145,6 +1193,7 @@ final class AppModel {
                     cli: cli,
                     config: config,
                     data: data,
+                    migrationId: migrationId,
                     agent: agent,
                     attempt: attempt + 1,
                     completion: completion
@@ -1157,6 +1206,7 @@ final class AppModel {
         cli: String,
         config: String,
         data: String,
+        migrationId: String?,
         agent: SMAppService?,
         success: Bool,
         message: String?,
@@ -1166,33 +1216,36 @@ final class AppModel {
             DispatchQueue.main.async { completion(true, nil) }
             return
         }
-        var rollbackFailure: String?
-        if let agent {
-            do {
-                try agent.unregister()
-            } catch {
-                appendLog("WARN: Snapshot Access SMAppService rollback failed: \(error.localizedDescription)")
-                rollbackFailure = "SMAppService rollback failed: \(error.localizedDescription)"
-            }
-        }
         DispatchQueue.global(qos: .utility).async {
+            var rollbackArgs = ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "rollback-migration"]
+            if let migrationId { rollbackArgs.append(contentsOf: ["--migration-id", migrationId]) }
             let rollback = self.runCommandCapture(
                 exe: cli,
-                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "rollback-migration"],
+                args: rollbackArgs,
                 timeoutSeconds: 20
             )
-            var failures = [String]()
-            if let rollbackFailure { failures.append(rollbackFailure) }
-            if rollback.status != 0 {
-                let output = (rollback.stderr.isEmpty ? rollback.stdout : rollback.stderr)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .prefix(300).description
-                failures.append(output.isEmpty ? "legacy registration rollback failed" : output)
-            }
-            var messages = failures
-            if let message { messages.insert(message, at: 0) }
-            let combinedMessage = messages.joined(separator: " ")
+            let rollbackState = try? JSONDecoder().decode(
+                SnapshotAccessMigrationRollbackResult.self,
+                from: Data(rollback.stdout.utf8)
+            )
             DispatchQueue.main.async {
+                var failures = [String]()
+                if rollback.status != 0 {
+                    let output = (rollback.stderr.isEmpty ? rollback.stdout : rollback.stderr)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .prefix(300).description
+                    failures.append(output.isEmpty ? "legacy registration rollback failed" : output)
+                } else if rollbackState?.rolledBack == true, let agent {
+                    do {
+                        try agent.unregister()
+                    } catch {
+                        self.appendLog("WARN: Snapshot Access SMAppService rollback failed: \(error.localizedDescription)")
+                        failures.append("SMAppService rollback failed: \(error.localizedDescription)")
+                    }
+                }
+                var messages = failures
+                if let message { messages.insert(message, at: 0) }
+                let combinedMessage = messages.joined(separator: " ")
                 completion(false, combinedMessage.isEmpty ? "Snapshot Access migration failed" : combinedMessage)
             }
         }
