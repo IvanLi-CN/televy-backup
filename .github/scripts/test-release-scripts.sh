@@ -56,6 +56,11 @@ assert "helper_source_tag" in release_workflow
 assert "hdiutil attach" in release_workflow
 assert "verify-component-identity.sh" in release_workflow
 assert "stable release requires a previously published RC" in release_workflow
+assert 'helper_source_tag="v${core_version}-rc.1"' in release_workflow
+assert 'source_is_prerelease' in release_workflow
+assert 'BUILD-MANIFEST.json" --dir' in release_workflow
+assert '--manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"' in release_workflow
+assert "final assembly" in release_workflow
 PY
 
 ruby -ryaml -e 'ARGV.each { |path| YAML.load_file(path) }' \

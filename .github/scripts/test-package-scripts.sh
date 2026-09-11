@@ -123,6 +123,10 @@ assert access["bundle_id"] == "com.ivan.televybackup.snapshot-access"
 assert access["component_version"] == "0.2.0"
 assert access["protocol_version"] == 2
 assert access["reuse_policy"] == "byte-identical-no-rebuild-no-lipo-no-resign"
+identity = access["identity"]
+assert identity["sha256"].startswith("BUILD-MANIFEST.json#/")
+assert identity["cdhash"].startswith("BUILD-MANIFEST.json#/")
+assert identity["designated_requirement"].startswith("BUILD-MANIFEST.json#/")
 mount = lock["components"]["snapshot_mount_helper"]
 assert mount["update_policy"] == "compatibility-check-only"
 PY

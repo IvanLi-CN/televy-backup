@@ -10,7 +10,12 @@
       "component_version": "0.2.0",
       "protocol_version": 2,
       "source": "rc1-universal-artifact",
-      "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign"
+      "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign",
+      "identity": {
+        "sha256": "BUILD-MANIFEST.json#/components/snapshot_access/sha256",
+        "cdhash": "BUILD-MANIFEST.json#/components/snapshot_access/cdhash",
+        "designated_requirement": "BUILD-MANIFEST.json#/components/snapshot_access/designated_requirement"
+      }
     },
     "snapshot_mount_helper": {
       "label": "com.ivan.televybackup.snapshot-mount-helper",

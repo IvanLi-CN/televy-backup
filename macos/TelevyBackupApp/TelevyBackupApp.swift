@@ -77,6 +77,11 @@ struct ManagedServiceStatus: Decodable, Equatable {
     }
 }
 
+private struct SnapshotAccessMigrationPrepareResult: Decodable {
+    let prepared: Bool
+    let migrationState: String?
+}
+
 private struct AppRuntimeKey: EnvironmentKey {
     static let defaultValue = ModelStore.shared
 }
@@ -816,6 +821,12 @@ final class AppModel {
         return defaultDataDir()
     }
 
+    private var shouldUseEmbeddedSnapshotAccessAgent: Bool {
+        guard !isDevAppVariant(), !effectiveDisableKeychain() else { return false }
+        return effectiveConfigDirURL().standardizedFileURL == defaultConfigDir().standardizedFileURL
+            && effectiveDataDirURL().standardizedFileURL == defaultDataDir().standardizedFileURL
+    }
+
     func controlSocketPath() -> String {
         effectiveDataDirURL()
             .appendingPathComponent("ipc")
@@ -943,6 +954,10 @@ final class AppModel {
             completion(true, nil)
             return
         }
+        guard shouldUseEmbeddedSnapshotAccessAgent else {
+            completion(true, nil)
+            return
+        }
         guard let cli = cliPath() else {
             DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
             return
@@ -962,11 +977,19 @@ final class AppModel {
                 DispatchQueue.main.async { completion(false, output.isEmpty ? "Snapshot Access migration could not be prepared" : output) }
                 return
             }
+            let prepareState = try? JSONDecoder().decode(
+                SnapshotAccessMigrationPrepareResult.self,
+                from: Data(prepare.stdout.utf8)
+            )
             DispatchQueue.main.async {
                 let agent = SMAppService.agent(plistName: "com.ivan.televybackup.snapshot-access.plist")
                 do {
                     if agent.status != .enabled {
                         try agent.register()
+                    }
+                    guard prepareState?.prepared ?? true else {
+                        completion(true, nil)
+                        return
                     }
                     self.commitSnapshotAccessRegistration(
                         cli: cli,

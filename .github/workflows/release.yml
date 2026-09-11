@@ -88,15 +88,22 @@ jobs:
           if [[ "${channel}" == rc ]]; then
             rc_number="${version##*-rc.}"
             if ((rc_number > 1)); then
-              helper_source_tag="v${core_version}-rc.$((rc_number - 1))"
+              helper_source_tag="v${core_version}-rc.1"
             fi
           else
-            helper_source_tag="$(gh release list --limit 100 --json tagName,isPrerelease,isDraft --jq '.[] | select(.isPrerelease == true and .isDraft == false) | .tagName' | awk -v prefix="v${core_version}-rc." 'index($0, prefix) == 1' | sort -V | tail -n 1)"
+            helper_source_tag="v${core_version}-rc.1"
           fi
           if [[ -n "${helper_source_tag}" ]]; then
             helper_version="${helper_source_tag#v}"
-            gh release view "${helper_source_tag}" --json assets --jq '.assets[].name' | grep -Fx "TelevyBackup-${helper_version}.dmg" >/dev/null || {
-              echo "helper source release has no Universal DMG: ${helper_source_tag}" >&2
+            source_release_json="$(gh release view "${helper_source_tag}" --json isDraft,isPrerelease,assets)"
+            source_is_draft="$(printf '%s' "${source_release_json}" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isDraft"]).lower())')"
+            source_is_prerelease="$(printf '%s' "${source_release_json}" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isPrerelease"]).lower())')"
+            if [[ "${source_is_draft}" != false || "${source_is_prerelease}" != true ]]; then
+              echo "helper source must be a published prerelease: ${helper_source_tag}" >&2
+              exit 1
+            fi
+            printf '%s' "${source_release_json}" | python3 -c 'import json,sys; names={a["name"] for a in json.load(sys.stdin)["assets"]}; expected=sys.argv[1:]; missing=[name for name in expected if name not in names]; print("\n".join(missing)); sys.exit(bool(missing))' "TelevyBackup-${helper_version}.dmg" "BUILD-MANIFEST.json" || {
+              echo "helper source release is missing its Universal DMG or BUILD-MANIFEST.json: ${helper_source_tag}" >&2
               exit 1
             }
           elif [[ "${channel}" == stable ]]; then
@@ -176,16 +183,19 @@ jobs:
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
           mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
-          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --dir "$RUNNER_TEMP/snapshot-helper"
+          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --dir "$RUNNER_TEMP/snapshot-helper"
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
-          codesign --verify --strict "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
+          bash scripts/macos/verify-component-identity.sh \
+            --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
           echo "TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE=$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" >> "$GITHUB_ENV"
       - run: bash scripts/macos/package-release.sh --mode release --arch arm64 --output-dir dist/arm64
       - name: Verify reused Snapshot Access identity
         if: needs.resolve.outputs.helper_source_tag != ''
-        run: bash scripts/macos/verify-component-identity.sh --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/arm64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+        run: bash scripts/macos/verify-component-identity.sh --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/arm64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
       - uses: actions/upload-artifact@v4
         with:
           name: release-package-arm64
@@ -214,16 +224,19 @@ jobs:
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
           mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
-          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --dir "$RUNNER_TEMP/snapshot-helper"
+          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --dir "$RUNNER_TEMP/snapshot-helper"
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
-          codesign --verify --strict "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
+          bash scripts/macos/verify-component-identity.sh \
+            --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
           echo "TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE=$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" >> "$GITHUB_ENV"
       - run: bash scripts/macos/package-release.sh --mode release --arch x86_64 --output-dir dist/x86_64
       - name: Verify reused Snapshot Access identity
         if: needs.resolve.outputs.helper_source_tag != ''
-        run: bash scripts/macos/verify-component-identity.sh --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/x86_64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+        run: bash scripts/macos/verify-component-identity.sh --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/x86_64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
       - uses: actions/upload-artifact@v4
         with:
           name: release-package-x86_64
@@ -247,9 +260,27 @@ jobs:
         with:
           name: release-package-x86_64
           path: dist/x86_64
+      - name: Fetch approved Snapshot Access helper for final assembly
+        if: needs.resolve.outputs.helper_source_tag != ''
+        env:
+          HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          helper_version="${HELPER_SOURCE_TAG#v}"
+          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
+          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --dir "$RUNNER_TEMP/snapshot-helper"
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
+          ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
+          hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
+          bash scripts/macos/verify-component-identity.sh \
+            --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
       - name: Assemble and validate final assets
         env:
           RUST_TOOLCHAIN: 1.91.0
+          HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
         run: |
           set -euo pipefail
           mkdir -p dist/final
@@ -262,6 +293,12 @@ jobs:
           cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
           bash scripts/macos/generate-release-manifest.sh --mode release --asset-dir dist/final --source-commit "${{ needs.resolve.outputs.source_sha }}" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
           bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final
+          if [[ -n "${HELPER_SOURCE_TAG}" ]]; then
+            bash scripts/macos/verify-component-identity.sh \
+              --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+              --candidate "dist/final/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" \
+              --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: release-assets

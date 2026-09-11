@@ -38,6 +38,9 @@ assert component["binary"] == locked["binary"]
 assert component["component_version"] == locked["component_version"]
 assert component["protocol_version"] == 2
 assert component["reuse_policy"] == locked["reuse_policy"]
+assert locked["identity"]["sha256"] == "BUILD-MANIFEST.json#/components/snapshot_access/sha256"
+assert locked["identity"]["cdhash"] == "BUILD-MANIFEST.json#/components/snapshot_access/cdhash"
+assert locked["identity"]["designated_requirement"] == "BUILD-MANIFEST.json#/components/snapshot_access/designated_requirement"
 mount_component = manifest["components"]["snapshot_mount_helper"]
 locked_mount_component = lock["components"]["snapshot_mount_helper"]
 assert mount_component["label"] == locked_mount_component["label"]
@@ -158,5 +161,11 @@ check_dmg_layout() {
 }
 for dmg in "$asset_dir/TelevyBackup-${version}.dmg" "$asset_dir/TelevyBackup-${version}-arm64.dmg" "$asset_dir/TelevyBackup-${version}-x86_64.dmg"; do
   check_dmg_layout "$dmg"
+done
+for tools_archive in "$asset_dir/televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/televybackup-tools-${version}-x86_64.tar.gz"; do
+  if tar -tzf "$tools_archive" | /usr/bin/grep -E '(^|/)(TelevyBackup Snapshot Access\.app|com\.ivan\.televybackup\.snapshot-access)' >/dev/null; then
+    echo "tools archive contains the private Snapshot Access app or service" >&2
+    exit 1
+  fi
 done
 echo "release assets verified: ${#required[@]} files"

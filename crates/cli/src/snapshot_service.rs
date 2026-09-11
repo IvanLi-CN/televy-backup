@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -155,6 +156,7 @@ fn status_from_socket(socket: &Path) -> Result<StatusResult, CliError> {
         .map_err(|error| CliError::retryable("snapshot_access.unavailable", error.to_string()))?;
     let response: Response = serde_json::from_str(line.trim())
         .map_err(|error| CliError::new("snapshot_access.protocol", error.to_string()))?;
+    validate_status_response(&response, &request.request_id)?;
     if !response.ok {
         return Err(CliError::new(
             "snapshot_access.rejected",
@@ -168,6 +170,25 @@ fn status_from_socket(socket: &Path) -> Result<StatusResult, CliError> {
             "status response missing",
         )),
     }
+}
+
+fn validate_status_response(response: &Response, request_id: &str) -> Result<(), CliError> {
+    if response.version != PROTOCOL_VERSION {
+        return Err(CliError::new(
+            "snapshot_access.protocol",
+            format!(
+                "unsupported Snapshot Access response version: {}",
+                response.version
+            ),
+        ));
+    }
+    if response.request_id != request_id {
+        return Err(CliError::new(
+            "snapshot_access.protocol",
+            "Snapshot Access response request id does not match",
+        ));
+    }
+    Ok(())
 }
 
 fn manifest_value(
@@ -214,10 +235,32 @@ fn manifest_data_dir(manifest: Option<&Value>, fallback: &Path) -> PathBuf {
         .unwrap_or_else(|| fallback.to_path_buf())
 }
 
-fn active_leases(manifest: Option<&Value>, data_dir: &Path) -> u64 {
+fn active_leases(manifest: Option<&Value>, data_dir: &Path) -> Result<u64, CliError> {
     status_from_socket(&default_socket(&manifest_data_dir(manifest, data_dir)))
         .map(|status| u64::from(status.active_leases))
-        .unwrap_or(0)
+}
+
+fn acquire_migration_lock(config_dir: &Path) -> Result<std::fs::File, CliError> {
+    let lock_path = config_dir.join("snapshot-access/migration.lock");
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            CliError::new("snapshot_access.migration_failed", error.to_string())
+        })?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|error| CliError::new("snapshot_access.migration_failed", error.to_string()))?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        return Err(CliError::retryable(
+            "snapshot_access.busy",
+            "another Snapshot Access migration is in progress",
+        ));
+    }
+    Ok(file)
 }
 
 fn migration_id() -> String {
@@ -303,6 +346,7 @@ pub fn prepare_migration(
     data_dir: &Path,
     json_output: bool,
 ) -> Result<(), CliError> {
+    let _migration_lock = acquire_migration_lock(config_dir)?;
     let access_app = embedded_access_app_path()?;
     let manifest_file = manifest_path(config_dir);
     let existing = manifest_json(config_dir);
@@ -326,11 +370,22 @@ pub fn prepare_migration(
         return Ok(());
     }
 
-    if legacy_registration && active_leases(existing.as_ref(), data_dir) > 0 {
-        return Err(CliError::new(
-            "snapshot_access.busy",
-            "cannot migrate Snapshot Access while a snapshot lease is active",
-        ));
+    if legacy_registration {
+        let leases = active_leases(existing.as_ref(), data_dir).map_err(|error| {
+            CliError::retryable(
+                "snapshot_access.busy",
+                format!(
+                    "cannot prove that Snapshot Access has no active lease: {}",
+                    error.message
+                ),
+            )
+        })?;
+        if leases > 0 {
+            return Err(CliError::retryable(
+                "snapshot_access.busy",
+                "cannot migrate Snapshot Access while a snapshot lease is active",
+            ));
+        }
     }
 
     let backup = backup_legacy_registration(config_dir, &manifest_file, &legacy_plist)?;
@@ -387,6 +442,7 @@ pub fn commit_migration(
     data_dir: &Path,
     json_output: bool,
 ) -> Result<(), CliError> {
+    let _migration_lock = acquire_migration_lock(config_dir)?;
     let access_app = embedded_access_app_path()?;
     let mut manifest = manifest_json(config_dir).ok_or_else(|| {
         CliError::new(
@@ -423,6 +479,7 @@ pub fn rollback_migration(
     data_dir: &Path,
     json_output: bool,
 ) -> Result<(), CliError> {
+    let _migration_lock = acquire_migration_lock(config_dir)?;
     let Some(manifest) = manifest_json(config_dir) else {
         return Ok(());
     };
@@ -464,6 +521,7 @@ pub fn status(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<V
 }
 
 fn status_payload(manifest: Option<&Value>, helper: Option<&StatusResult>, socket: &Path) -> Value {
+    let manifest_present = manifest.is_some();
     let registered_app_path = manifest
         .and_then(|value| value.get("appPath"))
         .and_then(Value::as_str);
@@ -471,11 +529,12 @@ fn status_payload(manifest: Option<&Value>, helper: Option<&StatusResult>, socke
     let managed_by = manifest
         .and_then(|value| value.get("managedBy"))
         .and_then(Value::as_str);
-    let registration_mismatch = managed_by != Some("smappservice")
-        || matches!(
-            (running_app_path, registered_app_path),
-            (Some(running), Some(registered)) if running != registered
-        );
+    let registration_mismatch = manifest_present
+        && (managed_by != Some("smappservice")
+            || matches!(
+                (running_app_path, registered_app_path),
+                (Some(running), Some(registered)) if running != registered
+            ));
     json!({
         "installed": manifest.is_some() && managed_by == Some("smappservice"),
         "label": ACCESS_LABEL,
@@ -550,5 +609,54 @@ mod tests {
         );
         assert_eq!(payload["accessAppRegistrationMismatch"], false);
         assert_eq!(payload["appPath"], manifest["appPath"]);
+    }
+
+    #[test]
+    fn fresh_install_without_registration_is_not_a_path_mismatch() {
+        let payload = status_payload(None, None, Path::new("/tmp/access.sock"));
+        assert_eq!(payload["installed"], false);
+        assert_eq!(payload["accessAppRegistrationMismatch"], false);
+    }
+
+    #[test]
+    fn active_lease_probe_fails_closed_when_helper_is_unreachable() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let error = active_leases(None, data_dir.path()).unwrap_err();
+        assert_eq!(error.code, "snapshot_access.unavailable");
+    }
+
+    #[test]
+    fn status_response_requires_protocol_and_request_identity() {
+        let response = Response::ok("request-1", ResponseResult::Status(StatusResult::default()));
+        assert!(validate_status_response(&response, "request-1").is_ok());
+
+        let mut wrong_version = response.clone();
+        wrong_version.version += 1;
+        assert_eq!(
+            validate_status_response(&wrong_version, "request-1")
+                .unwrap_err()
+                .code,
+            "snapshot_access.protocol"
+        );
+
+        let mut wrong_request = response;
+        wrong_request.request_id = "request-2".into();
+        assert_eq!(
+            validate_status_response(&wrong_request, "request-1")
+                .unwrap_err()
+                .code,
+            "snapshot_access.protocol"
+        );
+    }
+
+    #[test]
+    fn migration_lock_serializes_registration_changes() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let first = acquire_migration_lock(config_dir.path()).unwrap();
+        let second = acquire_migration_lock(config_dir.path()).unwrap_err();
+        assert_eq!(second.code, "snapshot_access.busy");
+        drop(first);
+        let third = acquire_migration_lock(config_dir.path()).unwrap();
+        drop(third);
     }
 }
