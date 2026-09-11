@@ -134,6 +134,19 @@ struct ControlOperationStatus: Decodable {
     let error: ControlIPCError?
 }
 
+struct SnapshotBrowseMountResponse: Decodable {
+    struct Mount: Decodable {
+        let url: String
+        let host: String
+        let port: Int
+    }
+
+    let sessionId: String
+    let volumeName: String
+    let catalogSource: String
+    let mount: Mount
+}
+
 enum ControlIPCClient {
     private static let logger = Logger(subsystem: "com.ivan.televybackup", category: "control-ipc")
     private static let maxResponseBytes = 8 * 1024 * 1024

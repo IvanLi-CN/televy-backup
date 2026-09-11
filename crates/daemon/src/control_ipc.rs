@@ -151,6 +151,7 @@ pub(crate) struct ControlContext {
     pub(crate) runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
     pub(crate) data_root: PathBuf,
     pub(crate) snapshot_inspection: Arc<crate::snapshot_inspection_ipc::SnapshotInspectionService>,
+    pub(crate) snapshot_browse: Arc<crate::snapshot_browse::SnapshotBrowseService>,
 }
 
 fn snapshot_access_paths(
@@ -398,6 +399,15 @@ async fn handle_control_ipc_client(
 
     if req.method.starts_with("snapshot.inspect.") {
         let response = context.snapshot_inspection.handle(&req).await;
+        write_json_line(&mut w, &response).await?;
+        return Ok(());
+    }
+
+    if req.method.starts_with("snapshot.browse.") {
+        let response = match context.snapshot_browse.handle(&req).await {
+            Ok(result) => ControlResponse::ok(req.id.clone(), result),
+            Err(error) => ControlResponse::err(req.id.clone(), error),
+        };
         write_json_line(&mut w, &response).await?;
         return Ok(());
     }
@@ -3051,11 +3061,16 @@ mod tests {
             snapshot_inspection: Arc::new(
                 crate::snapshot_inspection_ipc::SnapshotInspectionService::new(
                     config_root.to_path_buf(),
-                    data_root,
-                    settings,
+                    data_root.clone(),
+                    settings.clone(),
                     status_state.clone(),
                 ),
             ),
+            snapshot_browse: Arc::new(crate::snapshot_browse::SnapshotBrowseService::new(
+                config_root.to_path_buf(),
+                data_root,
+                settings,
+            )),
         }
     }
 
@@ -3257,11 +3272,16 @@ mod tests {
                 snapshot_inspection: Arc::new(
                     crate::snapshot_inspection_ipc::SnapshotInspectionService::new(
                         dir.path().join("cfg"),
-                        data_root,
-                        control_settings,
+                        data_root.clone(),
+                        control_settings.clone(),
                         status_state.clone(),
                     ),
                 ),
+                snapshot_browse: Arc::new(crate::snapshot_browse::SnapshotBrowseService::new(
+                    dir.path().join("cfg"),
+                    data_root,
+                    control_settings,
+                )),
             },
         )
         .unwrap();

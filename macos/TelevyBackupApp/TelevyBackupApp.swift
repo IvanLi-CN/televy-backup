@@ -4,6 +4,10 @@ import Darwin
 import Foundation
 import SwiftUI
 
+extension Notification.Name {
+    static let snapshotBrowseDidUnmount = Notification.Name("TelevyBackup.snapshotBrowseDidUnmount")
+}
+
 // Popover size is driven by real SwiftUI fitting height (sizeThatFits) and then clamped.
 // Keep these constants centralized so AppDelegate + tests agree on the exact behavior.
 enum PopoverAutoSize {
@@ -248,6 +252,15 @@ final class AppModel {
     private var daemonIpcRetryWork: DispatchWorkItem? = nil
     private var lastDaemonStartAttemptAt: Date? = nil
     private var lastRateSampleByTargetId: [String: RateSample] = [:]
+    private var didRecoverSnapshotBrowseSessions = false
+    private var browseUnmountObservers: [String: NSObjectProtocol] = [:]
+    private var browseUnmountTimers: [String: DispatchSourceTimer] = [:]
+    private struct BrowseMount {
+        let sessionId: String
+        let mountRoot: URL
+    }
+    private var browseMountsByTargetId: [String: BrowseMount] = [:]
+    private let browseMountLock = NSLock()
     private let guiOwnedProcessLock = NSLock()
     private var guiOwnedProcesses: [ObjectIdentifier: Process] = [:]
     var menuQuickActionFailureHandler: ((String) -> Void)? = nil
@@ -259,6 +272,244 @@ final class AppModel {
 
     func guiControlDataDirURL() -> URL {
         effectiveDataDirURL()
+    }
+
+    func browseTargetInFinder(
+        targetId: String,
+        allowCachedCatalog: Bool = false,
+        completion: @escaping (Result<Void, ControlRequestFailure>) -> Void
+    ) {
+        let socketPath = controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<SnapshotBrowseMountResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.browse.mount",
+                params: [
+                    "targetId": targetId,
+                    "allowCachedCatalog": allowCachedCatalog,
+                ],
+                timeoutSeconds: 30
+            )
+            switch result {
+            case let .failure(error):
+                DispatchQueue.main.async { completion(.failure(error)) }
+            case let .success(mount):
+                let mountRoot = self.guiControlDataDirURL()
+                    .appendingPathComponent("mounts", isDirectory: true)
+                    .appendingPathComponent(mount.sessionId, isDirectory: true)
+                do {
+                    try FileManager.default.createDirectory(at: mountRoot, withIntermediateDirectories: true)
+                    let task = Process()
+                    task.executableURL = URL(fileURLWithPath: "/sbin/mount_webdav")
+                    task.arguments = ["-S", "-v", mount.volumeName, mount.mount.url, mountRoot.path]
+                    try task.run()
+                    task.waitUntilExit()
+                    guard task.terminationStatus == 0 else {
+                        self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                        DispatchQueue.main.async {
+                            completion(.failure(ControlRequestFailure(code: "snapshot.browse.mount_failed", message: "The backup volume could not be mounted in Finder.", retryable: true)))
+                        }
+                        return
+                    }
+                    self.observeBrowseUnmount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                    self.browseMountLock.lock()
+                    self.browseMountsByTargetId[targetId] = BrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot)
+                    self.browseMountLock.unlock()
+                    NSWorkspace.shared.open(mountRoot)
+                    DispatchQueue.main.async { completion(.success(())) }
+                } catch {
+                    self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                    DispatchQueue.main.async {
+                        completion(.failure(ControlRequestFailure(code: "snapshot.browse.mount_failed", message: "The backup volume could not be mounted in Finder.", retryable: true)))
+                    }
+                }
+            }
+        }
+    }
+
+    func unmountTargetInFinder(
+        targetId: String,
+        completion: @escaping (Result<Void, ControlRequestFailure>) -> Void
+    ) {
+        browseMountLock.lock()
+        let mount = browseMountsByTargetId[targetId]
+        browseMountLock.unlock()
+        guard let mount else {
+            completion(.success(()))
+            return
+        }
+        let socketPath = controlSocketPath()
+        DispatchQueue.global(qos: .utility).async {
+            let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.browse.unmount",
+                params: ["sessionId": mount.sessionId]
+            )
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/sbin/umount")
+            task.arguments = [mount.mountRoot.path]
+            try? task.run()
+            task.waitUntilExit()
+            self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mount.mountRoot, socketPath: socketPath)
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    completion(.success(()))
+                case let .failure(error):
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func observeBrowseUnmount(sessionId: String, mountRoot: URL, socketPath: String) {
+        DispatchQueue.main.async {
+            let center = NSWorkspace.shared.notificationCenter
+            let token = center.addObserver(forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) { [weak self] notification in
+                guard let self,
+                      let volumeURL = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL,
+                      volumeURL.standardizedFileURL.path == mountRoot.standardizedFileURL.path
+                else { return }
+                self.cleanupBrowseMount(sessionId: sessionId, mountRoot: mountRoot, socketPath: socketPath)
+            }
+            self.browseUnmountObservers[sessionId] = token
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + 5, repeating: 5)
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                let mountedPath = mountRoot.standardizedFileURL.path
+                let mountedVolumes = FileManager.default.mountedVolumeURLs(
+                    includingResourceValuesForKeys: nil,
+                    options: FileManager.VolumeEnumerationOptions()
+                ) ?? []
+                let mounted = mountedVolumes.contains { volumeURL in
+                    volumeURL.standardizedFileURL.path == mountedPath
+                }
+                if !mounted {
+                    self.cleanupBrowseMount(sessionId: sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                }
+            }
+            timer.resume()
+            self.browseUnmountTimers[sessionId] = timer
+        }
+    }
+
+    private func cleanupBrowseMount(sessionId: String, mountRoot: URL, socketPath: String) {
+        _ = ControlIPCClient.request(
+            socketPath: socketPath,
+            method: "snapshot.browse.unmount",
+            params: ["sessionId": sessionId]
+        ) as Result<ControlAckResponse, ControlRequestFailure>
+        DispatchQueue.main.async {
+            self.browseMountLock.lock()
+            self.browseMountsByTargetId = self.browseMountsByTargetId.filter { $0.value.sessionId != sessionId }
+            self.browseMountLock.unlock()
+            if let token = self.browseUnmountObservers.removeValue(forKey: sessionId) {
+                NSWorkspace.shared.notificationCenter.removeObserver(token)
+            }
+            if let timer = self.browseUnmountTimers.removeValue(forKey: sessionId) {
+                timer.cancel()
+            }
+            NotificationCenter.default.post(
+                name: .snapshotBrowseDidUnmount,
+                object: nil,
+                userInfo: ["sessionId": sessionId]
+            )
+            let mountsRoot = self.guiControlDataDirURL()
+                .appendingPathComponent("mounts", isDirectory: true)
+                .standardizedFileURL
+            let candidate = mountRoot.standardizedFileURL
+            guard candidate.path.hasPrefix(mountsRoot.path + "/"), candidate.lastPathComponent == sessionId else { return }
+            try? FileManager.default.removeItem(at: candidate)
+        }
+    }
+
+    func unmountAllBrowseVolumesForTermination() {
+        browseMountLock.lock()
+        let mounts = Array(browseMountsByTargetId.values)
+        browseMountsByTargetId.removeAll()
+        browseMountLock.unlock()
+
+        let socketPath = controlSocketPath()
+        for mount in mounts {
+            _ = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.browse.unmount",
+                params: ["sessionId": mount.sessionId],
+                timeoutSeconds: 5
+            ) as Result<ControlAckResponse, ControlRequestFailure>
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/sbin/umount")
+            task.arguments = [mount.mountRoot.path]
+            try? task.run()
+            task.waitUntilExit()
+            if let token = browseUnmountObservers.removeValue(forKey: mount.sessionId) {
+                NSWorkspace.shared.notificationCenter.removeObserver(token)
+            }
+            if let timer = browseUnmountTimers.removeValue(forKey: mount.sessionId) {
+                timer.cancel()
+            }
+            let mountsRoot = guiControlDataDirURL()
+                .appendingPathComponent("mounts", isDirectory: true)
+                .standardizedFileURL
+            let candidate = mount.mountRoot.standardizedFileURL
+            if candidate.path.hasPrefix(mountsRoot.path + "/"), candidate.lastPathComponent == mount.sessionId {
+                try? FileManager.default.removeItem(at: candidate)
+            }
+        }
+    }
+
+    private func recoverSnapshotBrowseSessions() {
+        guard !didRecoverSnapshotBrowseSessions else { return }
+        let socketPath = controlSocketPath()
+        DispatchQueue.global(qos: .utility).async {
+            let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.browse.recover",
+                timeoutSeconds: 5
+            )
+            if case .success = result {
+                self.cleanupOrphanedBrowseMounts()
+                DispatchQueue.main.async { self.didRecoverSnapshotBrowseSessions = true }
+            }
+        }
+    }
+
+    func recoverSnapshotBrowseSessionsIfNeeded() {
+        recoverSnapshotBrowseSessions()
+    }
+
+    private func cleanupOrphanedBrowseMounts() {
+        let mountsRoot = guiControlDataDirURL()
+            .appendingPathComponent("mounts", isDirectory: true)
+            .standardizedFileURL
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: mountsRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let mountedPaths = Set(
+            (FileManager.default.mountedVolumeURLs(
+                includingResourceValuesForKeys: nil,
+                options: []
+            ) ?? []).map { $0.standardizedFileURL.path }
+        )
+        for entry in entries {
+            let sessionId = entry.lastPathComponent
+            guard sessionId.hasPrefix("browse_"), sessionId.count > "browse_".count else { continue }
+            guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            let candidate = entry.standardizedFileURL
+            guard candidate.path.hasPrefix(mountsRoot.path + "/") else { continue }
+            if mountedPaths.contains(candidate.path) {
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/sbin/umount")
+                task.arguments = [candidate.path]
+                try? task.run()
+                task.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: candidate)
+        }
     }
 
     func hasGUIOwnedLocalJobs() -> Bool {
@@ -1038,6 +1289,7 @@ final class AppModel {
                 self.showToast("Refreshing…", isError: false)
             }
         }
+        recoverSnapshotBrowseSessions()
         DispatchQueue.global(qos: .utility).async {
             self.refreshSettings(withSecrets: false) {
                 guard userInitiated else { return }
@@ -1260,7 +1512,10 @@ final class AppModel {
         DispatchQueue.main.async {
             self.daemonIpcRetryWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
-                self?.ensureDaemonRunning()
+                guard let self else { return }
+                if self.ensureDaemonRunning() {
+                    self.recoverSnapshotBrowseSessionsIfNeeded()
+                }
             }
             self.daemonIpcRetryWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.2, execute: work)
@@ -3019,7 +3274,7 @@ final class AppModel {
         }
     }
 
-    private func showToast(_ text: String, isError: Bool) {
+    func showToast(_ text: String, isError: Bool) {
         DispatchQueue.main.async {
             self.toastText = text
             self.toastIsError = isError
@@ -4982,6 +5237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             ModelStore.shared.ensureDaemonRunning()
+            ModelStore.shared.recoverSnapshotBrowseSessionsIfNeeded()
             ModelStore.shared.ensureStatusStreamRunning()
         }
 
@@ -5121,6 +5377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateCancel
         }
 
+        ModelStore.shared.unmountAllBrowseVolumesForTermination()
         guiControlAudit("application.termination-started")
         terminationInProgress = true
         if !fullyStopDaemon {
