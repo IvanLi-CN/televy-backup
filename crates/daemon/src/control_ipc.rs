@@ -463,7 +463,7 @@ async fn handle_control_ipc_client(
             .await?;
             return Ok(());
         };
-        match SnapshotClient::for_data_root(&context.data_root)
+        match SnapshotClient::for_environment(&context.config_root, &context.data_root)
             .probe_volume(target_id)
             .await
         {
@@ -502,7 +502,7 @@ async fn handle_control_ipc_client(
 
     if req.method == "snapshot.status" {
         let settings = context.settings.read().await.clone();
-        let helper = SnapshotClient::for_data_root(&context.data_root)
+        let helper = SnapshotClient::for_environment(&context.config_root, &context.data_root)
             .status()
             .await;
         let (

@@ -85,10 +85,13 @@ jobs:
           test "${version}" = "$(python3 scripts/product-version.py --mode release --source-sha "${TARGET_INPUT}")"
           helper_source_tag=""
           core_version="${version%%-rc.*}"
+          bootstrap_helper_tag="$(python3 -c 'import json; print(json.load(open("packaging/macos/snapshot-components.lock.json", encoding="utf-8"))["bootstrap_release_tag"])')"
           if [[ "${channel}" == rc ]]; then
             rc_number="${version##*-rc.}"
             if ((rc_number > 1)); then
               helper_source_tag="v${core_version}-rc.1"
+            elif [[ "v${core_version}-rc.1" != "${bootstrap_helper_tag}" ]]; then
+              helper_source_tag="${bootstrap_helper_tag}"
             fi
           else
             helper_source_tag="v${core_version}-rc.1"
@@ -332,6 +335,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/final
+          if [[ -n "${HELPER_SOURCE_TAG}" ]]; then
+            export TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=rc1-universal-artifact
+          else
+            export TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=fresh-rc1-build
+          fi
           arm_app="$(find dist/arm64 -maxdepth 1 -type d -name '*.app' -print -quit)"
           x86_app="$(find dist/x86_64 -maxdepth 1 -type d -name '*.app' -print -quit)"
           bash scripts/macos/assemble-universal.sh --mode release --arm64-app "$arm_app" --x86_64-app "$x86_app" --output-dir dist/final
@@ -368,6 +376,27 @@ jobs:
         with:
           name: release-assets
           path: release-assets
+      - name: Download and bind RC release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          core_version="${{ needs.resolve.outputs.version }}"
+          for rc_number in 1 2; do
+            rc_version="${core_version}-rc.${rc_number}"
+            rc_tag="v${rc_version}"
+            rc_dir="release-rc/rc${rc_number}"
+            mkdir -p "${rc_dir}"
+            gh release download "${rc_tag}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "TelevyBackup-${rc_version}.dmg" \
+              --pattern "BUILD-MANIFEST.json" \
+              --pattern "SHA256SUMS" \
+              --dir "${rc_dir}"
+            git fetch --force origin "refs/tags/${rc_tag}:refs/tags/${rc_tag}"
+            source_commit="$(git rev-list -n 1 "${rc_tag}^{commit}")"
+            echo "RC${rc_number}_SOURCE_COMMIT=${source_commit}" >> "$GITHUB_ENV"
+          done
       - name: Verify manual RC1 to RC2 acceptance evidence
         env:
           ACCEPTANCE_EVIDENCE: ${{ vars.TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE }}
@@ -391,7 +420,16 @@ jobs:
             --manifest release-assets/BUILD-MANIFEST.json \
             --stable-version "$core_version" \
             --rc1-tag "$rc1_tag" \
-            --rc2-tag "$rc2_tag"
+            --rc2-tag "$rc2_tag" \
+            --stable-source-commit "${{ needs.resolve.outputs.source_sha }}" \
+            --rc1-manifest release-rc/rc1/BUILD-MANIFEST.json \
+            --rc1-checksums release-rc/rc1/SHA256SUMS \
+            --rc1-dmg "release-rc/rc1/TelevyBackup-${core_version}-rc.1.dmg" \
+            --rc1-source-commit "$RC1_SOURCE_COMMIT" \
+            --rc2-manifest release-rc/rc2/BUILD-MANIFEST.json \
+            --rc2-checksums release-rc/rc2/SHA256SUMS \
+            --rc2-dmg "release-rc/rc2/TelevyBackup-${core_version}-rc.2.dmg" \
+            --rc2-source-commit "$RC2_SOURCE_COMMIT"
 
   publish:
     name: Publish GitHub Release

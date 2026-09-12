@@ -3104,7 +3104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let snapshot_client = SnapshotClient::for_data_root(&data_root);
+            let snapshot_client = SnapshotClient::for_environment(&config_root, &data_root);
             let enabled_snapshot_volumes = settings
                 .snapshot_volumes
                 .iter()

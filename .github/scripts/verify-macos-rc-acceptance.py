@@ -2,6 +2,7 @@
 """Verify the protected evidence required before publishing a stable macOS build."""
 
 import argparse
+import hashlib
 import json
 import sys
 
@@ -42,6 +43,15 @@ parser.add_argument("--manifest", required=True)
 parser.add_argument("--stable-version", required=True)
 parser.add_argument("--rc1-tag", required=True)
 parser.add_argument("--rc2-tag", required=True)
+parser.add_argument("--stable-source-commit")
+parser.add_argument("--rc1-manifest")
+parser.add_argument("--rc1-checksums")
+parser.add_argument("--rc1-dmg")
+parser.add_argument("--rc1-source-commit")
+parser.add_argument("--rc2-manifest")
+parser.add_argument("--rc2-checksums")
+parser.add_argument("--rc2-dmg")
+parser.add_argument("--rc2-source-commit")
 args = parser.parse_args()
 
 try:
@@ -63,6 +73,8 @@ if evidence.get("rc1_tag") != args.rc1_tag or evidence.get("rc2_tag") != args.rc
     fail("RC tags do not match the release sequence")
 if manifest.get("release_version") != args.stable_version:
     fail("BUILD-MANIFEST.json has the wrong stable version")
+if args.stable_source_commit and manifest.get("source_commit") != args.stable_source_commit:
+    fail("BUILD-MANIFEST.json source_commit does not match the stable release source")
 
 for field in (
     "legacy_registration_migrated",
@@ -103,7 +115,9 @@ if required_string(root_evidence.get("install_path"), "root_mount_helper.install
 ):
     fail("root_mount_helper.install_path does not match BUILD-MANIFEST.json")
 if root_evidence.get("component_version") != root_manifest.get("component_version"):
-    fail("root_mount_helper.component_version does not match BUILD-MANIFEST.json")
+    compatible_versions = root_manifest.get("compatible_component_versions", [])
+    if root_evidence.get("component_version") not in compatible_versions:
+        fail("root_mount_helper.component_version is not compatible with BUILD-MANIFEST.json")
 if root_evidence.get("protocol_version") != root_manifest.get("protocol_version"):
     fail("root_mount_helper.protocol_version does not match BUILD-MANIFEST.json")
 equal_identity(
@@ -112,5 +126,81 @@ equal_identity(
     "root_mount_helper",
     ("sha256", "artifact_sha256", "cdhash", "designated_requirement"),
 )
+
+
+def verify_rc_artifact(
+    manifest_path: str,
+    checksums_path: str,
+    dmg_path: str,
+    expected_version: str,
+    expected_source_commit: str | None,
+    name: str,
+):
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            rc_manifest = json.load(handle)
+        with open(checksums_path, encoding="utf-8") as handle:
+            checksum_lines = handle.read().splitlines()
+    except (OSError, json.JSONDecodeError) as error:
+        fail(f"{name} release metadata cannot be read: {error}")
+    if rc_manifest.get("release_version") != expected_version:
+        fail(f"{name} manifest has the wrong release version")
+    if expected_source_commit and rc_manifest.get("source_commit") != expected_source_commit:
+        fail(f"{name} manifest source_commit does not match its tag")
+    assets = rc_manifest.get("assets")
+    if not isinstance(assets, list):
+        fail(f"{name} manifest assets must be a list")
+    dmg_name = dmg_path.rsplit("/", 1)[-1]
+    asset = next(
+        (item for item in assets if isinstance(item, dict) and item.get("name") == dmg_name),
+        None,
+    )
+    if not isinstance(asset, dict):
+        fail(f"{name} manifest does not describe its Universal DMG")
+
+    with open(dmg_path, "rb") as handle:
+        digest = hashlib.sha256(handle.read()).hexdigest()
+    if asset.get("sha256") != digest:
+        fail(f"{name} Universal DMG does not match its manifest")
+    checksum = next(
+        (line.split()[0] for line in checksum_lines if line.rstrip().endswith("  " + dmg_name)),
+        None,
+    )
+    if checksum != digest:
+        fail(f"{name} Universal DMG does not match SHA256SUMS")
+    components = rc_manifest.get("components")
+    if not isinstance(components, dict):
+        fail(f"{name} manifest components must be an object")
+    helper = components.get("snapshot_access")
+    if not isinstance(helper, dict):
+        fail(f"{name} manifest snapshot_access component is missing")
+    identity = tuple(required_string(helper.get(field), f"{name}.snapshot_access.{field}") for field in (
+        "sha256", "artifact_sha256", "cdhash", "designated_requirement"
+    ))
+    return identity
+
+
+rc_args = (
+    args.rc1_manifest, args.rc1_checksums, args.rc1_dmg, args.rc1_source_commit,
+    args.rc2_manifest, args.rc2_checksums, args.rc2_dmg, args.rc2_source_commit,
+)
+if any(value is not None for value in rc_args) and not all(value is not None for value in rc_args):
+    fail("RC artifact verification arguments must be supplied as a complete pair")
+if all(value is not None for value in rc_args):
+    rc1_identity = verify_rc_artifact(
+        args.rc1_manifest, args.rc1_checksums, args.rc1_dmg,
+        f"{args.stable_version}-rc.1", args.rc1_source_commit, "RC1",
+    )
+    rc2_identity = verify_rc_artifact(
+        args.rc2_manifest, args.rc2_checksums, args.rc2_dmg,
+        f"{args.stable_version}-rc.2", args.rc2_source_commit, "RC2",
+    )
+    if rc1_identity != rc2_identity:
+        fail("Snapshot Access helper identity changed between the RC release artifacts")
+    final_identity = tuple(required_string(components["snapshot_access"].get(field), f"manifest snapshot_access.{field}") for field in (
+        "sha256", "artifact_sha256", "cdhash", "designated_requirement"
+    ))
+    if final_identity != rc1_identity:
+        fail("stable Snapshot Access identity does not match the accepted RC artifacts")
 
 print("macOS RC1 to RC2 acceptance evidence verified")

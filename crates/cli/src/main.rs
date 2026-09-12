@@ -155,6 +155,13 @@ enum SnapshotAccessCmd {
         migration_owner: String,
     },
     #[command(hide = true)]
+    RenewMigration {
+        #[arg(long)]
+        migration_id: String,
+        #[arg(long)]
+        migration_owner: String,
+    },
+    #[command(hide = true)]
     RollbackMigration {
         #[arg(long)]
         migration_id: String,
@@ -995,6 +1002,15 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             } => snapshot_service::commit_migration(
                 &config_dir,
                 &data_dir,
+                &migration_id,
+                &migration_owner,
+                cli.json,
+            ),
+            SnapshotAccessCmd::RenewMigration {
+                migration_id,
+                migration_owner,
+            } => snapshot_service::renew_migration(
+                &config_dir,
                 &migration_id,
                 &migration_owner,
                 cli.json,

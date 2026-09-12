@@ -98,11 +98,15 @@ the same prepare operation; missing or mismatched transaction credentials MUST f
 ## Compatibility
 
 The Access app is started by the main app's per-user `SMAppService` LaunchAgent and can be used
-without the GUI after registration. RC1 establishes the embedded helper identity; RC2 and stable
-reuse its exact Universal artifact, so ordinary main-app updates do not request FDA again. A real
-Access helper code or FDA behavior change creates a new component version and requires explicit
-migration and manual FDA review. Existing settings without `snapshot_volumes` remain valid and
-default to live mode until a volume is verified and enabled.
+without the GUI after registration. The v0.9.8 helper remains readable for the one-time lease
+probe, while only the current component may be committed or used for strict reads. RC1 establishes
+the embedded helper identity; ordinary future product-version RC1 builds reuse the approved
+artifact named by the component lock, and RC2/stable reuse that version's exact Universal artifact,
+so ordinary main-app updates do not request FDA again. A real Access helper code or FDA behavior
+change creates a new component version and requires explicit migration and manual FDA review.
+Production migration MUST run from `/Applications/TelevyBackup.app`; direct DMG launches MUST fail
+closed instead of registering a mounted helper. Existing settings without `snapshot_volumes` remain
+valid and default to live mode until a volume is verified and enabled.
 
 ## Verification
 

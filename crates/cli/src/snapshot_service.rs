@@ -19,6 +19,7 @@ pub const ACCESS_LABEL: &str = "com.ivan.televybackup.snapshot-access";
 const MANIFEST_FILE: &str = "snapshot-access/service.json";
 const MIGRATION_BACKUP_DIR: &str = "snapshot-access/migrations";
 const MIGRATION_OWNER_TTL_SECONDS: u64 = 120;
+const INSTALLED_PRODUCTION_APP_PATH: &str = "/Applications/TelevyBackup.app";
 
 fn user_service_target(domain: &str) -> String {
     format!("{domain}/{ACCESS_LABEL}")
@@ -67,6 +68,36 @@ fn launchctl(args: &[&str]) -> Result<(), CliError> {
     ))
 }
 
+fn launchctl_not_found(error: &CliError) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    message.contains("could not find service")
+        || message.contains("service not found")
+        || message.contains("unknown service")
+        || message.contains("no such process")
+}
+
+fn bootout_service(service: &str) -> Result<(), CliError> {
+    match launchctl(&["bootout", service]) {
+        Ok(()) => Ok(()),
+        Err(error) if launchctl_not_found(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn bootstrap_legacy_service(domain: &str, plist: &Path) -> Result<(), CliError> {
+    let plist = plist.to_string_lossy();
+    match launchctl(&["bootstrap", domain, plist.as_ref()]) {
+        Ok(()) => Ok(()),
+        Err(error) if launchctl_already_loaded(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn launchctl_already_loaded(error: &CliError) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    message.contains("already loaded") || message.contains("service exists")
+}
+
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), CliError> {
     let parent = path
         .parent()
@@ -111,6 +142,19 @@ fn main_app_path() -> Result<PathBuf, CliError> {
         })
 }
 
+fn require_installed_production_app() -> Result<PathBuf, CliError> {
+    let app = main_app_path()?;
+    if app != Path::new(INSTALLED_PRODUCTION_APP_PATH) {
+        return Err(CliError::new(
+            "snapshot_access.app_invalid",
+            format!(
+                "Snapshot Access migration must run from {INSTALLED_PRODUCTION_APP_PATH}; install TelevyBackup.app there before migrating"
+            ),
+        ));
+    }
+    Ok(app)
+}
+
 fn embedded_access_app_path() -> Result<PathBuf, CliError> {
     let app = main_app_path()?;
     let access_app = app.join(ACCESS_BUNDLE_RELATIVE_PATH);
@@ -131,6 +175,8 @@ fn default_socket(data_dir: &Path) -> PathBuf {
     data_dir.join("snapshot-access/access.sock")
 }
 
+// Migration lease probing must inspect the v0.9.8 helper before the new component is registered.
+// Callers that commit or use the new helper apply validate_component_status separately.
 fn status_from_socket(socket: &Path) -> Result<StatusResult, CliError> {
     use std::io::{BufRead, Write};
     use std::os::unix::net::UnixStream;
@@ -165,15 +211,18 @@ fn status_from_socket(socket: &Path) -> Result<StatusResult, CliError> {
         ));
     }
     match response.result {
-        Some(ResponseResult::Status(status)) => {
-            validate_component_status(&status)?;
-            Ok(status)
-        }
+        Some(ResponseResult::Status(status)) => Ok(status),
         _ => Err(CliError::new(
             "snapshot_access.protocol",
             "status response missing",
         )),
     }
+}
+
+fn current_status_from_socket(socket: &Path) -> Result<StatusResult, CliError> {
+    let status = status_from_socket(socket)?;
+    validate_component_status(&status)?;
+    Ok(status)
 }
 
 fn validate_component_status(status: &StatusResult) -> Result<(), CliError> {
@@ -421,7 +470,7 @@ fn restore_legacy_registration(
 ) -> Result<(), CliError> {
     let domain = format!("gui/{}", unsafe { libc::geteuid() });
     let service = user_service_target(&domain);
-    let _ = launchctl(&["bootout", &service]);
+    bootout_service(&service)?;
     if let (Some(source), Some(destination)) = (
         record.get("plistBackupPath").and_then(Value::as_str),
         record.get("originalPlistPath").and_then(Value::as_str),
@@ -434,7 +483,7 @@ fn restore_legacy_registration(
         }
         fs::copy(source, destination)
             .map_err(|error| CliError::new("snapshot_access.rollback_failed", error.to_string()))?;
-        launchctl(&["bootstrap", &domain, destination.to_string_lossy().as_ref()])?;
+        bootstrap_legacy_service(&domain, Path::new(destination))?;
     }
     if let Some(source) = record.get("manifestBackupPath").and_then(Value::as_str) {
         fs::copy(source, manifest_path(config_dir))
@@ -453,6 +502,7 @@ pub fn prepare_migration(
     json_output: bool,
 ) -> Result<(), CliError> {
     let _migration_lock = acquire_migration_lock(config_dir)?;
+    let _app = require_installed_production_app()?;
     let access_app = embedded_access_app_path()?;
     let manifest_file = manifest_path(config_dir);
     let existing = manifest_json(config_dir);
@@ -513,11 +563,15 @@ pub fn prepare_migration(
         // Re-bootstrap it before probing leases so recovery remains retryable.
         let domain = format!("gui/{}", unsafe { libc::geteuid() });
         if legacy_plist.exists() {
-            let _ = launchctl(&[
-                "bootstrap",
-                &domain,
-                legacy_plist.to_string_lossy().as_ref(),
-            ]);
+            bootstrap_legacy_service(&domain, &legacy_plist).map_err(|error| {
+                CliError::retryable(
+                    "snapshot_access.busy",
+                    format!(
+                        "cannot restore the legacy Snapshot Access service: {}",
+                        error.message
+                    ),
+                )
+            })?;
         }
         let leases = active_legacy_leases(Some(existing), data_dir).map_err(|error| {
             CliError::retryable(
@@ -535,7 +589,7 @@ pub fn prepare_migration(
             ));
         }
         let service = user_service_target(&domain);
-        let _ = launchctl(&["bootout", &service]);
+        bootout_service(&service)?;
         if legacy_plist.exists() {
             fs::remove_file(&legacy_plist).map_err(|error| {
                 CliError::new("snapshot_access.migration_failed", error.to_string())
@@ -603,7 +657,12 @@ pub fn prepare_migration(
     let domain = format!("gui/{}", unsafe { libc::geteuid() });
     let service = user_service_target(&domain);
     if legacy_registration {
-        let _ = launchctl(&["bootout", &service]);
+        if let Err(error) = bootout_service(&service) {
+            if let Some(backup) = manifest.get("legacyBackup") {
+                let _ = restore_legacy_registration(config_dir, data_dir, backup);
+            }
+            return Err(error);
+        }
         if legacy_plist.exists() {
             if let Err(error) = fs::remove_file(&legacy_plist) {
                 if let Some(backup) = manifest.get("legacyBackup") {
@@ -647,6 +706,7 @@ pub fn commit_migration(
     json_output: bool,
 ) -> Result<(), CliError> {
     let _migration_lock = acquire_migration_lock(config_dir)?;
+    let _app = require_installed_production_app()?;
     let access_app = embedded_access_app_path()?;
     let mut manifest = manifest_json(config_dir).ok_or_else(|| {
         CliError::new(
@@ -674,6 +734,12 @@ pub fn commit_migration(
                     "Snapshot Access migration is owned by another instance",
                 ));
             }
+            if !migration_owner_is_active(&manifest) {
+                return Err(CliError::retryable(
+                    "snapshot_access.busy",
+                    "Snapshot Access migration owner has expired",
+                ));
+            }
         }
         Some("ready") => {
             if migration_id_from_manifest(&manifest)? != expected_migration_id {
@@ -695,7 +761,7 @@ pub fn commit_migration(
         }
     }
     let socket = default_socket(&manifest_data_dir(Some(&manifest), data_dir));
-    let status = status_from_socket(&socket)?;
+    let status = current_status_from_socket(&socket)?;
     if status.access_app_path.as_deref() != Some(access_app.to_string_lossy().as_ref()) {
         return Err(CliError::new(
             "snapshot_access.identity_mismatch",
@@ -716,6 +782,60 @@ pub fn commit_migration(
     Ok(())
 }
 
+pub fn renew_migration(
+    config_dir: &Path,
+    expected_migration_id: &str,
+    expected_migration_owner: &str,
+    json_output: bool,
+) -> Result<(), CliError> {
+    let _migration_lock = acquire_migration_lock(config_dir)?;
+    let _app = require_installed_production_app()?;
+    let mut manifest = manifest_json(config_dir).ok_or_else(|| {
+        CliError::new(
+            "snapshot_access.migration_failed",
+            "Snapshot Access migration is not prepared",
+        )
+    })?;
+    if manifest.get("migrationState").and_then(Value::as_str) != Some("pending") {
+        return Err(CliError::retryable(
+            "snapshot_access.busy",
+            "Snapshot Access migration is no longer pending",
+        ));
+    }
+    if migration_id_from_manifest(&manifest)? != expected_migration_id {
+        return Err(CliError::retryable(
+            "snapshot_access.busy",
+            "Snapshot Access migration belongs to another transaction",
+        ));
+    }
+    if migration_owner_from_manifest(&manifest)? != expected_migration_owner {
+        return Err(CliError::retryable(
+            "snapshot_access.busy",
+            "Snapshot Access migration is owned by another instance",
+        ));
+    }
+    if !migration_owner_is_active(&manifest) {
+        return Err(CliError::retryable(
+            "snapshot_access.busy",
+            "Snapshot Access migration owner has expired",
+        ));
+    }
+    let expiry = migration_owner_expiry();
+    manifest["migrationOwnerExpiresAt"] = json!(expiry);
+    write_manifest(config_dir, &manifest)?;
+    if json_output {
+        println!(
+            "{}",
+            json!({
+                "renewed": true,
+                "migrationState": "pending",
+                "migrationOwnerExpiresAt": expiry,
+            })
+        );
+    }
+    Ok(())
+}
+
 pub fn rollback_migration(
     config_dir: &Path,
     data_dir: &Path,
@@ -724,6 +844,7 @@ pub fn rollback_migration(
     json_output: bool,
 ) -> Result<(), CliError> {
     let _migration_lock = acquire_migration_lock(config_dir)?;
+    let _app = require_installed_production_app()?;
     let Some(manifest) = manifest_json(config_dir) else {
         return Ok(());
     };
@@ -740,6 +861,12 @@ pub fn rollback_migration(
         return Err(CliError::retryable(
             "snapshot_access.busy",
             "Snapshot Access migration is owned by another instance",
+        ));
+    }
+    if !migration_owner_is_active(&manifest) {
+        return Err(CliError::retryable(
+            "snapshot_access.busy",
+            "Snapshot Access migration owner has expired",
         ));
     }
     let Some(backup) = manifest.get("legacyBackup") else {
@@ -762,8 +889,21 @@ pub fn rollback_migration(
 pub fn status(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<Value, CliError> {
     let manifest = manifest_json(config_dir);
     let socket = default_socket(&manifest_data_dir(manifest.as_ref(), data_dir));
-    let helper = status_from_socket(&socket).ok();
-    let payload = status_payload(manifest.as_ref(), helper.as_ref(), &socket);
+    let (helper, status_error) = match status_from_socket(&socket) {
+        Ok(status) => {
+            let error = validate_component_status(&status)
+                .err()
+                .map(|error| error.message);
+            (Some(status), error)
+        }
+        Err(error) => (None, Some(error.message)),
+    };
+    let payload = status_payload(
+        manifest.as_ref(),
+        helper.as_ref(),
+        status_error.as_deref(),
+        &socket,
+    );
     if json_output {
         println!("{payload}");
     } else {
@@ -779,7 +919,12 @@ pub fn status(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<V
     Ok(payload)
 }
 
-fn status_payload(manifest: Option<&Value>, helper: Option<&StatusResult>, socket: &Path) -> Value {
+fn status_payload(
+    manifest: Option<&Value>,
+    helper: Option<&StatusResult>,
+    status_error: Option<&str>,
+    socket: &Path,
+) -> Value {
     let manifest_present = manifest.is_some();
     let registered_app_path = manifest
         .and_then(|value| value.get("appPath"))
@@ -795,7 +940,10 @@ fn status_payload(manifest: Option<&Value>, helper: Option<&StatusResult>, socke
                 (Some(running), Some(registered)) if running != registered
             ));
     json!({
-        "installed": manifest.is_some() && managed_by == Some("smappservice"),
+        "installed": manifest.is_some()
+            && managed_by == Some("smappservice")
+            && manifest.and_then(|value| value.get("migrationState")).and_then(Value::as_str)
+                == Some("ready"),
         "label": ACCESS_LABEL,
         "bundleId": ACCESS_BUNDLE_ID,
         "managedBy": managed_by,
@@ -810,6 +958,7 @@ fn status_payload(manifest: Option<&Value>, helper: Option<&StatusResult>, socke
         "plistPath": manifest.and_then(|value| value.get("plistName")),
         "socketPath": socket,
         "serviceReachable": helper.is_some(),
+        "accessAppError": status_error,
         "activeLeases": helper.map(|value| value.active_leases).unwrap_or(0),
         "pendingCleanup": helper.map(|value| value.pending_cleanup).unwrap_or(0),
         "accessAppVersion": helper.map(|value| value.access_app_version.clone()),
@@ -844,7 +993,7 @@ mod tests {
             "managedBy": "legacy-launchagent",
             "migrationState": "legacy-detected",
         });
-        let payload = status_payload(Some(&manifest), None, Path::new("/tmp/access.sock"));
+        let payload = status_payload(Some(&manifest), None, None, Path::new("/tmp/access.sock"));
         assert_eq!(payload["installed"], false);
         assert_eq!(payload["managedBy"], "legacy-launchagent");
         assert_eq!(payload["migrationState"], "legacy-detected");
@@ -865,6 +1014,7 @@ mod tests {
         let payload = status_payload(
             Some(&manifest),
             Some(&status),
+            None,
             Path::new("/tmp/access.sock"),
         );
         assert_eq!(payload["accessAppRegistrationMismatch"], false);
@@ -881,6 +1031,7 @@ mod tests {
         let payload = status_payload(
             Some(&manifest),
             Some(&StatusResult::default()),
+            None,
             Path::new("/tmp/access.sock"),
         );
         assert_eq!(payload["appPath"], manifest["appPath"]);
@@ -889,7 +1040,7 @@ mod tests {
 
     #[test]
     fn fresh_install_without_registration_is_not_a_path_mismatch() {
-        let payload = status_payload(None, None, Path::new("/tmp/access.sock"));
+        let payload = status_payload(None, None, None, Path::new("/tmp/access.sock"));
         assert_eq!(payload["installed"], false);
         assert_eq!(payload["accessAppRegistrationMismatch"], false);
     }

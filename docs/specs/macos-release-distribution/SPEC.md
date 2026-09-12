@@ -17,7 +17,7 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 - **Managed service**: the single user LaunchAgent labeled `com.ivan.televybackup.daemon`.
 - **Snapshot Access app**: the private embedded user-session `LSUIElement` bundle labeled `com.ivan.televybackup.snapshot-access`; the user grants FDA to its exact path.
 - **Private Access helper**: the Snapshot Access app at `TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app`; it is not a second user-installable product.
-- **Authorization-stable helper artifact**: a helper bundle reused byte-for-byte across ordinary main-app releases, including its SHA-256, CodeDirectory hash, and designated requirement.
+- **Authorization-stable helper artifact**: a helper bundle reused byte-for-byte across ordinary main-app releases, including across product-version boundaries, with its SHA-256, CodeDirectory hash, and designated requirement.
 - **Snapshot mount helper**: the separate root-only `televybackup-snapshot-mount-helper` installed as a system LaunchDaemon; it only mounts/unmounts and UUID-cleans APFS leases.
 - **Environment**: the exact config and data directory pair passed to the daemon.
 - **Universal 2**: a Mach-O binary containing both arm64 and x86_64 slices.
@@ -59,8 +59,12 @@ The app MUST contain `TelevyBackup Snapshot Access.app` at the fixed nested path
 `Contents/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist` using `BundleProgram`.
 The CLI MUST expose read-only `snapshot-access status` and internal transactional migration
 operations, but MUST NOT accept `snapshot-access install --app <path>` or ship an external helper
-installer. RC1 MUST build and sign the Universal helper once; later RCs and stable MUST extract,
-verify, and embed that exact artifact without rebuilding, `lipo`, or re-signing it. The mount-helper
+installer. The first RC for a new Snapshot Access component MUST build and sign the Universal
+helper once; ordinary future product-version RC1 builds MUST extract, verify, and embed the last
+approved artifact named by `snapshot-components.lock.json`'s `bootstrap_release_tag`. RC2 and
+stable MUST reuse the current product-version RC1 artifact. Reuse MUST NOT rebuild, `lipo`, or
+re-sign it. A component code or FDA behavior change MUST update the component version and bootstrap
+tag so that the new product-version RC1 is an explicit authorization migration point. The mount-helper
 binary and system service templates remain available for its explicit administrator transaction;
 the installed root helper is compatibility-checked only and not automatically updated. FDA is an
 explicit System Settings action. Development variants and runs with custom config/data directories
@@ -70,7 +74,9 @@ environment fields.
 
 Stable publication MUST wait for the `macos-release-acceptance` GitHub environment approval and a
 JSON `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` environment value identifying the exact manual
-RC1-to-RC2 acceptance result. The evidence MUST name the stable version and both RC tags, cover
+RC1-to-RC2 acceptance result. The gate MUST download both RC Universal DMGs, bind each manifest's
+source commit to its tag, verify each DMG against its manifest and `SHA256SUMS`, and compare both
+RC helper identities with the final stable manifest. The evidence MUST name the stable version and both RC tags, cover
 legacy registration migration, exactly one FDA grant, strict backup success on RC1 and RC2 without
 a second grant, and an unchanged root mount helper. Its Snapshot Access and root helper identity
 fields MUST match the final `BUILD-MANIFEST.json`; arbitrary or stale non-JSON values MUST fail.
@@ -127,7 +133,7 @@ Covers: REQ-MRD-007. Swift unit tests and isolated Settings snapshots provide th
 ### VER-MRD-006: Authorization continuity across RCs
 
 Covers: REQ-MRD-010 and the authorization-stability requirement. On a controlled macOS 15 APFS
-fixture, start from the v0.9.8 external registration, replace the app with RC1, confirm that the
+fixture, start from the v0.9.8 external registration, install RC1 at `/Applications/TelevyBackup.app`, confirm that the
 old registration is backed up and the embedded agent is running, then manually grant FDA to the
 exact embedded helper path and complete a strict backup of a protected source. Replace only the
 main app with RC2 from the same product-version RC1 helper artifact, record equal helper

@@ -118,6 +118,7 @@ payload = json.load(open(sys.argv[1], encoding="utf-8"))
 assert payload["release_version"] == sys.argv[2]
 assert payload["signing"] == "ad-hoc"
 assert len(payload["assets"]) == 5
+assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.1.0", "0.9.8"]
 PY
 
 python3 - "$root_dir/packaging/macos/snapshot-components.lock.json" <<'PY'
@@ -127,6 +128,7 @@ import sys
 lock = json.load(open(sys.argv[1], encoding="utf-8"))
 access = lock["components"]["snapshot_access"]
 assert lock["signing"] == "ad-hoc"
+assert lock["bootstrap_release_tag"] == "v0.9.8-rc.1"
 assert access["bundle_id"] == "com.ivan.televybackup.snapshot-access"
 assert access["component_version"] == "0.2.0"
 assert access["protocol_version"] == 2

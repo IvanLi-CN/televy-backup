@@ -25,6 +25,7 @@ use crate::{
 };
 
 pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.1.0";
+pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MUTATING_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -83,7 +84,9 @@ pub fn status() -> Result<MountStatusResult, MountHelperError> {
 }
 
 fn validate_status_result(result: &MountStatusResult) -> Result<(), MountHelperError> {
-    if result.helper_version != ROOT_MOUNT_HELPER_VERSION {
+    if result.helper_version != ROOT_MOUNT_HELPER_VERSION
+        && result.helper_version != LEGACY_ROOT_MOUNT_HELPER_VERSION
+    {
         return Err(MountHelperError::Protocol(format!(
             "incompatible mount helper version: {}",
             result.helper_version
@@ -1010,5 +1013,14 @@ mod tests {
             active_mounts: 0,
         };
         assert!(validate_status_result(&result).is_err());
+    }
+
+    #[test]
+    fn mount_status_accepts_the_unchanged_v098_helper() {
+        let result = MountStatusResult {
+            helper_version: LEGACY_ROOT_MOUNT_HELPER_VERSION.into(),
+            active_mounts: 0,
+        };
+        assert!(validate_status_result(&result).is_ok());
     }
 }
