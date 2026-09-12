@@ -37,6 +37,10 @@ verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
   echo "Snapshot Access bundle is missing the full product identity metadata" >&2
   exit 1
 }
+[[ "$build_text" == *'bundle_id.daemon'* && "$build_text" == *'televybackupd'* ]] || {
+  echo "The daemon must be signed before the outer app bundle" >&2
+  exit 1
+}
 icon_text="$(<"$root_dir/scripts/macos/generate-app-icon-assets.sh")"
 [[ "$icon_text" == *'icon_512x512@2x.png:1024'* && "$icon_text" == *'iconutil -c icns'* && "$icon_text" == *'AppIcon-dark-'* ]] || {
   echo "AppIcon generation contract is incomplete" >&2

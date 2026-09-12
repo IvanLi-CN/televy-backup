@@ -269,12 +269,14 @@ PLIST
 if [[ -n "$codesign_identity" ]]; then
   echo "Codesigning main app with controlled identity: $codesign_identity"
   codesign --force --sign "$codesign_identity" -i "$bundle_id.cli" "$macos_dir/televybackup-cli"
+  codesign --force --sign "$codesign_identity" -i "$bundle_id.daemon" "$macos_dir/televybackupd"
   codesign --force --sign "$codesign_identity" -i "$bundle_id.mtproto-helper" "$macos_dir/televybackup-mtproto-helper"
   codesign --force --sign "$codesign_identity" -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper"
   codesign --force --sign "$codesign_identity" "$app_dir"
 else
   echo "No codesign identity found; applying ad-hoc signature for local runs"
   codesign --force --sign - -i "$bundle_id.snapshot-mount-helper" "$macos_dir/televybackup-snapshot-mount-helper"
+  codesign --force --sign - -i "$bundle_id.daemon" "$macos_dir/televybackupd"
   codesign --force --sign - "$app_dir"
 fi
 
