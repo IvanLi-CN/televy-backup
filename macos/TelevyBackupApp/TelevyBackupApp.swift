@@ -264,6 +264,9 @@ final class AppModel {
     var onStatusStreamEnded: (() -> Void)?
     private var daemonTask: Process? = nil
     private var snapshotAccessTask: Process? = nil
+    private var snapshotAccessRegistrationInFlight = false
+    private var snapshotAccessRegistrationReady = false
+    private var snapshotAccessRegistrationWaiters: [((Bool, String?) -> Void)] = []
     private var daemonIpcRetryWork: DispatchWorkItem? = nil
     private var lastDaemonStartAttemptAt: Date? = nil
     private var lastRateSampleByTargetId: [String: RateSample] = [:]
@@ -835,10 +838,19 @@ final class AppModel {
         return defaultDataDir()
     }
 
-    private var shouldUseEmbeddedSnapshotAccessAgent: Bool {
+    private var usesProductionSnapshotAccessConfiguration: Bool {
         guard !isDevAppVariant(), !effectiveDisableKeychain() else { return false }
         return effectiveConfigDirURL().standardizedFileURL == defaultConfigDir().standardizedFileURL
             && effectiveDataDirURL().standardizedFileURL == defaultDataDir().standardizedFileURL
+    }
+
+    private var isInstalledProductionApp: Bool {
+        Bundle.main.bundleURL.standardizedFileURL
+            == URL(fileURLWithPath: "/Applications/TelevyBackup.app").standardizedFileURL
+    }
+
+    private var shouldUseEmbeddedSnapshotAccessAgent: Bool {
+        usesProductionSnapshotAccessConfiguration && isInstalledProductionApp
     }
 
     private func embeddedSnapshotAccessAppPath() -> String {
@@ -1126,11 +1138,103 @@ final class AppModel {
         }
     }
 
+    private var requiresSnapshotAccessRegistrationBarrier: Bool {
+        usesProductionSnapshotAccessConfiguration
+    }
+
     // The migration commands only prepare/commit the data contract. SMAppService
-    // is the sole owner of the installed LaunchAgent registration.
+    // is the sole owner of the installed LaunchAgent registration. Keep one shared
+    // barrier so every GUI entry point observes the same migration result.
     func ensureSnapshotAccessRegistration(completion: @escaping (Bool, String?) -> Void) {
+        guard requiresSnapshotAccessRegistrationBarrier else {
+            performSnapshotAccessRegistration(completion: completion)
+            return
+        }
+        if snapshotAccessRegistrationReady {
+            completion(true, nil)
+            return
+        }
+        snapshotAccessRegistrationWaiters.append(completion)
+        guard !snapshotAccessRegistrationInFlight else { return }
+        snapshotAccessRegistrationInFlight = true
+        performSnapshotAccessRegistration { [weak self] success, error in
+            guard let self else { return }
+            self.snapshotAccessRegistrationInFlight = false
+            if success {
+                self.snapshotAccessRegistrationReady = true
+            }
+            let waiters = self.snapshotAccessRegistrationWaiters
+            self.snapshotAccessRegistrationWaiters.removeAll()
+            waiters.forEach { $0(success, error) }
+        }
+    }
+
+    private func waitForEmbeddedSnapshotAccess(
+        cli: String,
+        config: String,
+        data: String,
+        expectedPath: String,
+        expectedVersion: String,
+        attempt: Int,
+        completion: @escaping (Bool, String?) -> Void
+    ) {
+        DispatchQueue.global(qos: .utility).async {
+            let state = self.localSnapshotAccessIsCurrent(
+                cli: cli,
+                config: config,
+                data: data,
+                expectedPath: expectedPath,
+                expectedVersion: expectedVersion
+            )
+            DispatchQueue.main.async {
+                if state.isCurrent {
+                    completion(true, nil)
+                    return
+                }
+                guard attempt < 10 else {
+                    completion(false, state.message ?? "Snapshot Access helper identity could not be verified")
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.waitForEmbeddedSnapshotAccess(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        expectedPath: expectedPath,
+                        expectedVersion: expectedVersion,
+                        attempt: attempt + 1,
+                        completion: completion
+                    )
+                }
+            }
+        }
+    }
+
+    private func snapshotAccessRegistrationIsCommitted(cli: String, config: String, data: String) -> Bool {
+        let result = runCommandCapture(
+            exe: cli,
+            args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "status"],
+            timeoutSeconds: 8
+        )
+        guard result.status == 0,
+              let payload = try? JSONSerialization.jsonObject(
+                  with: Data(result.stdout.utf8)
+              ) as? [String: Any],
+              payload["migrationState"] as? String == "ready" else {
+            return false
+        }
+        let legacyPlist = ProcessInfo.processInfo.environment["TELEVYBACKUP_SNAPSHOT_ACCESS_PLIST"]
+            ?? (NSHomeDirectory() + "/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist")
+        return !FileManager.default.fileExists(atPath: legacyPlist)
+    }
+
+    private func performSnapshotAccessRegistration(completion: @escaping (Bool, String?) -> Void) {
         guard !UIDemo.enabled else {
             completion(true, nil)
+            return
+        }
+        if usesProductionSnapshotAccessConfiguration && !isInstalledProductionApp {
+            completion(false, "Install TelevyBackup.app in /Applications before migrating Snapshot Access")
             return
         }
         guard shouldUseEmbeddedSnapshotAccessAgent else {
@@ -1143,7 +1247,30 @@ final class AppModel {
         }
         let config = effectiveConfigDirURL().path
         let data = effectiveDataDirURL().path
+        let expectedPath = embeddedSnapshotAccessAppPath()
+        guard let expectedVersion = embeddedSnapshotAccessComponentVersion() else {
+            completion(false, "Snapshot Access embedded component version is unavailable")
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
+            // An old daemon can still hold the legacy helper open even when its
+            // lease probe was empty. Stop it before changing the helper owner.
+            if !self.snapshotAccessRegistrationIsCommitted(cli: cli, config: config, data: data) {
+                let stop = self.runCommandCapture(
+                    exe: cli,
+                    args: ["--json", "--config-dir", config, "--data-dir", data, "daemon", "stop"],
+                    timeoutSeconds: 20
+                )
+                guard stop.status == 0 else {
+                    let output = (stop.stderr.isEmpty ? stop.stdout : stop.stderr)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .prefix(400).description
+                    DispatchQueue.main.async {
+                        completion(false, output.isEmpty ? "The daemon must be stopped before Snapshot Access migration" : output)
+                    }
+                    return
+                }
+            }
             let prepare = self.runCommandCapture(
                 exe: cli,
                 args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "prepare-migration"],
@@ -1195,7 +1322,15 @@ final class AppModel {
                         if agent.status != .enabled {
                             try agent.register()
                         }
-                        completion(true, nil)
+                        self.waitForEmbeddedSnapshotAccess(
+                            cli: cli,
+                            config: config,
+                            data: data,
+                            expectedPath: expectedPath,
+                            expectedVersion: expectedVersion,
+                            attempt: 0,
+                            completion: completion
+                        )
                     } catch {
                         completion(false, error.localizedDescription)
                     }
@@ -1337,17 +1472,42 @@ final class AppModel {
             }
             return
         }
-        DispatchQueue.main.async {
-            var preRollbackFailures = [String]()
-            if let agent {
-                do {
-                    try agent.unregister()
-                } catch {
-                    self.appendLog("WARN: Snapshot Access SMAppService rollback failed: \(error.localizedDescription)")
-                    preRollbackFailures.append("SMAppService rollback failed: \(error.localizedDescription)")
+        // Renew the Rust-side owner immediately before touching SMAppService. An expired owner
+        // must not be able to unregister a service that a later app instance has registered.
+        DispatchQueue.global(qos: .utility).async {
+            let renew = self.runCommandCapture(
+                exe: cli,
+                args: [
+                    "--json", "--config-dir", config, "--data-dir", data,
+                    "snapshot-access", "renew-migration",
+                    "--migration-id", migrationId,
+                    "--migration-owner", migrationOwner,
+                ],
+                timeoutSeconds: 20
+            )
+            guard renew.status == 0 else {
+                let output = (renew.stderr.isEmpty ? renew.stdout : renew.stderr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(300).description
+                DispatchQueue.main.async {
+                    let renewalMessage = output.isEmpty
+                        ? "Snapshot Access migration ownership could not be renewed; rollback was not attempted"
+                        : "Snapshot Access migration ownership could not be renewed; rollback was not attempted: \(output)"
+                    completion(false, [message, renewalMessage].compactMap { $0 }.joined(separator: " "))
                 }
+                return
             }
-            DispatchQueue.global(qos: .utility).async {
+            DispatchQueue.main.async {
+                var preRollbackFailures = [String]()
+                if let agent {
+                    do {
+                        try agent.unregister()
+                    } catch {
+                        self.appendLog("WARN: Snapshot Access SMAppService rollback failed: \(error.localizedDescription)")
+                        preRollbackFailures.append("SMAppService rollback failed: \(error.localizedDescription)")
+                    }
+                }
+                DispatchQueue.global(qos: .utility).async {
                 let rollbackArgs = [
                     "--json", "--config-dir", config, "--data-dir", data,
                     "snapshot-access", "rollback-migration",
@@ -1380,6 +1540,7 @@ final class AppModel {
                 }
             }
         }
+    }
     }
 
     func fetchSnapshotStatus(completion: @escaping (SnapshotControlStatus?, String?) -> Void) {
@@ -1497,6 +1658,17 @@ final class AppModel {
     }
 
     func ensureStatusStreamRunning() {
+        if requiresSnapshotAccessRegistrationBarrier && !snapshotAccessRegistrationReady {
+            ensureSnapshotAccessRegistration { [weak self] success, error in
+                guard let self else { return }
+                guard success else {
+                    if let error { self.reportSnapshotAccessRegistrationFailure(error) }
+                    return
+                }
+                self.ensureStatusStreamRunning()
+            }
+            return
+        }
         DispatchQueue.main.async {
             self.statusStreamReconnectWork?.cancel()
             self.statusStreamReconnectWork = nil
@@ -1610,6 +1782,18 @@ final class AppModel {
 
     @discardableResult
     func ensureDaemonRunning() -> Bool {
+        if requiresSnapshotAccessRegistrationBarrier && !snapshotAccessRegistrationReady {
+            ensureSnapshotAccessRegistration { [weak self] success, error in
+                guard let self else { return }
+                guard success else {
+                    if let error { self.reportSnapshotAccessRegistrationFailure(error) }
+                    return
+                }
+                self.lastDaemonStartAttemptAt = nil
+                _ = self.ensureDaemonRunning()
+            }
+            return false
+        }
         let now = Date()
         if let last = lastDaemonStartAttemptAt, now.timeIntervalSince(last) < 3 {
             return waitForDaemonIpcReady(timeoutSeconds: 2.0)
@@ -1712,6 +1896,20 @@ final class AppModel {
             self.daemonIpcRetryWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.2, execute: work)
         }
+    }
+
+    private func runAfterDaemonReady(attempt: Int = 0, action: @escaping () -> Void) {
+        guard ensureDaemonRunning() else {
+            guard attempt < 20 else {
+                showToast("Daemon unavailable", isError: true)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.runAfterDaemonReady(attempt: attempt + 1, action: action)
+            }
+            return
+        }
+        action()
     }
 
     private func preferBundledDaemonForCurrentEnvironment() -> Bool {
@@ -2376,24 +2574,25 @@ final class AppModel {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
-        ensureDaemonRunning()
-        showToast("Starting restore…", isError: false)
-        runProcess(
-            exe: cli,
-            args: [
-                "--events",
-                "restore",
-                "latest",
-                "--target-id",
-                targetId,
-                "--target",
-                destinationPath,
-            ],
-            timeoutSeconds: nil,
-            onExit: { _ in
-                self.refreshRunHistory()
-            }
-        )
+        runAfterDaemonReady {
+            self.showToast("Starting restore…", isError: false)
+            self.runProcess(
+                exe: cli,
+                args: [
+                    "--events",
+                    "restore",
+                    "latest",
+                    "--target-id",
+                    targetId,
+                    "--target",
+                    destinationPath,
+                ],
+                timeoutSeconds: nil,
+                onExit: { _ in
+                    self.refreshRunHistory()
+                }
+            )
+        }
     }
 
     func verifyLatest(targetId: String) {
@@ -2402,22 +2601,23 @@ final class AppModel {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
-        ensureDaemonRunning()
-        showToast("Starting verify…", isError: false)
-        runProcess(
-            exe: cli,
-            args: [
-                "--events",
-                "verify",
-                "latest",
-                "--target-id",
-                targetId,
-            ],
-            timeoutSeconds: nil,
-            onExit: { _ in
-                self.refreshRunHistory()
-            }
-        )
+        runAfterDaemonReady {
+            self.showToast("Starting verify…", isError: false)
+            self.runProcess(
+                exe: cli,
+                args: [
+                    "--events",
+                    "verify",
+                    "latest",
+                    "--target-id",
+                    targetId,
+                ],
+                timeoutSeconds: nil,
+                onExit: { _ in
+                    self.refreshRunHistory()
+                }
+            )
+        }
     }
 
     func chooseSourceFolder() {
@@ -5433,12 +5633,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             ModelStore.shared.ensureSnapshotAccessRegistration { success, error in
-                if !success, let error {
-                    ModelStore.shared.reportSnapshotAccessRegistrationFailure(error)
+                if !success {
+                    if let error {
+                        ModelStore.shared.reportSnapshotAccessRegistrationFailure(error)
+                    }
+                    return
                 }
+                // The migration must quiesce the legacy helper before a new daemon can acquire
+                // a lease; starting both concurrently would make the lease check racy.
+                ModelStore.shared.ensureDaemonRunning()
+                ModelStore.shared.ensureStatusStreamRunning()
             }
-            ModelStore.shared.ensureDaemonRunning()
-            ModelStore.shared.ensureStatusStreamRunning()
         }
 
         ModelStore.shared.taskPresentationStore.$popoverResizeToken

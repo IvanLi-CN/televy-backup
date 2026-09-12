@@ -98,6 +98,7 @@ locked_mount_component = lock["components"]["snapshot_mount_helper"]
 assert mount_component["label"] == locked_mount_component["label"]
 assert mount_component["install_path"] == locked_mount_component["install_path"]
 assert mount_component["component_version"] == locked_mount_component["component_version"]
+assert mount_component["compatible_component_versions"] == locked_mount_component["compatible_component_versions"]
 assert mount_component["protocol_version"] == locked_mount_component["protocol_version"]
 assert mount_component["binary"] == locked_mount_component["binary"]
 assert mount_component["source"] == locked_mount_component["source"]
@@ -112,8 +113,10 @@ if sys.argv[5] != "true":
     assert mount_component["sha256"]
     assert mount_component["cdhash"]
     assert mount_component["designated_requirement"]
-expected_source = "fresh-rc1-build" if sys.argv[2].endswith("-rc.1") else "rc1-universal-artifact"
-assert component["source"] == expected_source
+if sys.argv[2].endswith("-rc.1"):
+    assert component["source"] in {"fresh-rc1-build", "rc1-universal-artifact"}
+else:
+    assert component["source"] == "rc1-universal-artifact"
 PY
 if [[ "$skip_bundle_checks" == true ]]; then
   echo "release metadata verified (bundle checks skipped)"
@@ -244,11 +247,14 @@ verify_dmg_helper_identity() (
   [[ -d "$app" ]] || { echo "DMG is missing TelevyBackup.app: $local_dmg" >&2; exit 1; }
   codesign --verify --deep --strict "$app"
   app_arches="$(lipo -info "$app/Contents/MacOS/TelevyBackup")"
+  expected_arches=universal
   case "$(basename "$local_dmg")" in
     TelevyBackup-*-arm64.dmg)
+      expected_arches=arm64
       [[ "$app_arches" == *arm64* && "$app_arches" != *x86_64* ]] || { echo "arm64 DMG contains a non-arm64 main app: $local_dmg" >&2; exit 1; }
       ;;
     TelevyBackup-*-x86_64.dmg)
+      expected_arches=x86_64
       [[ "$app_arches" == *x86_64* && "$app_arches" != *arm64* ]] || { echo "x86_64 DMG contains a non-x86_64 main app: $local_dmg" >&2; exit 1; }
       ;;
     TelevyBackup-*.dmg)
@@ -256,6 +262,14 @@ verify_dmg_helper_identity() (
       ;;
     *) echo "unexpected TelevyBackup DMG name: $local_dmg" >&2; exit 1 ;;
   esac
+  for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+    info="$(lipo -info "$app/Contents/MacOS/$binary")"
+    case "$expected_arches" in
+      universal) [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "Universal DMG binary is missing a slice: $binary" >&2; exit 1; } ;;
+      arm64) [[ "$info" == *arm64* && "$info" != *x86_64* ]] || { echo "arm64 DMG contains an unexpected binary architecture: $binary" >&2; exit 1; } ;;
+      x86_64) [[ "$info" == *x86_64* && "$info" != *arm64* ]] || { echo "x86_64 DMG contains an unexpected binary architecture: $binary" >&2; exit 1; } ;;
+    esac
+  done
   helper="$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
   [[ -d "$helper" ]] || { echo "DMG is missing embedded Snapshot Access: $local_dmg" >&2; exit 1; }
   codesign --verify --strict "$helper"
@@ -273,6 +287,12 @@ verify_dmg_helper_identity() (
   actual_artifact_sha256="$(artifact_sha256 "$helper")"
   actual_cdhash="$(printf '%s\n' "$signature" | awk -F= '/^CDHash=/{print $2}')"
   actual_requirement="$(codesign -d -r- "$helper" 2>&1 | sed -n '/designated =>/p')"
+  helper_arches="$(lipo -info "$helper/Contents/MacOS/televybackup-snapshot-access")"
+  case "$expected_arches" in
+    universal) [[ "$helper_arches" == *arm64* && "$helper_arches" == *x86_64* ]] || { echo "Universal DMG Snapshot Access is missing a slice: $local_dmg" >&2; exit 1; } ;;
+    arm64) [[ "$helper_arches" == *arm64* && "$helper_arches" != *x86_64* ]] || { echo "arm64 DMG Snapshot Access has an unexpected architecture: $local_dmg" >&2; exit 1; } ;;
+    x86_64) [[ "$helper_arches" == *x86_64* && "$helper_arches" != *arm64* ]] || { echo "x86_64 DMG Snapshot Access has an unexpected architecture: $local_dmg" >&2; exit 1; } ;;
+  esac
   access_metadata="$("$helper/Contents/MacOS/televybackup-snapshot-access" --component-metadata)"
   [[ -n "$actual_cdhash" && -n "$actual_requirement" ]] || {
     echo "DMG Snapshot Access signature identity is incomplete: $local_dmg" >&2
@@ -330,5 +350,18 @@ for tools_archive in "$asset_dir/televybackup-tools-${version}-arm64.tar.gz" "$a
     echo "tools archive contains the private Snapshot Access app or service" >&2
     exit 1
   fi
+  expected_arches=arm64
+  [[ "$tools_archive" == *-x86_64.tar.gz ]] && expected_arches=x86_64
+  tools_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-tools-verify.XXXXXX")"
+  tar -xzf "$tools_archive" -C "$tools_dir"
+  for binary in televybackup televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+    info="$(lipo -info "$tools_dir/TelevyBackup Tools/bin/$binary")"
+    if [[ "$expected_arches" == arm64 ]]; then
+      [[ "$info" == *arm64* && "$info" != *x86_64* ]] || { echo "arm64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
+    else
+      [[ "$info" == *x86_64* && "$info" != *arm64* ]] || { echo "x86_64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
+    fi
+  done
+  rm -rf "$tools_dir"
 done
 echo "release assets verified: ${#required[@]} files"

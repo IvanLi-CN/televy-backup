@@ -25,7 +25,11 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - native macOS package matrix and Universal 2 verification in GitHub Actions
 - `scripts/macos/verify-app-icon-assets.sh`, asset catalog `actool` compilation, and bundle `Info.plist`/resource inspection
 - nested helper component lock, SHA-256/CDHash/designated-requirement comparison, and RC artifact reuse inspection
-- published RC1 `BUILD-MANIFEST.json` anchoring for RC2/stable helper reuse, including the final Universal bundle
+- `snapshot-components.lock.json` bootstrap-tag anchoring for helper reuse across ordinary product
+  versions, plus published RC1 `BUILD-MANIFEST.json` anchoring for RC2/stable reuse, including the
+  final Universal bundle
+- stable-gate download and verification of both RC Universal DMGs, checksums, tag-bound source
+  commits, and helper identities before manual evidence is accepted
 - real macOS RC1-to-RC2 migration check: one manual FDA grant after the old registration migration, then no FDA regrant for the ordinary main-app update
 - stable publication approval through the `macos-release-acceptance` GitHub environment and the structured `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` value, validated against the final manifest
 - shared testbox full-feature Rust validation
