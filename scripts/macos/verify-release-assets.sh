@@ -288,11 +288,12 @@ verify_dmg_helper_identity() (
   actual_cdhash="$(printf '%s\n' "$signature" | awk -F= '/^CDHash=/{print $2}')"
   actual_requirement="$(codesign -d -r- "$helper" 2>&1 | sed -n '/designated =>/p')"
   helper_arches="$(lipo -info "$helper/Contents/MacOS/televybackup-snapshot-access")"
-  case "$expected_arches" in
-    universal) [[ "$helper_arches" == *arm64* && "$helper_arches" == *x86_64* ]] || { echo "Universal DMG Snapshot Access is missing a slice: $local_dmg" >&2; exit 1; } ;;
-    arm64) [[ "$helper_arches" == *arm64* && "$helper_arches" != *x86_64* ]] || { echo "arm64 DMG Snapshot Access has an unexpected architecture: $local_dmg" >&2; exit 1; } ;;
-    x86_64) [[ "$helper_arches" == *x86_64* && "$helper_arches" != *arm64* ]] || { echo "x86_64 DMG Snapshot Access has an unexpected architecture: $local_dmg" >&2; exit 1; } ;;
-  esac
+  # Snapshot Access is the identity-stable component. Native DMGs carry the exact same
+  # Universal helper as the Universal DMG, even though their outer app is thin.
+  [[ "$helper_arches" == *arm64* && "$helper_arches" == *x86_64* ]] || {
+    echo "DMG Snapshot Access must remain Universal: $local_dmg" >&2
+    exit 1
+  }
   access_metadata="$("$helper/Contents/MacOS/televybackup-snapshot-access" --component-metadata)"
   [[ -n "$actual_cdhash" && -n "$actual_requirement" ]] || {
     echo "DMG Snapshot Access signature identity is incomplete: $local_dmg" >&2
