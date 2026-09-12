@@ -25,6 +25,7 @@ use crate::{
 };
 
 pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.1.0";
+pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MUTATING_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -72,11 +73,26 @@ pub fn configured_journal_path() -> PathBuf {
 pub fn status() -> Result<MountStatusResult, MountHelperError> {
     let response = request(MountMethod::Status)?;
     match response.result {
-        Some(MountResponseResult::Status(result)) => Ok(result),
+        Some(MountResponseResult::Status(result)) => {
+            validate_status_result(&result)?;
+            Ok(result)
+        }
         _ => Err(MountHelperError::Protocol(
             "status response missing result".into(),
         )),
     }
+}
+
+fn validate_status_result(result: &MountStatusResult) -> Result<(), MountHelperError> {
+    if result.helper_version != ROOT_MOUNT_HELPER_VERSION
+        && result.helper_version != LEGACY_ROOT_MOUNT_HELPER_VERSION
+    {
+        return Err(MountHelperError::Protocol(format!(
+            "incompatible mount helper version: {}",
+            result.helper_version
+        )));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -159,6 +175,7 @@ fn request(method: MountMethod) -> Result<MountResponse, MountHelperError> {
     let mut line = String::new();
     std::io::BufReader::new(stream).read_line(&mut line)?;
     let response: MountResponse = serde_json::from_str(line.trim())?;
+    validate_response(&response, &request.request_id)?;
     if !response.ok {
         return Err(MountHelperError::Rejected {
             code: response.code.unwrap_or_else(|| "rejected".into()),
@@ -168,6 +185,20 @@ fn request(method: MountMethod) -> Result<MountResponse, MountHelperError> {
         });
     }
     Ok(response)
+}
+
+fn validate_response(response: &MountResponse, request_id: &str) -> Result<(), MountHelperError> {
+    if response.version != MOUNT_HELPER_PROTOCOL_VERSION {
+        return Err(MountHelperError::Protocol(
+            "unsupported mount helper response version".into(),
+        ));
+    }
+    if response.request_id != request_id {
+        return Err(MountHelperError::Protocol(
+            "mount helper response request id does not match".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn request_timeout(method: &MountMethod) -> Duration {
@@ -384,9 +415,7 @@ async fn status_result(pool: &SqlitePool) -> Result<MountStatusResult, MountHelp
     .fetch_one(pool)
     .await? as u32;
     Ok(MountStatusResult {
-        helper_version: option_env!("TELEVYBACKUP_BUILD_VERSION")
-            .unwrap_or(ROOT_MOUNT_HELPER_VERSION)
-            .to_string(),
+        helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
         active_mounts,
     })
 }
@@ -958,5 +987,40 @@ mod tests {
         assert_ne!(SOCKET_DIRECTORY_MODE & 0o001, 0);
         assert_eq!(SOCKET_DIRECTORY_MODE & 0o022, 0);
         assert_eq!(SOCKET_DIRECTORY_MODE & 0o044, 0);
+    }
+
+    #[test]
+    fn mount_response_validation_requires_protocol_and_request_identity() {
+        let response = MountResponse::ok(
+            "request-1",
+            MountResponseResult::Status(MountStatusResult::default()),
+        );
+        assert!(validate_response(&response, "request-1").is_ok());
+
+        let mut wrong_version = response.clone();
+        wrong_version.version += 1;
+        assert!(validate_response(&wrong_version, "request-1").is_err());
+
+        let mut wrong_request = response;
+        wrong_request.request_id = "request-2".into();
+        assert!(validate_response(&wrong_request, "request-1").is_err());
+    }
+
+    #[test]
+    fn mount_status_rejects_an_incompatible_component_version() {
+        let result = MountStatusResult {
+            helper_version: "0.0.0".into(),
+            active_mounts: 0,
+        };
+        assert!(validate_status_result(&result).is_err());
+    }
+
+    #[test]
+    fn mount_status_accepts_the_unchanged_v098_helper() {
+        let result = MountStatusResult {
+            helper_version: LEGACY_ROOT_MOUNT_HELPER_VERSION.into(),
+            active_mounts: 0,
+        };
+        assert!(validate_status_result(&result).is_ok());
     }
 }

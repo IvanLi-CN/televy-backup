@@ -273,7 +273,7 @@ deliberately narrow two-component permission boundary:
 
 | Component | Required authority | When the user acts |
 | --- | --- | --- |
-| `TelevyBackup Snapshot Access.app` | FDA for the exact installed app identity | After install or an identity/path change |
+| Embedded `TelevyBackup Snapshot Access.app` | FDA for the exact nested helper identity | First layout migration or helper identity change |
 | `televybackup-snapshot-mount-helper` | root LaunchDaemon plus FDA for `/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper` | Administrator authorization for install/update/uninstall; FDA after install or an identity/path change |
 
 The GUI app, CLI, and `televybackupd` stay non-root and do not need FDA; the daemon is the only

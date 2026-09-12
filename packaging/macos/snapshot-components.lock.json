@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "product": "TelevyBackup",
+  "signing": "ad-hoc",
+  "bootstrap_release_tag": "v0.9.8-rc.1",
+  "components": {
+    "snapshot_access": {
+      "bundle_id": "com.ivan.televybackup.snapshot-access",
+      "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+      "binary": "Contents/MacOS/televybackup-snapshot-access",
+      "component_version": "0.2.0",
+      "protocol_version": 2,
+      "source": "rc1-universal-artifact",
+      "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign",
+      "identity": {
+        "sha256": "BUILD-MANIFEST.json#/components/snapshot_access/sha256",
+        "artifact_sha256": "BUILD-MANIFEST.json#/components/snapshot_access/artifact_sha256",
+        "cdhash": "BUILD-MANIFEST.json#/components/snapshot_access/cdhash",
+        "designated_requirement": "BUILD-MANIFEST.json#/components/snapshot_access/designated_requirement"
+      }
+    },
+    "snapshot_mount_helper": {
+      "label": "com.ivan.televybackup.snapshot-mount-helper",
+      "install_path": "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
+      "binary": "Contents/MacOS/televybackup-snapshot-mount-helper",
+      "component_version": "0.1.0",
+      "compatible_component_versions": [
+        "0.1.0",
+        "0.9.8"
+      ],
+      "protocol_version": 1,
+      "source": "release-bundled-compatibility-reference",
+      "identity_source": "bundled-release-artifact",
+      "installed_observation": "manual-rc-acceptance-required",
+      "update_policy": "compatibility-check-only",
+      "identity": {
+        "sha256": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/sha256",
+        "artifact_sha256": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/artifact_sha256",
+        "cdhash": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/cdhash",
+        "designated_requirement": "BUILD-MANIFEST.json#/components/snapshot_mount_helper/designated_requirement"
+      }
+    }
+  }
+}

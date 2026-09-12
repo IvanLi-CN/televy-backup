@@ -2,7 +2,12 @@ import AppKit
 import Combine
 import Darwin
 import Foundation
+import ServiceManagement
 import SwiftUI
+
+extension Notification.Name {
+    static let snapshotBrowseDidUnmount = Notification.Name("TelevyBackup.snapshotBrowseDidUnmount")
+}
 
 // Popover size is driven by real SwiftUI fitting height (sizeThatFits) and then clamped.
 // Keep these constants centralized so AppDelegate + tests agree on the exact behavior.
@@ -74,6 +79,23 @@ struct ManagedServiceStatus: Decodable, Equatable {
         if !launchdLoaded { return "arrow.triangle.2.circlepath" }
         return "checkmark.circle"
     }
+}
+
+private struct SnapshotAccessMigrationPrepareResult: Decodable {
+    let prepared: Bool
+    let migrationState: String?
+    let migrationId: String?
+    let migrationOwner: String?
+}
+
+private struct SnapshotAccessMigrationRollbackResult: Decodable {
+    let rolledBack: Bool
+}
+
+private struct LocalSnapshotAccessStatus: Decodable {
+    let serviceReachable: Bool
+    let accessAppPath: String?
+    let accessAppVersion: String?
 }
 
 private struct AppRuntimeKey: EnvironmentKey {
@@ -245,9 +267,22 @@ final class AppModel {
     private var statusStreamBackoffSeconds: Double = 0.5
     var onStatusStreamEnded: (() -> Void)?
     private var daemonTask: Process? = nil
+    private var snapshotAccessTask: Process? = nil
+    private var snapshotAccessRegistrationInFlight = false
+    private var snapshotAccessRegistrationReady = false
+    private var snapshotAccessRegistrationWaiters: [((Bool, String?) -> Void)] = []
     private var daemonIpcRetryWork: DispatchWorkItem? = nil
     private var lastDaemonStartAttemptAt: Date? = nil
     private var lastRateSampleByTargetId: [String: RateSample] = [:]
+    private var didRecoverSnapshotBrowseSessions = false
+    private var browseUnmountObservers: [String: NSObjectProtocol] = [:]
+    private var browseUnmountTimers: [String: DispatchSourceTimer] = [:]
+    private struct BrowseMount {
+        let sessionId: String
+        let mountRoot: URL
+    }
+    private var browseMountsByTargetId: [String: BrowseMount] = [:]
+    private let browseMountLock = NSLock()
     private let guiOwnedProcessLock = NSLock()
     private var guiOwnedProcesses: [ObjectIdentifier: Process] = [:]
     var menuQuickActionFailureHandler: ((String) -> Void)? = nil
@@ -259,6 +294,285 @@ final class AppModel {
 
     func guiControlDataDirURL() -> URL {
         effectiveDataDirURL()
+    }
+
+    func browseTargetInFinder(
+        targetId: String,
+        allowCachedCatalog: Bool = false,
+        completion: @escaping (Result<Void, ControlRequestFailure>) -> Void
+    ) {
+        let socketPath = controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<SnapshotBrowseMountResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.browse.mount",
+                params: [
+                    "targetId": targetId,
+                    "allowCachedCatalog": allowCachedCatalog,
+                ],
+                timeoutSeconds: 30
+            )
+            switch result {
+            case let .failure(error):
+                DispatchQueue.main.async { completion(.failure(error)) }
+            case let .success(mount):
+                let mountRoot = self.guiControlDataDirURL()
+                    .appendingPathComponent("mounts", isDirectory: true)
+                    .appendingPathComponent(mount.sessionId, isDirectory: true)
+                do {
+                    try FileManager.default.createDirectory(at: mountRoot, withIntermediateDirectories: true)
+                    let task = Process()
+                    task.executableURL = URL(fileURLWithPath: "/sbin/mount_webdav")
+                    task.arguments = ["-S", "-v", mount.volumeName, mount.mount.url, mountRoot.path]
+                    let outputPipe = Pipe()
+                    task.standardOutput = outputPipe
+                    task.standardError = outputPipe
+                    try task.run()
+                    task.waitUntilExit()
+                    guard task.terminationStatus == 0 else {
+                        let output = String(
+                            decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(),
+                            as: UTF8.self
+                        ).trimmingCharacters(in: .whitespacesAndNewlines)
+                        self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                        DispatchQueue.main.async {
+                            completion(.failure(ControlRequestFailure(
+                                code: "snapshot.browse.mount_failed",
+                                message: output.isEmpty
+                                    ? "The backup volume could not be mounted in Finder."
+                                    : "The backup volume could not be mounted in Finder: \(output)",
+                                retryable: true
+                            )))
+                        }
+                        return
+                    }
+                    guard self.waitForMountedBrowseVolume(mountRoot, timeoutSeconds: 10) else {
+                        self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                        DispatchQueue.main.async {
+                            completion(.failure(ControlRequestFailure(
+                                code: "snapshot.browse.mount_failed",
+                                message: "The backup volume did not become available in Finder.",
+                                retryable: true
+                            )))
+                        }
+                        return
+                    }
+                    self.observeBrowseUnmount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                    self.browseMountLock.lock()
+                    self.browseMountsByTargetId[targetId] = BrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot)
+                    self.browseMountLock.unlock()
+                    NSWorkspace.shared.open(mountRoot)
+                    DispatchQueue.main.async { completion(.success(())) }
+                } catch {
+                    self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                    DispatchQueue.main.async {
+                        completion(.failure(ControlRequestFailure(code: "snapshot.browse.mount_failed", message: "The backup volume could not be mounted in Finder.", retryable: true)))
+                    }
+                }
+            }
+        }
+    }
+
+    private func waitForMountedBrowseVolume(_ mountRoot: URL, timeoutSeconds: Double) -> Bool {
+        let expectedPath = mountRoot.standardizedFileURL.path
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        repeat {
+            let mountedVolumes = FileManager.default.mountedVolumeURLs(
+                includingResourceValuesForKeys: nil,
+                options: FileManager.VolumeEnumerationOptions()
+            ) ?? []
+            if mountedVolumes.contains(where: { $0.standardizedFileURL.path == expectedPath }) {
+                return true
+            }
+            if Date() >= deadline { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while true
+        return false
+    }
+
+    func unmountTargetInFinder(
+        targetId: String,
+        completion: @escaping (Result<Void, ControlRequestFailure>) -> Void
+    ) {
+        browseMountLock.lock()
+        let mount = browseMountsByTargetId[targetId]
+        browseMountLock.unlock()
+        guard let mount else {
+            completion(.success(()))
+            return
+        }
+        let socketPath = controlSocketPath()
+        DispatchQueue.global(qos: .utility).async {
+            let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.browse.unmount",
+                params: ["sessionId": mount.sessionId]
+            )
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/sbin/umount")
+            task.arguments = [mount.mountRoot.path]
+            try? task.run()
+            task.waitUntilExit()
+            self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mount.mountRoot, socketPath: socketPath)
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    completion(.success(()))
+                case let .failure(error):
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func observeBrowseUnmount(sessionId: String, mountRoot: URL, socketPath: String) {
+        DispatchQueue.main.async {
+            let center = NSWorkspace.shared.notificationCenter
+            let token = center.addObserver(forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) { [weak self] notification in
+                guard let self,
+                      let volumeURL = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL,
+                      volumeURL.standardizedFileURL.path == mountRoot.standardizedFileURL.path
+                else { return }
+                self.cleanupBrowseMount(sessionId: sessionId, mountRoot: mountRoot, socketPath: socketPath)
+            }
+            self.browseUnmountObservers[sessionId] = token
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + 5, repeating: 5)
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                let mountedPath = mountRoot.standardizedFileURL.path
+                let mountedVolumes = FileManager.default.mountedVolumeURLs(
+                    includingResourceValuesForKeys: nil,
+                    options: FileManager.VolumeEnumerationOptions()
+                ) ?? []
+                let mounted = mountedVolumes.contains { volumeURL in
+                    volumeURL.standardizedFileURL.path == mountedPath
+                }
+                if !mounted {
+                    self.cleanupBrowseMount(sessionId: sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                }
+            }
+            timer.resume()
+            self.browseUnmountTimers[sessionId] = timer
+        }
+    }
+
+    private func cleanupBrowseMount(sessionId: String, mountRoot: URL, socketPath: String) {
+        _ = ControlIPCClient.request(
+            socketPath: socketPath,
+            method: "snapshot.browse.unmount",
+            params: ["sessionId": sessionId]
+        ) as Result<ControlAckResponse, ControlRequestFailure>
+        DispatchQueue.main.async {
+            self.browseMountLock.lock()
+            self.browseMountsByTargetId = self.browseMountsByTargetId.filter { $0.value.sessionId != sessionId }
+            self.browseMountLock.unlock()
+            if let token = self.browseUnmountObservers.removeValue(forKey: sessionId) {
+                NSWorkspace.shared.notificationCenter.removeObserver(token)
+            }
+            if let timer = self.browseUnmountTimers.removeValue(forKey: sessionId) {
+                timer.cancel()
+            }
+            NotificationCenter.default.post(
+                name: .snapshotBrowseDidUnmount,
+                object: nil,
+                userInfo: ["sessionId": sessionId]
+            )
+            let mountsRoot = self.guiControlDataDirURL()
+                .appendingPathComponent("mounts", isDirectory: true)
+                .standardizedFileURL
+            let candidate = mountRoot.standardizedFileURL
+            guard candidate.path.hasPrefix(mountsRoot.path + "/"), candidate.lastPathComponent == sessionId else { return }
+            try? FileManager.default.removeItem(at: candidate)
+        }
+    }
+
+    func unmountAllBrowseVolumesForTermination() {
+        browseMountLock.lock()
+        let mounts = Array(browseMountsByTargetId.values)
+        browseMountsByTargetId.removeAll()
+        browseMountLock.unlock()
+
+        let socketPath = controlSocketPath()
+        for mount in mounts {
+            _ = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.browse.unmount",
+                params: ["sessionId": mount.sessionId],
+                timeoutSeconds: 5
+            ) as Result<ControlAckResponse, ControlRequestFailure>
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/sbin/umount")
+            task.arguments = [mount.mountRoot.path]
+            try? task.run()
+            task.waitUntilExit()
+            if let token = browseUnmountObservers.removeValue(forKey: mount.sessionId) {
+                NSWorkspace.shared.notificationCenter.removeObserver(token)
+            }
+            if let timer = browseUnmountTimers.removeValue(forKey: mount.sessionId) {
+                timer.cancel()
+            }
+            let mountsRoot = guiControlDataDirURL()
+                .appendingPathComponent("mounts", isDirectory: true)
+                .standardizedFileURL
+            let candidate = mount.mountRoot.standardizedFileURL
+            if candidate.path.hasPrefix(mountsRoot.path + "/"), candidate.lastPathComponent == mount.sessionId {
+                try? FileManager.default.removeItem(at: candidate)
+            }
+        }
+    }
+
+    private func recoverSnapshotBrowseSessions() {
+        guard !didRecoverSnapshotBrowseSessions else { return }
+        let socketPath = controlSocketPath()
+        DispatchQueue.global(qos: .utility).async {
+            let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.browse.recover",
+                timeoutSeconds: 5
+            )
+            if case .success = result {
+                self.cleanupOrphanedBrowseMounts()
+                DispatchQueue.main.async { self.didRecoverSnapshotBrowseSessions = true }
+            }
+        }
+    }
+
+    func recoverSnapshotBrowseSessionsIfNeeded() {
+        recoverSnapshotBrowseSessions()
+    }
+
+    private func cleanupOrphanedBrowseMounts() {
+        let mountsRoot = guiControlDataDirURL()
+            .appendingPathComponent("mounts", isDirectory: true)
+            .standardizedFileURL
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: mountsRoot,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        let mountedPaths = Set(
+            (FileManager.default.mountedVolumeURLs(
+                includingResourceValuesForKeys: nil,
+                options: []
+            ) ?? []).map { $0.standardizedFileURL.path }
+        )
+        for entry in entries {
+            let sessionId = entry.lastPathComponent
+            guard sessionId.hasPrefix("browse_"), sessionId.count > "browse_".count else { continue }
+            guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            let candidate = entry.standardizedFileURL
+            guard candidate.path.hasPrefix(mountsRoot.path + "/") else { continue }
+            if mountedPaths.contains(candidate.path) {
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/sbin/umount")
+                task.arguments = [candidate.path]
+                try? task.run()
+                task.waitUntilExit()
+            }
+            try? FileManager.default.removeItem(at: candidate)
+        }
     }
 
     func hasGUIOwnedLocalJobs() -> Bool {
@@ -464,6 +778,7 @@ final class AppModel {
             }
         }
         daemonTask = nil
+        stopLocalSnapshotAccessProcess()
         return nil
     }
 
@@ -815,6 +1130,210 @@ final class AppModel {
         return defaultDataDir()
     }
 
+    private var usesProductionSnapshotAccessConfiguration: Bool {
+        guard !isDevAppVariant(), !effectiveDisableKeychain() else { return false }
+        return effectiveConfigDirURL().standardizedFileURL == defaultConfigDir().standardizedFileURL
+            && effectiveDataDirURL().standardizedFileURL == defaultDataDir().standardizedFileURL
+    }
+
+    private var isProductionAppVariant: Bool {
+        Bundle.main.bundleIdentifier == "com.ivan.televybackup"
+    }
+
+    private var shouldUseEmbeddedSnapshotAccessAgent: Bool {
+        usesProductionSnapshotAccessConfiguration
+            && isProductionAppVariant
+            && !isAdHocSignedMainApp
+    }
+
+    // Without Developer ID, macOS rejects SMAppService registration for the
+    // ad-hoc product. The installed product still owns the embedded helper,
+    // but the GUI must launch that helper directly and complete the same
+    // migration contract before starting the daemon.
+    private var isAdHocSignedMainApp: Bool {
+        let result = runCommandCapture(
+            exe: "/usr/bin/codesign",
+            args: ["-dv", "--verbose=4", Bundle.main.bundleURL.path],
+            timeoutSeconds: 3
+        )
+        let output = result.stdout + result.stderr
+        return output.contains("Signature=adhoc") || !output.contains("Authority=")
+    }
+
+    private func embeddedSnapshotAccessAppPath() -> String {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Library")
+            .appendingPathComponent("LoginItems")
+            .appendingPathComponent("TelevyBackup Snapshot Access.app")
+            .path
+    }
+
+    private func embeddedSnapshotAccessExecutablePath() -> String? {
+        let path = URL(fileURLWithPath: embeddedSnapshotAccessAppPath())
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("MacOS")
+            .appendingPathComponent("televybackup-snapshot-access")
+            .path
+        return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+    }
+
+    private func embeddedSnapshotAccessComponentVersion() -> String? {
+        Bundle(path: embeddedSnapshotAccessAppPath())?
+            .object(forInfoDictionaryKey: "TelevyBackupComponentVersion") as? String
+    }
+
+    private func localSnapshotAccessIsCurrent(
+        cli: String,
+        config: String,
+        data: String,
+        expectedPath: String,
+        expectedVersion: String
+    ) -> (isCurrent: Bool, message: String?) {
+        let result = runCommandCapture(
+            exe: cli,
+            args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "status"],
+            timeoutSeconds: 8
+        )
+        let output = result.stdout.isEmpty ? result.stderr : result.stdout
+        guard result.status == 0,
+              let status = try? JSONDecoder().decode(LocalSnapshotAccessStatus.self, from: Data(output.utf8)) else {
+            return (false, "Snapshot Access status could not be verified")
+        }
+        guard status.serviceReachable else {
+            return (false, "Snapshot Access service is not reachable")
+        }
+        let actualPath = status.accessAppPath.map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        let normalizedExpectedPath = URL(fileURLWithPath: expectedPath).standardizedFileURL.path
+        guard actualPath == normalizedExpectedPath else {
+            return (false, "Snapshot Access socket is owned by another helper")
+        }
+        guard status.accessAppVersion == expectedVersion else {
+            return (false, "Snapshot Access helper version is incompatible")
+        }
+        return (true, nil)
+    }
+
+    private func ensureLocalSnapshotAccessProcess(completion: @escaping (Bool, String?) -> Void) {
+        guard let executable = embeddedSnapshotAccessExecutablePath() else {
+            completion(false, "Embedded Snapshot Access helper is unavailable")
+            return
+        }
+        guard let cli = cliPath(), let expectedVersion = embeddedSnapshotAccessComponentVersion() else {
+            completion(false, "Embedded Snapshot Access identity metadata is unavailable")
+            return
+        }
+        let dataDir = effectiveDataDirURL()
+        let configDir = effectiveConfigDirURL()
+        let socketPath = dataDir.appendingPathComponent("snapshot-access/access.sock").path
+        let expectedPath = embeddedSnapshotAccessAppPath()
+        if let task = snapshotAccessTask, task.isRunning {
+            DispatchQueue.global(qos: .utility).async {
+                let state = self.localSnapshotAccessIsCurrent(
+                    cli: cli,
+                    config: configDir.path,
+                    data: dataDir.path,
+                    expectedPath: expectedPath,
+                    expectedVersion: expectedVersion
+                )
+                DispatchQueue.main.async { completion(state.isCurrent, state.message) }
+            }
+            return
+        }
+        if isUnixSocketConnectable(socketPath) {
+            DispatchQueue.global(qos: .utility).async {
+                let state = self.localSnapshotAccessIsCurrent(
+                    cli: cli,
+                    config: configDir.path,
+                    data: dataDir.path,
+                    expectedPath: expectedPath,
+                    expectedVersion: expectedVersion
+                )
+                DispatchQueue.main.async { completion(state.isCurrent, state.message) }
+            }
+            return
+        }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: executable)
+        task.currentDirectoryURL = URL(fileURLWithPath: executable).deletingLastPathComponent()
+        var environment = televybackupToolEnv()
+        environment["TELEVYBACKUP_SNAPSHOT_SOCKET"] = socketPath
+        environment["TELEVYBACKUP_SNAPSHOT_JOURNAL"] = dataDir
+            .appendingPathComponent("snapshot-access/journal.sqlite")
+            .path
+        task.environment = environment
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        task.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async {
+                guard let self, self.snapshotAccessTask === process else { return }
+                self.snapshotAccessTask = nil
+                self.appendLog("WARN: local Snapshot Access helper exited with status \(process.terminationStatus)")
+            }
+        }
+
+        do {
+            try task.run()
+            snapshotAccessTask = task
+        } catch {
+            completion(false, "Snapshot Access helper could not be started: \(error.localizedDescription)")
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak task] in
+            guard let self else { return }
+            let ready = self.waitForUnixSocket(socketPath, timeoutSeconds: 5)
+            let stillRunning = task?.isRunning ?? false
+            let state = ready && stillRunning
+                ? self.localSnapshotAccessIsCurrent(
+                    cli: cli,
+                    config: configDir.path,
+                    data: dataDir.path,
+                    expectedPath: expectedPath,
+                    expectedVersion: expectedVersion
+                )
+                : (isCurrent: false, message: Optional("Snapshot Access helper did not become ready"))
+            DispatchQueue.main.async {
+                if state.isCurrent {
+                    completion(true, nil)
+                } else {
+                    completion(false, state.message ?? "Snapshot Access helper identity could not be verified")
+                }
+            }
+        }
+    }
+
+    private func waitForUnixSocket(_ path: String, timeoutSeconds: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if isUnixSocketConnectable(path) { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return isUnixSocketConnectable(path)
+    }
+
+    private func waitForUnixSocketToClose(_ path: String, timeoutSeconds: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if !isUnixSocketConnectable(path) { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return !isUnixSocketConnectable(path)
+    }
+
+    private func stopLocalSnapshotAccessProcess() {
+        guard let task = snapshotAccessTask else { return }
+        snapshotAccessTask = nil
+        guard task.isRunning else { return }
+        task.terminate()
+        let pid = task.processIdentifier
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            guard task.isRunning, task.processIdentifier == pid else { return }
+            _ = kill(pid_t(pid), SIGKILL)
+        }
+    }
+
     func controlSocketPath() -> String {
         effectiveDataDirURL()
             .appendingPathComponent("ipc")
@@ -935,6 +1454,571 @@ final class AppModel {
         }
     }
 
+    private var requiresSnapshotAccessRegistrationBarrier: Bool {
+        usesProductionSnapshotAccessConfiguration
+    }
+
+    // The migration commands only prepare/commit the data contract. SMAppService
+    // is the sole owner of the installed LaunchAgent registration. Keep one shared
+    // barrier so every GUI entry point observes the same migration result.
+    func ensureSnapshotAccessRegistration(completion: @escaping (Bool, String?) -> Void) {
+        guard requiresSnapshotAccessRegistrationBarrier else {
+            performSnapshotAccessRegistration(completion: completion)
+            return
+        }
+        if snapshotAccessRegistrationReady {
+            completion(true, nil)
+            return
+        }
+        snapshotAccessRegistrationWaiters.append(completion)
+        guard !snapshotAccessRegistrationInFlight else { return }
+        snapshotAccessRegistrationInFlight = true
+        performSnapshotAccessRegistration { [weak self] success, error in
+            guard let self else { return }
+            self.snapshotAccessRegistrationInFlight = false
+            if success {
+                self.snapshotAccessRegistrationReady = true
+            }
+            let waiters = self.snapshotAccessRegistrationWaiters
+            self.snapshotAccessRegistrationWaiters.removeAll()
+            waiters.forEach { $0(success, error) }
+        }
+    }
+
+    private func waitForEmbeddedSnapshotAccess(
+        cli: String,
+        config: String,
+        data: String,
+        expectedPath: String,
+        expectedVersion: String,
+        attempt: Int,
+        completion: @escaping (Bool, String?) -> Void
+    ) {
+        DispatchQueue.global(qos: .utility).async {
+            let state = self.localSnapshotAccessIsCurrent(
+                cli: cli,
+                config: config,
+                data: data,
+                expectedPath: expectedPath,
+                expectedVersion: expectedVersion
+            )
+            DispatchQueue.main.async {
+                if state.isCurrent {
+                    completion(true, nil)
+                    return
+                }
+                guard attempt < 10 else {
+                    completion(false, state.message ?? "Snapshot Access helper identity could not be verified")
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.waitForEmbeddedSnapshotAccess(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        expectedPath: expectedPath,
+                        expectedVersion: expectedVersion,
+                        attempt: attempt + 1,
+                        completion: completion
+                    )
+                }
+            }
+        }
+    }
+
+    private func snapshotAccessRegistrationIsCommitted(cli: String, config: String, data: String) -> Bool {
+        let result = runCommandCapture(
+            exe: cli,
+            args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "status"],
+            timeoutSeconds: 8
+        )
+        guard result.status == 0,
+              let payload = try? JSONSerialization.jsonObject(
+                  with: Data(result.stdout.utf8)
+              ) as? [String: Any],
+              payload["migrationState"] as? String == "ready" else {
+            return false
+        }
+        let expectedPath = URL(fileURLWithPath: embeddedSnapshotAccessAppPath()).standardizedFileURL.path
+        let actualPath = (payload["accessAppPath"] as? String)
+            .map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        guard actualPath == expectedPath else { return false }
+        let legacyPlist = ProcessInfo.processInfo.environment["TELEVYBACKUP_SNAPSHOT_ACCESS_PLIST"]
+            ?? (NSHomeDirectory() + "/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist")
+        return !FileManager.default.fileExists(atPath: legacyPlist)
+    }
+
+    private func performSnapshotAccessRegistration(completion: @escaping (Bool, String?) -> Void) {
+        guard !UIDemo.enabled else {
+            completion(true, nil)
+            return
+        }
+        guard shouldUseEmbeddedSnapshotAccessAgent else {
+            if usesProductionSnapshotAccessConfiguration && isProductionAppVariant {
+                performAdHocSnapshotAccessRegistration(completion: completion)
+            } else {
+                ensureLocalSnapshotAccessProcess(completion: completion)
+            }
+            return
+        }
+        guard let cli = cliPath() else {
+            DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
+            return
+        }
+        let config = effectiveConfigDirURL().path
+        let data = effectiveDataDirURL().path
+        let expectedPath = embeddedSnapshotAccessAppPath()
+        guard let expectedVersion = embeddedSnapshotAccessComponentVersion() else {
+            completion(false, "Snapshot Access embedded component version is unavailable")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            // An old daemon can still hold the legacy helper open even when its
+            // lease probe was empty. Stop it before changing the helper owner.
+            if !self.snapshotAccessRegistrationIsCommitted(cli: cli, config: config, data: data) {
+                let stop = self.runCommandCapture(
+                    exe: cli,
+                    args: ["--json", "--config-dir", config, "--data-dir", data, "daemon", "stop"],
+                    timeoutSeconds: 20
+                )
+                guard stop.status == 0 else {
+                    let output = (stop.stderr.isEmpty ? stop.stdout : stop.stderr)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .prefix(400).description
+                    DispatchQueue.main.async {
+                        completion(false, output.isEmpty ? "The daemon must be stopped before Snapshot Access migration" : output)
+                    }
+                    return
+                }
+            }
+            let prepare = self.runCommandCapture(
+                exe: cli,
+                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "prepare-migration"],
+                timeoutSeconds: 20
+            )
+            guard prepare.status == 0 else {
+                let output = (prepare.stderr.isEmpty ? prepare.stdout : prepare.stderr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(400).description
+                DispatchQueue.main.async { completion(false, output.isEmpty ? "Snapshot Access migration could not be prepared" : output) }
+                return
+            }
+            let prepareState = try? JSONDecoder().decode(
+                SnapshotAccessMigrationPrepareResult.self,
+                from: Data(prepare.stdout.utf8)
+            )
+            DispatchQueue.main.async {
+                let agent = SMAppService.agent(plistName: "com.ivan.televybackup.snapshot-access.plist")
+                guard let prepareState else {
+                    self.finishSnapshotAccessMigration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        migrationId: nil,
+                        migrationOwner: nil,
+                        agent: agent,
+                        success: false,
+                        message: "Snapshot Access migration returned an invalid transaction record",
+                        completion: completion
+                    )
+                    return
+                }
+                if !prepareState.prepared {
+                    guard prepareState.migrationState == "ready" else {
+                        self.finishSnapshotAccessMigration(
+                            cli: cli,
+                            config: config,
+                            data: data,
+                            migrationId: nil,
+                            migrationOwner: nil,
+                            agent: agent,
+                            success: false,
+                            message: "Snapshot Access migration is still pending",
+                            completion: completion
+                        )
+                        return
+                    }
+                    do {
+                        if agent.status != .enabled {
+                            try agent.register()
+                        }
+                        self.waitForEmbeddedSnapshotAccess(
+                            cli: cli,
+                            config: config,
+                            data: data,
+                            expectedPath: expectedPath,
+                            expectedVersion: expectedVersion,
+                            attempt: 0,
+                            completion: completion
+                        )
+                    } catch {
+                        completion(false, error.localizedDescription)
+                    }
+                    return
+                }
+                guard prepareState.migrationState == "pending" else {
+                    self.finishSnapshotAccessMigration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        migrationId: nil,
+                        migrationOwner: nil,
+                        agent: agent,
+                        success: false,
+                        message: "Snapshot Access migration returned an invalid state",
+                        completion: completion
+                    )
+                    return
+                }
+                guard let migrationId = prepareState.migrationId, !migrationId.isEmpty,
+                      let migrationOwner = prepareState.migrationOwner, !migrationOwner.isEmpty else {
+                    self.finishSnapshotAccessMigration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        migrationId: nil,
+                        migrationOwner: nil,
+                        agent: agent,
+                        success: false,
+                        message: "Snapshot Access migration returned no transaction id",
+                        completion: completion
+                    )
+                    return
+                }
+                do {
+                    if agent.status != .enabled {
+                        try agent.register()
+                    }
+                    self.commitSnapshotAccessRegistration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        migrationId: migrationId,
+                        migrationOwner: migrationOwner,
+                        agent: agent,
+                        attempt: 0,
+                        completion: completion
+                    )
+                } catch {
+                    self.finishSnapshotAccessMigration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        migrationId: migrationId,
+                        migrationOwner: migrationOwner,
+                        agent: agent,
+                        success: false,
+                        message: error.localizedDescription,
+                        completion: completion
+                    )
+                }
+            }
+        }
+    }
+
+    private func performAdHocSnapshotAccessRegistration(completion: @escaping (Bool, String?) -> Void) {
+        guard let cli = cliPath() else {
+            DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
+            return
+        }
+        let config = effectiveConfigDirURL().path
+        let data = effectiveDataDirURL().path
+        guard embeddedSnapshotAccessComponentVersion() != nil else {
+            completion(false, "Snapshot Access embedded component version is unavailable")
+            return
+        }
+        let socketPath = URL(fileURLWithPath: data)
+            .appendingPathComponent("snapshot-access/access.sock")
+            .path
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            if !self.snapshotAccessRegistrationIsCommitted(cli: cli, config: config, data: data) {
+                let stop = self.runCommandCapture(
+                    exe: cli,
+                    args: ["--json", "--config-dir", config, "--data-dir", data, "daemon", "stop"],
+                    timeoutSeconds: 20
+                )
+                guard stop.status == 0 else {
+                    let output = (stop.stderr.isEmpty ? stop.stdout : stop.stderr)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .prefix(400).description
+                    DispatchQueue.main.async {
+                        completion(false, output.isEmpty ? "The daemon must be stopped before Snapshot Access migration" : output)
+                    }
+                    return
+                }
+            }
+
+            let prepare = self.runCommandCapture(
+                exe: cli,
+                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "prepare-migration"],
+                timeoutSeconds: 20
+            )
+            guard prepare.status == 0,
+                  let state = try? JSONDecoder().decode(
+                      SnapshotAccessMigrationPrepareResult.self,
+                      from: Data(prepare.stdout.utf8)
+                  ) else {
+                let output = (prepare.stderr.isEmpty ? prepare.stdout : prepare.stderr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(400).description
+                DispatchQueue.main.async {
+                    completion(false, output.isEmpty ? "Snapshot Access migration could not be prepared" : output)
+                }
+                return
+            }
+
+            if state.prepared {
+                guard self.waitForUnixSocketToClose(socketPath, timeoutSeconds: 5) else {
+                    DispatchQueue.main.async {
+                        completion(false, "The legacy Snapshot Access helper is still running")
+                    }
+                    return
+                }
+            }
+
+            self.ensureLocalSnapshotAccessProcess { success, error in
+                guard success else {
+                    guard let migrationId = state.migrationId,
+                          let migrationOwner = state.migrationOwner else {
+                        completion(false, error ?? "Embedded Snapshot Access helper could not be started")
+                        return
+                    }
+                    self.rollbackAdHocSnapshotAccessMigration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        socketPath: socketPath,
+                        migrationId: migrationId,
+                        migrationOwner: migrationOwner,
+                        message: error ?? "Embedded Snapshot Access helper could not be started",
+                        completion: completion
+                    )
+                    return
+                }
+                guard state.prepared else {
+                    completion(true, nil)
+                    return
+                }
+                guard let migrationId = state.migrationId,
+                      let migrationOwner = state.migrationOwner else {
+                    completion(false, "Snapshot Access migration returned no transaction id")
+                    return
+                }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let commit = self.runCommandCapture(
+                        exe: cli,
+                        args: [
+                            "--json", "--config-dir", config, "--data-dir", data,
+                            "snapshot-access", "commit-migration",
+                            "--migration-id", migrationId,
+                            "--migration-owner", migrationOwner,
+                        ],
+                        timeoutSeconds: 20
+                    )
+                    let output = (commit.stderr.isEmpty ? commit.stdout : commit.stderr)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .prefix(400).description
+                    DispatchQueue.main.async {
+                        guard commit.status != 0 else {
+                            completion(true, nil)
+                            return
+                        }
+                        self.rollbackAdHocSnapshotAccessMigration(
+                            cli: cli,
+                            config: config,
+                            data: data,
+                            socketPath: socketPath,
+                            migrationId: migrationId,
+                            migrationOwner: migrationOwner,
+                            message: output.isEmpty ? "Snapshot Access migration could not be committed" : output,
+                            completion: completion
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func rollbackAdHocSnapshotAccessMigration(
+        cli: String,
+        config: String,
+        data: String,
+        socketPath: String,
+        migrationId: String,
+        migrationOwner: String,
+        message: String,
+        completion: @escaping (Bool, String?) -> Void
+    ) {
+        stopLocalSnapshotAccessProcess()
+        DispatchQueue.global(qos: .utility).async {
+            guard self.waitForUnixSocketToClose(socketPath, timeoutSeconds: 5) else {
+                DispatchQueue.main.async {
+                    completion(false, message + " The embedded Snapshot Access helper did not stop; rollback was not attempted")
+                }
+                return
+            }
+            self.finishSnapshotAccessMigration(
+                cli: cli,
+                config: config,
+                data: data,
+                migrationId: migrationId,
+                migrationOwner: migrationOwner,
+                agent: nil,
+                success: false,
+                message: message,
+                completion: completion
+            )
+        }
+    }
+
+    private func commitSnapshotAccessRegistration(
+        cli: String,
+        config: String,
+        data: String,
+        migrationId: String,
+        migrationOwner: String,
+        agent: SMAppService,
+        attempt: Int,
+        completion: @escaping (Bool, String?) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let commit = self.runCommandCapture(
+                exe: cli,
+                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "commit-migration", "--migration-id", migrationId, "--migration-owner", migrationOwner],
+                timeoutSeconds: 20
+            )
+            if commit.status == 0 {
+                DispatchQueue.main.async { completion(true, nil) }
+                return
+            }
+            guard attempt < 10 else {
+                let output = (commit.stderr.isEmpty ? commit.stdout : commit.stderr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(400).description
+                self.finishSnapshotAccessMigration(
+                    cli: cli,
+                    config: config,
+                    data: data,
+                    migrationId: migrationId,
+                    migrationOwner: migrationOwner,
+                    agent: agent,
+                    success: false,
+                    message: output.isEmpty ? "Snapshot Access did not start with the embedded identity" : output,
+                    completion: completion
+                )
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.commitSnapshotAccessRegistration(
+                    cli: cli,
+                    config: config,
+                    data: data,
+                    migrationId: migrationId,
+                    migrationOwner: migrationOwner,
+                    agent: agent,
+                    attempt: attempt + 1,
+                    completion: completion
+                )
+            }
+        }
+    }
+
+    private func finishSnapshotAccessMigration(
+        cli: String,
+        config: String,
+        data: String,
+        migrationId: String?,
+        migrationOwner: String?,
+        agent: SMAppService?,
+        success: Bool,
+        message: String?,
+        completion: @escaping (Bool, String?) -> Void
+    ) {
+        guard !success else {
+            DispatchQueue.main.async { completion(true, nil) }
+            return
+        }
+        guard let migrationId, !migrationId.isEmpty,
+              let migrationOwner, !migrationOwner.isEmpty else {
+            DispatchQueue.main.async {
+                completion(false, [message, "migration rollback skipped because the transaction owner is unknown"]
+                    .compactMap { $0 }
+                    .joined(separator: " "))
+            }
+            return
+        }
+        // Renew the Rust-side owner immediately before touching SMAppService. An expired owner
+        // must not be able to unregister a service that a later app instance has registered.
+        DispatchQueue.global(qos: .utility).async {
+            let renew = self.runCommandCapture(
+                exe: cli,
+                args: [
+                    "--json", "--config-dir", config, "--data-dir", data,
+                    "snapshot-access", "renew-migration",
+                    "--migration-id", migrationId,
+                    "--migration-owner", migrationOwner,
+                ],
+                timeoutSeconds: 20
+            )
+            guard renew.status == 0 else {
+                let output = (renew.stderr.isEmpty ? renew.stdout : renew.stderr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(300).description
+                DispatchQueue.main.async {
+                    let renewalMessage = output.isEmpty
+                        ? "Snapshot Access migration ownership could not be renewed; rollback was not attempted"
+                        : "Snapshot Access migration ownership could not be renewed; rollback was not attempted: \(output)"
+                    completion(false, [message, renewalMessage].compactMap { $0 }.joined(separator: " "))
+                }
+                return
+            }
+            DispatchQueue.main.async {
+                var preRollbackFailures = [String]()
+                if let agent {
+                    do {
+                        try agent.unregister()
+                    } catch {
+                        self.appendLog("WARN: Snapshot Access SMAppService rollback failed: \(error.localizedDescription)")
+                        preRollbackFailures.append("SMAppService rollback failed: \(error.localizedDescription)")
+                    }
+                }
+                DispatchQueue.global(qos: .utility).async {
+                let rollbackArgs = [
+                    "--json", "--config-dir", config, "--data-dir", data,
+                    "snapshot-access", "rollback-migration",
+                    "--migration-id", migrationId,
+                    "--migration-owner", migrationOwner,
+                ]
+                let rollback = self.runCommandCapture(
+                    exe: cli,
+                    args: rollbackArgs,
+                    timeoutSeconds: 20
+                )
+                let rollbackState = try? JSONDecoder().decode(
+                    SnapshotAccessMigrationRollbackResult.self,
+                    from: Data(rollback.stdout.utf8)
+                )
+                DispatchQueue.main.async {
+                    var failures = preRollbackFailures
+                    if rollback.status != 0 {
+                        let output = (rollback.stderr.isEmpty ? rollback.stdout : rollback.stderr)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .prefix(300).description
+                        failures.append(output.isEmpty ? "legacy registration rollback failed" : output)
+                    } else if rollbackState?.rolledBack != true {
+                        failures.append("legacy registration rollback did not confirm completion")
+                    }
+                    var messages = failures
+                    if let message { messages.insert(message, at: 0) }
+                    let combinedMessage = messages.joined(separator: " ")
+                    completion(false, combinedMessage.isEmpty ? "Snapshot Access migration failed" : combinedMessage)
+                }
+            }
+        }
+    }
+    }
+
     func fetchSnapshotStatus(completion: @escaping (SnapshotControlStatus?, String?) -> Void) {
         let socketPath = controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1038,6 +2122,7 @@ final class AppModel {
                 self.showToast("Refreshing…", isError: false)
             }
         }
+        recoverSnapshotBrowseSessions()
         DispatchQueue.global(qos: .utility).async {
             self.refreshSettings(withSecrets: false) {
                 guard userInitiated else { return }
@@ -1050,6 +2135,17 @@ final class AppModel {
     }
 
     func ensureStatusStreamRunning() {
+        if requiresSnapshotAccessRegistrationBarrier && !snapshotAccessRegistrationReady {
+            ensureSnapshotAccessRegistration { [weak self] success, error in
+                guard let self else { return }
+                guard success else {
+                    if let error { self.reportSnapshotAccessRegistrationFailure(error) }
+                    return
+                }
+                self.ensureStatusStreamRunning()
+            }
+            return
+        }
         DispatchQueue.main.async {
             self.statusStreamReconnectWork?.cancel()
             self.statusStreamReconnectWork = nil
@@ -1163,6 +2259,18 @@ final class AppModel {
 
     @discardableResult
     func ensureDaemonRunning() -> Bool {
+        if requiresSnapshotAccessRegistrationBarrier && !snapshotAccessRegistrationReady {
+            ensureSnapshotAccessRegistration { [weak self] success, error in
+                guard let self else { return }
+                guard success else {
+                    if let error { self.reportSnapshotAccessRegistrationFailure(error) }
+                    return
+                }
+                self.lastDaemonStartAttemptAt = nil
+                _ = self.ensureDaemonRunning()
+            }
+            return false
+        }
         let now = Date()
         if let last = lastDaemonStartAttemptAt, now.timeIntervalSince(last) < 3 {
             return waitForDaemonIpcReady(timeoutSeconds: 2.0)
@@ -1260,11 +2368,28 @@ final class AppModel {
         DispatchQueue.main.async {
             self.daemonIpcRetryWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
-                self?.ensureDaemonRunning()
+                guard let self else { return }
+                if self.ensureDaemonRunning() {
+                    self.recoverSnapshotBrowseSessionsIfNeeded()
+                }
             }
             self.daemonIpcRetryWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.2, execute: work)
         }
+    }
+
+    private func runAfterDaemonReady(attempt: Int = 0, action: @escaping () -> Void) {
+        guard ensureDaemonRunning() else {
+            guard attempt < 20 else {
+                showToast("Daemon unavailable", isError: true)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.runAfterDaemonReady(attempt: attempt + 1, action: action)
+            }
+            return
+        }
+        action()
     }
 
     private func preferBundledDaemonForCurrentEnvironment() -> Bool {
@@ -1929,24 +3054,25 @@ final class AppModel {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
-        ensureDaemonRunning()
-        showToast("Starting restore…", isError: false)
-        runProcess(
-            exe: cli,
-            args: [
-                "--events",
-                "restore",
-                "latest",
-                "--target-id",
-                targetId,
-                "--target",
-                destinationPath,
-            ],
-            timeoutSeconds: nil,
-            onExit: { _ in
-                self.refreshRunHistory()
-            }
-        )
+        runAfterDaemonReady {
+            self.showToast("Starting restore…", isError: false)
+            self.runProcess(
+                exe: cli,
+                args: [
+                    "--events",
+                    "restore",
+                    "latest",
+                    "--target-id",
+                    targetId,
+                    "--target",
+                    destinationPath,
+                ],
+                timeoutSeconds: nil,
+                onExit: { _ in
+                    self.refreshRunHistory()
+                }
+            )
+        }
     }
 
     func verifyLatest(targetId: String) {
@@ -1955,22 +3081,23 @@ final class AppModel {
             appendLog("ERROR: televybackup not found (set TELEVYBACKUP_CLI_PATH or install it)")
             return
         }
-        ensureDaemonRunning()
-        showToast("Starting verify…", isError: false)
-        runProcess(
-            exe: cli,
-            args: [
-                "--events",
-                "verify",
-                "latest",
-                "--target-id",
-                targetId,
-            ],
-            timeoutSeconds: nil,
-            onExit: { _ in
-                self.refreshRunHistory()
-            }
-        )
+        runAfterDaemonReady {
+            self.showToast("Starting verify…", isError: false)
+            self.runProcess(
+                exe: cli,
+                args: [
+                    "--events",
+                    "verify",
+                    "latest",
+                    "--target-id",
+                    targetId,
+                ],
+                timeoutSeconds: nil,
+                onExit: { _ in
+                    self.refreshRunHistory()
+                }
+            )
+        }
     }
 
     func chooseSourceFolder() {
@@ -2565,6 +3692,10 @@ final class AppModel {
         appearanceOverride.apply(to: window)
     }
 
+    func reportSnapshotAccessRegistrationFailure(_ message: String) {
+        appendLog("WARN: Snapshot Access registration unavailable: \(message)")
+    }
+
     private func appendLog(_ line: String) {
         let trimmed = sanitizeLogLine(line.trimmingCharacters(in: .newlines))
         guard !trimmed.isEmpty else { return }
@@ -3019,7 +4150,7 @@ final class AppModel {
         }
     }
 
-    private func showToast(_ text: String, isError: Bool) {
+    func showToast(_ text: String, isError: Bool) {
         DispatchQueue.main.async {
             self.toastText = text
             self.toastIsError = isError
@@ -4981,8 +6112,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1" {
                 return
             }
-            ModelStore.shared.ensureDaemonRunning()
-            ModelStore.shared.ensureStatusStreamRunning()
+            ModelStore.shared.ensureSnapshotAccessRegistration { success, error in
+                if !success {
+                    if let error {
+                        ModelStore.shared.reportSnapshotAccessRegistrationFailure(error)
+                    }
+                    return
+                }
+                // The migration must quiesce the legacy helper before a new daemon can acquire
+                // a lease; starting both concurrently would make the lease check racy.
+                ModelStore.shared.ensureDaemonRunning()
+                ModelStore.shared.recoverSnapshotBrowseSessionsIfNeeded()
+                ModelStore.shared.ensureStatusStreamRunning()
+            }
         }
 
         ModelStore.shared.taskPresentationStore.$popoverResizeToken
@@ -5122,6 +6264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guiControlAudit("application.termination-started")
+        ModelStore.shared.unmountAllBrowseVolumesForTermination()
         terminationInProgress = true
         if !fullyStopDaemon {
             if let failure = ModelStore.shared.stopRuntimeResources(fullyStopDaemon: false) {

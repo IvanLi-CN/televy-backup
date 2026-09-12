@@ -45,6 +45,7 @@ fn print_version_if_requested() -> bool {
 }
 
 mod control_ipc;
+mod snapshot_browse;
 mod snapshot_client;
 mod snapshot_inspection_ipc;
 mod status_ipc;
@@ -2256,6 +2257,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         control_ipc_settings.clone(),
         status_state.clone(),
     ));
+    let snapshot_browse = Arc::new(snapshot_browse::SnapshotBrowseService::new(
+        config_root.clone(),
+        data_root.clone(),
+        control_ipc_settings.clone(),
+    ));
 
     let control_socket_path = televy_backup_core::control::control_ipc_socket_path(&data_root);
     let _control_ipc_server = match control_ipc::spawn_control_ipc_server(
@@ -2271,6 +2277,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             runtime_logging: runtime_logging.clone(),
             data_root: data_root.clone(),
             snapshot_inspection: snapshot_inspection.clone(),
+            snapshot_browse,
         },
     ) {
         Ok(h) => Some(h),
@@ -3104,7 +3111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let snapshot_client = SnapshotClient::for_data_root(&data_root);
+            let snapshot_client = SnapshotClient::for_environment(&config_root, &data_root);
             let enabled_snapshot_volumes = settings
                 .snapshot_volumes
                 .iter()
@@ -3716,7 +3723,7 @@ async fn clear_mtproto_storage_cache(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn preflight_remote_first_index_sync_daemon(
+pub(crate) async fn preflight_remote_first_index_sync_daemon(
     storage: &TelegramMtProtoStorage,
     master_key: &[u8; 32],
     target_id: &str,
@@ -3999,7 +4006,7 @@ async fn preflight_local_quick_stats_daemon(
     Ok(stats)
 }
 
-fn is_likely_private_chat_id(chat_id: &str) -> bool {
+pub(crate) fn is_likely_private_chat_id(chat_id: &str) -> bool {
     let s = chat_id.trim();
     let Ok(id) = s.parse::<i64>() else {
         return false;

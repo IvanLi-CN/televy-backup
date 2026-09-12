@@ -21,15 +21,14 @@ use sqlx::{
 };
 use televybackup_snapshot_access::mount_helper;
 use televybackup_snapshot_access::{
-    CONFIG_DIR_ENV, DATA_DIR_ENV, DEFAULT_JOURNAL_PATH, LeaseResult, MIN_FREE_BYTES, Method,
-    MountSnapshotRef, ProbeResult, ReadStreamResult, ReleaseResult, Request, Response,
-    ResponseResult, ScanPageResult, SourceEntry, StatusResult, validate_request,
+    COMPONENT_VERSION, CONFIG_DIR_ENV, DATA_DIR_ENV, DEFAULT_JOURNAL_PATH, LeaseResult,
+    MIN_FREE_BYTES, Method, MountSnapshotRef, PROTOCOL_VERSION, ProbeResult, ReadStreamResult,
+    ReleaseResult, Request, Response, ResponseResult, ScanPageResult, SourceEntry, StatusResult,
+    validate_request,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::{UnixListener, UnixStream};
 use uuid::Uuid;
-
-const ACCESS_APP_VERSION: &str = "0.2.0";
 
 #[derive(Debug, thiserror::Error)]
 enum HelperError {
@@ -108,10 +107,22 @@ struct VolumeInfo {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|arg| arg == "--component-metadata") {
+        println!(
+            "{}",
+            serde_json::json!({
+                "componentVersion": COMPONENT_VERSION,
+                "protocolVersion": PROTOCOL_VERSION,
+                "bundleId": televybackup_snapshot_access::ACCESS_BUNDLE_ID,
+                "relativePath": televybackup_snapshot_access::ACCESS_BUNDLE_RELATIVE_PATH,
+            })
+        );
+        return Ok(());
+    }
     if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
         println!(
             "televybackup-snapshot-access {} ({})",
-            option_env!("TELEVYBACKUP_BUILD_VERSION").unwrap_or(ACCESS_APP_VERSION),
+            option_env!("TELEVYBACKUP_BUILD_VERSION").unwrap_or(COMPONENT_VERSION),
             option_env!("TELEVYBACKUP_BUILD_COMMIT").unwrap_or("unknown")
         );
         return Ok(());
@@ -423,9 +434,7 @@ async fn status_result(state: &HelperState) -> Result<StatusResult, HelperError>
     Ok(StatusResult {
         active_leases,
         pending_cleanup,
-        access_app_version: option_env!("TELEVYBACKUP_BUILD_VERSION")
-            .unwrap_or(ACCESS_APP_VERSION)
-            .to_string(),
+        access_app_version: COMPONENT_VERSION.to_string(),
         access_app_path: current_access_app_path(),
         fda_ready: state.fda_ready.load(Ordering::Relaxed),
         fda_check_error,

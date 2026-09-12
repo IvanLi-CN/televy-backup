@@ -151,6 +151,7 @@ pub(crate) struct ControlContext {
     pub(crate) runtime_logging: Arc<RwLock<televy_backup_core::local_settings::ResolvedLogging>>,
     pub(crate) data_root: PathBuf,
     pub(crate) snapshot_inspection: Arc<crate::snapshot_inspection_ipc::SnapshotInspectionService>,
+    pub(crate) snapshot_browse: Arc<crate::snapshot_browse::SnapshotBrowseService>,
 }
 
 fn snapshot_access_paths(
@@ -402,6 +403,24 @@ async fn handle_control_ipc_client(
         return Ok(());
     }
 
+    if req.method.starts_with("snapshot.browse.") {
+        let response = match context.snapshot_browse.handle(&req).await {
+            Ok(result) => ControlResponse::ok(req.id.clone(), result),
+            Err(error) => ControlResponse::err(req.id.clone(), error),
+        };
+        write_json_line(&mut w, &response).await?;
+        return Ok(());
+    }
+
+    if req.method == "daemon.ping" {
+        write_json_line(
+            &mut w,
+            &ControlResponse::ok(req.id.clone(), serde_json::json!({ "running": true })),
+        )
+        .await?;
+        return Ok(());
+    }
+
     let (log_bytes, managed_log_usage) =
         if matches!(req.method.as_str(), "logging.status" | "diagnostics.get") {
             let log_dir = televy_backup_core::run_log::resolve_log_dir(&context.data_root);
@@ -463,7 +482,7 @@ async fn handle_control_ipc_client(
             .await?;
             return Ok(());
         };
-        match SnapshotClient::for_data_root(&context.data_root)
+        match SnapshotClient::for_environment(&context.config_root, &context.data_root)
             .probe_volume(target_id)
             .await
         {
@@ -502,7 +521,7 @@ async fn handle_control_ipc_client(
 
     if req.method == "snapshot.status" {
         let settings = context.settings.read().await.clone();
-        let helper = SnapshotClient::for_data_root(&context.data_root)
+        let helper = SnapshotClient::for_environment(&context.config_root, &context.data_root)
             .status()
             .await;
         let (
@@ -553,19 +572,42 @@ async fn handle_control_ipc_client(
                 })
             })
             .collect::<Vec<_>>();
-        let registered_access_app_path =
+        let snapshot_manifest =
             std::fs::read(context.config_root.join("snapshot-access/service.json"))
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|value| {
-                    value
-                        .get("appPath")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                })
-                .or_else(|| std::env::var("TELEVYBACKUP_SNAPSHOT_ACCESS_APP").ok());
-        let (access_app_path, registered_access_app_path, access_app_registration_mismatch) =
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        let registered_access_app_path = snapshot_manifest.as_ref().and_then(|value| {
+            value
+                .get("appPath")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        let managed_by = snapshot_manifest.as_ref().and_then(|value| {
+            value
+                .get("managedBy")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        let migration_state = snapshot_manifest.as_ref().and_then(|value| {
+            value
+                .get("migrationState")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        let legacy_registration_path = snapshot_manifest.as_ref().and_then(|value| {
+            value
+                .get("legacyBackup")
+                .and_then(|backup| backup.get("originalPlistPath"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        let (access_app_path, registered_access_app_path, path_mismatch) =
             snapshot_access_paths(helper.as_ref().ok(), registered_access_app_path);
+        let manifest_present = snapshot_manifest.is_some();
+        let access_app_registration_mismatch =
+            manifest_present && (path_mismatch || managed_by.as_deref() != Some("smappservice"));
+        let migration_state =
+            migration_state.or_else(|| manifest_present.then(|| "legacy-detected".to_string()));
         write_json_line(
             &mut w,
             &ControlResponse::ok(
@@ -576,6 +618,9 @@ async fn handle_control_ipc_client(
                     "accessAppPath": access_app_path,
                     "registeredAccessAppPath": registered_access_app_path,
                     "accessAppRegistrationMismatch": access_app_registration_mismatch,
+                    "managedBy": managed_by,
+                    "migrationState": migration_state,
+                    "legacyRegistrationPath": legacy_registration_path,
                     "accessAppVersion": access_app_version,
                     "fdaReady": fda_ready,
                     "fdaCheckError": fda_check_error,
@@ -3051,11 +3096,16 @@ mod tests {
             snapshot_inspection: Arc::new(
                 crate::snapshot_inspection_ipc::SnapshotInspectionService::new(
                     config_root.to_path_buf(),
-                    data_root,
-                    settings,
+                    data_root.clone(),
+                    settings.clone(),
                     status_state.clone(),
                 ),
             ),
+            snapshot_browse: Arc::new(crate::snapshot_browse::SnapshotBrowseService::new(
+                config_root.to_path_buf(),
+                data_root,
+                settings,
+            )),
         }
     }
 
@@ -3257,11 +3307,16 @@ mod tests {
                 snapshot_inspection: Arc::new(
                     crate::snapshot_inspection_ipc::SnapshotInspectionService::new(
                         dir.path().join("cfg"),
-                        data_root,
-                        control_settings,
+                        data_root.clone(),
+                        control_settings.clone(),
                         status_state.clone(),
                     ),
                 ),
+                snapshot_browse: Arc::new(crate::snapshot_browse::SnapshotBrowseService::new(
+                    dir.path().join("cfg"),
+                    data_root,
+                    control_settings,
+                )),
             },
         )
         .unwrap();

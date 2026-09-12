@@ -2,7 +2,7 @@
 
 本目录是项目唯一的 canonical topic Spec catalog。每个主题目录包含 `SPEC.md`、`IMPLEMENTATION.md` 和 `HISTORY.md`；实现状态与演进记录不再塞入 `SPEC.md`。
 
-当前 catalog 包含 50 个 canonical topics；其中 28 个由 legacy Plan 新建，`0003` 归并到既有的 `sync-logging-durability` 主题。
+当前 catalog 包含 51 个 canonical topics；其中 28 个由 legacy Plan 新建，`0003` 归并到既有的 `sync-logging-durability` 主题。
 
 > Legacy Plan sources remain under `docs/plan/**` until separately approved for deletion. Design assets remain at their existing paths.
 
@@ -60,6 +60,7 @@
 | Telegram 通信升级为 MTProto API（MTProto-only，移除 Bot API） | active | implemented | telegram-mtproto-storage/SPEC.md | - | legacy plan 0004; pending delete approval=docs/plan/0004:telegram-mtproto-storage/PLAN.md |
 | 支持 `.televyignore` 的文件/目录忽略能力 | active | implemented | televyignore-target-ignore/SPEC.md | - | legacy spec id g7gt3 normalized to slug-only |
 | 统一进度条规范（含 Prepare 并行）与四处 UI 对齐 | active | implemented | unified-backup-progress-prepare/SPEC.md | - | legacy spec id z324m normalized to slug-only |
+| 备份目标 WebDAV 浏览卷 | active | planned | webdav-snapshot-browsing/SPEC.md | - | canonical slug-only topic |
 
 ## Migration Rules
 

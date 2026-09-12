@@ -38,6 +38,7 @@ jobs:
       reason: ${{ steps.release.outputs.reason }}
       release_state: ${{ steps.release.outputs.release_state }}
       tag_status: ${{ steps.release.outputs.tag_status }}
+      helper_source_tag: ${{ steps.release.outputs.helper_source_tag }}
     steps:
       - name: Checkout main history
         uses: actions/checkout@v4
@@ -82,6 +83,55 @@ jobs:
           tag="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag"])')"
           channel="$(python3 scripts/product-version.py --mode release --source-sha "${TARGET_INPUT}" --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["channel"])')"
           test "${version}" = "$(python3 scripts/product-version.py --mode release --source-sha "${TARGET_INPUT}")"
+          helper_source_tag=""
+          core_version="${version%%-rc.*}"
+          bootstrap_helper_tag="$(python3 -c 'import json; print(json.load(open("packaging/macos/snapshot-components.lock.json", encoding="utf-8"))["bootstrap_release_tag"])')"
+          if [[ "${channel}" == rc ]]; then
+            rc_number="${version##*-rc.}"
+            if ((rc_number > 1)); then
+              helper_source_tag="v${core_version}-rc.1"
+            elif [[ "v${core_version}-rc.1" != "${bootstrap_helper_tag}" ]]; then
+              helper_source_tag="${bootstrap_helper_tag}"
+            fi
+          else
+            helper_source_tag="v${core_version}-rc.1"
+          fi
+          if [[ -n "${helper_source_tag}" ]]; then
+            helper_version="${helper_source_tag#v}"
+            source_release_json="$(gh release view "${helper_source_tag}" --json isDraft,isPrerelease,assets)"
+            source_is_draft="$(printf '%s' "${source_release_json}" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isDraft"]).lower())')"
+            source_is_prerelease="$(printf '%s' "${source_release_json}" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isPrerelease"]).lower())')"
+            if [[ "${source_is_draft}" != false || "${source_is_prerelease}" != true ]]; then
+              echo "helper source must be a published prerelease: ${helper_source_tag}" >&2
+              exit 1
+            fi
+            printf '%s' "${source_release_json}" | python3 -c 'import json,sys; names={a["name"] for a in json.load(sys.stdin)["assets"]}; expected=sys.argv[1:]; missing=[name for name in expected if name not in names]; print("\n".join(missing)); sys.exit(bool(missing))' "TelevyBackup-${helper_version}.dmg" "BUILD-MANIFEST.json" "SHA256SUMS" || {
+              echo "helper source release is missing its Universal DMG, BUILD-MANIFEST.json, or SHA256SUMS: ${helper_source_tag}" >&2
+              exit 1
+            }
+            source_manifest_dir="${RUNNER_TEMP}/snapshot-helper-source"
+            mkdir -p "${source_manifest_dir}"
+            gh release download "${helper_source_tag}" --repo "$GITHUB_REPOSITORY" --pattern "BUILD-MANIFEST.json" --dir "${source_manifest_dir}"
+            python3 - "${source_manifest_dir}/BUILD-MANIFEST.json" packaging/macos/snapshot-components.lock.json "${helper_source_tag}" <<'PY'
+          import json, sys
+
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          lock = json.load(open(sys.argv[2], encoding="utf-8"))
+          source_tag = sys.argv[3]
+          expected = lock["components"]["snapshot_access"]
+          actual = manifest["components"]["snapshot_access"]
+          if manifest.get("release_version") != source_tag.removeprefix("v"):
+              raise SystemExit("Snapshot Access source manifest version does not match its release tag")
+          for field in ("bundle_id", "relative_path", "binary", "component_version", "protocol_version", "reuse_policy"):
+              if actual.get(field) != expected.get(field):
+                  raise SystemExit(
+                      f"Snapshot Access source component contract mismatch: {field}"
+                  )
+          PY
+          elif [[ "${channel}" == stable ]]; then
+            echo "stable release requires a previously published RC Universal Snapshot Access helper" >&2
+            exit 1
+          fi
           sequence_json="$(python3 .github/scripts/release_chain.py verify-release-sequence --version "${version}" --expected-sha "${TARGET_INPUT}")"
           tag_status="$(printf '%s' "${sequence_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
           release_state=missing
@@ -114,6 +164,7 @@ jobs:
               echo "reason=already_published"
               echo "release_state=published"
               echo "tag_status=${tag_status}"
+              echo "helper_source_tag=${helper_source_tag}"
             } >> "$GITHUB_OUTPUT"
             echo "Product release already published for ${tag}; no rebuild or asset overwrite"
             exit 0
@@ -127,6 +178,7 @@ jobs:
             echo "reason=product_merge"
             echo "release_state=${release_state}"
             echo "tag_status=${tag_status}"
+            echo "helper_source_tag=${helper_source_tag}"
           } >> "$GITHUB_OUTPUT"
           echo "RELEASE_TARGET_SHA=${TARGET_INPUT} RELEASE_VERSION=${version} RELEASE_TAG=${tag}"
 
@@ -144,7 +196,44 @@ jobs:
         with:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
+      - name: Fetch approved Snapshot Access helper
+        if: needs.resolve.outputs.helper_source_tag != ''
+        env:
+          HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          helper_version="${HELPER_SOURCE_TAG#v}"
+          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
+          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --pattern "SHA256SUMS" --dir "$RUNNER_TEMP/snapshot-helper"
+          source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"
+          python3 - "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" "$RUNNER_TEMP/snapshot-helper/SHA256SUMS" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" "$helper_version" "$source_tag_commit" <<'PY'
+          import hashlib, json, sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["release_version"] == sys.argv[4]
+          assert manifest["source_commit"] == sys.argv[5]
+          name = sys.argv[3].rsplit('/', 1)[-1]
+          asset = next(item for item in manifest["assets"] if item["name"] == name)
+          with open(sys.argv[3], "rb") as handle:
+              data = handle.read()
+          digest = hashlib.sha256(data).hexdigest()
+          assert asset["sha256"] == digest
+          assert asset["bytes"] == len(data)
+          checksum = next(line.split()[0] for line in open(sys.argv[2], encoding="utf-8") if line.rstrip().endswith("  " + name))
+          assert checksum == digest
+          PY
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
+          ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
+          hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
+          bash scripts/macos/verify-component-identity.sh \
+            --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
+          echo "TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE=$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" >> "$GITHUB_ENV"
       - run: bash scripts/macos/package-release.sh --mode release --arch arm64 --output-dir dist/arm64
+      - name: Verify reused Snapshot Access identity
+        if: needs.resolve.outputs.helper_source_tag != ''
+        run: bash scripts/macos/verify-component-identity.sh --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/arm64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
       - uses: actions/upload-artifact@v4
         with:
           name: release-package-arm64
@@ -164,7 +253,44 @@ jobs:
         with:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
+      - name: Fetch approved Snapshot Access helper
+        if: needs.resolve.outputs.helper_source_tag != ''
+        env:
+          HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          helper_version="${HELPER_SOURCE_TAG#v}"
+          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
+          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --pattern "SHA256SUMS" --dir "$RUNNER_TEMP/snapshot-helper"
+          source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"
+          python3 - "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" "$RUNNER_TEMP/snapshot-helper/SHA256SUMS" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" "$helper_version" "$source_tag_commit" <<'PY'
+          import hashlib, json, sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["release_version"] == sys.argv[4]
+          assert manifest["source_commit"] == sys.argv[5]
+          name = sys.argv[3].rsplit('/', 1)[-1]
+          asset = next(item for item in manifest["assets"] if item["name"] == name)
+          with open(sys.argv[3], "rb") as handle:
+              data = handle.read()
+          digest = hashlib.sha256(data).hexdigest()
+          assert asset["sha256"] == digest
+          assert asset["bytes"] == len(data)
+          checksum = next(line.split()[0] for line in open(sys.argv[2], encoding="utf-8") if line.rstrip().endswith("  " + name))
+          assert checksum == digest
+          PY
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
+          ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
+          hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
+          bash scripts/macos/verify-component-identity.sh \
+            --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
+          echo "TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE=$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" >> "$GITHUB_ENV"
       - run: bash scripts/macos/package-release.sh --mode release --arch x86_64 --output-dir dist/x86_64
+      - name: Verify reused Snapshot Access identity
+        if: needs.resolve.outputs.helper_source_tag != ''
+        run: bash scripts/macos/verify-component-identity.sh --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/x86_64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
       - uses: actions/upload-artifact@v4
         with:
           name: release-package-x86_64
@@ -188,12 +314,51 @@ jobs:
         with:
           name: release-package-x86_64
           path: dist/x86_64
+      - name: Fetch approved Snapshot Access helper for final assembly
+        if: needs.resolve.outputs.helper_source_tag != ''
+        env:
+          HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          helper_version="${HELPER_SOURCE_TAG#v}"
+          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
+          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --pattern "SHA256SUMS" --dir "$RUNNER_TEMP/snapshot-helper"
+          source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"
+          python3 - "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" "$RUNNER_TEMP/snapshot-helper/SHA256SUMS" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" "$helper_version" "$source_tag_commit" <<'PY'
+          import hashlib, json, sys
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert manifest["release_version"] == sys.argv[4]
+          assert manifest["source_commit"] == sys.argv[5]
+          name = sys.argv[3].rsplit('/', 1)[-1]
+          asset = next(item for item in manifest["assets"] if item["name"] == name)
+          with open(sys.argv[3], "rb") as handle:
+              data = handle.read()
+          digest = hashlib.sha256(data).hexdigest()
+          assert asset["sha256"] == digest
+          assert asset["bytes"] == len(data)
+          checksum = next(line.split()[0] for line in open(sys.argv[2], encoding="utf-8") if line.rstrip().endswith("  " + name))
+          assert checksum == digest
+          PY
+          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
+          ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
+          hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
+          bash scripts/macos/verify-component-identity.sh \
+            --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+            --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
       - name: Assemble and validate final assets
         env:
           RUST_TOOLCHAIN: 1.91.0
+          HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
         run: |
           set -euo pipefail
           mkdir -p dist/final
+          if [[ -n "${HELPER_SOURCE_TAG}" ]]; then
+            export TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=rc1-universal-artifact
+          else
+            export TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=fresh-rc1-build
+          fi
           arm_app="$(find dist/arm64 -maxdepth 1 -type d -name '*.app' -print -quit)"
           x86_app="$(find dist/x86_64 -maxdepth 1 -type d -name '*.app' -print -quit)"
           bash scripts/macos/assemble-universal.sh --mode release --arm64-app "$arm_app" --x86_64-app "$x86_app" --output-dir dist/final
@@ -203,15 +368,95 @@ jobs:
           cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
           bash scripts/macos/generate-release-manifest.sh --mode release --asset-dir dist/final --source-commit "${{ needs.resolve.outputs.source_sha }}" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
           bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final
+          if [[ -n "${HELPER_SOURCE_TAG}" ]]; then
+            bash scripts/macos/verify-component-identity.sh \
+              --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
+              --candidate "dist/final/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" \
+              --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: release-assets
           path: dist/final
 
+  macos-acceptance:
+    name: Require macOS RC acceptance for stable
+    needs: [resolve, assemble]
+    if: needs.resolve.outputs.enabled == 'true' && needs.resolve.outputs.channel == 'stable'
+    runs-on: ubuntu-latest
+    environment:
+      name: macos-release-acceptance
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.source_sha }}
+          fetch-depth: 1
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+      - name: Download and bind RC release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          core_version="${{ needs.resolve.outputs.version }}"
+          for rc_number in 1 2; do
+            rc_version="${core_version}-rc.${rc_number}"
+            rc_tag="v${rc_version}"
+            rc_dir="release-rc/rc${rc_number}"
+            mkdir -p "${rc_dir}"
+            gh release download "${rc_tag}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "TelevyBackup-${rc_version}.dmg" \
+              --pattern "BUILD-MANIFEST.json" \
+              --pattern "SHA256SUMS" \
+              --dir "${rc_dir}"
+            git fetch --force origin "refs/tags/${rc_tag}:refs/tags/${rc_tag}"
+            source_commit="$(git rev-list -n 1 "${rc_tag}^{commit}")"
+            echo "RC${rc_number}_SOURCE_COMMIT=${source_commit}" >> "$GITHUB_ENV"
+          done
+      - name: Verify manual RC1 to RC2 acceptance evidence
+        env:
+          ACCEPTANCE_EVIDENCE: ${{ vars.TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          core_version="${{ needs.resolve.outputs.version }}"
+          rc1_tag="v${core_version}-rc.1"
+          rc2_tag="v${core_version}-rc.2"
+          rc1_json="$(gh release view "$rc1_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
+          rc2_json="$(gh release view "$rc2_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
+          python3 - "$rc1_json" "$rc2_json" <<'PY'
+          import json, sys
+          for raw in sys.argv[1:]:
+              state = json.loads(raw)
+              assert state["isDraft"] is False
+              assert state["isPrerelease"] is True
+          PY
+          python3 .github/scripts/verify-macos-rc-acceptance.py \
+            --evidence "$ACCEPTANCE_EVIDENCE" \
+            --manifest release-assets/BUILD-MANIFEST.json \
+            --stable-version "$core_version" \
+            --rc1-tag "$rc1_tag" \
+            --rc2-tag "$rc2_tag" \
+            --stable-source-commit "${{ needs.resolve.outputs.source_sha }}" \
+            --rc1-manifest release-rc/rc1/BUILD-MANIFEST.json \
+            --rc1-checksums release-rc/rc1/SHA256SUMS \
+            --rc1-dmg "release-rc/rc1/TelevyBackup-${core_version}-rc.1.dmg" \
+            --rc1-source-commit "$RC1_SOURCE_COMMIT" \
+            --rc2-manifest release-rc/rc2/BUILD-MANIFEST.json \
+            --rc2-checksums release-rc/rc2/SHA256SUMS \
+            --rc2-dmg "release-rc/rc2/TelevyBackup-${core_version}-rc.2.dmg" \
+            --rc2-source-commit "$RC2_SOURCE_COMMIT"
+
   publish:
     name: Publish GitHub Release
-    needs: [resolve, assemble]
-    if: needs.resolve.outputs.enabled == 'true'
+    needs: [resolve, assemble, macos-acceptance]
+    if: >-
+      always() && needs.resolve.outputs.enabled == 'true' &&
+      needs.assemble.result == 'success' &&
+      (needs.resolve.outputs.channel != 'stable' || needs.macos-acceptance.result == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: write

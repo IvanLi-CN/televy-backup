@@ -259,6 +259,56 @@ struct SettingsV2: Codable {
     var telegram_endpoints: [TelegramEndpointV2]
     var targets: [TargetV2]
     var snapshot_volumes: [String: SnapshotVolumeSettingV2]
+    var snapshot_browsing: SnapshotBrowsingV2
+
+    enum CodingKeys: String, CodingKey {
+        case version, schedule, retention, chunking, telegram, telegram_endpoints, targets, snapshot_volumes, snapshot_browsing
+    }
+
+    init(
+        version: Int,
+        schedule: ScheduleV2,
+        retention: RetentionV2,
+        chunking: ChunkingV2,
+        telegram: TelegramGlobalV2,
+        telegram_endpoints: [TelegramEndpointV2],
+        targets: [TargetV2],
+        snapshot_volumes: [String: SnapshotVolumeSettingV2],
+        snapshot_browsing: SnapshotBrowsingV2 = .default
+    ) {
+        self.version = version
+        self.schedule = schedule
+        self.retention = retention
+        self.chunking = chunking
+        self.telegram = telegram
+        self.telegram_endpoints = telegram_endpoints
+        self.targets = targets
+        self.snapshot_volumes = snapshot_volumes
+        self.snapshot_browsing = snapshot_browsing
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        schedule = try container.decode(ScheduleV2.self, forKey: .schedule)
+        retention = try container.decode(RetentionV2.self, forKey: .retention)
+        chunking = try container.decode(ChunkingV2.self, forKey: .chunking)
+        telegram = try container.decode(TelegramGlobalV2.self, forKey: .telegram)
+        telegram_endpoints = try container.decode([TelegramEndpointV2].self, forKey: .telegram_endpoints)
+        targets = try container.decode([TargetV2].self, forKey: .targets)
+        snapshot_volumes = try container.decode([String: SnapshotVolumeSettingV2].self, forKey: .snapshot_volumes)
+        snapshot_browsing = try container.decodeIfPresent(SnapshotBrowsingV2.self, forKey: .snapshot_browsing) ?? .default
+    }
+}
+
+struct SnapshotBrowsingV2: Codable, Equatable {
+    var cache_max_bytes: UInt64
+
+    static let `default` = SnapshotBrowsingV2(cache_max_bytes: 20 * 1024 * 1024 * 1024)
+
+    var cacheGiB: Int {
+        Int(cache_max_bytes / (1024 * 1024 * 1024))
+    }
 }
 
 struct SnapshotVolumeSettingV2: Codable, Equatable {
@@ -280,6 +330,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let accessAppPath: String?
     let registeredAccessAppPath: String?
     let accessAppRegistrationMismatch: Bool
+    let managedBy: String?
+    let migrationState: String?
+    let legacyRegistrationPath: String?
     let fdaReady: Bool
     let fdaCheckError: String?
     let accessAppError: String?
@@ -292,7 +345,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let volumes: [SnapshotVolumeStatus]
 
     private enum CodingKeys: String, CodingKey {
-        case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, registeredAccessAppPath, accessAppRegistrationMismatch, fdaReady, fdaCheckError, accessAppError
+        case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, registeredAccessAppPath, accessAppRegistrationMismatch, managedBy, migrationState, legacyRegistrationPath, fdaReady, fdaCheckError, accessAppError
         case mountHelperPath, mountHelperReachable, mountHelperVersion, mountHelperError
         case helperAvailable, helperVersion, helperError
         case activeLeases, pendingCleanup, volumes
@@ -305,6 +358,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
         accessAppPath: String?,
         registeredAccessAppPath: String? = nil,
         accessAppRegistrationMismatch: Bool = false,
+        managedBy: String? = nil,
+        migrationState: String? = nil,
+        legacyRegistrationPath: String? = nil,
         fdaReady: Bool,
         fdaCheckError: String? = nil,
         accessAppError: String?,
@@ -322,6 +378,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
         self.accessAppPath = accessAppPath
         self.registeredAccessAppPath = registeredAccessAppPath
         self.accessAppRegistrationMismatch = accessAppRegistrationMismatch
+        self.managedBy = managedBy
+        self.migrationState = migrationState
+        self.legacyRegistrationPath = legacyRegistrationPath
         self.fdaReady = fdaReady
         self.fdaCheckError = fdaCheckError
         self.accessAppError = accessAppError
@@ -345,6 +404,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
         accessAppPath = try values.decodeIfPresent(String.self, forKey: .accessAppPath)
         registeredAccessAppPath = try values.decodeIfPresent(String.self, forKey: .registeredAccessAppPath)
         accessAppRegistrationMismatch = try values.decodeIfPresent(Bool.self, forKey: .accessAppRegistrationMismatch) ?? false
+        managedBy = try values.decodeIfPresent(String.self, forKey: .managedBy)
+        migrationState = try values.decodeIfPresent(String.self, forKey: .migrationState)
+        legacyRegistrationPath = try values.decodeIfPresent(String.self, forKey: .legacyRegistrationPath)
         fdaReady = try values.decodeIfPresent(Bool.self, forKey: .fdaReady) ?? false
         fdaCheckError = try values.decodeIfPresent(String.self, forKey: .fdaCheckError)
         accessAppError = try values.decodeIfPresent(String.self, forKey: .accessAppError)
@@ -684,7 +746,8 @@ private enum SettingsUIDemo {
             targets: targets,
             snapshot_volumes: [
                 "A1B2C3D4-E5F6-47A8-9012-ABCDEF123456": SnapshotVolumeSettingV2(enabled: scene != "snapshots-disabled")
-            ]
+            ],
+            snapshot_browsing: .default
         )
     }
 }
@@ -845,6 +908,35 @@ struct SettingsWindowRootView: View {
             Toggle("Show transfer rates in menu bar", isOn: $showsMenuBarTransferRates)
                 .toggleStyle(.switch)
 
+            if settings != nil {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Snapshot browsing cache")
+                                .font(.system(size: 13, weight: .semibold))
+                            Spacer()
+                            Text("\(settings!.snapshot_browsing.cacheGiB) GiB")
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: Binding(
+                            get: { Double(settings?.snapshot_browsing.cacheGiB ?? 20) },
+                            set: { value in
+                                let gib = UInt64(min(max(value.rounded(), 1), 1024))
+                                settings?.snapshot_browsing.cache_max_bytes = gib * 1024 * 1024 * 1024
+                            }
+                        ), in: 1...1024, step: 1)
+                        .onChange(of: settings?.snapshot_browsing.cache_max_bytes) { _, _ in queueAutoSave() }
+                        Text("Encrypted remote objects are cached locally; decrypted file bytes are not persisted.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                } label: {
+                    Text("Finder snapshot browsing")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+            }
+
             Spacer(minLength: 0)
         }
         .frame(maxWidth: 700, maxHeight: .infinity, alignment: .topLeading)
@@ -986,7 +1078,13 @@ struct SettingsWindowRootView: View {
                                     .lineLimit(2)
                             }
                             if snapshotStatus.accessAppRegistrationMismatch {
-                                Text("The running Access App differs from its registered launch path. Update Snapshot Access before restarting.")
+                                Text("Snapshot Access is using a legacy registration. Restart TelevyBackup to retry migration.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.orange)
+                                    .lineLimit(2)
+                            }
+                            if snapshotStatus.migrationState == "pending" {
+                                Text("Snapshot Access migration is waiting for the embedded helper to start.")
                                     .font(.system(size: 11))
                                     .foregroundStyle(.orange)
                                     .lineLimit(2)
@@ -1063,7 +1161,9 @@ struct SettingsWindowRootView: View {
                 consistencyMode: strict ? "strict" : "live",
                 serviceReachable: !accessMissing,
                 accessAppVersion: accessMissing ? nil : "0.2.0",
-                accessAppPath: accessMissing ? nil : "~/Applications/TelevyBackup Snapshot Access.app",
+                accessAppPath: accessMissing ? nil : "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+                managedBy: accessMissing ? nil : "smappservice",
+                migrationState: accessMissing ? nil : "ready",
                 fdaReady: !accessMissing && SettingsUIDemo.scene != "snapshots-fda-required",
                 accessAppError: accessMissing ? "Snapshot Access is not installed" : (SettingsUIDemo.scene == "snapshots-fda-required" ? "Full Disk Access is required" : nil),
                 mountHelperPath: "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
@@ -2436,6 +2536,10 @@ struct SettingsWindowRootView: View {
         out.append("min_bytes = \(settings.chunking.min_bytes)")
         out.append("avg_bytes = \(settings.chunking.avg_bytes)")
         out.append("max_bytes = \(settings.chunking.max_bytes)")
+        out.append("")
+
+        out.append("[snapshot_browsing]")
+        out.append("cache_max_bytes = \(settings.snapshot_browsing.cache_max_bytes)")
         out.append("")
 
         out.append("[telegram]")
