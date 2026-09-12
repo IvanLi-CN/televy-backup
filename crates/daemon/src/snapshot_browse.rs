@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fmt::Debug;
 use std::io::SeekFrom;
@@ -756,18 +756,7 @@ impl SnapshotBrowseService {
                 }
             }
         }
-        let mut unavailable_entries = Vec::new();
-        for snapshot in &snapshots {
-            if let Ok(paths) = reader.unavailable_entries(&snapshot.snapshot_id).await {
-                unavailable_entries.extend(paths.into_iter().map(|path| {
-                    if path.is_empty() {
-                        snapshot.display_name.clone()
-                    } else {
-                        format!("{}/{}", snapshot.display_name, path)
-                    }
-                }));
-            }
-        }
+        let unavailable_entries = collect_unavailable_entries(&reader, &snapshots).await?;
         let diagnostics_json = Arc::new(
             serde_json::to_vec(&serde_json::json!({
                 "entries": unavailable_entries,
@@ -1349,16 +1338,77 @@ async fn snapshot_path(
 }
 
 async fn refresh_snapshots(session: &BrowseSession) -> Result<Vec<BrowseSnapshot>, FsError> {
-    match session.reader.list_snapshots(&session.source_path).await {
-        Ok(snapshots) => {
-            *session.snapshots.lock().await = snapshots.clone();
-            Ok(snapshots)
-        }
-        Err(_) => {
-            session.snapshots.lock().await.clear();
-            Err(FsError::GeneralFailure)
+    let fresh = session
+        .reader
+        .list_snapshots(&session.source_path)
+        .await
+        .map_err(|_| FsError::GeneralFailure)?;
+    let mut stored = session.snapshots.lock().await;
+    let previous_names = stored
+        .iter()
+        .map(|snapshot| {
+            (
+                snapshot.snapshot_id.as_str(),
+                snapshot.display_name.as_str(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut used_names = HashSet::new();
+
+    // Keep the first name assigned to each snapshot for the lifetime of the mount. New snapshots
+    // still receive the current local-time name, while removed snapshots disappear on refresh.
+    let mut snapshots = fresh;
+    for snapshot in &mut snapshots {
+        if let Some(previous_name) = previous_names.get(snapshot.snapshot_id.as_str()) {
+            snapshot.display_name = (*previous_name).to_string();
+            used_names.insert(snapshot.display_name.clone());
         }
     }
+    for snapshot in &mut snapshots {
+        if previous_names.contains_key(snapshot.snapshot_id.as_str()) {
+            continue;
+        }
+        let base_name = snapshot.display_name.clone();
+        let mut candidate = base_name.clone();
+        let mut suffix = 2;
+        while !used_names.insert(candidate.clone()) {
+            candidate = format!("{base_name} ({suffix})");
+            suffix += 1;
+        }
+        snapshot.display_name = candidate;
+    }
+
+    *stored = snapshots.clone();
+    Ok(snapshots)
+}
+
+async fn collect_unavailable_entries(
+    reader: &SnapshotContentReader,
+    snapshots: &[BrowseSnapshot],
+) -> Result<Vec<String>, ControlError> {
+    let mut unavailable_entries = Vec::new();
+    for snapshot in snapshots {
+        let paths = reader
+            .unavailable_entries(&snapshot.snapshot_id)
+            .await
+            .map_err(|error| ControlError {
+                code: "snapshot.browse.diagnostics_unavailable".to_string(),
+                message: "Snapshot diagnostics could not be collected.".to_string(),
+                retryable: true,
+                details: serde_json::json!({
+                    "snapshotId": snapshot.snapshot_id,
+                    "sourceCode": error.code(),
+                }),
+            })?;
+        unavailable_entries.extend(paths.into_iter().map(|path| {
+            if path.is_empty() {
+                snapshot.display_name.clone()
+            } else {
+                format!("{}/{}", snapshot.display_name, path)
+            }
+        }));
+    }
+    Ok(unavailable_entries)
 }
 
 fn metadata_overlay_path(relative: &str) -> bool {
@@ -1911,6 +1961,68 @@ mod tests {
                 .iter()
                 .any(|entry| entry.name.ends_with(b"[snapshot]"))
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_directory_names_remain_stable_while_pruned_snapshots_disappear() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db_path = temp.path().join("endpoint.sqlite");
+        let pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1234")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&pool)
+        .await
+        .unwrap();
+        drop(pool);
+
+        let session = test_session(&endpoint_db_path, temp.path()).await;
+        refresh_snapshots(&session).await.unwrap();
+        session.snapshots.lock().await[0].display_name = "Stable Snapshot".to_string();
+
+        let refreshed = refresh_snapshots(&session).await.unwrap();
+        assert_eq!(refreshed[0].display_name, "Stable Snapshot");
+
+        let pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM snapshots WHERE snapshot_id = ?")
+            .bind("snapshot-1234")
+            .execute(&pool)
+            .await
+            .unwrap();
+        drop(pool);
+
+        assert!(refresh_snapshots(&session).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_entry_errors_are_reported_during_mount_setup() {
+        let temp = tempfile::tempdir().unwrap();
+        let reader = SnapshotContentReader::new_cached(
+            temp.path().join("endpoint.sqlite"),
+            temp.path().join("filemaps"),
+            "test.mem",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+        let snapshots = [BrowseSnapshot {
+            snapshot_id: "snapshot-1234".to_string(),
+            display_name: "Snapshot".to_string(),
+            created_at: "2026-09-11T08:00:00Z".to_string(),
+        }];
+
+        let error = collect_unavailable_entries(&reader, &snapshots)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "snapshot.browse.diagnostics_unavailable");
+        assert_eq!(error.details["snapshotId"], "snapshot-1234");
     }
 
     #[tokio::test]
