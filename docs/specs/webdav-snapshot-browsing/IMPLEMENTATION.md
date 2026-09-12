@@ -32,6 +32,7 @@
 - Existing retained snapshot filemaps contain regular-file and directory metadata plus symlink kind, but not a symlink target. Historical snapshots cannot gain that missing target retroactively.
 - The existing daemon control socket is the sole control-plane boundary. A new WebDAV listener must not be repurposed as a general daemon API.
 - A runtime implementation requires macOS Finder compatibility evidence before the feature can be exposed as a normal target-history action.
+- `scripts/macos/verify-webdav-snapshot-browsing.sh` runs the daemon protocol checks by default. Setting `TELEVYBACKUP_RUN_WEBDAV_MOUNT_ACCEPTANCE=1` runs the ignored macOS acceptance test, which uses the daemon's WebDAV listener with `/sbin/mount_webdav`, enumerates and copies a regular file, and exercises daemon recovery. That opt-in test requires a real macOS session with the necessary Full Disk Access grant; ordinary CI does not claim this evidence.
 
 ## Related Changes
 
