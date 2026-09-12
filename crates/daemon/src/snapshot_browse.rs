@@ -65,6 +65,7 @@ struct BrowseSession {
     catalog_source: String,
     reader: Arc<SnapshotContentReader>,
     snapshots: Arc<Mutex<Vec<BrowseSnapshot>>>,
+    retired_snapshot_names: Arc<Mutex<HashSet<String>>>,
     metadata_overlay: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     diagnostics_json: Arc<Vec<u8>>,
     shutdown: CancellationToken,
@@ -793,6 +794,7 @@ impl SnapshotBrowseService {
             catalog_source: catalog_source.to_string(),
             reader,
             snapshots: Arc::new(Mutex::new(snapshots)),
+            retired_snapshot_names: Arc::new(Mutex::new(HashSet::new())),
             metadata_overlay: Arc::new(Mutex::new(HashMap::new())),
             diagnostics_json,
             shutdown: shutdown.clone(),
@@ -1353,10 +1355,20 @@ async fn refresh_snapshots(session: &BrowseSession) -> Result<Vec<BrowseSnapshot
             )
         })
         .collect::<HashMap<_, _>>();
-    let mut used_names = HashSet::new();
+    let fresh_ids = fresh
+        .iter()
+        .map(|snapshot| snapshot.snapshot_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut retired_names = session.retired_snapshot_names.lock().await;
+    for snapshot in stored.iter() {
+        if !fresh_ids.contains(snapshot.snapshot_id.as_str()) {
+            retired_names.insert(snapshot.display_name.clone());
+        }
+    }
+    let mut used_names = retired_names.clone();
 
-    // Keep the first name assigned to each snapshot for the lifetime of the mount. New snapshots
-    // still receive the current local-time name, while removed snapshots disappear on refresh.
+    // Keep the first name assigned to each snapshot for the lifetime of the mount. Retired names
+    // remain reserved so a later snapshot cannot make an old Finder path resolve elsewhere.
     let mut snapshots = fresh;
     for snapshot in &mut snapshots {
         if let Some(previous_name) = previous_names.get(snapshot.snapshot_id.as_str()) {
@@ -1743,6 +1755,7 @@ mod tests {
                 Arc::new(SnapshotBrowseCache::new(cache_root, 1024 * 1024)),
             )),
             snapshots: Arc::new(Mutex::new(Vec::new())),
+            retired_snapshot_names: Arc::new(Mutex::new(HashSet::new())),
             metadata_overlay: Arc::new(Mutex::new(HashMap::new())),
             diagnostics_json: Arc::new(b"{}\n".to_vec()),
             shutdown: CancellationToken::new(),
@@ -2000,6 +2013,60 @@ mod tests {
         drop(pool);
 
         assert!(refresh_snapshots(&session).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pruned_snapshot_directory_names_are_not_reused() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db_path = temp.path().join("endpoint.sqlite");
+        let pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1234")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&pool)
+        .await
+        .unwrap();
+        drop(pool);
+
+        let session = test_session(&endpoint_db_path, temp.path()).await;
+        let initial_name = refresh_snapshots(&session).await.unwrap()[0]
+            .display_name
+            .clone();
+
+        let pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM snapshots WHERE snapshot_id = ?")
+            .bind("snapshot-1234")
+            .execute(&pool)
+            .await
+            .unwrap();
+        drop(pool);
+        assert!(refresh_snapshots(&session).await.unwrap().is_empty());
+
+        let pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1234")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&pool)
+        .await
+        .unwrap();
+        drop(pool);
+
+        let recreated = refresh_snapshots(&session).await.unwrap();
+        assert_ne!(recreated[0].display_name, initial_name);
     }
 
     #[tokio::test]
