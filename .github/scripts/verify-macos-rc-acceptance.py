@@ -120,12 +120,15 @@ if root_evidence.get("component_version") != root_manifest.get("component_versio
         fail("root_mount_helper.component_version is not compatible with BUILD-MANIFEST.json")
 if root_evidence.get("protocol_version") != root_manifest.get("protocol_version"):
     fail("root_mount_helper.protocol_version does not match BUILD-MANIFEST.json")
-equal_identity(
-    root_evidence.get("rc1"),
-    root_evidence.get("rc2"),
-    "root_mount_helper",
-    ("sha256", "artifact_sha256", "cdhash", "designated_requirement"),
-)
+root_identity_fields = ("sha256", "artifact_sha256", "cdhash", "designated_requirement")
+for rc_name in ("rc1", "rc2"):
+    required_identity(
+        root_evidence.get(rc_name),
+        root_manifest,
+        f"root_mount_helper.{rc_name}",
+        root_identity_fields,
+    )
+equal_identity(root_evidence.get("rc1"), root_evidence.get("rc2"), "root_mount_helper", root_identity_fields)
 
 
 def verify_rc_artifact(
