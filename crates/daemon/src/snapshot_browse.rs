@@ -2049,6 +2049,12 @@ mod tests {
             .unwrap();
         drop(pool);
         assert!(refresh_snapshots(&session).await.unwrap().is_empty());
+        assert!(
+            snapshot_path(&format!("{initial_name}/file.txt"), &session)
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         let pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
             .await
