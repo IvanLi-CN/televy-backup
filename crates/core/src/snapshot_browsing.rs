@@ -161,16 +161,17 @@ impl SnapshotContentReader {
         .bind(relative_path)
         .fetch_optional(&pool)
         .await?;
-        Ok(row.map(|row| {
-            let path: String = row.get("path");
-            BrowseEntry {
-                name: path.rsplit('/').next().unwrap_or(&path).to_string(),
-                path,
-                kind: row.get("kind"),
-                size: non_negative_u64(row.get::<i64, _>("size")),
-                mtime_ms: row.get("mtime_ms"),
-                mode: row.get("mode"),
-            }
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let path: String = row.get("path");
+        Ok(Some(BrowseEntry {
+            name: path.rsplit('/').next().unwrap_or(&path).to_string(),
+            path,
+            kind: row.get("kind"),
+            size: non_negative_u64(row.get::<i64, _>("size"))?,
+            mtime_ms: row.get("mtime_ms"),
+            mode: row.get("mode"),
         }))
     }
 
@@ -210,7 +211,7 @@ impl SnapshotContentReader {
                 name: name.to_string(),
                 kind,
                 size: if is_direct {
-                    non_negative_u64(row.get::<i64, _>("size"))
+                    non_negative_u64(row.get::<i64, _>("size"))?
                 } else {
                     0
                 },
@@ -259,9 +260,6 @@ impl SnapshotContentReader {
             .map(|len| start.saturating_add(len))
             .unwrap_or(entry.size)
             .min(entry.size);
-        if end <= start {
-            return Ok((entry, Vec::new()));
-        }
         let (pool, endpoint_attached, dedupe_attached) = self.filemap_pool(snapshot_id).await?;
         let file_id: String = sqlx::query_scalar(
             "SELECT file_id FROM files WHERE snapshot_id = ? AND path = ? AND kind = 'file' LIMIT 1",
@@ -360,6 +358,10 @@ impl SnapshotContentReader {
                     expected_offset, entry.size
                 ),
             });
+        }
+
+        if end <= start {
+            return Ok((entry, Vec::new()));
         }
 
         let mut out = Vec::with_capacity((end - start) as usize);
@@ -531,8 +533,13 @@ fn validate_relative_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn non_negative_u64(value: i64) -> u64 {
-    value.max(0) as u64
+fn non_negative_u64(value: i64) -> Result<u64> {
+    if value < 0 {
+        return Err(Error::Integrity {
+            message: format!("negative file size: {value}"),
+        });
+    }
+    Ok(value as u64)
 }
 
 fn local_display_time(value: &str) -> String {
@@ -781,6 +788,150 @@ mod tests {
         assert_eq!(
             reader.list_children("snapshot-1", "").await.unwrap()[0].name,
             "Folder"
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_rejects_negative_file_sizes() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db = temp.path().join("index.sqlite");
+        let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap = filemap_dir.join("snapshot-1.sqlite");
+        let filemap_pool = crate::index_db::open_snapshot_filemap_db(&filemap)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("file-1")
+        .bind("snapshot-1")
+        .bind("broken.txt")
+        .bind(-1_i64)
+        .bind(0_i64)
+        .bind(0o644_i64)
+        .bind("file")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
+
+        let reader = SnapshotContentReader::new_cached(
+            endpoint_db,
+            filemap_dir,
+            "test.mem",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+        let error = reader.entry("snapshot-1", "broken.txt").await.unwrap_err();
+
+        assert!(
+            matches!(error, Error::Integrity { message } if message.contains("negative file size"))
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_rejects_chunks_for_zero_length_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db = temp.path().join("index.sqlite");
+        let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap = filemap_dir.join("snapshot-1.sqlite");
+        let filemap_pool = crate::index_db::open_snapshot_filemap_db(&filemap)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("file-1")
+        .bind("snapshot-1")
+        .bind("empty.txt")
+        .bind(0_i64)
+        .bind(0_i64)
+        .bind(0o644_i64)
+        .bind("file")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES (?, ?, 'blake3', 'xchacha20poly1305', '2026-09-11T08:00:00Z')",
+        )
+        .bind("chunk-1")
+        .bind(1_i64)
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("file-1")
+        .bind(0_i64)
+        .bind("chunk-1")
+        .bind(0_i64)
+        .bind(1_i64)
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
+
+        let reader = SnapshotContentReader::new_cached(
+            endpoint_db,
+            filemap_dir,
+            "test.mem",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+        let error = reader
+            .read_range("snapshot-1", "empty.txt", 0, None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, Error::Integrity { message } if message.contains("not contiguous"))
         );
     }
 
