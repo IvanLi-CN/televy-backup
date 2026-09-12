@@ -259,6 +259,56 @@ struct SettingsV2: Codable {
     var telegram_endpoints: [TelegramEndpointV2]
     var targets: [TargetV2]
     var snapshot_volumes: [String: SnapshotVolumeSettingV2]
+    var snapshot_browsing: SnapshotBrowsingV2
+
+    enum CodingKeys: String, CodingKey {
+        case version, schedule, retention, chunking, telegram, telegram_endpoints, targets, snapshot_volumes, snapshot_browsing
+    }
+
+    init(
+        version: Int,
+        schedule: ScheduleV2,
+        retention: RetentionV2,
+        chunking: ChunkingV2,
+        telegram: TelegramGlobalV2,
+        telegram_endpoints: [TelegramEndpointV2],
+        targets: [TargetV2],
+        snapshot_volumes: [String: SnapshotVolumeSettingV2],
+        snapshot_browsing: SnapshotBrowsingV2 = .default
+    ) {
+        self.version = version
+        self.schedule = schedule
+        self.retention = retention
+        self.chunking = chunking
+        self.telegram = telegram
+        self.telegram_endpoints = telegram_endpoints
+        self.targets = targets
+        self.snapshot_volumes = snapshot_volumes
+        self.snapshot_browsing = snapshot_browsing
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        schedule = try container.decode(ScheduleV2.self, forKey: .schedule)
+        retention = try container.decode(RetentionV2.self, forKey: .retention)
+        chunking = try container.decode(ChunkingV2.self, forKey: .chunking)
+        telegram = try container.decode(TelegramGlobalV2.self, forKey: .telegram)
+        telegram_endpoints = try container.decode([TelegramEndpointV2].self, forKey: .telegram_endpoints)
+        targets = try container.decode([TargetV2].self, forKey: .targets)
+        snapshot_volumes = try container.decode([String: SnapshotVolumeSettingV2].self, forKey: .snapshot_volumes)
+        snapshot_browsing = try container.decodeIfPresent(SnapshotBrowsingV2.self, forKey: .snapshot_browsing) ?? .default
+    }
+}
+
+struct SnapshotBrowsingV2: Codable, Equatable {
+    var cache_max_bytes: UInt64
+
+    static let `default` = SnapshotBrowsingV2(cache_max_bytes: 20 * 1024 * 1024 * 1024)
+
+    var cacheGiB: Int {
+        Int(cache_max_bytes / (1024 * 1024 * 1024))
+    }
 }
 
 struct SnapshotVolumeSettingV2: Codable, Equatable {
@@ -696,7 +746,8 @@ private enum SettingsUIDemo {
             targets: targets,
             snapshot_volumes: [
                 "A1B2C3D4-E5F6-47A8-9012-ABCDEF123456": SnapshotVolumeSettingV2(enabled: scene != "snapshots-disabled")
-            ]
+            ],
+            snapshot_browsing: .default
         )
     }
 }
@@ -856,6 +907,35 @@ struct SettingsWindowRootView: View {
 
             Toggle("Show transfer rates in menu bar", isOn: $showsMenuBarTransferRates)
                 .toggleStyle(.switch)
+
+            if settings != nil {
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Snapshot browsing cache")
+                                .font(.system(size: 13, weight: .semibold))
+                            Spacer()
+                            Text("\(settings!.snapshot_browsing.cacheGiB) GiB")
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: Binding(
+                            get: { Double(settings?.snapshot_browsing.cacheGiB ?? 20) },
+                            set: { value in
+                                let gib = UInt64(min(max(value.rounded(), 1), 1024))
+                                settings?.snapshot_browsing.cache_max_bytes = gib * 1024 * 1024 * 1024
+                            }
+                        ), in: 1...1024, step: 1)
+                        .onChange(of: settings?.snapshot_browsing.cache_max_bytes) { _, _ in queueAutoSave() }
+                        Text("Encrypted remote objects are cached locally; decrypted file bytes are not persisted.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(12)
+                } label: {
+                    Text("Finder snapshot browsing")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+            }
 
             Spacer(minLength: 0)
         }
@@ -2456,6 +2536,10 @@ struct SettingsWindowRootView: View {
         out.append("min_bytes = \(settings.chunking.min_bytes)")
         out.append("avg_bytes = \(settings.chunking.avg_bytes)")
         out.append("max_bytes = \(settings.chunking.max_bytes)")
+        out.append("")
+
+        out.append("[snapshot_browsing]")
+        out.append("cache_max_bytes = \(settings.snapshot_browsing.cache_max_bytes)")
         out.append("")
 
         out.append("[telegram]")

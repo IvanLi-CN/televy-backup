@@ -423,6 +423,7 @@ mod tests {
                 schedule: None,
             }],
             snapshot_volumes: std::collections::BTreeMap::new(),
+            snapshot_browsing: crate::config::SnapshotBrowsing::default(),
         }
     }
 

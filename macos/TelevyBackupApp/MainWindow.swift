@@ -651,6 +651,13 @@ private struct TargetListRow: View {
             Button("Backup now") { onBackup() }
                 .disabled(!model.canEnqueueBackup())
             Divider()
+            Button("Browse backups in Finder") {
+                model.browseTargetInFinder(targetId: target.targetId) { result in
+                    if case let .failure(error) = result {
+                        model.showToast(controlFailureMessage(error), isError: true)
+                    }
+                }
+            }
             Button("Restore…") { onRestore() }
                 .disabled(isBusy)
             Button("Verify") { onVerify() }
@@ -676,6 +683,15 @@ private struct TargetDetailView: View {
         let systemImage: String
     }
 
+    private struct BrowseIssue: Identifiable {
+        let id = UUID()
+        let failure: ControlRequestFailure
+
+        var canBrowseCached: Bool {
+            failure.code == "snapshot.browse.catalog_refresh_unavailable"
+        }
+    }
+
     private enum Tab: String, CaseIterable, Identifiable {
         case history = "History"
         case diagnostics = "Diagnostics"
@@ -691,6 +707,19 @@ private struct TargetDetailView: View {
             }
         }
         return .history
+    }()
+    @State private var browseInFlight = false
+    @State private var browseMounted = false
+    @State private var browseUnmountInFlight = false
+    @State private var browseIssue: BrowseIssue? = {
+        guard MainWindowUIDemo.scene == "main-window-target-browse-cached-catalog" else {
+            return nil
+        }
+        return BrowseIssue(failure: ControlRequestFailure(
+            code: "snapshot.browse.catalog_refresh_unavailable",
+            message: "The remote backup catalog could not be refreshed. You can browse the last cached catalog.",
+            retryable: true
+        ))
     }()
 
     private var runs: [RunLogSummary] {
@@ -740,6 +769,25 @@ private struct TargetDetailView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidUnmount)) { _ in
+            browseMounted = false
+        }
+        .alert(item: $browseIssue) { issue in
+            if issue.canBrowseCached {
+                Alert(
+                    title: Text("Couldn’t refresh backup catalog"),
+                    message: Text(controlFailureMessage(issue.failure)),
+                    primaryButton: .default(Text("Browse Cached")) { browse(allowCachedCatalog: true) },
+                    secondaryButton: .cancel(Text("Cancel"))
+                )
+            } else {
+                Alert(
+                    title: Text("Couldn’t browse backups"),
+                    message: Text(controlFailureMessage(issue.failure)),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+        }
     }
 
     private var controlsRow: some View {
@@ -754,6 +802,38 @@ private struct TargetDetailView: View {
             .fixedSize()
 
             Spacer(minLength: 0)
+
+            if tab == .history {
+                if browseMounted {
+                    Button {
+                        unmountBrowse()
+                    } label: {
+                        if browseUnmountInFlight {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label("Eject backup volume", systemImage: "eject")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(browseUnmountInFlight)
+                } else {
+                    Button {
+                        browse()
+                    } label: {
+                        if browseInFlight {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label("Browse backups in Finder", systemImage: "externaldrive")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(browseInFlight)
+                }
+            }
 
             if tab == .diagnostics {
                 Button {
@@ -772,6 +852,35 @@ private struct TargetDetailView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+            }
+        }
+    }
+
+    private func browse(allowCachedCatalog: Bool = false) {
+        guard !browseInFlight else { return }
+        browseInFlight = true
+        model.browseTargetInFinder(targetId: target.targetId, allowCachedCatalog: allowCachedCatalog) { result in
+            browseInFlight = false
+            switch result {
+            case .success:
+                browseMounted = true
+                model.showToast("Backup volume opened in Finder", isError: false)
+            case let .failure(error):
+                browseIssue = BrowseIssue(failure: error)
+            }
+        }
+    }
+
+    private func unmountBrowse() {
+        guard !browseUnmountInFlight else { return }
+        browseUnmountInFlight = true
+        model.unmountTargetInFinder(targetId: target.targetId) { result in
+            browseUnmountInFlight = false
+            switch result {
+            case .success:
+                browseMounted = false
+            case let .failure(error):
+                model.showToast(controlFailureMessage(error), isError: true)
             }
         }
     }

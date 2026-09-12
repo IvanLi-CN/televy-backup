@@ -597,6 +597,17 @@ async fn snapshot_inspector_for(
     Ok(inspector)
 }
 
+pub(crate) async fn prepare_snapshot_filemap_for_browse(
+    config_root: &Path,
+    data_root: &Path,
+    settings: &Settings,
+    snapshot_id: &str,
+) -> Result<(), ControlError> {
+    snapshot_inspector_for(config_root, data_root, settings, snapshot_id, None)
+        .await
+        .map(|_| ())
+}
+
 async fn find_snapshot_endpoint_db(
     data_root: &Path,
     snapshot_id: &str,
@@ -1376,6 +1387,11 @@ mod tests {
                 )),
                 data_root: temp.path().join("data"),
                 snapshot_inspection: Arc::new(service),
+                snapshot_browse: Arc::new(crate::snapshot_browse::SnapshotBrowseService::new(
+                    config_root.clone(),
+                    temp.path().join("data"),
+                    settings,
+                )),
             },
         )
         .unwrap();
