@@ -109,6 +109,25 @@ jobs:
               echo "helper source release is missing its Universal DMG, BUILD-MANIFEST.json, or SHA256SUMS: ${helper_source_tag}" >&2
               exit 1
             }
+            source_manifest_dir="${RUNNER_TEMP}/snapshot-helper-source"
+            mkdir -p "${source_manifest_dir}"
+            gh release download "${helper_source_tag}" --repo "$GITHUB_REPOSITORY" --pattern "BUILD-MANIFEST.json" --dir "${source_manifest_dir}"
+            python3 - "${source_manifest_dir}/BUILD-MANIFEST.json" packaging/macos/snapshot-components.lock.json "${helper_source_tag}" <<'PY'
+          import json, sys
+
+          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+          lock = json.load(open(sys.argv[2], encoding="utf-8"))
+          source_tag = sys.argv[3]
+          expected = lock["components"]["snapshot_access"]
+          actual = manifest["components"]["snapshot_access"]
+          if manifest.get("release_version") != source_tag.removeprefix("v"):
+              raise SystemExit("Snapshot Access source manifest version does not match its release tag")
+          for field in ("bundle_id", "relative_path", "binary", "component_version", "protocol_version", "reuse_policy"):
+              if actual.get(field) != expected.get(field):
+                  raise SystemExit(
+                      f"Snapshot Access source component contract mismatch: {field}"
+                  )
+          PY
           elif [[ "${channel}" == stable ]]; then
             echo "stable release requires a previously published RC Universal Snapshot Access helper" >&2
             exit 1

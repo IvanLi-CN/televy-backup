@@ -66,6 +66,8 @@ assert 'SHA256SUMS" --dir' in release_workflow
 assert '--manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"' in release_workflow
 assert 'source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"' in release_workflow
 assert 'manifest["source_commit"] == sys.argv[5]' in release_workflow
+assert 'Snapshot Access source component contract mismatch' in release_workflow
+assert 'source_manifest_dir="${RUNNER_TEMP}/snapshot-helper-source"' in release_workflow
 assert "macos-release-acceptance" in release_workflow
 assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow
 assert "verify-macos-rc-acceptance.py" in release_workflow

@@ -340,11 +340,31 @@ impl SnapshotContentReader {
             }
         };
 
+        let mut expected_offset = 0_u64;
+        for row in &rows {
+            let (chunk_offset, _, chunk_end) = chunk_bounds(row)?;
+            if chunk_offset != expected_offset || chunk_end > entry.size {
+                return Err(Error::Integrity {
+                    message: format!(
+                        "file chunk layout is not contiguous: expected offset {}, got {}..{}",
+                        expected_offset, chunk_offset, chunk_end
+                    ),
+                });
+            }
+            expected_offset = chunk_end;
+        }
+        if expected_offset != entry.size {
+            return Err(Error::Integrity {
+                message: format!(
+                    "file chunk layout does not cover file: covered {} of {} bytes",
+                    expected_offset, entry.size
+                ),
+            });
+        }
+
         let mut out = Vec::with_capacity((end - start) as usize);
         for row in rows {
-            let chunk_offset = non_negative_u64(row.get::<i64, _>("offset"));
-            let chunk_len = non_negative_u64(row.get::<i64, _>("len"));
-            let chunk_end = chunk_offset.saturating_add(chunk_len);
+            let (chunk_offset, chunk_len, chunk_end) = chunk_bounds(&row)?;
             if chunk_end <= start || chunk_offset >= end {
                 continue;
             }
@@ -477,6 +497,22 @@ fn verify_chunk(chunk_hash: &str, plain: Vec<u8>) -> Result<Vec<u8>> {
         });
     }
     Ok(plain)
+}
+
+fn chunk_bounds(row: &sqlx::sqlite::SqliteRow) -> Result<(u64, u64, u64)> {
+    let offset: i64 = row.get("offset");
+    let len: i64 = row.get("len");
+    if offset < 0 || len <= 0 {
+        return Err(Error::Integrity {
+            message: format!("invalid file chunk bounds: offset={offset} len={len}"),
+        });
+    }
+    let offset = offset as u64;
+    let len = len as u64;
+    let end = offset.checked_add(len).ok_or_else(|| Error::Integrity {
+        message: format!("file chunk bounds overflow: offset={offset} len={len}"),
+    })?;
+    Ok((offset, len, end))
 }
 
 fn validate_relative_path(path: &str) -> Result<()> {
@@ -745,6 +781,90 @@ mod tests {
         assert_eq!(
             reader.list_children("snapshot-1", "").await.unwrap()[0].name,
             "Folder"
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_rejects_overlapping_file_chunks_before_loading_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db = temp.path().join("index.sqlite");
+        let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap = filemap_dir.join("snapshot-1.sqlite");
+        let filemap_pool = crate::index_db::open_snapshot_filemap_db(&filemap)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("file-1")
+        .bind("snapshot-1")
+        .bind("hello.txt")
+        .bind(6_i64)
+        .bind(0_i64)
+        .bind(0o644_i64)
+        .bind("file")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        for (seq, offset, len) in [(0_i64, 0_i64, 4_i64), (1_i64, 3_i64, 3_i64)] {
+            sqlx::query(
+                "INSERT INTO chunks (chunk_hash, size, hash_alg, enc_alg, created_at) VALUES (?, ?, 'blake3', 'xchacha20poly1305', '2026-09-11T08:00:00Z')",
+            )
+            .bind(format!("chunk-{seq}"))
+            .bind(len)
+            .execute(&filemap_pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO file_chunks (file_id, seq, chunk_hash, offset, len) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind("file-1")
+            .bind(seq)
+            .bind(format!("chunk-{seq}"))
+            .bind(offset)
+            .bind(len)
+            .execute(&filemap_pool)
+            .await
+            .unwrap();
+        }
+        drop(filemap_pool);
+
+        let reader = SnapshotContentReader::new_cached(
+            endpoint_db,
+            filemap_dir,
+            "test.mem",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+        let error = reader
+            .read_range("snapshot-1", "hello.txt", 0, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Integrity { message } if message.contains("not contiguous"))
         );
     }
 }

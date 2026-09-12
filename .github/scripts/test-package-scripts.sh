@@ -55,6 +55,9 @@ verify_release_text="$(<"$root_dir/scripts/macos/verify-release-assets.sh")"
 webdav_text="$(<"$root_dir/scripts/macos/verify-webdav-snapshot-browsing.sh")"
 [[ "$webdav_text" == *'cargo test --manifest-path "$root_dir/Cargo.toml" -p televybackupd webdav_service -- --list'* ]]
 [[ "$webdav_text" != *'http.server'* ]]
+[[ "$webdav_text" == *'TELEVYBACKUP_RUN_WEBDAV_MOUNT_ACCEPTANCE'* ]]
+[[ "$webdav_text" == *'cargo test --manifest-path "$root_dir/Cargo.toml" -p televybackupd snapshot_browse::tests -- --list'* ]]
+[[ "$webdav_text" == *'--exact --ignored --nocapture'* ]]
 
 package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" == *'--mode release|development'* ]]

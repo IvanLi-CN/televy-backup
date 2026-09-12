@@ -17,10 +17,22 @@ expected_tests=(
 )
 test_list="$(cargo test --manifest-path "$root_dir/Cargo.toml" -p televybackupd webdav_service -- --list)"
 for test_name in "${expected_tests[@]}"; do
-  grep -F "snapshot_browse::tests::$test_name" <<<"$test_list" >/dev/null || {
+  full_test_name="snapshot_browse::tests::$test_name"
+  grep -F "$full_test_name" <<<"$test_list" >/dev/null || {
     echo "ERROR: expected daemon WebDAV test is missing: $test_name" >&2
     exit 1
   }
-  cargo test --manifest-path "$root_dir/Cargo.toml" -p televybackupd "$test_name" -- --exact --nocapture
+  cargo test --manifest-path "$root_dir/Cargo.toml" -p televybackupd "$full_test_name" -- --exact --nocapture
 done
+if [[ "${TELEVYBACKUP_RUN_WEBDAV_MOUNT_ACCEPTANCE:-0}" == "1" ]]; then
+  full_test_name="snapshot_browse::tests::webdav_mount_webdav_enumerates_copies_and_recovers"
+  mount_test_list="$(cargo test --manifest-path "$root_dir/Cargo.toml" -p televybackupd snapshot_browse::tests -- --list)"
+  grep -F "$full_test_name" <<<"$mount_test_list" >/dev/null || {
+    echo "ERROR: expected macOS WebDAV mount acceptance test is missing" >&2
+    exit 1
+  }
+  cargo test --manifest-path "$root_dir/Cargo.toml" -p televybackupd "$full_test_name" -- --exact --ignored --nocapture
+else
+  echo "SKIP: set TELEVYBACKUP_RUN_WEBDAV_MOUNT_ACCEPTANCE=1 for real mount_webdav acceptance" >&2
+fi
 echo "OK: daemon-owned WebDAV service passed the macOS daemon checks"

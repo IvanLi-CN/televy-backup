@@ -1773,6 +1773,117 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires macOS mount_webdav and Full Disk Access"]
+    async fn webdav_mount_webdav_enumerates_copies_and_recovers() {
+        assert!(cfg!(target_os = "macos"));
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db_path = temp.path().join("endpoint.sqlite");
+        let endpoint_pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1234")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let session = Arc::new(test_session(&endpoint_db_path, temp.path()).await);
+        let expected = b"daemon-backed WebDAV fixture\n".to_vec();
+        session
+            .metadata_overlay
+            .lock()
+            .await
+            .insert("hello.txt".to_string(), expected.clone());
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve(listener, session.clone()));
+        let mount_dir = temp.path().join("webdav-mount");
+        std::fs::create_dir(&mount_dir).unwrap();
+        let _mount_guard = TestMountGuard(mount_dir.clone());
+        let url = format!(
+            "http://127.0.0.1:{}/{}/",
+            address.port(),
+            session.capability
+        );
+        let mount = std::process::Command::new("/sbin/mount_webdav")
+            .args(["-S", "-v", "TelevyBackup WebDAV Acceptance", &url])
+            .arg(&mount_dir)
+            .output()
+            .unwrap();
+        assert!(
+            mount.status.success(),
+            "mount_webdav failed: {}",
+            String::from_utf8_lossy(&mount.stderr)
+        );
+        assert!(wait_for_test_mount(&mount_dir));
+
+        let names = std::fs::read_dir(&mount_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "hello.txt"), "{names:?}");
+        let copied = temp.path().join("copied.txt");
+        std::fs::copy(mount_dir.join("hello.txt"), &copied).unwrap();
+        assert_eq!(std::fs::read(copied).unwrap(), expected);
+
+        let service = SnapshotBrowseService::new(
+            temp.path().join("config"),
+            temp.path().join("data"),
+            Arc::new(RwLock::new(SettingsV2::default())),
+        );
+        service
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), session.clone());
+        service
+            .target_sessions
+            .lock()
+            .await
+            .insert(session.target_id.clone(), session.id.clone());
+        service.recover().await;
+        assert!(service.sessions.lock().await.is_empty());
+        server.await.unwrap();
+    }
+
+    struct TestMountGuard(PathBuf);
+
+    impl Drop for TestMountGuard {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("/sbin/umount")
+                .args(["-f"])
+                .arg(&self.0)
+                .status();
+        }
+    }
+
+    fn wait_for_test_mount(path: &Path) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            let mounted = std::process::Command::new("/sbin/mount")
+                .output()
+                .map(|output| {
+                    String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .any(|line| line.contains(&format!(" on {} ", path.display())))
+                })
+                .unwrap_or(false);
+            if mounted {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
     #[tokio::test]
     async fn root_directory_lists_retained_snapshots() {
         let temp = tempfile::tempdir().unwrap();

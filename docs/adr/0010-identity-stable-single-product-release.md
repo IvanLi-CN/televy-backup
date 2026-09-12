@@ -16,6 +16,12 @@ product-version boundaries. The `bootstrap_release_tag` in
 Snapshot Access component or its FDA behavior changes, which makes that version's RC1 the new
 explicit authorization migration point. Reuse forbids rebuilding, `lipo`, deep signing, or any
 other mutation of the helper.
+
+For an RC1, the target product tag must equal `bootstrap_release_tag` when the locked component is
+being established, so the workflow performs a fresh Universal build. Otherwise the workflow may
+reuse the bootstrap release only after its `BUILD-MANIFEST.json` matches the locked component
+metadata. A mismatch fails closed; a stale bootstrap tag can never silently reuse an older helper
+identity after a component change.
 The outer app is signed from the inside out. The helper's component version, IPC protocol version,
 source policy, executable SHA-256, complete artifact digest, CodeDirectory hash, and designated
 requirement are recorded in the release manifest.

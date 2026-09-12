@@ -99,6 +99,8 @@
 - covers: `REQ-WDB-005`, `REQ-WDB-006`, `REQ-WDB-009`
 - Pass condition: Finder can enumerate and copy regular files, requested metadata writes stay session-local, no idle period closes a mounted volume, and eject or recovery revokes the mount and capability.
 
+The repository provides the daemon-backed portion of this acceptance as an ignored macOS test. Run `TELEVYBACKUP_RUN_WEBDAV_MOUNT_ACCEPTANCE=1 scripts/macos/verify-webdav-snapshot-browsing.sh` on a real macOS session with the required Full Disk Access grant; the normal CI invocation intentionally reports this real-mount evidence as pending rather than substituting a daemon unit test for it.
+
 ## Related ADRs
 
 - [0001-snapshot-inspection-retention](../../adr/0001-snapshot-inspection-retention.md)
