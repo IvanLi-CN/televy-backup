@@ -49,8 +49,10 @@ pub struct BrowseEntry {
 pub struct SnapshotContentReader {
     endpoint_db_path: PathBuf,
     filemap_dir: PathBuf,
-    storage: Arc<dyn Storage + Send + Sync>,
-    master_key: [u8; 32],
+    dedupe_db_path: Option<PathBuf>,
+    storage_provider: String,
+    storage: Option<Arc<dyn Storage + Send + Sync>>,
+    master_key: Option<[u8; 32]>,
     cache: Arc<SnapshotBrowseCache>,
 }
 
@@ -65,10 +67,37 @@ impl SnapshotContentReader {
         Self {
             endpoint_db_path: endpoint_db_path.into(),
             filemap_dir: filemap_dir.into(),
-            storage,
-            master_key,
+            dedupe_db_path: None,
+            storage_provider: storage.provider().to_string(),
+            storage: Some(storage),
+            master_key: Some(master_key),
             cache,
         }
+    }
+
+    /// Creates a reader that can inspect retained local metadata without initializing remote
+    /// storage or loading the vault. File reads remain fail-closed until both a decryption key
+    /// and a storage provider are available (or a previously fetched object is cached).
+    pub fn new_cached(
+        endpoint_db_path: impl Into<PathBuf>,
+        filemap_dir: impl Into<PathBuf>,
+        storage_provider: impl Into<String>,
+        cache: Arc<SnapshotBrowseCache>,
+    ) -> Self {
+        Self {
+            endpoint_db_path: endpoint_db_path.into(),
+            filemap_dir: filemap_dir.into(),
+            dedupe_db_path: None,
+            storage_provider: storage_provider.into(),
+            storage: None,
+            master_key: None,
+            cache,
+        }
+    }
+
+    pub fn with_dedupe_db(mut self, path: impl Into<PathBuf>) -> Self {
+        self.dedupe_db_path = Some(path.into());
+        self
     }
 
     pub async fn list_snapshots(&self, source_path: &str) -> Result<Vec<BrowseSnapshot>> {
@@ -124,7 +153,7 @@ impl SnapshotContentReader {
                 mode: 0o755,
             }));
         }
-        let (pool, _) = self.filemap_pool(snapshot_id).await?;
+        let (pool, _, _) = self.filemap_pool(snapshot_id).await?;
         let row = sqlx::query(
             "SELECT path, size, mtime_ms, mode, kind FROM files WHERE snapshot_id = ? AND path = ? LIMIT 1",
         )
@@ -147,7 +176,7 @@ impl SnapshotContentReader {
 
     pub async fn list_children(&self, snapshot_id: &str, parent: &str) -> Result<Vec<BrowseEntry>> {
         validate_relative_path(parent)?;
-        let (pool, _) = self.filemap_pool(snapshot_id).await?;
+        let (pool, _, _) = self.filemap_pool(snapshot_id).await?;
         let rows = sqlx::query(
             "SELECT path, size, mtime_ms, mode, kind FROM files WHERE snapshot_id = ? ORDER BY path",
         )
@@ -193,7 +222,7 @@ impl SnapshotContentReader {
     }
 
     pub async fn unavailable_entries(&self, snapshot_id: &str) -> Result<Vec<String>> {
-        let (pool, _) = self.filemap_pool(snapshot_id).await?;
+        let (pool, _, _) = self.filemap_pool(snapshot_id).await?;
         let rows = sqlx::query(
             "SELECT path FROM files WHERE snapshot_id = ? AND kind NOT IN ('file', 'dir') ORDER BY path",
         )
@@ -233,7 +262,7 @@ impl SnapshotContentReader {
         if end <= start {
             return Ok((entry, Vec::new()));
         }
-        let (pool, endpoint_attached) = self.filemap_pool(snapshot_id).await?;
+        let (pool, endpoint_attached, dedupe_attached) = self.filemap_pool(snapshot_id).await?;
         let file_id: String = sqlx::query_scalar(
             "SELECT file_id FROM files WHERE snapshot_id = ? AND path = ? AND kind = 'file' LIMIT 1",
         )
@@ -241,30 +270,74 @@ impl SnapshotContentReader {
         .bind(relative_path)
         .fetch_one(&pool)
         .await?;
-        let rows = if endpoint_attached {
-            sqlx::query(
-                "SELECT fc.chunk_hash, fc.offset, fc.len, COALESCE(ep.object_id, co.object_id) AS object_id
-                 FROM file_chunks fc
-                 LEFT JOIN browse_endpoint.chunk_objects ep ON ep.chunk_hash = fc.chunk_hash AND ep.provider = ?
-                 LEFT JOIN chunk_objects co ON co.chunk_hash = fc.chunk_hash AND co.provider = ?
-                 WHERE fc.file_id = ? ORDER BY fc.seq",
-            )
-            .bind(self.storage.provider())
-            .bind(self.storage.provider())
-            .bind(&file_id)
-            .fetch_all(&pool)
-            .await?
-        } else {
-            sqlx::query(
-                "SELECT fc.chunk_hash, fc.offset, fc.len, co.object_id AS object_id
-                 FROM file_chunks fc
-                 LEFT JOIN chunk_objects co ON co.chunk_hash = fc.chunk_hash AND co.provider = ?
-                 WHERE fc.file_id = ? ORDER BY fc.seq",
-            )
-            .bind(self.storage.provider())
-            .bind(&file_id)
-            .fetch_all(&pool)
-            .await?
+        let rows = match (endpoint_attached, dedupe_attached) {
+            (true, true) => {
+                sqlx::query(
+                    "SELECT fc.chunk_hash, fc.offset, fc.len,
+                            COALESCE(ep.object_id, dd.object_id, co.object_id) AS object_id
+                     FROM file_chunks fc
+                     LEFT JOIN browse_endpoint.chunk_objects ep
+                       ON ep.chunk_hash = fc.chunk_hash AND ep.provider = ?
+                     LEFT JOIN browse_dedupe.chunk_objects dd
+                       ON dd.chunk_hash = fc.chunk_hash AND dd.provider = ?
+                     LEFT JOIN chunk_objects co
+                       ON co.chunk_hash = fc.chunk_hash AND co.provider = ?
+                     WHERE fc.file_id = ? ORDER BY fc.seq",
+                )
+                .bind(&self.storage_provider)
+                .bind(&self.storage_provider)
+                .bind(&self.storage_provider)
+                .bind(&file_id)
+                .fetch_all(&pool)
+                .await?
+            }
+            (true, false) => {
+                sqlx::query(
+                    "SELECT fc.chunk_hash, fc.offset, fc.len,
+                            COALESCE(ep.object_id, co.object_id) AS object_id
+                     FROM file_chunks fc
+                     LEFT JOIN browse_endpoint.chunk_objects ep
+                       ON ep.chunk_hash = fc.chunk_hash AND ep.provider = ?
+                     LEFT JOIN chunk_objects co
+                       ON co.chunk_hash = fc.chunk_hash AND co.provider = ?
+                     WHERE fc.file_id = ? ORDER BY fc.seq",
+                )
+                .bind(&self.storage_provider)
+                .bind(&self.storage_provider)
+                .bind(&file_id)
+                .fetch_all(&pool)
+                .await?
+            }
+            (false, true) => {
+                sqlx::query(
+                    "SELECT fc.chunk_hash, fc.offset, fc.len,
+                            COALESCE(dd.object_id, co.object_id) AS object_id
+                     FROM file_chunks fc
+                     LEFT JOIN browse_dedupe.chunk_objects dd
+                       ON dd.chunk_hash = fc.chunk_hash AND dd.provider = ?
+                     LEFT JOIN chunk_objects co
+                       ON co.chunk_hash = fc.chunk_hash AND co.provider = ?
+                     WHERE fc.file_id = ? ORDER BY fc.seq",
+                )
+                .bind(&self.storage_provider)
+                .bind(&self.storage_provider)
+                .bind(&file_id)
+                .fetch_all(&pool)
+                .await?
+            }
+            (false, false) => {
+                sqlx::query(
+                    "SELECT fc.chunk_hash, fc.offset, fc.len, co.object_id AS object_id
+                     FROM file_chunks fc
+                     LEFT JOIN chunk_objects co
+                       ON co.chunk_hash = fc.chunk_hash AND co.provider = ?
+                     WHERE fc.file_id = ? ORDER BY fc.seq",
+                )
+                .bind(&self.storage_provider)
+                .bind(&file_id)
+                .fetch_all(&pool)
+                .await?
+            }
         };
 
         let mut out = Vec::with_capacity((end - start) as usize);
@@ -299,17 +372,19 @@ impl SnapshotContentReader {
     }
 
     async fn load_chunk(&self, chunk_hash: &str, encoded_object_id: &str) -> Result<Vec<u8>> {
+        let master_key = self.master_key.ok_or_else(|| Error::SnapshotAccess {
+            message: "snapshot content decryption is unavailable while backup storage is offline"
+                .to_string(),
+        })?;
         match parse_chunk_object_ref(encoded_object_id)? {
             ChunkObjectRef::Direct { object_id } => {
-                let key = format!("{}:{object_id}", self.storage.provider());
-                let framed = self
-                    .cache
-                    .get_or_fetch(&key, self.storage.download_document(&object_id))
-                    .await?;
-                let plain = decrypt_framed(&self.master_key, chunk_hash.as_bytes(), &framed)
-                    .map_err(|error| Error::Crypto {
+                let key = format!("{}:{object_id}", self.storage_provider);
+                let framed = self.load_object(&key, &object_id).await?;
+                let plain = decrypt_framed(&master_key, chunk_hash.as_bytes(), &framed).map_err(
+                    |error| Error::Crypto {
                         message: format!("chunk decrypt failed: {error}"),
-                    })?;
+                    },
+                )?;
                 verify_chunk(chunk_hash, plain)
             }
             ChunkObjectRef::PackSlice {
@@ -317,22 +392,36 @@ impl SnapshotContentReader {
                 offset,
                 len,
             } => {
-                let key = format!("{}:{pack_object_id}", self.storage.provider());
-                let pack = self
-                    .cache
-                    .get_or_fetch(&key, self.storage.download_document(&pack_object_id))
-                    .await?;
+                let key = format!("{}:{pack_object_id}", self.storage_provider);
+                let pack = self.load_object(&key, &pack_object_id).await?;
                 let framed = extract_pack_blob(&pack, offset, len)?;
-                let plain = decrypt_framed(&self.master_key, chunk_hash.as_bytes(), framed)
-                    .map_err(|error| Error::Crypto {
+                let plain = decrypt_framed(&master_key, chunk_hash.as_bytes(), framed).map_err(
+                    |error| Error::Crypto {
                         message: format!("pack chunk decrypt failed: {error}"),
-                    })?;
+                    },
+                )?;
                 verify_chunk(chunk_hash, plain)
             }
         }
     }
 
-    async fn filemap_pool(&self, snapshot_id: &str) -> Result<(SqlitePool, bool)> {
+    async fn load_object(&self, key: &str, object_id: &str) -> Result<Vec<u8>> {
+        if let Some(storage) = &self.storage {
+            return self
+                .cache
+                .get_or_fetch(key, storage.download_document(object_id))
+                .await;
+        }
+        self.cache
+            .get(key)
+            .await?
+            .ok_or_else(|| Error::SnapshotAccess {
+                message: "snapshot content is unavailable while backup storage is offline"
+                    .to_string(),
+            })
+    }
+
+    async fn filemap_pool(&self, snapshot_id: &str) -> Result<(SqlitePool, bool, bool)> {
         let filemap = self.filemap_dir.join(format!("{snapshot_id}.sqlite"));
         let path = if filemap.is_file() {
             filemap
@@ -350,7 +439,23 @@ impl SnapshotContentReader {
                 .execute(&pool)
                 .await?;
         }
-        Ok((pool, path != self.endpoint_db_path))
+        let dedupe_attached = self
+            .dedupe_db_path
+            .as_ref()
+            .is_some_and(|path| path.is_file());
+        if dedupe_attached {
+            sqlx::query("ATTACH DATABASE ? AS browse_dedupe")
+                .bind(
+                    self.dedupe_db_path
+                        .as_ref()
+                        .expect("dedupe path checked above")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+                .execute(&pool)
+                .await?;
+        }
+        Ok((pool, path != self.endpoint_db_path, dedupe_attached))
     }
 }
 
@@ -375,6 +480,9 @@ fn verify_chunk(chunk_hash: &str, plain: Vec<u8>) -> Result<Vec<u8>> {
 }
 
 fn validate_relative_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        return Ok(());
+    }
     if path.starts_with('/')
         || path
             .split('/')
@@ -459,6 +567,17 @@ impl SnapshotBrowseCache {
         restrict_file_permissions(&temp)?;
         tokio::fs::rename(&temp, &path).await?;
         Ok(bytes)
+    }
+
+    pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let _guard = self.lock.lock().await;
+        let path = self.path_for(key);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let bytes = tokio::fs::read(&path).await?;
+        touch_file(&path)?;
+        Ok(Some(bytes))
     }
 
     async fn evict_for(&self, incoming: u64, keep: Option<&Path>) -> Result<()> {
@@ -565,5 +684,67 @@ mod tests {
             .get_or_fetch("too-large", async { Ok::<_, Error>(vec![3, 4, 5, 6, 7]) })
             .await;
         assert!(too_large.is_err());
+    }
+
+    #[tokio::test]
+    async fn cached_reader_lists_filemap_without_storage() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db = temp.path().join("index.sqlite");
+        let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap = filemap_dir.join("snapshot-1.sqlite");
+        let filemap_pool = crate::index_db::open_snapshot_filemap_db(&filemap)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("folder-1")
+        .bind("snapshot-1")
+        .bind("Folder")
+        .bind(0i64)
+        .bind(0i64)
+        .bind(0o755i64)
+        .bind("dir")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
+
+        let reader = SnapshotContentReader::new_cached(
+            endpoint_db,
+            filemap_dir,
+            "telegram.mtproto/default",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+        let snapshots = reader.list_snapshots("/source").await.unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            reader.list_children("snapshot-1", "").await.unwrap()[0].name,
+            "Folder"
+        );
     }
 }

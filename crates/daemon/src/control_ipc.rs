@@ -412,6 +412,15 @@ async fn handle_control_ipc_client(
         return Ok(());
     }
 
+    if req.method == "daemon.ping" {
+        write_json_line(
+            &mut w,
+            &ControlResponse::ok(req.id.clone(), serde_json::json!({ "running": true })),
+        )
+        .await?;
+        return Ok(());
+    }
+
     let (log_bytes, managed_log_usage) =
         if matches!(req.method.as_str(), "logging.status" | "diagnostics.get") {
             let log_dir = televy_backup_core::run_log::resolve_log_dir(&context.data_root);

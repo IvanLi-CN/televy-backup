@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use plist::Value as PlistValue;
 use serde_json::{Value, json};
 use televybackup_snapshot_access::{
     ACCESS_AGENT_PLIST_NAME, ACCESS_BUNDLE_ID, ACCESS_BUNDLE_RELATIVE_PATH, COMPONENT_VERSION,
@@ -20,6 +21,7 @@ const MANIFEST_FILE: &str = "snapshot-access/service.json";
 const MIGRATION_BACKUP_DIR: &str = "snapshot-access/migrations";
 const MIGRATION_OWNER_TTL_SECONDS: u64 = 120;
 const INSTALLED_PRODUCTION_APP_PATH: &str = "/Applications/TelevyBackup.app";
+const PRODUCTION_BUNDLE_ID: &str = "com.ivan.televybackup";
 
 fn user_service_target(domain: &str) -> String {
     format!("{domain}/{ACCESS_LABEL}")
@@ -144,7 +146,30 @@ fn main_app_path() -> Result<PathBuf, CliError> {
 
 fn require_installed_production_app() -> Result<PathBuf, CliError> {
     let app = main_app_path()?;
-    if app != Path::new(INSTALLED_PRODUCTION_APP_PATH) {
+    let info_plist = app.join("Contents/Info.plist");
+    let bundle_id = plist::from_file::<_, PlistValue>(&info_plist)
+        .ok()
+        .and_then(|value| value.as_dictionary().cloned())
+        .and_then(|dictionary| dictionary.get("CFBundleIdentifier").cloned())
+        .and_then(PlistValue::into_string)
+        .ok_or_else(|| {
+            CliError::new(
+                "snapshot_access.app_invalid",
+                format!(
+                    "cannot read production bundle identifier from {}",
+                    info_plist.display()
+                ),
+            )
+        })?;
+    if bundle_id != PRODUCTION_BUNDLE_ID {
+        return Err(CliError::new(
+            "snapshot_access.app_invalid",
+            format!(
+                "Snapshot Access migration requires bundle id {PRODUCTION_BUNDLE_ID}; found {bundle_id}"
+            ),
+        ));
+    }
+    if !is_canonical_production_app(&app) {
         return Err(CliError::new(
             "snapshot_access.app_invalid",
             format!(
@@ -153,6 +178,17 @@ fn require_installed_production_app() -> Result<PathBuf, CliError> {
         ));
     }
     Ok(app)
+}
+
+fn is_canonical_production_app(app: &Path) -> bool {
+    app == Path::new(INSTALLED_PRODUCTION_APP_PATH)
+}
+
+fn manifest_matches_embedded_access_app(manifest: Option<&Value>, access_app: &Path) -> bool {
+    manifest
+        .and_then(|value| value.get("appPath"))
+        .and_then(Value::as_str)
+        .is_some_and(|path| Path::new(path) == access_app)
 }
 
 fn embedded_access_app_path() -> Result<PathBuf, CliError> {
@@ -333,6 +369,7 @@ fn acquire_migration_lock(config_dir: &Path) -> Result<std::fs::File, CliError> 
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(lock_path)
         .map_err(|error| CliError::new("snapshot_access.migration_failed", error.to_string()))?;
     let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -517,6 +554,7 @@ pub fn prepare_migration(
             .and_then(|value| value.get("relativeAppPath"))
             .and_then(Value::as_str)
             == Some(ACCESS_BUNDLE_RELATIVE_PATH)
+        && manifest_matches_embedded_access_app(existing.as_ref(), &access_app)
         && existing
             .as_ref()
             .and_then(|value| value.get("migrationState"))
@@ -663,16 +701,16 @@ pub fn prepare_migration(
             }
             return Err(error);
         }
-        if legacy_plist.exists() {
-            if let Err(error) = fs::remove_file(&legacy_plist) {
-                if let Some(backup) = manifest.get("legacyBackup") {
-                    let _ = restore_legacy_registration(config_dir, data_dir, backup);
-                }
-                return Err(CliError::new(
-                    "snapshot_access.migration_failed",
-                    error.to_string(),
-                ));
+        if legacy_plist.exists()
+            && let Err(error) = fs::remove_file(&legacy_plist)
+        {
+            if let Some(backup) = manifest.get("legacyBackup") {
+                let _ = restore_legacy_registration(config_dir, data_dir, backup);
             }
+            return Err(CliError::new(
+                "snapshot_access.migration_failed",
+                error.to_string(),
+            ));
         }
     }
 
@@ -984,6 +1022,47 @@ mod tests {
         assert!(plist.contains(ACCESS_BUNDLE_RELATIVE_PATH));
         assert!(!plist.contains("ProgramArguments"));
         assert!(!plist.contains("target/macos-app"));
+    }
+
+    #[test]
+    fn legacy_embedded_manifest_path_is_not_current_for_a_new_app_location() {
+        let manifest = json!({
+            "appPath": "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+            "managedBy": "smappservice",
+            "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
+            "migrationState": "ready",
+        });
+        let current = Path::new(
+            "/Users/test/worktree/target/macos-app/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+        );
+
+        assert!(!manifest_matches_embedded_access_app(
+            Some(&manifest),
+            current
+        ));
+    }
+
+    #[test]
+    fn current_embedded_manifest_path_is_current() {
+        let current = Path::new(
+            "/Users/test/worktree/target/macos-app/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+        );
+        let manifest = json!({"appPath": current});
+
+        assert!(manifest_matches_embedded_access_app(
+            Some(&manifest),
+            current
+        ));
+    }
+
+    #[test]
+    fn production_migration_requires_the_canonical_installed_app_path() {
+        assert!(is_canonical_production_app(Path::new(
+            "/Applications/TelevyBackup.app"
+        )));
+        assert!(!is_canonical_production_app(Path::new(
+            "/Users/test/worktree/target/macos-app/TelevyBackup.app"
+        )));
     }
 
     #[test]
