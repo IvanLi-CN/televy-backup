@@ -324,12 +324,36 @@ final class AppModel {
                     let task = Process()
                     task.executableURL = URL(fileURLWithPath: "/sbin/mount_webdav")
                     task.arguments = ["-S", "-v", mount.volumeName, mount.mount.url, mountRoot.path]
+                    let outputPipe = Pipe()
+                    task.standardOutput = outputPipe
+                    task.standardError = outputPipe
                     try task.run()
                     task.waitUntilExit()
                     guard task.terminationStatus == 0 else {
+                        let output = String(
+                            decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(),
+                            as: UTF8.self
+                        ).trimmingCharacters(in: .whitespacesAndNewlines)
                         self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
                         DispatchQueue.main.async {
-                            completion(.failure(ControlRequestFailure(code: "snapshot.browse.mount_failed", message: "The backup volume could not be mounted in Finder.", retryable: true)))
+                            completion(.failure(ControlRequestFailure(
+                                code: "snapshot.browse.mount_failed",
+                                message: output.isEmpty
+                                    ? "The backup volume could not be mounted in Finder."
+                                    : "The backup volume could not be mounted in Finder: \(output)",
+                                retryable: true
+                            )))
+                        }
+                        return
+                    }
+                    guard self.waitForMountedBrowseVolume(mountRoot, timeoutSeconds: 10) else {
+                        self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                        DispatchQueue.main.async {
+                            completion(.failure(ControlRequestFailure(
+                                code: "snapshot.browse.mount_failed",
+                                message: "The backup volume did not become available in Finder.",
+                                retryable: true
+                            )))
                         }
                         return
                     }
@@ -347,6 +371,23 @@ final class AppModel {
                 }
             }
         }
+    }
+
+    private func waitForMountedBrowseVolume(_ mountRoot: URL, timeoutSeconds: Double) -> Bool {
+        let expectedPath = mountRoot.standardizedFileURL.path
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        repeat {
+            let mountedVolumes = FileManager.default.mountedVolumeURLs(
+                includingResourceValuesForKeys: nil,
+                options: FileManager.VolumeEnumerationOptions()
+            ) ?? []
+            if mountedVolumes.contains(where: { $0.standardizedFileURL.path == expectedPath }) {
+                return true
+            }
+            if Date() >= deadline { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while true
+        return false
     }
 
     func unmountTargetInFinder(
@@ -1095,13 +1136,28 @@ final class AppModel {
             && effectiveDataDirURL().standardizedFileURL == defaultDataDir().standardizedFileURL
     }
 
-    private var isInstalledProductionApp: Bool {
-        Bundle.main.bundleURL.standardizedFileURL
-            == URL(fileURLWithPath: "/Applications/TelevyBackup.app").standardizedFileURL
+    private var isProductionAppVariant: Bool {
+        Bundle.main.bundleIdentifier == "com.ivan.televybackup"
     }
 
     private var shouldUseEmbeddedSnapshotAccessAgent: Bool {
-        usesProductionSnapshotAccessConfiguration && isInstalledProductionApp
+        usesProductionSnapshotAccessConfiguration
+            && isProductionAppVariant
+            && !isAdHocSignedMainApp
+    }
+
+    // Without Developer ID, macOS rejects SMAppService registration for the
+    // ad-hoc product. The installed product still owns the embedded helper,
+    // but the GUI must launch that helper directly and complete the same
+    // migration contract before starting the daemon.
+    private var isAdHocSignedMainApp: Bool {
+        let result = runCommandCapture(
+            exe: "/usr/bin/codesign",
+            args: ["-dv", "--verbose=4", Bundle.main.bundleURL.path],
+            timeoutSeconds: 3
+        )
+        let output = result.stdout + result.stderr
+        return output.contains("Signature=adhoc") || !output.contains("Authority=")
     }
 
     private func embeddedSnapshotAccessAppPath() -> String {
@@ -1255,6 +1311,15 @@ final class AppModel {
             Thread.sleep(forTimeInterval: 0.05)
         }
         return isUnixSocketConnectable(path)
+    }
+
+    private func waitForUnixSocketToClose(_ path: String, timeoutSeconds: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if !isUnixSocketConnectable(path) { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return !isUnixSocketConnectable(path)
     }
 
     private func stopLocalSnapshotAccessProcess() {
@@ -1474,6 +1539,10 @@ final class AppModel {
               payload["migrationState"] as? String == "ready" else {
             return false
         }
+        let expectedPath = URL(fileURLWithPath: embeddedSnapshotAccessAppPath()).standardizedFileURL.path
+        let actualPath = (payload["accessAppPath"] as? String)
+            .map { URL(fileURLWithPath: $0).standardizedFileURL.path }
+        guard actualPath == expectedPath else { return false }
         let legacyPlist = ProcessInfo.processInfo.environment["TELEVYBACKUP_SNAPSHOT_ACCESS_PLIST"]
             ?? (NSHomeDirectory() + "/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist")
         return !FileManager.default.fileExists(atPath: legacyPlist)
@@ -1484,12 +1553,12 @@ final class AppModel {
             completion(true, nil)
             return
         }
-        if usesProductionSnapshotAccessConfiguration && !isInstalledProductionApp {
-            completion(false, "Install TelevyBackup.app in /Applications before migrating Snapshot Access")
-            return
-        }
         guard shouldUseEmbeddedSnapshotAccessAgent else {
-            ensureLocalSnapshotAccessProcess(completion: completion)
+            if usesProductionSnapshotAccessConfiguration && isProductionAppVariant {
+                performAdHocSnapshotAccessRegistration(completion: completion)
+            } else {
+                ensureLocalSnapshotAccessProcess(completion: completion)
+            }
             return
         }
         guard let cli = cliPath() else {
@@ -1644,6 +1713,162 @@ final class AppModel {
                     )
                 }
             }
+        }
+    }
+
+    private func performAdHocSnapshotAccessRegistration(completion: @escaping (Bool, String?) -> Void) {
+        guard let cli = cliPath() else {
+            DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
+            return
+        }
+        let config = effectiveConfigDirURL().path
+        let data = effectiveDataDirURL().path
+        guard embeddedSnapshotAccessComponentVersion() != nil else {
+            completion(false, "Snapshot Access embedded component version is unavailable")
+            return
+        }
+        let socketPath = URL(fileURLWithPath: data)
+            .appendingPathComponent("snapshot-access/access.sock")
+            .path
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            if !self.snapshotAccessRegistrationIsCommitted(cli: cli, config: config, data: data) {
+                let stop = self.runCommandCapture(
+                    exe: cli,
+                    args: ["--json", "--config-dir", config, "--data-dir", data, "daemon", "stop"],
+                    timeoutSeconds: 20
+                )
+                guard stop.status == 0 else {
+                    let output = (stop.stderr.isEmpty ? stop.stdout : stop.stderr)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .prefix(400).description
+                    DispatchQueue.main.async {
+                        completion(false, output.isEmpty ? "The daemon must be stopped before Snapshot Access migration" : output)
+                    }
+                    return
+                }
+            }
+
+            let prepare = self.runCommandCapture(
+                exe: cli,
+                args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "prepare-migration"],
+                timeoutSeconds: 20
+            )
+            guard prepare.status == 0,
+                  let state = try? JSONDecoder().decode(
+                      SnapshotAccessMigrationPrepareResult.self,
+                      from: Data(prepare.stdout.utf8)
+                  ) else {
+                let output = (prepare.stderr.isEmpty ? prepare.stdout : prepare.stderr)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(400).description
+                DispatchQueue.main.async {
+                    completion(false, output.isEmpty ? "Snapshot Access migration could not be prepared" : output)
+                }
+                return
+            }
+
+            if state.prepared {
+                guard self.waitForUnixSocketToClose(socketPath, timeoutSeconds: 5) else {
+                    DispatchQueue.main.async {
+                        completion(false, "The legacy Snapshot Access helper is still running")
+                    }
+                    return
+                }
+            }
+
+            self.ensureLocalSnapshotAccessProcess { success, error in
+                guard success else {
+                    guard let migrationId = state.migrationId,
+                          let migrationOwner = state.migrationOwner else {
+                        completion(false, error ?? "Embedded Snapshot Access helper could not be started")
+                        return
+                    }
+                    self.rollbackAdHocSnapshotAccessMigration(
+                        cli: cli,
+                        config: config,
+                        data: data,
+                        socketPath: socketPath,
+                        migrationId: migrationId,
+                        migrationOwner: migrationOwner,
+                        message: error ?? "Embedded Snapshot Access helper could not be started",
+                        completion: completion
+                    )
+                    return
+                }
+                guard state.prepared else {
+                    completion(true, nil)
+                    return
+                }
+                guard let migrationId = state.migrationId,
+                      let migrationOwner = state.migrationOwner else {
+                    completion(false, "Snapshot Access migration returned no transaction id")
+                    return
+                }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let commit = self.runCommandCapture(
+                        exe: cli,
+                        args: [
+                            "--json", "--config-dir", config, "--data-dir", data,
+                            "snapshot-access", "commit-migration",
+                            "--migration-id", migrationId,
+                            "--migration-owner", migrationOwner,
+                        ],
+                        timeoutSeconds: 20
+                    )
+                    let output = (commit.stderr.isEmpty ? commit.stdout : commit.stderr)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .prefix(400).description
+                    DispatchQueue.main.async {
+                        guard commit.status != 0 else {
+                            completion(true, nil)
+                            return
+                        }
+                        self.rollbackAdHocSnapshotAccessMigration(
+                            cli: cli,
+                            config: config,
+                            data: data,
+                            socketPath: socketPath,
+                            migrationId: migrationId,
+                            migrationOwner: migrationOwner,
+                            message: output.isEmpty ? "Snapshot Access migration could not be committed" : output,
+                            completion: completion
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func rollbackAdHocSnapshotAccessMigration(
+        cli: String,
+        config: String,
+        data: String,
+        socketPath: String,
+        migrationId: String,
+        migrationOwner: String,
+        message: String,
+        completion: @escaping (Bool, String?) -> Void
+    ) {
+        stopLocalSnapshotAccessProcess()
+        DispatchQueue.global(qos: .utility).async {
+            guard self.waitForUnixSocketToClose(socketPath, timeoutSeconds: 5) else {
+                DispatchQueue.main.async {
+                    completion(false, message + " The embedded Snapshot Access helper did not stop; rollback was not attempted")
+                }
+                return
+            }
+            self.finishSnapshotAccessMigration(
+                cli: cli,
+                config: config,
+                data: data,
+                migrationId: migrationId,
+                migrationOwner: migrationOwner,
+                agent: nil,
+                success: false,
+                message: message,
+                completion: completion
+            )
         }
     }
 

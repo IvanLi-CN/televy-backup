@@ -61,6 +61,7 @@ struct BrowseSession {
     target_id: String,
     source_path: String,
     volume_name: String,
+    port: u16,
     capability: String,
     catalog_source: String,
     reader: Arc<SnapshotContentReader>,
@@ -588,10 +589,43 @@ impl SnapshotBrowseService {
                 details: serde_json::json!({}),
             });
         }
-        let (storage, master_key) =
-            connect_storage(&self.config_root, &self.data_root, &settings, &target)
-                .await
-                .map_err(sanitize_mount_error)?;
+        let cache_root = self
+            .data_root
+            .join("cache")
+            .join("snapshot-browsing")
+            .join(&target.endpoint_id);
+        let cache = Arc::new(SnapshotBrowseCache::new(
+            cache_root,
+            settings.snapshot_browsing.cache_max_bytes,
+        ));
+        let dedupe_db_path = self
+            .data_root
+            .join("index")
+            .join("dedupe")
+            .join(format!("dedupe.{}.sqlite", target.endpoint_id));
+        // A cached catalog must remain usable when remote storage is unavailable, but it should
+        // still attach storage when credentials are available so file reads can fetch objects.
+        // A fresh catalog initializes storage before refreshing the endpoint index.
+        let remote_storage = if params.allow_cached_catalog {
+            match connect_storage(&self.config_root, &self.data_root, &settings, &target).await {
+                Ok(storage) => Some(storage),
+                Err(error) => {
+                    tracing::debug!(
+                        event = "snapshot.browse.cached_storage_unavailable",
+                        target_id = %target.id,
+                        error = ?error,
+                        "cached snapshot browsing will remain metadata-only"
+                    );
+                    None
+                }
+            }
+        } else {
+            Some(
+                connect_storage(&self.config_root, &self.data_root, &settings, &target)
+                    .await
+                    .map_err(sanitize_mount_error)?,
+            )
+        };
         if !params.allow_cached_catalog {
             let endpoint = settings
                 .telegram_endpoints
@@ -611,14 +645,12 @@ impl SnapshotBrowseService {
                     details: serde_json::json!({}),
                 });
             }
-            let dedupe_db_path = self
-                .data_root
-                .join("index")
-                .join("dedupe")
-                .join(format!("dedupe.{}.sqlite", target.endpoint_id));
+            let (storage, master_key) = remote_storage
+                .as_ref()
+                .expect("fresh snapshot browsing requires remote storage");
             crate::preflight_remote_first_index_sync_daemon(
-                &storage,
-                &master_key,
+                storage,
+                master_key,
                 &target.id,
                 &target.source_path,
                 &endpoint_db_path,
@@ -636,22 +668,27 @@ impl SnapshotBrowseService {
                 details: serde_json::json!({ "sourceCode": error.code() }),
             })?;
         }
-        let cache_root = self
-            .data_root
-            .join("cache")
-            .join("snapshot-browsing")
-            .join(&target.endpoint_id);
-        let cache = Arc::new(SnapshotBrowseCache::new(
-            cache_root,
-            settings.snapshot_browsing.cache_max_bytes,
-        ));
-        let reader = Arc::new(SnapshotContentReader::new(
-            endpoint_db_path,
-            filemap_dir,
-            Arc::new(storage),
-            master_key,
-            cache,
-        ));
+        let reader = match remote_storage {
+            Some((storage, master_key)) => Arc::new(
+                SnapshotContentReader::new(
+                    endpoint_db_path,
+                    filemap_dir,
+                    Arc::new(storage),
+                    master_key,
+                    cache,
+                )
+                .with_dedupe_db(dedupe_db_path),
+            ),
+            None => Arc::new(
+                SnapshotContentReader::new_cached(
+                    endpoint_db_path,
+                    filemap_dir,
+                    endpoint_provider(&target.endpoint_id),
+                    cache,
+                )
+                .with_dedupe_db(dedupe_db_path),
+            ),
+        };
         let snapshots = reader
             .list_snapshots(&target.source_path)
             .await
@@ -739,12 +776,17 @@ impl SnapshotBrowseService {
             .filter(|value| !value.is_empty())
             .unwrap_or("Backup Target")
             .to_string();
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .map_err(io_control_error)?;
+        let port = listener.local_addr().map_err(io_control_error)?.port();
         let shutdown = CancellationToken::new();
         let session = Arc::new(BrowseSession {
             id: session_id.clone(),
             target_id: target.id.clone(),
             source_path: target.source_path.clone(),
             volume_name,
+            port,
             capability: capability.clone(),
             catalog_source: catalog_source.to_string(),
             reader,
@@ -753,10 +795,6 @@ impl SnapshotBrowseService {
             diagnostics_json,
             shutdown: shutdown.clone(),
         });
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .map_err(io_control_error)?;
-        let port = listener.local_addr().map_err(io_control_error)?.port();
         let server_session = session.clone();
         tokio::spawn(async move {
             serve(listener, server_session).await;
@@ -785,9 +823,18 @@ impl SnapshotBrowseService {
             retryable: false,
             details: serde_json::json!({}),
         })?;
-        Ok(
-            serde_json::json!({ "sessionId": session.id, "targetId": session.target_id, "volumeName": session.volume_name, "catalogSource": session.catalog_source, "mountState": "mounted" }),
-        )
+        Ok(serde_json::json!({
+            "sessionId": session.id,
+            "targetId": session.target_id,
+            "volumeName": session.volume_name,
+            "catalogSource": session.catalog_source,
+            "mountState": "mounted",
+            "mount": {
+                "host": "127.0.0.1",
+                "port": session.port,
+                "url": format!("http://127.0.0.1:{}/{}/", session.port, session.capability),
+            },
+        }))
     }
 
     async fn unmount(&self, session_id: &str) -> Result<serde_json::Value, ControlError> {
@@ -840,12 +887,14 @@ async fn serve(listener: TcpListener, session: Arc<BrowseSession>) {
                 let handler = handler.clone();
                 let connection_capability_prefix = capability_prefix.clone();
                 let connection_capability_root = capability_root.clone();
+                let connection_session = session.clone();
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
                     let service = service_fn(move |request| {
                         let handler = handler.clone();
                         let capability_prefix = connection_capability_prefix.clone();
                         let capability_root = connection_capability_root.clone();
+                        let session = connection_session.clone();
                         async move {
                             let request_path = request.uri().path();
                             if request_path != capability_root
@@ -871,6 +920,34 @@ async fn serve(listener: TcpListener, session: Arc<BrowseSession>) {
                                     return Ok::<_, Infallible>(response);
                                 }
                             }
+                            if matches!(request.method().as_str(), "GET" | "HEAD") {
+                                let relative = if request_path == capability_root {
+                                    ""
+                                } else {
+                                    request_path
+                                        .strip_prefix(&capability_prefix)
+                                        .unwrap_or_default()
+                                };
+                                let relative = decode_path(relative).unwrap_or_default();
+                                let headers = request
+                                    .headers()
+                                    .iter()
+                                    .filter_map(|(name, value)| {
+                                        Some((
+                                            name.as_str().to_ascii_lowercase(),
+                                            value.to_str().ok()?.to_string(),
+                                        ))
+                                    })
+                                    .collect::<HashMap<_, _>>();
+                                let raw = get_file(
+                                    request.method().as_str() == "HEAD",
+                                    &relative,
+                                    &headers,
+                                    &session,
+                                )
+                                .await;
+                                return Ok::<_, Infallible>(response_from_raw(raw));
+                            }
                             Ok::<_, Infallible>(handler.handle(request).await)
                         }
                     });
@@ -879,6 +956,38 @@ async fn serve(listener: TcpListener, session: Arc<BrowseSession>) {
             }
         }
     }
+}
+
+fn response_from_raw(raw: Vec<u8>) -> Response<dav_server::body::Body> {
+    let header_end = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap_or(raw.len());
+    let (head, body) = raw.split_at(header_end.min(raw.len()));
+    let body = if body.len() >= 4 { &body[4..] } else { &[] };
+    let mut lines = head.split(|byte| *byte == b'\n');
+    let status = lines
+        .next()
+        .and_then(|line| {
+            String::from_utf8_lossy(line)
+                .split_whitespace()
+                .nth(1)
+                .map(str::to_string)
+        })
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(500);
+    let mut builder = Response::builder().status(status);
+    for line in lines {
+        let line = String::from_utf8_lossy(line)
+            .trim_end_matches('\r')
+            .to_string();
+        if let Some((name, value)) = line.split_once(':') {
+            builder = builder.header(name, value.trim());
+        }
+    }
+    builder
+        .body(dav_server::body::Body::from(Bytes::from(body.to_vec())))
+        .expect("generated WebDAV response is valid")
 }
 
 #[allow(dead_code)]
@@ -1141,12 +1250,23 @@ async fn get_file(
     if start > entry.size {
         return response(416, "text/plain", b"range not satisfiable");
     }
-    let Ok((_entry, bytes)) = session
+    let bytes = match session
         .reader
         .read_range(&snapshot.snapshot_id, &snapshot_path, start, len)
         .await
-    else {
-        return response(503, "text/plain", b"snapshot data unavailable");
+    {
+        Ok((_entry, bytes)) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                event = "snapshot.browse.content_unavailable",
+                snapshot_id = %snapshot.snapshot_id,
+                path = %snapshot_path,
+                error_code = error.code(),
+                error = ?error,
+                "snapshot browse content read failed"
+            );
+            return response(503, "text/plain", b"snapshot data unavailable");
+        }
     };
     let status = if partial { 206 } else { 200 };
     let mut extra = vec![
@@ -1509,6 +1629,8 @@ fn sanitize_mount_error(error: ControlError) -> ControlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
+    use hyper::Request;
 
     async fn test_session(endpoint_db_path: &Path, cache_root: &Path) -> BrowseSession {
         BrowseSession {
@@ -1516,6 +1638,7 @@ mod tests {
             target_id: "target".to_string(),
             source_path: "/source".to_string(),
             volume_name: "Test".to_string(),
+            port: 0,
             capability: "capability".to_string(),
             catalog_source: "cached".to_string(),
             reader: Arc::new(SnapshotContentReader::new(
@@ -1583,6 +1706,128 @@ mod tests {
             response.starts_with(b"HTTP/1.1 503 Service Unavailable\r\n"),
             "{}",
             String::from_utf8_lossy(&response)
+        );
+    }
+
+    #[tokio::test]
+    async fn dav_handler_lists_snapshot_children_for_encoded_snapshot_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db_path = temp.path().join("endpoint.sqlite");
+        let endpoint_pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1234")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap_path = filemap_dir.join("snapshot-1234.sqlite");
+        let filemap_pool = televy_backup_core::index_db::open_snapshot_filemap_db(&filemap_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1234")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("dir-id")
+        .bind("snapshot-1234")
+        .bind("Folder")
+        .bind(0i64)
+        .bind(0i64)
+        .bind(0o755i64)
+        .bind("dir")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("missing-file-id")
+        .bind("snapshot-1234")
+        .bind("missing.txt")
+        .bind(4i64)
+        .bind(0i64)
+        .bind(0o644i64)
+        .bind("file")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
+
+        let session = test_session(&endpoint_db_path, temp.path()).await;
+        let snapshot = session
+            .reader
+            .list_snapshots(&session.source_path)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let direct_fs = BrowseDavFs {
+            session: Arc::new(session.clone()),
+        };
+        let direct_path = DavPath::new(&format!("/{}/", uri_path(&snapshot.display_name))).unwrap();
+        direct_fs
+            .metadata(&direct_path)
+            .await
+            .unwrap_or_else(|error| panic!("metadata failed: {error:?}"));
+        let mut direct_entries = direct_fs
+            .read_dir(&direct_path, ReadDirMeta::Data)
+            .await
+            .unwrap_or_else(|error| panic!("read_dir failed: {error:?}"));
+        let mut names = Vec::new();
+        while let Some(entry) = direct_entries.next().await {
+            names.push(String::from_utf8(entry.unwrap().name()).unwrap());
+        }
+        assert_eq!(names, vec!["Folder", "missing.txt"]);
+        let handler = DavHandler::builder()
+            .filesystem(Box::new(BrowseDavFs {
+                session: Arc::new(session.clone()),
+            }))
+            .strip_prefix("/capability")
+            .autoindex(false)
+            .build_handler();
+        let encoded_name = uri_path(&snapshot.display_name);
+        let request = Request::builder()
+            .method("PROPFIND")
+            .uri(format!("/capability/{encoded_name}/"))
+            .header("Depth", "1")
+            .body(dav_server::body::Body::empty())
+            .unwrap();
+
+        let response = handler.handle(request).await;
+
+        assert_eq!(response.status(), 207);
+        let get_response = respond(
+            "GET",
+            &format!("/capability/{encoded_name}/missing.txt"),
+            &HashMap::new(),
+            &[],
+            &session,
+        )
+        .await;
+        assert!(
+            get_response.starts_with(b"HTTP/1.1 503 Service Unavailable\r\n"),
+            "{}",
+            String::from_utf8_lossy(&get_response)
         );
     }
 

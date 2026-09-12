@@ -120,6 +120,10 @@ enum Command {
         #[command(subcommand)]
         cmd: SnapshotAccessCmd,
     },
+    SnapshotBrowse {
+        #[command(subcommand)]
+        cmd: SnapshotBrowseCmd,
+    },
     SnapshotMountHelper {
         #[command(subcommand)]
         cmd: SnapshotMountHelperCmd,
@@ -176,6 +180,24 @@ enum SnapshotMountHelperCmd {
     Install,
     Uninstall,
     Status,
+}
+
+#[derive(Subcommand)]
+enum SnapshotBrowseCmd {
+    Mount {
+        #[arg(long)]
+        target_id: String,
+        #[arg(long)]
+        cached: bool,
+    },
+    Status {
+        #[arg(long)]
+        session_id: String,
+    },
+    Unmount {
+        #[arg(long)]
+        session_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1029,6 +1051,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 snapshot_service::status(&config_dir, &data_dir, cli.json).map(|_| ())
             }
         },
+        Command::SnapshotBrowse { cmd } => match cmd {
+            SnapshotBrowseCmd::Mount { target_id, cached } => {
+                snapshot_browse_mount(&data_dir, &target_id, cached, cli.json)
+            }
+            SnapshotBrowseCmd::Status { session_id } => {
+                snapshot_browse_status(&data_dir, &session_id, cli.json)
+            }
+            SnapshotBrowseCmd::Unmount { session_id } => {
+                snapshot_browse_unmount(&data_dir, &session_id, cli.json)
+            }
+        },
         Command::SnapshotMountHelper { cmd } => match cmd {
             SnapshotMountHelperCmd::Install => snapshot_mount_service::install(cli.json),
             SnapshotMountHelperCmd::Uninstall => snapshot_mount_service::uninstall(cli.json),
@@ -1528,8 +1561,12 @@ fn daemon_binary_path() -> PathBuf {
 fn daemon_ipc_ready(data_dir: &Path) -> bool {
     #[cfg(unix)]
     {
-        std::os::unix::net::UnixStream::connect(
-            televy_backup_core::control::control_ipc_socket_path(data_dir),
+        control_ipc_call_with_timeouts(
+            data_dir,
+            "daemon.ping",
+            serde_json::json!({}),
+            Duration::from_millis(250),
+            Duration::from_millis(250),
         )
         .is_ok()
     }
@@ -1686,6 +1723,92 @@ async fn daemon_stop(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(
         "daemon.stop_timeout",
         "daemon did not exit within 10s",
     ))
+}
+
+fn snapshot_browse_mount(
+    data_dir: &Path,
+    target_id: &str,
+    cached: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    let response = control_ipc_call_with_timeouts(
+        data_dir,
+        "snapshot.browse.mount",
+        serde_json::json!({
+            "targetId": target_id,
+            "allowCachedCatalog": cached,
+        }),
+        Duration::from_secs(60),
+        Duration::from_secs(5),
+    )?;
+    let result = response.result.ok_or_else(|| {
+        CliError::new("snapshot.browse.invalid", "daemon returned no mount result")
+    })?;
+    if json {
+        println!("{result}");
+    } else {
+        let session_id = result
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let url = result
+            .get("mount")
+            .and_then(|mount| mount.get("url"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        println!("snapshot browse mounted: session={session_id} url={url}");
+    }
+    Ok(())
+}
+
+fn snapshot_browse_status(data_dir: &Path, session_id: &str, json: bool) -> Result<(), CliError> {
+    let response = control_ipc_call(
+        data_dir,
+        "snapshot.browse.status",
+        serde_json::json!({ "sessionId": session_id }),
+    )?;
+    let result = response.result.ok_or_else(|| {
+        CliError::new(
+            "snapshot.browse.invalid",
+            "daemon returned no browse status",
+        )
+    })?;
+    if json {
+        println!("{result}");
+    } else {
+        println!(
+            "snapshot browse {}: {}",
+            result
+                .get("mountState")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown"),
+            result
+                .get("volumeName")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+        );
+    }
+    Ok(())
+}
+
+fn snapshot_browse_unmount(data_dir: &Path, session_id: &str, json: bool) -> Result<(), CliError> {
+    let response = control_ipc_call(
+        data_dir,
+        "snapshot.browse.unmount",
+        serde_json::json!({ "sessionId": session_id }),
+    )?;
+    let result = response.result.ok_or_else(|| {
+        CliError::new(
+            "snapshot.browse.invalid",
+            "daemon returned no unmount result",
+        )
+    })?;
+    if json {
+        println!("{result}");
+    } else {
+        println!("snapshot browse unmounted: {session_id}");
+    }
+    Ok(())
 }
 
 async fn vault_ensure(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
