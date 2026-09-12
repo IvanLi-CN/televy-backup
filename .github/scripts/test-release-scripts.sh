@@ -138,6 +138,7 @@ with tempfile.TemporaryDirectory() as directory:
                 "component_version": "0.1.0",
                 "compatible_component_versions": ["0.1.0", "0.9.8"],
                 "protocol_version": 1,
+                **identity,
             },
         },
     }
@@ -169,6 +170,9 @@ with tempfile.TemporaryDirectory() as directory:
     assert subprocess.run(common, capture_output=True, text=True).returncode == 0
     stale = temp / "rc2.json"
     stale.write_text(stale.read_text(encoding="utf-8").replace("helper-sha", "stale-sha"), encoding="utf-8")
+    assert subprocess.run(common, capture_output=True, text=True).returncode != 0
+    stable_manifest["components"]["snapshot_mount_helper"]["cdhash"] = "stale-cdhash"
+    stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
     assert subprocess.run(common, capture_output=True, text=True).returncode != 0
 PY
 

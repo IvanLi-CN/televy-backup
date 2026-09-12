@@ -12,6 +12,7 @@ bash -n \
   "$root_dir/scripts/macos/generate-release-manifest.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
   "$root_dir/scripts/macos/verify-component-identity.sh" \
+  "$root_dir/scripts/macos/verify-webdav-snapshot-browsing.sh" \
   "$root_dir/scripts/macos/generate-brand-variants.sh" \
   "$root_dir/scripts/macos/verify-brand-assets.sh" \
   "$root_dir/scripts/macos/generate-app-icon-assets.sh" \
@@ -51,6 +52,9 @@ verify_release_text="$(<"$root_dir/scripts/macos/verify-release-assets.sh")"
   echo "Snapshot Access mode check must parse stat output as octal" >&2
   exit 1
 }
+webdav_text="$(<"$root_dir/scripts/macos/verify-webdav-snapshot-browsing.sh")"
+[[ "$webdav_text" == *'cargo test --manifest-path "$root_dir/Cargo.toml" -p televybackupd webdav_service -- --list'* ]]
+[[ "$webdav_text" != *'http.server'* ]]
 
 package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" == *'--mode release|development'* ]]

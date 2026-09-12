@@ -61,7 +61,6 @@ struct BrowseSession {
     target_id: String,
     source_path: String,
     volume_name: String,
-    port: u16,
     capability: String,
     catalog_source: String,
     reader: Arc<SnapshotContentReader>,
@@ -181,18 +180,28 @@ impl BrowseDavFs {
             .await
             .map_err(|_| FsError::GeneralFailure)?
             .ok_or(FsError::NotFound)?;
-        let dir = entry.kind == "dir";
-        Ok(BrowseNode {
-            meta: BrowseMeta {
-                size: entry.size,
-                mtime_ms: entry.mtime_ms,
-                dir,
-            },
-            source: (!dir).then_some(BrowseFileSource::Snapshot {
-                snapshot_id: snapshot.snapshot_id,
-                path: snapshot_path,
+        match entry.kind.as_str() {
+            "dir" => Ok(BrowseNode {
+                meta: BrowseMeta {
+                    size: entry.size,
+                    mtime_ms: entry.mtime_ms,
+                    dir: true,
+                },
+                source: None,
             }),
-        })
+            "file" => Ok(BrowseNode {
+                meta: BrowseMeta {
+                    size: entry.size,
+                    mtime_ms: entry.mtime_ms,
+                    dir: false,
+                },
+                source: Some(BrowseFileSource::Snapshot {
+                    snapshot_id: snapshot.snapshot_id,
+                    path: snapshot_path,
+                }),
+            }),
+            _ => Err(FsError::NotFound),
+        }
     }
 
     async fn children(
@@ -238,14 +247,19 @@ impl BrowseDavFs {
                 .list_children(&snapshot.snapshot_id, &snapshot_path)
                 .await
                 .map_err(|_| FsError::GeneralFailure)?;
-            entries.extend(children.into_iter().map(|entry| BrowseDirEntryImpl {
-                name: entry.name.into_bytes(),
-                meta: BrowseMeta {
-                    size: entry.size,
-                    mtime_ms: entry.mtime_ms,
-                    dir: entry.kind == "dir",
-                },
-            }));
+            entries.extend(
+                children
+                    .into_iter()
+                    .filter(|entry| matches!(entry.kind.as_str(), "file" | "dir"))
+                    .map(|entry| BrowseDirEntryImpl {
+                        name: entry.name.into_bytes(),
+                        meta: BrowseMeta {
+                            size: entry.size,
+                            mtime_ms: entry.mtime_ms,
+                            dir: entry.kind == "dir",
+                        },
+                    }),
+            );
         }
         let overlays = session.metadata_overlay.lock().await;
         for path in overlays.keys() {
@@ -786,7 +800,6 @@ impl SnapshotBrowseService {
             target_id: target.id.clone(),
             source_path: target.source_path.clone(),
             volume_name,
-            port,
             capability: capability.clone(),
             catalog_source: catalog_source.to_string(),
             reader,
@@ -829,11 +842,7 @@ impl SnapshotBrowseService {
             "volumeName": session.volume_name,
             "catalogSource": session.catalog_source,
             "mountState": "mounted",
-            "mount": {
-                "host": "127.0.0.1",
-                "port": session.port,
-                "url": format!("http://127.0.0.1:{}/{}/", session.port, session.capability),
-            },
+            "metadataOverlayPresent": !session.metadata_overlay.lock().await.is_empty(),
         }))
     }
 
@@ -888,6 +897,7 @@ async fn serve(listener: TcpListener, session: Arc<BrowseSession>) {
                 let connection_capability_prefix = capability_prefix.clone();
                 let connection_capability_root = capability_root.clone();
                 let connection_session = session.clone();
+                let connection_shutdown = connection_session.shutdown.clone();
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
                     let service = service_fn(move |request| {
@@ -896,6 +906,9 @@ async fn serve(listener: TcpListener, session: Arc<BrowseSession>) {
                         let capability_root = connection_capability_root.clone();
                         let session = connection_session.clone();
                         async move {
+                            if session.shutdown.is_cancelled() {
+                                return Ok::<_, Infallible>(revoked_response());
+                            }
                             let request_path = request.uri().path();
                             if request_path != capability_root
                                 && !request_path.starts_with(&capability_prefix)
@@ -946,16 +959,36 @@ async fn serve(listener: TcpListener, session: Arc<BrowseSession>) {
                                     &session,
                                 )
                                 .await;
-                                return Ok::<_, Infallible>(response_from_raw(raw));
+                                return Ok::<_, Infallible>(if session.shutdown.is_cancelled() {
+                                    revoked_response()
+                                } else {
+                                    response_from_raw(raw)
+                                });
                             }
-                            Ok::<_, Infallible>(handler.handle(request).await)
+                            let response = handler.handle(request).await;
+                            if session.shutdown.is_cancelled() {
+                                Ok::<_, Infallible>(revoked_response())
+                            } else {
+                                Ok::<_, Infallible>(response)
+                            }
                         }
                     });
-                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                    tokio::select! {
+                        _ = connection_shutdown.cancelled() => {}
+                        _ = http1::Builder::new().serve_connection(io, service) => {}
+                    }
                 });
             }
         }
     }
+}
+
+fn revoked_response() -> Response<dav_server::body::Body> {
+    Response::builder()
+        .status(404)
+        .header("Connection", "close")
+        .body(dav_server::body::Body::from("not found"))
+        .expect("static revoked-session response")
 }
 
 fn response_from_raw(raw: Vec<u8>) -> Response<dav_server::body::Body> {
@@ -1141,21 +1174,29 @@ async fn propfind(
             .await
             .map_err(|_| FsError::GeneralFailure)?
         {
-            resources.push((relative.to_string(), entry.kind, entry.size, entry.mtime_ms));
-            if depth != "0" {
+            let browseable = is_browseable_entry_kind(&entry.kind);
+            if browseable {
+                resources.push((relative.to_string(), entry.kind, entry.size, entry.mtime_ms));
+            }
+            if browseable && depth != "0" {
                 let children = session
                     .reader
                     .list_children(&snapshot.snapshot_id, &snapshot_path)
                     .await
                     .map_err(|_| FsError::GeneralFailure)?;
-                resources.extend(children.into_iter().map(|entry| {
-                    (
-                        relative_join(relative, &entry.name),
-                        entry.kind,
-                        entry.size,
-                        entry.mtime_ms,
-                    )
-                }));
+                resources.extend(
+                    children
+                        .into_iter()
+                        .filter(|entry| is_browseable_entry_kind(&entry.kind))
+                        .map(|entry| {
+                            (
+                                relative_join(relative, &entry.name),
+                                entry.kind,
+                                entry.size,
+                                entry.mtime_ms,
+                            )
+                        }),
+                );
             }
         } else if session.metadata_overlay.lock().await.contains_key(relative) {
             resources.push((relative.to_string(), "file".to_string(), 0, 0));
@@ -1323,6 +1364,10 @@ async fn refresh_snapshots(session: &BrowseSession) -> Result<Vec<BrowseSnapshot
 fn metadata_overlay_path(relative: &str) -> bool {
     let name = relative.rsplit('/').next().unwrap_or(relative);
     name == ".DS_Store" || name.starts_with("._")
+}
+
+fn is_browseable_entry_kind(kind: &str) -> bool {
+    matches!(kind, "file" | "dir")
 }
 
 async fn real_snapshot_entry(relative: &str, session: &BrowseSession) -> Result<bool, FsError> {
@@ -1638,7 +1683,6 @@ mod tests {
             target_id: "target".to_string(),
             source_path: "/source".to_string(),
             volume_name: "Test".to_string(),
-            port: 0,
             capability: "capability".to_string(),
             catalog_source: "cached".to_string(),
             reader: Arc::new(SnapshotContentReader::new(
@@ -1653,6 +1697,80 @@ mod tests {
             diagnostics_json: Arc::new(b"{}\n".to_vec()),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    async fn read_http_headers(stream: &mut TcpStream) -> Vec<u8> {
+        let mut headers = Vec::new();
+        let mut byte = [0u8; 1];
+        while !headers.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).await.unwrap();
+            headers.push(byte[0]);
+        }
+        headers
+    }
+
+    #[tokio::test]
+    async fn status_does_not_expose_capability_or_mount_url() {
+        let temp = tempfile::tempdir().unwrap();
+        let session =
+            Arc::new(test_session(&temp.path().join("endpoint.sqlite"), temp.path()).await);
+        let service = SnapshotBrowseService::new(
+            temp.path().join("config"),
+            temp.path().join("data"),
+            Arc::new(RwLock::new(SettingsV2::default())),
+        );
+        service
+            .sessions
+            .lock()
+            .await
+            .insert(session.id.clone(), session.clone());
+
+        let status = service.status(&session.id).await.unwrap();
+
+        assert!(status.get("mount").is_none());
+        assert!(status.get("capability").is_none());
+        assert_eq!(status["metadataOverlayPresent"], false);
+    }
+
+    #[tokio::test]
+    async fn webdav_service_closes_an_established_connection_after_unmount() {
+        let temp = tempfile::tempdir().unwrap();
+        let session =
+            Arc::new(test_session(&temp.path().join("endpoint.sqlite"), temp.path()).await);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve(listener, session.clone()));
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(
+                b"OPTIONS /capability/ HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let headers = read_http_headers(&mut stream).await;
+        let headers_text = String::from_utf8_lossy(&headers);
+        assert!(headers_text.starts_with("HTTP/1.1 200"), "{headers_text}");
+        assert!(
+            !headers_text
+                .to_ascii_lowercase()
+                .contains("connection: close")
+        );
+        if let Some(content_length) = headers_text.lines().find_map(|line| {
+            line.strip_prefix("Content-Length:")
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        }) {
+            let mut body = vec![0u8; content_length];
+            stream.read_exact(&mut body).await.unwrap();
+        }
+
+        session.shutdown.cancel();
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut byte))
+            .await
+            .expect("revoked connection did not close")
+            .unwrap();
+        assert_eq!(read, 0);
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -1710,7 +1828,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dav_handler_lists_snapshot_children_for_encoded_snapshot_directory() {
+    async fn webdav_service_lists_snapshot_children_for_encoded_snapshot_directory() {
         let temp = tempfile::tempdir().unwrap();
         let endpoint_db_path = temp.path().join("endpoint.sqlite");
         let endpoint_pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
@@ -1770,6 +1888,19 @@ mod tests {
         .execute(&filemap_pool)
         .await
         .unwrap();
+        sqlx::query(
+            "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("symlink-id")
+        .bind("snapshot-1234")
+        .bind("unavailable-link")
+        .bind(0i64)
+        .bind(0i64)
+        .bind(0o777i64)
+        .bind("symlink")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
         drop(filemap_pool);
 
         let session = test_session(&endpoint_db_path, temp.path()).await;
@@ -1798,6 +1929,14 @@ mod tests {
             names.push(String::from_utf8(entry.unwrap().name()).unwrap());
         }
         assert_eq!(names, vec!["Folder", "missing.txt"]);
+        assert_eq!(
+            session
+                .reader
+                .unavailable_entries("snapshot-1234")
+                .await
+                .unwrap(),
+            vec!["unavailable-link"]
+        );
         let handler = DavHandler::builder()
             .filesystem(Box::new(BrowseDavFs {
                 session: Arc::new(session.clone()),
@@ -1816,6 +1955,17 @@ mod tests {
         let response = handler.handle(request).await;
 
         assert_eq!(response.status(), 207);
+        let folder_response = propfind(&format!("{}/Folder", snapshot.display_name), "1", &session)
+            .await
+            .unwrap();
+        let folder_response_text = String::from_utf8_lossy(&folder_response);
+        assert!(folder_response_text.starts_with("HTTP/1.1 207"));
+        assert_eq!(
+            folder_response_text.matches("<D:response>").count(),
+            1,
+            "{folder_response_text}"
+        );
+        assert!(folder_response_text.contains("Folder/"));
         let get_response = respond(
             "GET",
             &format!("/capability/{encoded_name}/missing.txt"),
