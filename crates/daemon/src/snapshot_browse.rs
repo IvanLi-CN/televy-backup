@@ -1358,12 +1358,14 @@ async fn snapshot_path(
 }
 
 async fn refresh_snapshots(session: &BrowseSession) -> Result<Vec<BrowseSnapshot>, FsError> {
+    // Serialize the catalog read with the name/state replacement. Reading before acquiring this
+    // lock allows an older, slower refresh to overwrite a newer retention result.
+    let mut stored = session.snapshots.lock().await;
     let fresh = session
         .reader
         .list_snapshots(&session.source_path)
         .await
         .map_err(|_| FsError::GeneralFailure)?;
-    let mut stored = session.snapshots.lock().await;
     let previous_names = stored
         .iter()
         .map(|snapshot| {

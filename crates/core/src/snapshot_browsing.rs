@@ -146,6 +146,10 @@ impl SnapshotContentReader {
         validate_snapshot_id(snapshot_id)?;
         validate_relative_path(relative_path)?;
         if relative_path.is_empty() {
+            // A synthetic snapshot root is only valid when its backing metadata is readable.
+            // Otherwise WebDAV would expose a retained catalog row as an empty directory and
+            // hide a missing or corrupt filemap from the caller.
+            self.filemap_pool(snapshot_id).await?;
             return Ok(Some(BrowseEntry {
                 path: String::new(),
                 name: String::new(),
@@ -880,6 +884,43 @@ mod tests {
         .unwrap();
         drop(filemap_pool);
         assert!(reader.list_children("snapshot-1", "").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reader_rejects_a_missing_filemap_for_the_snapshot_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db = temp.path().join("index.sqlite");
+        let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap = filemap_dir.join("snapshot-1.sqlite");
+        drop(
+            crate::index_db::open_snapshot_filemap_db(&filemap)
+                .await
+                .unwrap(),
+        );
+        std::fs::remove_file(&filemap).unwrap();
+
+        let reader = SnapshotContentReader::new_cached(
+            endpoint_db,
+            filemap_dir,
+            "telegram.mtproto/default",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+
+        assert!(reader.entry("snapshot-1", "").await.is_err());
     }
 
     #[tokio::test]
