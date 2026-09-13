@@ -87,4 +87,9 @@ jobs:
           fi
           python3 .github/scripts/release_completion.py "${completion_args[@]}" \
             --allow-migration \
-            --migration-version 0.9.2
+            --migration-version 0.9.2 \
+            --reservation-json "${RUNNER_TEMP}/reservation.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --token "${GH_TOKEN}" \
+            --api-root "${GITHUB_API_URL}" \
+            --require-github-verification

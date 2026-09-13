@@ -12,6 +12,7 @@ python3 -m py_compile \
 
 python3 "$root_dir/scripts/test-product-version.py"
 bash "$root_dir/.github/scripts/test-release-failure-context.sh"
+bash "$root_dir/.github/scripts/test-release-github-api.sh"
 
 out="$(LABELS_JSON='[{"name":"type:patch"},{"name":"channel:prod"}]' \
   "$root_dir/.github/scripts/label-gate.sh")"
@@ -41,6 +42,9 @@ assert contract["recovery"]["historical_backfill"] is False
 assert contract["release_sequence"]["final_baseline"] == "highest final vX.Y.Z only"
 assert contract["release_states"]["published"] == "idempotent-success-without-build-or-overwrite"
 assert contract["identity_refs"]["write_policy"] == "append-only-create"
+assert contract["identity_refs"]["state_order"] == "bound-before-consumed;released-only-when-unbound"
+assert contract["identity_refs"]["receipt_validation"] == "independently-verify-reservation-provenance"
+assert contract["recovery"]["dispatch_requires_existing_bound"] is True
 
 workflow_text = "\n".join(
     (root / ".github/workflows" / name).read_text(encoding="utf-8")

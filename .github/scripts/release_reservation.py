@@ -19,6 +19,7 @@ SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 REF_RE = re.compile(r"^refs/tags/[A-Za-z0-9._/-]+$")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-(?:beta|rc|dev)\.[1-9]\d*)?$")
 CHANNELS = {"prod", "beta", "rc", "dev"}
+IDENTITY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class ReservationError(RuntimeError):
@@ -31,22 +32,31 @@ def normalize_sha(value: str, label: str = "SHA") -> str:
     return value.lower()
 
 
-def validate_identity(version: str, channel: str) -> None:
+def validate_version(version: str) -> None:
     if not VERSION_RE.fullmatch(version):
         raise ReservationError(f"invalid release version: {version!r}")
+
+
+def validate_identity(version: str, channel: str) -> None:
+    validate_version(version)
     if channel not in CHANNELS:
         raise ReservationError(f"invalid release channel: {channel!r}")
+    version_channel = version.rsplit("-", 1)[-1].split(".", 1)[0] if "-" in version else "prod"
+    if version_channel != channel:
+        raise ReservationError(f"release version {version!r} does not match channel {channel!r}")
 
 
 def reservation_ref(version: str) -> str:
-    validate_identity(version, "prod")
+    validate_version(version)
     return f"refs/tags/release-reservation/v{version}"
 
 
 def receipt_ref(state: str, version: str, identity: str) -> str:
     if state not in {"bound", "consumed", "released"}:
         raise ReservationError(f"unsupported receipt state: {state}")
-    validate_identity(version, "prod")
+    validate_version(version)
+    if not IDENTITY_SEGMENT_RE.fullmatch(identity):
+        raise ReservationError(f"invalid receipt identity: {identity!r}")
     if state == "released":
         return f"refs/tags/release-released/v{version}/{identity}"
     normalize_sha(identity, "merge SHA")
@@ -128,13 +138,37 @@ def expected_reservation(
         channel=channel,
         state="claimed",
     )
-    return {"sourceSha": source, "version": version, "channel": channel, **metadata}
+    return {
+        "sourceSha": source,
+        "version": version,
+        "channel": channel,
+        "reservationId": reservation_id,
+        **metadata,
+    }
+
+
+def validate_expected_reservation(expected: dict[str, Any]) -> None:
+    version = str(expected["version"])
+    channel = str(expected["channel"])
+    validate_identity(version, channel)
+    if str(expected["ref"]) != reservation_ref(version):
+        raise ReservationError("reservation ref does not match the release version")
+    normalize_sha(str(expected["sourceSha"]), "source SHA")
+    for key in (
+        "reservationId",
+        "Reservation-Owner",
+        "Reservation-Claim-Key",
+        "Reservation-Boundary-Token",
+    ):
+        if not str(expected.get(key, "")).strip():
+            raise ReservationError(f"reservation is missing {key}")
 
 
 def verify_reservation_commit(ref_target: str, expected: dict[str, Any], cwd: Path = ROOT) -> dict[str, Any]:
+    validate_expected_reservation(expected)
     info = local_commit_info(ref_target, cwd)
     source = normalize_sha(str(expected["sourceSha"]), "source SHA")
-    if info["parents"] != [source]:
+    if [normalize_sha(parent, "reservation parent") for parent in info["parents"]] != [source]:
         raise ReservationError("reservation must have source SHA as its only parent")
     source_info = local_commit_info(source, cwd)
     if info["tree"] != source_info["tree"]:
@@ -171,6 +205,7 @@ def local_ref_target(ref: str, cwd: Path = ROOT) -> str | None:
 
 
 def create_local_reservation(expected: dict[str, Any], cwd: Path = ROOT) -> dict[str, Any]:
+    validate_expected_reservation(expected)
     ref = str(expected["ref"])
     existing = local_ref_target(ref, cwd)
     if existing:
@@ -272,6 +307,7 @@ class GitHubRefClient:
 def create_github_reservation(
     expected: dict[str, Any], *, repository: str, token: str, api_root: str = "https://api.github.com"
 ) -> dict[str, Any]:
+    validate_expected_reservation(expected)
     client = GitHubRefClient(repository, token, api_root)
     ref = str(expected["ref"])
     existing = client.ref_target(ref)
@@ -322,6 +358,7 @@ def create_github_reservation(
 
 
 def verify_github_reservation(expected: dict[str, Any], *, repository: str, token: str, api_root: str = "https://api.github.com") -> dict[str, Any]:
+    validate_expected_reservation(expected)
     client = GitHubRefClient(repository, token, api_root)
     ref = str(expected["ref"])
     target = client.ref_target(ref)
@@ -329,8 +366,9 @@ def verify_github_reservation(expected: dict[str, Any], *, repository: str, toke
         raise ReservationError(f"reservation ref is missing: {ref}")
     info = client.commit_info(target)
     parents = [parent.get("sha") for parent in info.get("parents", [])]
-    source_info = client.commit_info(str(expected["sourceSha"]))
-    if parents != [expected["sourceSha"]] or info.get("tree", {}).get("sha") != source_info.get("tree", {}).get("sha"):
+    source = normalize_sha(str(expected["sourceSha"]), "source SHA")
+    source_info = client.commit_info(source)
+    if parents != [source] or info.get("tree", {}).get("sha") != source_info.get("tree", {}).get("sha"):
         raise ReservationError("remote reservation provenance does not match the claim")
     trailers = trailers_from_message(str(info.get("message", "")))
     for key, value in {
@@ -347,10 +385,104 @@ def verify_github_reservation(expected: dict[str, Any], *, repository: str, toke
     return {"ref": ref, "target": target, **expected}
 
 
+def verify_local_reservation_claim(
+    *, reservation_ref_value: str, version: str, reservation_id: str, owner: str, claim_key: str,
+    boundary_token: str, cwd: Path = ROOT
+) -> dict[str, Any]:
+    validate_version(version)
+    if reservation_ref_value != reservation_ref(version):
+        raise ReservationError("receipt reservation ref does not match the release version")
+    target = local_ref_target(reservation_ref_value, cwd)
+    if not target:
+        raise ReservationError(f"reservation ref is missing: {reservation_ref_value}")
+    info = local_commit_info(target, cwd)
+    if len(info["parents"]) != 1:
+        raise ReservationError("reservation must have one source parent")
+    trailers = trailers_from_message(info["message"])
+    channel = trailers.get("Release-Channel", "")
+    expected = {
+        "ref": reservation_ref_value,
+        "sourceSha": info["parents"][0],
+        "version": version,
+        "channel": channel,
+        "reservationId": reservation_id,
+        "Reservation-Owner": owner,
+        "Reservation-Claim-Key": claim_key,
+        "Reservation-Boundary-Token": boundary_token,
+    }
+    return verify_reservation_commit(target, expected, cwd)
+
+
+def verify_github_reservation_claim(
+    *, reservation_ref_value: str, version: str, reservation_id: str, owner: str, claim_key: str,
+    boundary_token: str, repository: str, token: str, api_root: str = "https://api.github.com"
+) -> dict[str, Any]:
+    client = GitHubRefClient(repository, token, api_root)
+    validate_version(version)
+    if reservation_ref_value != reservation_ref(version):
+        raise ReservationError("receipt reservation ref does not match the release version")
+    target = client.ref_target(reservation_ref_value)
+    if not target:
+        raise ReservationError(f"reservation ref is missing: {reservation_ref_value}")
+    info = client.commit_info(target)
+    parents = [parent.get("sha") for parent in info.get("parents", [])]
+    if len(parents) != 1 or not isinstance(parents[0], str):
+        raise ReservationError("remote reservation must have one source parent")
+    source = normalize_sha(parents[0], "reservation parent")
+    source_info = client.commit_info(source)
+    if info.get("tree", {}).get("sha") != source_info.get("tree", {}).get("sha"):
+        raise ReservationError("remote reservation tree does not match its source")
+    trailers = trailers_from_message(str(info.get("message", "")))
+    channel = trailers.get("Release-Channel", "")
+    expected = {
+        "ref": reservation_ref_value,
+        "sourceSha": source,
+        "version": version,
+        "channel": channel,
+        "reservationId": reservation_id,
+        "Reservation-Owner": owner,
+        "Reservation-Claim-Key": claim_key,
+        "Reservation-Boundary-Token": boundary_token,
+    }
+    validate_identity(version, channel)
+    for key, value in {
+        "Reservation-Id": reservation_id,
+        "Reservation-Owner": owner,
+        "Reservation-Claim-Key": claim_key,
+        "Reservation-Boundary-Token": boundary_token,
+        "Release-Version": version,
+        "Release-Channel": channel,
+        "Reservation-State": "claimed",
+    }.items():
+        if trailers.get(key) != value:
+            raise ReservationError(f"remote reservation trailer {key} does not match")
+    return {"ref": reservation_ref_value, "target": target, **expected}
+
+
 def receipt_message(fields: dict[str, str]) -> str:
     lines = ["release: immutable identity receipt", ""]
     lines.extend(f"{key}: {value}" for key, value in fields.items())
     return "\n".join(lines) + "\n"
+
+
+def receipt_fields(
+    *, state: str, version: str, merge_sha: str, reservation_id: str, owner: str, claim_key: str,
+    boundary_token: str, reservation_ref_value: str
+) -> dict[str, str]:
+    if state not in {"bound", "consumed", "released"}:
+        raise ReservationError(f"unsupported receipt state: {state}")
+    validate_version(version)
+    return {
+        "Receipt-State": state,
+        "Release-Version": version,
+        "Release-Merge-SHA": normalize_sha(merge_sha, "merge SHA"),
+        "Release-Reservation-Id": reservation_id,
+        "Release-Owner": owner,
+        "Release-Claim-Key": claim_key,
+        "Release-Boundary-Token": boundary_token,
+        "Release-Reservation-Ref": reservation_ref_value,
+        "Receipt-Provenance": "immutable-receipt",
+    }
 
 
 def verify_receipt_commit(ref_target: str, fields: dict[str, str], cwd: Path = ROOT) -> dict[str, Any]:
@@ -371,18 +503,27 @@ def create_local_receipt(
 ) -> dict[str, str]:
     merge = normalize_sha(merge_sha, "merge SHA")
     ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
+    fields = receipt_fields(
+        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
+        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+    )
+    verify_local_reservation_claim(
+        reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
+        owner=owner, claim_key=claim_key, boundary_token=boundary_token, cwd=cwd,
+    )
+    bound_ref = receipt_ref("bound", version, merge)
+    consumed_ref = receipt_ref("consumed", version, merge)
+    bound_target = local_ref_target(bound_ref, cwd)
+    consumed_target = local_ref_target(consumed_ref, cwd)
+    if state == "bound" and consumed_target:
+        raise ReservationError("consumed receipt exists before bound receipt")
+    if state == "consumed":
+        if not bound_target:
+            raise ReservationError("consumed receipt requires a matching bound receipt")
+        verify_receipt_commit(bound_target, {**fields, "Receipt-State": "bound"}, cwd)
+    if state == "released" and (bound_target or consumed_target):
+        raise ReservationError("released receipt is only valid for an unbound claim")
     existing = local_ref_target(ref, cwd)
-    fields = {
-        "Receipt-State": state,
-        "Release-Version": version,
-        "Release-Merge-SHA": merge,
-        "Release-Reservation-Id": reservation_id,
-        "Release-Owner": owner,
-        "Release-Claim-Key": claim_key,
-        "Release-Boundary-Token": boundary_token,
-        "Release-Reservation-Ref": reservation_ref_value,
-        "Receipt-Provenance": "immutable-receipt",
-    }
     if existing:
         return {"ref": ref, **verify_receipt_commit(existing, fields, cwd)}
     merge_info = local_commit_info(merge, cwd)
@@ -406,18 +547,32 @@ def create_github_receipt(
 ) -> dict[str, str]:
     merge = normalize_sha(merge_sha, "merge SHA")
     ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
-    fields = {
-        "Receipt-State": state,
-        "Release-Version": version,
-        "Release-Merge-SHA": merge,
-        "Release-Reservation-Id": reservation_id,
-        "Release-Owner": owner,
-        "Release-Claim-Key": claim_key,
-        "Release-Boundary-Token": boundary_token,
-        "Release-Reservation-Ref": reservation_ref_value,
-        "Receipt-Provenance": "immutable-receipt",
-    }
+    fields = receipt_fields(
+        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
+        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+    )
     client = GitHubRefClient(repository, token, api_root)
+    verify_github_reservation_claim(
+        reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
+        owner=owner, claim_key=claim_key, boundary_token=boundary_token, repository=repository,
+        token=token, api_root=api_root,
+    )
+    bound_ref = receipt_ref("bound", version, merge)
+    consumed_ref = receipt_ref("consumed", version, merge)
+    bound_target = client.ref_target(bound_ref)
+    consumed_target = client.ref_target(consumed_ref)
+    if state == "bound" and consumed_target:
+        raise ReservationError("consumed receipt exists before bound receipt")
+    if state == "consumed":
+        if not bound_target:
+            raise ReservationError("consumed receipt requires a matching bound receipt")
+        verify_github_receipt(
+            state="bound", version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
+            claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+            repository=repository, token=token, api_root=api_root,
+        )
+    if state == "released" and (bound_target or consumed_target):
+        raise ReservationError("released receipt is only valid for an unbound claim")
     existing = client.ref_target(ref)
     if existing:
         info = client.commit_info(existing)
@@ -446,6 +601,57 @@ def create_github_receipt(
             claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
             repository=repository, token=token, api_root=api_root
         )
+    return {"ref": ref, "target": target, **fields}
+
+
+def verify_local_receipt(
+    *, state: str, version: str, merge_sha: str, reservation_id: str, owner: str, claim_key: str,
+    boundary_token: str, reservation_ref_value: str, cwd: Path = ROOT
+) -> dict[str, str]:
+    merge = normalize_sha(merge_sha, "merge SHA")
+    ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
+    fields = receipt_fields(
+        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
+        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+    )
+    verify_local_reservation_claim(
+        reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
+        owner=owner, claim_key=claim_key, boundary_token=boundary_token, cwd=cwd,
+    )
+    target = local_ref_target(ref, cwd)
+    if not target:
+        raise ReservationError(f"receipt ref is missing: {ref}")
+    return {"ref": ref, **verify_receipt_commit(target, fields, cwd)}
+
+
+def verify_github_receipt(
+    *, state: str, version: str, merge_sha: str, reservation_id: str, owner: str, claim_key: str,
+    boundary_token: str, reservation_ref_value: str, repository: str, token: str,
+    api_root: str = "https://api.github.com"
+) -> dict[str, str]:
+    merge = normalize_sha(merge_sha, "merge SHA")
+    ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
+    fields = receipt_fields(
+        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
+        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+    )
+    verify_github_reservation_claim(
+        reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
+        owner=owner, claim_key=claim_key, boundary_token=boundary_token, repository=repository,
+        token=token, api_root=api_root,
+    )
+    client = GitHubRefClient(repository, token, api_root)
+    target = client.ref_target(ref)
+    if not target:
+        raise ReservationError(f"receipt ref is missing: {ref}")
+    info = client.commit_info(target)
+    merge_info = client.commit_info(merge)
+    parents = [parent.get("sha") for parent in info.get("parents", [])]
+    if parents != [merge] or info.get("tree", {}).get("sha") != merge_info.get("tree", {}).get("sha"):
+        raise ReservationError("remote receipt provenance does not match its merge SHA")
+    actual = trailers_from_message(str(info.get("message", "")))
+    if any(actual.get(key) != value for key, value in fields.items()):
+        raise ReservationError("remote receipt does not match the requested identity")
     return {"ref": ref, "target": target, **fields}
 
 

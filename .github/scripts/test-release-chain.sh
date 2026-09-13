@@ -105,6 +105,12 @@ assert "0.9.8-rc.3" in chain.occupied_identity_versions()
 assert chain.allocate_version(
     chain.product_tags(), "type:patch", "channel:rc", chain.occupied_identity_versions()
 )["version"] == "0.9.8-rc.4"
+try:
+    chain.allocate_version(chain.product_tags(), "type:patch", "channel:prod", ["0.9.8"])
+except chain.ReleaseChainError as error:
+    assert "already reserved" in str(error)
+else:
+    raise AssertionError("occupied prod identity unexpectedly allocated a successor")
 assert chain.verify_release_sequence("0.9.8", source)["status"] == "available"
 chain.git("tag", "v0.9.8", source)
 assert_sequence_rejected("0.9.8", chain.git("rev-parse", "HEAD"), "product_tag_conflict")

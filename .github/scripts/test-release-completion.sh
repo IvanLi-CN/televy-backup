@@ -49,8 +49,17 @@ python3 "$root_dir/.github/scripts/release_preparation.py" \
 prepared_sha="$(git -C "$repo_dir" rev-parse HEAD)"
 out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \
-  --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json")"
+  --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --reservation-json "$tmp_dir/reservation.json")"
 [[ "$out" == *'"status": "ready"'* ]]
+
+if python3 "$root_dir/.github/scripts/release_completion.py" \
+  --repo-root "$repo_dir" \
+  --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --reservation-json "$tmp_dir/reservation.json" --require-github-verification >/dev/null 2>&1; then
+  echo "fixture-verified preparation passed the production completion gate" >&2
+  exit 1
+fi
 
 printf '[{"name":"type:skip"}]\n' > "$tmp_dir/skip-labels.json"
 printf '{"check_runs":[]}\n' > "$tmp_dir/skip-checks.json"

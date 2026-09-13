@@ -25,6 +25,11 @@ After merge, append immutable `release-bound/v<version>/<merge-sha>` and, after 
 updated or deleted: an identical claim is idempotent, while a foreign owner, claim, provenance, or
 state fails closed.
 
+Every receipt writer independently verifies the reservation's parent, tree, and trailers. The
+`bound` receipt must exist before `consumed` is created; a recovery run may only verify an existing
+`bound` receipt and may not create the first one. A `released` receipt is rejected once a bound or
+consumed receipt exists.
+
 The release intent JSON is an Actions artifact snapshot only. Recovery reconstructs identity from
 reservation and receipt refs, preparation/merge trailers, and the product tag. The normal PR mode,
 the explicit `version-only-release-pr` mode, and same-SHA recovery remain separate contracts.

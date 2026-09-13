@@ -42,7 +42,9 @@ Before VERSION preparation, the trusted controller creates
 source SHA and whose tree equals the source tree. Its trailers record reservation id, owner, claim
 key, boundary token, version, channel, and `claimed` state. First creation wins; an identical claim
 is idempotent; foreign ownership, stale state, provenance mismatch and tag conflict fail closed.
-No reservation or receipt ref is updated, deleted, or force-pushed.
+No reservation or receipt ref is updated, deleted, or force-pushed. Receipt creation independently
+re-verifies reservation parent/tree/trailers; `bound` must exist before `consumed`, while `released`
+is allowed only for an unbound claim with explicit maintainer confirmation.
 
 ### REQ-PVR-005: Preparation and completion preserve identity
 
@@ -50,6 +52,8 @@ Normal preparation uses GitHub `createCommitOnBranch` with `expectedHeadOid`, ch
 and requires a GitHub-native verified commit. The commit records source SHA, final version, type,
 channel, reservation ref, owner, claim key, boundary token, release mode and provenance. Release
 completion validates those fields, source checks, ancestry, and reservation provenance.
+The production completion gate additionally requires the preparation commit's GitHub-native
+verification state; fixture provenance cannot enter the merge gate.
 
 `version-only-release-pr` is a separate mode. It is a non-empty PR changing only VERSION and
 records one covered merge SHA that does not already have a release identity. Its new merge SHA is
@@ -67,7 +71,8 @@ surface; beta/rc/dev are prereleases and never update stable latest.
 ### REQ-PVR-007: Recovery is same-SHA or an explicit new PR
 
 Same-SHA recovery accepts only an existing bound identity and retries missing publish or receipt
-work. It never writes VERSION, computes a successor, changes a channel, or retags. A historical
+work. A manual recovery run must find and verify that bound receipt before doing publish work; it
+cannot create the first bound identity. It never writes VERSION, computes a successor, changes a channel, or retags. A historical
 merge with no identity is not a recovery input; it can be released only through a new,
 version-only-release-pr. History scanning, queues, trains, backfill and automatic PR creation are
 not part of this contract.

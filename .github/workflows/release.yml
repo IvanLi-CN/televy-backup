@@ -134,12 +134,27 @@ jobs:
           PY
           sequence_json="$(python3 .github/scripts/release_chain.py verify-release-sequence --version "${version}" --expected-sha "${merge_sha}")"
           tag_status="$(printf '%s' "${sequence_json}" | jq -r .status)"
-          python3 .github/scripts/release_reservation.py receipt \
-            --state bound --version "${version}" --merge-sha "${merge_sha}" \
-            --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
-            --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
-            --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
-            --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
+          if [[ "${EVENT_NAME}" == workflow_dispatch ]]; then
+            python3 - "${version}" "${merge_sha}" "${reservation_id}" "${reservation_owner}" \
+              "${claim_key}" "${boundary_token}" "${reservation_ref}" "${GITHUB_REPOSITORY}" \
+              "${GH_TOKEN}" "${GITHUB_API_URL}" <<'PY'
+          import sys
+          sys.path.insert(0, '.github/scripts')
+          import release_reservation
+          release_reservation.verify_github_receipt(
+              state='bound', version=sys.argv[1], merge_sha=sys.argv[2], reservation_id=sys.argv[3],
+              owner=sys.argv[4], claim_key=sys.argv[5], boundary_token=sys.argv[6],
+              reservation_ref_value=sys.argv[7], repository=sys.argv[8], token=sys.argv[9], api_root=sys.argv[10],
+          )
+          PY
+          else
+            python3 .github/scripts/release_reservation.py receipt \
+              --state bound --version "${version}" --merge-sha "${merge_sha}" \
+              --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
+              --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
+              --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
+              --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
+          fi
           release_state=missing
           release_output=""
           if release_output="$(gh release view "${tag}" --json isDraft 2>&1)"; then
@@ -377,23 +392,23 @@ jobs:
           fi
           if [[ "${runtime_state}" == published ]]; then
             echo "Product release became published for ${PRODUCT_TAG}; no asset overwrite"
-            exit 0
-          fi
-          release_files=()
-          while IFS= read -r -d '' asset; do release_files+=("$asset"); done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
-          ((${#release_files[@]} > 0))
-          if [[ "${runtime_state}" == draft ]]; then
-            gh release upload "${PRODUCT_TAG}" "${release_files[@]}" --clobber
-            gh release edit "${PRODUCT_TAG}" --draft=false
           else
-            test "${runtime_state}" = missing
-            flags=(--verify-tag --title "${PRODUCT_TAG}" --generate-notes)
-            if [[ "${PRODUCT_CHANNEL}" == prod ]]; then
-              flags+=(--latest=true)
+            release_files=()
+            while IFS= read -r -d '' asset; do release_files+=("$asset"); done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
+            ((${#release_files[@]} > 0))
+            if [[ "${runtime_state}" == draft ]]; then
+              gh release upload "${PRODUCT_TAG}" "${release_files[@]}" --clobber
+              gh release edit "${PRODUCT_TAG}" --draft=false
             else
-              flags+=(--prerelease --latest=false)
+              test "${runtime_state}" = missing
+              flags=(--verify-tag --title "${PRODUCT_TAG}" --generate-notes)
+              if [[ "${PRODUCT_CHANNEL}" == prod ]]; then
+                flags+=(--latest=true)
+              else
+                flags+=(--prerelease --latest=false)
+              fi
+              gh release create "${PRODUCT_TAG}" "${release_files[@]}" "${flags[@]}"
             fi
-            gh release create "${PRODUCT_TAG}" "${release_files[@]}" "${flags[@]}"
           fi
       - name: Append consumed receipt
         run: |

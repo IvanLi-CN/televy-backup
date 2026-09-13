@@ -329,7 +329,8 @@ def final_tag_baseline(tags: list[dict[str, str]]) -> str:
 
 
 def allocate_version(
-    tags: list[dict[str, str]], type_label: str, channel_label: str, occupied_versions: list[str] | None = None
+    tags: list[dict[str, str]], type_label: str, channel_label: str, occupied_versions: list[str] | None = None,
+    allow_occupied_version: str | None = None,
 ) -> dict[str, str | int]:
     type_name = type_label.removeprefix("type:")
     channel = channel_label.removeprefix("channel:")
@@ -339,8 +340,17 @@ def allocate_version(
     if channel == "prod":
         version = base
         ordinal: int | None = None
+        occupied = set(occupied_versions or []) | {row["version"] for row in tags}
+        if allow_occupied_version:
+            occupied.discard(allow_occupied_version)
+        if version in occupied:
+            raise ReleaseChainError(
+                f"final release identity v{version} is already reserved or tagged; refusing to allocate a successor"
+            )
     else:
         occupied = list(occupied_versions or []) + [row["version"] for row in tags]
+        if allow_occupied_version:
+            occupied = [value for value in occupied if value != allow_occupied_version]
         ordinals = []
         for value in occupied:
             try:
@@ -396,7 +406,8 @@ def _stage_version(args: argparse.Namespace) -> str:
     if getattr(args, "version", None):
         version = args.version
         allocation = allocate_version(
-            product_tags(), args.intent_type, args.intent_channel, occupied_identity_versions()
+            product_tags(), args.intent_type, args.intent_channel, occupied_identity_versions(),
+            allow_occupied_version=version,
         )
         if version != allocation["version"]:
             raise ReleaseChainError(

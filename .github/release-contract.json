@@ -47,6 +47,7 @@
     "write_api": "createCommitOnBranch",
     "expected_head_oid": true,
     "signature": "github-native-verified",
+    "completion_requires_native_verification": true,
     "only_path": "VERSION",
     "no_gpg_secrets": true,
     "allocation": "final-tag-first",
@@ -57,11 +58,14 @@
     "bound": "refs/tags/release-bound/v<version>/<merge-sha>",
     "consumed": "refs/tags/release-consumed/v<version>/<merge-sha>",
     "released": "refs/tags/release-released/v<version>/<reservation-id>",
-    "write_policy": "append-only-create"
+    "write_policy": "append-only-create",
+    "state_order": "bound-before-consumed;released-only-when-unbound",
+    "receipt_validation": "independently-verify-reservation-provenance"
   },
   "recovery": {
     "same_sha_operation": "recover",
     "same_sha_identity": "bound merge SHA + VERSION + channel + matching reservation",
+    "dispatch_requires_existing_bound": true,
     "version_only_release_pr": "new non-empty VERSION-only PR with new merge identity",
     "historical_backfill": false,
     "queue": false,

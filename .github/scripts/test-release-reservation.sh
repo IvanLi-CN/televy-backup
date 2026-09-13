@@ -31,6 +31,22 @@ if python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
   exit 1
 fi
 
+if python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$repo_dir" --source-sha "$source_sha" --version 1.0.0-beta.1 --channel rc \
+  --owner fixture --claim-key "$claim_key" >/dev/null 2>&1; then
+  echo "version/channel mismatch was accepted" >&2
+  exit 1
+fi
+
+if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
+  --local-root "$repo_dir" --state consumed --version 1.0.0-beta.1 --merge-sha "$source_sha" \
+  --reservation-id "$(printf '%s' "$first" | jq -r .reservationId)" --owner fixture \
+  --claim-key "$claim_key" --boundary-token "$(printf '%s' "$first" | jq -r '."Reservation-Boundary-Token"')" \
+  --reservation-ref refs/tags/release-reservation/v1.0.0-beta.1 >/dev/null 2>&1; then
+  echo "consumed receipt was created without bound receipt" >&2
+  exit 1
+fi
+
 bound="$(python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
   --local-root "$repo_dir" --state bound --version 1.0.0-beta.1 --merge-sha "$source_sha" \
   --reservation-id "$(printf '%s' "$first" | jq -r .reservationId)" --owner fixture \
@@ -59,6 +75,15 @@ if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
   --claim-key "$claim_key" --boundary-token "$(printf '%s' "$first" | jq -r '."Reservation-Boundary-Token"')" \
   --reservation-ref refs/tags/release-reservation/v1.0.0-beta.1 >/dev/null 2>&1; then
   echo "released receipt bypassed maintainer confirmation" >&2
+  exit 1
+fi
+
+if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
+  --local-root "$repo_dir" --state released --version 1.0.0-beta.1 --merge-sha "$source_sha" \
+  --reservation-id "$(printf '%s' "$first" | jq -r .reservationId)" --owner fixture \
+  --claim-key "$claim_key" --boundary-token "$(printf '%s' "$first" | jq -r '."Reservation-Boundary-Token"')" \
+  --reservation-ref refs/tags/release-reservation/v1.0.0-beta.1 --maintainer-confirmed >/dev/null 2>&1; then
+  echo "released receipt bypassed bound state" >&2
   exit 1
 fi
 

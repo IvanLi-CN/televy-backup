@@ -50,6 +50,7 @@ assert_contains "release full history checkout" "$release_text" "fetch-depth: 0"
 assert_contains "release full tag fetch" "$release_text" "git fetch --force origin main '+refs/tags/*:refs/tags/*'"
 assert_contains "release sequence gate" "$release_text" "verify-release-sequence"
 assert_contains "release reservation verification" "$release_text" "verify_github_reservation"
+assert_contains "recovery existing bound verification" "$release_text" "verify_github_receipt"
 assert_contains "release bound receipt" "$release_text" "--state bound"
 assert_contains "release consumed receipt" "$release_text" "--state consumed"
 assert_contains "release intent artifact" "$release_text" "name: release-intent"
@@ -57,6 +58,10 @@ assert_contains "release intent covered merge" "$release_text" "covered_merge_sh
 assert_contains "release intent type" "$release_text" "RELEASE_TYPE"
 assert_contains "release publish recheck" "$release_text" "Create or verify immutable product tag"
 assert_contains "release state fail closed" "$release_text" "unable to resolve GitHub Release state"
+if [[ "$release_text" == *'Product release became published for "${PRODUCT_TAG}"; no asset overwrite'*$'\n'*'exit 0'* ]]; then
+  printf 'published release path exits before consumed receipt\n' >&2
+  exit 1
+fi
 assert_contains "draft release publish" "$release_text" "gh release edit \"\${PRODUCT_TAG}\" --draft=false"
 assert_contains "draft-only asset overwrite" "$release_text" '[[ "${runtime_state}" == draft ]]'
 if (( $(printf '%s' "$release_text" | grep -Fc 'verify-release-sequence') < 2 )); then
@@ -73,6 +78,9 @@ assert_not_contains "source PR release comment marker" "$release_text" "televyba
 assert_not_contains "source PR lookup" "$release_text" "/commits/\${TARGET_INPUT}/pulls"
 assert_not_contains "source PR number output" "$release_text" "pr_number"
 assert_contains "prerelease release behavior" "$release_text" "--prerelease --latest=false"
+completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
+assert_contains "completion native signature gate" "$completion_text" "--require-github-verification"
+assert_contains "completion reservation provenance gate" "$completion_text" "--reservation-json"
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'
 release = YAML.load_file(ARGV.fetch(0))
 expected_permissions = {"contents" => "write"}
