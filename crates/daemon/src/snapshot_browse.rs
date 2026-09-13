@@ -839,17 +839,15 @@ impl SnapshotBrowseService {
 
     async fn unmount(&self, session_id: &str) -> Result<serde_json::Value, ControlError> {
         let _mount_guard = self.mount_lock.lock().await;
-        let session = self
-            .sessions
-            .lock()
-            .await
-            .remove(session_id)
-            .ok_or_else(|| ControlError {
-                code: "snapshot.browse.not_found".to_string(),
-                message: "Browse session was not found.".to_string(),
-                retryable: false,
-                details: serde_json::json!({}),
-            })?;
+        let Some(session) = self.sessions.lock().await.remove(session_id) else {
+            // Cleanup can race with daemon recovery or a previous retry. Treat an already
+            // revoked session as success so clients can finish local volume cleanup.
+            return Ok(serde_json::json!({
+                "sessionId": session_id,
+                "unmounted": true,
+                "alreadyUnmounted": true,
+            }));
+        };
         session.shutdown.cancel();
         self.target_sessions.lock().await.remove(&session.target_id);
         Ok(serde_json::json!({ "sessionId": session_id, "unmounted": true }))
@@ -1793,6 +1791,22 @@ mod tests {
         assert!(status.get("mount").is_none());
         assert!(status.get("capability").is_none());
         assert_eq!(status["metadataOverlayPresent"], false);
+    }
+
+    #[tokio::test]
+    async fn unmounting_an_unknown_session_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = SnapshotBrowseService::new(
+            temp.path().join("config"),
+            temp.path().join("data"),
+            Arc::new(RwLock::new(SettingsV2::default())),
+        );
+
+        let result = service.unmount("missing-session").await.unwrap();
+
+        assert_eq!(result["sessionId"], "missing-session");
+        assert_eq!(result["unmounted"], true);
+        assert_eq!(result["alreadyUnmounted"], true);
     }
 
     #[tokio::test]
