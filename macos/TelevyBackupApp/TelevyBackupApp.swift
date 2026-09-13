@@ -536,12 +536,14 @@ final class AppModel {
         return false
     }
 
-    func unmountAllBrowseVolumesForTermination() {
+    @discardableResult
+    func unmountAllBrowseVolumesForTermination() -> Bool {
         browseMountLock.lock()
         let mounts = Array(browseMountsByTargetId.values)
         browseMountLock.unlock()
 
         let socketPath = controlSocketPath()
+        var allUnmounted = true
         for mount in mounts {
             let daemonUnmounted = unmountBrowseSessionBeforeTermination(
                 sessionId: mount.sessionId,
@@ -555,8 +557,16 @@ final class AppModel {
             if daemonUnmounted {
                 clearBrowseMountTracking(sessionId: mount.sessionId)
                 removeBrowseMountDirectory(sessionId: mount.sessionId, mountRoot: mount.mountRoot)
+            } else {
+                allUnmounted = false
+                scheduleBrowseMountCleanupRetry(
+                    sessionId: mount.sessionId,
+                    mountRoot: mount.mountRoot,
+                    socketPath: socketPath
+                )
             }
         }
+        return allUnmounted
     }
 
     private func recoverSnapshotBrowseSessions() {
@@ -6300,7 +6310,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return .terminateCancel
         }
 
-        ModelStore.shared.unmountAllBrowseVolumesForTermination()
+        let wasGuiOnlyExitRequested = guiOnlyExitRequested
+        guard ModelStore.shared.unmountAllBrowseVolumesForTermination() else {
+            guiControlAudit("application.termination-blocked-by-browse-cleanup")
+            terminationInProgress = false
+            guiOnlyExitRequested = false
+            menuCompleteExitRequested = false
+            if !wasGuiOnlyExitRequested {
+                lifecycleGate.end()
+            }
+            ModelStore.shared.reportMenuQuickActionError(
+                "A Finder backup volume is still closing. Try quitting again after it disappears."
+            )
+            return .terminateCancel
+        }
         guiControlAudit("application.termination-started")
         terminationInProgress = true
         if !fullyStopDaemon {
