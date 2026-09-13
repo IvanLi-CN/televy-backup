@@ -488,41 +488,48 @@ final class AppModel {
 
     private func finishBrowseMountCleanup(sessionId: String, mountRoot: URL) {
         DispatchQueue.main.async {
-            self.browseMountLock.lock()
-            self.browseMountsByTargetId = self.browseMountsByTargetId.filter { $0.value.sessionId != sessionId }
-            self.browseMountLock.unlock()
-            if let token = self.browseUnmountObservers.removeValue(forKey: sessionId) {
-                NSWorkspace.shared.notificationCenter.removeObserver(token)
-            }
-            if let timer = self.browseUnmountTimers.removeValue(forKey: sessionId) {
-                timer.cancel()
-            }
-            if let timer = self.browseOrphanCleanupTimers.removeValue(forKey: sessionId) {
-                timer.cancel()
-            }
+            self.clearBrowseMountTracking(sessionId: sessionId)
             NotificationCenter.default.post(
                 name: .snapshotBrowseDidUnmount,
                 object: nil,
                 userInfo: ["sessionId": sessionId]
             )
-            let mountsRoot = self.guiControlDataDirURL()
-                .appendingPathComponent("mounts", isDirectory: true)
-                .standardizedFileURL
-            let candidate = mountRoot.standardizedFileURL
-            guard candidate.path.hasPrefix(mountsRoot.path + "/"), candidate.lastPathComponent == sessionId else { return }
-            try? FileManager.default.removeItem(at: candidate)
+            self.removeBrowseMountDirectory(sessionId: sessionId, mountRoot: mountRoot)
         }
+    }
+
+    private func clearBrowseMountTracking(sessionId: String) {
+        browseMountLock.lock()
+        browseMountsByTargetId = browseMountsByTargetId.filter { $0.value.sessionId != sessionId }
+        browseMountLock.unlock()
+        if let token = browseUnmountObservers.removeValue(forKey: sessionId) {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+        }
+        if let timer = browseUnmountTimers.removeValue(forKey: sessionId) {
+            timer.cancel()
+        }
+        if let timer = browseOrphanCleanupTimers.removeValue(forKey: sessionId) {
+            timer.cancel()
+        }
+    }
+
+    private func removeBrowseMountDirectory(sessionId: String, mountRoot: URL) {
+        let mountsRoot = guiControlDataDirURL()
+            .appendingPathComponent("mounts", isDirectory: true)
+            .standardizedFileURL
+        let candidate = mountRoot.standardizedFileURL
+        guard candidate.path.hasPrefix(mountsRoot.path + "/"), candidate.lastPathComponent == sessionId else { return }
+        try? FileManager.default.removeItem(at: candidate)
     }
 
     func unmountAllBrowseVolumesForTermination() {
         browseMountLock.lock()
         let mounts = Array(browseMountsByTargetId.values)
-        browseMountsByTargetId.removeAll()
         browseMountLock.unlock()
 
         let socketPath = controlSocketPath()
         for mount in mounts {
-            _ = ControlIPCClient.request(
+            let result = ControlIPCClient.request(
                 socketPath: socketPath,
                 method: "snapshot.browse.unmount",
                 params: ["sessionId": mount.sessionId],
@@ -533,18 +540,9 @@ final class AppModel {
             task.arguments = [mount.mountRoot.path]
             try? task.run()
             task.waitUntilExit()
-            if let token = browseUnmountObservers.removeValue(forKey: mount.sessionId) {
-                NSWorkspace.shared.notificationCenter.removeObserver(token)
-            }
-            if let timer = browseUnmountTimers.removeValue(forKey: mount.sessionId) {
-                timer.cancel()
-            }
-            let mountsRoot = guiControlDataDirURL()
-                .appendingPathComponent("mounts", isDirectory: true)
-                .standardizedFileURL
-            let candidate = mount.mountRoot.standardizedFileURL
-            if candidate.path.hasPrefix(mountsRoot.path + "/"), candidate.lastPathComponent == mount.sessionId {
-                try? FileManager.default.removeItem(at: candidate)
+            if case .success = result {
+                clearBrowseMountTracking(sessionId: mount.sessionId)
+                removeBrowseMountDirectory(sessionId: mount.sessionId, mountRoot: mount.mountRoot)
             }
         }
     }
