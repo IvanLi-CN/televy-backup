@@ -277,6 +277,7 @@ final class AppModel {
     private var didRecoverSnapshotBrowseSessions = false
     private var browseUnmountObservers: [String: NSObjectProtocol] = [:]
     private var browseUnmountTimers: [String: DispatchSourceTimer] = [:]
+    private var browseOrphanCleanupTimers: [String: DispatchSourceTimer] = [:]
     private struct BrowseMount {
         let sessionId: String
         let mountRoot: URL
@@ -413,7 +414,9 @@ final class AppModel {
             task.arguments = [mount.mountRoot.path]
             try? task.run()
             task.waitUntilExit()
-            self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mount.mountRoot, socketPath: socketPath)
+            if case .success = result {
+                self.finishBrowseMountCleanup(sessionId: mount.sessionId, mountRoot: mount.mountRoot)
+            }
             DispatchQueue.main.async {
                 switch result {
                 case .success:
@@ -458,11 +461,32 @@ final class AppModel {
     }
 
     private func cleanupBrowseMount(sessionId: String, mountRoot: URL, socketPath: String) {
-        _ = ControlIPCClient.request(
+        let result = ControlIPCClient.request(
             socketPath: socketPath,
             method: "snapshot.browse.unmount",
             params: ["sessionId": sessionId]
         ) as Result<ControlAckResponse, ControlRequestFailure>
+        guard case .success = result else {
+            scheduleBrowseMountCleanupRetry(sessionId: sessionId, mountRoot: mountRoot, socketPath: socketPath)
+            return
+        }
+        finishBrowseMountCleanup(sessionId: sessionId, mountRoot: mountRoot)
+    }
+
+    private func scheduleBrowseMountCleanupRetry(sessionId: String, mountRoot: URL, socketPath: String) {
+        DispatchQueue.main.async {
+            guard self.browseOrphanCleanupTimers[sessionId] == nil else { return }
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + 2, repeating: 2)
+            timer.setEventHandler { [weak self] in
+                self?.cleanupBrowseMount(sessionId: sessionId, mountRoot: mountRoot, socketPath: socketPath)
+            }
+            timer.resume()
+            self.browseOrphanCleanupTimers[sessionId] = timer
+        }
+    }
+
+    private func finishBrowseMountCleanup(sessionId: String, mountRoot: URL) {
         DispatchQueue.main.async {
             self.browseMountLock.lock()
             self.browseMountsByTargetId = self.browseMountsByTargetId.filter { $0.value.sessionId != sessionId }
@@ -471,6 +495,9 @@ final class AppModel {
                 NSWorkspace.shared.notificationCenter.removeObserver(token)
             }
             if let timer = self.browseUnmountTimers.removeValue(forKey: sessionId) {
+                timer.cancel()
+            }
+            if let timer = self.browseOrphanCleanupTimers.removeValue(forKey: sessionId) {
                 timer.cancel()
             }
             NotificationCenter.default.post(

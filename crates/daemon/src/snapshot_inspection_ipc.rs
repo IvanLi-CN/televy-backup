@@ -13,6 +13,7 @@ use televy_backup_core::control::{
     SnapshotInspectStorageParams, SnapshotInspectSummaryParams,
 };
 use televy_backup_core::remote_index_db::{IndexDownloadProgress, IndexDownloadProgressSink};
+use televy_backup_core::snapshot_browsing::validate_snapshot_id;
 use televy_backup_core::snapshot_inspection::{
     BlockInspectionRequest, FileInspectionRequest, FilePresentation, FileScope,
     SnapshotInspectionError, SnapshotInspectionSession, SnapshotInspector,
@@ -516,10 +517,10 @@ async fn snapshot_inspector_for(
     source_progress: Option<&SourcePreparationProgress>,
 ) -> Result<SnapshotInspector, ControlError> {
     let endpoint_db_path = find_snapshot_endpoint_db(data_root, snapshot_id).await?;
-    let mut filemap_dir = endpoint_filemap_dir_for_db(data_root, &endpoint_db_path);
+    let mut filemap_dir = endpoint_filemap_dir_for_db(data_root, &endpoint_db_path)?;
     let provider = snapshot_provider_for(&endpoint_db_path, snapshot_id).await?;
     if let Some(endpoint_id) = endpoint_id_from_provider(provider.as_deref())? {
-        filemap_dir = endpoint_filemap_dir(data_root, endpoint_id);
+        filemap_dir = endpoint_filemap_dir(data_root, endpoint_id)?;
     }
     ensure_snapshot_filemap(
         config_root,
@@ -666,18 +667,62 @@ fn list_index_db_paths_for_read(data_root: &Path) -> Result<Vec<PathBuf>, Contro
     Ok(paths)
 }
 
-fn endpoint_filemap_dir_for_db(data_root: &Path, db_path: &Path) -> PathBuf {
+fn endpoint_filemap_dir_for_db(data_root: &Path, db_path: &Path) -> Result<PathBuf, ControlError> {
     db_path
         .file_name()
         .and_then(|name| name.to_str())
         .and_then(|name| name.strip_prefix("index."))
         .and_then(|name| name.strip_suffix(".sqlite"))
         .map(|endpoint_id| endpoint_filemap_dir(data_root, endpoint_id))
-        .unwrap_or_else(|| data_root.join("index").join("filemaps"))
+        .unwrap_or_else(|| Ok(data_root.join("index").join("filemaps")))
 }
 
-fn endpoint_filemap_dir(data_root: &Path, endpoint_id: &str) -> PathBuf {
-    data_root.join("index").join("filemaps").join(endpoint_id)
+fn endpoint_filemap_dir(data_root: &Path, endpoint_id: &str) -> Result<PathBuf, ControlError> {
+    validate_snapshot_id(endpoint_id).map_err(core_error)?;
+    Ok(data_root.join("index").join("filemaps").join(endpoint_id))
+}
+
+fn ensure_filemap_directory_containment(
+    data_root: &Path,
+    filemap_dir: &Path,
+) -> Result<(), ControlError> {
+    let root = data_root.join("index").join("filemaps");
+    std::fs::create_dir_all(filemap_dir).map_err(io_error)?;
+    let canonical_root = root.canonicalize().map_err(io_error)?;
+    let canonical_data_root = data_root.canonicalize().map_err(io_error)?;
+    let canonical_dir = filemap_dir.canonicalize().map_err(io_error)?;
+    if !canonical_root.starts_with(&canonical_data_root)
+        || !canonical_dir.starts_with(&canonical_root)
+    {
+        return Err(ControlError {
+            code: "snapshot.filemap_unavailable".to_string(),
+            message: "snapshot filemap directory is outside the data root".to_string(),
+            retryable: false,
+            details: serde_json::json!({}),
+        });
+    }
+    Ok(())
+}
+
+fn ensure_filemap_file_containment(
+    data_root: &Path,
+    filemap_dir: &Path,
+    filemap: &Path,
+) -> Result<(), ControlError> {
+    ensure_filemap_directory_containment(data_root, filemap_dir)?;
+    if filemap.exists() {
+        let canonical_dir = filemap_dir.canonicalize().map_err(io_error)?;
+        let canonical_filemap = filemap.canonicalize().map_err(io_error)?;
+        if canonical_filemap.parent() != Some(canonical_dir.as_path()) {
+            return Err(ControlError {
+                code: "snapshot.filemap_unavailable".to_string(),
+                message: "snapshot filemap is outside its configured directory".to_string(),
+                retryable: false,
+                details: serde_json::json!({}),
+            });
+        }
+    }
+    Ok(())
 }
 
 async fn snapshot_provider_for(
@@ -723,7 +768,9 @@ async fn ensure_snapshot_filemap(
         provider_hint,
         source_progress,
     } = request;
+    validate_snapshot_id(snapshot_id).map_err(core_error)?;
     let cached_filemap = filemap_dir.join(format!("{snapshot_id}.sqlite"));
+    ensure_filemap_file_containment(data_root, filemap_dir, &cached_filemap)?;
     if cached_filemap.is_file()
         || endpoint_db_path.file_name().and_then(|name| name.to_str()) == Some("index.sqlite")
         || endpoint_has_snapshot_files(endpoint_db_path, snapshot_id).await?

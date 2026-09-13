@@ -113,6 +113,7 @@ impl SnapshotContentReader {
         let mut names = std::collections::HashSet::new();
         for row in rows {
             let snapshot_id: String = row.get("snapshot_id");
+            validate_snapshot_id(&snapshot_id)?;
             let created_at: String = row.get("created_at");
             let base = local_display_time(&created_at);
             let short_id = snapshot_id.chars().take(8).collect::<String>();
@@ -142,6 +143,7 @@ impl SnapshotContentReader {
         snapshot_id: &str,
         relative_path: &str,
     ) -> Result<Option<BrowseEntry>> {
+        validate_snapshot_id(snapshot_id)?;
         validate_relative_path(relative_path)?;
         if relative_path.is_empty() {
             return Ok(Some(BrowseEntry {
@@ -165,6 +167,7 @@ impl SnapshotContentReader {
             return Ok(None);
         };
         let path: String = row.get("path");
+        validate_filemap_path(&path)?;
         Ok(Some(BrowseEntry {
             name: path.rsplit('/').next().unwrap_or(&path).to_string(),
             path,
@@ -176,6 +179,7 @@ impl SnapshotContentReader {
     }
 
     pub async fn list_children(&self, snapshot_id: &str, parent: &str) -> Result<Vec<BrowseEntry>> {
+        validate_snapshot_id(snapshot_id)?;
         validate_relative_path(parent)?;
         let (pool, _, _) = self.filemap_pool(snapshot_id).await?;
         let rows = sqlx::query(
@@ -193,6 +197,7 @@ impl SnapshotContentReader {
         let mut seen = std::collections::HashSet::new();
         for row in rows {
             let path: String = row.get("path");
+            validate_filemap_path(&path)?;
             let Some(rest) = path.strip_prefix(&prefix) else {
                 continue;
             };
@@ -223,6 +228,7 @@ impl SnapshotContentReader {
     }
 
     pub async fn unavailable_entries(&self, snapshot_id: &str) -> Result<Vec<String>> {
+        validate_snapshot_id(snapshot_id)?;
         let (pool, _, _) = self.filemap_pool(snapshot_id).await?;
         let rows = sqlx::query(
             "SELECT path FROM files WHERE snapshot_id = ? AND kind NOT IN ('file', 'dir') ORDER BY path",
@@ -230,7 +236,12 @@ impl SnapshotContentReader {
         .bind(snapshot_id)
         .fetch_all(&pool)
         .await?;
-        Ok(rows.into_iter().map(|row| row.get("path")).collect())
+        rows.into_iter()
+            .map(|row| {
+                let path: String = row.get("path");
+                validate_filemap_path(&path).map(|_| path)
+            })
+            .collect()
     }
 
     pub async fn read_range(
@@ -444,8 +455,10 @@ impl SnapshotContentReader {
     }
 
     async fn filemap_pool(&self, snapshot_id: &str) -> Result<(SqlitePool, bool, bool)> {
-        let filemap = self.filemap_dir.join(format!("{snapshot_id}.sqlite"));
+        validate_snapshot_id(snapshot_id)?;
+        let filemap = snapshot_filemap_path(&self.filemap_dir, snapshot_id)?;
         let path = if filemap.is_file() {
+            ensure_filemap_containment(&self.filemap_dir, &filemap)?;
             filemap
         } else if endpoint_has_snapshot_files(&self.endpoint_db_path, snapshot_id).await? {
             self.endpoint_db_path.clone()
@@ -517,11 +530,61 @@ fn chunk_bounds(row: &sqlx::sqlite::SqliteRow) -> Result<(u64, u64, u64)> {
     Ok((offset, len, end))
 }
 
+pub fn validate_snapshot_id(snapshot_id: &str) -> Result<()> {
+    if snapshot_id.is_empty()
+        || snapshot_id == "."
+        || snapshot_id == ".."
+        || snapshot_id.contains('/')
+        || snapshot_id.contains('\\')
+        || snapshot_id.contains('\0')
+    {
+        return Err(Error::SnapshotAccess {
+            message: "invalid snapshot id".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn snapshot_filemap_path(filemap_dir: &Path, snapshot_id: &str) -> Result<PathBuf> {
+    validate_snapshot_id(snapshot_id)?;
+    Ok(filemap_dir.join(format!("{snapshot_id}.sqlite")))
+}
+
+fn ensure_filemap_containment(filemap_dir: &Path, filemap: &Path) -> Result<()> {
+    let canonical_dir = filemap_dir
+        .canonicalize()
+        .map_err(|error| Error::SnapshotAccess {
+            message: format!("snapshot filemap directory is unavailable: {error}"),
+        })?;
+    let canonical_filemap = filemap
+        .canonicalize()
+        .map_err(|error| Error::SnapshotAccess {
+            message: format!("snapshot filemap is unavailable: {error}"),
+        })?;
+    if canonical_filemap.parent() != Some(canonical_dir.as_path()) {
+        return Err(Error::SnapshotAccess {
+            message: "snapshot filemap is outside its configured directory".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_filemap_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        return Err(Error::Integrity {
+            message: "filemap contains an empty path".to_string(),
+        });
+    }
+    validate_relative_path(path)
+}
+
 fn validate_relative_path(path: &str) -> Result<()> {
     if path.is_empty() {
         return Ok(());
     }
     if path.starts_with('/')
+        || path.contains('\\')
+        || path.contains('\0')
         || path
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
@@ -705,7 +768,19 @@ mod tests {
     fn relative_paths_reject_traversal() {
         assert!(validate_relative_path("../secret").is_err());
         assert!(validate_relative_path("a/../secret").is_err());
+        assert!(validate_relative_path("a\\secret").is_err());
         assert!(validate_relative_path("a/file").is_ok());
+    }
+
+    #[test]
+    fn snapshot_ids_reject_filesystem_path_injection() {
+        for snapshot_id in ["", ".", "..", "../outside", "/tmp/outside", "a\\outside"] {
+            assert!(
+                validate_snapshot_id(snapshot_id).is_err(),
+                "{snapshot_id:?}"
+            );
+        }
+        assert!(validate_snapshot_id("snapshot-1").is_ok());
     }
 
     #[tokio::test]
@@ -789,6 +864,25 @@ mod tests {
             reader.list_children("snapshot-1", "").await.unwrap()[0].name,
             "Folder"
         );
+
+        let filemap_pool = crate::index_db::open_snapshot_filemap_db(&filemap)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind("malformed-1")
+        .bind("snapshot-1")
+        .bind("../secret")
+        .bind(0i64)
+        .bind(0i64)
+        .bind(0o644i64)
+        .bind("file")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
+        assert!(reader.list_children("snapshot-1", "").await.is_err());
     }
 
     #[tokio::test]

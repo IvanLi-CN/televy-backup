@@ -130,6 +130,8 @@ app="$asset_dir/TelevyBackup.app"
 }
 if [[ -d "$app" ]]; then
   codesign --verify --deep --strict "$app"
+  app_signature="$(codesign -dvvv "$app" 2>&1 || true)"
+  [[ "$app_signature" == *"Signature=adhoc"* ]] || { echo "main app must use an ad-hoc signature" >&2; exit 1; }
   [[ -s "$app/Contents/Resources/TelevyBackup.icns" ]] || {
     echo "app bundle missing TelevyBackup.icns: $app" >&2
     exit 1
@@ -166,6 +168,7 @@ if [[ -d "$app" ]]; then
   [[ -x "$app/Contents/MacOS/televybackup-snapshot-mount-helper" ]] || { echo "snapshot mount helper missing" >&2; exit 1; }
   root_helper_binary="$app/Contents/MacOS/televybackup-snapshot-mount-helper"
   root_helper_signature="$(codesign -dvvv "$root_helper_binary" 2>&1 || true)"
+  [[ "$root_helper_signature" == *"Signature=adhoc"* ]] || { echo "snapshot mount helper must use an ad-hoc signature" >&2; exit 1; }
   root_helper_sha256="$(shasum -a 256 "$root_helper_binary" | awk '{print $1}')"
   root_helper_cdhash="$(printf '%s\n' "$root_helper_signature" | awk -F= '/^CDHash=/{print $2}')"
   root_helper_requirement="$(codesign -d -r- "$root_helper_binary" 2>&1 | sed -n '/designated =>/p')"
@@ -246,6 +249,8 @@ verify_dmg_helper_identity() (
   app="$mount_point/TelevyBackup.app"
   [[ -d "$app" ]] || { echo "DMG is missing TelevyBackup.app: $local_dmg" >&2; exit 1; }
   codesign --verify --deep --strict "$app"
+  app_signature="$(codesign -dvvv "$app" 2>&1 || true)"
+  [[ "$app_signature" == *"Signature=adhoc"* ]] || { echo "DMG main app must use an ad-hoc signature: $local_dmg" >&2; exit 1; }
   app_arches="$(lipo -info "$app/Contents/MacOS/TelevyBackup")"
   expected_arches=universal
   case "$(basename "$local_dmg")" in
@@ -269,6 +274,8 @@ verify_dmg_helper_identity() (
       arm64) [[ "$info" == *arm64* && "$info" != *x86_64* ]] || { echo "arm64 DMG contains an unexpected binary architecture: $binary" >&2; exit 1; } ;;
       x86_64) [[ "$info" == *x86_64* && "$info" != *arm64* ]] || { echo "x86_64 DMG contains an unexpected binary architecture: $binary" >&2; exit 1; } ;;
     esac
+    binary_signature="$(codesign -dvvv "$app/Contents/MacOS/$binary" 2>&1 || true)"
+    [[ "$binary_signature" == *"Signature=adhoc"* ]] || { echo "DMG binary is not ad-hoc signed: $binary" >&2; exit 1; }
   done
   helper="$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
   [[ -d "$helper" ]] || { echo "DMG is missing embedded Snapshot Access: $local_dmg" >&2; exit 1; }
@@ -362,6 +369,8 @@ for tools_archive in "$asset_dir/televybackup-tools-${version}-arm64.tar.gz" "$a
     else
       [[ "$info" == *x86_64* && "$info" != *arm64* ]] || { echo "x86_64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
     fi
+    binary_signature="$(codesign -dvvv "$tools_dir/TelevyBackup Tools/bin/$binary" 2>&1 || true)"
+    [[ "$binary_signature" == *"Signature=adhoc"* ]] || { echo "tools binary is not ad-hoc signed: $binary" >&2; exit 1; }
   done
   rm -rf "$tools_dir"
 done

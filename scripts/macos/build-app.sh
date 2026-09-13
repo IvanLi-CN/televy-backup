@@ -114,25 +114,25 @@ if [[ -n "$cargo_target" ]]; then
 fi
 
 echo "Building CLI ($release_version, $cargo_target)..."
-if [[ -n "$cargo_target" ]]; then cargo build -p televybackup --release --target "$cargo_target"; else cargo build -p televybackup --release; fi
+if [[ -n "$cargo_target" ]]; then cargo build -p televybackup --locked --release --target "$cargo_target"; else cargo build -p televybackup --locked --release; fi
 cp "$binary_dir/televybackup" "$macos_dir/televybackup-cli"
 
 echo "Building daemon..."
-if [[ -n "$cargo_target" ]]; then cargo build -p televybackupd --release --target "$cargo_target"; else cargo build -p televybackupd --release; fi
+if [[ -n "$cargo_target" ]]; then cargo build -p televybackupd --locked --release --target "$cargo_target"; else cargo build -p televybackupd --locked --release; fi
 cp "$binary_dir/televybackupd" "$macos_dir/televybackupd"
 
 echo "Building APFS Snapshot Access..."
 if [[ -n "$cargo_target" ]]; then
   if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
-    cargo build -p televybackup-snapshot-access --bin televybackup-snapshot-mount-helper --release --target "$cargo_target"
+    cargo build -p televybackup-snapshot-access --locked --bin televybackup-snapshot-mount-helper --release --target "$cargo_target"
   else
-    cargo build -p televybackup-snapshot-access --release --target "$cargo_target"
+    cargo build -p televybackup-snapshot-access --locked --release --target "$cargo_target"
   fi
 else
   if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
-    cargo build -p televybackup-snapshot-access --bin televybackup-snapshot-mount-helper --release
+    cargo build -p televybackup-snapshot-access --locked --bin televybackup-snapshot-mount-helper --release
   else
-    cargo build -p televybackup-snapshot-access --release
+    cargo build -p televybackup-snapshot-access --locked --release
   fi
 fi
 snapshot_access_binary="$binary_dir/televybackup-snapshot-access"
@@ -141,7 +141,7 @@ cp "$snapshot_mount_helper_binary" "$macos_dir/televybackup-snapshot-mount-helpe
 chmod 755 "$macos_dir/televybackup-snapshot-mount-helper"
 
 echo "Building MTProto helper..."
-if [[ -n "$cargo_target" ]]; then cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release --target "$cargo_target"; else cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --release; fi
+if [[ -n "$cargo_target" ]]; then cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --locked --release --target "$cargo_target"; else cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --locked --release; fi
 helper_binary_dir="$root_dir/crates/mtproto-helper/target/release"
 if [[ -n "$cargo_target" ]]; then
   helper_binary_dir="$root_dir/crates/mtproto-helper/target/$cargo_target/release"
