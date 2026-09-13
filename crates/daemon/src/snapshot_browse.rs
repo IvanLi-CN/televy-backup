@@ -219,6 +219,12 @@ impl BrowseDavFs {
         let mut entries = Vec::new();
         if relative.is_empty() {
             for snapshot in refresh_snapshots(session).await? {
+                session
+                    .reader
+                    .entry(&snapshot.snapshot_id, "")
+                    .await
+                    .map_err(|_| FsError::GeneralFailure)?
+                    .ok_or(FsError::GeneralFailure)?;
                 entries.push(BrowseDirEntryImpl {
                     name: snapshot.display_name.into_bytes(),
                     meta: BrowseMeta {
@@ -2029,6 +2035,24 @@ mod tests {
         .unwrap();
         drop(pool);
 
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap = filemap_dir.join("snapshot-1234.sqlite");
+        let filemap_pool = televy_backup_core::index_db::open_snapshot_filemap_db(&filemap)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1234")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
+
         let session = test_session(&endpoint_db_path, temp.path()).await;
         let entries = BrowseDavFs::children(&session, "").await.unwrap();
 
@@ -2037,6 +2061,31 @@ mod tests {
                 .iter()
                 .any(|entry| entry.name.ends_with(b"[snapshot]"))
         );
+    }
+
+    #[tokio::test]
+    async fn root_directory_rejects_a_retained_snapshot_without_a_filemap() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db_path = temp.path().join("endpoint.sqlite");
+        let pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1234")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&pool)
+        .await
+        .unwrap();
+        drop(pool);
+
+        let session = test_session(&endpoint_db_path, temp.path()).await;
+        let error = BrowseDavFs::children(&session, "").await.unwrap_err();
+
+        assert!(matches!(error, FsError::GeneralFailure));
     }
 
     #[tokio::test]
