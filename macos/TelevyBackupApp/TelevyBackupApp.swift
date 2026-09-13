@@ -522,6 +522,20 @@ final class AppModel {
         try? FileManager.default.removeItem(at: candidate)
     }
 
+    private func unmountBrowseSessionBeforeTermination(sessionId: String, socketPath: String) -> Bool {
+        for attempt in 0..<3 {
+            let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
+                socketPath: socketPath,
+                method: "snapshot.browse.unmount",
+                params: ["sessionId": sessionId],
+                timeoutSeconds: 5
+            )
+            if case .success = result { return true }
+            if attempt < 2 { Thread.sleep(forTimeInterval: 0.25) }
+        }
+        return false
+    }
+
     func unmountAllBrowseVolumesForTermination() {
         browseMountLock.lock()
         let mounts = Array(browseMountsByTargetId.values)
@@ -529,18 +543,16 @@ final class AppModel {
 
         let socketPath = controlSocketPath()
         for mount in mounts {
-            let result = ControlIPCClient.request(
-                socketPath: socketPath,
-                method: "snapshot.browse.unmount",
-                params: ["sessionId": mount.sessionId],
-                timeoutSeconds: 5
-            ) as Result<ControlAckResponse, ControlRequestFailure>
+            let daemonUnmounted = unmountBrowseSessionBeforeTermination(
+                sessionId: mount.sessionId,
+                socketPath: socketPath
+            )
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/sbin/umount")
             task.arguments = [mount.mountRoot.path]
             try? task.run()
             task.waitUntilExit()
-            if case .success = result {
+            if daemonUnmounted {
                 clearBrowseMountTracking(sessionId: mount.sessionId)
                 removeBrowseMountDirectory(sessionId: mount.sessionId, mountRoot: mount.mountRoot)
             }
