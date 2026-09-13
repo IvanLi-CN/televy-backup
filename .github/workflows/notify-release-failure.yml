@@ -21,13 +21,17 @@ jobs:
     outputs:
       ref_label: ${{ steps.resolve.outputs.ref_label }}
       head_sha: ${{ steps.resolve.outputs.head_sha }}
+      merge_sha: ${{ steps.resolve.outputs.merge_sha }}
       actor: ${{ steps.resolve.outputs.actor }}
+      identity_status: ${{ steps.resolve.outputs.identity_status }}
       extra_details: ${{ steps.resolve.outputs.extra_details }}
       version: ${{ steps.resolve.outputs.version }}
+      channel: ${{ steps.resolve.outputs.channel }}
       tag: ${{ steps.resolve.outputs.tag }}
+      reservation_ref: ${{ steps.resolve.outputs.reservation_ref }}
       recovery_candidate: ${{ steps.resolve.outputs.recovery_candidate }}
     steps:
-      - name: Resolve failed release metadata
+      - name: Resolve locked release context from run logs
         id: resolve
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,165 +44,116 @@ jobs:
           TRIGGERING_ACTOR: ${{ github.event.workflow_run.triggering_actor.login || github.event.workflow_run.actor.login || github.actor }}
         shell: bash
         run: |
+          set -euo pipefail
           python3 - <<'PYCODE'
           from __future__ import annotations
 
           import json
           import os
           import re
-          from urllib import error, request
+          from urllib import request
 
           api_root = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
           token = os.environ['GH_TOKEN']
           repository = os.environ['REPOSITORY']
           run_id = os.environ['RUN_ID']
           run_attempt = os.environ.get('RUN_ATTEMPT', '').strip()
-          run_event = os.environ.get('RUN_EVENT', '').strip()
           head_branch = os.environ.get('HEAD_BRANCH', '').strip()
           fallback_head_sha = os.environ.get('HEAD_SHA', '').strip()
           actor = os.environ.get('TRIGGERING_ACTOR', '').strip()
           output_path = os.environ['GITHUB_OUTPUT']
 
-          sha_re = re.compile(r'\b[0-9a-f]{40}\b')
-          actual_patterns = [re.compile(r'\bRELEASE_TARGET_SHA=([0-9a-f]{40})\b')]
-          requested_patterns = [re.compile(r'\bRELEASE_REQUESTED_SHA=([0-9a-f]{40})\b')]
-
-          def api_request(path: str, *, accept: str = 'application/vnd.github+json') -> str:
-              url = path if path.startswith('http') else f'{api_root}{path}'
+          def api_json(path: str) -> dict:
               req = request.Request(
-                  url,
+                  f'{api_root}{path}',
                   headers={
                       'Authorization': f'Bearer {token}',
-                      'Accept': accept,
+                      'Accept': 'application/vnd.github+json',
                       'X-GitHub-Api-Version': '2022-11-28',
                       'User-Agent': 'televy-backup-release-alert-resolver',
                   },
               )
-              with request.urlopen(req) as resp:
-                  charset = resp.headers.get_content_charset() or 'utf-8'
-                  return resp.read().decode(charset, errors='replace')
+              with request.urlopen(req) as response:
+                  return json.loads(response.read().decode('utf-8'))
 
-          def api_json(path: str) -> dict:
-              return json.loads(api_request(path))
-
-          def list_jobs() -> list[dict]:
-              paths = []
-              if run_attempt:
-                  paths.append(f'/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page=100')
-              paths.append(f'/repos/{repository}/actions/runs/{run_id}/jobs?per_page=100')
-              last_error: Exception | None = None
-              for path in paths:
-                  try:
-                      payload = api_json(path)
-                  except error.HTTPError as exc:
-                      last_error = exc
-                      if exc.code == 404:
-                          continue
-                      raise
-                  return payload.get('jobs', [])
-              if last_error is not None:
-                  raise last_error
-              return []
-
-          def load_job_log(job_id: int) -> str:
-              return api_request(f'/repos/{repository}/actions/jobs/{job_id}/logs')
-
-          def pick_ref_label() -> str:
-              if run_event == 'workflow_dispatch':
-                  if head_branch:
-                      return f'dispatch ref: {head_branch}'
-                  return 'dispatch ref: unavailable from workflow_run payload'
-              if head_branch:
-                  return f'branch: {head_branch}'
-              return 'ref: unavailable from workflow_run payload'
-
-          def match_sha(patterns: list[re.Pattern[str]], text: str) -> str:
-              for pattern in patterns:
-                  match = pattern.search(text)
-                  if match:
-                      candidate = match.group(1)
-                      if sha_re.fullmatch(candidate):
-                          return candidate
-              return ''
-
-          resolved_sha = fallback_head_sha
-          extra_details = ''
-          version = ''
-          tag = ''
-          superseded = False
-
-          try:
-              jobs = list_jobs()
-              requested_sha = ''
-              resolved_from = ''
-              for job in jobs:
-                  if not isinstance(job, dict):
-                      continue
-                  job_id = job.get('id')
-                  job_name = str(job.get('name') or 'unnamed job')
-                  if not isinstance(job_id, int):
-                      continue
-                  log_text = load_job_log(job_id)
-                  if 'superseded_by_product_tag' in log_text:
-                      superseded = True
-                  candidate = match_sha(actual_patterns, log_text)
-                  if candidate:
-                      if not resolved_from:
-                          resolved_sha = candidate
-                          resolved_from = job_name
-                      continue
-                  if not requested_sha:
-                      requested_sha = match_sha(requested_patterns, log_text)
-                      if requested_sha:
-                          resolved_from = job_name
-
-              if resolved_sha == fallback_head_sha and requested_sha:
-                  resolved_sha = requested_sha
-
-              if resolved_sha and resolved_sha != fallback_head_sha:
-                  extra_details = f'resolved release target sha from {resolved_from} logs'
-              elif requested_sha and run_event == 'workflow_dispatch':
-                  extra_details = f'resolved requested commit sha from {resolved_from} logs'
-              elif run_event == 'workflow_dispatch':
-                  extra_details = 'manual release dispatch'
-          except Exception as exc:  # noqa: BLE001
-              if run_event == 'workflow_dispatch':
-                  extra_details = f'manual release dispatch; target sha resolution fell back to workflow_run head sha ({type(exc).__name__})'
-              else:
-                  extra_details = f'target sha resolution fell back to workflow_run head sha ({type(exc).__name__})'
-
-          if resolved_sha:
-              try:
-                  version_payload = api_json(f'/repos/{repository}/contents/VERSION?ref={resolved_sha}')
-                  encoded = version_payload.get('content', '')
-                  if isinstance(encoded, str):
-                      import base64
-                      candidate = base64.b64decode(encoded.replace('\n', '')).decode('utf-8').strip()
-                      if re.fullmatch(r'\d+\.\d+\.\d+(?:-rc\.\d+)?', candidate):
-                          version = candidate
-                          tag = f'v{candidate}'
-              except Exception:  # noqa: BLE001
-                  pass
-
-          with open(output_path, 'a', encoding='utf-8') as handle:
-              handle.write(f'ref_label={pick_ref_label()}\n')
-              handle.write(f'head_sha={resolved_sha or fallback_head_sha}\n')
-              handle.write(f'actor={actor}\n')
-              handle.write('extra_details<<EOF\n')
-              handle.write(extra_details)
-              handle.write('\nEOF\n')
-              handle.write(f'version={version}\n')
-              handle.write(f'tag={tag}\n')
-              recovery_candidate = (
-                  'not-applicable: superseded_by_product_tag; no Release was created'
-                  if superseded
-                  else
-                  f'workflow_dispatch operation=recover commit_sha={resolved_sha} '
-                  'precondition=recheck-current-product-tag-watermark-and-same-sha'
-                  if resolved_sha and version
-                  else 'unavailable-until-release-identity-is-resolved'
+          def api_text(path: str) -> str:
+              req = request.Request(
+                  f'{api_root}{path}',
+                  headers={
+                      'Authorization': f'Bearer {token}',
+                      'Accept': 'application/vnd.github+json',
+                      'X-GitHub-Api-Version': '2022-11-28',
+                      'User-Agent': 'televy-backup-release-alert-resolver',
+                  },
               )
-              handle.write(f'recovery_candidate={recovery_candidate}\n')
+              with request.urlopen(req) as response:
+                  return response.read().decode('utf-8', errors='replace')
+
+          jobs = []
+          paths = [f'/repos/{repository}/actions/runs/{run_id}/jobs?per_page=100']
+          if run_attempt:
+              paths.insert(0, f'/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page=100')
+          for path in paths:
+              try:
+                  jobs = api_json(path).get('jobs', [])
+                  break
+              except Exception:
+                  continue
+
+          logs = []
+          for job in jobs:
+              if isinstance(job, dict) and isinstance(job.get('id'), int):
+                  try:
+                      logs.append(api_text(f"/repos/{repository}/actions/jobs/{job['id']}/logs"))
+                  except Exception:
+                      pass
+          text = '\n'.join(logs)
+          resolved = re.search(
+              r'RELEASE_IDENTITY status=resolved version=(\S+) channel=(\S+) merge_sha=([0-9a-f]{40}) tag=(\S+)', text
+          )
+          no_identity = re.search(r'RELEASE_NO_IDENTITY=([0-9a-f]{40})', text)
+          reservation = re.search(r'release-reservation/v[^\s]+', text)
+          if resolved:
+              identity_status = 'resolved'
+              version, channel, merge_sha, tag = resolved.groups()
+              recovery = (
+                  f'workflow_dispatch operation=recover commit_sha={merge_sha} '
+                  'precondition=verify-bound-identity-and-same-sha'
+              )
+              extra = 'locked merged identity recovered from Release Product logs'
+          elif 'superseded_by_product_tag' in text:
+              identity_status = 'no-identity'
+              merge_sha = ''
+              version = channel = tag = ''
+              recovery = 'not-applicable: superseded_by_product_tag; no Release was created'
+              extra = 'candidate was superseded before build; no release identity was published'
+          elif no_identity:
+              identity_status = 'no-identity'
+              merge_sha = ''
+              version = channel = tag = ''
+              recovery = 'unavailable-until-version-only-release-pr-creates-a-new-identity'
+              extra = 'Release Product reached a merge without a release identity'
+          else:
+              identity_status = 'resolver-error'
+              merge_sha = ''
+              version = channel = tag = ''
+              recovery = 'unavailable-until-release-identity-resolver-is-repaired'
+              extra = 'Release identity could not be resolved; no version or tag was inferred'
+          ref_label = f'branch: {head_branch}' if head_branch else 'ref: unavailable from workflow_run payload'
+          with open(output_path, 'a', encoding='utf-8') as handle:
+              handle.write(f'ref_label={ref_label}\n')
+              handle.write(f'head_sha={fallback_head_sha}\n')
+              handle.write(f'merge_sha={merge_sha}\n')
+              handle.write(f'actor={actor}\n')
+              handle.write(f'identity_status={identity_status}\n')
+              handle.write(f'version={version}\n')
+              handle.write(f'channel={channel}\n')
+              handle.write(f'tag={tag}\n')
+              handle.write(f'reservation_ref={reservation.group(0) if reservation else ""}\n')
+              handle.write('extra_details<<EOF\n')
+              handle.write(extra)
+              handle.write('\nEOF\n')
+              handle.write(f'recovery_candidate={recovery}\n')
           PYCODE
 
   notify_failure:
@@ -216,13 +171,18 @@ jobs:
         workflow: ${{ github.event.workflow_run.name }}
         event: ${{ github.event.workflow_run.event }}
         ref: ${{ needs.resolve_release_context.outputs.ref_label }}
-        target_sha: ${{ needs.resolve_release_context.outputs.head_sha }}
+        head_sha: ${{ needs.resolve_release_context.outputs.head_sha }}
+        target_sha: ${{ needs.resolve_release_context.outputs.merge_sha || needs.resolve_release_context.outputs.head_sha }}
+        merge_sha: ${{ needs.resolve_release_context.outputs.merge_sha }}
         run_attempt: ${{ github.event.workflow_run.run_attempt }}
         actor: ${{ needs.resolve_release_context.outputs.actor }}
         run_url: ${{ github.event.workflow_run.html_url }}
+        identity_status: ${{ needs.resolve_release_context.outputs.identity_status }}
         note: ${{ needs.resolve_release_context.outputs.extra_details }}
         version: ${{ needs.resolve_release_context.outputs.version }}
+        channel: ${{ needs.resolve_release_context.outputs.channel }}
         tag: ${{ needs.resolve_release_context.outputs.tag }}
+        reservation_ref: ${{ needs.resolve_release_context.outputs.reservation_ref }}
         recovery_candidate: ${{ needs.resolve_release_context.outputs.recovery_candidate }}
 
   smoke_test:
@@ -238,7 +198,8 @@ jobs:
         workflow: Notify failed release
         event: workflow_dispatch
         ref: ${{ format('branch: {0}', github.ref_name) }}
-        target_sha: ${{ github.sha }}
+        head_sha: ${{ github.sha }}
+        identity_status: smoke-test
         run_attempt: ${{ github.run_attempt }}
         actor: ${{ github.actor }}
         run_url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}

@@ -14,17 +14,34 @@ TelevyBackup treats pull request checks as an explicit merge contract. The canon
 
 The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks.
 
-Release Product also treats the highest remote product tag as the release sequence waterline. Candidates below that full-SemVer waterline fail before packaging; same-version recovery requires the tag to target the same merge SHA. A matching published Release is terminal and is not rebuilt or overwritten. Failure alerts use `recovery_candidate` only after this condition is rechecked.
+Release Product treats the highest eligible final product tag as the numeric baseline. Prerelease
+ordinals are allocated only within their base/channel. Reservation, bound, and consumed refs are
+append-only; any provenance or ownership conflict fails before packaging. A matching published
+Release is terminal and is not rebuilt or overwritten. Failure alerts use `recovery_candidate` only
+after a complete merged identity is rechecked.
 
 ## Release checks
 
-`Label Gate` enforces exactly one `type:*` and one `channel:*` label. Source PR heads run the full Rust, Swift, and native package matrix. A trusted preparation run adds only `VERSION` to the PR branch and then the same required check names run structural verification against that preparation commit. `Release completion` is the required PR-local contract for ancestry, VERSION, labels, source checks, and migration handling.
+`Label Gate` enforces exactly one product `type:*` and one `channel:prod|beta|rc|dev` label, or a
+channel-free `type:docs|skip` intent. Source PR heads run the full Rust, Swift, and native package
+matrix. A trusted preparation run reserves identity, adds only `VERSION` to the PR branch, and then
+the same required check names run structural verification against that preparation commit.
+`Release completion` is the required PR-local contract for ancestry, VERSION, labels, source checks,
+reservation provenance, and the explicit version-only release PR mode.
 
-After a normal merge, `Release Product` reads only the committed merge SHA and VERSION. Its manual entry is restricted to same-identity `recover`. Successful publication is reported directly to the owner by the release-owning agent; Release Product does not write a result comment to the source PR. Failed releases are handled by `Notify failed release`, which reports the resolved SHA, VERSION, tag, and recovery command.
+After a normal merge, `Release Product` reads only the committed merged identity and its reservation
+ref. Its manual entry is restricted to same-identity `recover`. Successful publication is reported
+directly to the owner by the release-owning agent; Release Product does not write a result comment to
+the source PR. Failed releases are handled by `Notify failed release`, which reports locked identity
+context only when it can be resolved.
+Successful publication is reported directly to the owner by the release-owning agent; Release Product does not write a result comment to the source PR.
 
 ## Remote alignment
 
-The declaration is the repository source of truth. GitHub ruleset and branch-protection settings must be reconciled separately by an authorized owner; this change records the expected policy but performs no remote mutation.
+The declaration is the repository source of truth. GitHub labels, required checks, signed commits,
+main branch rules, and reservation/receipt/product tag protection are reconciled only at PR-ready
+Step 5C by the release-owning agent. Unrelated rules are preserved and insufficient permissions
+remain an explicit blocker.
 
 ## Local verification
 

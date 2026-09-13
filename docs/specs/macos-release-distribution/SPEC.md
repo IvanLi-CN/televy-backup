@@ -12,7 +12,7 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 
 ## Terms
 
-- **Release version**: the complete semver-like version shown to users, including an RC suffix.
+- **Release version**: the complete formal product version shown to users, with an optional beta, RC, or dev suffix.
 - **Build number**: a deterministic numeric `CFBundleVersion` derived from the source history.
 - **Managed service**: the single user LaunchAgent labeled `com.ivan.televybackup.daemon`.
 - **Snapshot Access app**: the user `LSUIElement` bundle labeled `com.ivan.televybackup.snapshot-access`; the user grants FDA to its exact path.
@@ -25,7 +25,7 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 
 ### REQ-MRD-001: Traceable release assets
 
-Every stable or RC release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBackup-<version>-arm64.dmg`, `TelevyBackup-<version>-x86_64.dmg`, `televybackup-tools-<version>-arm64.tar.gz`, `televybackup-tools-<version>-x86_64.tar.gz`, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after all asset checks pass. Each DMG MUST contain the installable `TelevyBackup.app` plus the separate `TelevyBackup Snapshot Access.app`; version and architecture belong in the downloadable DMG filename, not the app entry names.
+Every `prod`, `beta`, `rc`, or `dev` release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBackup-<version>-arm64.dmg`, `TelevyBackup-<version>-x86_64.dmg`, `televybackup-tools-<version>-arm64.tar.gz`, `televybackup-tools-<version>-x86_64.tar.gz`, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after all asset checks pass. Each DMG MUST contain the installable `TelevyBackup.app` plus the separate `TelevyBackup Snapshot Access.app`; version and architecture belong in the downloadable DMG filename, not the app entry names. Only `prod` may update the stable/latest surface; prerelease channels remain prereleases.
 
 ### REQ-MRD-002: Native build matrix
 
@@ -93,6 +93,14 @@ Covers: REQ-MRD-005, REQ-MRD-006. CLI service tests and the transaction fixture 
 ### VER-MRD-005
 
 Covers: REQ-MRD-007. Swift unit tests and isolated Settings snapshots provide the evidence.
+
+### VER-MRD-006
+
+Covers: REQ-MRD-009. App Icon asset generation, bundle inspection, and brand asset verification provide the evidence.
+
+### VER-MRD-007
+
+Covers: REQ-MRD-010. Package verification, Snapshot Access transaction tests, and LaunchAgent plist inspection provide the evidence.
 
 ## Verification Map
 

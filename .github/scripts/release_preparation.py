@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage one VERSION-only preparation commit for an in-repository PR."""
+"""Stage a VERSION-only preparation commit after identity reservation."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def source_checks_ready(payload: object) -> bool:
     return all(outcomes.get(name) == "success" for name in REQUIRED_SOURCE_CHECKS)
 
 
-def source_is_ready(repo_root: Path, source_sha: str, base_sha: str) -> None:
+def source_is_ready(repo_root: Path, source_sha: str, base_sha: str, release_mode: str) -> None:
     source = CHAIN.git("rev-parse", f"{source_sha}^{{commit}}")
     base = CHAIN.git("rev-parse", f"{base_sha}^{{commit}}")
     if source != source_sha:
@@ -65,8 +65,10 @@ def source_is_ready(repo_root: Path, source_sha: str, base_sha: str) -> None:
     if CHAIN.git("merge-base", base, source) != base:
         raise PreparationError("PR source is not based on current main")
     changed = CHAIN.git("diff", "--name-only", f"{base}...{source}").splitlines()
-    if "VERSION" in changed:
-        raise PreparationError("source commits must not modify VERSION before preparation")
+    if release_mode == "normal" and "VERSION" in changed:
+        raise PreparationError("normal source commits must not modify VERSION before preparation")
+    if release_mode == "version-only-release-pr" and changed != ["VERSION"]:
+        raise PreparationError("version-only-release-pr must change only VERSION")
 
 
 def output(values: dict[str, str], path: str | None) -> None:
@@ -84,10 +86,13 @@ def prepare(args: argparse.Namespace) -> None:
     CHAIN.ROOT = repo_root
     labels = read_json(args.labels_json)
     intent = CHAIN.intent_from_labels(labels)
+    release_mode = args.release_mode
+    if intent["action"] == "skip":
+        output({"prepared": "not_required", "release_action": "skip", "source_sha": args.source_sha}, args.github_output)
+        return
     if not source_checks_ready(read_json(args.checks_json)):
         output({"prepared": "waiting", "release_action": intent["action"], "source_sha": args.source_sha}, args.github_output)
         return
-
     try:
         existing = CHAIN.verify_prepared(args.source_sha)
     except CHAIN.ReleaseChainError:
@@ -103,44 +108,44 @@ def prepare(args: argparse.Namespace) -> None:
                 "source_sha": existing["sourceSha"],
                 "version": existing["version"],
                 "tag": existing["tag"],
+                "reservation_id": existing["reservationId"],
+                "reservation_ref": existing["reservationRef"],
+                "boundary_token": existing["boundaryToken"],
             },
             args.github_output,
         )
         return
-
-    if not CHAIN.tree_path_exists(args.base_sha, "VERSION"):
-        changed = CHAIN.git("diff", "--name-only", f"{args.base_sha}...{args.source_sha}").splitlines()
-        if changed == ["VERSION"] and CHAIN.commit_version(args.source_sha) == "0.9.2":
-            output(
-                {"prepared": "migration", "release_action": "skip", "source_sha": args.source_sha},
-                args.github_output,
-            )
-            return
-
-    source_is_ready(repo_root, args.source_sha, args.base_sha)
-    if intent["action"] == "skip":
-        output({"prepared": "not_required", "release_action": "skip", "source_sha": args.source_sha}, args.github_output)
-        return
-    if args.mode == "automatic" and intent["action"] == "exact":
-        output({"prepared": "waiting_for_exact", "release_action": "exact", "source_sha": args.source_sha}, args.github_output)
-        return
-    if args.mode != intent["action"]:
-        raise PreparationError(f"labels require {intent['action']} preparation, got {args.mode}")
-    if args.mode == "exact" and not args.exact_version:
-        raise PreparationError("exact preparation requires --exact-version")
-
-    CHAIN.stage(
-        argparse.Namespace(
-            source_sha=args.source_sha,
-            mode=args.mode,
-            exact_version=args.exact_version,
-            expected_channel=intent["channel"].removeprefix("channel:"),
-            intent_type=intent["type"],
-            intent_channel=intent["channel"],
-            intent_action=intent["action"],
-            intent_components=intent["components"],
-        )
+    if not args.reservation_json:
+        raise PreparationError("preparation requires a completed reservation JSON")
+    reservation = read_json(args.reservation_json)
+    if not isinstance(reservation, dict):
+        raise PreparationError("reservation JSON must be an object")
+    required = ("version", "reservationId", "ref", "Reservation-Owner", "Reservation-Claim-Key", "Reservation-Boundary-Token")
+    if any(not reservation.get(key) for key in required):
+        raise PreparationError("reservation JSON is missing immutable identity fields")
+    source_is_ready(repo_root, args.source_sha, args.base_sha, release_mode)
+    if release_mode == "version-only-release-pr" and not args.covered_merge_sha:
+        raise PreparationError("version-only-release-pr requires one covered merge SHA")
+    if release_mode == "version-only-release-pr" and args.covered_merge_sha == args.source_sha:
+        raise PreparationError("version-only-release-pr cannot cover its own source SHA")
+    stage_args = argparse.Namespace(
+        source_sha=args.source_sha,
+        mode="exact",
+        version=reservation["version"],
+        intent_type=intent["type"],
+        intent_channel=intent["channel"],
+        intent_action=intent["action"],
+        intent_components=intent["components"],
+        release_mode=release_mode,
+        reservation_id=reservation["reservationId"],
+        reservation_ref=reservation["ref"],
+        reservation_owner=reservation["Reservation-Owner"],
+        claim_key=reservation["Reservation-Claim-Key"],
+        boundary_token=reservation["Reservation-Boundary-Token"],
+        covered_merge_sha=args.covered_merge_sha or "",
+        provenance=args.provenance,
     )
+    CHAIN.stage(stage_args)
     prepared = CHAIN.verify_prepared(CHAIN.git("rev-parse", "HEAD"), args.source_sha)
     output(
         {
@@ -150,6 +155,9 @@ def prepare(args: argparse.Namespace) -> None:
             "source_sha": prepared["sourceSha"],
             "version": prepared["version"],
             "tag": prepared["tag"],
+            "reservation_id": prepared["reservationId"],
+            "reservation_ref": prepared["reservationRef"],
+            "boundary_token": prepared["boundaryToken"],
         },
         args.github_output,
     )
@@ -162,8 +170,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-sha", required=True)
     parser.add_argument("--labels-json", type=Path, required=True)
     parser.add_argument("--checks-json", type=Path, required=True)
-    parser.add_argument("--mode", choices=("automatic", "exact"), required=True)
+    parser.add_argument("--mode", choices=("automatic", "allocate", "exact"), default="allocate")
     parser.add_argument("--exact-version")
+    parser.add_argument("--release-mode", choices=("normal", "version-only-release-pr"), default="normal")
+    parser.add_argument("--covered-merge-sha", default="")
+    parser.add_argument("--reservation-json", type=Path)
+    parser.add_argument("--provenance", default="fixture-verified")
     parser.add_argument("--github-output")
     args = parser.parse_args(argv)
     try:

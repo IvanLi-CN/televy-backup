@@ -26,16 +26,26 @@ class ProductVersionTests(unittest.TestCase):
             with self.assertRaises(MODULE.VersionError):
                 MODULE.read_version(path)
 
-    def test_stable_and_rc_grammar(self) -> None:
+    def test_formal_channel_grammar(self) -> None:
         self.assertEqual(MODULE.parse_version("1.2.3")["prerelease"], None)
-        self.assertEqual(MODULE.parse_version("1.2.3-rc.4")["prerelease"], "rc.4")
-        for value in ("1.2", "1.2.3-dev.abc", "v1.2.3", "1.2.3-rc"):
+        for value in ("1.2.3-beta.4", "1.2.3-rc.4", "1.2.3-dev.2"):
+            self.assertEqual(MODULE.parse_version(value)["ordinal"], 4 if "4" in value else 2)
+        for value in ("1.2", "1.2.3-dev.abc", "v1.2.3", "1.2.3-rc", "1.2.3-beta.0"):
             with self.assertRaises(MODULE.VersionError):
                 MODULE.parse_version(value)
 
     def test_next_patch_ignores_rc_qualifier(self) -> None:
         self.assertEqual(MODULE.next_patch("0.9.2"), "0.9.3")
         self.assertEqual(MODULE.next_patch("0.9.3-rc.2"), "0.9.4")
+
+    def test_base_and_channel_formatting(self) -> None:
+        self.assertEqual(MODULE.next_base("0.9.8", "patch"), "0.9.9")
+        self.assertEqual(MODULE.next_base("0.9.8", "minor"), "0.10.0")
+        self.assertEqual(MODULE.next_base("0.9.8", "major"), "1.0.0")
+        self.assertEqual(MODULE.format_release_version("0.9.9", "prod"), "0.9.9")
+        self.assertEqual(MODULE.format_release_version("0.9.9", "beta", 1), "0.9.9-beta.1")
+        self.assertEqual(MODULE.format_release_version("0.9.9", "rc", 2), "0.9.9-rc.2")
+        self.assertEqual(MODULE.format_release_version("0.9.9", "dev", 3), "0.9.9-dev.3")
 
     def test_resolve_modes(self) -> None:
         sha = "a" * 40

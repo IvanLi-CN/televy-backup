@@ -71,6 +71,53 @@ _Avoid_: Nearest-snapshot comparison, approximate diff
 A deduplicated logical data block referenced by one or more regular files in a backup snapshot.
 _Avoid_: Upload attempt, pack
 
+## Product Release Identity
+
+**Product Release Identity**:
+The immutable tuple `(merge SHA, product version, release channel)` that names one published
+product boundary. A release identity is created only after a trusted preparation has been merged.
+_Avoid_: VERSION value alone, release run, artifact name
+
+**Final Version Baseline**:
+The highest eligible final product tag `vX.Y.Z` used to calculate the next numeric base. A
+prerelease tag never advances this baseline.
+_Avoid_: current VERSION, Cargo package version, merge order
+
+**Release Channel**:
+The publication surface selected for a product identity: `prod`, `beta`, `rc`, or `dev`.
+`prod` is final; the other channels are prereleases of the same numeric base.
+_Avoid_: stable, development build
+
+**Prerelease Ordinal**:
+The positive integer allocated within one numeric base and channel. It is part of a beta, RC, or
+formal dev version and is never inferred from merge order.
+_Avoid_: patch number, short SHA
+
+**Reservation**:
+An immutable repository tag under `release-reservation/` that claims one version and records its
+pre-merge provenance before VERSION preparation.
+_Avoid_: queue entry, mutable lock, Git note
+
+**Boundary Token**:
+The frozen token carried by a reservation and preparation trailers that proves the same release
+claim crossed the PR-to-merge boundary.
+_Avoid_: workflow run ID, artifact ID
+
+**Merged Identity**:
+The release identity bound to a specific mainline merge SHA after the reservation has crossed the
+merge boundary.
+_Avoid_: source SHA, preparation SHA
+
+**Same-SHA Recovery**:
+A retry of publish or receipt work for an existing merged identity without recalculating a version,
+changing VERSION, or creating a new identity.
+_Avoid_: backfill, successor allocation
+
+**VERSION-only Release PR**:
+A new, non-empty PR that changes only VERSION to create a new merged identity for one old product
+merge that never acquired a release identity. It is not recovery of the old merge SHA.
+_Avoid_: empty PR, historical backfill, release queue
+
 ## GUI Lifecycle
 
 **GUI Controller**:

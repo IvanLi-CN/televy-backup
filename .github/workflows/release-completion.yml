@@ -40,15 +40,56 @@ jobs:
           set -euo pipefail
           jq '.pull_request.labels' "${GITHUB_EVENT_PATH}" > "${RUNNER_TEMP}/labels.json"
           verification_sha="${HEAD_SHA}"
+          prepared_json=''
           if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then
             verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
           fi
           gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
-          python3 .github/scripts/release_completion.py \
-            --repo-root . \
-            --commit "${HEAD_SHA}" \
-            --base "${BASE_SHA}" \
-            --labels-json "${RUNNER_TEMP}/labels.json" \
-            --checks-json "${RUNNER_TEMP}/source-checks.json" \
+          completion_args=(
+            --repo-root .
+            --commit "${HEAD_SHA}"
+            --base "${BASE_SHA}"
+            --labels-json "${RUNNER_TEMP}/labels.json"
+            --checks-json "${RUNNER_TEMP}/source-checks.json"
+          )
+          if [[ -n "${prepared_json}" ]]; then
+            release_mode="$(printf '%s' "${prepared_json}" | jq -r .mode)"
+            jq -n \
+              --arg ref "$(printf '%s' "${prepared_json}" | jq -r .reservationRef)" \
+              --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r .sourceSha)" \
+              --arg version "$(printf '%s' "${prepared_json}" | jq -r .version)" \
+              --arg channel "$(printf '%s' "${prepared_json}" | jq -r .channel | sed 's/^channel://')" \
+              --arg reservationId "$(printf '%s' "${prepared_json}" | jq -r .reservationId)" \
+              --arg owner "$(printf '%s' "${prepared_json}" | jq -r .reservationOwner)" \
+              --arg claimKey "$(printf '%s' "${prepared_json}" | jq -r .claimKey)" \
+              --arg boundaryToken "$(printf '%s' "${prepared_json}" | jq -r .boundaryToken)" \
+              '{ref:$ref,sourceSha:$sourceSha,version:$version,channel:$channel,reservationId:$reservationId,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claimKey,"Reservation-Boundary-Token":$boundaryToken}' \
+              > "${RUNNER_TEMP}/reservation.json"
+            python3 - "${RUNNER_TEMP}/reservation.json" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+          sys.path.insert(0, '.github/scripts')
+          import release_reservation
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+          release_reservation.verify_github_reservation(
+              value,
+              repository=os.environ['GITHUB_REPOSITORY'],
+              token=os.environ['GH_TOKEN'],
+              api_root=os.environ.get('GITHUB_API_URL', 'https://api.github.com'),
+          )
+          PY
+            completion_args+=(--release-mode "${release_mode}")
+            if [[ "${release_mode}" == version-only-release-pr ]]; then
+              completion_args+=(--covered-merge-sha "$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)")
+            fi
+          fi
+          python3 .github/scripts/release_completion.py "${completion_args[@]}" \
             --allow-migration \
-            --migration-version 0.9.2
+            --migration-version 0.9.2 \
+            --reservation-json "${RUNNER_TEMP}/reservation.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --token "${GH_TOKEN}" \
+            --api-root "${GITHUB_API_URL}" \
+            --require-github-verification

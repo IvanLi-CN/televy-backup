@@ -1,11 +1,15 @@
 {
-  "schema_version": 1,
-  "source_of_truth": "VERSION",
+  "schema_version": 2,
+  "source_of_truth": "trusted-preparation VERSION plus immutable repository identity refs",
   "version_file": "VERSION",
-  "migration_baseline": "0.9.2",
+  "numeric_baseline": "highest eligible final remote product tag vX.Y.Z",
+  "virtual_final_baseline": "0.0.0",
   "version_grammar": {
-    "stable": "X.Y.Z",
-    "rc": "X.Y.Z-rc.N"
+    "prod": "X.Y.Z",
+    "beta": "X.Y.Z-beta.N",
+    "rc": "X.Y.Z-rc.N",
+    "dev": "X.Y.Z-dev.N",
+    "local_development": "next final patch-dev.<short-sha>"
   },
   "label_groups": {
     "type": [
@@ -16,45 +20,66 @@
       "type:skip"
     ],
     "channel": [
-      "channel:stable",
-      "channel:rc"
+      "channel:prod",
+      "channel:beta",
+      "channel:rc",
+      "channel:dev"
     ]
   },
+  "legacy_migration_map": {
+    "channel:stable": "channel:prod",
+    "channel:canary": "channel:dev",
+    "type:none": "type:skip"
+  },
   "release_actions": {
-    "automatic": "type:patch + channel:stable",
-    "exact": "type:major, type:minor, or any channel:rc",
-    "skip": "type:docs or type:skip"
+    "product": "type:major|minor|patch plus exactly one channel",
+    "skip": "type:docs or type:skip without channel"
   },
   "workflows": {
-    "label_gate": "Label Gate",
+    "label_gate": "Release intent label gate",
     "preparation": "Prepare product version",
     "completion": "Release completion",
     "release": "Release Product",
     "failure_notification": "Notify failed release"
   },
   "preparation": {
-    "mode": "pr-local-version-only",
+    "modes": ["normal", "version-only-release-pr"],
     "write_api": "createCommitOnBranch",
     "expected_head_oid": true,
     "signature": "github-native-verified",
+    "completion_requires_native_verification": true,
     "only_path": "VERSION",
-    "no_gpg_secrets": true
+    "no_gpg_secrets": true,
+    "allocation": "final-tag-first",
+    "reservation_before_version": true
+  },
+  "identity_refs": {
+    "reservation": "refs/tags/release-reservation/v<version>",
+    "bound": "refs/tags/release-bound/v<version>/<merge-sha>",
+    "consumed": "refs/tags/release-consumed/v<version>/<merge-sha>",
+    "released": "refs/tags/release-released/v<version>/<reservation-id>",
+    "write_policy": "append-only-create",
+    "state_order": "bound-before-consumed;released-only-when-unbound",
+    "receipt_validation": "independently-verify-reservation-provenance"
   },
   "recovery": {
-    "operation": "recover",
-    "identity": "same merge SHA and VERSION",
-    "sequence_guard": "candidate must not be below the highest remote product tag",
-    "superseded_reason": "superseded_by_product_tag",
-    "backfill": false,
-    "snapshot": false,
-    "queue": false
+    "same_sha_operation": "recover",
+    "same_sha_identity": "bound merge SHA + VERSION + channel + matching reservation",
+    "dispatch_requires_existing_bound": true,
+    "version_only_release_pr": "new non-empty VERSION-only PR with new merge identity",
+    "historical_backfill": false,
+    "queue": false,
+    "auto_scan_history": false,
+    "auto_create_pr": false,
+    "unresolved_identity": "no version, tag, or recovery instruction"
   },
   "release_sequence": {
-    "source": "remote product tags",
-    "tag_grammar": ["vX.Y.Z", "vX.Y.Z-rc.N"],
-    "ordering": "full-semver-rc-before-stable",
+    "source": "remote product tags and existing reservation/receipt refs",
+    "final_baseline": "highest final vX.Y.Z only",
+    "prerelease_ordinal": "max existing same-base channel ordinal plus one",
     "lower_candidate": "reject-before-build",
-    "equal_candidate": "require-tag-target-equals-merge-sha"
+    "equal_candidate": "require tag target equals merge SHA",
+    "successor_on_recovery": false
   },
   "release_states": {
     "missing": "build-and-create",
@@ -63,7 +88,9 @@
   },
   "merge_policy": {
     "normal_merge_only": true,
-    "release_reads_committed_version": true,
-    "remote_rules_mutated_by_this_contract": false
-  }
+    "release_reads_committed_identity": true,
+    "remote_rules_mutated_by_this_contract": true,
+    "remote_mutation_stage": "PR-ready Step 5C only"
+  },
+  "forbidden_identity_stores": ["git-notes", "control-branch", "external-database", "object-storage", "new-service"]
 }

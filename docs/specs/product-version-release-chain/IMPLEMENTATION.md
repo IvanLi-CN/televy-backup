@@ -1,35 +1,35 @@
 # Implementation
 
-## Current State
-
-Implemented in the current release-chain delivery. The repository contract is
-normative; GitHub ruleset changes remain outside this topic.
-
 ## Components
 
 | Component | Location |
 | --- | --- |
-| Version resolver and grammar | `VERSION`, `scripts/product-version.py` |
-| Rust build identity | `crates/cli/build.rs`, `crates/daemon/build.rs`, `crates/mtproto-helper/build.rs` |
-| macOS identity and assets | `scripts/macos/build-app.sh`, `package-release.sh`, `assemble-universal.sh`, `generate-release-manifest.sh`, `verify-release-assets.sh` |
-| Label and chain validation | `.github/scripts/label-gate.sh`, `release_chain.py`, `release_preparation.py`, `release_completion.py` |
+| Formal and local version grammar | `scripts/product-version.py` |
+| Final-tag-first allocation and provenance | `.github/scripts/release_chain.py` |
+| Append-only reservation, receipt and intent snapshot | `.github/scripts/release_reservation.py` |
+| Label policy | `.github/scripts/label-gate.sh`, `.github/release-contract.json` |
 | Trusted preparation | `.github/workflows/release-preparation.yml` |
-| Completion and release | `.github/workflows/release-completion.yml`, `.github/workflows/release.yml` |
-| Quality declaration | `.github/quality-gates.json`, `.github/release-contract.json` |
+| Completion gate | `.github/workflows/release-completion.yml`, `.github/scripts/release_completion.py` |
+| Mainline bind, build and publish | `.github/workflows/release.yml` |
+| Failure context delivery | `.github/workflows/notify-release-failure.yml` |
+| Required-check declaration | `.github/quality-gates.json`, `docs/quality-gates.md` |
 
-## Migration
+## Identity flow
 
-The initial root `VERSION` value is `0.9.2`, matching the existing published `v0.9.2` identity. The completion check has a one-time migration path for a PR that adds exactly this value while the base has no VERSION. It reports migration and cannot trigger a product release.
+1. Label Gate validates one product type and one new channel, or channel-free docs/skip.
+2. Preparation enumerates fetched product tags and reservation refs, calculates the candidate from
+   the highest final tag, and creates the reservation before writing VERSION.
+3. The same PR branch receives one GitHub verified VERSION-only commit guarded by
+   `expectedHeadOid`.
+4. Release completion freezes the reservation and provenance. A normal PR merge creates the
+   candidate's merged identity; a version-only release PR creates a new identity for one covered
+   old merge.
+5. Release Product verifies the merged identity, appends bound, builds once, creates the product
+   tag and GitHub Release, then appends consumed.
 
-`Release Product` publishes only the immutable tag and GitHub Release with
-`contents: write`; successful publication is reported directly to the owner by
-the release-owning agent rather than written to the source PR.
+## Recovery boundaries
 
-Release Product resolves the remote product-tag waterline before packaging. A
-superseded VERSION exits without creating a tag or Release; a matching draft is
-completed explicitly, while a matching published Release is treated as an
-idempotent terminal state.
-
-## Verification
-
-Local verification runs the resolver unit tests, release-chain fixtures, package manifest fixture, shell syntax checks, YAML parsing, Rust checks, and the quality-gates checker. macOS native package and Swift matrix jobs remain the authoritative hosted checks.
+The `release-intent.json` artifact is convenient run context only. A missing or expired artifact is
+reconstructed from immutable Git refs, commit trailers and product tags. Same-SHA recovery requires
+the existing bound identity and never calculates a new version. No identity is reported as an
+unresolved state and cannot produce a fabricated tag or recovery command.
