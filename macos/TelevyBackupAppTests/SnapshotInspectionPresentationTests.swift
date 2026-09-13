@@ -188,6 +188,26 @@ private func testStoragePreparationDoesNotShowPageLoader() {
     )
 }
 
+private func testSnapshotAccessPathFallsBackToRegisteredPath() {
+    let registeredPath = "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+    let status = SnapshotControlStatus(
+        consistencyMode: "strict",
+        serviceReachable: false,
+        accessAppVersion: nil,
+        accessAppPath: nil,
+        registeredAccessAppPath: registeredPath,
+        fdaReady: false,
+        accessAppError: "Snapshot Access service is unavailable",
+        activeLeases: 0,
+        pendingCleanup: 0,
+        volumes: []
+    )
+    expect(
+        SnapshotAccessPathPresentation.displayPath(for: status) == registeredPath,
+        "the settings view must keep showing the embedded helper path when the helper is unreachable"
+    )
+}
+
 @main
 enum SnapshotInspectionPresentationTestsMain {
     static func main() {
@@ -199,6 +219,7 @@ enum SnapshotInspectionPresentationTestsMain {
         testBlockRequestEpochRejectsStaleResults()
         testStorageRequestEpochRejectsStaleExpansion()
         testStoragePreparationDoesNotShowPageLoader()
+        testSnapshotAccessPathFallsBackToRegisteredPath()
         print("OK: SnapshotInspectionPresentationTests")
     }
 }

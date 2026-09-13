@@ -421,6 +421,12 @@ struct SnapshotControlStatus: Decodable, Equatable {
     }
 }
 
+enum SnapshotAccessPathPresentation {
+    static func displayPath(for status: SnapshotControlStatus) -> String? {
+        status.accessAppPath ?? status.registeredAccessAppPath
+    }
+}
+
 struct SnapshotProbeResponse: Decodable {
     let volumeUuid: String
     let filesystem: String
@@ -1063,7 +1069,7 @@ struct SettingsWindowRootView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Label(snapshotStatus.fdaReady ? "Snapshot Access Full Disk Access ready" : "Snapshot Access Full Disk Access required", systemImage: snapshotStatus.fdaReady ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
                                 .foregroundStyle(snapshotStatus.fdaReady ? .green : .orange)
-                            if let path = snapshotStatus.accessAppPath {
+                            if let path = SnapshotAccessPathPresentation.displayPath(for: snapshotStatus) {
                                 Text(path)
                                     .font(.system(size: 11, design: .monospaced))
                                     .textSelection(.enabled)

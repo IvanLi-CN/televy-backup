@@ -145,11 +145,9 @@ impl SnapshotContentReader {
     ) -> Result<Option<BrowseEntry>> {
         validate_snapshot_id(snapshot_id)?;
         validate_relative_path(relative_path)?;
+        let (pool, _, _) = self.filemap_pool(snapshot_id).await?;
         if relative_path.is_empty() {
-            // A synthetic snapshot root is only valid when its backing metadata is readable.
-            // Otherwise WebDAV would expose a retained catalog row as an empty directory and
-            // hide a missing or corrupt filemap from the caller.
-            self.filemap_pool(snapshot_id).await?;
+            validate_snapshot_filemap(&pool, snapshot_id).await?;
             return Ok(Some(BrowseEntry {
                 path: String::new(),
                 name: String::new(),
@@ -159,7 +157,6 @@ impl SnapshotContentReader {
                 mode: 0o755,
             }));
         }
-        let (pool, _, _) = self.filemap_pool(snapshot_id).await?;
         let row = sqlx::query(
             "SELECT path, size, mtime_ms, mode, kind FROM files WHERE snapshot_id = ? AND path = ? LIMIT 1",
         )
@@ -507,6 +504,36 @@ async fn endpoint_has_snapshot_files(endpoint_db_path: &Path, snapshot_id: &str)
             .await?
             .is_some(),
     )
+}
+
+async fn validate_snapshot_filemap(pool: &SqlitePool, snapshot_id: &str) -> Result<()> {
+    const REQUIRED_TABLES: [&str; 4] = ["snapshots", "files", "chunks", "file_chunks"];
+
+    for table in REQUIRED_TABLES {
+        let table_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .bind(table)
+        .fetch_one(pool)
+        .await?;
+        if table_count != 1 {
+            return Err(Error::Integrity {
+                message: format!("snapshot filemap is missing required table: {table}"),
+            });
+        }
+    }
+
+    let snapshot_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM snapshots WHERE snapshot_id = ?")
+            .bind(snapshot_id)
+            .fetch_one(pool)
+            .await?;
+    if snapshot_count != 1 {
+        return Err(Error::Integrity {
+            message: format!("snapshot filemap does not contain snapshot: {snapshot_id}"),
+        });
+    }
+    Ok(())
 }
 
 fn verify_chunk(chunk_hash: &str, plain: Vec<u8>) -> Result<Vec<u8>> {
@@ -912,6 +939,51 @@ mod tests {
                 .unwrap(),
         );
         std::fs::remove_file(&filemap).unwrap();
+
+        let reader = SnapshotContentReader::new_cached(
+            endpoint_db,
+            filemap_dir,
+            "telegram.mtproto/default",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+
+        assert!(reader.entry("snapshot-1", "").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reader_rejects_a_mismatched_filemap_for_the_snapshot_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db = temp.path().join("index.sqlite");
+        let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap = filemap_dir.join("snapshot-1.sqlite");
+        let filemap_pool = crate::index_db::open_snapshot_filemap_db(&filemap)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-2")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
 
         let reader = SnapshotContentReader::new_cached(
             endpoint_db,
