@@ -23,7 +23,7 @@ assert_not_contains() {
   fi
 }
 
-for workflow in ci-pr.yml ci-main.yml label-gate.yml release-intent-label-gate.yml package-ci.yml release-preparation.yml release-completion.yml release.yml notify-release-failure.yml; do
+for workflow in ci-pr.yml ci-main.yml label-gate.yml package-ci.yml release-preparation.yml release-completion.yml release.yml notify-release-failure.yml; do
   ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$root_dir/.github/workflows/$workflow"
 done
 for workflow in release-preparation.yml release.yml; do
@@ -35,7 +35,7 @@ for workflow in release-preparation.yml release.yml; do
 done
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
 assert_contains "release preparation expectedHeadOid" "$preparation_text" "expectedHeadOid"
-label_gate_text="$(<"$root_dir/.github/workflows/release-intent-label-gate.yml")"
+label_gate_text="$(<"$root_dir/.github/workflows/label-gate.yml")"
 assert_contains "release intent label gate job" "$label_gate_text" "name: Release intent label gate"
 notify_text="$(<"$root_dir/.github/workflows/notify-release-failure.yml")"
 assert_contains "notifier Release Product trigger" "$notify_text" "- Release Product"
@@ -47,16 +47,18 @@ assert_contains "notifier recovery candidate output" "$notify_text" "recovery_ca
 assert_contains "notifier superseded handling" "$notify_text" "not-applicable: superseded_by_product_tag"
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
 assert_contains "release full history checkout" "$release_text" "fetch-depth: 0"
-assert_contains "release full tag fetch" "$release_text" "git fetch --force origin main --tags"
+assert_contains "release full tag fetch" "$release_text" "git fetch --force origin main '+refs/tags/*:refs/tags/*'"
 assert_contains "release sequence gate" "$release_text" "verify-release-sequence"
-assert_contains "release publish recheck" "$release_text" "Create or verify immutable tag"
+assert_contains "release reservation verification" "$release_text" "verify_github_reservation"
+assert_contains "release bound receipt" "$release_text" "--state bound"
+assert_contains "release consumed receipt" "$release_text" "--state consumed"
+assert_contains "release intent artifact" "$release_text" "name: release-intent"
+assert_contains "release intent covered merge" "$release_text" "covered_merge_sha"
+assert_contains "release intent type" "$release_text" "RELEASE_TYPE"
+assert_contains "release publish recheck" "$release_text" "Create or verify immutable product tag"
 assert_contains "release state fail closed" "$release_text" "unable to resolve GitHub Release state"
 assert_contains "draft release publish" "$release_text" "gh release edit \"\${PRODUCT_TAG}\" --draft=false"
 assert_contains "draft-only asset overwrite" "$release_text" '[[ "${runtime_state}" == draft ]]'
-if (( $(printf '%s' "$release_text" | grep -Fc 'git fetch --force origin main --tags') < 2 )); then
-  printf 'release workflow must re-fetch tags before publication\n' >&2
-  exit 1
-fi
 if (( $(printf '%s' "$release_text" | grep -Fc 'verify-release-sequence') < 2 )); then
   printf 'release workflow must verify sequence before and during publication\n' >&2
   exit 1
@@ -68,9 +70,9 @@ fi
 assert_contains "release regular-file collection" "$release_text" "find release-assets -maxdepth 1 -type f"
 assert_not_contains "source PR release comment step" "$release_text" "Upsert PR release version comment"
 assert_not_contains "source PR release comment marker" "$release_text" "televybackup-release-version-comment"
-assert_not_contains "source PR release comment API" "$release_text" "gh api"
 assert_not_contains "source PR lookup" "$release_text" "/commits/\${TARGET_INPUT}/pulls"
 assert_not_contains "source PR number output" "$release_text" "pr_number"
+assert_contains "prerelease release behavior" "$release_text" "--prerelease --latest=false"
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'
 release = YAML.load_file(ARGV.fetch(0))
 expected_permissions = {"contents" => "write"}

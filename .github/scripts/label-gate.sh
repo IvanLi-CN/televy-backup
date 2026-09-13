@@ -100,9 +100,6 @@ if unknown_intents:
 if unknown_channels:
     fail(f"Unknown channel label(s): {', '.join(unknown_channels)}")
 
-if len(channel_present) == 0:
-    fail("Missing channel label: PR must have exactly one channel label")
-
 if len(channel_present) > 1:
     fail(f"Conflicting channel labels: {', '.join(channel_present)} (must be exactly one)")
 
@@ -113,7 +110,14 @@ if len(intent_present) > 1:
     fail(f"Conflicting intent labels: {', '.join(intent_present)} (must be exactly one)")
 
 intent = intent_present[0]
-release_channel = "rc" if channel_present == ["channel:rc"] else "stable"
+if intent in {"type:docs", "type:skip"}:
+    if channel_present:
+        fail("Docs/skip intents must not have a channel label")
+    release_channel = ""
+else:
+    if len(channel_present) != 1:
+        fail("Product PRs must have exactly one channel label")
+    release_channel = channel_present[0].removeprefix("channel:")
 bump_level = "" if intent in {"type:docs", "type:skip"} else intent.removeprefix("type:")
 
 out_path = os.environ.get("GITHUB_OUTPUT")

@@ -97,6 +97,8 @@ jobs:
         if: needs.classify.outputs.kind == 'source'
         run: |
           bash ./.github/scripts/test-release-chain.sh
+          bash ./.github/scripts/test-release-reservation.sh
+          bash ./.github/scripts/test-release-failure-context.sh
           bash ./.github/scripts/test-release-preparation.sh
           bash ./.github/scripts/test-release-completion.sh
           bash ./.github/scripts/test-release-workflows.sh

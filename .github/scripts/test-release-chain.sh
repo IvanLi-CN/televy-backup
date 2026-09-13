@@ -31,15 +31,41 @@ chain = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(chain)
 chain.ROOT = repo
 
+reservation_spec = importlib.util.spec_from_file_location("release_reservation", root / ".github/scripts/release_reservation.py")
+assert reservation_spec and reservation_spec.loader
+reservation = importlib.util.module_from_spec(reservation_spec)
+reservation_spec.loader.exec_module(reservation)
+allocation = chain.allocate_version(chain.product_tags(), "type:patch", "channel:prod")
+claim_key = f"pr:1:source:{source}:type:type:patch:channel:channel:prod"
+generated = reservation.deterministic_identity("fixture", claim_key)
+reservation_value = {
+    "ref": reservation.reservation_ref(str(allocation["version"])),
+    "sourceSha": source,
+    "version": str(allocation["version"]),
+    "channel": "prod",
+    "reservationId": generated["reservationId"],
+    "Reservation-Owner": "fixture",
+    "Reservation-Claim-Key": claim_key,
+    "Reservation-Boundary-Token": generated["boundaryToken"],
+}
+assert reservation.create_local_reservation(reservation_value, repo)["ref"] == reservation_value["ref"]
+
 chain.stage(argparse.Namespace(
     source_sha=source,
-    mode="automatic",
-    exact_version=None,
-    expected_channel="stable",
+    mode="exact",
+    version=str(allocation["version"]),
     intent_type="type:patch",
-    intent_channel="channel:stable",
-    intent_action="automatic",
+    intent_channel="channel:prod",
+    intent_action="allocate",
     intent_components="none",
+    release_mode="normal",
+    reservation_id=reservation_value["reservationId"],
+    reservation_ref=reservation_value["ref"],
+    reservation_owner=reservation_value["Reservation-Owner"],
+    claim_key=reservation_value["Reservation-Claim-Key"],
+    boundary_token=reservation_value["Reservation-Boundary-Token"],
+    covered_merge_sha="",
+    provenance="fixture-verified",
 ))
 prepared = chain.verify_prepared(chain.git("rev-parse", "HEAD"), source)
 assert prepared["version"] == "0.9.4"
@@ -61,7 +87,24 @@ matching = chain.verify_release_sequence("0.9.7", source)
 assert matching["status"] == "matching"
 
 chain.git("tag", "v0.9.8-rc.2", source)
-assert_sequence_rejected("0.9.8-rc.1", source, "superseded_by_product_tag")
+assert chain.verify_release_sequence("0.9.8-rc.1", source)["status"] == "available"
+claim_key = "occupied-rc-claim"
+generated = reservation.deterministic_identity("fixture", claim_key)
+occupied = {
+    "ref": reservation.reservation_ref("0.9.8-rc.3"),
+    "sourceSha": source,
+    "version": "0.9.8-rc.3",
+    "channel": "rc",
+    "reservationId": generated["reservationId"],
+    "Reservation-Owner": "fixture",
+    "Reservation-Claim-Key": claim_key,
+    "Reservation-Boundary-Token": generated["boundaryToken"],
+}
+reservation.create_local_reservation(occupied, repo)
+assert "0.9.8-rc.3" in chain.occupied_identity_versions()
+assert chain.allocate_version(
+    chain.product_tags(), "type:patch", "channel:rc", chain.occupied_identity_versions()
+)["version"] == "0.9.8-rc.4"
 assert chain.verify_release_sequence("0.9.8", source)["status"] == "available"
 chain.git("tag", "v0.9.8", source)
 assert_sequence_rejected("0.9.8", chain.git("rev-parse", "HEAD"), "product_tag_conflict")
@@ -101,8 +144,13 @@ subprocess.run(
     [
         "git", "-C", str(topology), "commit", "-qm", "chore(release): v0.9.3",
         "-m", f"Release-Source-SHA: {topology_source}\nProduct-Version: 0.9.3\n"
-        "Release-Intent-Type: type:patch\nRelease-Intent-Channel: channel:stable\n"
-        "Release-Intent-Action: automatic\nRelease-Intent-Components: none",
+        "Release-Intent-Type: type:patch\nRelease-Intent-Channel: channel:prod\n"
+        "Release-Intent-Action: allocate\nRelease-Intent-Components: none\n"
+        "Release-Mode: normal\nRelease-Reservation-Id: res-topology\n"
+        "Release-Reservation-Ref: refs/tags/release-reservation/v0.9.3\n"
+        "Release-Reservation-Owner: fixture\n"
+        "Release-Claim-Key: topology-claim\nRelease-Boundary-Token: topology-boundary\n"
+        "Release-Provenance: fixture-verified",
     ],
     check=True,
 )

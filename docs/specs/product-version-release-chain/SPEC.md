@@ -1,59 +1,136 @@
-# TelevyBackup VERSION-only Release Chain
-
-> Canonical topic retained as the canonical source for current product behavior.
+# TelevyBackup Product Version and Release Chain
 
 ## Related ADRs
 
 - [PR-local VERSION preparation](../../adr/0004-pr-local-version-preparation.md)
+- [Immutable release identity reservation](../../adr/0010-release-identity-reservation.md)
+
+## Context and Scope
+
+This topic owns TelevyBackup's product version identity from PR labels through VERSION preparation,
+mainline release, receipts, recovery, and failure context. It covers release orchestration facts and
+does not change macOS application behavior, package contents, or notification transport selection.
+GitHub remote policy is reconciled only at the PR-ready delivery boundary.
 
 ## Requirements
 
-### REQ-PVR-001: VERSION is the product version authority
+### REQ-PVR-001: Final tags are the numeric baseline
 
-The root `VERSION` file is the only numeric product-version source. It contains exactly one LF-terminated stable `X.Y.Z` or release-candidate `X.Y.Z-rc.N` value. Cargo package metadata remains non-authoritative package metadata and must not be used as a fallback.
+The highest eligible final product tag `vX.Y.Z` is the only numeric baseline. If no final tag
+exists, the virtual baseline is `0.0.0`. `VERSION`, Cargo manifests, environment variables and
+merge order are never successor inputs. `type:major`, `type:minor` and `type:patch` advance that
+baseline once; prerelease tags do not advance it.
 
-Covers: G1, G2.
+### REQ-PVR-002: Channels have one formal grammar
 
-### REQ-PVR-002: Development and release identities are deterministic
+Product labels use exactly one of `channel:prod`, `channel:beta`, `channel:rc`, or `channel:dev`.
+`prod` writes `X.Y.Z`; the other channels write `X.Y.Z-beta.N`, `X.Y.Z-rc.N`, or `X.Y.Z-dev.N`.
+The ordinal starts at one and is the next existing ordinal for the same base/channel. Local
+development builds retain the short-SHA identity and are separate from formal `channel:dev`.
 
-`scripts/product-version.py` MUST resolve development identity as the next patch of the committed VERSION plus `-dev.<short-sha>`. Release identity MUST equal the committed VERSION. Rust binaries, plist values, DMG names, tools archives, Universal bundles, and manifests MUST consume the same resolver result.
+### REQ-PVR-003: Non-product labels are channel-free
 
-Covers: G1, G2, A1, A2, A4.
+`type:docs` and `type:skip` must have no channel. They complete successfully without writing
+VERSION, creating a reservation, creating a product tag, publishing a Release, or notifying a
+failure. `channel:stable`, `channel:canary`, and `type:none` are migration inputs only and are
+rejected by the new gate.
 
-### REQ-PVR-003: Labels have an exact release action
+### REQ-PVR-004: Reservation is the pre-merge claim
 
-`Label Gate` MUST require exactly one `type:*` label from the declared type set and exactly one `channel:*` label from the declared channel set. Patch plus stable uses automatic next-patch preparation, advancing past already-owned product tags when necessary; major, minor, and every RC use a controlled exact version; docs and skip do not publish.
+Before VERSION preparation, the trusted controller creates
+`refs/tags/release-reservation/v<version>`. The ref target is a commit whose only parent is the
+source SHA and whose tree equals the source tree. Its trailers record reservation id, owner, claim
+key, boundary token, version, channel, and `claimed` state. First creation wins; an identical claim
+is idempotent; foreign ownership, stale state, provenance mismatch and tag conflict fail closed.
+No reservation or receipt ref is updated, deleted, or force-pushed.
 
-Covers: G1, G3, A3.
+### REQ-PVR-005: Preparation and completion preserve identity
 
-### REQ-PVR-004: Preparation is a PR-local VERSION-only commit
+Normal preparation uses GitHub `createCommitOnBranch` with `expectedHeadOid`, changes only VERSION,
+and requires a GitHub-native verified commit. The commit records source SHA, final version, type,
+channel, reservation ref, owner, claim key, boundary token, release mode and provenance. Release
+completion validates those fields, source checks, ancestry, and reservation provenance.
 
-After all source PR checks succeed, trusted preparation MAY create one single-parent commit on the PR branch using GitHub GraphQL `createCommitOnBranch` and `GITHUB_TOKEN`, guarded by `expectedHeadOid`. The commit MUST change only `VERSION`, include source/version/intent trailers, and have GitHub `commit.verification.verified == true`. No GPG secret, dedicated bot account, or bypass path is part of the contract.
+`version-only-release-pr` is a separate mode. It is a non-empty PR changing only VERSION and
+records one covered merge SHA that does not already have a release identity. Its new merge SHA is
+the identity; the covered merge remains historical context. No workflow automatically creates this
+PR.
 
-Covers: G3, A3.
+### REQ-PVR-006: Mainline release uses bound identity only
 
-### REQ-PVR-005: Release follows normal merge and supports ordered same-identity recovery
+After merge, Release Product reads the same SHA/version/channel triple, verifies the reservation,
+and appends `release-bound/v<version>/<merge-sha>`. It builds and publishes from that merge SHA,
+creates the product tag without overwriting an existing ref, and appends
+`release-consumed/v<version>/<merge-sha>` after publication. `prod` may be the stable latest
+surface; beta/rc/dev are prereleases and never update stable latest.
 
-Release completion MUST validate source checks, preparation ancestry, merge structure, VERSION, and tag ownership. The normal release workflow reads the committed merge SHA and VERSION, builds and verifies all macOS assets, and creates the immutable tag/release. The release-owning agent MUST report successful publication directly to the owner, and Release Product MUST NOT create or update a result comment on the source PR. Manual dispatch MUST accept only `recover` for the same merge SHA and VERSION. Snapshot, queue, arbitrary SHA backfill, and retagging are forbidden.
+### REQ-PVR-007: Recovery is same-SHA or an explicit new PR
 
-Before either automatic publication or `recover`, Release Product MUST enumerate the remote product tags matching `vX.Y.Z` and `vX.Y.Z-rc.N` and compare the candidate with the highest full-SemVer tag. A lower candidate MUST fail before build, tag, or asset work with `superseded_by_product_tag`. An equal candidate MUST prove that the existing tag targets the same merge SHA. A higher candidate is the only candidate eligible for a new tag. If the matching tag already has a draft Release, the workflow MAY replace its assets and MUST publish it explicitly; a published matching Release is an idempotent success and MUST NOT rebuild or overwrite assets.
+Same-SHA recovery accepts only an existing bound identity and retries missing publish or receipt
+work. It never writes VERSION, computes a successor, changes a channel, or retags. A historical
+merge with no identity is not a recovery input; it can be released only through a new,
+version-only-release-pr. History scanning, queues, trains, backfill and automatic PR creation are
+not part of this contract.
 
-Covers: G4, A3, A4.
+### REQ-PVR-008: Intent snapshots and failure context are non-authoritative
 
-### REQ-PVR-006: Quality and notification contracts are explicit
+Each resolved run writes and uploads `release-intent.json` containing PR/source/merge SHA, mode,
+covered merge, type/channel/version/tag, all reservation fields, provenance, artifact names, run
+URL and recovery instruction. It is an Actions artifact snapshot, not product code and not the only
+fact source. Recovery reconstructs identity from refs, trailers and product tags. Failure
+notification distinguishes publish failure, no-identity and resolver error; unresolved identity
+never fabricates a version, tag, or recovery command.
 
-`.github/quality-gates.json` MUST declare exact required check names and workflow mappings. Source heads run the complete Rust, Swift, and native package matrix; preparation heads run structural fast paths with the same required check names. Eligible failed releases MUST notify with the locked merge/version/tag identity and a same-SHA recovery candidate.
+The release-owning agent MUST report successful publication directly to the owner, and Release Product MUST NOT create or update a result comment on the source PR.
 
-Failure notifications MUST label any command as `recovery_candidate` and include the condition that the current product-tag waterline and same-SHA identity must be rechecked. A superseded candidate MUST state that no Release was created and MUST NOT advertise recovery.
+## Verification
 
-Covers: G5, A5, A6.
+### VER-PVR-001
+
+Covers: REQ-PVR-001, REQ-PVR-002, REQ-PVR-003. `scripts/test-product-version.py`, label-gate
+fixtures, and final-tag-first release-chain fixtures verify formal grammar, channel allocation and
+channel-free skip behavior.
+
+### VER-PVR-002
+
+Covers: REQ-PVR-004. `.github/scripts/test-release-reservation.sh` verifies first-create-wins,
+same-claim retry, foreign-claim rejection, and immutable receipt refs.
+
+### VER-PVR-003
+
+Covers: REQ-PVR-005. Preparation and completion fixtures verify VERSION-only ancestry, provenance,
+expected-head workflow text, GitHub-native verification, and version-only release PR boundaries.
+
+### VER-PVR-004
+
+Covers: REQ-PVR-006, REQ-PVR-007. Release workflow contract tests verify bound/consumed receipts,
+same-SHA recovery inputs, product tag ownership, prerelease publication, and no automatic history
+backfill.
+
+### VER-PVR-005
+
+Covers: REQ-PVR-008. Failure-context and workflow contract tests verify locked identity payloads,
+no-identity/resolver-error distinction, unresolved identity fail-closed behavior, and intent artifact
+generation.
+
+## Verification Map
+
+| Requirement | Verification |
+| --- | --- |
+| REQ-PVR-001, 002, 003 | VER-PVR-001 |
+| REQ-PVR-004 | VER-PVR-002 |
+| REQ-PVR-005 | VER-PVR-003 |
+| REQ-PVR-006, 007 | VER-PVR-004 |
+| REQ-PVR-008 | VER-PVR-005 |
 
 ## Acceptance evidence
 
 - `scripts/test-product-version.py`
+- `.github/scripts/test-release-scripts.sh`
 - `.github/scripts/test-release-chain.sh`
+- `.github/scripts/test-release-reservation.sh`
 - `.github/scripts/test-release-preparation.sh`
 - `.github/scripts/test-release-completion.sh`
 - `.github/scripts/test-release-workflows.sh`
 - `.github/scripts/test-package-scripts.sh`
-- `.github/quality-gates.json` checked with the repository quality-gates checker
+- `.github/quality-gates.json`
