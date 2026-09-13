@@ -2165,6 +2165,20 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        let filemap_pool = televy_backup_core::index_db::open_snapshot_filemap_db(&filemap)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1234")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
         let session = test_session(&endpoint_db_path, temp.path()).await;
         let snapshot = session
             .reader

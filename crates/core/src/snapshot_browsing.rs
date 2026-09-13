@@ -147,7 +147,6 @@ impl SnapshotContentReader {
         validate_relative_path(relative_path)?;
         let (pool, _, _) = self.filemap_pool(snapshot_id).await?;
         if relative_path.is_empty() {
-            validate_snapshot_filemap(&pool, snapshot_id).await?;
             return Ok(Some(BrowseEntry {
                 path: String::new(),
                 name: String::new(),
@@ -469,6 +468,7 @@ impl SnapshotContentReader {
             });
         };
         let pool = open_readonly_index_db(&path).await?;
+        validate_snapshot_filemap(&pool, snapshot_id).await?;
         if path != self.endpoint_db_path {
             sqlx::query("ATTACH DATABASE ? AS browse_endpoint")
                 .bind(self.endpoint_db_path.to_string_lossy().to_string())
@@ -951,7 +951,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reader_rejects_a_mismatched_filemap_for_the_snapshot_root() {
+    async fn reader_rejects_a_mismatched_filemap_for_the_snapshot() {
         let temp = tempfile::tempdir().unwrap();
         let endpoint_db = temp.path().join("index.sqlite");
         let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
@@ -992,7 +992,7 @@ mod tests {
             Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
         );
 
-        assert!(reader.entry("snapshot-1", "").await.is_err());
+        assert!(reader.list_children("snapshot-1", "").await.is_err());
     }
 
     #[tokio::test]
