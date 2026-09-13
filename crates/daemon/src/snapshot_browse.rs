@@ -163,6 +163,9 @@ impl BrowseDavFs {
             });
         }
         if let Some(bytes) = session.metadata_overlay.lock().await.get(relative).cloned() {
+            if !metadata_overlay_is_allowed(relative, session).await? {
+                return Err(FsError::NotFound);
+            }
             return Ok(BrowseNode {
                 meta: BrowseMeta {
                     size: bytes.len() as u64,
@@ -296,6 +299,9 @@ impl DavFileSystem for BrowseDavFs {
             let node = match Self::node(&session, &relative).await {
                 Ok(node) => node,
                 Err(FsError::NotFound) if options.write && metadata_overlay_path(&relative) => {
+                    if !metadata_overlay_is_allowed(&relative, &session).await? {
+                        return Err(FsError::NotFound);
+                    }
                     if real_snapshot_entry(&relative, &session).await? {
                         return Err(FsError::Forbidden);
                     }
@@ -314,6 +320,9 @@ impl DavFileSystem for BrowseDavFs {
                 return Err(FsError::Forbidden);
             }
             if options.write {
+                if !metadata_overlay_is_allowed(&relative, &session).await? {
+                    return Err(FsError::Forbidden);
+                }
                 let is_real_snapshot_entry = real_snapshot_entry(&relative, &session).await?;
                 if !metadata_overlay_path(&relative) || is_real_snapshot_entry {
                     return Err(FsError::Forbidden);
@@ -1109,6 +1118,11 @@ async fn respond(
         "PUT" => {
             if !metadata_overlay_path(relative) {
                 response(405, "text/plain", b"read-only")
+            } else if !metadata_overlay_is_allowed(relative, session)
+                .await
+                .unwrap_or(false)
+            {
+                response(404, "text/plain", b"not found")
             } else {
                 match real_snapshot_entry(relative, session).await {
                     Ok(false) => {
@@ -1241,6 +1255,12 @@ async fn get_file(
     session: &BrowseSession,
 ) -> Vec<u8> {
     if let Some(bytes) = session.metadata_overlay.lock().await.get(relative).cloned() {
+        if !metadata_overlay_is_allowed(relative, session)
+            .await
+            .unwrap_or(false)
+        {
+            return response(404, "text/plain", b"not found");
+        }
         return response_with_headers(
             200,
             "application/octet-stream",
@@ -1424,6 +1444,33 @@ async fn collect_unavailable_entries(
 fn metadata_overlay_path(relative: &str) -> bool {
     let name = relative.rsplit('/').next().unwrap_or(relative);
     name == ".DS_Store" || name.starts_with("._")
+}
+
+async fn metadata_overlay_is_allowed(
+    relative: &str,
+    session: &BrowseSession,
+) -> Result<bool, FsError> {
+    if !metadata_overlay_path(relative) {
+        return Ok(false);
+    }
+    let Some((parent, _)) = relative.rsplit_once('/') else {
+        return Ok(true);
+    };
+    if parent == DIAGNOSTICS_DIRECTORY {
+        return Ok(true);
+    }
+    let Some((snapshot, snapshot_path)) = snapshot_path(parent, session).await? else {
+        return Ok(false);
+    };
+    if snapshot_path.is_empty() {
+        return Ok(true);
+    }
+    Ok(session
+        .reader
+        .entry(&snapshot.snapshot_id, &snapshot_path)
+        .await
+        .map_err(|_| FsError::GeneralFailure)?
+        .is_some_and(|entry| entry.kind == "dir"))
 }
 
 fn is_browseable_entry_kind(kind: &str) -> bool {
@@ -2087,6 +2134,75 @@ mod tests {
 
         let recreated = refresh_snapshots(&session).await.unwrap();
         assert_ne!(recreated[0].display_name, initial_name);
+    }
+
+    #[tokio::test]
+    async fn metadata_overlay_does_not_resurrect_a_pruned_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db_path = temp.path().join("endpoint.sqlite");
+        let endpoint_pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind("snapshot-1234")
+        .bind("2026-09-11T08:00:00Z")
+        .bind("/source")
+        .bind("Test")
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap = filemap_dir.join("snapshot-1234.sqlite");
+        drop(
+            televy_backup_core::index_db::open_snapshot_filemap_db(&filemap)
+                .await
+                .unwrap(),
+        );
+        let session = test_session(&endpoint_db_path, temp.path()).await;
+        let snapshot = session
+            .reader
+            .list_snapshots("/source")
+            .await
+            .unwrap()
+            .remove(0);
+        let path = format!(
+            "/capability/{}/._FinderInfo",
+            uri_path(&snapshot.display_name)
+        );
+        let put = respond("PUT", &path, &HashMap::new(), b"finder", &session).await;
+        assert!(
+            put.starts_with(b"HTTP/1.1 201"),
+            "{}",
+            String::from_utf8_lossy(&put)
+        );
+        let before_prune = respond("GET", &path, &HashMap::new(), &[], &session).await;
+        assert!(
+            before_prune.starts_with(b"HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&before_prune)
+        );
+
+        let endpoint_pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM snapshots WHERE snapshot_id = ?")
+            .bind("snapshot-1234")
+            .execute(&endpoint_pool)
+            .await
+            .unwrap();
+        drop(endpoint_pool);
+
+        let after_prune = respond("GET", &path, &HashMap::new(), &[], &session).await;
+        assert!(
+            after_prune.starts_with(b"HTTP/1.1 404"),
+            "{}",
+            String::from_utf8_lossy(&after_prune)
+        );
     }
 
     #[tokio::test]

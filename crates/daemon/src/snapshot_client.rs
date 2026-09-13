@@ -184,18 +184,22 @@ impl SnapshotClient {
                 ))
             })?;
             let required = [
-                ("managedBy", "smappservice"),
                 ("migrationState", "ready"),
                 ("bundleId", ACCESS_BUNDLE_ID),
                 ("relativeAppPath", ACCESS_BUNDLE_RELATIVE_PATH),
                 ("componentVersion", COMPONENT_VERSION),
             ];
-            if required.iter().any(|(field, expected)| {
-                manifest.get(field).and_then(serde_json::Value::as_str) != Some(*expected)
-            }) || manifest
-                .get("protocolVersion")
-                .and_then(serde_json::Value::as_u64)
-                != Some(u64::from(PROTOCOL_VERSION))
+            let managed_by = manifest
+                .get("managedBy")
+                .and_then(serde_json::Value::as_str);
+            if !matches!(managed_by, Some("launchctl-embedded" | "smappservice"))
+                || required.iter().any(|(field, expected)| {
+                    manifest.get(field).and_then(serde_json::Value::as_str) != Some(*expected)
+                })
+                || manifest
+                    .get("protocolVersion")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(u64::from(PROTOCOL_VERSION))
                 || manifest.get("appPath").and_then(serde_json::Value::as_str)
                     != self
                         .expected_access_app_path

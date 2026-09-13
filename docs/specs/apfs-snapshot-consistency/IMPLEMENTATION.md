@@ -10,8 +10,8 @@
   migration, owner renewal, and rollback; arbitrary external app installation and DMG-mounted
   production migration are not supported.
 - `macos/TelevyBackupApp/SettingsWindow.swift`: per-volume FDA and service state presentation.
-- `scripts/macos/build-app.sh`: nested Snapshot Access bundle and `SMAppService` LaunchAgent plist.
-- `macos/TelevyBackupApp/TelevyBackupApp.swift`: SMAppService registration and migration commit/
-  rollback orchestration.
+- `scripts/macos/build-app.sh`: nested Snapshot Access bundle and bundle-relative LaunchAgent plist.
+- `macos/TelevyBackupApp/TelevyBackupApp.swift`: ad-hoc `launchctl` registration, optional
+  `SMAppService` registration for signed builds, and migration commit/rollback orchestration.
 - `crates/cli/src/snapshot_mount_service.rs`: explicit administrator-authorized mount-helper
   LaunchDaemon installation and status contract.

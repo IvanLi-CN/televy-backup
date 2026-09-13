@@ -83,8 +83,10 @@ lease.
 
 ### REQ-APFS-006: User installation and observability
 
-The main app MUST register the embedded agent with `SMAppService.agent` and its plist MUST use a
-bundle-relative `BundleProgram`. The CLI MUST expose only read-only `snapshot-access status` plus
+The main app MUST register the embedded agent with the platform launch service and its plist MUST
+use a bundle-relative `BundleProgram`. Official ad-hoc releases MUST use `launchctl bootstrap` on
+the plist embedded in the product bundle; `SMAppService.agent` MAY be used only by separately
+signed builds. The CLI MUST expose only read-only `snapshot-access status` plus
 internal migration operations; it MUST reject arbitrary external app paths and MUST NOT create a
 new user LaunchAgent plist. Settings MUST show the exact embedded Access app and mount helper paths,
 component versions, migration state, service reachability, active leases, pending cleanup, and a
@@ -97,8 +99,9 @@ the same prepare operation; missing or mismatched transaction credentials MUST f
 
 ## Compatibility
 
-The Access app is started by the main app's per-user `SMAppService` LaunchAgent and can be used
-without the GUI after registration. The v0.9.8 helper remains readable for the one-time lease
+The Access app is started by the main app's per-user embedded launch service and can be used
+without the GUI after registration. The official ad-hoc path uses `launchctl bootstrap`; a signed
+build may use `SMAppService.agent`. The v0.9.8 helper remains readable for the one-time lease
 probe, while only the current component may be committed or used for strict reads. RC1 establishes
 the embedded helper identity; ordinary future product-version RC1 builds reuse the approved
 artifact named by the component lock, and RC2/stable reuse that version's exact Universal artifact,
@@ -153,6 +156,7 @@ and version. The result is a manual release artifact; tests MUST NOT modify TCC 
 - [0008-apfs-snapshot-access-app](../../adr/0008-apfs-snapshot-access-app.md)
 - [0009-apfs-snapshot-mount-helper](../../adr/0009-apfs-snapshot-mount-helper.md)
 - [0010-identity-stable-single-product-release](../../adr/0010-identity-stable-single-product-release.md)
+- [0011-ad-hoc-embedded-agent-registration](../../adr/0011-ad-hoc-embedded-agent-registration.md)
 
 ## Visual Evidence
 

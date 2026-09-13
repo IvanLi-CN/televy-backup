@@ -7,7 +7,7 @@ serves a versioned, owner-UID-scoped Unix IPC that accepts configured target IDs
 pages or bounded read streams. The backup daemon keeps only an opaque lease and logical source path.
 The current validated strict-mode baseline grants FDA to the exact Access app identity and to the
 exact root mount-helper identity. The Access app is embedded in the single visible
-`TelevyBackup.app` and registered by `SMAppService` using a bundle-relative program. Because FDA does not grant mount(2) privilege, the Access app
+`TelevyBackup.app` and registered by the platform launch service using a bundle-relative program. Official ad-hoc releases use `launchctl`; signed builds may use `SMAppService`. Because FDA does not grant mount(2) privilege, the Access app
 delegates only mount, unmount, and UUID-scoped cleanup to the separate minimal root helper defined
 in ADR 0009.
 

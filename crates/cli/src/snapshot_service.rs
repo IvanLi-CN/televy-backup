@@ -22,6 +22,11 @@ const MIGRATION_BACKUP_DIR: &str = "snapshot-access/migrations";
 const MIGRATION_OWNER_TTL_SECONDS: u64 = 120;
 const INSTALLED_PRODUCTION_APP_PATH: &str = "/Applications/TelevyBackup.app";
 const PRODUCTION_BUNDLE_ID: &str = "com.ivan.televybackup";
+const EMBEDDED_REGISTRATION_MANAGER: &str = "launchctl-embedded";
+
+fn is_embedded_registration_manager(value: Option<&str>) -> bool {
+    matches!(value, Some("launchctl-embedded" | "smappservice"))
+}
 
 fn user_service_target(domain: &str) -> String {
     format!("{domain}/{ACCESS_LABEL}")
@@ -306,7 +311,7 @@ fn manifest_value(
         "schemaVersion": 2,
         "label": ACCESS_LABEL,
         "bundleId": ACCESS_BUNDLE_ID,
-        "managedBy": "smappservice",
+        "managedBy": EMBEDDED_REGISTRATION_MANAGER,
         "plistName": ACCESS_AGENT_PLIST_NAME,
         "appPath": access_app,
         "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
@@ -432,7 +437,10 @@ fn migration_owner_is_active(manifest: &Value) -> bool {
 fn pending_response(access_app: &Path, manifest: &Value) -> Value {
     json!({
         "prepared": true,
-        "managedBy": "smappservice",
+        "managedBy": manifest
+            .get("managedBy")
+            .and_then(Value::as_str)
+            .unwrap_or(EMBEDDED_REGISTRATION_MANAGER),
         "appPath": access_app,
         "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
         "migrationState": "pending",
@@ -443,7 +451,7 @@ fn pending_response(access_app: &Path, manifest: &Value) -> Value {
 
 fn is_pending_migration(manifest: Option<&Value>) -> bool {
     manifest.is_some_and(|value| {
-        value.get("managedBy").and_then(Value::as_str) == Some("smappservice")
+        is_embedded_registration_manager(value.get("managedBy").and_then(Value::as_str))
             && value.get("relativeAppPath").and_then(Value::as_str)
                 == Some(ACCESS_BUNDLE_RELATIVE_PATH)
             && value.get("migrationState").and_then(Value::as_str) == Some("pending")
@@ -548,7 +556,7 @@ pub fn prepare_migration(
         .as_ref()
         .and_then(|value| value.get("managedBy"))
         .and_then(Value::as_str)
-        == Some("smappservice")
+        .is_some_and(|value| is_embedded_registration_manager(Some(value)))
         && existing
             .as_ref()
             .and_then(|value| value.get("relativeAppPath"))
@@ -719,7 +727,7 @@ pub fn prepare_migration(
             "{}",
             json!({
                 "prepared": true,
-                "managedBy": "smappservice",
+                "managedBy": EMBEDDED_REGISTRATION_MANAGER,
                 "appPath": access_app,
                 "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
                 "migrationState": "pending",
@@ -752,10 +760,10 @@ pub fn commit_migration(
             "Snapshot Access migration is not prepared",
         )
     })?;
-    if manifest.get("managedBy").and_then(Value::as_str) != Some("smappservice") {
+    if !is_embedded_registration_manager(manifest.get("managedBy").and_then(Value::as_str)) {
         return Err(CliError::new(
             "snapshot_access.migration_failed",
-            "Snapshot Access manifest is not managed by SMAppService",
+            "Snapshot Access manifest is not managed by an embedded launch service",
         ));
     }
     match manifest.get("migrationState").and_then(Value::as_str) {
@@ -972,14 +980,14 @@ fn status_payload(
         .and_then(|value| value.get("managedBy"))
         .and_then(Value::as_str);
     let registration_mismatch = manifest_present
-        && (managed_by != Some("smappservice")
+        && (!is_embedded_registration_manager(managed_by)
             || matches!(
                 (running_app_path, registered_app_path),
                 (Some(running), Some(registered)) if running != registered
             ));
     json!({
         "installed": manifest.is_some()
-            && managed_by == Some("smappservice")
+            && is_embedded_registration_manager(managed_by)
             && manifest.and_then(|value| value.get("migrationState")).and_then(Value::as_str)
                 == Some("ready"),
         "label": ACCESS_LABEL,
@@ -1022,6 +1030,22 @@ mod tests {
         assert!(plist.contains(ACCESS_BUNDLE_RELATIVE_PATH));
         assert!(!plist.contains("ProgramArguments"));
         assert!(!plist.contains("target/macos-app"));
+    }
+
+    #[test]
+    fn new_migration_manifest_uses_the_ad_hoc_embedded_manager() {
+        let manifest = manifest_value(
+            Path::new(
+                "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+            ),
+            Path::new("/tmp/config"),
+            Path::new("/tmp/data"),
+            "pending",
+            "migration-1",
+            "owner-1",
+            123,
+        );
+        assert_eq!(manifest["managedBy"], "launchctl-embedded");
     }
 
     #[test]

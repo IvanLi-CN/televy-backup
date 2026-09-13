@@ -22,7 +22,7 @@
 - **APFS Snapshot Access**: `televybackup-snapshot-access` (`crates/snapshot-helper/`).
   - Runs as a separate user-session `LSUIElement` app (`com.ivan.televybackup.snapshot-access`) embedded inside the single visible `TelevyBackup.app` at `Contents/Library/LoginItems/`. The user grants FDA to this exact nested bundle. Its peer-UID checked Unix socket exposes only configured target IDs, opaque leases, metadata pages, and bounded read streams.
   - It creates snapshots and reads their metadata/content, journaling the exact snapshot UUID and private mount root. It never encrypts or uploads backup data.
-  - Registration is owned by `SMAppService.agent` and uses `BundleProgram`; the CLI exposes status and a transactional migration from the old external registration. Scheduled backups use the already registered helper and never prompt for a password. Ordinary main-app releases reuse unchanged helper bytes.
+  - Registration uses the embedded bundle-relative `BundleProgram`; official ad-hoc releases bootstrap it with `launchctl`, while signed builds may use `SMAppService.agent`. The CLI exposes status and a transactional migration from the old external registration. Scheduled backups use the already registered helper and never prompt for a password. Ordinary main-app releases reuse unchanged helper bytes.
 - **APFS Snapshot Mount Helper**: `televybackup-snapshot-mount-helper` (`crates/snapshot-helper/src/bin/`).
   - Runs as root under `com.ivan.televybackup.snapshot-mount-helper`. Its restricted IPC only mounts,
     unmounts, and UUID-cleans leases presented by the Access app; it never opens source files or

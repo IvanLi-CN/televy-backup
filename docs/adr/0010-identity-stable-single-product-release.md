@@ -4,9 +4,12 @@
 
 Ship one visible product bundle, `TelevyBackup.app`. Keep Snapshot Access as an independent
 user-session process and Full Disk Access identity, but embed it at
-`Contents/Library/LoginItems/TelevyBackup Snapshot Access.app`. Register its LaunchAgent through
-`SMAppService.agent` using a bundle-relative `BundleProgram`; no user LaunchAgent plist may contain
-an absolute workspace or installation path.
+`Contents/Library/LoginItems/TelevyBackup Snapshot Access.app`. Register its LaunchAgent through the
+platform launch service using a bundle-relative `BundleProgram`; no user LaunchAgent plist may
+contain an absolute workspace or installation path. Official ad-hoc releases use `launchctl
+bootstrap` with the plist embedded in the product bundle. The signed-build `SMAppService.agent`
+backend is optional and is not part of the official release contract; ADR 0011 records this
+ad-hoc registration decision.
 
 The first RC that introduces this layout builds and ad-hoc signs a Universal Snapshot Access
 bundle. Later RCs and the stable release reuse the approved helper artifact from the current
@@ -28,7 +31,8 @@ requirement are recorded in the release manifest.
 
 The main app performs a transactional migration from the old external LaunchAgent. It backs up the
 old plist and manifest, refuses to switch while a lease is active, unregisters the old service,
-registers the embedded agent, confirms the running helper identity, and then commits. A short-lived
+registers the embedded agent with the selected platform backend, confirms the running helper identity,
+and then commits. A short-lived
 owner token prevents another app instance from committing or rolling back the transaction.
 Registration failure restores the old plist and manifest. The old external app is never deleted and
 TCC/FDA is never changed by the migration.

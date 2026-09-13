@@ -1336,10 +1336,9 @@ final class AppModel {
             && !isAdHocSignedMainApp
     }
 
-    // Without Developer ID, macOS rejects SMAppService registration for the
-    // ad-hoc product. The installed product still owns the embedded helper,
-    // but the GUI must launch that helper directly and complete the same
-    // migration contract before starting the daemon.
+    // Release builds are ad-hoc signed. Under the no-Developer-ID release
+    // constraint, the official path cannot depend on SMAppService, so it uses
+    // launchctl with the same bundle-relative LaunchAgent plist.
     private var isAdHocSignedMainApp: Bool {
         let result = runCommandCapture(
             exe: "/usr/bin/codesign",
@@ -1357,6 +1356,80 @@ final class AppModel {
             .appendingPathComponent("LoginItems")
             .appendingPathComponent("TelevyBackup Snapshot Access.app")
             .path
+    }
+
+    private func embeddedSnapshotAccessAgentPlistPath() -> String {
+        Bundle.main.bundleURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Library")
+            .appendingPathComponent("LaunchAgents")
+            .appendingPathComponent("com.ivan.televybackup.snapshot-access.plist")
+            .path
+    }
+
+    private var embeddedSnapshotAccessLaunchdService: String {
+        "gui/\(getuid())/com.ivan.televybackup.snapshot-access"
+    }
+
+    private func launchctlFailure(_ result: (stdout: String, stderr: String, status: Int32, reason: Process.TerminationReason)) -> String {
+        let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.isEmpty ? "launchctl operation failed with status \(result.status)" : output
+    }
+
+    private func registerEmbeddedSnapshotAccessAgent(completion: @escaping (Bool, String?) -> Void) {
+        let plistPath = embeddedSnapshotAccessAgentPlistPath()
+        guard FileManager.default.fileExists(atPath: plistPath) else {
+            completion(false, "Embedded Snapshot Access LaunchAgent plist is unavailable")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let domain = "gui/\(getuid())"
+            let bootstrap = self.runCommandCapture(
+                exe: "/bin/launchctl",
+                args: ["bootstrap", domain, plistPath],
+                timeoutSeconds: 5
+            )
+            if bootstrap.status == 0 {
+                DispatchQueue.main.async { completion(true, nil) }
+                return
+            }
+
+            let bootstrapError = self.launchctlFailure(bootstrap)
+            let lowercased = bootstrapError.lowercased()
+            guard lowercased.contains("already loaded") || lowercased.contains("service exists") else {
+                DispatchQueue.main.async { completion(false, bootstrapError) }
+                return
+            }
+
+            let kickstart = self.runCommandCapture(
+                exe: "/bin/launchctl",
+                args: ["kickstart", "-k", self.embeddedSnapshotAccessLaunchdService],
+                timeoutSeconds: 5
+            )
+            DispatchQueue.main.async {
+                completion(
+                    kickstart.status == 0,
+                    kickstart.status == 0 ? nil : self.launchctlFailure(kickstart)
+                )
+            }
+        }
+    }
+
+    private func unregisterEmbeddedSnapshotAccessAgent() -> String? {
+        let result = runCommandCapture(
+            exe: "/bin/launchctl",
+            args: ["bootout", embeddedSnapshotAccessLaunchdService],
+            timeoutSeconds: 5
+        )
+        if result.status == 0 {
+            return nil
+        }
+        let message = launchctlFailure(result).lowercased()
+        if message.contains("could not find service") || message.contains("service not found") || message.contains("no such process") {
+            return nil
+        }
+        return launchctlFailure(result)
     }
 
     private func embeddedSnapshotAccessExecutablePath() -> String? {
@@ -1648,9 +1721,10 @@ final class AppModel {
         usesProductionSnapshotAccessConfiguration
     }
 
-    // The migration commands only prepare/commit the data contract. SMAppService
-    // is the sole owner of the installed LaunchAgent registration. Keep one shared
-    // barrier so every GUI entry point observes the same migration result.
+    // The migration commands only prepare/commit the data contract. The
+    // production ad-hoc path registers the embedded LaunchAgent with launchctl;
+    // signed builds may use SMAppService. Keep one shared barrier so every GUI
+    // entry point observes the same migration result.
     func ensureSnapshotAccessRegistration(completion: @escaping (Bool, String?) -> Void) {
         guard requiresSnapshotAccessRegistrationBarrier else {
             performSnapshotAccessRegistration(completion: completion)
@@ -1745,7 +1819,7 @@ final class AppModel {
         }
         guard shouldUseEmbeddedSnapshotAccessAgent else {
             if usesProductionSnapshotAccessConfiguration && isProductionAppVariant {
-                performAdHocSnapshotAccessRegistration(completion: completion)
+                performLaunchctlSnapshotAccessRegistration(completion: completion)
             } else {
                 ensureLocalSnapshotAccessProcess(completion: completion)
             }
@@ -1906,7 +1980,7 @@ final class AppModel {
         }
     }
 
-    private func performAdHocSnapshotAccessRegistration(completion: @escaping (Bool, String?) -> Void) {
+    private func performLaunchctlSnapshotAccessRegistration(completion: @escaping (Bool, String?) -> Void) {
         guard let cli = cliPath() else {
             DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
             return
@@ -1967,14 +2041,14 @@ final class AppModel {
                 }
             }
 
-            self.ensureLocalSnapshotAccessProcess { success, error in
+            self.registerEmbeddedSnapshotAccessAgent { success, error in
                 guard success else {
                     guard let migrationId = state.migrationId,
                           let migrationOwner = state.migrationOwner else {
                         completion(false, error ?? "Embedded Snapshot Access helper could not be started")
                         return
                     }
-                    self.rollbackAdHocSnapshotAccessMigration(
+                    self.rollbackLaunchctlSnapshotAccessMigration(
                         cli: cli,
                         config: config,
                         data: data,
@@ -2014,7 +2088,7 @@ final class AppModel {
                             completion(true, nil)
                             return
                         }
-                        self.rollbackAdHocSnapshotAccessMigration(
+                        self.rollbackLaunchctlSnapshotAccessMigration(
                             cli: cli,
                             config: config,
                             data: data,
@@ -2030,7 +2104,7 @@ final class AppModel {
         }
     }
 
-    private func rollbackAdHocSnapshotAccessMigration(
+    private func rollbackLaunchctlSnapshotAccessMigration(
         cli: String,
         config: String,
         data: String,
@@ -2040,14 +2114,27 @@ final class AppModel {
         message: String,
         completion: @escaping (Bool, String?) -> Void
     ) {
-        stopLocalSnapshotAccessProcess()
         DispatchQueue.global(qos: .utility).async {
+            let unregisterError = self.unregisterEmbeddedSnapshotAccessAgent()
             guard self.waitForUnixSocketToClose(socketPath, timeoutSeconds: 5) else {
                 DispatchQueue.main.async {
-                    completion(false, message + " The embedded Snapshot Access helper did not stop; rollback was not attempted")
+                    let details = [
+                        message,
+                        unregisterError,
+                        "The embedded Snapshot Access helper did not stop; rollback was not attempted",
+                    ]
+                    .compactMap { $0 }
+                    .joined(separator: " ")
+                    completion(false, details)
                 }
                 return
             }
+            let rollbackMessage = [
+                message,
+                unregisterError.map { "The embedded Snapshot Access service could not be stopped: \($0)" },
+            ]
+            .compactMap { $0 }
+            .joined(separator: " ")
             self.finishSnapshotAccessMigration(
                 cli: cli,
                 config: config,
@@ -2056,7 +2143,7 @@ final class AppModel {
                 migrationOwner: migrationOwner,
                 agent: nil,
                 success: false,
-                message: message,
+                message: rollbackMessage,
                 completion: completion
             )
         }

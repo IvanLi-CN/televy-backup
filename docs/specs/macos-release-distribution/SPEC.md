@@ -57,6 +57,8 @@ The Settings Schedule page MUST default the service switch to off, display insta
 
 The app MUST contain `TelevyBackup Snapshot Access.app` at the fixed nested path and a
 `Contents/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist` using `BundleProgram`.
+Official ad-hoc releases MUST register this plist with `launchctl` from the installed product bundle;
+`SMAppService` is optional only for separately signed builds.
 The CLI MUST expose read-only `snapshot-access status` and internal transactional migration
 operations, but MUST NOT accept `snapshot-access install --app <path>` or ship an external helper
 installer. The first RC for a new Snapshot Access component MUST build and sign the Universal

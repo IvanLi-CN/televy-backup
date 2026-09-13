@@ -1162,7 +1162,7 @@ struct SettingsWindowRootView: View {
                 serviceReachable: !accessMissing,
                 accessAppVersion: accessMissing ? nil : "0.2.0",
                 accessAppPath: accessMissing ? nil : "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
-                managedBy: accessMissing ? nil : "smappservice",
+                managedBy: accessMissing ? nil : "launchctl-embedded",
                 migrationState: accessMissing ? nil : "ready",
                 fdaReady: !accessMissing && SettingsUIDemo.scene != "snapshots-fda-required",
                 accessAppError: accessMissing ? "Snapshot Access is not installed" : (SettingsUIDemo.scene == "snapshots-fda-required" ? "Full Disk Access is required" : nil),

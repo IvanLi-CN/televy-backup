@@ -115,7 +115,7 @@ impl SnapshotContentReader {
             let snapshot_id: String = row.get("snapshot_id");
             validate_snapshot_id(&snapshot_id)?;
             let created_at: String = row.get("created_at");
-            let base = local_display_time(&created_at);
+            let base = local_display_time(&created_at)?;
             let short_id = snapshot_id.chars().take(8).collect::<String>();
             let mut display_name = format!("{base} [{short_id}]");
             if !names.insert(display_name.clone()) {
@@ -605,27 +605,18 @@ fn non_negative_u64(value: i64) -> Result<u64> {
     Ok(value as u64)
 }
 
-fn local_display_time(value: &str) -> String {
-    DateTime::parse_from_rfc3339(value)
-        .map(|dt| {
-            dt.with_timezone(&Local)
-                .format("%Y-%m-%d %H-%M-%S")
-                .to_string()
-        })
+fn local_display_time(value: &str) -> Result<String> {
+    let local = DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&Local))
         .or_else(|_| {
-            value.parse::<DateTime<Utc>>().map(|dt| {
-                dt.with_timezone(&Local)
-                    .format("%Y-%m-%d %H-%M-%S")
-                    .to_string()
-            })
-        })
-        .unwrap_or_else(|_| {
             value
-                .replace([':', 'T', 'Z'], "-")
-                .chars()
-                .take(19)
-                .collect()
+                .parse::<DateTime<Utc>>()
+                .map(|dt| dt.with_timezone(&Local))
         })
+        .map_err(|_| Error::Integrity {
+            message: "invalid snapshot created_at timestamp".to_string(),
+        })?;
+    Ok(local.format("%Y-%m-%d %H-%M-%S").to_string())
 }
 
 #[derive(Debug)]
@@ -759,9 +750,15 @@ mod tests {
 
     #[test]
     fn local_names_have_no_timezone_suffix() {
-        let value = local_display_time("2026-09-11T14:05:37+08:00");
+        let value = local_display_time("2026-09-11T14:05:37+08:00").unwrap();
         assert_eq!(value.len(), 19);
         assert!(!value.contains('+'));
+    }
+
+    #[test]
+    fn malformed_snapshot_timestamps_fail_closed() {
+        assert!(local_display_time("2026/09/11T14:05:37").is_err());
+        assert!(local_display_time("not-a-timestamp").is_err());
     }
 
     #[test]

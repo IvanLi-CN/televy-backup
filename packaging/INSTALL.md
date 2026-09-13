@@ -8,7 +8,7 @@
    ```
 
 3. The controlled distribution is ad-hoc signed. macOS may show a Gatekeeper warning. After verifying the checksum, open the app from Finder and use **Open** in the confirmation dialog. Do not remove quarantine before checksum verification.
-4. The tool archive contains `televybackup`, `televybackupd`, `televybackup-mtproto-helper`, and the narrowly-scoped `televybackup-snapshot-mount-helper`. Snapshot Access is private to the DMG's single `TelevyBackup.app`; it is not installed from the tools archive. The main app registers it automatically through `SMAppService`.
+4. The tool archive contains `televybackup`, `televybackupd`, `televybackup-mtproto-helper`, and the narrowly-scoped `televybackup-snapshot-mount-helper`. Snapshot Access is private to the DMG's single `TelevyBackup.app`; it is not installed from the tools archive. The ad-hoc release registers its embedded LaunchAgent automatically with `launchctl` using the bundle-relative `BundleProgram`.
 5. Strict APFS snapshot backups additionally require the following one-time setup:
    - Install the mount helper from an administrator-authorized shell with `sudo televybackup snapshot-mount-helper install`.
    - On the first launch after the layout migration, grant Full Disk Access to the exact embedded helper path shown in Settings and `/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper`.
