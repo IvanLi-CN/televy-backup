@@ -27,7 +27,7 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 
 ### REQ-MRD-001: Traceable release assets
 
-Every `prod`, `beta`, `rc`, or `dev` release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBackup-<version>-arm64.dmg`, `TelevyBackup-<version>-x86_64.dmg`, `televybackup-tools-<version>-arm64.tar.gz`, `televybackup-tools-<version>-x86_64.tar.gz`, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after all asset checks pass. Each DMG MUST contain exactly one top-level installable `TelevyBackup.app` with the private Snapshot Access helper embedded inside it. The tools archive MUST NOT contain or install Snapshot Access. Version and architecture belong in the downloadable DMG filename, not the app entry names. Only `prod` may update the stable/latest surface; prerelease channels remain prereleases.
+Every `prod`, `beta`, `rc`, or `dev` release MUST publish `TelevyBackup-<version>.dmg`, `TelevyBackup-<version>-arm64.dmg`, `TelevyBackup-<version>-x86_64.dmg`, `televybackup-tools-<version>-arm64.tar.gz`, `televybackup-tools-<version>-x86_64.tar.gz`, `SHA256SUMS`, and `BUILD-MANIFEST.json` only after all asset checks pass. Each DMG MUST contain exactly one top-level installable `TelevyBackup.app` with the private Snapshot Access helper embedded inside it, and all five main executables under `Contents/MacOS` MUST be executable. The tools archive MUST NOT contain or install Snapshot Access, and every packaged tool binary MUST be executable. Version and architecture belong in the downloadable DMG filename, not the app entry names. Only `prod` may update the stable/latest surface; prerelease channels remain prereleases.
 
 ### REQ-MRD-002: Native build matrix
 

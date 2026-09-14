@@ -41,6 +41,16 @@ verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
   echo "The daemon must be signed before the outer app bundle" >&2
   exit 1
 }
+for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+  grep -F "\"\$macos_dir/$binary\"" <<<"$build_text" >/dev/null || {
+    echo "build-app.sh must preserve executable modes for every main binary" >&2
+    exit 1
+  }
+done
+grep -F 'chmod 755 \' <<<"$build_text" >/dev/null || {
+  echo "build-app.sh must preserve executable modes for every main binary" >&2
+  exit 1
+}
 icon_text="$(<"$root_dir/scripts/macos/generate-app-icon-assets.sh")"
 [[ "$icon_text" == *'icon_512x512@2x.png:1024'* && "$icon_text" == *'iconutil -c icns'* && "$icon_text" == *'AppIcon-dark-'* ]] || {
   echo "AppIcon generation contract is incomplete" >&2
@@ -58,6 +68,14 @@ verify_release_text="$(<"$root_dir/scripts/macos/verify-release-assets.sh")"
 }
 [[ "$verify_release_text" == *'one-time-bootstrap-universal-build'* ]] || {
   echo "release asset verifier must recognize the explicit helper bootstrap source" >&2
+  exit 1
+}
+grep -F '[[ -x "$app/Contents/MacOS/$binary" ]]' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must reject non-executable main binaries" >&2
+  exit 1
+}
+grep -F '[[ -x "$tools_dir/TelevyBackup Tools/bin/$binary" ]]' <<<"$verify_release_text" >/dev/null || {
+  echo "tools archive verification must reject non-executable binaries" >&2
   exit 1
 }
 webdav_text="$(<"$root_dir/scripts/macos/verify-webdav-snapshot-browsing.sh")"
@@ -81,6 +99,10 @@ grep -F 'chmod 755 "$universal_app/Contents/MacOS/"*' <<<"$assemble_text" >/dev/
 }
 grep -F 'chmod 755 "$universal_access_binary"' <<<"$assemble_text" >/dev/null || {
   echo "Universal Snapshot Access binary must remain executable after lipo" >&2
+  exit 1
+}
+grep -F 'chmod 755 "$native_app/Contents/MacOS/$binary"' <<<"$assemble_text" >/dev/null || {
+  echo "Native DMG repackage must preserve executable modes for every main binary" >&2
   exit 1
 }
 grep -F 'access_relative_path="Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"' <<<"$assemble_text" >/dev/null || {

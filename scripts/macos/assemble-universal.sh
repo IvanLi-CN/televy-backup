@@ -93,6 +93,9 @@ repackage_native_app() {
   rm -rf "$native_access_app"
   mkdir -p "$(dirname "$native_access_app")"
   ditto "$universal_access_app" "$native_access_app"
+  for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+    chmod 755 "$native_app/Contents/MacOS/$binary"
+  done
   rm -rf "$native_app/Contents/_CodeSignature"
   codesign --force --sign - "$native_app"
   codesign --verify --deep --strict "$native_app"

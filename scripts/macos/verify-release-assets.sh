@@ -270,6 +270,7 @@ verify_dmg_helper_identity() (
     *) echo "unexpected TelevyBackup DMG name: $local_dmg" >&2; exit 1 ;;
   esac
   for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+    [[ -x "$app/Contents/MacOS/$binary" ]] || { echo "DMG main binary is not executable: $binary" >&2; exit 1; }
     info="$(lipo -info "$app/Contents/MacOS/$binary")"
     case "$expected_arches" in
       universal) [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "Universal DMG binary is missing a slice: $binary" >&2; exit 1; } ;;
@@ -365,6 +366,7 @@ for tools_archive in "$asset_dir/televybackup-tools-${version}-arm64.tar.gz" "$a
   tools_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-tools-verify.XXXXXX")"
   tar -xzf "$tools_archive" -C "$tools_dir"
   for binary in televybackup televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+    [[ -x "$tools_dir/TelevyBackup Tools/bin/$binary" ]] || { echo "tools binary is not executable: $binary" >&2; exit 1; }
     info="$(lipo -info "$tools_dir/TelevyBackup Tools/bin/$binary")"
     if [[ "$expected_arches" == arm64 ]]; then
       [[ "$info" == *arm64* && "$info" != *x86_64* ]] || { echo "arm64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
