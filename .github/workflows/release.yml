@@ -43,6 +43,9 @@ jobs:
       merge_sha: ${{ steps.release.outputs.merge_sha }}
       policy_sha: ${{ steps.release.outputs.policy_sha }}
       merge_commit_sha: ${{ steps.release.outputs.merge_commit_sha }}
+      head_sha: ${{ steps.release.outputs.head_sha }}
+      labels: ${{ steps.release.outputs.labels }}
+      components: ${{ steps.release.outputs.components }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       channel: ${{ steps.release.outputs.channel }}
@@ -128,6 +131,14 @@ jobs:
           release_type="$(printf '%s' "${prepared_json}" | jq -r .type)"
           covered_merge_sha="$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)"
           pull_request="${{ github.event.workflow_run.pull_requests[0].number || '' }}"
+          if [[ -z "${pull_request}" ]]; then
+            pull_request="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${merge_sha}/pulls" | python3 -c 'import json,sys; merge=sys.argv[1]; rows=json.load(sys.stdin); matches=[row.get("number") for row in rows if row.get("merge_commit_sha") == merge and row.get("number") is not None]; print(matches[0] if matches else "")' "${merge_sha}")"
+          fi
+          test -n "${pull_request}"
+          pull_request_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pull_request}")"
+          pull_request_head_sha="$(printf '%s' "${pull_request_json}" | jq -r '.head.sha')"
+          labels_json="$(printf '%s' "${pull_request_json}" | jq -c '[.labels[].name]')"
+          components_json="$(printf '%s' "${labels_json}" | jq -c '[.[] | select(startswith("component:"))]')"
           verified="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${preparation_sha}" --jq '.commit.verification.verified')"
           test "${verified}" = true
           reservation_json="${RUNNER_TEMP}/reservation.json"
@@ -344,6 +355,9 @@ jobs:
             echo "preparation_commit_sha=${preparation_sha}"
             echo "merge_sha=${merge_sha}"
             echo "merge_commit_sha=${merge_sha}"
+            echo "head_sha=${pull_request_head_sha}"
+            echo "labels=${labels_json}"
+            echo "components=${components_json}"
             echo "version=${version}"
             echo "tag=${tag}"
             echo "channel=${channel}"
@@ -380,6 +394,9 @@ jobs:
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           PREPARATION_SHA: ${{ steps.release.outputs.preparation_commit_sha }}
           MERGE_SHA: ${{ steps.release.outputs.merge_sha }}
+          HEAD_SHA: ${{ steps.release.outputs.head_sha }}
+          LABELS_JSON: ${{ steps.release.outputs.labels }}
+          COMPONENTS_JSON: ${{ steps.release.outputs.components }}
           VERSION: ${{ steps.release.outputs.version }}
           CHANNEL: ${{ steps.release.outputs.channel }}
           RELEASE_MODE: ${{ steps.release.outputs.release_mode }}
@@ -404,9 +421,11 @@ jobs:
             --arg reservation_ref "${RESERVATION_REF}" --arg owner "${OWNER}" --arg claim_key "${CLAIM_KEY}" \
             --arg boundary_token "${BOUNDARY_TOKEN}" --arg run_url "${RUN_URL}" --arg release_type "${RELEASE_TYPE}" \
             --arg preparation_sha "${PREPARATION_SHA}" --arg covered_merge_sha "${COVERED_MERGE_SHA}" --arg pull_request "${PULL_REQUEST}" \
+            --arg head_sha "${HEAD_SHA}" --argjson labels "${LABELS_JSON}" --argjson components "${COMPONENTS_JSON}" \
+            --arg tag_owner "protected-release-automation" \
             --arg helper_source_mode "${HELPER_SOURCE_MODE}" --arg helper_source_tag "${HELPER_SOURCE_TAG}" \
             --arg helper_source_commit "${HELPER_SOURCE_COMMIT}" --arg helper_source_artifact_digest "${HELPER_SOURCE_ARTIFACT_DIGEST}" \
-            '{schema_version:1,pull_request:$pull_request,source_sha:$source_sha,preparation_commit_sha:$preparation_sha,merge_sha:$merge_sha,merge_commit_sha:$merge_sha,branch_head:$merge_sha,release_mode:$mode,covered_merge_sha:$covered_merge_sha,type:$release_type,channel:$channel,version:$version,tag:("v"+$version),tag_target_sha:$merge_sha,tag_owner:$owner,helper:{mode:$helper_source_mode,source_tag:$helper_source_tag,source_commit:$helper_source_commit,artifact_digest:$helper_source_artifact_digest},reservation:{id:$reservation_id,ref:$reservation_ref,owner:$owner,claim_key:$claim_key,boundary_token:$boundary_token,state:"bound",merge_commit_sha:$merge_sha},provenance:{signature:"github-native-verified",signature_verified:true,provenance_verified:true,tag_owner:$owner,identity:"release_chain_and_reservation_refs"},artifact_names:(if $helper_source_mode == "reuse" then ["snapshot-helper-source","release-package-arm64","release-package-x86_64","release-assets"] else ["release-package-arm64","release-package-x86_64","release-assets"] end),run_url:$run_url,recovery_instruction:("workflow_dispatch operation=recover commit_sha="+$merge_sha+" helper_mode=bootstrap only when no-approved-helper-release")}' \
+            '{schema_version:1,pull_request:$pull_request,source_sha:$source_sha,merge_sha:$merge_sha,merge_commit_sha:$merge_sha,head_sha:$head_sha,branch_head:$merge_sha,release_mode:$mode,preparation_commit_sha:$preparation_sha,covered_merge_sha:$covered_merge_sha,labels:$labels,type:$release_type,channel:$channel,components:$components,version:$version,tag:("v"+$version),tag_target_sha:$merge_sha,tag_owner:$tag_owner,helper:{mode:$helper_source_mode,source_tag:$helper_source_tag,source_commit:$helper_source_commit,artifact_digest:$helper_source_artifact_digest},reservation:{id:$reservation_id,ref:$reservation_ref,owner:$owner,claim_key:$claim_key,boundary_token:$boundary_token,state:"bound",merge_commit_sha:$merge_sha},provenance:{signature:"github-native-verified",signature_verified:true,provenance_verified:true,tag_owner:$tag_owner,identity:"release_chain_and_reservation_refs"},artifact_names:(if $helper_source_mode == "reuse" then ["snapshot-helper-source","release-package-arm64","release-package-x86_64","release-assets"] else ["release-package-arm64","release-package-x86_64","release-assets"] end),run_url:$run_url,recovery_instruction:("workflow_dispatch operation=recover commit_sha="+$merge_sha+" helper_mode=bootstrap only when no-approved-helper-release")}' \
             > release-intent.json
 
       - name: Upload locked release intent

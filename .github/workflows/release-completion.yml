@@ -3,7 +3,7 @@ name: Release completion
 on:
   pull_request_target:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited, ready_for_review]
   merge_group:
   workflow_dispatch:
     inputs:
@@ -13,7 +13,7 @@ on:
         type: string
 
 concurrency:
-  group: release-completion-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
+  group: release-completion-${{ github.event.pull_request.number || inputs.pr_number || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -24,11 +24,12 @@ permissions:
 jobs:
   release-completion:
     name: Release completion
-    if: github.event_name != 'merge_group'
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - name: Checkout trusted base
+        if: github.event_name != 'merge_group'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha || 'main' }}
@@ -36,6 +37,7 @@ jobs:
 
       - name: Resolve pull request context
         id: pr
+        if: github.event_name != 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_PATH: ${{ github.event_path }}
@@ -62,6 +64,7 @@ jobs:
           jq '.labels' "${RUNNER_TEMP}/pull-request.json" > "${RUNNER_TEMP}/labels.json"
 
       - name: Fetch pull request head
+        if: github.event_name != 'merge_group'
         env:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: git fetch --no-tags origin "${HEAD_SHA}"
@@ -73,7 +76,12 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: test "${GITHUB_REF}" = "refs/heads/main"
 
+      - name: Bridge merge-group gate
+        if: github.event_name == 'merge_group'
+        run: echo "merge-group reuses Release completion from each pull request"
+
       - name: Verify VERSION and release completion
+        if: github.event_name != 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}

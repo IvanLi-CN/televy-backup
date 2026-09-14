@@ -128,14 +128,25 @@ jobs:
                   raise RuntimeError('release-intent.json is not an object')
               return value
 
-          def resolve_pull_request(merge_sha: str, declared: object) -> str:
-              if str(declared or '').strip():
-                  return str(declared).strip()
+          def resolve_pull_request(merge_sha: str, declared: object, expected_head_sha: str) -> str:
               pulls = api_json(f'/repos/{repository}/commits/{merge_sha}/pulls')
-              for pull in pulls if isinstance(pulls, list) else []:
-                  if pull.get('merge_commit_sha') == merge_sha and pull.get('number') is not None:
-                      return str(pull['number'])
-              raise RuntimeError('merged pull request is unavailable for the release identity')
+              candidates = {
+                  str(pull['number']): pull
+                  for pull in pulls if isinstance(pulls, list) and isinstance(pull, dict)
+                  if pull.get('merge_commit_sha') == merge_sha and pull.get('number') is not None
+              }
+              declared_number = str(declared or '').strip()
+              if declared_number and declared_number not in candidates:
+                  raise RuntimeError('declared pull request is not associated with the merge SHA')
+              number = declared_number or next(iter(candidates), '')
+              if not number:
+                  raise RuntimeError('merged pull request is unavailable for the release identity')
+              pull = api_json(f'/repos/{repository}/pulls/{number}')
+              if str(pull.get('merge_commit_sha', '')) != merge_sha:
+                  raise RuntimeError('pull request merge SHA does not match the release identity')
+              if str(pull.get('head', {}).get('sha', '')) != expected_head_sha:
+                  raise RuntimeError('pull request head SHA does not match the release snapshot')
+              return number
 
           def commit_snapshot(sha: str) -> dict[str, object]:
               payload = api_json(f'/repos/{repository}/commits/{sha}')
@@ -267,12 +278,18 @@ jobs:
               sha_re = re.compile(r'^[0-9a-f]{40}$')
               provenance = intent.get('provenance')
               artifacts = intent.get('artifact_names')
-              required = ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'branch_head', 'release_mode', 'type', 'channel', 'version', 'tag', 'tag_target_sha', 'run_url', 'recovery_instruction')
+              required = ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'head_sha', 'branch_head', 'release_mode', 'type', 'channel', 'version', 'tag', 'tag_target_sha', 'tag_owner', 'run_url', 'recovery_instruction')
               if any(not str(intent.get(key, '')).strip() for key in required):
                   raise RuntimeError('release intent is incomplete')
+              labels = intent.get('labels')
+              components = intent.get('components')
+              if not isinstance(labels, list) or any(not isinstance(item, str) or not item for item in labels):
+                  raise RuntimeError('release intent labels are incomplete')
+              if not isinstance(components, list) or any(not isinstance(item, str) or not item.startswith('component:') for item in components):
+                  raise RuntimeError('release intent components are incomplete')
               if not isinstance(artifacts, list) or not artifacts or any(not isinstance(item, str) or not item for item in artifacts):
                   raise RuntimeError('release intent artifact names are incomplete')
-              for key in ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'branch_head', 'tag_target_sha'):
+              for key in ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'head_sha', 'branch_head', 'tag_target_sha'):
                   if not sha_re.fullmatch(str(intent[key])):
                       raise RuntimeError(f'release intent {key} is not a full SHA')
               if intent['tag'] != f"v{intent['version']}" or intent['merge_commit_sha'] != intent['merge_sha'] or intent['branch_head'] != intent['merge_sha'] or intent['tag_target_sha'] != intent['merge_sha']:
@@ -281,9 +298,16 @@ jobs:
                   raise RuntimeError('release intent version is not a valid product version')
               if str(intent['channel']) not in {'prod', 'beta', 'rc', 'dev'}:
                   raise RuntimeError('release intent channel is not a supported release channel')
+              if str(intent['tag_owner']) != 'protected-release-automation':
+                  raise RuntimeError('release intent tag owner is not the protected release automation owner')
+              expected_labels = {str(intent['type']), f"channel:{intent['channel']}"}
+              if not expected_labels.issubset(set(labels)):
+                  raise RuntimeError('release intent labels do not contain the locked release intent')
               source_sha = require_sha(intent['source_sha'], 'source SHA')
               merge_sha = require_sha(intent['merge_sha'], 'merge SHA')
               preparation_sha, signature_verified = verify_preparation(intent, source_sha, merge_sha)
+              if preparation_sha != require_sha(intent['head_sha'], 'release head SHA'):
+                  raise RuntimeError('release head SHA does not match the preparation commit')
               reservation, _ = verify_reservation(intent, source_sha, str(intent['version']), str(intent['channel']))
               merge = commit_snapshot(merge_sha)
               verify_bound_receipt(intent, merge_sha, str(intent['version']), reservation, merge)
@@ -293,14 +317,15 @@ jobs:
               tag_status = 'present' if tag_target_sha is not None else 'not-created'
               if tag_target_sha is None:
                   tag_target_sha = merge_sha
-              if not isinstance(provenance, dict) or provenance.get('identity') != 'release_chain_and_reservation_refs':
+              if not isinstance(provenance, dict) or provenance.get('identity') != 'release_chain_and_reservation_refs' or provenance.get('tag_owner') != intent['tag_owner']:
                   raise RuntimeError('release intent provenance identity is not recognized')
               if merge_sha not in str(intent['recovery_instruction']):
                   raise RuntimeError('release recovery instruction is not bound to the merge SHA')
               return {
-                  'pull_request': resolve_pull_request(merge_sha, intent.get('pull_request')),
+                  'pull_request': resolve_pull_request(merge_sha, intent.get('pull_request'), preparation_sha),
                   'source_sha': source_sha,
                   'preparation_commit_sha': preparation_sha,
+                  'head_sha': preparation_sha,
                   'merge_sha': merge_sha,
                   'merge_commit_sha': merge_sha,
                   'release_type': str(intent['type']),
@@ -309,7 +334,7 @@ jobs:
                   'tag': str(intent['tag']),
                   'tag_status': tag_status,
                   'tag_target_sha': tag_target_sha,
-                  'tag_owner': reservation['owner'],
+                  'tag_owner': str(intent['tag_owner']),
                   'reservation_id': reservation['id'],
                   'reservation_ref': reservation['ref'],
                   'reservation_owner': reservation['owner'],
@@ -397,7 +422,7 @@ jobs:
           ref_label = f'branch: {head_branch}' if head_branch else 'ref: unavailable from workflow_run payload'
           with open(output_path, 'a', encoding='utf-8') as handle:
               handle.write(f'ref_label={ref_label}\n')
-              handle.write(f'head_sha={fallback_head_sha}\n')
+              handle.write(f'head_sha={identity.get("head_sha", fallback_head_sha) if identity_status == "resolved" else fallback_head_sha}\n')
               handle.write(f'merge_sha={merge_sha}\n')
               handle.write(f'merge_commit_sha={merge_commit_sha}\n')
               handle.write(f'preparation_commit_sha={preparation_commit_sha}\n')

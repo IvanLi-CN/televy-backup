@@ -2,8 +2,8 @@
   "schema_version": 1,
   "kind": "version-impact-record",
   "change": {
-    "description": "Install the release Policy Skills and record the repository-local release contracts.",
-    "release_unit_description": "TelevyBackup release identity, label, quality-gate, and failure-notification policy surfaces.",
+    "description": "Align TelevyBackup release identity, required gates, and failure notification with the installed release Policy Skills.",
+    "release_unit_description": "TelevyBackup release identity, label, quality-gate, and failure-notification implementation and policy surfaces.",
     "affected_contracts": [
       "release-policy"
     ]
@@ -16,7 +16,7 @@
     ],
     "planned": {
       "impact": "patch",
-      "reasoning": "The change affects checked-in delivery policy only; it does not change the application API or persisted data format.",
+      "reasoning": "The change affects checked-in delivery policy and workflow enforcement only; it does not change the application API or persisted application data format.",
       "assessed_at": "2026-09-14T00:00:00Z",
       "evidence": [
         ".github/release-contract.json",
@@ -27,12 +27,20 @@
       "impact": "patch",
       "scope_drift": {
         "detected": false,
-        "description": "No scope drift; the change remains limited to release policy installation and metadata."
+        "description": "No scope drift; the approved release-policy alignment includes workflow enforcement, immutable identity resolution, and required-check execution."
       },
-      "reasoning": "The installed policies and metadata describe existing release workflows and do not alter runtime behavior.",
+      "reasoning": "The implementation changes only CI/release workflow behavior and notification provenance; it does not alter product runtime behavior or persisted application state.",
       "reassessed_at": "2026-09-14T00:00:00Z",
       "evidence": [
         ".github/pr-label-release.json",
+        ".github/workflows/release.yml",
+        ".github/workflows/notify-release-failure.yml",
+        ".github/workflows/label-gate.yml",
+        ".github/workflows/release-completion.yml",
+        ".github/quality-gates.json",
+        ".github/scripts/test-release-failure-context.sh",
+        ".github/scripts/test-release-failure-context.py",
+        ".github/scripts/test-release-workflows.sh",
         "docs/specs/product-version-release-chain/SPEC.md",
         "docs/specs/release-failure-telegram-alerts/SPEC.md"
       ]
@@ -45,7 +53,12 @@
         "skills-lock.json",
         ".agents/skills/quality-gates/SKILL.md",
         ".agents/skills/pr-label-release/SKILL.md",
-        ".agents/skills/release-failure-notification/SKILL.md"
+        ".agents/skills/release-failure-notification/SKILL.md",
+        ".github/workflows/release.yml",
+        ".github/workflows/notify-release-failure.yml",
+        ".github/workflows/label-gate.yml",
+        ".github/workflows/release-completion.yml",
+        ".github/scripts/test-release-failure-context.py"
       ]
     }
   },
@@ -69,13 +82,16 @@
   },
   "release_unit": {
     "member_change_records": [
-      "release-policy-skill-adoption"
+      "release-policy-skill-adoption",
+      "release-identity-workflow-alignment"
     ],
     "maximum_verified_impact": "patch",
     "calculation_evidence": [
       ".github/pr-label-release.json",
       "docs/specs/release-failure-telegram-alerts/transport-gate.json",
-      ".github/quality-gates.json"
+      ".github/quality-gates.json",
+      ".github/workflows/release.yml",
+      ".github/workflows/notify-release-failure.yml"
     ]
   }
 }

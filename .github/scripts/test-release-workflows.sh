@@ -26,6 +26,10 @@ assert_not_contains() {
 for workflow in ci-pr.yml ci-main.yml label-gate.yml package-ci.yml release-preparation.yml release-completion.yml release.yml notify-release-failure.yml; do
   ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$root_dir/.github/workflows/$workflow"
 done
+python3 "$root_dir/.agents/skills/quality-gates/assets/scripts/check_quality_gates.py" \
+  --repo-root "$root_dir" \
+  --declaration "$root_dir/.github/quality-gates.json" \
+  --allow-unchecked-branch-protection >/dev/null
 for workflow in release-preparation.yml release.yml; do
   text="$(<"$root_dir/.github/workflows/$workflow")"
   if [[ "$text" != *"GITHUB_TOKEN"* && "$text" != *"github.token"* ]]; then
@@ -40,6 +44,8 @@ assert_contains "prepared-head label gate dispatch" "$preparation_text" "gh work
 assert_contains "prepared-head completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
 label_gate_text="$(<"$root_dir/.github/workflows/label-gate.yml")"
 assert_contains "release intent label gate job" "$label_gate_text" "name: Release intent label gate"
+assert_contains "label gate merge-group bridge" "$label_gate_text" "Bridge merge-group gate"
+assert_not_contains "label gate merge-group skip" "$label_gate_text" $'name: Release intent label gate\n    if: github.event_name != '\''merge_group'\'''
 notify_text="$(<"$root_dir/.github/workflows/notify-release-failure.yml")"
 assert_contains "notifier Release Product trigger" "$notify_text" "- Release Product"
 if [[ "$notify_text" == *"Release exact-tag backfill"* ]]; then
@@ -55,7 +61,15 @@ assert_contains "notifier immutable reservation validation" "$notify_text" "veri
 assert_contains "notifier immutable bound receipt validation" "$notify_text" "verify_bound_receipt"
 assert_contains "notifier optional product tag validation" "$notify_text" "api_json_optional"
 assert_contains "notifier product tag status" "$notify_text" 'tag_status: ${{ needs.resolve_release_context.outputs.tag_status }}'
+completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
+assert_contains "completion ready-for-review trigger" "$completion_text" "ready_for_review"
+assert_contains "completion merge-group bridge" "$completion_text" "Bridge merge-group gate"
+assert_not_contains "completion merge-group skip" "$completion_text" $'name: Release completion\n    if: github.event_name != '\''merge_group'\'''
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
+assert_contains "release snapshot head" "$release_text" "head_sha"
+assert_contains "release snapshot labels" "$release_text" "labels_json"
+assert_contains "release snapshot components" "$release_text" "components_json"
+assert_contains "protected release tag owner" "$release_text" "protected-release-automation"
 assert_contains "release full history checkout" "$release_text" "fetch-depth: 0"
 assert_contains "release full tag fetch" "$release_text" "git fetch --force origin main '+refs/tags/*:refs/tags/*'"
 assert_contains "release sequence gate" "$release_text" "verify-release-sequence"

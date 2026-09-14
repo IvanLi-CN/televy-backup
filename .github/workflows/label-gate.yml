@@ -24,7 +24,7 @@ permissions:
 jobs:
   label-gate:
     name: Release intent label gate
-    if: github.event_name != 'merge_group'
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Checkout trusted gate scripts (base)
@@ -41,7 +41,12 @@ jobs:
           ref: ${{ github.ref }}
           persist-credentials: false
 
+      - name: Bridge merge-group gate
+        if: github.event_name == 'merge_group'
+        run: echo "merge-group reuses the Release intent label gate from each pull request"
+
       - name: Validate release intent + channel labels
+        if: github.event_name != 'merge_group'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || inputs.pr_number }}
