@@ -94,6 +94,11 @@ assert "preferred helper source is missing" not in release_workflow
 assert "preferred helper source manifest failed" not in release_workflow
 assert "Keep the trusted main checkout for release policy scripts" in release_workflow
 assert 'git checkout --detach "${TARGET_INPUT}"' not in release_workflow
+assert 'policy_sha: ${{ steps.release.outputs.policy_sha }}' in release_workflow
+assert 'echo "policy_sha=${main_sha}" >> "$GITHUB_OUTPUT"' in release_workflow
+assert 'git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh"' in release_workflow
+assert '"${policy_verify_release_assets}" --mode release --asset-dir dist/final' in release_workflow
+assert 'bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final' not in release_workflow
 build_and_assembly = release_workflow.split("  build-arm64:", 1)[1].split("  macos-acceptance:", 1)[0]
 assert "gh release download" not in build_and_assembly
 assert build_and_assembly.count("name: snapshot-helper-source") == 3

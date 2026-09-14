@@ -40,6 +40,7 @@ jobs:
       identity_status: ${{ steps.release.outputs.identity_status }}
       source_sha: ${{ steps.release.outputs.source_sha }}
       merge_sha: ${{ steps.release.outputs.merge_sha }}
+      policy_sha: ${{ steps.release.outputs.policy_sha }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       channel: ${{ steps.release.outputs.channel }}
@@ -82,6 +83,7 @@ jobs:
           set -euo pipefail
           git fetch --force origin main '+refs/tags/*:refs/tags/*'
           main_sha="$(git rev-parse origin/main)"
+          echo "policy_sha=${main_sha}" >> "$GITHUB_OUTPUT"
           test -n "${TARGET_INPUT}"
           if [[ "${EVENT_NAME}" == workflow_run ]]; then
             test "${WORKFLOW_CONCLUSION}" = success
@@ -560,6 +562,7 @@ jobs:
           RUST_TOOLCHAIN: 1.91.0
           HELPER_SOURCE_MODE: ${{ needs.resolve.outputs.helper_source_mode }}
           HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
+          POLICY_SHA: ${{ needs.resolve.outputs.policy_sha }}
         run: |
           set -euo pipefail
           mkdir -p dist/final
@@ -576,7 +579,14 @@ jobs:
           cp dist/arm64/televybackup-tools-*-arm64.tar.gz dist/final/
           cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
           bash scripts/macos/generate-release-manifest.sh --mode release --asset-dir dist/final --source-commit "${{ needs.resolve.outputs.merge_sha }}" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
-          bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final
+          # Keep product inputs on the recovered merge checkout, but evaluate the
+          # release asset policy from the exact trusted main commit resolved above.
+          test -n "${POLICY_SHA}"
+          git fetch --force origin main
+          policy_verify_release_assets="${RUNNER_TEMP}/verify-release-assets.sh"
+          git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh" > "${policy_verify_release_assets}"
+          chmod +x "${policy_verify_release_assets}"
+          "${policy_verify_release_assets}" --mode release --asset-dir dist/final
           if [[ "${HELPER_SOURCE_MODE}" == reuse ]]; then
             bash scripts/macos/verify-component-identity.sh \
               --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \

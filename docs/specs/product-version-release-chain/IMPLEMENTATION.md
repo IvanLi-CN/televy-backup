@@ -41,3 +41,5 @@ when no approved helper Release is available and the recovery input explicitly r
 identity is reported as an unresolved state and cannot produce a fabricated tag or recovery command.
 Recovery keeps the trusted main checkout for policy and helper scripts; the historical recovery
 input remains the product identity passed through resolved outputs for packaging and publication.
+The assembly job likewise evaluates release-asset validation from the exact trusted policy commit
+resolved by the workflow while keeping the recovered merge checkout as the product input.
