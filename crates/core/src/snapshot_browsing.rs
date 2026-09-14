@@ -460,7 +460,9 @@ impl SnapshotContentReader {
         let path = if filemap.is_file() {
             ensure_filemap_containment(&self.filemap_dir, &filemap)?;
             filemap
-        } else if endpoint_has_snapshot_files(&self.endpoint_db_path, snapshot_id).await? {
+        } else if is_legacy_global_index_db(&self.endpoint_db_path)
+            || endpoint_has_snapshot_files(&self.endpoint_db_path, snapshot_id).await?
+        {
             self.endpoint_db_path.clone()
         } else {
             return Err(Error::SnapshotAccess {
@@ -494,6 +496,10 @@ impl SnapshotContentReader {
         }
         Ok((pool, uses_filemap, dedupe_attached))
     }
+}
+
+fn is_legacy_global_index_db(endpoint_db_path: &Path) -> bool {
+    endpoint_db_path.file_name().and_then(|name| name.to_str()) == Some("index.sqlite")
 }
 
 async fn endpoint_has_snapshot_files(endpoint_db_path: &Path, snapshot_id: &str) -> Result<bool> {
@@ -1003,7 +1009,7 @@ mod tests {
     #[tokio::test]
     async fn reader_rejects_a_missing_filemap_for_the_snapshot_root() {
         let temp = tempfile::tempdir().unwrap();
-        let endpoint_db = temp.path().join("index.sqlite");
+        let endpoint_db = temp.path().join("index.ep1.sqlite");
         let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
         sqlx::query(
             "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
@@ -1128,6 +1134,35 @@ mod tests {
         let error = reader.entry("snapshot-1", "").await.unwrap_err();
         assert!(
             matches!(error, Error::Integrity { message } if message.contains("foreign-key") || message.contains("without a snapshot"))
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_browses_empty_legacy_endpoint_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db = temp.path().join("index.sqlite");
+        let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('snapshot-1', '2026-09-11T08:00:00Z', '/source', 'Test', NULL)",
+        )
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let reader = SnapshotContentReader::new_cached(
+            endpoint_db,
+            temp.path().join("missing-filemaps"),
+            "test.mem",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+        assert!(reader.entry("snapshot-1", "").await.unwrap().is_some());
+        assert!(
+            reader
+                .list_children("snapshot-1", "")
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

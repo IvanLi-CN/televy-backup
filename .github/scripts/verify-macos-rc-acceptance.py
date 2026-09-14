@@ -75,6 +75,12 @@ def command_output(command: list[str], name: str) -> str:
     return result.stdout + result.stderr
 
 
+def require_universal2(path: Path, name: str) -> None:
+    architectures = command_output(["lipo", "-info", str(path)], f"{name} architecture check")
+    if "arm64" not in architectures or "x86_64" not in architectures:
+        fail(f"{name} must be a Universal 2 binary")
+
+
 def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
     mount_path = Path(tempfile.mkdtemp(prefix="televybackup-rc-"))
     mounted = False
@@ -99,12 +105,17 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
         )
         if top_level_apps != ["TelevyBackup.app"]:
             fail(f"{name} DMG must contain exactly one top-level TelevyBackup.app")
+        main_binary = mount_path / "TelevyBackup.app/Contents/MacOS/TelevyBackup"
+        if not main_binary.is_file():
+            fail(f"{name} DMG is missing the main TelevyBackup executable")
+        require_universal2(main_binary, f"{name} main app")
         helper = mount_path / "TelevyBackup.app" / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
         if not helper.is_dir():
             fail(f"{name} DMG is missing the embedded Snapshot Access app")
         binary = helper / "Contents/MacOS/televybackup-snapshot-access"
         if not binary.is_file():
             fail(f"{name} DMG is missing the Snapshot Access executable")
+        require_universal2(binary, f"{name} Snapshot Access")
         signature = command_output(["codesign", "-dvvv", str(helper)], f"{name} Snapshot Access signature")
         if "Signature=adhoc" not in signature:
             fail(f"{name} Snapshot Access must use an ad-hoc signature")

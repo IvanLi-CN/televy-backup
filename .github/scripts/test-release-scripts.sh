@@ -170,6 +170,19 @@ fi
         encoding="utf-8",
     )
     hdiutil_path.chmod(0o755)
+    lipo_path = fake_bin / "lipo"
+    lipo_path.write_text(
+        """#!/bin/sh
+set -eu
+if [ "$1" = -info ]; then
+  echo "Architectures in the fat file: $2 are: arm64 x86_64"
+else
+  exit 2
+fi
+""",
+        encoding="utf-8",
+    )
+    lipo_path.chmod(0o755)
     codesign_path = fake_bin / "codesign"
     codesign_path.write_text(
         """#!/bin/sh
@@ -216,6 +229,9 @@ fi
         binary.parent.mkdir(parents=True)
         binary.write_bytes(helper_binary_bytes)
         binary.chmod(0o755)
+        main_binary = tree / "TelevyBackup.app/Contents/MacOS/TelevyBackup"
+        main_binary.parent.mkdir(parents=True, exist_ok=True)
+        main_binary.write_bytes(b"universal-main-fixture")
         (helper / "Contents/Info.plist").write_text("fixture", encoding="utf-8")
         helper_paths.append(helper)
     identity["sha256"] = hashlib.sha256(
@@ -273,6 +289,27 @@ fi
     ]
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    lipo_path.write_text(
+        """#!/bin/sh
+set -eu
+echo "Non-fat file: $2 is architecture: arm64"
+""",
+        encoding="utf-8",
+    )
+    lipo_path.chmod(0o755)
+    assert subprocess.run(common, capture_output=True, text=True).returncode != 0
+    lipo_path.write_text(
+        """#!/bin/sh
+set -eu
+if [ "$1" = -info ]; then
+  echo "Architectures in the fat file: $2 are: arm64 x86_64"
+else
+  exit 2
+fi
+""",
+        encoding="utf-8",
+    )
+    lipo_path.chmod(0o755)
     tampered_binary = helper_paths[1] / "Contents/MacOS/televybackup-snapshot-access"
     tampered_binary.write_bytes(helper_binary_bytes + b"tampered")
     assert subprocess.run(common, capture_output=True, text=True).returncode != 0
