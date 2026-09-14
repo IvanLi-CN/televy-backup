@@ -81,6 +81,8 @@ assert_contains "prerelease release behavior" "$release_text" "--prerelease --la
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion native signature gate" "$completion_text" "--require-github-verification"
 assert_contains "completion reservation provenance gate" "$completion_text" "--reservation-json"
+assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
+assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'
 release = YAML.load_file(ARGV.fetch(0))
 expected_permissions = {"contents" => "write"}
