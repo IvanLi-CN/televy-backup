@@ -114,10 +114,15 @@ jobs:
               return api_request(path).decode('utf-8', errors='replace')
 
           def load_release_intent() -> dict:
-              payload = api_json(f'/repos/{repository}/actions/runs/{run_id}/artifacts?name=release-intent&per_page=100')
+              try:
+                  payload = api_json(f'/repos/{repository}/actions/runs/{run_id}/artifacts?name=release-intent&per_page=100')
+              except error.HTTPError as exc:
+                  if exc.code == 404:
+                      return None
+                  raise
               artifact = next((item for item in payload.get('artifacts', []) if item.get('name') == 'release-intent' and not item.get('expired')), None)
               if not artifact or not artifact.get('archive_download_url'):
-                  raise RuntimeError('release-intent artifact is unavailable')
+                  return None
               archive = api_request(artifact['archive_download_url'])
               with zipfile.ZipFile(BytesIO(archive)) as bundle:
                   member = next((name for name in bundle.namelist() if name == 'release-intent.json' or name.endswith('/release-intent.json')), None)
@@ -127,6 +132,70 @@ jobs:
               if not isinstance(value, dict):
                   raise RuntimeError('release-intent.json is not an object')
               return value
+
+          def reconstruct_intent(merge_sha: str) -> dict:
+              merge = commit_snapshot(merge_sha)
+              candidates = []
+              for parent in merge['parents']:
+                  candidate = commit_snapshot(parent)
+                  values = trailers(candidate['message'])
+                  if values.get('Release-Source-SHA') and values.get('Product-Version'):
+                      candidates.append((parent, candidate, values))
+              if len(candidates) != 1:
+                  raise RuntimeError('immutable release identity has no unique preparation commit')
+              preparation_sha, preparation, values = candidates[0]
+              source_sha = require_sha(values.get('Release-Source-SHA'), 'reconstructed source SHA')
+              version = str(values.get('Product-Version', ''))
+              channel_label = str(values.get('Release-Intent-Channel', ''))
+              release_type = str(values.get('Release-Intent-Type', ''))
+              channel = channel_label.removeprefix('channel:')
+              components_value = str(values.get('Release-Intent-Components', 'none'))
+              components = [] if components_value == 'none' else [item for item in components_value.split(',') if item]
+              reservation_ref = f'refs/tags/release-reservation/v{version}'
+              reservation_ref_payload = api_json(f'/repos/{repository}/git/ref/{reservation_ref.removeprefix("refs/")}')
+              reservation_sha = require_sha(reservation_ref_payload.get('object', {}).get('sha'), 'reconstructed reservation SHA')
+              reservation_commit = commit_snapshot(reservation_sha)
+              reservation_values = trailers(reservation_commit['message'])
+              reservation = {
+                  'id': reservation_values.get('Reservation-Id', ''),
+                  'ref': reservation_ref,
+                  'owner': reservation_values.get('Reservation-Owner', ''),
+                  'claim_key': reservation_values.get('Reservation-Claim-Key', ''),
+                  'boundary_token': reservation_values.get('Reservation-Boundary-Token', ''),
+                  'state': 'bound',
+                  'merge_commit_sha': merge_sha,
+              }
+              return {
+                  'schema_version': 1,
+                  'pull_request': '',
+                  'source_sha': source_sha,
+                  'preparation_commit_sha': preparation_sha,
+                  'merge_sha': merge_sha,
+                  'merge_commit_sha': merge_sha,
+                  'head_sha': preparation_sha,
+                  'branch_head': merge_sha,
+                  'release_mode': values.get('Release-Mode', 'normal'),
+                  'covered_merge_sha': values.get('Release-Covered-Merge-SHA', ''),
+                  'labels': [release_type, f'channel:{channel}', *components],
+                  'type': release_type,
+                  'channel': channel,
+                  'components': components,
+                  'version': version,
+                  'tag': f'v{version}',
+                  'tag_target_sha': merge_sha,
+                  'tag_owner': 'protected-release-automation',
+                  'reservation': reservation,
+                  'provenance': {
+                      'signature': 'github-native-verified',
+                      'signature_verified': True,
+                      'provenance_verified': True,
+                      'tag_owner': 'protected-release-automation',
+                      'identity': 'release_chain_and_reservation_refs',
+                  },
+                  'artifact_names': ['reconstructed-from-immutable-refs'],
+                  'run_url': f'{os.environ.get("GITHUB_SERVER_URL", "https://github.com")}/{repository}/actions/runs/{run_id}',
+                  'recovery_instruction': f'workflow_dispatch operation=recover commit_sha={merge_sha} helper_mode=bootstrap only when no-approved-helper-release',
+              }
 
           def resolve_pull_request(merge_sha: str, declared: object, expected_head_sha: str) -> str:
               pulls = api_json(f'/repos/{repository}/commits/{merge_sha}/pulls')
@@ -294,8 +363,10 @@ jobs:
                       raise RuntimeError(f'release intent {key} is not a full SHA')
               if intent['tag'] != f"v{intent['version']}" or intent['merge_commit_sha'] != intent['merge_sha'] or intent['branch_head'] != intent['merge_sha'] or intent['tag_target_sha'] != intent['merge_sha']:
                   raise RuntimeError('release intent identity fields do not agree')
-              if not re.fullmatch(r'\d+\.\d+\.\d+(?:-(?:beta|rc|dev)\.[1-9]\d*)?', str(intent['version'])):
+              if not re.fullmatch(r'(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?', str(intent['version'])):
                   raise RuntimeError('release intent version is not a valid product version')
+              if str(intent['type']) not in {'type:major', 'type:minor', 'type:patch'}:
+                  raise RuntimeError('release intent type is not a supported product type')
               if str(intent['channel']) not in {'prod', 'beta', 'rc', 'dev'}:
                   raise RuntimeError('release intent channel is not a supported release channel')
               if str(intent['tag_owner']) != 'protected-release-automation':
@@ -373,8 +444,9 @@ jobs:
           identity = {}
           if resolved:
               try:
-                  identity = validate_intent(load_release_intent())
                   expected_version, expected_channel, expected_merge_sha, expected_tag = resolved.groups()
+                  snapshot = load_release_intent()
+                  identity = validate_intent(snapshot if snapshot is not None else reconstruct_intent(expected_merge_sha))
                   if (identity['version'], identity['channel'], identity['merge_sha'], identity['tag']) != (expected_version, expected_channel, expected_merge_sha, expected_tag):
                       raise RuntimeError('release log identity does not match release-intent artifact')
               except Exception:

@@ -76,9 +76,12 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: test "${GITHUB_REF}" = "refs/heads/main"
 
-      - name: Bridge merge-group gate
+      - name: Checkout trusted merge-group gate scripts
         if: github.event_name == 'merge_group'
-        run: echo "merge-group reuses Release completion from each pull request"
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
 
       - name: Verify VERSION and release completion
         if: github.event_name != 'merge_group'
@@ -213,3 +216,10 @@ jobs:
             --token "${GH_TOKEN}" \
             --api-root "${GITHUB_API_URL}" \
             --require-github-verification
+
+      - name: Validate merge-group release completion
+        if: github.event_name == 'merge_group'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: bash ./.github/scripts/merge-group-release-gate.sh completion

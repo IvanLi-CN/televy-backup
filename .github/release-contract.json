@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_of_truth": "trusted-preparation VERSION plus immutable repository identity refs",
+  "source_of_truth": "immutable repository identity refs plus trusted preparation provenance",
   "version_file": "VERSION",
   "numeric_baseline": "highest eligible final remote product tag vX.Y.Z",
   "virtual_final_baseline": "0.0.0",
@@ -55,11 +55,12 @@
   },
   "identity_refs": {
     "reservation": "refs/tags/release-reservation/v<version>",
+    "decision": "refs/tags/release-decision/v<version>",
     "bound": "refs/tags/release-bound/v<version>/<merge-sha>",
     "consumed": "refs/tags/release-consumed/v<version>/<merge-sha>",
     "released": "refs/tags/release-released/v<version>/<reservation-id>",
     "write_policy": "append-only-create",
-    "state_order": "bound-before-consumed;released-only-when-unbound",
+    "state_order": "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound",
     "receipt_validation": "independently-verify-reservation-provenance"
   },
   "recovery": {

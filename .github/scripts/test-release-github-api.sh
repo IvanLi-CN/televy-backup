@@ -17,6 +17,9 @@ source = "1" * 40
 fake_reservation = "2" * 40
 fake_bound = "3" * 40
 fake_consumed = "4" * 40
+fake_decision = "7" * 40
+preparation = "5" * 40
+merge = "6" * 40
 tree = "a" * 40
 
 
@@ -25,7 +28,7 @@ class FakeGitHubRefClient:
     commits = {
         source: {"sha": source, "tree": {"sha": tree}, "parents": [], "message": "source\n"},
     }
-    next_commits = iter((fake_reservation, fake_bound, fake_consumed))
+    next_commits = iter((fake_reservation, fake_decision, fake_bound, fake_consumed))
 
     def __init__(self, repository, token, api_root):
         assert repository == "fixture/repo"
@@ -64,18 +67,41 @@ expected = module.expected_reservation(
 )
 expected["ref"] = module.reservation_ref("1.0.0-beta.1")
 expected["reservationId"] = identity["reservationId"]
+FakeGitHubRefClient.commits[preparation] = {
+    "sha": preparation,
+    "tree": {"sha": tree},
+    "parents": [{"sha": source}],
+    "message": f"""chore(release): v1.0.0-beta.1
+
+Release-Source-SHA: {source}
+Product-Version: 1.0.0-beta.1
+Release-Intent-Type: type:patch
+Release-Intent-Channel: channel:beta
+Release-Reservation-Id: {identity["reservationId"]}
+Release-Reservation-Ref: {expected["ref"]}
+Release-Reservation-Owner: fixture
+Release-Claim-Key: {claim_key}
+Release-Boundary-Token: {identity["boundaryToken"]}
+""",
+}
+FakeGitHubRefClient.commits[merge] = {
+    "sha": merge,
+    "tree": {"sha": tree},
+    "parents": [{"sha": source}, {"sha": preparation}],
+    "message": "Merge pull request #7\n",
+}
 created = module.create_github_reservation(expected, repository="fixture/repo", token="token", api_root="https://fixture.invalid")
 assert created["target"] == fake_reservation
 assert module.create_github_reservation(expected, repository="fixture/repo", token="token", api_root="https://fixture.invalid")["target"] == fake_reservation
 
 bound = module.create_github_receipt(
-    state="bound", version="1.0.0-beta.1", merge_sha=source,
+    state="bound", version="1.0.0-beta.1", merge_sha=merge,
     reservation_id=identity["reservationId"], owner="fixture", claim_key=claim_key,
     boundary_token=identity["boundaryToken"], reservation_ref_value=expected["ref"],
     repository="fixture/repo", token="token", api_root="https://fixture.invalid",
 )
 consumed = module.create_github_receipt(
-    state="consumed", version="1.0.0-beta.1", merge_sha=source,
+    state="consumed", version="1.0.0-beta.1", merge_sha=merge,
     reservation_id=identity["reservationId"], owner="fixture", claim_key=claim_key,
     boundary_token=identity["boundaryToken"], reservation_ref_value=expected["ref"],
     repository="fixture/repo", token="token", api_root="https://fixture.invalid",
@@ -83,7 +109,7 @@ consumed = module.create_github_receipt(
 assert bound["target"] == fake_bound
 assert consumed["target"] == fake_consumed
 module.verify_github_receipt(
-    state="bound", version="1.0.0-beta.1", merge_sha=source,
+    state="bound", version="1.0.0-beta.1", merge_sha=merge,
     reservation_id=identity["reservationId"], owner="fixture", claim_key=claim_key,
     boundary_token=identity["boundaryToken"], reservation_ref_value=expected["ref"],
     repository="fixture/repo", token="token", api_root="https://fixture.invalid",

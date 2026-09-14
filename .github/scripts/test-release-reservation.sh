@@ -47,13 +47,31 @@ if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
   exit 1
 fi
 
+git -C "$repo_dir" switch -q -c prepared
+printf '1.0.0-beta.1\n' > "$repo_dir/VERSION"
+git -C "$repo_dir" add VERSION
+git -C "$repo_dir" commit -qm "chore(release): v1.0.0-beta.1" -m "Release-Source-SHA: ${source_sha}
+Product-Version: 1.0.0-beta.1
+Release-Intent-Type: type:patch
+Release-Intent-Channel: channel:beta
+Release-Mode: normal
+Release-Reservation-Id: $(printf '%s' "$first" | jq -r .reservationId)
+Release-Reservation-Ref: refs/tags/release-reservation/v1.0.0-beta.1
+Release-Reservation-Owner: fixture
+Release-Claim-Key: ${claim_key}
+Release-Boundary-Token: $(printf '%s' "$first" | jq -r '."Reservation-Boundary-Token"')
+Release-Provenance: fixture-verified"
+git -C "$repo_dir" switch -q -c mainline "$source_sha"
+git -C "$repo_dir" merge --no-ff -qm "fixture product merge" prepared
+merge_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+
 bound="$(python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
-  --local-root "$repo_dir" --state bound --version 1.0.0-beta.1 --merge-sha "$source_sha" \
+  --local-root "$repo_dir" --state bound --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
   --reservation-id "$(printf '%s' "$first" | jq -r .reservationId)" --owner fixture \
   --claim-key "$claim_key" --boundary-token "$(printf '%s' "$first" | jq -r '."Reservation-Boundary-Token"')" \
   --reservation-ref refs/tags/release-reservation/v1.0.0-beta.1)"
 consumed="$(python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
-  --local-root "$repo_dir" --state consumed --version 1.0.0-beta.1 --merge-sha "$source_sha" \
+  --local-root "$repo_dir" --state consumed --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
   --reservation-id "$(printf '%s' "$first" | jq -r .reservationId)" --owner fixture \
   --claim-key "$claim_key" --boundary-token "$(printf '%s' "$first" | jq -r '."Reservation-Boundary-Token"')" \
   --reservation-ref refs/tags/release-reservation/v1.0.0-beta.1)"
@@ -61,7 +79,7 @@ consumed="$(python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
 [[ "$(printf '%s' "$consumed" | jq -r .ref)" == refs/tags/release-consumed/* ]]
 
 if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
-  --local-root "$repo_dir" --state bound --version 1.0.0-beta.1 --merge-sha "$source_sha" \
+  --local-root "$repo_dir" --state bound --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
   --reservation-id "$(printf '%s' "$first" | jq -r .reservationId)" --owner foreign \
   --claim-key "$claim_key" --boundary-token "wrong" \
   --reservation-ref refs/tags/release-reservation/v1.0.0-beta.1 >/dev/null 2>&1; then
@@ -70,7 +88,7 @@ if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
 fi
 
 if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
-  --local-root "$repo_dir" --state released --version 1.0.0-beta.1 --merge-sha "$source_sha" \
+  --local-root "$repo_dir" --state released --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
   --reservation-id "$(printf '%s' "$first" | jq -r .reservationId)" --owner fixture \
   --claim-key "$claim_key" --boundary-token "$(printf '%s' "$first" | jq -r '."Reservation-Boundary-Token"')" \
   --reservation-ref refs/tags/release-reservation/v1.0.0-beta.1 >/dev/null 2>&1; then
@@ -79,7 +97,7 @@ if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
 fi
 
 if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
-  --local-root "$repo_dir" --state released --version 1.0.0-beta.1 --merge-sha "$source_sha" \
+  --local-root "$repo_dir" --state released --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
   --reservation-id "$(printf '%s' "$first" | jq -r .reservationId)" --owner fixture \
   --claim-key "$claim_key" --boundary-token "$(printf '%s' "$first" | jq -r '."Reservation-Boundary-Token"')" \
   --reservation-ref refs/tags/release-reservation/v1.0.0-beta.1 --maintainer-confirmed >/dev/null 2>&1; then

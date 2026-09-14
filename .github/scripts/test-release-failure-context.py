@@ -45,7 +45,7 @@ def json_response(value: object) -> Response:
     return Response(json.dumps(value).encode("utf-8"))
 
 
-def intent(declared_pull_request: str = "7") -> dict[str, object]:
+def intent(declared_pull_request: str = "7", release_type: str = "type:patch") -> dict[str, object]:
     return {
         "schema_version": 1,
         "pull_request": declared_pull_request,
@@ -57,8 +57,8 @@ def intent(declared_pull_request: str = "7") -> dict[str, object]:
         "branch_head": MERGE,
         "release_mode": "normal",
         "covered_merge_sha": "",
-        "labels": ["type:patch", "channel:rc"],
-        "type": "type:patch",
+        "labels": [release_type, "channel:rc"],
+        "type": release_type,
         "channel": "rc",
         "components": ["component:app"],
         "version": "1.2.3-rc.1",
@@ -96,12 +96,30 @@ def commit_payload(sha: str) -> dict[str, object]:
     elif sha == PREPARATION:
         parents = [SOURCE]
         tree = "4" * 40
-        message = "chore(release): v1.2.3-rc.1\n"
+        message = f"""chore(release): v1.2.3-rc.1
+
+Release-Source-SHA: {SOURCE}
+Product-Version: 1.2.3-rc.1
+Release-Intent-Type: type:patch
+Release-Intent-Channel: channel:rc
+Release-Mode: normal
+Release-Reservation-Id: res-1
+Release-Reservation-Ref: refs/tags/release-reservation/v1.2.3-rc.1
+Release-Reservation-Owner: github-actions[bot]
+Release-Claim-Key: pr:7:source:a:type:patch:channel:rc
+Release-Boundary-Token: bnd-1
+Release-Provenance: github-native-verified
+"""
         verification = {"verified": True}
     elif sha == MERGE:
         parents = ["f" * 40, PREPARATION]
         tree = MERGE_TREE
         message = "Merge pull request #7\n"
+        verification = {"verified": True}
+    elif sha == "f" * 40:
+        parents = []
+        tree = MERGE_TREE
+        message = "mainline\n"
         verification = {"verified": True}
     elif sha == RESERVATION_COMMIT:
         parents = [SOURCE]
@@ -146,19 +164,23 @@ Receipt-Provenance: immutable-receipt
 
 
 class GitHubMock:
-    def __init__(self, tag_mode: str, declared_pull_request: str):
+    def __init__(self, tag_mode: str, declared_pull_request: str, artifact_available: bool, release_type: str):
         self.tag_mode = tag_mode
         self.declared_pull_request = declared_pull_request
+        self.artifact_available = artifact_available
         archive = BytesIO()
         with zipfile.ZipFile(archive, "w") as bundle:
-            bundle.writestr("release-intent.json", json.dumps(intent(declared_pull_request)))
+            bundle.writestr("release-intent.json", json.dumps(intent(declared_pull_request, release_type)))
         self.archive = archive.getvalue()
 
     def __call__(self, req: urllib.request.Request) -> Response:
         parsed = urllib.parse.urlparse(req.full_url)
         path = parsed.path
         if path.endswith("/actions/runs/7/artifacts"):
-            return json_response({"artifacts": [{"name": "release-intent", "expired": False, "archive_download_url": "https://fixture/archive"}]})
+            artifacts = []
+            if self.artifact_available:
+                artifacts = [{"name": "release-intent", "expired": False, "archive_download_url": "https://fixture/archive"}]
+            return json_response({"artifacts": artifacts})
         if path == "/archive":
             return Response(self.archive)
         if path.endswith("/actions/runs/7/jobs/1") or path.endswith("/actions/runs/7/jobs"):
@@ -184,7 +206,7 @@ class GitHubMock:
         raise AssertionError(f"unexpected API request: {path}")
 
 
-def run_case(tag_mode: str, declared_pull_request: str) -> str:
+def run_case(tag_mode: str, declared_pull_request: str, artifact_available: bool = True, release_type: str = "type:patch") -> str:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     source = workflow.split("          python3 - <<'PYCODE'\n", 1)[1].split("\n          PYCODE", 1)[0]
     output = tempfile.NamedTemporaryFile(delete=False)
@@ -205,7 +227,7 @@ def run_case(tag_mode: str, declared_pull_request: str) -> str:
     try:
         from unittest.mock import patch
 
-        with patch("urllib.request.urlopen", side_effect=GitHubMock(tag_mode, declared_pull_request)):
+        with patch("urllib.request.urlopen", side_effect=GitHubMock(tag_mode, declared_pull_request, artifact_available, release_type)):
             exec(compile(textwrap.dedent(source), str(WORKFLOW), "exec"), {"__name__": "__main__"})
         return Path(output.name).read_text(encoding="utf-8")
     finally:
@@ -217,10 +239,15 @@ def run_case(tag_mode: str, declared_pull_request: str) -> str:
 missing = run_case("missing", "7")
 assert "identity_status=resolved" in missing
 assert "tag_status=not-created" in missing
+reconstructed = run_case("missing", "7", artifact_available=False)
+assert "identity_status=resolved" in reconstructed
+assert "artifact_names=reconstructed-from-immutable-refs" in reconstructed
 annotated = run_case("annotated", "7")
 assert "identity_status=resolved" in annotated
 assert "tag_status=present" in annotated
 mismatched_pr = run_case("missing", "99")
 assert "identity_status=resolver-error" in mismatched_pr
 assert "merge_sha=\n" in mismatched_pr
+invalid_type = run_case("missing", "7", release_type="type:invalid")
+assert "identity_status=resolver-error" in invalid_type
 print("release failure resolver mock tests passed")

@@ -44,8 +44,8 @@ assert_contains "prepared-head label gate dispatch" "$preparation_text" "gh work
 assert_contains "prepared-head completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
 label_gate_text="$(<"$root_dir/.github/workflows/label-gate.yml")"
 assert_contains "release intent label gate job" "$label_gate_text" "name: Release intent label gate"
-assert_contains "label gate merge-group bridge" "$label_gate_text" "Bridge merge-group gate"
-assert_not_contains "label gate merge-group skip" "$label_gate_text" $'name: Release intent label gate\n    if: github.event_name != '\''merge_group'\'''
+assert_contains "label gate merge-group validation" "$label_gate_text" "merge-group-release-gate.sh labels"
+assert_not_contains "label gate merge-group echo bridge" "$label_gate_text" "reuses the Release intent label gate"
 notify_text="$(<"$root_dir/.github/workflows/notify-release-failure.yml")"
 assert_contains "notifier Release Product trigger" "$notify_text" "- Release Product"
 if [[ "$notify_text" == *"Release exact-tag backfill"* ]]; then
@@ -63,13 +63,15 @@ assert_contains "notifier optional product tag validation" "$notify_text" "api_j
 assert_contains "notifier product tag status" "$notify_text" 'tag_status: ${{ needs.resolve_release_context.outputs.tag_status }}'
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion ready-for-review trigger" "$completion_text" "ready_for_review"
-assert_contains "completion merge-group bridge" "$completion_text" "Bridge merge-group gate"
-assert_not_contains "completion merge-group skip" "$completion_text" $'name: Release completion\n    if: github.event_name != '\''merge_group'\'''
+assert_contains "completion merge-group validation" "$completion_text" "merge-group-release-gate.sh completion"
+assert_not_contains "completion merge-group echo bridge" "$completion_text" "reuses Release completion"
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
 assert_contains "release snapshot head" "$release_text" "head_sha"
 assert_contains "release snapshot labels" "$release_text" "labels_json"
 assert_contains "release snapshot components" "$release_text" "components_json"
 assert_contains "protected release tag owner" "$release_text" "protected-release-automation"
+reservation_text="$(<"$root_dir/.github/scripts/release_reservation.py")"
+assert_contains "decision receipt namespace" "$reservation_text" "release-decision"
 assert_contains "release full history checkout" "$release_text" "fetch-depth: 0"
 assert_contains "release full tag fetch" "$release_text" "git fetch --force origin main '+refs/tags/*:refs/tags/*'"
 assert_contains "release sequence gate" "$release_text" "verify-release-sequence"

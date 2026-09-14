@@ -31,9 +31,9 @@ search_stdin() {
 search_stdin_quiet() {
   local pattern="$1"
   if command -v rg >/dev/null 2>&1; then
-    rg -q "$pattern"
+    rg -n "$pattern" >/dev/null
   else
-    grep -Eq "$pattern"
+    grep -En "$pattern" >/dev/null
   fi
 }
 

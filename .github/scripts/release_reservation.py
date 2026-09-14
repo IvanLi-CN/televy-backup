@@ -17,7 +17,7 @@ from urllib import error, request
 ROOT = Path(__file__).resolve().parents[2]
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 REF_RE = re.compile(r"^refs/tags/[A-Za-z0-9._/-]+$")
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-(?:beta|rc|dev)\.[1-9]\d*)?$")
+VERSION_RE = re.compile(r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?$")
 CHANNELS = {"prod", "beta", "rc", "dev"}
 IDENTITY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -61,6 +61,11 @@ def receipt_ref(state: str, version: str, identity: str) -> str:
         return f"refs/tags/release-released/v{version}/{identity}"
     normalize_sha(identity, "merge SHA")
     return f"refs/tags/release-{state}/v{version}/{identity}"
+
+
+def decision_ref(version: str) -> str:
+    validate_version(version)
+    return f"refs/tags/release-decision/v{version}"
 
 
 def deterministic_identity(owner: str, claim_key: str) -> dict[str, str]:
@@ -304,6 +309,50 @@ class GitHubRefClient:
         return normalize_sha(value, "created ref target")
 
 
+def verify_github_decision(
+    *, client: GitHubRefClient, fields: dict[str, str], reservation: dict[str, Any]
+) -> dict[str, Any]:
+    ref = decision_ref(str(reservation["version"]))
+    target = client.ref_target(ref)
+    if not target:
+        raise ReservationError(f"decision ref is missing: {ref}")
+    info = client.commit_info(target)
+    reservation_info = client.commit_info(str(reservation["target"]))
+    parents = [parent.get("sha") for parent in info.get("parents", [])]
+    if parents != [reservation_info.get("sha")] or info.get("tree", {}).get("sha") != reservation_info.get("tree", {}).get("sha"):
+        raise ReservationError("remote decision provenance does not match the reservation")
+    actual = trailers_from_message(str(info.get("message", "")))
+    if any(actual.get(key) != value for key, value in fields.items()):
+        raise ReservationError("remote decision does not match the requested identity")
+    return {"ref": ref, "target": target, **fields}
+
+
+def create_github_decision(
+    *, state: str, merge_sha: str, reservation: dict[str, Any], client: GitHubRefClient
+) -> dict[str, str]:
+    fields = decision_fields(
+        state=state, version=str(reservation["version"]), merge_sha=merge_sha, reservation=reservation
+    )
+    ref = decision_ref(str(reservation["version"]))
+    existing = client.ref_target(ref)
+    if existing:
+        return {"ref": ref, **verify_github_decision(client=client, fields=fields, reservation=reservation)}
+    reservation_info = client.commit_info(str(reservation["target"]))
+    tree = reservation_info.get("tree", {}).get("sha")
+    if not isinstance(tree, str):
+        raise ReservationError("reservation tree provenance is unavailable")
+    commit = client.create_commit(tree=tree, parent=str(reservation["target"]), message=decision_message(fields))
+    try:
+        target = client.create_ref(ref, commit)
+    except ReservationError:
+        target = client.ref_target(ref)
+        if not target:
+            raise
+    if target != commit:
+        return {"ref": ref, **verify_github_decision(client=client, fields=fields, reservation=reservation)}
+    return {"ref": ref, **verify_github_decision(client=client, fields=fields, reservation=reservation)}
+
+
 def create_github_reservation(
     expected: dict[str, Any], *, repository: str, token: str, api_root: str = "https://api.github.com"
 ) -> dict[str, Any]:
@@ -465,6 +514,67 @@ def receipt_message(fields: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def decision_fields(*, state: str, version: str, merge_sha: str, reservation: dict[str, Any]) -> dict[str, str]:
+    if state not in {"bound", "released"}:
+        raise ReservationError(f"unsupported decision state: {state}")
+    return {
+        "Decision-State": state,
+        "Release-Version": version,
+        "Release-Merge-SHA": normalize_sha(merge_sha, "decision merge SHA"),
+        "Release-Reservation-Id": reservation["reservationId"],
+        "Release-Owner": reservation["Reservation-Owner"],
+        "Release-Claim-Key": reservation["Reservation-Claim-Key"],
+        "Release-Boundary-Token": reservation["Reservation-Boundary-Token"],
+        "Release-Reservation-Ref": reservation["ref"],
+        "Decision-Provenance": "immutable-decision",
+    }
+
+
+def decision_message(fields: dict[str, str]) -> str:
+    lines = ["release: immutable identity decision", ""]
+    lines.extend(f"{key}: {value}" for key, value in fields.items())
+    return "\n".join(lines) + "\n"
+
+
+def verify_decision_commit(
+    ref_target: str, fields: dict[str, str], reservation: dict[str, Any], cwd: Path = ROOT
+) -> dict[str, Any]:
+    info = local_commit_info(ref_target, cwd)
+    reservation_info = local_commit_info(str(reservation["target"]), cwd)
+    if info["parents"] != [reservation_info["sha"]] or info["tree"] != reservation_info["tree"]:
+        raise ReservationError("decision provenance does not match the reservation")
+    actual = trailers_from_message(info["message"])
+    if any(actual.get(key) != value for key, value in fields.items()):
+        raise ReservationError("existing decision does not match the requested identity")
+    return {"target": info["sha"], **fields}
+
+
+def create_local_decision(
+    *, state: str, merge_sha: str, reservation: dict[str, Any], cwd: Path = ROOT
+) -> dict[str, str]:
+    fields = decision_fields(
+        state=state, version=str(reservation["version"]), merge_sha=merge_sha, reservation=reservation
+    )
+    ref = decision_ref(str(reservation["version"]))
+    existing = local_ref_target(ref, cwd)
+    if existing:
+        return {"ref": ref, **verify_decision_commit(existing, fields, reservation, cwd)}
+    reservation_info = local_commit_info(str(reservation["target"]), cwd)
+    commit = _git(
+        "commit-tree", reservation_info["tree"], "-p", reservation_info["sha"],
+        "-m", decision_message(fields), cwd=cwd
+    )
+    update = subprocess.run(
+        ["git", "update-ref", ref, commit, "0" * 40], cwd=cwd, text=True, capture_output=True
+    )
+    if update.returncode != 0:
+        existing = local_ref_target(ref, cwd)
+        if existing:
+            return {"ref": ref, **verify_decision_commit(existing, fields, reservation, cwd)}
+        raise ReservationError(update.stderr.strip() or "decision ref creation failed")
+    return {"ref": ref, **verify_decision_commit(commit, fields, reservation, cwd)}
+
+
 def receipt_fields(
     *, state: str, version: str, merge_sha: str, reservation_id: str, owner: str, claim_key: str,
     boundary_token: str, reservation_ref_value: str
@@ -497,6 +607,63 @@ def verify_receipt_commit(ref_target: str, fields: dict[str, str], cwd: Path = R
     return {"target": info["sha"], **fields}
 
 
+def verify_local_merge_identity(
+    *, merge_sha: str, source_sha: str, version: str, channel: str,
+    reservation: dict[str, Any], cwd: Path = ROOT
+) -> None:
+    merge = local_commit_info(merge_sha, cwd)
+    if len(merge["parents"]) != 2:
+        raise ReservationError("bound receipt merge SHA must be a two-parent merge commit")
+    expected = {
+        "Release-Source-SHA": source_sha,
+        "Product-Version": version,
+        "Release-Intent-Channel": f"channel:{channel}",
+        "Release-Reservation-Id": reservation["reservationId"],
+        "Release-Reservation-Ref": reservation["ref"],
+        "Release-Reservation-Owner": reservation["Reservation-Owner"],
+        "Release-Claim-Key": reservation["Reservation-Claim-Key"],
+        "Release-Boundary-Token": reservation["Reservation-Boundary-Token"],
+    }
+    for preparation_sha in merge["parents"]:
+        preparation = local_commit_info(preparation_sha, cwd)
+        if preparation["parents"] != [source_sha] or preparation["tree"] != merge["tree"]:
+            continue
+        values = trailers_from_message(preparation["message"])
+        if all(values.get(key) == value for key, value in expected.items()):
+            return
+    raise ReservationError("merge SHA does not contain the matching prepared release identity")
+
+
+def verify_github_merge_identity(
+    *, client: GitHubRefClient, merge_sha: str, source_sha: str, version: str, channel: str,
+    reservation: dict[str, Any]
+) -> None:
+    merge = client.commit_info(merge_sha)
+    parents = [parent.get("sha") for parent in merge.get("parents", [])]
+    if len(parents) != 2 or any(not isinstance(parent, str) for parent in parents):
+        raise ReservationError("bound receipt merge SHA must be a two-parent merge commit")
+    expected = {
+        "Release-Source-SHA": source_sha,
+        "Product-Version": version,
+        "Release-Intent-Channel": f"channel:{channel}",
+        "Release-Reservation-Id": reservation["reservationId"],
+        "Release-Reservation-Ref": reservation["ref"],
+        "Release-Reservation-Owner": reservation["Reservation-Owner"],
+        "Release-Claim-Key": reservation["Reservation-Claim-Key"],
+        "Release-Boundary-Token": reservation["Reservation-Boundary-Token"],
+    }
+    merge_tree = merge.get("tree", {}).get("sha")
+    for preparation_sha in parents:
+        preparation = client.commit_info(preparation_sha)
+        preparation_parents = [parent.get("sha") for parent in preparation.get("parents", [])]
+        if preparation_parents != [source_sha] or preparation.get("tree", {}).get("sha") != merge_tree:
+            continue
+        values = trailers_from_message(str(preparation.get("message", "")))
+        if all(values.get(key) == value for key, value in expected.items()):
+            return
+    raise ReservationError("merge SHA does not contain the matching prepared release identity")
+
+
 def create_local_receipt(
     *, state: str, version: str, merge_sha: str, reservation_id: str, owner: str, claim_key: str,
     boundary_token: str, reservation_ref_value: str, cwd: Path = ROOT
@@ -507,7 +674,7 @@ def create_local_receipt(
         state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
         claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
     )
-    verify_local_reservation_claim(
+    reservation = verify_local_reservation_claim(
         reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
         owner=owner, claim_key=claim_key, boundary_token=boundary_token, cwd=cwd,
     )
@@ -515,6 +682,9 @@ def create_local_receipt(
     consumed_ref = receipt_ref("consumed", version, merge)
     bound_target = local_ref_target(bound_ref, cwd)
     consumed_target = local_ref_target(consumed_ref, cwd)
+    released_target = local_ref_target(receipt_ref("released", version, reservation_id), cwd)
+    if state in {"bound", "consumed"} and released_target:
+        raise ReservationError("release claim is already marked released")
     if state == "bound" and consumed_target:
         raise ReservationError("consumed receipt exists before bound receipt")
     if state == "consumed":
@@ -523,6 +693,14 @@ def create_local_receipt(
         verify_receipt_commit(bound_target, {**fields, "Receipt-State": "bound"}, cwd)
     if state == "released" and (bound_target or consumed_target):
         raise ReservationError("released receipt is only valid for an unbound claim")
+    if state in {"bound", "consumed"}:
+        verify_local_merge_identity(
+            merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
+            channel=reservation["channel"], reservation=reservation, cwd=cwd,
+        )
+        create_local_decision(state="bound", merge_sha=merge, reservation=reservation, cwd=cwd)
+    elif state == "released":
+        create_local_decision(state="released", merge_sha=merge, reservation=reservation, cwd=cwd)
     existing = local_ref_target(ref, cwd)
     if existing:
         return {"ref": ref, **verify_receipt_commit(existing, fields, cwd)}
@@ -552,7 +730,7 @@ def create_github_receipt(
         claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
     )
     client = GitHubRefClient(repository, token, api_root)
-    verify_github_reservation_claim(
+    reservation = verify_github_reservation_claim(
         reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
         owner=owner, claim_key=claim_key, boundary_token=boundary_token, repository=repository,
         token=token, api_root=api_root,
@@ -561,6 +739,9 @@ def create_github_receipt(
     consumed_ref = receipt_ref("consumed", version, merge)
     bound_target = client.ref_target(bound_ref)
     consumed_target = client.ref_target(consumed_ref)
+    released_target = client.ref_target(receipt_ref("released", version, reservation_id))
+    if state in {"bound", "consumed"} and released_target:
+        raise ReservationError("release claim is already marked released")
     if state == "bound" and consumed_target:
         raise ReservationError("consumed receipt exists before bound receipt")
     if state == "consumed":
@@ -573,6 +754,14 @@ def create_github_receipt(
         )
     if state == "released" and (bound_target or consumed_target):
         raise ReservationError("released receipt is only valid for an unbound claim")
+    if state in {"bound", "consumed"}:
+        verify_github_merge_identity(
+            client=client, merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
+            channel=reservation["channel"], reservation=reservation,
+        )
+        create_github_decision(state="bound", merge_sha=merge, reservation=reservation, client=client)
+    elif state == "released":
+        create_github_decision(state="released", merge_sha=merge, reservation=reservation, client=client)
     existing = client.ref_target(ref)
     if existing:
         info = client.commit_info(existing)

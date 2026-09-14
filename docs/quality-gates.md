@@ -40,12 +40,7 @@ and merge identity. A published product Release or consumed receipt is terminal 
 resolution and never re-enters packaging. The package-ci development artifact is not an approved
 Release source.
 
-After a normal merge, `Release Product` reads only the committed merged identity and its reservation
-ref. Its manual entry is restricted to same-identity `recover`. Successful publication is reported
-directly to the owner by the release-owning agent; Release Product does not write a result comment to
-the source PR. Failed releases are handled by `Notify failed release`, which reports locked identity
-context only when it can be resolved.
-Successful publication is reported directly to the owner by the release-owning agent; Release Product does not write a result comment to the source PR.
+After a normal merge, `Release Product` reads only the committed merged identity and its reservation ref. Its manual entry is restricted to same-identity `recover`. Successful publication is reported directly to the owner by the release-owning agent; Release Product does not write a result comment to the source PR. Failed releases are handled by `Notify failed release`, which reports locked identity context only when it can be resolved.
 
 Recovery evaluates policy and helper resolution from the trusted main checkout, while its historical
 input selects the recovered product identity. Packaging and publication remain bound to that identity

@@ -26,10 +26,10 @@ PRODUCT_TYPES = VALID_TYPES - {"type:docs", "type:skip"}
 VALID_CHANNELS = {"channel:prod", "channel:beta", "channel:rc", "channel:dev"}
 LEGACY_LABELS = {"channel:stable", "channel:canary", "type:none"}
 PRODUCT_TAG_RE = re.compile(
-    r"^v(?P<version>\d+\.\d+\.\d+(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$"
+    r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$"
 )
 IDENTITY_REF_RE = re.compile(
-    r"^refs/tags/release-(?:reservation|bound|consumed|released)/v(?P<version>\d+\.\d+\.\d+(?:-(?:beta|rc|dev)\.[1-9]\d*)?)(?:/|$)"
+    r"^refs/tags/release-(?:reservation|decision|bound|consumed|released)/v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)(?:/|$)"
 )
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -295,14 +295,26 @@ def compare_versions(left: str, right: str) -> int:
     )
 
 
+def mainline_sha() -> str:
+    for ref in ("refs/remotes/origin/main", "refs/heads/main"):
+        value = git("rev-parse", f"{ref}^{{commit}}", check=False)
+        if SHA_RE.fullmatch(value):
+            return value
+    return git("rev-parse", "HEAD^{commit}")
+
+
 def product_tags() -> list[dict[str, str]]:
+    mainline = mainline_sha()
     values: list[dict[str, str]] = []
     for tag in git("tag", "--list", "v*").splitlines():
         match = PRODUCT_TAG_RE.fullmatch(tag)
         if match is None:
             continue
         version = match.group("version")
-        values.append({"tag": tag, "version": version, "target": tag_target(tag) or ""})
+        target = tag_target(tag) or ""
+        if not target or not is_ancestor(target, mainline):
+            continue
+        values.append({"tag": tag, "version": version, "target": target})
     return values
 
 
@@ -310,6 +322,7 @@ def occupied_identity_versions() -> list[str]:
     """Return versions already claimed by any append-only release identity ref."""
     prefixes = (
         "refs/tags/release-reservation",
+        "refs/tags/release-decision",
         "refs/tags/release-bound",
         "refs/tags/release-consumed",
         "refs/tags/release-released",

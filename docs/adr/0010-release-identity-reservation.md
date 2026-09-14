@@ -25,6 +25,12 @@ After merge, append immutable `release-bound/v<version>/<merge-sha>` and, after 
 updated or deleted: an identical claim is idempotent, while a foreign owner, claim, provenance, or
 state fails closed.
 
+The first post-reservation state transition also creates one immutable
+`release-decision/v<version>` ref. Its append-only creation arbitrates the mutually exclusive
+`bound` and `released` paths before their state-specific receipt refs are created; an existing
+decision with another state or identity fails closed. This closes the cross-ref race that separate
+receipt names cannot solve by read-before-create checks alone.
+
 Every receipt writer independently verifies the reservation's parent, tree, and trailers. The
 `bound` receipt must exist before `consumed` is created; a recovery run may only verify an existing
 `bound` receipt and may not create the first one. A `released` receipt is rejected once a bound or

@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release_chain as CHAIN  # noqa: E402
+import release_reservation as RESERVATION  # noqa: E402
 
 
 REQUIRED_SOURCE_CHECKS = {
@@ -124,6 +125,34 @@ def prepare(args: argparse.Namespace) -> None:
     if any(not reservation.get(key) for key in required):
         raise PreparationError("reservation JSON is missing immutable identity fields")
     source_is_ready(repo_root, args.source_sha, args.base_sha, release_mode)
+    reservation_channel = str(reservation.get("channel", ""))
+    expected_channel = intent["channel"].removeprefix("channel:")
+    if reservation.get("sourceSha") != args.source_sha or reservation_channel != expected_channel:
+        raise PreparationError("reservation source or channel does not match the release intent")
+    reservation_expected = {
+        "ref": reservation["ref"],
+        "sourceSha": args.source_sha,
+        "version": reservation["version"],
+        "channel": expected_channel,
+        "reservationId": reservation["reservationId"],
+        "Reservation-Owner": reservation["Reservation-Owner"],
+        "Reservation-Claim-Key": reservation["Reservation-Claim-Key"],
+        "Reservation-Boundary-Token": reservation["Reservation-Boundary-Token"],
+    }
+    try:
+        if args.repository and args.token:
+            RESERVATION.verify_github_reservation(
+                reservation_expected, repository=args.repository, token=args.token, api_root=args.api_root
+            )
+        else:
+            RESERVATION.verify_local_reservation_claim(
+                reservation_ref_value=reservation_expected["ref"], version=reservation_expected["version"],
+                reservation_id=reservation_expected["reservationId"], owner=reservation_expected["Reservation-Owner"],
+                claim_key=reservation_expected["Reservation-Claim-Key"],
+                boundary_token=reservation_expected["Reservation-Boundary-Token"], cwd=repo_root,
+            )
+    except RESERVATION.ReservationError as error:
+        raise PreparationError(f"reservation provenance is not verified: {error}") from error
     if release_mode == "version-only-release-pr" and not args.covered_merge_sha:
         raise PreparationError("version-only-release-pr requires one covered merge SHA")
     if release_mode == "version-only-release-pr" and args.covered_merge_sha == args.source_sha:
@@ -176,6 +205,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--covered-merge-sha", default="")
     parser.add_argument("--reservation-json", type=Path)
     parser.add_argument("--provenance", default="fixture-verified")
+    parser.add_argument("--repository")
+    parser.add_argument("--token")
+    parser.add_argument("--api-root", default="https://api.github.com")
     parser.add_argument("--github-output")
     args = parser.parse_args(argv)
     try:

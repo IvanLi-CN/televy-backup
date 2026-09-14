@@ -30,7 +30,7 @@ class ProductVersionTests(unittest.TestCase):
         self.assertEqual(MODULE.parse_version("1.2.3")["prerelease"], None)
         for value in ("1.2.3-beta.4", "1.2.3-rc.4", "1.2.3-dev.2"):
             self.assertEqual(MODULE.parse_version(value)["ordinal"], 4 if "4" in value else 2)
-        for value in ("1.2", "1.2.3-dev.abc", "v1.2.3", "1.2.3-rc", "1.2.3-beta.0"):
+        for value in ("1.2", "01.2.3", "1.02.3", "1.2.03", "1.2.3-dev.abc", "v1.2.3", "1.2.3-rc", "1.2.3-beta.0"):
             with self.assertRaises(MODULE.VersionError):
                 MODULE.parse_version(value)
 

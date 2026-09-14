@@ -43,7 +43,10 @@ Before VERSION preparation, the trusted controller creates
 source SHA and whose tree equals the source tree. Its trailers record reservation id, owner, claim
 key, boundary token, version, channel, and `claimed` state. First creation wins; an identical claim
 is idempotent; foreign ownership, stale state, provenance mismatch and tag conflict fail closed.
-No reservation or receipt ref is updated, deleted, or force-pushed. Receipt creation independently
+Before the first `bound` or explicitly confirmed `released` transition, the controller also creates
+the immutable arbitration ref `refs/tags/release-decision/v<version>`. First decision creation wins;
+a decision for the other state or identity fails closed. No reservation, decision, or receipt ref is
+updated, deleted, or force-pushed. Receipt creation independently
 re-verifies reservation parent/tree/trailers; `bound` must exist before `consumed`, while `released`
 is allowed only for an unbound claim with explicit maintainer confirmation.
 

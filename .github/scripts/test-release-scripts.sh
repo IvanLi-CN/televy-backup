@@ -52,7 +52,7 @@ assert contract["helper_bootstrap"]["terminal_states_before_resolution"] == ["pu
 assert contract["helper_bootstrap"]["immutable_source_artifact"]["name"] == "snapshot-helper-source"
 assert contract["helper_bootstrap"]["immutable_source_artifact"]["release_redownload_after_resolve"] is False
 assert contract["identity_refs"]["write_policy"] == "append-only-create"
-assert contract["identity_refs"]["state_order"] == "bound-before-consumed;released-only-when-unbound"
+assert contract["identity_refs"]["state_order"] == "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound"
 assert contract["identity_refs"]["receipt_validation"] == "independently-verify-reservation-provenance"
 assert contract["recovery"]["dispatch_requires_existing_bound"] is True
 

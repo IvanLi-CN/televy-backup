@@ -41,9 +41,12 @@ jobs:
           ref: ${{ github.ref }}
           persist-credentials: false
 
-      - name: Bridge merge-group gate
+      - name: Checkout trusted merge-group gate scripts
         if: github.event_name == 'merge_group'
-        run: echo "merge-group reuses the Release intent label gate from each pull request"
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
 
       - name: Validate release intent + channel labels
         if: github.event_name != 'merge_group'
@@ -51,3 +54,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || inputs.pr_number }}
         run: bash ./.github/scripts/label-gate.sh
+
+      - name: Validate merge-group release labels
+        if: github.event_name == 'merge_group'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: bash ./.github/scripts/merge-group-release-gate.sh labels
