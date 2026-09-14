@@ -86,6 +86,27 @@
     "draft": "build-upload-and-publish",
     "published": "idempotent-success-without-build-or-overwrite"
   },
+  "helper_bootstrap": {
+    "resolver": "published-prerelease-release-plus-verified-build-manifest",
+    "candidate_order": [
+      "current-product-rc1",
+      "locked-bootstrap-release",
+      "published-prerelease-releases"
+    ],
+    "source_modes": ["reuse-approved-release", "one-time-bootstrap"],
+    "bootstrap_requires": "workflow_dispatch recover with helper_mode=bootstrap and no approved helper Release",
+    "bootstrap_preserves_identity": true,
+    "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign",
+    "identity_fields": ["sha256", "artifact_sha256", "cdhash", "designated_requirement"],
+    "invalid_candidate_policy": "fallback-to-next-candidate",
+    "terminal_states_before_resolution": ["published-release", "consumed-receipt"],
+    "immutable_source_artifact": {
+      "name": "snapshot-helper-source",
+      "resolve_job": "download-and-verify-dmg-manifest-checksums",
+      "consumer_jobs": ["build-arm64", "build-x86_64", "assemble"],
+      "release_redownload_after_resolve": false
+    }
+  },
   "merge_policy": {
     "normal_merge_only": true,
     "release_reads_committed_identity": true,

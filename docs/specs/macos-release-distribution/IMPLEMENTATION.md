@@ -14,7 +14,7 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 | Managed service | `crates/cli/src/service.rs` | REQ-MRD-005, 006 |
 | Snapshot Access and mount services | `crates/snapshot-helper/`, `crates/cli/src/snapshot_service.rs`, `crates/cli/src/snapshot_mount_service.rs` | REQ-MRD-010 |
 | GUI service control | `macos/TelevyBackupApp/SettingsWindow.swift` | REQ-MRD-007 |
-| Release orchestration | `.github/workflows/release.yml`, `.github/workflows/release-completion.yml` | REQ-MRD-008; see `product-version-release-chain` for the current VERSION-only contract |
+| Release orchestration | `.github/workflows/release.yml`, `.github/workflows/release-completion.yml`, `.github/scripts/release_helper.py` | REQ-MRD-008, REQ-MRD-010; see `product-version-release-chain` for the current VERSION-only contract |
 
 ## Required Evidence
 
@@ -25,9 +25,11 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - native macOS package matrix and Universal 2 verification in GitHub Actions
 - `scripts/macos/verify-app-icon-assets.sh`, asset catalog `actool` compilation, and bundle `Info.plist`/resource inspection
 - nested helper component lock, SHA-256/CDHash/designated-requirement comparison, and RC artifact reuse inspection
-- `snapshot-components.lock.json` bootstrap-tag anchoring for helper reuse across ordinary product
-  versions, plus published RC1 `BUILD-MANIFEST.json` anchoring for RC2/stable reuse, including the
-  final Universal bundle
+- helper source resolution independent of the product RC ordinal; published Release manifest
+  discovery and explicit no-source bootstrap mode are covered by resolver fixtures
+- `snapshot-components.lock.json` bootstrap-tag preference for helper reuse across ordinary product
+  versions, plus verified published prerelease `BUILD-MANIFEST.json` anchoring for RC2/stable reuse,
+  including the final Universal bundle
 - stable-gate download and verification of both RC Universal DMGs, checksums, tag-bound source
   commits, and helper identities before manual evidence is accepted
 - real macOS RC1-to-RC2 migration check: one manual FDA grant after the old registration migration, then no FDA regrant for the ordinary main-app update

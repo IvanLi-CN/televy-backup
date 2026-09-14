@@ -113,7 +113,9 @@ if sys.argv[5] != "true":
     assert mount_component["sha256"]
     assert mount_component["cdhash"]
     assert mount_component["designated_requirement"]
-if sys.argv[2].endswith("-rc.1"):
+if component["source"] == "one-time-bootstrap-universal-build":
+    assert component["reuse_policy"] == "byte-identical-no-rebuild-no-lipo-no-resign"
+elif sys.argv[2].endswith("-rc.1"):
     assert component["source"] in {"fresh-rc1-build", "rc1-universal-artifact"}
 else:
     assert component["source"] == "rc1-universal-artifact"

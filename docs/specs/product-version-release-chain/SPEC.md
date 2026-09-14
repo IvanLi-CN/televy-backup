@@ -4,6 +4,7 @@
 
 - [PR-local VERSION preparation](../../adr/0004-pr-local-version-preparation.md)
 - [Immutable release identity reservation](../../adr/0010-release-identity-reservation.md)
+- [Independent helper bootstrap state](../../adr/0012-helper-bootstrap-state.md)
 
 ## Context and Scope
 
@@ -65,8 +66,10 @@ PR.
 After merge, Release Product reads the same SHA/version/channel triple, verifies the reservation,
 and appends `release-bound/v<version>/<merge-sha>`. It builds and publishes from that merge SHA,
 creates the product tag without overwriting an existing ref, and appends
-`release-consumed/v<version>/<merge-sha>` after publication. `prod` may be the stable latest
-surface; beta/rc/dev are prereleases and never update stable latest.
+`release-consumed/v<version>/<merge-sha>` after publication. Before helper resolution, an already
+published product Release or a verified consumed receipt is terminal; it may verify or append the
+consumed receipt but MUST NOT re-enter packaging. `prod` may be the stable latest surface; beta/rc/dev
+are prereleases and never update stable latest.
 
 ### REQ-PVR-007: Recovery is same-SHA or an explicit new PR
 
@@ -80,9 +83,14 @@ not part of this contract.
 ### REQ-PVR-008: Intent snapshots and failure context are non-authoritative
 
 Each resolved run writes and uploads `release-intent.json` containing PR/source/merge SHA, mode,
-covered merge, type/channel/version/tag, all reservation fields, provenance, artifact names, run
-URL and recovery instruction. It is an Actions artifact snapshot, not product code and not the only
-fact source. Recovery reconstructs identity from refs, trailers and product tags. Failure
+covered merge, type/channel/version/tag, helper source mode/tag, all reservation fields, provenance,
+artifact names, run URL and recovery instruction. Reused helper resolution also uploads the exact
+Universal DMG, `BUILD-MANIFEST.json`, and `SHA256SUMS` as the immutable `snapshot-helper-source`
+workflow artifact consumed by every macOS build/assembly job. It is an Actions artifact snapshot, not
+product code and not the only fact source. Recovery reconstructs identity from immutable Git refs,
+commit trailers and product tags. Helper bootstrap state is resolved independently from the product RC
+ordinal: a verified published helper Release is reused when available, invalid candidates fall back to
+the next candidate, while a missing helper Release requires an explicit same-SHA bootstrap recovery. Failure
 notification distinguishes publish failure, no-identity and resolver error; unresolved identity
 never fabricates a version, tag, or recovery command.
 
@@ -108,9 +116,9 @@ expected-head workflow text, GitHub-native verification, and version-only releas
 
 ### VER-PVR-004
 
-Covers: REQ-PVR-006, REQ-PVR-007. Release workflow contract tests verify bound/consumed receipts,
-same-SHA recovery inputs, product tag ownership, prerelease publication, and no automatic history
-backfill.
+Covers: REQ-PVR-006, REQ-PVR-007. Release workflow and helper resolver contract tests verify
+bound/consumed receipts, same-SHA recovery inputs, product tag ownership, prerelease publication,
+independent helper bootstrap state, and no automatic history backfill.
 
 ### VER-PVR-005
 
@@ -137,5 +145,6 @@ generation.
 - `.github/scripts/test-release-preparation.sh`
 - `.github/scripts/test-release-completion.sh`
 - `.github/scripts/test-release-workflows.sh`
+- `.github/scripts/test-release-helper.sh`
 - `.github/scripts/test-package-scripts.sh`
 - `.github/quality-gates.json`

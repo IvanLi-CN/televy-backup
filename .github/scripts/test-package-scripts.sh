@@ -56,6 +56,10 @@ verify_release_text="$(<"$root_dir/scripts/macos/verify-release-assets.sh")"
   echo "Snapshot Access mode check must parse stat output as octal" >&2
   exit 1
 }
+[[ "$verify_release_text" == *'one-time-bootstrap-universal-build'* ]] || {
+  echo "release asset verifier must recognize the explicit helper bootstrap source" >&2
+  exit 1
+}
 webdav_text="$(<"$root_dir/scripts/macos/verify-webdav-snapshot-browsing.sh")"
 [[ "$webdav_text" == *'cargo test --manifest-path "$root_dir/Cargo.toml" -p televybackupd webdav_service -- --list'* ]]
 [[ "$webdav_text" != *'http.server'* ]]
@@ -111,7 +115,8 @@ printf '%s\n' "$version" > "$tmp_dir/VERSION"
 git -C "$tmp_dir" add VERSION scripts
 git -C "$tmp_dir" commit -qm fixture
 
-bash "$root_dir/scripts/macos/generate-release-manifest.sh" \
+TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=one-time-bootstrap-universal-build \
+  bash "$root_dir/scripts/macos/generate-release-manifest.sh" \
   --mode release \
   --asset-dir "$tmp_dir" \
   --source-commit "$(git -C "$tmp_dir" rev-parse HEAD)" \
@@ -129,6 +134,7 @@ payload = json.load(open(sys.argv[1], encoding="utf-8"))
 assert payload["release_version"] == sys.argv[2]
 assert payload["signing"] == "ad-hoc"
 assert len(payload["assets"]) == 5
+assert payload["components"]["snapshot_access"]["source"] == "one-time-bootstrap-universal-build"
 assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.1.0", "0.9.8"]
 PY
 

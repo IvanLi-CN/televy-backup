@@ -61,12 +61,26 @@ Official ad-hoc releases MUST register this plist with `launchctl` from the inst
 `SMAppService` is optional only for separately signed builds.
 The CLI MUST expose read-only `snapshot-access status` and internal transactional migration
 operations, but MUST NOT accept `snapshot-access install --app <path>` or ship an external helper
-installer. The first RC for a new Snapshot Access component MUST build and sign the Universal
-helper once; ordinary future product-version RC1 builds MUST extract, verify, and embed the last
-approved artifact named by `snapshot-components.lock.json`'s `bootstrap_release_tag`. RC2 and
-stable MUST reuse the current product-version RC1 artifact. Reuse MUST NOT rebuild, `lipo`, or
-re-sign it. A component code or FDA behavior change MUST update the component version and bootstrap
-tag so that the new product-version RC1 is an explicit authorization migration point. The mount-helper
+installer. The product RC ordinal MUST NOT determine Snapshot Access helper source state. Release
+Product MUST prefer the current product-version RC1, then the artifact named by
+`snapshot-components.lock.json`'s `bootstrap_release_tag`, then a published prerelease Release
+discovered by its verified `BUILD-MANIFEST.json`. Every reused source MUST provide its Universal
+DMG, `BUILD-MANIFEST.json`, and `SHA256SUMS`; its component metadata, executable SHA-256, complete
+artifact digest, CodeDirectory hash, and designated requirement MUST match the lock and downloaded
+bundle. The resolve job MUST download and verify those three source assets, including the tag-bound
+source commit and manifest/checksum relationships, then upload the exact files as the immutable
+`snapshot-helper-source` workflow artifact. Native build and assembly jobs MUST consume that artifact
+and MUST NOT redownload helper assets from the Release. Any unavailable, incomplete, or invalid
+candidate MUST fall back to the next candidate. RC2, stable, and ordinary future product releases
+MUST reuse the approved helper bundle's original bytes. Reuse MUST NOT rebuild, `lipo`, re-sign, or
+deep-sign it. A component code or FDA
+behavior change MUST update the component version and bootstrap tag so that the new component has an
+explicit authorization migration point. If no approved helper Release exists, only an explicit
+same-SHA `workflow_dispatch` recovery with `helper_mode=bootstrap` may build and sign one Universal
+helper. That one-time bootstrap preserves the existing product version, merge SHA, reservation, and
+bound receipt; stable publication still requires a previously published RC helper. An already
+published product Release or verified consumed receipt is terminal before helper resolution and MUST
+not re-enter packaging. The mount-helper
 binary and system service templates remain available for its explicit administrator transaction;
 the installed root helper is compatibility-checked only and not automatically updated. FDA is an
 explicit System Settings action. Development variants and runs with custom config/data directories
@@ -175,6 +189,7 @@ inspection provide the evidence for the required icon, catalog, and SVG resource
 - [0002-settings-window-ipc-only](../../adr/0002-settings-window-ipc-only.md)
 - [0003-product-managed-daemon-launchagent](../../adr/0003-product-managed-daemon-launchagent.md)
 - [0010-identity-stable-single-product-release](../../adr/0010-identity-stable-single-product-release.md)
+- [0012-helper-bootstrap-state](../../adr/0012-helper-bootstrap-state.md)
 
 ## Visual Evidence
 
