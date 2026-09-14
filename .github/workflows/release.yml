@@ -91,7 +91,9 @@ jobs:
             test "${OPERATION}" = recover
             git merge-base --is-ancestor "${TARGET_INPUT}" "${main_sha}"
           fi
-          git checkout --detach "${TARGET_INPUT}"
+          # Keep the trusted main checkout for release policy scripts. TARGET_INPUT
+          # is the historical product identity and remains the package ref through
+          # the resolved outputs; recovery inputs may predate current policy helpers.
           prepared_json="$(python3 .github/scripts/release_chain.py verify-merged --commit "${TARGET_INPUT}")"
           prepared="$(printf '%s' "${prepared_json}" | jq -r .prepared)"
           if [[ "${prepared}" != true ]]; then

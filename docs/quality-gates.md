@@ -47,6 +47,10 @@ the source PR. Failed releases are handled by `Notify failed release`, which rep
 context only when it can be resolved.
 Successful publication is reported directly to the owner by the release-owning agent; Release Product does not write a result comment to the source PR.
 
+Recovery evaluates policy and helper resolution from the trusted main checkout, while its historical
+input selects the recovered product identity. Packaging and publication remain bound to that identity
+and do not silently switch to the policy checkout's commit.
+
 ## Remote alignment
 
 The declaration is the repository source of truth. GitHub labels, required checks, signed commits,
