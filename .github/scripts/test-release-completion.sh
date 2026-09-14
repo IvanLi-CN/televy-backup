@@ -45,19 +45,31 @@ python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
 python3 "$root_dir/.github/scripts/release_preparation.py" \
   --repo-root "$repo_dir" --source-sha "$source_sha" --base-sha "$source_sha" \
   --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" --mode allocate \
-  --reservation-json "$tmp_dir/reservation.json" >/dev/null
+  --reservation-json "$tmp_dir/reservation.json" --provenance github-native-verified >/dev/null
 prepared_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+printf '{"sha":"%s","commit":{"verification":{"verified":true}}}\n' "$prepared_sha" > "$tmp_dir/github-verification.json"
 out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \
   --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
-  --reservation-json "$tmp_dir/reservation.json")"
+  --reservation-json "$tmp_dir/reservation.json" --require-github-verification \
+  --github-verification-json "$tmp_dir/github-verification.json")"
 [[ "$out" == *'"status": "ready"'* ]]
 
 if python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \
   --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
   --reservation-json "$tmp_dir/reservation.json" --require-github-verification >/dev/null 2>&1; then
-  echo "fixture-verified preparation passed the production completion gate" >&2
+  echo "production completion accepted missing GitHub verification evidence" >&2
+  exit 1
+fi
+
+printf '{"sha":"%s","commit":{"verification":{"verified":false}}}\n' "$prepared_sha" > "$tmp_dir/github-verification.json"
+if python3 "$root_dir/.github/scripts/release_completion.py" \
+  --repo-root "$repo_dir" \
+  --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --reservation-json "$tmp_dir/reservation.json" --require-github-verification \
+  --github-verification-json "$tmp_dir/github-verification.json" >/dev/null 2>&1; then
+  echo "unverified preparation passed the production completion gate" >&2
   exit 1
 fi
 
