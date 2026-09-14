@@ -164,10 +164,10 @@ if [[ -d "$app" ]]; then
     }
   done
   for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+    [[ -x "$app/Contents/MacOS/$binary" ]] || { echo "main app binary is not executable: $binary" >&2; exit 1; }
     info="$(lipo -info "$app/Contents/MacOS/$binary")"
     [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "universal binary missing slice: $binary" >&2; exit 1; }
   done
-  [[ -x "$app/Contents/MacOS/televybackup-snapshot-mount-helper" ]] || { echo "snapshot mount helper missing" >&2; exit 1; }
   root_helper_binary="$app/Contents/MacOS/televybackup-snapshot-mount-helper"
   root_helper_signature="$(codesign -dvvv "$root_helper_binary" 2>&1 || true)"
   [[ "$root_helper_signature" == *"Signature=adhoc"* ]] || { echo "snapshot mount helper must use an ad-hoc signature" >&2; exit 1; }

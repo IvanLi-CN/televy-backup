@@ -74,6 +74,11 @@ grep -F '[[ -x "$app/Contents/MacOS/$binary" ]]' <<<"$verify_release_text" >/dev
   echo "DMG verification must reject non-executable main binaries" >&2
   exit 1
 }
+main_binary_mode_checks="$(grep -Fc '[[ -x "$app/Contents/MacOS/$binary" ]]' <<<"$verify_release_text")"
+[[ "$main_binary_mode_checks" -ge 2 ]] || {
+  echo "app and DMG verification must reject non-executable main binaries" >&2
+  exit 1
+}
 grep -F '[[ -x "$tools_dir/TelevyBackup Tools/bin/$binary" ]]' <<<"$verify_release_text" >/dev/null || {
   echo "tools archive verification must reject non-executable binaries" >&2
   exit 1
@@ -105,8 +110,12 @@ grep -F 'chmod 755 "$native_app/Contents/MacOS/$binary"' <<<"$assemble_text" >/d
   echo "Native DMG repackage must preserve executable modes for every main binary" >&2
   exit 1
 }
-grep -F 'chmod 755 "$native_access_app/Contents/MacOS/televybackup-snapshot-access"' <<<"$assemble_text" >/dev/null || {
+grep -F '[[ -x "$native_access_app/Contents/MacOS/televybackup-snapshot-access" ]]' <<<"$assemble_text" >/dev/null || {
   echo "Native DMG repackage must preserve the nested helper executable mode" >&2
+  exit 1
+}
+grep -F '[[ -x "$universal_access_binary" ]]' <<<"$assemble_text" >/dev/null || {
+  echo "Universal assembly must preserve the nested helper executable mode" >&2
   exit 1
 }
 grep -F 'access_relative_path="Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"' <<<"$assemble_text" >/dev/null || {
