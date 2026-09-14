@@ -95,7 +95,8 @@ assert "preferred helper source manifest failed" not in release_workflow
 assert "Keep the trusted main checkout for release policy scripts" in release_workflow
 assert 'git checkout --detach "${TARGET_INPUT}"' not in release_workflow
 assert 'policy_sha: ${{ steps.release.outputs.policy_sha }}' in release_workflow
-assert 'echo "policy_sha=${main_sha}" >> "$GITHUB_OUTPUT"' in release_workflow
+assert 'policy_sha="$(git rev-parse HEAD)"' in release_workflow
+assert 'echo "policy_sha=${policy_sha}" >> "$GITHUB_OUTPUT"' in release_workflow
 assert 'git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh"' in release_workflow
 assert '"${policy_verify_release_assets}" --mode release --asset-dir dist/final' in release_workflow
 assert 'bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final' not in release_workflow
@@ -117,6 +118,142 @@ assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.
 assert "needs.macos-acceptance.result == 'success'" in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
 assert "Assemble and validate final assets" in release_workflow
+PY
+
+python3 - "$root_dir" <<'PY'
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+version = (root / "VERSION").read_text(encoding="utf-8").strip()
+validator_source = root / "scripts/macos/verify-release-assets.sh"
+
+with tempfile.TemporaryDirectory() as directory:
+    temp = Path(directory)
+    policy_repo = temp / "policy-repo"
+    asset_dir = temp / "dist"
+    (policy_repo / "scripts/macos").mkdir(parents=True)
+    (policy_repo / "packaging/macos").mkdir(parents=True)
+    (asset_dir).mkdir()
+    shutil.copy2(validator_source, policy_repo / "scripts/macos/verify-release-assets.sh")
+    shutil.copy2(root / "scripts/product-version.py", policy_repo / "scripts/product-version.py")
+    shutil.copy2(root / "VERSION", policy_repo / "VERSION")
+    shutil.copy2(
+        root / "packaging/macos/snapshot-components.lock.json",
+        policy_repo / "packaging/macos/snapshot-components.lock.json",
+    )
+    subprocess.run(["git", "-C", str(policy_repo), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(policy_repo), "config", "user.name", "fixture"], check=True)
+    subprocess.run(
+        ["git", "-C", str(policy_repo), "config", "user.email", "fixture@example.com"],
+        check=True,
+    )
+
+    asset_names = [
+        f"TelevyBackup-{version}.dmg",
+        f"TelevyBackup-{version}-arm64.dmg",
+        f"TelevyBackup-{version}-x86_64.dmg",
+        f"televybackup-tools-{version}-arm64.tar.gz",
+        f"televybackup-tools-{version}-x86_64.tar.gz",
+    ]
+    assets = []
+    for name in asset_names:
+        path = asset_dir / name
+        path.write_bytes(f"bootstrap fixture: {name}\n".encode())
+        assets.append(
+            {
+                "name": name,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "bytes": path.stat().st_size,
+            }
+        )
+    (asset_dir / "SHA256SUMS").write_text(
+        "".join(f"{asset['sha256']}  {asset['name']}\n" for asset in assets),
+        encoding="utf-8",
+    )
+    identity = {
+        "sha256": "bootstrap-sha",
+        "artifact_sha256": "bootstrap-artifact-sha",
+        "cdhash": "bootstrap-cdhash",
+        "designated_requirement": "designated => identifier \\\"com.ivan.televybackup.snapshot-access\\\"",
+    }
+    manifest = {
+        "release_version": version,
+        "signing": "ad-hoc",
+        "architectures": ["arm64", "x86_64", "universal2"],
+        "components": {
+            "snapshot_access": {
+                "bundle_id": "com.ivan.televybackup.snapshot-access",
+                "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+                "binary": "Contents/MacOS/televybackup-snapshot-access",
+                "component_version": "0.2.0",
+                "protocol_version": 2,
+                "source": "one-time-bootstrap-universal-build",
+                "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign",
+                **identity,
+            },
+            "snapshot_mount_helper": {
+                "label": "com.ivan.televybackup.snapshot-mount-helper",
+                "install_path": "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
+                "component_version": "0.1.0",
+                "compatible_component_versions": ["0.1.0", "0.9.8"],
+                "protocol_version": 1,
+                "binary": "Contents/MacOS/televybackup-snapshot-mount-helper",
+                "source": "release-bundled-compatibility-reference",
+                "identity_source": "bundled-release-artifact",
+                "installed_observation": "manual-rc-acceptance-required",
+                "update_policy": "compatibility-check-only",
+                **identity,
+            },
+        },
+        "assets": assets,
+    }
+    (asset_dir / "BUILD-MANIFEST.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    subprocess.run(
+        ["git", "-C", str(policy_repo), "add", "."],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(policy_repo), "commit", "-qm", "trusted policy fixture"],
+        check=True,
+    )
+    policy_sha = subprocess.check_output(
+        ["git", "-C", str(policy_repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+    extracted = temp / "verify-release-assets.sh"
+    extracted.write_bytes(
+        subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(policy_repo),
+                "show",
+                f"{policy_sha}:scripts/macos/verify-release-assets.sh",
+            ]
+        )
+    )
+    extracted.chmod(0o755)
+    result = subprocess.run(
+        [
+            str(extracted),
+            "--mode",
+            "release",
+            "--asset-dir",
+            str(asset_dir),
+            "--skip-bundle-checks",
+        ],
+        cwd=policy_repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 PY
 
 python3 - "$root_dir" <<'PY'

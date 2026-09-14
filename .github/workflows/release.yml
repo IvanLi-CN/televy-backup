@@ -83,7 +83,8 @@ jobs:
           set -euo pipefail
           git fetch --force origin main '+refs/tags/*:refs/tags/*'
           main_sha="$(git rev-parse origin/main)"
-          echo "policy_sha=${main_sha}" >> "$GITHUB_OUTPUT"
+          policy_sha="$(git rev-parse HEAD)"
+          echo "policy_sha=${policy_sha}" >> "$GITHUB_OUTPUT"
           test -n "${TARGET_INPUT}"
           if [[ "${EVENT_NAME}" == workflow_run ]]; then
             test "${WORKFLOW_CONCLUSION}" = success
