@@ -66,11 +66,9 @@ jobs:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: git fetch --no-tags origin "${HEAD_SHA}"
 
-      - name: Verify dispatched ref is current pull request head
+      - name: Verify dispatched workflow comes from trusted main
         if: github.event_name == 'workflow_dispatch'
-        env:
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-        run: test "${GITHUB_SHA}" = "${HEAD_SHA}"
+        run: test "${GITHUB_REF}" = "refs/heads/main"
 
       - name: Verify VERSION and release completion
         env:
@@ -84,10 +82,13 @@ jobs:
           if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then
             verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
           fi
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"
-          jq -e --arg commit "${HEAD_SHA}" \
-            '.sha == $commit and .commit.verification.verified == true' \
-            "${RUNNER_TEMP}/github-verification.json" >/dev/null
+          product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
+          if [[ "${product_release}" == true ]]; then
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"
+            jq -e --arg commit "${HEAD_SHA}" \
+              '.sha == $commit and .commit.verification.verified == true' \
+              "${RUNNER_TEMP}/github-verification.json" >/dev/null
+          fi
           deadline=$((SECONDS + 1800))
           while :; do
             gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
@@ -143,6 +144,10 @@ jobs:
             --labels-json "${RUNNER_TEMP}/labels.json"
             --checks-json "${RUNNER_TEMP}/source-checks.json"
           )
+          if [[ "${product_release}" == true ]] && \
+             python3 .github/scripts/release_completion.py --help 2>&1 | grep -Fq -- "--github-verification-json"; then
+            completion_args+=(--github-verification-json "${RUNNER_TEMP}/github-verification.json")
+          fi
           if [[ -n "${prepared_json}" ]]; then
             release_mode="$(printf '%s' "${prepared_json}" | jq -r .mode)"
             jq -n \

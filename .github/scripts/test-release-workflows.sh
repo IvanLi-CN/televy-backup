@@ -87,12 +87,17 @@ assert_contains "completion reservation provenance gate" "$completion_text" "--r
 assert_contains "completion GitHub verification fetch" "$completion_text" 'gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}"'
 assert_contains "completion GitHub verification SHA gate" "$completion_text" 'jq -e --arg commit "${HEAD_SHA}"'
 assert_contains "completion GitHub verification status gate" "$completion_text" '.commit.verification.verified == true'
-assert_not_contains "completion trusted-base-only verification argument" "$completion_text" "--github-verification-json"
+assert_contains "completion GitHub verification compatibility probe" "$completion_text" 'release_completion.py --help'
+assert_contains "completion GitHub verification argument" "$completion_text" "--github-verification-json"
+assert_contains "completion product-only verification selector" "$completion_text" 'product_release='
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
 assert_contains "completion workflow dispatch input" "$completion_text" "pr_number:"
 assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${pr_number}'
-assert_contains "completion dispatch ref freshness" "$completion_text" 'Verify dispatched ref is current pull request head'
+assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/main'
+preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
+assert_contains "prepared-head gates use trusted main" "$preparation_text" "--ref main"
+assert_not_contains "prepared-head gates use mutable PR workflow" "$preparation_text" '--ref "${HEAD_REF}"'
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'
 release = YAML.load_file(ARGV.fetch(0))
 expected_permissions = {"contents" => "write"}
