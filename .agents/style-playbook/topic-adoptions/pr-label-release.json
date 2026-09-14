@@ -1,0 +1,22 @@
+{
+  "evidence": [
+    ".github/pr-label-release.json",
+    ".github/release-contract.json"
+  ],
+  "implementation_commit": "eca88ed76230525bdf4bdbb4e75179c370491c24",
+  "playbook_commit": "e4a632b742af7611f6cd73635f37bea9ff55b46c",
+  "policy_observations": [
+    {
+      "reason": "package-and-lock-verified",
+      "slug": "semver-change-governance",
+      "state": "installed"
+    },
+    {
+      "reason": "package-and-lock-verified",
+      "slug": "pr-label-release",
+      "state": "installed"
+    }
+  ],
+  "schema_version": 1,
+  "topic": "pr-label-release"
+}

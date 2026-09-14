@@ -1,0 +1,17 @@
+{
+  "evidence": [
+    "docs/specs/release-failure-telegram-alerts/transport-gate.json",
+    ".github/workflows/notify-release-failure.yml"
+  ],
+  "implementation_commit": "eca88ed76230525bdf4bdbb4e75179c370491c24",
+  "playbook_commit": "e4a632b742af7611f6cd73635f37bea9ff55b46c",
+  "policy_observations": [
+    {
+      "reason": "package-and-lock-verified",
+      "slug": "release-failure-notification",
+      "state": "installed"
+    }
+  ],
+  "schema_version": 1,
+  "topic": "release-failure-notification"
+}
