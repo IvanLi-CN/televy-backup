@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "kind": "version-impact-record",
+  "change": {
+    "description": "Install the release Policy Skills and record the repository-local release contracts.",
+    "release_unit_description": "TelevyBackup release identity, label, quality-gate, and failure-notification policy surfaces.",
+    "affected_contracts": [
+      "release-policy"
+    ]
+  },
+  "classification": {
+    "allowed_impacts": [
+      "patch",
+      "minor",
+      "major"
+    ],
+    "planned": {
+      "impact": "patch",
+      "reasoning": "The change affects checked-in delivery policy only; it does not change the application API or persisted data format.",
+      "assessed_at": "2026-09-14T00:00:00Z",
+      "evidence": [
+        ".github/release-contract.json",
+        ".github/quality-gates.json"
+      ]
+    },
+    "current": {
+      "impact": "patch",
+      "scope_drift": {
+        "detected": false,
+        "description": "No scope drift; the change remains limited to release policy installation and metadata."
+      },
+      "reasoning": "The installed policies and metadata describe existing release workflows and do not alter runtime behavior.",
+      "reassessed_at": "2026-09-14T00:00:00Z",
+      "evidence": [
+        ".github/pr-label-release.json",
+        "docs/specs/product-version-release-chain/SPEC.md",
+        "docs/specs/release-failure-telegram-alerts/SPEC.md"
+      ]
+    },
+    "verified": {
+      "impact": "patch",
+      "reasoning": "Verified as a patch-level delivery-policy change: public API is unchanged and no persistent application state is introduced or migrated.",
+      "verified_at": "2026-09-14T00:00:00Z",
+      "evidence": [
+        "skills-lock.json",
+        ".agents/skills/quality-gates/SKILL.md",
+        ".agents/skills/pr-label-release/SKILL.md",
+        ".agents/skills/release-failure-notification/SKILL.md"
+      ]
+    }
+  },
+  "compatibility_evidence": {
+    "public_api": {
+      "change": "none",
+      "supported_consumer_range": "All existing TelevyBackup consumers; no public API changes.",
+      "evidence": [
+        ".github/release-contract.json",
+        "docs/specs/product-version-release-chain/SPEC.md"
+      ]
+    },
+    "persistent_state": {
+      "applicable": false,
+      "state_description": "Not applicable; no application database, file format, queue, or device state is changed.",
+      "source_program_compatibility_range": "Not applicable",
+      "evidence": [
+        "docs/specs/product-version-release-chain/SPEC.md"
+      ]
+    }
+  },
+  "release_unit": {
+    "member_change_records": [
+      "release-policy-skill-adoption"
+    ],
+    "maximum_verified_impact": "patch",
+    "calculation_evidence": [
+      ".github/pr-label-release.json",
+      "docs/specs/release-failure-telegram-alerts/transport-gate.json",
+      ".github/quality-gates.json"
+    ]
+  }
+}
