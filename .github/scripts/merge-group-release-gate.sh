@@ -13,8 +13,10 @@ token="${GITHUB_TOKEN:-${GH_TOKEN:?}}"
 api_root="${GITHUB_API_URL:-https://api.github.com}"
 head_sha="${MERGE_GROUP_HEAD_SHA:?}"
 
-pr_numbers="$({
-  EVENT_PATH="${event_path}" python3 - <<'PY'
+api_pr_numbers="$(gh api "repos/${repository}/commits/${head_sha}/pulls?per_page=100" --jq '.[].number')"
+pr_numbers="$(
+  {
+    EVENT_PATH="${event_path}" python3 - <<'PY'
 import json
 import os
 import re
@@ -25,8 +27,9 @@ numbers = re.findall(r"(?:^|/)pr-([0-9]+)(?:-|$)", head_ref)
 for number in dict.fromkeys(numbers):
     print(number)
 PY
-  gh api "repos/${repository}/commits/${head_sha}/pulls?per_page=100" --jq '.[].number' || true
-} | sort -n -u)"
+    printf '%s\n' "${api_pr_numbers}"
+  } | sort -n -u
+)"
 
 if [[ -z "${pr_numbers}" ]]; then
   echo "merge-group gate: cannot resolve a pull request from ${head_sha}" >&2
@@ -48,7 +51,12 @@ if not rows:
     print("missing")
 else:
     row = max(rows, key=lambda value: str(value.get("completed_at") or value.get("started_at") or ""))
-    print("success" if row.get("status") == "completed" and row.get("conclusion") == "success" else "pending")
+    if row.get("status") != "completed":
+        print("pending")
+    elif row.get("conclusion") == "success":
+        print("success")
+    else:
+        print("failed")
 ' "${name}"
 }
 
@@ -121,6 +129,7 @@ if [[ "${mode}" == completion ]]; then
         success) ;;
         pending) pending+=("${name}") ;;
         missing) pending+=("${name}") ;;
+        failed) echo "merge-group gate: required check failed: ${name}" >&2; exit 1 ;;
         *) echo "merge-group gate: unexpected check state for ${name}" >&2; exit 1 ;;
       esac
     done

@@ -17,10 +17,13 @@ GitHub remote policy is reconciled only at the PR-ready delivery boundary.
 
 ### REQ-PVR-001: Final tags are the numeric baseline
 
-The highest eligible final product tag `vX.Y.Z` is the only numeric baseline. If no final tag
-exists, the virtual baseline is `0.0.0`. `VERSION`, Cargo manifests, environment variables and
-merge order are never successor inputs. `type:major`, `type:minor` and `type:patch` advance that
-baseline once; prerelease tags do not advance it.
+The highest eligible final product tag `vX.Y.Z` is the only numeric baseline. An eligible product
+tag must be an annotated tag created by `github-actions[bot]` under the protected
+`protected-release-automation` namespace and must point to a commit reachable from `main`.
+Foreign, lightweight, incomplete, or unreachable product tags fail closed. If no final tag exists,
+the virtual baseline is `0.0.0`. `VERSION`, Cargo manifests, environment variables and merge order
+are never successor inputs. `type:major`, `type:minor` and `type:patch` advance that baseline once;
+prerelease tags do not advance it.
 
 ### REQ-PVR-002: Channels have one formal grammar
 

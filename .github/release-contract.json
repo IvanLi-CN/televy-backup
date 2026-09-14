@@ -3,6 +3,11 @@
   "source_of_truth": "immutable repository identity refs plus trusted preparation provenance",
   "version_file": "VERSION",
   "numeric_baseline": "highest eligible final remote product tag vX.Y.Z",
+  "eligible_final_tag_provenance": {
+    "owner": "protected-release-automation",
+    "object_type": "annotated-tag",
+    "tagger": "github-actions[bot]"
+  },
   "virtual_final_baseline": "0.0.0",
   "version_grammar": {
     "prod": "X.Y.Z",

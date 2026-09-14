@@ -42,6 +42,8 @@
       },
       "eligible_final_tag_requires_main_reachability": true,
       "eligible_final_tag_owner": "protected-release-automation",
+      "eligible_final_tag_object_type": "annotated-tag",
+      "eligible_final_tag_tagger": "github-actions[bot]",
       "empty_history_baseline": "0.0.0",
       "formats": {
         "channel:prod": "X.Y.Z",

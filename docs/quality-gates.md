@@ -14,11 +14,13 @@ TelevyBackup treats pull request checks as an explicit merge contract. The canon
 
 The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks.
 
-Release Product treats the highest eligible final product tag as the numeric baseline. Prerelease
-ordinals are allocated only within their base/channel. Reservation, bound, and consumed refs are
-append-only; any provenance or ownership conflict fails before packaging. A matching published
-Release is terminal and is not rebuilt or overwritten. Failure alerts use `recovery_candidate` only
-after a complete merged identity is rechecked.
+Release Product treats the highest eligible final product tag as the numeric baseline. Eligible
+product tags are protected annotated tags created by `github-actions[bot]` and reachable from
+`main`; foreign, lightweight, incomplete, or unreachable tags fail closed. Prerelease ordinals are
+allocated only within their base/channel. Reservation, bound, and consumed refs are append-only;
+any provenance or ownership conflict fails before packaging. A matching published Release is
+terminal and is not rebuilt or overwritten. Failure alerts use `recovery_candidate` only after a
+complete merged identity is rechecked.
 
 ## Release checks
 

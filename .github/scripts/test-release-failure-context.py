@@ -164,10 +164,11 @@ Receipt-Provenance: immutable-receipt
 
 
 class GitHubMock:
-    def __init__(self, tag_mode: str, declared_pull_request: str, artifact_available: bool, release_type: str):
+    def __init__(self, tag_mode: str, declared_pull_request: str, artifact_available: bool, release_type: str, trusted_resolver: bool = True):
         self.tag_mode = tag_mode
         self.declared_pull_request = declared_pull_request
         self.artifact_available = artifact_available
+        self.trusted_resolver = trusted_resolver
         archive = BytesIO()
         with zipfile.ZipFile(archive, "w") as bundle:
             bundle.writestr("release-intent.json", json.dumps(intent(declared_pull_request, release_type)))
@@ -184,9 +185,14 @@ class GitHubMock:
         if path == "/archive":
             return Response(self.archive)
         if path.endswith("/actions/runs/7/jobs/1") or path.endswith("/actions/runs/7/jobs"):
-            return json_response({"jobs": [{"id": 1}]})
+            job = {"id": 1, "name": "Resolve merged product identity", "workflow_name": "Release Product", "head_sha": MERGE}
+            if not self.trusted_resolver:
+                job = {"id": 2, "name": "Build arm64 package", "workflow_name": "Release Product", "head_sha": MERGE}
+            return json_response({"jobs": [job]})
         if path.endswith("/actions/jobs/1/logs"):
             return Response(b"RELEASE_IDENTITY status=resolved version=1.2.3-rc.1 channel=rc merge_sha=" + MERGE.encode() + b" tag=v1.2.3-rc.1")
+        if path.endswith("/actions/jobs/2/logs"):
+            return Response(b"RELEASE_NO_IDENTITY=" + MERGE.encode())
         if path.endswith(f"/commits/{MERGE}/pulls"):
             return json_response([{"number": 7, "merge_commit_sha": MERGE}])
         if path.endswith("/pulls/7"):
@@ -206,7 +212,7 @@ class GitHubMock:
         raise AssertionError(f"unexpected API request: {path}")
 
 
-def run_case(tag_mode: str, declared_pull_request: str, artifact_available: bool = True, release_type: str = "type:patch") -> str:
+def run_case(tag_mode: str, declared_pull_request: str, artifact_available: bool = True, release_type: str = "type:patch", trusted_resolver: bool = True) -> str:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     source = workflow.split("          python3 - <<'PYCODE'\n", 1)[1].split("\n          PYCODE", 1)[0]
     output = tempfile.NamedTemporaryFile(delete=False)
@@ -227,7 +233,7 @@ def run_case(tag_mode: str, declared_pull_request: str, artifact_available: bool
     try:
         from unittest.mock import patch
 
-        with patch("urllib.request.urlopen", side_effect=GitHubMock(tag_mode, declared_pull_request, artifact_available, release_type)):
+        with patch("urllib.request.urlopen", side_effect=GitHubMock(tag_mode, declared_pull_request, artifact_available, release_type, trusted_resolver)):
             exec(compile(textwrap.dedent(source), str(WORKFLOW), "exec"), {"__name__": "__main__"})
         return Path(output.name).read_text(encoding="utf-8")
     finally:
@@ -239,6 +245,7 @@ def run_case(tag_mode: str, declared_pull_request: str, artifact_available: bool
 missing = run_case("missing", "7")
 assert "identity_status=resolved" in missing
 assert "tag_status=not-created" in missing
+assert "tag_target_sha=\n" in missing
 reconstructed = run_case("missing", "7", artifact_available=False)
 assert "identity_status=resolved" in reconstructed
 assert "artifact_names=reconstructed-from-immutable-refs" in reconstructed
@@ -250,4 +257,7 @@ assert "identity_status=resolver-error" in mismatched_pr
 assert "merge_sha=\n" in mismatched_pr
 invalid_type = run_case("missing", "7", release_type="type:invalid")
 assert "identity_status=resolver-error" in invalid_type
+untrusted_marker = run_case("missing", "7", trusted_resolver=False)
+assert "identity_status=resolver-error" in untrusted_marker
+assert "version=\n" in untrusted_marker
 print("release failure resolver mock tests passed")

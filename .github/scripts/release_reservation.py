@@ -848,6 +848,11 @@ def verify_local_receipt(
     consumed_ref = receipt_ref("consumed", version, merge)
     bound_target = local_ref_target(bound_ref, cwd)
     consumed_target = local_ref_target(consumed_ref, cwd)
+    if state in {"bound", "consumed"}:
+        verify_local_merge_identity(
+            merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
+            channel=reservation["channel"], reservation=reservation, cwd=cwd,
+        )
     if state == "bound":
         verify_local_decision_state(state="bound", merge_sha=merge, reservation=reservation, cwd=cwd)
     elif state == "consumed":
@@ -886,6 +891,11 @@ def verify_github_receipt(
     consumed_ref = receipt_ref("consumed", version, merge)
     bound_target = client.ref_target(bound_ref)
     consumed_target = client.ref_target(consumed_ref)
+    if state in {"bound", "consumed"}:
+        verify_github_merge_identity(
+            client=client, merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
+            channel=reservation["channel"], reservation=reservation,
+        )
     if state == "bound":
         verify_github_decision_state(state="bound", merge_sha=merge, reservation=reservation, client=client)
     elif state == "consumed":

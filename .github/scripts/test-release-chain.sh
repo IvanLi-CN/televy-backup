@@ -23,7 +23,18 @@ for key, value in (("user.name", "fixture"), ("user.email", "fixture@example.com
 subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
 subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture source"], check=True)
 source = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-subprocess.run(["git", "-C", str(repo), "tag", "v0.9.3", source], check=True)
+
+def product_tag(name: str, target: str) -> None:
+    subprocess.run(
+        [
+            "git", "-C", str(repo), "-c", "user.name=github-actions[bot]",
+            "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+            "tag", "-a", "-m", name, name, target,
+        ],
+        check=True,
+    )
+
+product_tag("v0.9.3", source)
 
 spec = importlib.util.spec_from_file_location("release_chain", root / ".github/scripts/release_chain.py")
 assert spec and spec.loader
@@ -81,12 +92,12 @@ def assert_sequence_rejected(version: str, expected: str, marker: str) -> None:
     else:
         raise AssertionError(f"{version} unexpectedly passed sequence validation")
 
-chain.git("tag", "v0.9.7", source)
+product_tag("v0.9.7", source)
 assert_sequence_rejected("0.9.4", source, "superseded_by_product_tag")
 matching = chain.verify_release_sequence("0.9.7", source)
 assert matching["status"] == "matching"
 
-chain.git("tag", "v0.9.8-rc.2", source)
+product_tag("v0.9.8-rc.2", source)
 assert chain.verify_release_sequence("0.9.8-rc.1", source)["status"] == "available"
 claim_key = "occupied-rc-claim"
 generated = reservation.deterministic_identity("fixture", claim_key)
@@ -112,9 +123,9 @@ except chain.ReleaseChainError as error:
 else:
     raise AssertionError("occupied prod identity unexpectedly allocated a successor")
 assert chain.verify_release_sequence("0.9.8", source)["status"] == "available"
-chain.git("tag", "v0.9.8", source)
+product_tag("v0.9.8", source)
 assert_sequence_rejected("0.9.8", chain.git("rev-parse", "HEAD"), "product_tag_conflict")
-chain.git("tag", "v0.9.9-beta", source)
+product_tag("v0.9.9-beta", source)
 assert all(item["tag"] != "v0.9.9-beta" for item in chain.product_tags())
 
 (repo / "README").write_text("invalid\n", encoding="utf-8")

@@ -61,15 +61,27 @@ jobs:
       boundary_token: ${{ steps.release.outputs.boundary_token }}
       release_type: ${{ steps.release.outputs.release_type }}
       covered_merge_sha: ${{ steps.release.outputs.covered_merge_sha }}
+      bound_identity: ${{ steps.release.outputs.bound_identity }}
       pull_request: ${{ steps.release.outputs.pull_request }}
       helper_source_tag: ${{ steps.release.outputs.helper_source_tag }}
       helper_source_commit: ${{ steps.release.outputs.helper_source_commit }}
       helper_source_artifact_digest: ${{ steps.upload-helper-source.outputs.artifact-digest }}
     steps:
+      - name: Resolve current trusted main SHA
+        id: trusted-main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${main_sha}" =~ ^[0-9a-fA-F]{40}$ ]]
+          echo "sha=${main_sha}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout main history
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ steps.trusted-main.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -111,6 +123,7 @@ jobs:
               echo "identity_status=no-identity"
               echo "source_sha=${TARGET_INPUT}"
               echo "merge_sha=${TARGET_INPUT}"
+              echo "bound_identity=missing"
               echo "reason=$(printf '%s' "${prepared_json}" | jq -r '.reason // "no_identity"')"
             } >> "$GITHUB_OUTPUT"
             echo "RELEASE_NO_IDENTITY=${TARGET_INPUT}"
@@ -165,16 +178,66 @@ jobs:
             auto|bootstrap) ;;
             *) echo "invalid helper mode: ${HELPER_MODE}" >&2; exit 1 ;;
           esac
-          sequence_json="$(python3 .github/scripts/release_chain.py verify-release-sequence --version "${version}" --expected-sha "${merge_sha}")"
-          tag_status="$(printf '%s' "${sequence_json}" | jq -r .status)"
+
+          bound_state=missing
+          bound_ref="refs/tags/release-bound/v${version}/${merge_sha}"
+          bound_ref_path="${bound_ref#refs/}"
+          bound_output=""
+          if bound_output="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/${bound_ref_path}" --jq '.object.sha' 2>&1)"; then
+            if [[ ! "${bound_output}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "release_state_conflict: bound receipt target is not a full commit SHA" >&2
+              exit 1
+            fi
+            python3 - "${version}" "${merge_sha}" "${reservation_id}" "${reservation_owner}" \
+              "${claim_key}" "${boundary_token}" "${reservation_ref}" "${GITHUB_REPOSITORY}" \
+              "${GH_TOKEN}" "${GITHUB_API_URL}" <<'PY'
+          import sys
+          sys.path.insert(0, '.github/scripts')
+          import release_reservation
+          release_reservation.verify_github_receipt(
+              state='bound', version=sys.argv[1], merge_sha=sys.argv[2], reservation_id=sys.argv[3],
+              owner=sys.argv[4], claim_key=sys.argv[5], boundary_token=sys.argv[6],
+              reservation_ref_value=sys.argv[7], repository=sys.argv[8], token=sys.argv[9], api_root=sys.argv[10],
+          )
+          PY
+            bound_state=present
+          else
+            if ! printf '%s' "${bound_output}" | grep -qiE '404|not found'; then
+              printf '%s\n' "${bound_output}" >&2
+              echo "release_state_conflict: unable to resolve bound receipt state" >&2
+              exit 1
+            fi
+          fi
+
+          if [[ "${bound_state}" == present ]]; then
+            # A same-SHA recovery reuses its already-bound identity and must not
+            # be rejected because a newer product tag now exists.
+            tag_status=matching
+          else
+            sequence_json="$(python3 .github/scripts/release_chain.py verify-release-sequence --version "${version}" --expected-sha "${merge_sha}")"
+            tag_status="$(printf '%s' "${sequence_json}" | jq -r .status)"
+          fi
           release_state=missing
           release_output=""
-          if release_output="$(gh release view "${tag}" --json isDraft 2>&1)"; then
+          if release_output="$(gh release view "${tag}" --json isDraft,isPrerelease,isLatest 2>&1)"; then
             if [[ "${tag_status}" != matching ]]; then
               echo "release_state_conflict: Release exists without a matching product tag" >&2
               exit 1
             fi
             is_draft="$(printf '%s' "${release_output}" | jq -r '.isDraft | tostring')"
+            is_prerelease="$(printf '%s' "${release_output}" | jq -r '.isPrerelease | tostring')"
+            is_latest="$(printf '%s' "${release_output}" | jq -r '.isLatest | tostring')"
+            expected_prerelease=false
+            expected_latest=false
+            if [[ "${channel}" != prod ]]; then
+              expected_prerelease=true
+            elif [[ "${is_draft}" == false ]]; then
+              expected_latest=true
+            fi
+            if [[ "${is_prerelease}" != "${expected_prerelease}" || "${is_latest}" != "${expected_latest}" ]]; then
+              echo "release_state_conflict: GitHub Release channel flags do not match ${channel}" >&2
+              exit 1
+            fi
             case "${is_draft}" in
               true) release_state=draft ;;
               false) release_state=published ;;
@@ -372,6 +435,7 @@ jobs:
             echo "boundary_token=${boundary_token}"
             echo "release_type=${release_type}"
             echo "covered_merge_sha=${covered_merge_sha}"
+            echo "bound_identity=${bound_state}"
             echo "pull_request=${pull_request}"
             echo "helper_source_tag=${helper_source_tag}"
             echo "helper_source_commit=${helper_source_commit}"
@@ -727,6 +791,7 @@ jobs:
       RESERVATION_OWNER: ${{ needs.resolve.outputs.reservation_owner }}
       CLAIM_KEY: ${{ needs.resolve.outputs.claim_key }}
       BOUNDARY_TOKEN: ${{ needs.resolve.outputs.boundary_token }}
+      BOUND_IDENTITY: ${{ needs.resolve.outputs.bound_identity }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -744,23 +809,42 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force origin main '+refs/tags/*:refs/tags/*'
-          python3 .github/scripts/release_chain.py verify-release-sequence --version "${PRODUCT_VERSION}" --expected-sha "${RELEASE_SHA}"
+          if [[ "${BOUND_IDENTITY}" != present ]]; then
+            python3 .github/scripts/release_chain.py verify-release-sequence --version "${PRODUCT_VERSION}" --expected-sha "${RELEASE_SHA}"
+          fi
           tag_json="$(python3 .github/scripts/release_chain.py verify-tag --version "${PRODUCT_VERSION}" --expected-sha "${RELEASE_SHA}" --allow-existing)"
           status="$(printf '%s' "${tag_json}" | jq -r .status)"
           if [[ "${status}" == available ]]; then
+            tag_object_sha="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
+              -f tag="${PRODUCT_TAG}" -f message="${PRODUCT_TAG}" \
+              -f object="${RELEASE_SHA}" -f type=commit --jq '.sha')"
             if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/${PRODUCT_TAG}" -f sha="${RELEASE_SHA}" >/dev/null; then
+              -f ref="refs/tags/${PRODUCT_TAG}" -f sha="${tag_object_sha}" >/dev/null; then
               git fetch --force origin "refs/tags/${PRODUCT_TAG}:refs/tags/${PRODUCT_TAG}"
             fi
           fi
+          git fetch --force origin "refs/tags/${PRODUCT_TAG}:refs/tags/${PRODUCT_TAG}"
           python3 .github/scripts/release_chain.py verify-tag --version "${PRODUCT_VERSION}" --expected-sha "${RELEASE_SHA}" --allow-existing
       - name: Create or update GitHub Release
         run: |
           set -euo pipefail
           runtime_state="${RELEASE_STATE}"
           release_output=""
-          if release_output="$(gh release view "${PRODUCT_TAG}" --json isDraft 2>&1)"; then
+          if release_output="$(gh release view "${PRODUCT_TAG}" --json isDraft,isPrerelease,isLatest 2>&1)"; then
             is_draft="$(printf '%s' "${release_output}" | jq -r '.isDraft | tostring')"
+            is_prerelease="$(printf '%s' "${release_output}" | jq -r '.isPrerelease | tostring')"
+            is_latest="$(printf '%s' "${release_output}" | jq -r '.isLatest | tostring')"
+            expected_prerelease=false
+            expected_latest=false
+            if [[ "${PRODUCT_CHANNEL}" != prod ]]; then
+              expected_prerelease=true
+            elif [[ "${is_draft}" == false ]]; then
+              expected_latest=true
+            fi
+            if [[ "${is_prerelease}" != "${expected_prerelease}" || "${is_latest}" != "${expected_latest}" ]]; then
+              echo "release_state_conflict: GitHub Release channel flags do not match ${PRODUCT_CHANNEL}" >&2
+              exit 1
+            fi
             case "${is_draft}" in
               true) runtime_state=draft ;;
               false) runtime_state=published ;;
@@ -781,7 +865,11 @@ jobs:
             ((${#release_files[@]} > 0))
             if [[ "${runtime_state}" == draft ]]; then
               gh release upload "${PRODUCT_TAG}" "${release_files[@]}" --clobber
-              gh release edit "${PRODUCT_TAG}" --draft=false
+              if [[ "${PRODUCT_CHANNEL}" == prod ]]; then
+                gh release edit "${PRODUCT_TAG}" --draft=false --latest=true
+              else
+                gh release edit "${PRODUCT_TAG}" --draft=false --prerelease --latest=false
+              fi
             else
               test "${runtime_state}" = missing
               flags=(--verify-tag --title "${PRODUCT_TAG}" --generate-notes)
