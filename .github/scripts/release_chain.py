@@ -332,9 +332,11 @@ def product_tags() -> list[dict[str, str]]:
         if match is None:
             continue
         version = match.group("version")
-        target = tag_target(tag) or ""
-        if not target or not is_ancestor(target, mainline):
-            continue
+        target = tag_target(tag)
+        if not target:
+            raise ReleaseChainError(f"product tag {tag} has no commit target")
+        if not is_ancestor(target, mainline):
+            raise ReleaseChainError(f"product tag {tag} targets an unreachable commit")
         provenance = verify_product_tag_provenance(tag)
         values.append({"tag": tag, "version": version, "target": target, **provenance})
     return values

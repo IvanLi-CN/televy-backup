@@ -91,7 +91,9 @@ scripts, while packaging and publication remain bound to the recovered merge ide
 
 Each resolved run writes and uploads `release-intent.json` containing PR/source/merge SHA, mode,
 covered merge, type/channel/version/tag, helper source mode/tag, all reservation fields, provenance,
-artifact names, run URL and recovery instruction. Reused helper resolution also uploads the exact
+artifact names, `run_id`, `run_attempt`, run URL and recovery instruction. The failure notifier accepts
+the snapshot only when both run fields match the failed `Release Product` workflow attempt; otherwise
+it fails closed and reconstructs only from immutable repository facts. Reused helper resolution also uploads the exact
 Universal DMG, `BUILD-MANIFEST.json`, and `SHA256SUMS` as the immutable `snapshot-helper-source`
 workflow artifact consumed by every macOS build/assembly job. It is an Actions artifact snapshot, not
 product code and not the only fact source. Recovery reconstructs identity from immutable Git refs,
@@ -152,6 +154,7 @@ generation.
 - `.github/scripts/test-release-preparation.sh`
 - `.github/scripts/test-release-completion.sh`
 - `.github/scripts/test-release-workflows.sh`
+- `.github/scripts/test-release-workflow-execution.sh`
 - `.github/scripts/test-release-helper.sh`
 - `.github/scripts/test-package-scripts.sh`
 - `.github/quality-gates.json`

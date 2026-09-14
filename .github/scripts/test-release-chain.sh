@@ -128,6 +128,22 @@ assert_sequence_rejected("0.9.8", chain.git("rev-parse", "HEAD"), "product_tag_c
 product_tag("v0.9.9-beta", source)
 assert all(item["tag"] != "v0.9.9-beta" for item in chain.product_tags())
 
+# A matching product tag outside mainline cannot be ignored: doing so would
+# let final-tag-first allocation reuse an identity that already exists.
+subprocess.run(["git", "-C", str(repo), "switch", "-q", "-c", "foreign"], check=True)
+(repo / "foreign").write_text("foreign\n", encoding="utf-8")
+subprocess.run(["git", "-C", str(repo), "add", "foreign"], check=True)
+subprocess.run(["git", "-C", str(repo), "commit", "-qm", "foreign product boundary"], check=True)
+foreign_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+product_tag("v9.9.9", foreign_sha)
+subprocess.run(["git", "-C", str(repo), "switch", "-q", "-"] , check=True)
+try:
+    chain.product_tags()
+except chain.ReleaseChainError as error:
+    assert "unreachable commit" in str(error)
+else:
+    raise AssertionError("unreachable product tag was silently ignored")
+
 (repo / "README").write_text("invalid\n", encoding="utf-8")
 subprocess.run(["git", "-C", str(repo), "add", "README"], check=True)
 subprocess.run(["git", "-C", str(repo), "commit", "-qm", "invalid extra file"], check=True)

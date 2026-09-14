@@ -146,8 +146,10 @@ assert_not_contains "prepared-head gates use mutable PR workflow" "$preparation_
 assert_contains "existing preparation verification source" "$preparation_text" 'SOURCE_SHA: ${{ steps.prepare.outputs.source_sha }}'
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'
 release = YAML.load_file(ARGV.fetch(0))
+abort "release workflow default permissions are not read-only" unless release.fetch("permissions") == {"contents" => "read", "pull-requests" => "read"}
+resolve_permissions = release.fetch("jobs").fetch("resolve").fetch("permissions")
+abort "release resolver must be able to read PR metadata" unless resolve_permissions == {"contents" => "write", "pull-requests" => "read"}
 expected_permissions = {"contents" => "write"}
-abort "release workflow permissions are broader than contents: write" unless release.fetch("permissions") == expected_permissions
 abort "publish job permissions are broader than contents: write" unless release.fetch("jobs").fetch("publish").fetch("permissions") == expected_permissions
 
 notify = YAML.load_file(ARGV.fetch(1))
@@ -170,3 +172,4 @@ assert_contains "release owner confirmation boundary" "$quality_gates_text" "Suc
 release_spec_text="$(<"$root_dir/docs/specs/product-version-release-chain/SPEC.md")"
 assert_contains "release spec owner confirmation boundary" "$release_spec_text" "The release-owning agent MUST report successful publication directly to the owner, and Release Product MUST NOT create or update a result comment on the source PR."
 echo "release workflow contract tests passed"
+bash "$root_dir/.github/scripts/test-release-workflow-execution.sh"

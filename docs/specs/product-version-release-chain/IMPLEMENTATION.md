@@ -15,6 +15,11 @@
 | Failure context delivery | `.github/workflows/notify-release-failure.yml` |
 | Required-check declaration | `.github/quality-gates.json`, `docs/quality-gates.md` |
 
+The failure resolver is bound to the exact `Release Product` workflow attempt and verifies
+annotated product-tag tagger provenance before exposing a recovery candidate. The publish tag,
+channel, and terminal published-release paths are exercised from the checked-in workflow `run`
+blocks with a local Git/API fixture.
+
 ## Identity flow
 
 1. Label Gate validates one product type and one new channel, or channel-free docs/skip.

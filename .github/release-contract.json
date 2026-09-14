@@ -92,6 +92,11 @@
     "draft": "build-upload-and-publish",
     "published": "idempotent-success-without-build-or-overwrite"
   },
+  "intent_snapshot": {
+    "artifact_policy": "snapshot-only; immutable refs and trailers remain authoritative",
+    "run_binding": ["run_id", "run_attempt"],
+    "notifier_acceptance": "artifact run_id and run_attempt must match the failed Release Product workflow run"
+  },
   "helper_bootstrap": {
     "resolver": "published-prerelease-release-plus-verified-build-manifest",
     "candidate_order": [

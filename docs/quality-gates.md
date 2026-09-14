@@ -20,7 +20,9 @@ product tags are protected annotated tags created by `github-actions[bot]` and r
 allocated only within their base/channel. Reservation, bound, and consumed refs are append-only;
 any provenance or ownership conflict fails before packaging. A matching published Release is
 terminal and is not rebuilt or overwritten. Failure alerts use `recovery_candidate` only after a
-complete merged identity is rechecked.
+complete merged identity is rechecked. The intent artifact is also bound to the exact failed
+`Release Product` run attempt; a prior attempt's snapshot or resolver job cannot supply notification
+identity.
 
 ## Release checks
 
@@ -59,4 +61,6 @@ remain an explicit blocker.
 
 ## Local verification
 
-Run `bash .github/scripts/test-release-scripts.sh`, the focused release fixture scripts, `bash .github/scripts/test-package-scripts.sh`, and the Rust checks before opening a PR. Hosted macOS jobs remain authoritative for Swift and native packaging.
+Run `bash .github/scripts/test-release-scripts.sh`, the focused release fixture scripts including
+`test-release-workflow-execution.sh`, `bash .github/scripts/test-package-scripts.sh`, and the Rust
+checks before opening a PR. Hosted macOS jobs remain authoritative for Swift and native packaging.

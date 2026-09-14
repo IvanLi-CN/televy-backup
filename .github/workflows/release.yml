@@ -29,12 +29,16 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
+  pull-requests: read
 
 jobs:
   resolve:
     name: Resolve merged product identity
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
     outputs:
       enabled: ${{ steps.release.outputs.enabled }}
       identity_status: ${{ steps.release.outputs.identity_status }}
@@ -482,13 +486,13 @@ jobs:
             --arg source_sha "${SOURCE_SHA}" --arg merge_sha "${MERGE_SHA}" --arg version "${VERSION}" \
             --arg channel "${CHANNEL}" --arg mode "${RELEASE_MODE}" --arg reservation_id "${RESERVATION_ID}" \
             --arg reservation_ref "${RESERVATION_REF}" --arg owner "${OWNER}" --arg claim_key "${CLAIM_KEY}" \
-            --arg boundary_token "${BOUNDARY_TOKEN}" --arg run_url "${RUN_URL}" --arg release_type "${RELEASE_TYPE}" \
+            --arg boundary_token "${BOUNDARY_TOKEN}" --arg run_url "${RUN_URL}" --arg run_id "${GITHUB_RUN_ID}" --arg run_attempt "${GITHUB_RUN_ATTEMPT}" --arg release_type "${RELEASE_TYPE}" \
             --arg preparation_sha "${PREPARATION_SHA}" --arg covered_merge_sha "${COVERED_MERGE_SHA}" --arg pull_request "${PULL_REQUEST}" \
             --arg head_sha "${HEAD_SHA}" --argjson labels "${LABELS_JSON}" --argjson components "${COMPONENTS_JSON}" \
             --arg tag_owner "protected-release-automation" \
             --arg helper_source_mode "${HELPER_SOURCE_MODE}" --arg helper_source_tag "${HELPER_SOURCE_TAG}" \
             --arg helper_source_commit "${HELPER_SOURCE_COMMIT}" --arg helper_source_artifact_digest "${HELPER_SOURCE_ARTIFACT_DIGEST}" \
-            '{schema_version:1,pull_request:$pull_request,source_sha:$source_sha,merge_sha:$merge_sha,merge_commit_sha:$merge_sha,head_sha:$head_sha,branch_head:$merge_sha,release_mode:$mode,preparation_commit_sha:$preparation_sha,covered_merge_sha:$covered_merge_sha,labels:$labels,type:$release_type,channel:$channel,components:$components,version:$version,tag:("v"+$version),tag_target_sha:$merge_sha,tag_owner:$tag_owner,helper:{mode:$helper_source_mode,source_tag:$helper_source_tag,source_commit:$helper_source_commit,artifact_digest:$helper_source_artifact_digest},reservation:{id:$reservation_id,ref:$reservation_ref,owner:$owner,claim_key:$claim_key,boundary_token:$boundary_token,state:"bound",merge_commit_sha:$merge_sha},provenance:{signature:"github-native-verified",signature_verified:true,provenance_verified:true,tag_owner:$tag_owner,identity:"release_chain_and_reservation_refs"},artifact_names:(if $helper_source_mode == "reuse" then ["snapshot-helper-source","release-package-arm64","release-package-x86_64","release-assets"] else ["release-package-arm64","release-package-x86_64","release-assets"] end),run_url:$run_url,recovery_instruction:("workflow_dispatch operation=recover commit_sha="+$merge_sha+" helper_mode=bootstrap only when no-approved-helper-release")}' \
+            '{schema_version:1,pull_request:$pull_request,source_sha:$source_sha,merge_sha:$merge_sha,merge_commit_sha:$merge_sha,head_sha:$head_sha,branch_head:$merge_sha,release_mode:$mode,preparation_commit_sha:$preparation_sha,covered_merge_sha:$covered_merge_sha,labels:$labels,type:$release_type,channel:$channel,components:$components,version:$version,tag:("v"+$version),tag_target_sha:$merge_sha,tag_owner:$tag_owner,helper:{mode:$helper_source_mode,source_tag:$helper_source_tag,source_commit:$helper_source_commit,artifact_digest:$helper_source_artifact_digest},reservation:{id:$reservation_id,ref:$reservation_ref,owner:$owner,claim_key:$claim_key,boundary_token:$boundary_token,state:"bound",merge_commit_sha:$merge_sha},provenance:{signature:"github-native-verified",signature_verified:true,provenance_verified:true,tag_owner:$tag_owner,identity:"release_chain_and_reservation_refs"},artifact_names:(if $helper_source_mode == "reuse" then ["snapshot-helper-source","release-package-arm64","release-package-x86_64","release-assets"] else ["release-package-arm64","release-package-x86_64","release-assets"] end),run_id:$run_id,run_attempt:$run_attempt,run_url:$run_url,recovery_instruction:("workflow_dispatch operation=recover commit_sha="+$merge_sha+" helper_mode=bootstrap only when no-approved-helper-release")}' \
             > release-intent.json
 
       - name: Upload locked release intent

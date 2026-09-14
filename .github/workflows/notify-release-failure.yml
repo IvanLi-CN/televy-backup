@@ -113,7 +113,7 @@ jobs:
           def api_text(path: str) -> str:
               return api_request(path).decode('utf-8', errors='replace')
 
-          def load_release_intent() -> dict:
+          def load_release_intent() -> dict | None:
               try:
                   payload = api_json(f'/repos/{repository}/actions/runs/{run_id}/artifacts?name=release-intent&per_page=100')
               except error.HTTPError as exc:
@@ -131,6 +131,8 @@ jobs:
                   value = json.loads(bundle.read(member).decode('utf-8'))
               if not isinstance(value, dict):
                   raise RuntimeError('release-intent.json is not an object')
+              if str(value.get('run_id', '')).strip() != run_id or str(value.get('run_attempt', '')).strip() != run_attempt:
+                  raise RuntimeError('release-intent artifact belongs to a different workflow attempt')
               return value
 
           def reconstruct_intent(merge_sha: str) -> dict:
@@ -193,6 +195,8 @@ jobs:
                       'identity': 'release_chain_and_reservation_refs',
                   },
                   'artifact_names': ['reconstructed-from-immutable-refs'],
+                  'run_id': run_id,
+                  'run_attempt': run_attempt,
                   'run_url': f'{os.environ.get("GITHUB_SERVER_URL", "https://github.com")}/{repository}/actions/runs/{run_id}',
                   'recovery_instruction': f'workflow_dispatch operation=recover commit_sha={merge_sha} helper_mode=bootstrap only when no-approved-helper-release',
               }
@@ -335,19 +339,25 @@ jobs:
               if not isinstance(tag_object, dict):
                   raise RuntimeError('product tag object is incomplete')
               target = require_sha(tag_object.get('sha'), 'product tag target')
-              if tag_object.get('type') == 'tag':
-                  annotated = api_json(f'/repos/{repository}/git/tags/{target}')
-                  annotated_object = annotated.get('object')
-                  if not isinstance(annotated_object, dict):
-                      raise RuntimeError('annotated product tag target is incomplete')
-                  target = require_sha(annotated_object.get('sha'), 'annotated product tag target')
+              if tag_object.get('type') != 'tag':
+                  raise RuntimeError('product tag is not an annotated tag')
+              annotated = api_json(f'/repos/{repository}/git/tags/{target}')
+              if annotated.get('tag') != tag_name:
+                  raise RuntimeError('annotated product tag name does not match the product tag')
+              tagger = annotated.get('tagger')
+              if not isinstance(tagger, dict) or tagger.get('name') != 'github-actions[bot]' or tagger.get('email') != '41898282+github-actions[bot]@users.noreply.github.com':
+                  raise RuntimeError('product tag tagger is not protected release automation')
+              annotated_object = annotated.get('object')
+              if not isinstance(annotated_object, dict) or annotated_object.get('type') != 'commit':
+                  raise RuntimeError('annotated product tag target is incomplete')
+              target = require_sha(annotated_object.get('sha'), 'annotated product tag target')
               return target
 
           def validate_intent(intent: dict) -> dict[str, str]:
               sha_re = re.compile(r'^[0-9a-f]{40}$')
               provenance = intent.get('provenance')
               artifacts = intent.get('artifact_names')
-              required = ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'head_sha', 'branch_head', 'release_mode', 'type', 'channel', 'version', 'tag', 'tag_owner', 'run_url', 'recovery_instruction')
+              required = ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'head_sha', 'branch_head', 'release_mode', 'type', 'channel', 'version', 'tag', 'tag_owner', 'run_id', 'run_attempt', 'run_url', 'recovery_instruction')
               if any(not str(intent.get(key, '')).strip() for key in required):
                   raise RuntimeError('release intent is incomplete')
               labels = intent.get('labels')
@@ -393,8 +403,12 @@ jobs:
               tag_status = 'present' if tag_target_sha is not None else 'not-created'
               if not isinstance(provenance, dict) or provenance.get('identity') != 'release_chain_and_reservation_refs' or provenance.get('tag_owner') != intent['tag_owner']:
                   raise RuntimeError('release intent provenance identity is not recognized')
-              if merge_sha not in str(intent['recovery_instruction']):
-                  raise RuntimeError('release recovery instruction is not bound to the merge SHA')
+              recovery_match = re.fullmatch(
+                  r'workflow_dispatch operation=recover commit_sha=([0-9a-f]{40}) helper_mode=(auto|bootstrap)(?: only when no-approved-helper-release)?',
+                  str(intent['recovery_instruction']),
+              )
+              if not recovery_match or recovery_match.group(1) != merge_sha:
+                  raise RuntimeError('release recovery instruction is not canonical for the release identity')
               return {
                   'pull_request': resolve_pull_request(merge_sha, intent.get('pull_request'), preparation_sha),
                   'source_sha': source_sha,
@@ -422,36 +436,48 @@ jobs:
               }
 
           jobs = []
-          paths = [f'/repos/{repository}/actions/runs/{run_id}/jobs?per_page=100']
-          if run_attempt:
-              paths.insert(0, f'/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page=100')
-          for path in paths:
-              try:
-                  jobs = api_json(path).get('jobs', [])
-                  break
-              except Exception:
-                  continue
+          resolver_error = ''
+          try:
+              if run_attempt:
+                  jobs = api_json(f'/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page=100').get('jobs', [])
+              else:
+                  jobs = api_json(f'/repos/{repository}/actions/runs/{run_id}/jobs?per_page=100').get('jobs', [])
+          except Exception as exc:
+              resolver_error = f'Unable to resolve the exact workflow attempt jobs: {exc}'
 
           resolver_jobs = [
               job for job in jobs
               if isinstance(job, dict)
               and job.get('name') == 'Resolve merged product identity'
-              and (not job.get('workflow_name') or job.get('workflow_name') == 'Release Product')
-              and (not job.get('head_sha') or job.get('head_sha') == fallback_head_sha)
+              and job.get('workflow_name') == 'Release Product'
+              and job.get('head_sha') == fallback_head_sha
+              and (not run_attempt or job.get('run_attempt') == int(run_attempt))
           ]
           logs = []
-          if len(resolver_jobs) == 1 and isinstance(resolver_jobs[0].get('id'), int):
+          if resolver_error:
+              logs_error = resolver_error
+          elif len(resolver_jobs) == 1 and isinstance(resolver_jobs[0].get('id'), int):
               try:
                   logs.append(api_text(f"/repos/{repository}/actions/jobs/{resolver_jobs[0]['id']}/logs"))
-              except Exception:
-                  pass
+                  logs_error = ''
+              except Exception as exc:
+                  logs_error = f'Unable to resolve the trusted resolver job log: {exc}'
+          else:
+              logs_error = ''
           text = '\n'.join(logs)
           resolved = re.search(
               r'RELEASE_IDENTITY status=resolved version=(\S+) channel=(\S+) merge_sha=([0-9a-f]{40}) tag=(\S+)', text
           )
           no_identity = re.search(r'RELEASE_NO_IDENTITY=([0-9a-f]{40})', text)
           identity = {}
-          if resolved:
+          if logs_error:
+              identity_status = 'resolver-error'
+              merge_sha = version = channel = tag = ''
+              merge_commit_sha = preparation_commit_sha = ''
+              tag_status = ''
+              recovery = ''
+              extra = logs_error
+          elif resolved:
               try:
                   expected_version, expected_channel, expected_merge_sha, expected_tag = resolved.groups()
                   snapshot = load_release_intent()
