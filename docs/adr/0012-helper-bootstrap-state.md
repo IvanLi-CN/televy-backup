@@ -12,7 +12,18 @@ Product first resolves a published prerelease Release whose Universal DMG, `BUIL
 `SHA256SUMS`, component metadata, SHA-256, CodeDirectory hash, and designated requirement match
 the checked-in component lock. It prefers the current product RC1, then the locked bootstrap tag,
 then discovers other published prerelease Releases. A missing or stale preferred tag does not
-change the product version or allocate a successor.
+change the product version or allocate a successor. Any unavailable, incomplete, or invalid
+candidate is skipped so that the next candidate can be proven.
+
+The resolve job downloads the selected candidate's Universal DMG, manifest, and checksums, verifies
+their tag-bound source commit and digest relationships, and uploads the exact files as the immutable
+`snapshot-helper-source` workflow artifact. The native build and assembly jobs consume that artifact
+and do not download helper assets from the Release again. macOS jobs then extract the artifact and
+compare the embedded bundle identity with its manifest.
+
+An already published product Release or an independently verified consumed receipt is terminal before
+helper resolution. Such a run may verify or append the consumed receipt, but it must not enter the
+helper build or package jobs.
 
 When no approved helper Release can be proven, only an explicit same-SHA recovery dispatched with
 `helper_mode=bootstrap` may perform the one-time Universal helper build. The resulting release

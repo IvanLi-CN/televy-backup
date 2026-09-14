@@ -31,9 +31,14 @@ reservation provenance, and the explicit version-only release PR mode.
 
 Release Product resolves Snapshot Access helper state separately from the product RC ordinal. It
 reuses only a published prerelease Release whose Universal artifact, manifest, checksums, and helper
-identity match the component lock. If no approved helper Release exists, a same-SHA recovery must
+identity match the component lock. The resolve job binds the exact Universal DMG, manifest, and
+checksums into the immutable `snapshot-helper-source` workflow artifact; native build and assembly
+jobs consume that artifact and never redownload helper assets from the Release. Invalid candidates
+fall back to the next candidate. If no approved helper Release exists, a same-SHA recovery must
 explicitly set `helper_mode=bootstrap`; the resulting bootstrap preserves the existing reservation
-and merge identity. The package-ci development artifact is not an approved Release source.
+and merge identity. A published product Release or consumed receipt is terminal before helper
+resolution and never re-enters packaging. The package-ci development artifact is not an approved
+Release source.
 
 After a normal merge, `Release Product` reads only the committed merged identity and its reservation
 ref. Its manual entry is restricted to same-identity `recover`. Successful publication is reported

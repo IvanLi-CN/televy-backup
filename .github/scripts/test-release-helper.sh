@@ -5,8 +5,10 @@ root_dir="$(git rev-parse --show-toplevel)"
 
 python3 - "$root_dir" <<'PY'
 import importlib.util
+import hashlib
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 root = Path(sys.argv[1])
@@ -76,5 +78,50 @@ except helper.HelperResolutionError:
     pass
 else:
     raise AssertionError("invalid helper CodeDirectory identity was accepted")
+
+with tempfile.TemporaryDirectory() as directory:
+    asset_dir = Path(directory)
+    source_tag = "v0.9.7-rc.2"
+    source_commit = "d" * 40
+    dmg_name = f"TelevyBackup-{source_tag[1:]}.dmg"
+    dmg_bytes = b"universal helper dmg fixture\n"
+    dmg_digest = hashlib.sha256(dmg_bytes).hexdigest()
+    extra_name = "televybackup-tools-0.9.7-rc.2-x86_64.tar.gz"
+    extra_digest = "b" * 64
+    source_manifest = {
+        "product": "TelevyBackup",
+        "signing": "ad-hoc",
+        "release_version": source_tag[1:],
+        "source_commit": source_commit,
+        "components": {"snapshot_access": {
+            "bundle_id": lock["components"]["snapshot_access"]["bundle_id"],
+            "relative_path": lock["components"]["snapshot_access"]["relative_path"],
+            "binary": lock["components"]["snapshot_access"]["binary"],
+            "component_version": lock["components"]["snapshot_access"]["component_version"],
+            "protocol_version": lock["components"]["snapshot_access"]["protocol_version"],
+            "reuse_policy": lock["components"]["snapshot_access"]["reuse_policy"],
+            **identity,
+        }},
+        "assets": [
+            {"name": dmg_name, "sha256": dmg_digest, "bytes": len(dmg_bytes)},
+            {"name": extra_name, "sha256": extra_digest, "bytes": 3},
+        ],
+    }
+    (asset_dir / dmg_name).write_bytes(dmg_bytes)
+    (asset_dir / "BUILD-MANIFEST.json").write_text(json.dumps(source_manifest), encoding="utf-8")
+    (asset_dir / "SHA256SUMS").write_text(
+        f"{dmg_digest}  {dmg_name}\n{extra_digest}  {extra_name}\n", encoding="utf-8"
+    )
+    verified = helper.verify_source_assets(str(asset_dir), lock, source_tag, source_commit)
+    assert verified["source_tag"] == source_tag
+    assert verified["source_commit"] == source_commit
+    assert verified["dmg_sha256"] == dmg_digest
+    (asset_dir / dmg_name).write_bytes(b"tampered helper dmg fixture\n")
+    try:
+        helper.verify_source_assets(str(asset_dir), lock, source_tag, source_commit)
+    except helper.HelperResolutionError:
+        pass
+    else:
+        raise AssertionError("tampered helper Universal DMG was accepted")
 print("release helper resolver fixture tests passed")
 PY

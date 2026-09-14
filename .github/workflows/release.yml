@@ -57,6 +57,8 @@ jobs:
       covered_merge_sha: ${{ steps.release.outputs.covered_merge_sha }}
       pull_request: ${{ steps.release.outputs.pull_request }}
       helper_source_tag: ${{ steps.release.outputs.helper_source_tag }}
+      helper_source_commit: ${{ steps.release.outputs.helper_source_commit }}
+      helper_source_artifact_digest: ${{ steps.upload-helper-source.outputs.artifact-digest }}
     steps:
       - name: Checkout main history
         uses: actions/checkout@v4
@@ -141,113 +143,10 @@ jobs:
               api_root=__import__('os').environ.get('GITHUB_API_URL', 'https://api.github.com'),
           )
           PY
-          sequence_json="$(python3 .github/scripts/release_chain.py verify-release-sequence --version "${version}" --expected-sha "${merge_sha}")"
-          tag_status="$(printf '%s' "${sequence_json}" | jq -r .status)"
-          if [[ "${EVENT_NAME}" == workflow_dispatch ]]; then
-            python3 - "${version}" "${merge_sha}" "${reservation_id}" "${reservation_owner}" \
-              "${claim_key}" "${boundary_token}" "${reservation_ref}" "${GITHUB_REPOSITORY}" \
-              "${GH_TOKEN}" "${GITHUB_API_URL}" <<'PY'
-          import sys
-          sys.path.insert(0, '.github/scripts')
-          import release_reservation
-          release_reservation.verify_github_receipt(
-              state='bound', version=sys.argv[1], merge_sha=sys.argv[2], reservation_id=sys.argv[3],
-              owner=sys.argv[4], claim_key=sys.argv[5], boundary_token=sys.argv[6],
-              reservation_ref_value=sys.argv[7], repository=sys.argv[8], token=sys.argv[9], api_root=sys.argv[10],
-          )
-          PY
-          else
-            python3 .github/scripts/release_reservation.py receipt \
-              --state bound --version "${version}" --merge-sha "${merge_sha}" \
-              --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
-              --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
-              --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
-              --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
-          fi
           case "${HELPER_MODE}" in
             auto|bootstrap) ;;
             *) echo "invalid helper mode: ${HELPER_MODE}" >&2; exit 1 ;;
           esac
-          helper_source_tag=""
-          helper_source_mode=""
-          core_version="${version%%-*}"
-          current_rc1_tag="v${core_version}-rc.1"
-          bootstrap_helper_tag="$(python3 -c 'import json; print(json.load(open("packaging/macos/snapshot-components.lock.json", encoding="utf-8"))["bootstrap_release_tag"])')"
-          release_list_json="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft,isPrerelease,publishedAt)"
-          helper_candidates_json="$(printf '%s' "${release_list_json}" | python3 .github/scripts/release_helper.py candidates --version "${version}" --bootstrap-tag "${bootstrap_helper_tag}")"
-          source_manifest_dir="${RUNNER_TEMP}/snapshot-helper-source"
-          mkdir -p "${source_manifest_dir}"
-          while IFS= read -r candidate; do
-            [[ -n "${candidate}" ]] || continue
-            preferred_candidate=false
-            if [[ "${candidate}" == "${current_rc1_tag}" || "${candidate}" == "${bootstrap_helper_tag}" ]]; then
-              preferred_candidate=true
-            fi
-            source_release_json=""
-            if ! source_release_json="$(gh release view "${candidate}" --json isDraft,isPrerelease,assets 2>&1)"; then
-              if printf '%s' "${source_release_json}" | grep -qiE '404|not found'; then
-                echo "helper candidate is unavailable: ${candidate}"
-                continue
-              fi
-              printf '%s\n' "${source_release_json}" >&2
-              echo "unable to resolve helper candidate Release: ${candidate}" >&2
-              exit 1
-            fi
-            source_is_draft="$(printf '%s' "${source_release_json}" | jq -r '.isDraft | tostring')"
-            source_is_prerelease="$(printf '%s' "${source_release_json}" | jq -r '.isPrerelease | tostring')"
-            if [[ "${source_is_draft}" != false || "${source_is_prerelease}" != true ]]; then
-              if [[ "${preferred_candidate}" == true ]]; then
-                echo "preferred helper source must be a published prerelease: ${candidate}" >&2
-                exit 1
-              fi
-              echo "skipping non-approved helper candidate: ${candidate}"
-              continue
-            fi
-            helper_version="${candidate#v}"
-            missing_assets="$(printf '%s' "${source_release_json}" | python3 -c 'import json,sys; names={a["name"] for a in json.load(sys.stdin)["assets"]}; print("\n".join(name for name in sys.argv[1:] if name not in names))' "TelevyBackup-${helper_version}.dmg" "BUILD-MANIFEST.json" "SHA256SUMS")"
-            if [[ -n "${missing_assets}" ]]; then
-              if [[ "${preferred_candidate}" == true ]]; then
-                echo "preferred helper source is missing its Universal DMG, BUILD-MANIFEST.json, or SHA256SUMS: ${candidate}" >&2
-                exit 1
-              fi
-              echo "skipping helper candidate with incomplete assets: ${candidate}"
-              continue
-            fi
-            candidate_manifest_dir="${source_manifest_dir}/${helper_version}"
-            mkdir -p "${candidate_manifest_dir}"
-            gh release download "${candidate}" --repo "$GITHUB_REPOSITORY" --pattern "BUILD-MANIFEST.json" --dir "${candidate_manifest_dir}"
-            if ! python3 .github/scripts/release_helper.py verify-manifest \
-              --manifest "${candidate_manifest_dir}/BUILD-MANIFEST.json" \
-              --lock packaging/macos/snapshot-components.lock.json \
-              --source-tag "${candidate}"; then
-              if [[ "${preferred_candidate}" == true ]]; then
-                echo "preferred helper source manifest failed verification: ${candidate}" >&2
-                exit 1
-              fi
-              echo "skipping helper candidate with an incompatible manifest: ${candidate}"
-              continue
-            fi
-            helper_source_tag="${candidate}"
-            helper_source_mode="reuse"
-            echo "approved Snapshot Access helper source: ${helper_source_tag}"
-            break
-          done < <(printf '%s' "${helper_candidates_json}" | jq -r '.candidates[]')
-          if [[ -n "${helper_source_tag}" ]]; then
-            if [[ "${HELPER_MODE}" == bootstrap ]]; then
-              echo "approved helper Release exists; refusing one-time bootstrap: ${helper_source_tag}" >&2
-              exit 1
-            fi
-          elif [[ "${HELPER_MODE}" == bootstrap ]]; then
-            helper_source_mode="bootstrap"
-            echo "SNAPSHOT_ACCESS_HELPER_MODE=one-time-bootstrap version=${version} reason=no-approved-helper-release"
-          else
-            echo "no approved Snapshot Access helper Release; rerun same-SHA recovery with helper_mode=bootstrap" >&2
-            exit 1
-          fi
-          if [[ "${channel}" == prod && "${helper_source_mode}" == bootstrap ]]; then
-            echo "stable release requires a previously published RC Universal Snapshot Access helper" >&2
-            exit 1
-          fi
           sequence_json="$(python3 .github/scripts/release_chain.py verify-release-sequence --version "${version}" --expected-sha "${merge_sha}")"
           tag_status="$(printf '%s' "${sequence_json}" | jq -r .status)"
           release_state=missing
@@ -270,18 +169,165 @@ jobs:
               exit 1
             fi
           fi
-          if [[ "${release_state}" == published ]]; then
-            python3 .github/scripts/release_reservation.py receipt \
-              --state consumed --version "${version}" --merge-sha "${merge_sha}" \
-              --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
-              --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
-              --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
-              --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
-            enabled=false
-            reason=already_published
+
+          consumed_state=missing
+          consumed_ref="refs/tags/release-consumed/v${version}/${merge_sha}"
+          consumed_ref_path="${consumed_ref#refs/}"
+          consumed_output=""
+          if consumed_output="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/${consumed_ref_path}" --jq '.object.sha' 2>&1)"; then
+            if [[ ! "${consumed_output}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "release_state_conflict: consumed receipt target is not a full commit SHA" >&2
+              exit 1
+            fi
+            python3 - "${version}" "${merge_sha}" "${reservation_id}" "${reservation_owner}" \
+              "${claim_key}" "${boundary_token}" "${reservation_ref}" "${GITHUB_REPOSITORY}" \
+              "${GH_TOKEN}" "${GITHUB_API_URL}" <<'PY'
+          import sys
+          sys.path.insert(0, '.github/scripts')
+          import release_reservation
+          release_reservation.verify_github_receipt(
+              state='consumed', version=sys.argv[1], merge_sha=sys.argv[2], reservation_id=sys.argv[3],
+              owner=sys.argv[4], claim_key=sys.argv[5], boundary_token=sys.argv[6],
+              reservation_ref_value=sys.argv[7], repository=sys.argv[8], token=sys.argv[9], api_root=sys.argv[10],
+          )
+          PY
+            consumed_state=present
           else
-            enabled=true
-            reason=product_identity
+            if ! printf '%s' "${consumed_output}" | grep -qiE '404|not found'; then
+              printf '%s\n' "${consumed_output}" >&2
+              echo "release_state_conflict: unable to resolve consumed receipt state" >&2
+              exit 1
+            fi
+          fi
+
+          helper_source_tag=""
+          helper_source_mode=""
+          helper_source_commit=""
+          if [[ "${consumed_state}" == present ]]; then
+            if [[ "${tag_status}" != matching ]]; then
+              echo "release_state_conflict: consumed receipt exists without a matching product tag" >&2
+              exit 1
+            fi
+            if [[ "${release_state}" == draft ]]; then
+              echo "release_state_conflict: consumed receipt exists for a draft Release" >&2
+              exit 1
+            fi
+            release_state=published
+            enabled=false
+            reason=already_consumed
+            echo "RELEASE_TERMINAL state=consumed version=${version} merge_sha=${merge_sha}"
+          else
+            if [[ "${EVENT_NAME}" == workflow_dispatch ]]; then
+              python3 - "${version}" "${merge_sha}" "${reservation_id}" "${reservation_owner}" \
+                "${claim_key}" "${boundary_token}" "${reservation_ref}" "${GITHUB_REPOSITORY}" \
+                "${GH_TOKEN}" "${GITHUB_API_URL}" <<'PY'
+          import sys
+          sys.path.insert(0, '.github/scripts')
+          import release_reservation
+          release_reservation.verify_github_receipt(
+              state='bound', version=sys.argv[1], merge_sha=sys.argv[2], reservation_id=sys.argv[3],
+              owner=sys.argv[4], claim_key=sys.argv[5], boundary_token=sys.argv[6],
+              reservation_ref_value=sys.argv[7], repository=sys.argv[8], token=sys.argv[9], api_root=sys.argv[10],
+          )
+          PY
+            else
+              python3 .github/scripts/release_reservation.py receipt \
+                --state bound --version "${version}" --merge-sha "${merge_sha}" \
+                --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
+                --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
+                --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
+                --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
+            fi
+            if [[ "${release_state}" == published ]]; then
+              python3 .github/scripts/release_reservation.py receipt \
+                --state consumed --version "${version}" --merge-sha "${merge_sha}" \
+                --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
+                --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
+                --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
+                --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
+              enabled=false
+              reason=already_published
+            else
+              bootstrap_helper_tag="$(python3 -c 'import json; print(json.load(open("packaging/macos/snapshot-components.lock.json", encoding="utf-8"))["bootstrap_release_tag"])')"
+              release_list_json="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft,isPrerelease,publishedAt)"
+              helper_candidates_json="$(printf '%s' "${release_list_json}" | python3 .github/scripts/release_helper.py candidates --version "${version}" --bootstrap-tag "${bootstrap_helper_tag}")"
+              source_download_dir="${RUNNER_TEMP}/snapshot-helper-downloads"
+              source_artifact_dir="${RUNNER_TEMP}/snapshot-helper-source"
+              mkdir -p "${source_download_dir}" "${source_artifact_dir}"
+              while IFS= read -r candidate; do
+                [[ -n "${candidate}" ]] || continue
+                source_release_json=""
+                if ! source_release_json="$(gh release view "${candidate}" --json isDraft,isPrerelease,assets 2>&1)"; then
+                  if printf '%s' "${source_release_json}" | grep -qiE '404|not found'; then
+                    echo "helper candidate is unavailable: ${candidate}"
+                    continue
+                  fi
+                  printf '%s\n' "${source_release_json}" >&2
+                  echo "unable to resolve helper candidate Release: ${candidate}" >&2
+                  exit 1
+                fi
+                source_is_draft="$(printf '%s' "${source_release_json}" | jq -r '.isDraft | tostring')"
+                source_is_prerelease="$(printf '%s' "${source_release_json}" | jq -r '.isPrerelease | tostring')"
+                if [[ "${source_is_draft}" != false || "${source_is_prerelease}" != true ]]; then
+                  echo "skipping non-approved helper candidate: ${candidate}"
+                  continue
+                fi
+                helper_version="${candidate#v}"
+                missing_assets="$(printf '%s' "${source_release_json}" | python3 -c 'import json,sys; names={a.get("name") for a in json.load(sys.stdin).get("assets", []) if isinstance(a,dict)}; print("\n".join(name for name in sys.argv[1:] if name not in names))' "TelevyBackup-${helper_version}.dmg" "BUILD-MANIFEST.json" "SHA256SUMS")"
+                if [[ -n "${missing_assets}" ]]; then
+                  echo "skipping helper candidate with incomplete assets: ${candidate}"
+                  continue
+                fi
+                candidate_asset_dir="${source_download_dir}/${helper_version}"
+                mkdir -p "${candidate_asset_dir}"
+                if ! gh release download "${candidate}" --repo "$GITHUB_REPOSITORY" \
+                  --pattern "TelevyBackup-${helper_version}.dmg" \
+                  --pattern "BUILD-MANIFEST.json" --pattern "SHA256SUMS" \
+                  --dir "${candidate_asset_dir}"; then
+                  echo "skipping helper candidate whose assets could not be downloaded: ${candidate}"
+                  continue
+                fi
+                source_tag_commit="$(git rev-list -n 1 "${candidate}^{commit}" 2>/dev/null || true)"
+                if [[ -z "${source_tag_commit}" ]]; then
+                  echo "skipping helper candidate without a resolvable tag commit: ${candidate}"
+                  continue
+                fi
+                if ! python3 .github/scripts/release_helper.py verify-assets \
+                  --asset-dir "${candidate_asset_dir}" \
+                  --lock packaging/macos/snapshot-components.lock.json \
+                  --source-tag "${candidate}" \
+                  --expected-source-commit "${source_tag_commit}"; then
+                  echo "skipping helper candidate with incompatible immutable assets: ${candidate}"
+                  continue
+                fi
+                cp "${candidate_asset_dir}/TelevyBackup-${helper_version}.dmg" "${source_artifact_dir}/"
+                cp "${candidate_asset_dir}/BUILD-MANIFEST.json" "${source_artifact_dir}/"
+                cp "${candidate_asset_dir}/SHA256SUMS" "${source_artifact_dir}/"
+                helper_source_tag="${candidate}"
+                helper_source_commit="${source_tag_commit}"
+                helper_source_mode="reuse"
+                echo "approved Snapshot Access helper source: ${helper_source_tag}"
+                break
+              done < <(printf '%s' "${helper_candidates_json}" | jq -r '.candidates[]')
+              if [[ -n "${helper_source_tag}" ]]; then
+                if [[ "${HELPER_MODE}" == bootstrap ]]; then
+                  echo "approved helper Release exists; refusing one-time bootstrap: ${helper_source_tag}" >&2
+                  exit 1
+                fi
+              elif [[ "${HELPER_MODE}" == bootstrap ]]; then
+                helper_source_mode="bootstrap"
+                echo "SNAPSHOT_ACCESS_HELPER_MODE=one-time-bootstrap version=${version} reason=no-approved-helper-release"
+              else
+                echo "no approved Snapshot Access helper Release; rerun same-SHA recovery with helper_mode=bootstrap" >&2
+                exit 1
+              fi
+              if [[ "${channel}" == prod && "${helper_source_mode}" == bootstrap ]]; then
+                echo "stable release requires a previously published RC Universal Snapshot Access helper" >&2
+                exit 1
+              fi
+              enabled=true
+              reason=product_identity
+            fi
           fi
           {
             echo "enabled=${enabled}"
@@ -305,8 +351,18 @@ jobs:
             echo "covered_merge_sha=${covered_merge_sha}"
             echo "pull_request=${pull_request}"
             echo "helper_source_tag=${helper_source_tag}"
+            echo "helper_source_commit=${helper_source_commit}"
           } >> "$GITHUB_OUTPUT"
           echo "RELEASE_IDENTITY status=resolved version=${version} channel=${channel} merge_sha=${merge_sha} tag=${tag} reservation_ref=${reservation_ref}"
+
+      - name: Upload immutable helper source
+        if: steps.release.outputs.identity_status == 'resolved' && steps.release.outputs.helper_source_mode == 'reuse'
+        id: upload-helper-source
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-helper-source
+          path: ${{ runner.temp }}/snapshot-helper-source
+          if-no-files-found: error
 
       - name: Write release intent snapshot
         if: steps.release.outputs.identity_status == 'resolved'
@@ -325,6 +381,8 @@ jobs:
           COVERED_MERGE_SHA: ${{ steps.release.outputs.covered_merge_sha }}
           HELPER_SOURCE_MODE: ${{ steps.release.outputs.helper_source_mode }}
           HELPER_SOURCE_TAG: ${{ steps.release.outputs.helper_source_tag }}
+          HELPER_SOURCE_COMMIT: ${{ steps.release.outputs.helper_source_commit }}
+          HELPER_SOURCE_ARTIFACT_DIGEST: ${{ steps.upload-helper-source.outputs.artifact-digest }}
           PULL_REQUEST: ${{ steps.release.outputs.pull_request }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -336,7 +394,8 @@ jobs:
             --arg boundary_token "${BOUNDARY_TOKEN}" --arg run_url "${RUN_URL}" --arg release_type "${RELEASE_TYPE}" \
             --arg covered_merge_sha "${COVERED_MERGE_SHA}" --arg pull_request "${PULL_REQUEST}" \
             --arg helper_source_mode "${HELPER_SOURCE_MODE}" --arg helper_source_tag "${HELPER_SOURCE_TAG}" \
-            '{schema_version:1,pull_request:$pull_request,source_sha:$source_sha,merge_sha:$merge_sha,release_mode:$mode,covered_merge_sha:$covered_merge_sha,type:$release_type,channel:$channel,version:$version,tag:("v"+$version),helper:{mode:$helper_source_mode,source_tag:$helper_source_tag},reservation:{id:$reservation_id,ref:$reservation_ref,owner:$owner,claim_key:$claim_key,boundary_token:$boundary_token,state:"bound"},provenance:{signature:"github-native-verified",identity:"release_chain_and_reservation_refs"},artifact_names:["release-package-arm64","release-package-x86_64","release-assets"],run_url:$run_url,recovery_instruction:("workflow_dispatch operation=recover commit_sha="+$merge_sha+" helper_mode=bootstrap only when no-approved-helper-release")}' \
+            --arg helper_source_commit "${HELPER_SOURCE_COMMIT}" --arg helper_source_artifact_digest "${HELPER_SOURCE_ARTIFACT_DIGEST}" \
+            '{schema_version:1,pull_request:$pull_request,source_sha:$source_sha,merge_sha:$merge_sha,release_mode:$mode,covered_merge_sha:$covered_merge_sha,type:$release_type,channel:$channel,version:$version,tag:("v"+$version),helper:{mode:$helper_source_mode,source_tag:$helper_source_tag,source_commit:$helper_source_commit,artifact_digest:$helper_source_artifact_digest},reservation:{id:$reservation_id,ref:$reservation_ref,owner:$owner,claim_key:$claim_key,boundary_token:$boundary_token,state:"bound"},provenance:{signature:"github-native-verified",identity:"release_chain_and_reservation_refs"},artifact_names:(if $helper_source_mode == "reuse" then ["snapshot-helper-source","release-package-arm64","release-package-x86_64","release-assets"] else ["release-package-arm64","release-package-x86_64","release-assets"] end),run_url:$run_url,recovery_instruction:("workflow_dispatch operation=recover commit_sha="+$merge_sha+" helper_mode=bootstrap only when no-approved-helper-release")}' \
             > release-intent.json
 
       - name: Upload locked release intent
@@ -361,36 +420,26 @@ jobs:
         with:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
-      - name: Fetch approved Snapshot Access helper
+      - name: Download immutable Snapshot Access helper source
+        if: needs.resolve.outputs.helper_source_mode == 'reuse'
+        uses: actions/download-artifact@v4
+        with:
+          name: snapshot-helper-source
+          path: ${{ runner.temp }}/snapshot-helper
+      - name: Extract and verify immutable Snapshot Access helper
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
         env:
           HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
-          GH_TOKEN: ${{ github.token }}
+          HELPER_SOURCE_COMMIT: ${{ needs.resolve.outputs.helper_source_commit }}
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
-          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
-          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --pattern "SHA256SUMS" --dir "$RUNNER_TEMP/snapshot-helper"
-          source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"
-          python3 - "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" "$RUNNER_TEMP/snapshot-helper/SHA256SUMS" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" "$helper_version" "$source_tag_commit" <<'PY'
-          import hashlib, json, sys
-          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
-          assert manifest["release_version"] == sys.argv[4]
-          assert manifest["source_commit"] == sys.argv[5]
-          name = sys.argv[3].rsplit('/', 1)[-1]
-          asset = next(item for item in manifest["assets"] if item["name"] == name)
-          with open(sys.argv[3], "rb") as handle:
-              data = handle.read()
-          digest = hashlib.sha256(data).hexdigest()
-          assert asset["sha256"] == digest
-          assert asset["bytes"] == len(data)
-          checksum = next(line.split()[0] for line in open(sys.argv[2], encoding="utf-8") if line.rstrip().endswith("  " + name))
-          assert checksum == digest
-          PY
-          python3 .github/scripts/release_helper.py verify-manifest \
-            --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" \
+          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount"
+          python3 .github/scripts/release_helper.py verify-assets \
+            --asset-dir "$RUNNER_TEMP/snapshot-helper" \
             --lock packaging/macos/snapshot-components.lock.json \
-            --source-tag "$HELPER_SOURCE_TAG"
+            --source-tag "$HELPER_SOURCE_TAG" \
+            --expected-source-commit "$HELPER_SOURCE_COMMIT"
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
@@ -422,36 +471,26 @@ jobs:
         with:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
-      - name: Fetch approved Snapshot Access helper
+      - name: Download immutable Snapshot Access helper source
+        if: needs.resolve.outputs.helper_source_mode == 'reuse'
+        uses: actions/download-artifact@v4
+        with:
+          name: snapshot-helper-source
+          path: ${{ runner.temp }}/snapshot-helper
+      - name: Extract and verify immutable Snapshot Access helper
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
         env:
           HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
-          GH_TOKEN: ${{ github.token }}
+          HELPER_SOURCE_COMMIT: ${{ needs.resolve.outputs.helper_source_commit }}
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
-          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
-          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --pattern "SHA256SUMS" --dir "$RUNNER_TEMP/snapshot-helper"
-          source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"
-          python3 - "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" "$RUNNER_TEMP/snapshot-helper/SHA256SUMS" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" "$helper_version" "$source_tag_commit" <<'PY'
-          import hashlib, json, sys
-          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
-          assert manifest["release_version"] == sys.argv[4]
-          assert manifest["source_commit"] == sys.argv[5]
-          name = sys.argv[3].rsplit('/', 1)[-1]
-          asset = next(item for item in manifest["assets"] if item["name"] == name)
-          with open(sys.argv[3], "rb") as handle:
-              data = handle.read()
-          digest = hashlib.sha256(data).hexdigest()
-          assert asset["sha256"] == digest
-          assert asset["bytes"] == len(data)
-          checksum = next(line.split()[0] for line in open(sys.argv[2], encoding="utf-8") if line.rstrip().endswith("  " + name))
-          assert checksum == digest
-          PY
-          python3 .github/scripts/release_helper.py verify-manifest \
-            --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" \
+          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount"
+          python3 .github/scripts/release_helper.py verify-assets \
+            --asset-dir "$RUNNER_TEMP/snapshot-helper" \
             --lock packaging/macos/snapshot-components.lock.json \
-            --source-tag "$HELPER_SOURCE_TAG"
+            --source-tag "$HELPER_SOURCE_TAG" \
+            --expected-source-commit "$HELPER_SOURCE_COMMIT"
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
@@ -487,36 +526,26 @@ jobs:
         with:
           name: release-package-x86_64
           path: dist/x86_64
-      - name: Fetch approved Snapshot Access helper for final assembly
+      - name: Download immutable Snapshot Access helper source
+        if: needs.resolve.outputs.helper_source_mode == 'reuse'
+        uses: actions/download-artifact@v4
+        with:
+          name: snapshot-helper-source
+          path: ${{ runner.temp }}/snapshot-helper
+      - name: Extract and verify immutable Snapshot Access helper
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
         env:
           HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
-          GH_TOKEN: ${{ github.token }}
+          HELPER_SOURCE_COMMIT: ${{ needs.resolve.outputs.helper_source_commit }}
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
-          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper"
-          gh release download "$HELPER_SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "TelevyBackup-${helper_version}.dmg" --pattern "BUILD-MANIFEST.json" --pattern "SHA256SUMS" --dir "$RUNNER_TEMP/snapshot-helper"
-          source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"
-          python3 - "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" "$RUNNER_TEMP/snapshot-helper/SHA256SUMS" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" "$helper_version" "$source_tag_commit" <<'PY'
-          import hashlib, json, sys
-          manifest = json.load(open(sys.argv[1], encoding="utf-8"))
-          assert manifest["release_version"] == sys.argv[4]
-          assert manifest["source_commit"] == sys.argv[5]
-          name = sys.argv[3].rsplit('/', 1)[-1]
-          asset = next(item for item in manifest["assets"] if item["name"] == name)
-          with open(sys.argv[3], "rb") as handle:
-              data = handle.read()
-          digest = hashlib.sha256(data).hexdigest()
-          assert asset["sha256"] == digest
-          assert asset["bytes"] == len(data)
-          checksum = next(line.split()[0] for line in open(sys.argv[2], encoding="utf-8") if line.rstrip().endswith("  " + name))
-          assert checksum == digest
-          PY
-          python3 .github/scripts/release_helper.py verify-manifest \
-            --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json" \
+          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount"
+          python3 .github/scripts/release_helper.py verify-assets \
+            --asset-dir "$RUNNER_TEMP/snapshot-helper" \
             --lock packaging/macos/snapshot-components.lock.json \
-            --source-tag "$HELPER_SOURCE_TAG"
+            --source-tag "$HELPER_SOURCE_TAG" \
+            --expected-source-commit "$HELPER_SOURCE_COMMIT"
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+from pathlib import Path
 import re
 import sys
 from typing import Any
@@ -16,6 +18,7 @@ VERSION_RE = re.compile(
 TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 CDHASH_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 IDENTITY_FIELDS = ("sha256", "artifact_sha256", "cdhash", "designated_requirement")
 COMPONENT_FIELDS = (
     "bundle_id",
@@ -148,6 +151,77 @@ def validate_source_manifest(
     return {field: str(actual[field]) for field in IDENTITY_FIELDS}
 
 
+def verify_source_assets(
+    asset_dir: str, lock: dict[str, Any], source_tag: str, expected_source_commit: str
+) -> dict[str, str]:
+    """Verify the immutable helper Release assets selected for this workflow run."""
+    source_version = _tag_version(source_tag)
+    if COMMIT_RE.fullmatch(expected_source_commit) is None:
+        raise HelperResolutionError("helper source commit must be a full commit SHA")
+    root = Path(asset_dir)
+    manifest_path = root / "BUILD-MANIFEST.json"
+    checksums_path = root / "SHA256SUMS"
+    dmg_name = f"TelevyBackup-{source_version}.dmg"
+    dmg_path = root / dmg_name
+    for path in (manifest_path, checksums_path, dmg_path):
+        if not path.is_file():
+            raise HelperResolutionError(f"helper source asset is missing: {path.name}")
+
+    manifest = _read_json(str(manifest_path))
+    if not isinstance(manifest, dict):
+        raise HelperResolutionError("helper source manifest must be a JSON object")
+    identities = validate_source_manifest(manifest, lock, source_tag)
+    if manifest.get("source_commit") != expected_source_commit:
+        raise HelperResolutionError("helper source manifest commit does not match its tag")
+
+    raw_assets = manifest.get("assets")
+    if not isinstance(raw_assets, list) or not raw_assets:
+        raise HelperResolutionError("helper source manifest has no release assets")
+    manifest_assets: dict[str, tuple[str, int]] = {}
+    for asset in raw_assets:
+        if not isinstance(asset, dict):
+            raise HelperResolutionError("helper source manifest contains an invalid asset")
+        name = asset.get("name")
+        digest = asset.get("sha256")
+        size = asset.get("bytes")
+        if not isinstance(name, str) or not name:
+            raise HelperResolutionError("helper source manifest contains an asset without a name")
+        if name in manifest_assets:
+            raise HelperResolutionError(f"helper source manifest contains duplicate asset: {name}")
+        if not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None:
+            raise HelperResolutionError(f"helper source manifest has invalid asset digest: {name}")
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            raise HelperResolutionError(f"helper source manifest has invalid asset size: {name}")
+        manifest_assets[name] = (digest.lower(), size)
+    if dmg_name not in manifest_assets:
+        raise HelperResolutionError(f"helper source manifest does not contain its Universal DMG: {dmg_name}")
+
+    checksum_assets: dict[str, str] = {}
+    for line in checksums_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or SHA256_RE.fullmatch(fields[0]) is None or not fields[1]:
+            raise HelperResolutionError("helper source SHA256SUMS contains an invalid line")
+        name = fields[1][1:] if fields[1].startswith("*") else fields[1]
+        if name in checksum_assets:
+            raise HelperResolutionError(f"helper source SHA256SUMS contains duplicate asset: {name}")
+        checksum_assets[name] = fields[0].lower()
+    if checksum_assets != {name: digest for name, (digest, _) in manifest_assets.items()}:
+        raise HelperResolutionError("helper source SHA256SUMS does not match BUILD-MANIFEST.json")
+
+    digest = hashlib.sha256(dmg_path.read_bytes()).hexdigest()
+    expected_digest, expected_size = manifest_assets[dmg_name]
+    if digest != expected_digest or dmg_path.stat().st_size != expected_size:
+        raise HelperResolutionError("helper source Universal DMG does not match BUILD-MANIFEST.json")
+    return {
+        "source_tag": source_tag,
+        "source_commit": expected_source_commit,
+        "dmg_sha256": digest,
+        **identities,
+    }
+
+
 def _read_json(path: str) -> Any:
     if path == "-":
         return json.load(sys.stdin)
@@ -174,6 +248,12 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--lock", required=True)
     verify.add_argument("--source-tag", required=True)
 
+    assets = sub.add_parser("verify-assets")
+    assets.add_argument("--asset-dir", required=True)
+    assets.add_argument("--lock", required=True)
+    assets.add_argument("--source-tag", required=True)
+    assets.add_argument("--expected-source-commit", required=True)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "candidates":
@@ -190,12 +270,19 @@ def main(argv: list[str] | None = None) -> int:
                 requested_mode=args.requested_mode,
                 approved_source_tag=args.approved_source_tag,
             )
-        else:
+        elif args.command == "verify-manifest":
             manifest = _read_json(args.manifest)
             lock = _read_json(args.lock)
             if not isinstance(manifest, dict) or not isinstance(lock, dict):
                 raise HelperResolutionError("helper manifest and lock must be JSON objects")
             result = validate_source_manifest(manifest, lock, args.source_tag)
+        else:
+            lock = _read_json(args.lock)
+            if not isinstance(lock, dict):
+                raise HelperResolutionError("helper lock must be a JSON object")
+            result = verify_source_assets(
+                args.asset_dir, lock, args.source_tag, args.expected_source_commit
+            )
         print(json.dumps(result, sort_keys=True))
         return 0
     except (HelperResolutionError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:

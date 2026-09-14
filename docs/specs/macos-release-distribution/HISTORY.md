@@ -8,3 +8,6 @@
 - Helper source selection is independent from product RC numbering. A missing approved helper Release
   has an explicit same-SHA bootstrap recovery path; ordinary releases continue to reuse verified
   helper bytes unchanged.
+- Helper source assets are bound once in the resolve job and passed to macOS build/assembly jobs as
+  the immutable `snapshot-helper-source` workflow artifact; invalid candidates fall back, while
+  published and consumed release identities terminate before helper resolution.

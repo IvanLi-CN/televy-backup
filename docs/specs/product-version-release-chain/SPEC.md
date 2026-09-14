@@ -66,8 +66,10 @@ PR.
 After merge, Release Product reads the same SHA/version/channel triple, verifies the reservation,
 and appends `release-bound/v<version>/<merge-sha>`. It builds and publishes from that merge SHA,
 creates the product tag without overwriting an existing ref, and appends
-`release-consumed/v<version>/<merge-sha>` after publication. `prod` may be the stable latest
-surface; beta/rc/dev are prereleases and never update stable latest.
+`release-consumed/v<version>/<merge-sha>` after publication. Before helper resolution, an already
+published product Release or a verified consumed receipt is terminal; it may verify or append the
+consumed receipt but MUST NOT re-enter packaging. `prod` may be the stable latest surface; beta/rc/dev
+are prereleases and never update stable latest.
 
 ### REQ-PVR-007: Recovery is same-SHA or an explicit new PR
 
@@ -82,11 +84,13 @@ not part of this contract.
 
 Each resolved run writes and uploads `release-intent.json` containing PR/source/merge SHA, mode,
 covered merge, type/channel/version/tag, helper source mode/tag, all reservation fields, provenance,
-artifact names, run URL and recovery instruction. It is an Actions artifact snapshot, not product
-code and not the only fact source. Recovery reconstructs identity from refs, trailers and product
-tags. Helper bootstrap state is resolved independently from the product RC ordinal: a verified
-published helper Release is reused when available, while a missing helper Release requires an
-explicit same-SHA bootstrap recovery. Failure
+artifact names, run URL and recovery instruction. Reused helper resolution also uploads the exact
+Universal DMG, `BUILD-MANIFEST.json`, and `SHA256SUMS` as the immutable `snapshot-helper-source`
+workflow artifact consumed by every macOS build/assembly job. It is an Actions artifact snapshot, not
+product code and not the only fact source. Recovery reconstructs identity from immutable Git refs,
+commit trailers and product tags. Helper bootstrap state is resolved independently from the product RC
+ordinal: a verified published helper Release is reused when available, invalid candidates fall back to
+the next candidate, while a missing helper Release requires an explicit same-SHA bootstrap recovery. Failure
 notification distinguishes publish failure, no-identity and resolver error; unresolved identity
 never fabricates a version, tag, or recovery command.
 

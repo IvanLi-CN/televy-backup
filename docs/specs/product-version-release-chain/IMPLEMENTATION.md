@@ -25,9 +25,12 @@
 4. Release completion freezes the reservation and provenance. A normal PR merge creates the
    candidate's merged identity; a version-only release PR creates a new identity for one covered
    old merge.
-5. Release Product resolves and records either a verified helper Release for byte-identical reuse or
-   an explicitly requested one-time bootstrap mode. It then verifies the merged identity, appends
-   bound, builds once, creates the product tag and GitHub Release, then appends consumed.
+5. Release Product verifies an existing published Release or consumed receipt as a terminal state
+   before helper resolution. For an active release, it resolves and records either a verified helper
+   Release for byte-identical reuse or an explicitly requested one-time bootstrap mode. Reused helper
+   assets are downloaded and verified once in `resolve`, uploaded as `snapshot-helper-source`, and
+   consumed by the native build and assembly jobs. It then verifies the merged identity, appends bound,
+   builds once, creates the product tag and GitHub Release, then appends consumed.
 
 ## Recovery boundaries
 

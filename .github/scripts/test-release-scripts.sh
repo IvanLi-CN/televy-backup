@@ -47,6 +47,10 @@ assert contract["release_states"]["published"] == "idempotent-success-without-bu
 assert contract["helper_bootstrap"]["bootstrap_preserves_identity"] is True
 assert contract["helper_bootstrap"]["reuse_policy"] == "byte-identical-no-rebuild-no-lipo-no-resign"
 assert contract["helper_bootstrap"]["identity_fields"] == ["sha256", "artifact_sha256", "cdhash", "designated_requirement"]
+assert contract["helper_bootstrap"]["invalid_candidate_policy"] == "fallback-to-next-candidate"
+assert contract["helper_bootstrap"]["terminal_states_before_resolution"] == ["published-release", "consumed-receipt"]
+assert contract["helper_bootstrap"]["immutable_source_artifact"]["name"] == "snapshot-helper-source"
+assert contract["helper_bootstrap"]["immutable_source_artifact"]["release_redownload_after_resolve"] is False
 assert contract["identity_refs"]["write_policy"] == "append-only-create"
 assert contract["identity_refs"]["state_order"] == "bound-before-consumed;released-only-when-unbound"
 assert contract["identity_refs"]["receipt_validation"] == "independently-verify-reservation-provenance"
@@ -77,13 +81,24 @@ assert 'bootstrap_release_tag' in release_workflow
 assert 'TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=rc1-universal-artifact' in release_workflow
 assert 'source_is_prerelease' in release_workflow
 assert '--pattern "BUILD-MANIFEST.json"' in release_workflow
-assert 'SHA256SUMS" --dir' in release_workflow
+assert '--pattern "SHA256SUMS"' in release_workflow
 assert '--manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"' in release_workflow
-assert 'source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"' in release_workflow
-assert 'manifest["source_commit"] == sys.argv[5]' in release_workflow
-assert "release_helper.py verify-manifest" in release_workflow
+assert 'source_tag_commit="$(git rev-list -n 1 "${candidate}^{commit}"' in release_workflow
+assert "release_helper.py verify-assets" in release_workflow
 assert "Snapshot Access source component contract mismatch" in (root / ".github/scripts/release_helper.py").read_text(encoding="utf-8")
-assert 'source_manifest_dir="${RUNNER_TEMP}/snapshot-helper-source"' in release_workflow
+assert 'source_artifact_dir="${RUNNER_TEMP}/snapshot-helper-source"' in release_workflow
+assert "Upload immutable helper source" in release_workflow
+assert "name: snapshot-helper-source" in release_workflow
+assert "skipping helper candidate with incompatible immutable assets" in release_workflow
+assert "preferred helper source is missing" not in release_workflow
+assert "preferred helper source manifest failed" not in release_workflow
+build_and_assembly = release_workflow.split("  build-arm64:", 1)[1].split("  macos-acceptance:", 1)[0]
+assert "gh release download" not in build_and_assembly
+assert build_and_assembly.count("name: snapshot-helper-source") == 3
+assert release_workflow.index("release_state=missing") < release_workflow.index("helper_candidates_json")
+assert release_workflow.index("consumed_state=missing") < release_workflow.index("helper_candidates_json")
+assert release_workflow.index("RELEASE_TERMINAL state=consumed") < release_workflow.index("helper_candidates_json")
+assert "consumed receipt exists without a matching product tag" in release_workflow
 assert "macos-release-acceptance" in release_workflow
 assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow
 assert "verify-macos-rc-acceptance.py" in release_workflow
@@ -94,7 +109,7 @@ assert "fda_regrant_requested" in (root / ".github/scripts/verify-macos-rc-accep
 assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
 assert "needs.macos-acceptance.result == 'success'" in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
-assert "final assembly" in release_workflow
+assert "Assemble and validate final assets" in release_workflow
 PY
 
 python3 - "$root_dir" <<'PY'

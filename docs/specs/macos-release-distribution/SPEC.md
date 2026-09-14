@@ -67,13 +67,20 @@ Product MUST prefer the current product-version RC1, then the artifact named by
 discovered by its verified `BUILD-MANIFEST.json`. Every reused source MUST provide its Universal
 DMG, `BUILD-MANIFEST.json`, and `SHA256SUMS`; its component metadata, executable SHA-256, complete
 artifact digest, CodeDirectory hash, and designated requirement MUST match the lock and downloaded
-bundle. RC2, stable, and ordinary future product releases MUST reuse the approved helper bundle's
-original bytes. Reuse MUST NOT rebuild, `lipo`, re-sign, or deep-sign it. A component code or FDA
+bundle. The resolve job MUST download and verify those three source assets, including the tag-bound
+source commit and manifest/checksum relationships, then upload the exact files as the immutable
+`snapshot-helper-source` workflow artifact. Native build and assembly jobs MUST consume that artifact
+and MUST NOT redownload helper assets from the Release. Any unavailable, incomplete, or invalid
+candidate MUST fall back to the next candidate. RC2, stable, and ordinary future product releases
+MUST reuse the approved helper bundle's original bytes. Reuse MUST NOT rebuild, `lipo`, re-sign, or
+deep-sign it. A component code or FDA
 behavior change MUST update the component version and bootstrap tag so that the new component has an
 explicit authorization migration point. If no approved helper Release exists, only an explicit
 same-SHA `workflow_dispatch` recovery with `helper_mode=bootstrap` may build and sign one Universal
 helper. That one-time bootstrap preserves the existing product version, merge SHA, reservation, and
-bound receipt; stable publication still requires a previously published RC helper. The mount-helper
+bound receipt; stable publication still requires a previously published RC helper. An already
+published product Release or verified consumed receipt is terminal before helper resolution and MUST
+not re-enter packaging. The mount-helper
 binary and system service templates remain available for its explicit administrator transaction;
 the installed root helper is compatibility-checked only and not automatically updated. FDA is an
 explicit System Settings action. Development variants and runs with custom config/data directories
