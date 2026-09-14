@@ -153,6 +153,46 @@ async fn backup_pipeline_dedupes_chunks_across_runs() {
         .get("n");
     assert_eq!(snapshots, 2);
 
+    let snapshot_ids: Vec<String> = sqlx::query("SELECT snapshot_id FROM snapshots")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.get("snapshot_id"))
+        .collect();
+    for snapshot_id in snapshot_ids {
+        let endpoint = sqlx::query(
+            "SELECT created_at, source_path, label, base_snapshot_id FROM snapshots WHERE snapshot_id = ?",
+        )
+        .bind(&snapshot_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let filemap_path = filemap_dir.join(format!("{snapshot_id}.sqlite"));
+        let filemap_pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", filemap_path.display()))
+            .await
+            .unwrap();
+        let filemap = sqlx::query(
+            "SELECT created_at, source_path, label, base_snapshot_id FROM snapshots WHERE snapshot_id = ?",
+        )
+        .bind(&snapshot_id)
+        .fetch_one(&filemap_pool)
+        .await
+        .unwrap();
+        for column in ["created_at", "source_path", "label"] {
+            assert_eq!(
+                endpoint.get::<String, _>(column),
+                filemap.get::<String, _>(column),
+                "endpoint/filemap metadata mismatch for {snapshot_id}: {column}"
+            );
+        }
+        assert_eq!(
+            endpoint.get::<Option<String>, _>("base_snapshot_id"),
+            filemap.get::<Option<String>, _>("base_snapshot_id"),
+            "endpoint/filemap metadata mismatch for {snapshot_id}: base_snapshot_id"
+        );
+    }
+
     let remote_indexes: i64 = sqlx::query("SELECT COUNT(*) as n FROM remote_indexes")
         .fetch_one(&pool)
         .await

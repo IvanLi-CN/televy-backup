@@ -3,6 +3,11 @@ use serde::{Deserialize, Serialize};
 pub mod mount_helper;
 
 pub const PROTOCOL_VERSION: u32 = 2;
+pub const COMPONENT_VERSION: &str = "0.2.0";
+pub const ACCESS_BUNDLE_ID: &str = "com.ivan.televybackup.snapshot-access";
+pub const ACCESS_BUNDLE_RELATIVE_PATH: &str =
+    "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app";
+pub const ACCESS_AGENT_PLIST_NAME: &str = "com.ivan.televybackup.snapshot-access.plist";
 pub const MOUNT_HELPER_PROTOCOL_VERSION: u32 = 1;
 pub const MOUNT_HELPER_LABEL: &str = "com.ivan.televybackup.snapshot-mount-helper";
 pub const MOUNT_HELPER_INSTALL_PATH: &str =

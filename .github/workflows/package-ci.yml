@@ -99,6 +99,10 @@ jobs:
         with:
           ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@v1
+        if: needs.classify.outputs.kind == 'source'
+        with:
+          toolchain: 1.91.0
       - uses: actions/download-artifact@v4
         if: needs.classify.outputs.kind == 'source'
         with:
@@ -128,6 +132,9 @@ jobs:
           cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
           bash scripts/macos/generate-release-manifest.sh --mode development --asset-dir dist/final --source-commit "$(git rev-parse HEAD)" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
           bash scripts/macos/verify-release-assets.sh --mode development --asset-dir dist/final
+      - name: Verify daemon-owned WebDAV service
+        if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/verify-webdav-snapshot-browsing.sh
       - uses: actions/upload-artifact@v4
         if: needs.classify.outputs.kind == 'source'
         with:
