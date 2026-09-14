@@ -130,6 +130,11 @@ app="$asset_dir/TelevyBackup.app"
   echo "Snapshot Access must not be a top-level installable app" >&2
   exit 1
 }
+bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")"
+[[ "$bundle_id" == "com.ivan.televybackup" ]] || {
+  echo "release asset must use the prod app bundle id: $bundle_id" >&2
+  exit 1
+}
 if [[ -d "$app" ]]; then
   codesign --verify --deep --strict "$app"
   app_signature="$(codesign -dvvv "$app" 2>&1 || true)"
@@ -250,6 +255,11 @@ verify_dmg_helper_identity() (
   mounted=true
   app="$mount_point/TelevyBackup.app"
   [[ -d "$app" ]] || { echo "DMG is missing TelevyBackup.app: $local_dmg" >&2; exit 1; }
+  bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")"
+  [[ "$bundle_id" == "com.ivan.televybackup" ]] || {
+    echo "DMG must use the prod app bundle id: $local_dmg" >&2
+    exit 1
+  }
   codesign --verify --deep --strict "$app"
   app_signature="$(codesign -dvvv "$app" 2>&1 || true)"
   [[ "$app_signature" == *"Signature=adhoc"* ]] || { echo "DMG main app must use an ad-hoc signature: $local_dmg" >&2; exit 1; }

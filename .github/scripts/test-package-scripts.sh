@@ -83,6 +83,11 @@ grep -F '[[ -x "$tools_dir/TelevyBackup Tools/bin/$binary" ]]' <<<"$verify_relea
   echo "tools archive verification must reject non-executable binaries" >&2
   exit 1
 }
+release_bundle_id_checks="$(grep -Fc 'com.ivan.televybackup" ]]' <<<"$verify_release_text")"
+[[ "$release_bundle_id_checks" -ge 2 ]] || {
+  echo "app and DMG verification must reject non-prod bundle ids" >&2
+  exit 1
+}
 grep -F "trap 'rm -rf \"\$tools_dir\"' EXIT" <<<"$verify_release_text" >/dev/null || {
   echo "tools archive verification must clean extracted temporary files on failure" >&2
   exit 1
