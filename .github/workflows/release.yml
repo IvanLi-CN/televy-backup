@@ -84,6 +84,7 @@ jobs:
           git fetch --force origin main '+refs/tags/*:refs/tags/*'
           main_sha="$(git rev-parse origin/main)"
           policy_sha="$(git rev-parse HEAD)"
+          test "${policy_sha}" = "${main_sha}"
           echo "policy_sha=${policy_sha}" >> "$GITHUB_OUTPUT"
           test -n "${TARGET_INPUT}"
           if [[ "${EVENT_NAME}" == workflow_run ]]; then
@@ -584,10 +585,21 @@ jobs:
           # release asset policy from the exact trusted main commit resolved above.
           test -n "${POLICY_SHA}"
           git fetch --force origin main
-          policy_verify_release_assets="${RUNNER_TEMP}/verify-release-assets.sh"
-          git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh" > "${policy_verify_release_assets}"
-          chmod +x "${policy_verify_release_assets}"
-          "${policy_verify_release_assets}" --mode release --asset-dir dist/final
+          git cat-file -e "${POLICY_SHA}^{commit}"
+          policy_checkout="${RUNNER_TEMP}/release-policy"
+          git worktree add --detach "${policy_checkout}" "${POLICY_SHA}"
+          policy_cleanup() {
+            git worktree remove --force "${policy_checkout}" >/dev/null 2>&1 || true
+          }
+          trap policy_cleanup EXIT
+          # VERSION is the recovered product input; policy code and its lock remain
+          # materialized from the exact trusted policy commit.
+          cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"
+          policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"
+          (
+            cd "${policy_checkout}"
+            "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final"
+          )
           if [[ "${HELPER_SOURCE_MODE}" == reuse ]]; then
             bash scripts/macos/verify-component-identity.sh \
               --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \

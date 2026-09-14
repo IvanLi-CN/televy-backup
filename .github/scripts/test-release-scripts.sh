@@ -96,9 +96,15 @@ assert "Keep the trusted main checkout for release policy scripts" in release_wo
 assert 'git checkout --detach "${TARGET_INPUT}"' not in release_workflow
 assert 'policy_sha: ${{ steps.release.outputs.policy_sha }}' in release_workflow
 assert 'policy_sha="$(git rev-parse HEAD)"' in release_workflow
+assert 'test "${policy_sha}" = "${main_sha}"' in release_workflow
 assert 'echo "policy_sha=${policy_sha}" >> "$GITHUB_OUTPUT"' in release_workflow
-assert 'git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh"' in release_workflow
-assert '"${policy_verify_release_assets}" --mode release --asset-dir dist/final' in release_workflow
+assert 'git cat-file -e "${POLICY_SHA}^{commit}"' in release_workflow
+assert 'git worktree add --detach "${policy_checkout}" "${POLICY_SHA}"' in release_workflow
+assert 'cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"' in release_workflow
+assert 'policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"' in release_workflow
+assert 'cd "${policy_checkout}"' in release_workflow
+assert '"${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final"' in release_workflow
+assert 'git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh"' not in release_workflow
 assert 'bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final' not in release_workflow
 build_and_assembly = release_workflow.split("  build-arm64:", 1)[1].split("  macos-acceptance:", 1)[0]
 assert "gh release download" not in build_and_assembly
@@ -142,7 +148,7 @@ with tempfile.TemporaryDirectory() as directory:
     (asset_dir).mkdir()
     shutil.copy2(validator_source, policy_repo / "scripts/macos/verify-release-assets.sh")
     shutil.copy2(root / "scripts/product-version.py", policy_repo / "scripts/product-version.py")
-    shutil.copy2(root / "VERSION", policy_repo / "VERSION")
+    (policy_repo / "VERSION").write_text("0.9.9-rc.37\n", encoding="utf-8")
     shutil.copy2(
         root / "packaging/macos/snapshot-components.lock.json",
         policy_repo / "packaging/macos/snapshot-components.lock.json",
@@ -227,33 +233,51 @@ with tempfile.TemporaryDirectory() as directory:
     policy_sha = subprocess.check_output(
         ["git", "-C", str(policy_repo), "rev-parse", "HEAD"], text=True
     ).strip()
-    extracted = temp / "verify-release-assets.sh"
-    extracted.write_bytes(
-        subprocess.check_output(
-            [
-                "git",
-                "-C",
-                str(policy_repo),
-                "show",
-                f"{policy_sha}:scripts/macos/verify-release-assets.sh",
-            ]
-        )
-    )
-    extracted.chmod(0o755)
-    result = subprocess.run(
+    policy_checkout = temp / "policy-checkout"
+    subprocess.run(
         [
-            str(extracted),
-            "--mode",
-            "release",
-            "--asset-dir",
-            str(asset_dir),
-            "--skip-bundle-checks",
+            "git",
+            "-C",
+            str(policy_repo),
+            "worktree",
+            "add",
+            "--detach",
+            str(policy_checkout),
+            policy_sha,
         ],
-        cwd=policy_repo,
-        capture_output=True,
-        text=True,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    try:
+        assert (
+            subprocess.check_output(
+                ["git", "-C", str(policy_checkout), "rev-parse", "HEAD"], text=True
+            ).strip()
+            == policy_sha
+        )
+        shutil.copy2(root / "VERSION", policy_checkout / "VERSION")
+        result = subprocess.run(
+            [
+                str(policy_checkout / "scripts/macos/verify-release-assets.sh"),
+                "--mode",
+                "release",
+                "--asset-dir",
+                str(asset_dir),
+                "--skip-bundle-checks",
+            ],
+            cwd=policy_checkout,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    finally:
+        subprocess.run(
+            ["git", "-C", str(policy_repo), "worktree", "remove", "--force", str(policy_checkout)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 PY
 
 python3 - "$root_dir" <<'PY'
