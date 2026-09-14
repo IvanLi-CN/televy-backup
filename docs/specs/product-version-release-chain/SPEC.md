@@ -4,6 +4,7 @@
 
 - [PR-local VERSION preparation](../../adr/0004-pr-local-version-preparation.md)
 - [Immutable release identity reservation](../../adr/0010-release-identity-reservation.md)
+- [Independent helper bootstrap state](../../adr/0012-helper-bootstrap-state.md)
 
 ## Context and Scope
 
@@ -80,9 +81,12 @@ not part of this contract.
 ### REQ-PVR-008: Intent snapshots and failure context are non-authoritative
 
 Each resolved run writes and uploads `release-intent.json` containing PR/source/merge SHA, mode,
-covered merge, type/channel/version/tag, all reservation fields, provenance, artifact names, run
-URL and recovery instruction. It is an Actions artifact snapshot, not product code and not the only
-fact source. Recovery reconstructs identity from refs, trailers and product tags. Failure
+covered merge, type/channel/version/tag, helper source mode/tag, all reservation fields, provenance,
+artifact names, run URL and recovery instruction. It is an Actions artifact snapshot, not product
+code and not the only fact source. Recovery reconstructs identity from refs, trailers and product
+tags. Helper bootstrap state is resolved independently from the product RC ordinal: a verified
+published helper Release is reused when available, while a missing helper Release requires an
+explicit same-SHA bootstrap recovery. Failure
 notification distinguishes publish failure, no-identity and resolver error; unresolved identity
 never fabricates a version, tag, or recovery command.
 
@@ -108,9 +112,9 @@ expected-head workflow text, GitHub-native verification, and version-only releas
 
 ### VER-PVR-004
 
-Covers: REQ-PVR-006, REQ-PVR-007. Release workflow contract tests verify bound/consumed receipts,
-same-SHA recovery inputs, product tag ownership, prerelease publication, and no automatic history
-backfill.
+Covers: REQ-PVR-006, REQ-PVR-007. Release workflow and helper resolver contract tests verify
+bound/consumed receipts, same-SHA recovery inputs, product tag ownership, prerelease publication,
+independent helper bootstrap state, and no automatic history backfill.
 
 ### VER-PVR-005
 
@@ -137,5 +141,6 @@ generation.
 - `.github/scripts/test-release-preparation.sh`
 - `.github/scripts/test-release-completion.sh`
 - `.github/scripts/test-release-workflows.sh`
+- `.github/scripts/test-release-helper.sh`
 - `.github/scripts/test-package-scripts.sh`
 - `.github/quality-gates.json`

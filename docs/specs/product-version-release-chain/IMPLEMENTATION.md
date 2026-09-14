@@ -7,6 +7,7 @@
 | Formal and local version grammar | `scripts/product-version.py` |
 | Final-tag-first allocation and provenance | `.github/scripts/release_chain.py` |
 | Append-only reservation, receipt and intent snapshot | `.github/scripts/release_reservation.py` |
+| Independent Snapshot Access helper source resolution | `.github/scripts/release_helper.py`, `.github/workflows/release.yml` |
 | Label policy | `.github/scripts/label-gate.sh`, `.github/release-contract.json` |
 | Trusted preparation | `.github/workflows/release-preparation.yml` |
 | Completion gate | `.github/workflows/release-completion.yml`, `.github/scripts/release_completion.py` |
@@ -24,12 +25,14 @@
 4. Release completion freezes the reservation and provenance. A normal PR merge creates the
    candidate's merged identity; a version-only release PR creates a new identity for one covered
    old merge.
-5. Release Product verifies the merged identity, appends bound, builds once, creates the product
-   tag and GitHub Release, then appends consumed.
+5. Release Product resolves and records either a verified helper Release for byte-identical reuse or
+   an explicitly requested one-time bootstrap mode. It then verifies the merged identity, appends
+   bound, builds once, creates the product tag and GitHub Release, then appends consumed.
 
 ## Recovery boundaries
 
 The `release-intent.json` artifact is convenient run context only. A missing or expired artifact is
 reconstructed from immutable Git refs, commit trailers and product tags. Same-SHA recovery requires
-the existing bound identity and never calculates a new version. No identity is reported as an
-unresolved state and cannot produce a fabricated tag or recovery command.
+the existing bound identity and never calculates a new version. Helper bootstrap is permitted only
+when no approved helper Release is available and the recovery input explicitly requests it. No
+identity is reported as an unresolved state and cannot produce a fabricated tag or recovery command.

@@ -5,3 +5,6 @@
 - Homebrew remains a detected legacy integration only; the product owns one explicit per-user LaunchAgent.
 - Snapshot Access is a private embedded component rather than a second user-installable app. RC
   and stable packaging reuses its locked Universal artifact when the component has not changed.
+- Helper source selection is independent from product RC numbering. A missing approved helper Release
+  has an explicit same-SHA bootstrap recovery path; ordinary releases continue to reuse verified
+  helper bytes unchanged.

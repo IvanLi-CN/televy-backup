@@ -9,9 +9,11 @@ python3 -m py_compile \
   "$root_dir/.github/scripts/release_reservation.py" \
   "$root_dir/.github/scripts/release_preparation.py" \
   "$root_dir/.github/scripts/release_completion.py" \
+  "$root_dir/.github/scripts/release_helper.py" \
   "$root_dir/.github/scripts/verify-macos-rc-acceptance.py"
 
 python3 "$root_dir/scripts/test-product-version.py"
+bash "$root_dir/.github/scripts/test-release-helper.sh"
 bash "$root_dir/.github/scripts/test-release-failure-context.sh"
 bash "$root_dir/.github/scripts/test-release-github-api.sh"
 
@@ -42,6 +44,9 @@ assert contract["preparation"]["no_gpg_secrets"] is True
 assert contract["recovery"]["historical_backfill"] is False
 assert contract["release_sequence"]["final_baseline"] == "highest final vX.Y.Z only"
 assert contract["release_states"]["published"] == "idempotent-success-without-build-or-overwrite"
+assert contract["helper_bootstrap"]["bootstrap_preserves_identity"] is True
+assert contract["helper_bootstrap"]["reuse_policy"] == "byte-identical-no-rebuild-no-lipo-no-resign"
+assert contract["helper_bootstrap"]["identity_fields"] == ["sha256", "artifact_sha256", "cdhash", "designated_requirement"]
 assert contract["identity_refs"]["write_policy"] == "append-only-create"
 assert contract["identity_refs"]["state_order"] == "bound-before-consumed;released-only-when-unbound"
 assert contract["identity_refs"]["receipt_validation"] == "independently-verify-reservation-provenance"
@@ -59,11 +64,15 @@ assert ".commit.verification.verified" in workflow_text
 assert "verify-release-sequence" in workflow_text
 release_workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 assert "options: [recover]" in release_workflow
+assert "helper_source_mode" in release_workflow
 assert "helper_source_tag" in release_workflow
 assert "hdiutil attach" in release_workflow
 assert "verify-component-identity.sh" in release_workflow
 assert "stable release requires a previously published RC" in release_workflow
-assert 'helper_source_tag="v${core_version}-rc.1"' in release_workflow
+assert "gh release list" in release_workflow
+assert "helper_mode=bootstrap" in release_workflow
+assert "one-time-bootstrap-universal-build" in release_workflow
+assert 'helper_source_tag="v${core_version}-rc.1"' not in release_workflow
 assert 'bootstrap_release_tag' in release_workflow
 assert 'TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=rc1-universal-artifact' in release_workflow
 assert 'source_is_prerelease' in release_workflow
@@ -72,7 +81,8 @@ assert 'SHA256SUMS" --dir' in release_workflow
 assert '--manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"' in release_workflow
 assert 'source_tag_commit="$(git rev-list -n 1 "${HELPER_SOURCE_TAG}^{commit}")"' in release_workflow
 assert 'manifest["source_commit"] == sys.argv[5]' in release_workflow
-assert 'Snapshot Access source component contract mismatch' in release_workflow
+assert "release_helper.py verify-manifest" in release_workflow
+assert "Snapshot Access source component contract mismatch" in (root / ".github/scripts/release_helper.py").read_text(encoding="utf-8")
 assert 'source_manifest_dir="${RUNNER_TEMP}/snapshot-helper-source"' in release_workflow
 assert "macos-release-acceptance" in release_workflow
 assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow

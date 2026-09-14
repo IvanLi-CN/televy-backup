@@ -29,6 +29,12 @@ the same required check names run structural verification against that preparati
 `Release completion` is the required PR-local contract for ancestry, VERSION, labels, source checks,
 reservation provenance, and the explicit version-only release PR mode.
 
+Release Product resolves Snapshot Access helper state separately from the product RC ordinal. It
+reuses only a published prerelease Release whose Universal artifact, manifest, checksums, and helper
+identity match the component lock. If no approved helper Release exists, a same-SHA recovery must
+explicitly set `helper_mode=bootstrap`; the resulting bootstrap preserves the existing reservation
+and merge identity. The package-ci development artifact is not an approved Release source.
+
 After a normal merge, `Release Product` reads only the committed merged identity and its reservation
 ref. Its manual entry is restricted to same-identity `recover`. Successful publication is reported
 directly to the owner by the release-owning agent; Release Product does not write a result comment to
