@@ -4,7 +4,11 @@
 import argparse
 import hashlib
 import json
+import os
+import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 
 def fail(message: str) -> "NoReturn":
@@ -35,6 +39,114 @@ def equal_identity(first, second, name: str, fields: tuple[str, ...]) -> None:
         second_value = required_string(second.get(field), f"{name}.rc2.{field}")
         if first_value != second_value:
             fail(f"{name}.{field} changed between RC1 and RC2")
+
+
+def artifact_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    if path.is_file():
+        digest.update(path.read_bytes())
+        return digest.hexdigest()
+    for root, directories, files in os.walk(path, followlinks=False):
+        directories.sort()
+        files.sort()
+        relative_root = os.path.relpath(root, path)
+        if relative_root == ".":
+            relative_root = ""
+        for name in directories + files:
+            entry = Path(root) / name
+            relative = os.path.join(relative_root, name)
+            stat = os.lstat(entry)
+            digest.update(b"entry\0" + relative.encode() + b"\0")
+            digest.update(str(stat.st_mode).encode() + b"\0")
+            if os.path.islink(entry):
+                digest.update(b"link\0" + os.readlink(entry).encode() + b"\0")
+            elif entry.is_file():
+                digest.update(b"file\0" + entry.read_bytes())
+            else:
+                digest.update(b"other\0")
+    return digest.hexdigest()
+
+
+def command_output(command: list[str], name: str) -> str:
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stdout + result.stderr).strip()
+        fail(f"{name} failed: {detail or result.returncode}")
+    return result.stdout + result.stderr
+
+
+def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
+    mount_path = Path(tempfile.mkdtemp(prefix="televybackup-rc-"))
+    mounted = False
+    try:
+        command_output(
+            [
+                "hdiutil",
+                "attach",
+                "-nobrowse",
+                "-readonly",
+                "-mountpoint",
+                str(mount_path),
+                dmg_path,
+            ],
+            f"{name} DMG mount",
+        )
+        mounted = True
+        top_level_apps = sorted(
+            path.name
+            for path in mount_path.iterdir()
+            if path.is_dir() and path.name.endswith(".app")
+        )
+        if top_level_apps != ["TelevyBackup.app"]:
+            fail(f"{name} DMG must contain exactly one top-level TelevyBackup.app")
+        helper = mount_path / "TelevyBackup.app" / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+        if not helper.is_dir():
+            fail(f"{name} DMG is missing the embedded Snapshot Access app")
+        binary = helper / "Contents/MacOS/televybackup-snapshot-access"
+        if not binary.is_file():
+            fail(f"{name} DMG is missing the Snapshot Access executable")
+        signature = command_output(["codesign", "-dvvv", str(helper)], f"{name} Snapshot Access signature")
+        if "Signature=adhoc" not in signature:
+            fail(f"{name} Snapshot Access must use an ad-hoc signature")
+        cdhash = next(
+            (line.split("=", 1)[1].strip() for line in signature.splitlines() if line.startswith("CDHash=")),
+            "",
+        )
+        requirement = next(
+            (line.strip() for line in command_output(
+                ["codesign", "-d", "-r-", str(helper)],
+                f"{name} Snapshot Access designated requirement",
+            ).splitlines() if line.startswith("designated =>")),
+            "",
+        )
+        if not cdhash or not requirement:
+            fail(f"{name} Snapshot Access signature identity is incomplete")
+        try:
+            metadata = json.loads(
+                command_output([str(binary), "--component-metadata"], f"{name} Snapshot Access metadata")
+            )
+        except json.JSONDecodeError as error:
+            fail(f"{name} Snapshot Access metadata is invalid: {error}")
+        return {
+            "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+            "artifact_sha256": artifact_sha256(helper),
+            "cdhash": cdhash,
+            "designated_requirement": requirement,
+            "binary": "Contents/MacOS/televybackup-snapshot-access",
+            "bundle_id": required_string(metadata.get("bundleId"), f"{name}.snapshot_access.bundle_id"),
+            "relative_path": required_string(metadata.get("relativePath"), f"{name}.snapshot_access.relative_path"),
+            "component_version": required_string(metadata.get("componentVersion"), f"{name}.snapshot_access.component_version"),
+            "protocol_version": metadata.get("protocolVersion"),
+        }
+    finally:
+        if mounted:
+            subprocess.run(
+                ["hdiutil", "detach", str(mount_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        mount_path.rmdir()
 
 
 parser = argparse.ArgumentParser()
@@ -162,9 +274,12 @@ def verify_rc_artifact(
         fail(f"{name} manifest does not describe its Universal DMG")
 
     with open(dmg_path, "rb") as handle:
-        digest = hashlib.sha256(handle.read()).hexdigest()
+        dmg_bytes = handle.read()
+    digest = hashlib.sha256(dmg_bytes).hexdigest()
     if asset.get("sha256") != digest:
         fail(f"{name} Universal DMG does not match its manifest")
+    if asset.get("bytes") != len(dmg_bytes):
+        fail(f"{name} Universal DMG size does not match its manifest")
     checksum = next(
         (line.split()[0] for line in checksum_lines if line.rstrip().endswith("  " + dmg_name)),
         None,
@@ -177,10 +292,17 @@ def verify_rc_artifact(
     helper = components.get("snapshot_access")
     if not isinstance(helper, dict):
         fail(f"{name} manifest snapshot_access component is missing")
-    identity = tuple(required_string(helper.get(field), f"{name}.snapshot_access.{field}") for field in (
+    identity_fields = (
         "sha256", "artifact_sha256", "cdhash", "designated_requirement"
-    ))
-    return identity
+    )
+    actual = helper_identity_from_dmg(dmg_path, name)
+    for field in identity_fields + ("binary", "bundle_id", "relative_path", "component_version"):
+        expected = required_string(helper.get(field), f"{name}.snapshot_access.{field}")
+        if actual[field] != expected:
+            fail(f"{name}. Snapshot Access {field} does not match its BUILD-MANIFEST.json")
+    if helper.get("protocol_version") != actual["protocol_version"]:
+        fail(f"{name}. Snapshot Access protocol_version does not match its BUILD-MANIFEST.json")
+    return tuple(str(actual[field]) for field in identity_fields)
 
 
 rc_args = (

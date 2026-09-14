@@ -28,6 +28,7 @@ use televybackup_snapshot_access::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +94,7 @@ struct HelperState {
     data_dir: PathBuf,
     streams: Arc<Mutex<HashMap<String, ReadStream>>>,
     scan_inventories: Arc<Mutex<HashMap<String, Arc<ScanInventory>>>>,
+    volume_acquire_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     fda_ready: Arc<AtomicBool>,
 }
 
@@ -187,6 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_dir,
         streams: Arc::new(Mutex::new(HashMap::new())),
         scan_inventories: Arc::new(Mutex::new(HashMap::new())),
+        volume_acquire_locks: Arc::new(Mutex::new(HashMap::new())),
         fda_ready: Arc::new(AtomicBool::new(false)),
     };
     tracing_log_start(&state);
@@ -834,6 +837,10 @@ async fn acquire_lease(
             nested_mount.display()
         )));
     }
+    // Snapshot creation and mounting are volume-scoped operations. Keep this guard for the whole
+    // acquire flow so two requests cannot both pass the journal check before either one mounts.
+    let volume_lock = volume_acquire_lock(state, &info.uuid)?;
+    let _volume_guard = volume_lock.lock_owned().await;
     {
         let leases = state
             .leases
@@ -978,6 +985,21 @@ async fn acquire_lease(
         source_path: source_path.to_string_lossy().into_owned(),
         snapshot_created_at: snapshot.created_at.clone(),
     })
+}
+
+fn volume_acquire_lock(
+    state: &HelperState,
+    volume_uuid: &str,
+) -> Result<Arc<AsyncMutex<()>>, HelperError> {
+    let key = volume_uuid.to_ascii_lowercase();
+    let mut locks = state
+        .volume_acquire_locks
+        .lock()
+        .map_err(|_| HelperError::Message("volume acquire lock poisoned".into()))?;
+    Ok(locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone())
 }
 
 fn source_snapshot<'a>(
@@ -1364,6 +1386,7 @@ mod tests {
             data_dir: temp.path().to_path_buf(),
             streams: Arc::new(Mutex::new(HashMap::new())),
             scan_inventories: Arc::new(Mutex::new(HashMap::new())),
+            volume_acquire_locks: Arc::new(Mutex::new(HashMap::new())),
             fda_ready: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1459,6 +1482,30 @@ mod tests {
         ];
 
         assert!(source_snapshot(&manifest, "disk5s1").is_err());
+    }
+
+    #[tokio::test]
+    async fn volume_acquire_locks_serialize_same_volume_case_insensitively() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = scan_test_state(&temp, unsafe { libc::geteuid() }).await;
+        let first = volume_acquire_lock(&state, "ABCD-1234").unwrap();
+        let held = first.lock_owned().await;
+        let second = volume_acquire_lock(&state, "abcd-1234").unwrap();
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                second.clone().lock_owned()
+            )
+            .await
+            .is_err()
+        );
+        drop(held);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(250), second.lock_owned())
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

@@ -90,6 +90,7 @@ PY
 python3 - "$root_dir" <<'PY'
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -98,10 +99,16 @@ from pathlib import Path
 root = Path(sys.argv[1])
 verifier = root / ".github/scripts/verify-macos-rc-acceptance.py"
 identity = {
-    "sha256": "helper-sha",
-    "artifact_sha256": "helper-artifact",
+    "sha256": "",
+    "artifact_sha256": "",
     "cdhash": "helper-cdhash",
-    "designated_requirement": "helper-requirement",
+    "designated_requirement": "designated => identifier \"com.ivan.televybackup.snapshot-access\"",
+    "bundle_id": "com.ivan.televybackup.snapshot-access",
+    "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+    "binary": "Contents/MacOS/televybackup-snapshot-access",
+    "component_version": "0.2.0",
+    "protocol_version": 2,
+    "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign",
 }
 
 def manifest(version, source_commit, dmg_name, dmg_digest):
@@ -136,6 +143,93 @@ evidence = {
 
 with tempfile.TemporaryDirectory() as directory:
     temp = Path(directory)
+    fake_bin = temp / "bin"
+    fake_bin.mkdir()
+    hdiutil_path = fake_bin / "hdiutil"
+    hdiutil_path.write_text(
+        """#!/bin/sh
+set -eu
+if [ "$1" = attach ]; then
+  shift
+  mount_point=""
+  source=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -mountpoint) mount_point="$2"; shift 2 ;;
+      *) source="$1"; shift ;;
+    esac
+  done
+  mkdir -p "$mount_point"
+  cp -R "${source}.tree/TelevyBackup.app" "$mount_point/"
+elif [ "$1" = detach ]; then
+  rm -rf "$2/TelevyBackup.app"
+else
+  exit 2
+fi
+""",
+        encoding="utf-8",
+    )
+    hdiutil_path.chmod(0o755)
+    codesign_path = fake_bin / "codesign"
+    codesign_path.write_text(
+        """#!/bin/sh
+set -eu
+if [ "$1" = -dvvv ]; then
+  echo 'Signature=adhoc' >&2
+  echo 'CDHash=helper-cdhash' >&2
+elif [ "$1" = -d ] && [ "$2" = -r- ]; then
+  echo 'designated => identifier "com.ivan.televybackup.snapshot-access"' >&2
+else
+  exit 2
+fi
+""",
+        encoding="utf-8",
+    )
+    codesign_path.chmod(0o755)
+
+    def artifact_sha256(path):
+        digest = hashlib.sha256()
+        for root_path, directories, files in os.walk(path, followlinks=False):
+            directories.sort()
+            files.sort()
+            relative_root = os.path.relpath(root_path, path)
+            if relative_root == ".":
+                relative_root = ""
+            for entry_name in directories + files:
+                entry = Path(root_path) / entry_name
+                relative = os.path.join(relative_root, entry_name)
+                stat = os.lstat(entry)
+                digest.update(b"entry\0" + relative.encode() + b"\0")
+                digest.update(str(stat.st_mode).encode() + b"\0")
+                if entry.is_file():
+                    digest.update(b"file\0" + entry.read_bytes())
+                else:
+                    digest.update(b"other\0")
+        return digest.hexdigest()
+
+    helper_binary_bytes = b"#!/bin/sh\nprintf '%s\\n' '{\"bundleId\":\"com.ivan.televybackup.snapshot-access\",\"relativePath\":\"Contents/Library/LoginItems/TelevyBackup Snapshot Access.app\",\"componentVersion\":\"0.2.0\",\"protocolVersion\":2}'\n"
+    helper_paths = []
+    for number in (1, 2):
+        tree = temp / f"TelevyBackup-1.0.0-rc.{number}.dmg.tree"
+        helper = tree / "TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+        binary = helper / "Contents/MacOS/televybackup-snapshot-access"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(helper_binary_bytes)
+        binary.chmod(0o755)
+        (helper / "Contents/Info.plist").write_text("fixture", encoding="utf-8")
+        helper_paths.append(helper)
+    identity["sha256"] = hashlib.sha256(
+        (helper_paths[0] / "Contents/MacOS/televybackup-snapshot-access").read_bytes()
+    ).hexdigest()
+    identity["artifact_sha256"] = artifact_sha256(helper_paths[0])
+    evidence["snapshot_access"] = identity.copy()
+    evidence["root_mount_helper"]["rc1"] = identity.copy()
+    evidence["root_mount_helper"]["rc2"] = identity.copy()
+    root_identity = {
+        field: identity[field]
+        for field in ("sha256", "artifact_sha256", "cdhash", "designated_requirement")
+    }
+
     stable_manifest = {
         "release_version": "1.0.0",
         "source_commit": "stable-source",
@@ -146,7 +240,7 @@ with tempfile.TemporaryDirectory() as directory:
                 "component_version": "0.1.0",
                 "compatible_component_versions": ["0.1.0", "0.9.8"],
                 "protocol_version": 1,
-                **identity,
+                **root_identity,
             },
         },
     }
@@ -169,15 +263,22 @@ with tempfile.TemporaryDirectory() as directory:
             f"--rc{number}-dmg", str(dmg),
             f"--rc{number}-source-commit", source,
         ])
+    old_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{fake_bin}{os.pathsep}{old_path}"
     common = [
         sys.executable, str(verifier), "--evidence", json.dumps(evidence),
         "--manifest", str(stable_path), "--stable-version", "1.0.0",
         "--rc1-tag", "v1.0.0-rc.1", "--rc2-tag", "v1.0.0-rc.2",
         "--stable-source-commit", "stable-source", *rc_args,
     ]
-    assert subprocess.run(common, capture_output=True, text=True).returncode == 0
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    tampered_binary = helper_paths[1] / "Contents/MacOS/televybackup-snapshot-access"
+    tampered_binary.write_bytes(helper_binary_bytes + b"tampered")
+    assert subprocess.run(common, capture_output=True, text=True).returncode != 0
+    tampered_binary.write_bytes(helper_binary_bytes)
     stale = temp / "rc2.json"
-    stale.write_text(stale.read_text(encoding="utf-8").replace("helper-sha", "stale-sha"), encoding="utf-8")
+    stale.write_text(stale.read_text(encoding="utf-8").replace(identity["sha256"], "stale-sha"), encoding="utf-8")
     assert subprocess.run(common, capture_output=True, text=True).returncode != 0
     stable_manifest["components"]["snapshot_mount_helper"]["cdhash"] = "stale-cdhash"
     stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")

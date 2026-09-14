@@ -468,13 +468,14 @@ impl SnapshotContentReader {
             });
         };
         let pool = open_readonly_index_db(&path).await?;
-        validate_snapshot_filemap(&pool, snapshot_id).await?;
-        if path != self.endpoint_db_path {
+        let uses_filemap = path != self.endpoint_db_path;
+        if uses_filemap {
             sqlx::query("ATTACH DATABASE ? AS browse_endpoint")
                 .bind(self.endpoint_db_path.to_string_lossy().to_string())
                 .execute(&pool)
                 .await?;
         }
+        validate_snapshot_filemap(&pool, snapshot_id, uses_filemap).await?;
         let dedupe_attached = self
             .dedupe_db_path
             .as_ref()
@@ -491,7 +492,7 @@ impl SnapshotContentReader {
                 .execute(&pool)
                 .await?;
         }
-        Ok((pool, path != self.endpoint_db_path, dedupe_attached))
+        Ok((pool, uses_filemap, dedupe_attached))
     }
 }
 
@@ -506,7 +507,11 @@ async fn endpoint_has_snapshot_files(endpoint_db_path: &Path, snapshot_id: &str)
     )
 }
 
-async fn validate_snapshot_filemap(pool: &SqlitePool, snapshot_id: &str) -> Result<()> {
+async fn validate_snapshot_filemap(
+    pool: &SqlitePool,
+    snapshot_id: &str,
+    compare_endpoint_catalog: bool,
+) -> Result<()> {
     const REQUIRED_TABLES: [&str; 4] = ["snapshots", "files", "chunks", "file_chunks"];
 
     for table in REQUIRED_TABLES {
@@ -523,6 +528,19 @@ async fn validate_snapshot_filemap(pool: &SqlitePool, snapshot_id: &str) -> Resu
         }
     }
 
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(pool)
+        .await?;
+    if compare_endpoint_catalog {
+        let snapshot_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM snapshots")
+            .fetch_one(pool)
+            .await?;
+        if snapshot_count != 1 {
+            return Err(Error::Integrity {
+                message: "snapshot filemap must contain exactly one snapshot".to_string(),
+            });
+        }
+    }
     let snapshot_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM snapshots WHERE snapshot_id = ?")
             .bind(snapshot_id)
@@ -532,6 +550,75 @@ async fn validate_snapshot_filemap(pool: &SqlitePool, snapshot_id: &str) -> Resu
         return Err(Error::Integrity {
             message: format!("snapshot filemap does not contain snapshot: {snapshot_id}"),
         });
+    }
+
+    if !sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(pool)
+        .await?
+        .is_empty()
+    {
+        return Err(Error::Integrity {
+            message: "snapshot filemap contains a foreign-key violation".to_string(),
+        });
+    }
+    let orphan_files: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM files AS f LEFT JOIN snapshots AS s ON s.snapshot_id = f.snapshot_id WHERE s.snapshot_id IS NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    if orphan_files != 0 {
+        return Err(Error::Integrity {
+            message: "snapshot filemap contains files without a snapshot".to_string(),
+        });
+    }
+    let orphan_file_chunks: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM file_chunks AS fc LEFT JOIN files AS f ON f.file_id = fc.file_id LEFT JOIN chunks AS c ON c.chunk_hash = fc.chunk_hash WHERE f.file_id IS NULL OR c.chunk_hash IS NULL",
+    )
+    .fetch_one(pool)
+    .await?;
+    if orphan_file_chunks != 0 {
+        return Err(Error::Integrity {
+            message: "snapshot filemap contains unresolvable file chunks".to_string(),
+        });
+    }
+
+    if compare_endpoint_catalog {
+        let filemap = sqlx::query(
+            "SELECT created_at, source_path, label, base_snapshot_id FROM snapshots WHERE snapshot_id = ?",
+        )
+        .bind(snapshot_id)
+        .fetch_one(pool)
+        .await?;
+        let endpoint = sqlx::query(
+            "SELECT created_at, source_path, label, base_snapshot_id FROM browse_endpoint.snapshots WHERE snapshot_id = ?",
+        )
+        .bind(snapshot_id)
+        .fetch_optional(pool)
+        .await?;
+        let Some(endpoint) = endpoint else {
+            return Err(Error::Integrity {
+                message: format!("endpoint catalog does not contain snapshot: {snapshot_id}"),
+            });
+        };
+        let filemap_metadata = (
+            filemap.get::<String, _>("created_at"),
+            filemap.get::<String, _>("source_path"),
+            filemap.get::<String, _>("label"),
+            filemap.get::<Option<String>, _>("base_snapshot_id"),
+        );
+        let endpoint_metadata = (
+            endpoint.get::<String, _>("created_at"),
+            endpoint.get::<String, _>("source_path"),
+            endpoint.get::<String, _>("label"),
+            endpoint.get::<Option<String>, _>("base_snapshot_id"),
+        );
+        if filemap_metadata != endpoint_metadata {
+            return Err(Error::Integrity {
+                message: format!(
+                    "snapshot filemap metadata does not match endpoint catalog: {snapshot_id}"
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -993,6 +1080,94 @@ mod tests {
         );
 
         assert!(reader.list_children("snapshot-1", "").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reader_rejects_filemap_with_orphan_relationships() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db = temp.path().join("index.sqlite");
+        let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('snapshot-1', '2026-09-11T08:00:00Z', '/source', 'Test', NULL)",
+        )
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap = filemap_dir.join("snapshot-1.sqlite");
+        let filemap_pool = crate::index_db::open_snapshot_filemap_db(&filemap)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('snapshot-1', '2026-09-11T08:00:00Z', '/source', 'Test', NULL)",
+        )
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&filemap_pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO files (file_id, snapshot_id, path, size, mtime_ms, mode, kind) VALUES ('orphan-file', 'missing-snapshot', 'secret.txt', 1, 0, 0, 'file')",
+        )
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
+
+        let reader = SnapshotContentReader::new_cached(
+            endpoint_db,
+            filemap_dir,
+            "test.mem",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+        let error = reader.entry("snapshot-1", "").await.unwrap_err();
+        assert!(
+            matches!(error, Error::Integrity { message } if message.contains("foreign-key") || message.contains("without a snapshot"))
+        );
+    }
+
+    #[tokio::test]
+    async fn reader_rejects_filemap_with_mismatched_endpoint_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db = temp.path().join("index.sqlite");
+        let endpoint_pool = crate::index_db::open_index_db(&endpoint_db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('snapshot-1', '2026-09-11T08:00:00Z', '/source', 'Test', NULL)",
+        )
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap = filemap_dir.join("snapshot-1.sqlite");
+        let filemap_pool = crate::index_db::open_snapshot_filemap_db(&filemap)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('snapshot-1', '2026-09-11T08:00:00Z', '/wrong-source', 'Test', NULL)",
+        )
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
+
+        let reader = SnapshotContentReader::new_cached(
+            endpoint_db,
+            filemap_dir,
+            "test.mem",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+        let error = reader.entry("snapshot-1", "").await.unwrap_err();
+        assert!(
+            matches!(error, Error::Integrity { message } if message.contains("metadata does not match endpoint catalog"))
+        );
     }
 
     #[tokio::test]

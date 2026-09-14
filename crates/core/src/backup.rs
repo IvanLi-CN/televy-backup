@@ -2459,6 +2459,8 @@ async fn run_backup_with_source_internal<S: Storage>(
                 scan_performance.record(ScanWorkKind::Sqlite, sqlite_started);
                 let snapshot_id = snapshot_id.clone();
                 let source_path_utf8 = path_to_utf8(&logical_source_path)?;
+                let snapshot_created_at =
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
                 let sqlite_started = Instant::now();
                 let (_, retry_waits) = execute_scan_sqlite_with_busy_retry!(
@@ -2466,10 +2468,11 @@ async fn run_backup_with_source_internal<S: Storage>(
                     sqlx::query(
                         r#"
                         INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id)
-                        VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?)
                         "#,
                     )
                     .bind(&snapshot_id)
+                    .bind(&snapshot_created_at)
                     .bind(&source_path_utf8)
                     .bind(&scan_label)
                     .bind(&base_snapshot_id)
@@ -2489,10 +2492,11 @@ async fn run_backup_with_source_internal<S: Storage>(
                     sqlx::query(
                         r#"
                         INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id)
-                        VALUES (?, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?)
                         "#,
                     )
                     .bind(&snapshot_id)
+                    .bind(&snapshot_created_at)
                     .bind(&source_path_utf8)
                     .bind(&scan_label)
                     .bind(&base_snapshot_id)

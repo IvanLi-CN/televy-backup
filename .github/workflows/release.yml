@@ -501,7 +501,7 @@ jobs:
     name: Require macOS RC acceptance for stable
     needs: [resolve, assemble]
     if: needs.resolve.outputs.enabled == 'true' && needs.resolve.outputs.channel == 'prod'
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     environment:
       name: macos-release-acceptance
     steps:
