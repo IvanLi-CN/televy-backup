@@ -48,6 +48,8 @@ if [[ "$notify_text" == *"Release exact-tag backfill"* ]]; then
 fi
 assert_contains "notifier recovery candidate output" "$notify_text" "recovery_candidate:"
 assert_contains "notifier superseded handling" "$notify_text" "not-applicable: superseded_by_product_tag"
+assert_contains "notifier intent artifact resolver" "$notify_text" "load_release_intent"
+assert_contains "notifier fail-closed target" "$notify_text" 'target_sha: ${{ needs.resolve_release_context.outputs.merge_sha }}'
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
 assert_contains "release full history checkout" "$release_text" "fetch-depth: 0"
 assert_contains "release full tag fetch" "$release_text" "git fetch --force origin main '+refs/tags/*:refs/tags/*'"
@@ -59,6 +61,8 @@ assert_contains "release consumed receipt" "$release_text" "--state consumed"
 assert_contains "release intent artifact" "$release_text" "name: release-intent"
 assert_contains "release intent covered merge" "$release_text" "covered_merge_sha"
 assert_contains "release intent type" "$release_text" "RELEASE_TYPE"
+assert_contains "release intent tag target" "$release_text" "tag_target_sha"
+assert_contains "release intent verified provenance" "$release_text" "provenance_verified:true"
 assert_contains "release publish recheck" "$release_text" "Create or verify immutable product tag"
 assert_contains "release state fail closed" "$release_text" "unable to resolve GitHub Release state"
 if [[ "$release_text" == *'Product release became published for "${PRODUCT_TAG}"; no asset overwrite'*$'\n'*'exit 0'* ]]; then

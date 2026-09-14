@@ -82,7 +82,7 @@
           "channel",
           "reservation_merge_commit_sha"
         ],
-        "state_field": "reservation_state",
+        "state_field": "receipt_state",
         "states": [
           "claimed",
           "bound",
@@ -92,11 +92,11 @@
         "pre_merge_retry_requires_state": "claimed",
         "claimed_requires_reservation_merge_commit_sha_null": true,
         "recovery_requires_state": "bound",
-        "merge_binding_transition": "mainline-release-atomic-claimed-to-bound-when-reservation_merge_commit_sha-is-recorded-and-pre_merge_boundary_token-matches",
-        "consumption_transition": "atomic-bound-to-consumed-after-publication-completes",
-        "release_transition": "atomic-claimed-to-released-only-if-reservation_merge_commit_sha-is-null-and-pre_merge_boundary_token-is-not-merged",
+        "merge_binding_transition": "append-only-create-bound-receipt-after-reservation-provenance-and-pre-merge-boundary-token-match",
+        "consumption_transition": "append-only-create-consumed-receipt-after-publication-completes",
+        "release_transition": "append-only-create-released-receipt-only-if-no-bound-or-consumed-receipt-exists-and-maintainer-confirms-unmerged-boundary",
         "released_reservation_recovery": "forbidden",
-        "merge_binding": "mainline-release-atomic-claimed-to-bound-when-reservation_merge_commit_sha-is-recorded-and-pre_merge_boundary_token-matches"
+        "merge_binding": "append-only-create-bound-receipt-after-reservation-provenance-and-pre-merge-boundary-token-match"
       },
       "tag_ownership": {
         "reserve_before_preparation": true,
