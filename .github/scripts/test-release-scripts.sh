@@ -4,6 +4,7 @@ set -euo pipefail
 root_dir="$(git rev-parse --show-toplevel)"
 
 bash -n "$root_dir/.github/scripts/label-gate.sh"
+bash -n "$root_dir/.github/scripts/merge-group-release-gate.sh"
 python3 -m py_compile \
   "$root_dir/.github/scripts/release_chain.py" \
   "$root_dir/.github/scripts/release_reservation.py" \

@@ -129,8 +129,12 @@ merge_group_text="$(<"$root_dir/.github/scripts/merge-group-release-gate.sh")"
 assert_not_contains "merge-group pull request API suppression" "$merge_group_text" "|| true"
 assert_contains "merge-group failed check state" "$merge_group_text" 'failed) echo "merge-group gate: required check failed'
 poll_line="$(grep -n 'required=("quality"' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
+final_pr_line="$(grep -n 'merge-group-final-pr' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
+final_checks_line="$(grep -n 'commits/\${verification_sha}/check-runs' "$root_dir/.github/scripts/merge-group-release-gate.sh" | tail -1 | cut -d: -f1)"
 completion_line="$(grep -n 'python3 .github/scripts/release_completion.py' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
-if [[ -z "$poll_line" || -z "$completion_line" || "$poll_line" -ge "$completion_line" ]]; then
+assert_contains "merge-group final PR identity check" "$merge_group_text" 'test "$(jq -r '\''.head.sha'\'' "${final_pr_json}")" = "${pr_head_sha}"'
+assert_contains "merge-group final labels snapshot" "$merge_group_text" 'labels_json="$(jq -c '\''.labels'\'' "${final_pr_json}")"'
+if [[ -z "$poll_line" || -z "$final_pr_line" || -z "$final_checks_line" || -z "$completion_line" || "$poll_line" -ge "$final_pr_line" || "$final_pr_line" -ge "$final_checks_line" || "$final_checks_line" -ge "$completion_line" ]]; then
   printf 'merge-group completion must wait for required checks before validation\n' >&2
   exit 1
 fi

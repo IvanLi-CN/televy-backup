@@ -136,6 +136,16 @@ for pr_number in ${pr_numbers}; do
       fi
       sleep 10
     done
+    final_pr_json="${RUNNER_TEMP:-/tmp}/merge-group-final-pr-${pr_number}.json"
+    gh api "repos/${repository}/pulls/${pr_number}" > "${final_pr_json}"
+    test "$(jq -r '.state' "${final_pr_json}")" = open
+    test "$(jq -r '.base.ref' "${final_pr_json}")" = main
+    test "$(jq -r '.head.repo.full_name // empty' "${final_pr_json}")" = "${repository}"
+    test "$(jq -r '.head.sha' "${final_pr_json}")" = "${pr_head_sha}"
+    test "$(jq -r '.base.sha' "${final_pr_json}")" = "${base_sha}"
+    labels_json="$(jq -c '.labels' "${final_pr_json}")"
+    printf '%s' "${labels_json}" > "${labels_file}"
+    gh api "repos/${repository}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${checks_json}"
     python3 .github/scripts/release_completion.py "${completion_args[@]}" \
       --allow-migration --migration-version 0.9.2
   fi
