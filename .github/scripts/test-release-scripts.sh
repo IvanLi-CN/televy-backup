@@ -127,8 +127,8 @@ assert "Assemble and validate final assets" in release_workflow
 PY
 
 python3 - "$root_dir" <<'PY'
-import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -145,8 +145,12 @@ with tempfile.TemporaryDirectory() as directory:
     asset_dir = temp / "dist"
     (policy_repo / "scripts/macos").mkdir(parents=True)
     (policy_repo / "packaging/macos").mkdir(parents=True)
-    (asset_dir).mkdir()
+    asset_dir.mkdir()
     shutil.copy2(validator_source, policy_repo / "scripts/macos/verify-release-assets.sh")
+    shutil.copy2(
+        root / "scripts/macos/generate-release-manifest.sh",
+        policy_repo / "scripts/macos/generate-release-manifest.sh",
+    )
     shutil.copy2(root / "scripts/product-version.py", policy_repo / "scripts/product-version.py")
     (policy_repo / "VERSION").write_text("0.9.9-rc.37\n", encoding="utf-8")
     shutil.copy2(
@@ -167,61 +171,8 @@ with tempfile.TemporaryDirectory() as directory:
         f"televybackup-tools-{version}-arm64.tar.gz",
         f"televybackup-tools-{version}-x86_64.tar.gz",
     ]
-    assets = []
     for name in asset_names:
-        path = asset_dir / name
-        path.write_bytes(f"bootstrap fixture: {name}\n".encode())
-        assets.append(
-            {
-                "name": name,
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                "bytes": path.stat().st_size,
-            }
-        )
-    (asset_dir / "SHA256SUMS").write_text(
-        "".join(f"{asset['sha256']}  {asset['name']}\n" for asset in assets),
-        encoding="utf-8",
-    )
-    identity = {
-        "sha256": "bootstrap-sha",
-        "artifact_sha256": "bootstrap-artifact-sha",
-        "cdhash": "bootstrap-cdhash",
-        "designated_requirement": "designated => identifier \\\"com.ivan.televybackup.snapshot-access\\\"",
-    }
-    manifest = {
-        "release_version": version,
-        "signing": "ad-hoc",
-        "architectures": ["arm64", "x86_64", "universal2"],
-        "components": {
-            "snapshot_access": {
-                "bundle_id": "com.ivan.televybackup.snapshot-access",
-                "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
-                "binary": "Contents/MacOS/televybackup-snapshot-access",
-                "component_version": "0.2.0",
-                "protocol_version": 2,
-                "source": "one-time-bootstrap-universal-build",
-                "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign",
-                **identity,
-            },
-            "snapshot_mount_helper": {
-                "label": "com.ivan.televybackup.snapshot-mount-helper",
-                "install_path": "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
-                "component_version": "0.1.0",
-                "compatible_component_versions": ["0.1.0", "0.9.8"],
-                "protocol_version": 1,
-                "binary": "Contents/MacOS/televybackup-snapshot-mount-helper",
-                "source": "release-bundled-compatibility-reference",
-                "identity_source": "bundled-release-artifact",
-                "installed_observation": "manual-rc-acceptance-required",
-                "update_policy": "compatibility-check-only",
-                **identity,
-            },
-        },
-        "assets": assets,
-    }
-    (asset_dir / "BUILD-MANIFEST.json").write_text(
-        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
-    )
+        (asset_dir / name).write_bytes(f"bootstrap fixture: {name}\n".encode())
     subprocess.run(
         ["git", "-C", str(policy_repo), "add", "."],
         check=True,
@@ -257,6 +208,38 @@ with tempfile.TemporaryDirectory() as directory:
             == policy_sha
         )
         shutil.copy2(root / "VERSION", policy_checkout / "VERSION")
+        generation_env = dict(os.environ)
+        generation_env["TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE"] = (
+            "one-time-bootstrap-universal-build"
+        )
+        generation = subprocess.run(
+            [
+                str(policy_checkout / "scripts/macos/generate-release-manifest.sh"),
+                "--mode",
+                "release",
+                "--asset-dir",
+                str(asset_dir),
+                "--source-commit",
+                "1" * 40,
+                "--packaging-commit",
+                "2" * 40,
+                "--output",
+                str(asset_dir / "BUILD-MANIFEST.json"),
+            ],
+            cwd=policy_checkout,
+            env=generation_env,
+            capture_output=True,
+            text=True,
+        )
+        assert generation.returncode == 0, generation.stdout + generation.stderr
+        generated_manifest = json.loads(
+            (asset_dir / "BUILD-MANIFEST.json").read_text(encoding="utf-8")
+        )
+        assert generated_manifest["release_version"] == version
+        assert (
+            generated_manifest["components"]["snapshot_access"]["source"]
+            == "one-time-bootstrap-universal-build"
+        )
         result = subprocess.run(
             [
                 str(policy_checkout / "scripts/macos/verify-release-assets.sh"),
