@@ -105,6 +105,15 @@ never fabricates a version, tag, or recovery command.
 
 The release-owning agent MUST report successful publication directly to the owner, and Release Product MUST NOT create or update a result comment on the source PR.
 
+### REQ-PVR-009: Required gates preserve queued evaluations
+
+`Release intent label gate` and `Release completion` are required PR gates and use a per-PR
+non-preemptive `queue: max` concurrency policy. They MUST NOT use `cancel-in-progress: true`.
+`Release completion` MUST fetch the current pull request through the GitHub API at execution time,
+verify that its open head and base still match the event-bound SHAs, and pass that current labels
+snapshot to the validator. Event-payload labels are trigger metadata, not an authoritative input for
+a queued completion evaluation.
+
 ## Verification
 
 ### VER-PVR-001
@@ -131,9 +140,9 @@ independent helper bootstrap state, and no automatic history backfill.
 
 ### VER-PVR-005
 
-Covers: REQ-PVR-008. Failure-context and workflow contract tests verify locked identity payloads,
-no-identity/resolver-error distinction, unresolved identity fail-closed behavior, and intent artifact
-generation.
+Covers: REQ-PVR-008, REQ-PVR-009. Failure-context and workflow contract tests verify locked identity
+payloads, no-identity/resolver-error distinction, unresolved identity fail-closed behavior, intent
+artifact generation, required-gate scheduling, and current PR label revalidation.
 
 ## Verification Map
 
@@ -144,6 +153,7 @@ generation.
 | REQ-PVR-005 | VER-PVR-003 |
 | REQ-PVR-006, 007 | VER-PVR-004 |
 | REQ-PVR-008 | VER-PVR-005 |
+| REQ-PVR-009 | `.github/scripts/test-release-workflows.sh` |
 
 ## Acceptance evidence
 

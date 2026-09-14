@@ -14,7 +14,7 @@ on:
 
 concurrency:
   group: release-completion-${{ github.event.pull_request.number || inputs.pr_number || github.event.merge_group.head_sha || github.ref }}
-  cancel-in-progress: true
+  queue: max
 
 permissions:
   checks: read
@@ -93,6 +93,21 @@ jobs:
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
         run: |
           set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/current-pr.json"
+          python3 - "${RUNNER_TEMP}/current-pr.json" <<'PY'
+          import json
+          import os
+          import sys
+
+          current = json.load(open(sys.argv[1], encoding="utf-8"))
+          if current.get("state") != "open" or current.get("base", {}).get("ref") != "main":
+              raise SystemExit("current PR is not an open PR targeting main")
+          if current.get("head", {}).get("sha") != os.environ["HEAD_SHA"]:
+              raise SystemExit("current PR head changed while Release completion was queued")
+          if current.get("base", {}).get("sha") != os.environ["BASE_SHA"]:
+              raise SystemExit("current PR base changed while Release completion was queued")
+          PY
+          jq '.labels' "${RUNNER_TEMP}/current-pr.json" > "${RUNNER_TEMP}/labels.json"
           verification_sha="${HEAD_SHA}"
           prepared_json=''
           if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then

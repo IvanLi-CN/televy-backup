@@ -47,6 +47,20 @@
     "release": "Release Product",
     "failure_notification": "Notify failed release"
   },
+  "required_gate_scheduling": {
+    "label_gate": {
+      "group": "per-pull-request",
+      "queue": "max",
+      "cancel_in_progress": false,
+      "labels_source": "current GitHub pull request API snapshot"
+    },
+    "completion": {
+      "group": "per-pull-request",
+      "queue": "max",
+      "cancel_in_progress": false,
+      "labels_source": "current GitHub pull request API snapshot after head/base match"
+    }
+  },
   "preparation": {
     "modes": ["normal", "version-only-release-pr"],
     "write_api": "createCommitOnBranch",

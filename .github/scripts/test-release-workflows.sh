@@ -46,6 +46,8 @@ label_gate_text="$(<"$root_dir/.github/workflows/label-gate.yml")"
 assert_contains "release intent label gate job" "$label_gate_text" "name: Release intent label gate"
 assert_contains "label gate merge-group validation" "$label_gate_text" "merge-group-release-gate.sh labels"
 assert_not_contains "label gate merge-group echo bridge" "$label_gate_text" "reuses the Release intent label gate"
+assert_contains "label gate non-preemptive queue" "$label_gate_text" "queue: max"
+assert_not_contains "label gate preemptive cancellation" "$label_gate_text" "cancel-in-progress: true"
 notify_text="$(<"$root_dir/.github/workflows/notify-release-failure.yml")"
 assert_contains "notifier Release Product trigger" "$notify_text" "- Release Product"
 if [[ "$notify_text" == *"Release exact-tag backfill"* ]]; then
@@ -66,6 +68,11 @@ assert_contains "completion ready-for-review trigger" "$completion_text" "ready_
 assert_contains "completion merge-group validation" "$completion_text" "merge-group-release-gate.sh completion"
 assert_not_contains "completion merge-group echo bridge" "$completion_text" "reuses Release completion"
 assert_contains "completion merge-group full history" "$completion_text" "fetch-depth: 0"
+assert_contains "completion current PR API snapshot" "$completion_text" 'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"'
+assert_contains "completion current PR head validation" "$completion_text" 'current PR head changed while Release completion was queued'
+assert_contains "completion current PR labels" "$completion_text" 'jq '\''.labels'\'' "${RUNNER_TEMP}/current-pr.json"'
+assert_contains "completion non-preemptive queue" "$completion_text" "queue: max"
+assert_not_contains "completion preemptive cancellation" "$completion_text" "cancel-in-progress: true"
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
 assert_contains "release snapshot head" "$release_text" "head_sha"
 assert_contains "release snapshot labels" "$release_text" "labels_json"

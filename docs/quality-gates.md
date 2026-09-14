@@ -12,7 +12,7 @@ TelevyBackup treats pull request checks as an explicit merge contract. The canon
 - `Release intent label gate`
 - `Release completion`
 
-The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks.
+The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks. `Release intent label gate` and `Release completion` use per-PR non-preemptive `queue: max` scheduling so an already queued required evaluation is not cancelled by a later event.
 
 Release Product treats the highest eligible final product tag as the numeric baseline. Eligible
 product tags are protected annotated tags created by `github-actions[bot]` and reachable from
@@ -31,7 +31,9 @@ channel-free `type:docs|skip` intent. Source PR heads run the full Rust, Swift, 
 matrix. A trusted preparation run reserves identity, adds only `VERSION` to the PR branch, and then
 the same required check names run structural verification against that preparation commit.
 `Release completion` is the required PR-local contract for ancestry, VERSION, labels, source checks,
-reservation provenance, and the explicit version-only release PR mode.
+reservation provenance, and the explicit version-only release PR mode. At runtime it reads the current
+PR from the GitHub API, verifies the event-bound head/base still match, and validates that current
+labels snapshot; queued event-payload labels are not authoritative.
 
 Release Product resolves Snapshot Access helper state separately from the product RC ordinal. It
 reuses only a published prerelease Release whose Universal artifact, manifest, checksums, and helper

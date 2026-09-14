@@ -55,12 +55,16 @@ assert contract["identity_refs"]["write_policy"] == "append-only-create"
 assert contract["identity_refs"]["state_order"] == "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound"
 assert contract["identity_refs"]["receipt_validation"] == "independently-verify-reservation-provenance"
 assert contract["recovery"]["dispatch_requires_existing_bound"] is True
+for gate in ("label_gate", "completion"):
+    scheduling = contract["required_gate_scheduling"][gate]
+    assert scheduling["queue"] == "max"
+    assert scheduling["cancel_in_progress"] is False
 
 workflow_text = "\n".join(
     (root / ".github/workflows" / name).read_text(encoding="utf-8")
     for name in ("release-preparation.yml", "release-completion.yml", "release.yml")
 )
-for forbidden in ("GPG", "release-backfill", "backfill", "queue"):
+for forbidden in ("GPG", "release-backfill", "backfill"):
     assert forbidden not in workflow_text, forbidden
 assert "createCommitOnBranch" in workflow_text
 assert "expectedHeadOid" in workflow_text

@@ -23,6 +23,8 @@ blocks with a local Git/API fixture.
 ## Identity flow
 
 1. Label Gate validates one product type and one new channel, or channel-free docs/skip.
+   Label Gate and Release completion are required per-PR gates with non-preemptive `queue: max`
+   scheduling; completion re-reads the current PR labels after verifying the queued head/base.
 2. Preparation enumerates fetched annotated product tags, verifies the GitHub Actions tagger and
    main reachability, calculates the candidate from the highest final tag, and creates the
    reservation before writing VERSION.
