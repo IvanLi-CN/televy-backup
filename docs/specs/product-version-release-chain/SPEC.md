@@ -111,8 +111,9 @@ The release-owning agent MUST report successful publication directly to the owne
 non-preemptive `queue: max` concurrency policy. They MUST NOT use `cancel-in-progress: true`.
 `Release completion` MUST fetch the current pull request through the GitHub API at execution time,
 verify that its open head and base still match the event-bound SHAs, and pass that current labels
-snapshot to the validator. Event-payload labels are trigger metadata, not an authoritative input for
-a queued completion evaluation.
+snapshot to the validator. After waiting for source checks, it MUST repeat the head/base and labels
+validation immediately before invoking the completion validator. Event-payload labels are trigger
+metadata, not an authoritative input for a queued completion evaluation.
 
 ## Verification
 

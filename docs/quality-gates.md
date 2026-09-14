@@ -33,7 +33,8 @@ the same required check names run structural verification against that preparati
 `Release completion` is the required PR-local contract for ancestry, VERSION, labels, source checks,
 reservation provenance, and the explicit version-only release PR mode. At runtime it reads the current
 PR from the GitHub API, verifies the event-bound head/base still match, and validates that current
-labels snapshot; queued event-payload labels are not authoritative.
+labels snapshot both before waiting for source checks and immediately before completion validation;
+queued event-payload labels are not authoritative.
 
 Release Product resolves Snapshot Access helper state separately from the product RC ordinal. It
 reuses only a published prerelease Release whose Universal artifact, manifest, checksums, and helper

@@ -71,6 +71,8 @@ assert_contains "completion merge-group full history" "$completion_text" "fetch-
 assert_contains "completion current PR API snapshot" "$completion_text" 'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"'
 assert_contains "completion current PR head validation" "$completion_text" 'current PR head changed while Release completion was queued'
 assert_contains "completion current PR labels" "$completion_text" 'jq '\''.labels'\'' "${RUNNER_TEMP}/current-pr.json"'
+assert_contains "completion final PR revalidation" "$completion_text" 'validate_current_pr "${RUNNER_TEMP}/current-pr-final.json"'
+assert_contains "completion final PR labels" "$completion_text" 'jq '\''.labels'\'' "${RUNNER_TEMP}/current-pr-final.json"'
 assert_contains "completion non-preemptive queue" "$completion_text" "queue: max"
 assert_not_contains "completion preemptive cancellation" "$completion_text" "cancel-in-progress: true"
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
