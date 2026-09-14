@@ -47,7 +47,7 @@ for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-h
     exit 1
   }
 done
-grep -F 'chmod 755 \' <<<"$build_text" >/dev/null || {
+grep -F "chmod 755 \\" <<<"$build_text" >/dev/null || {
   echo "build-app.sh must preserve executable modes for every main binary" >&2
   exit 1
 }
@@ -83,6 +83,14 @@ grep -F '[[ -x "$tools_dir/TelevyBackup Tools/bin/$binary" ]]' <<<"$verify_relea
   echo "tools archive verification must reject non-executable binaries" >&2
   exit 1
 }
+grep -F "trap 'rm -rf \"\$tools_dir\"' EXIT" <<<"$verify_release_text" >/dev/null || {
+  echo "tools archive verification must clean extracted temporary files on failure" >&2
+  exit 1
+}
+grep -F '  (' <<<"$verify_release_text" >/dev/null || {
+  echo "tools archive verification must isolate cleanup for each archive" >&2
+  exit 1
+}
 webdav_text="$(<"$root_dir/scripts/macos/verify-webdav-snapshot-browsing.sh")"
 [[ "$webdav_text" == *'cargo test --manifest-path "$root_dir/Cargo.toml" -p televybackupd webdav_service -- --list'* ]]
 [[ "$webdav_text" != *'http.server'* ]]
@@ -116,6 +124,10 @@ grep -F '[[ -x "$native_access_app/Contents/MacOS/televybackup-snapshot-access" 
 }
 grep -F '[[ -x "$universal_access_binary" ]]' <<<"$assemble_text" >/dev/null || {
   echo "Universal assembly must preserve the nested helper executable mode" >&2
+  exit 1
+}
+grep -F 'chmod 755 "$arm_access_binary" "$x86_access_binary" "$universal_access_binary"' <<<"$assemble_text" >/dev/null || {
+  echo "Universal assembly must restore artifact-normalized helper modes" >&2
   exit 1
 }
 grep -F 'access_relative_path="Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"' <<<"$assemble_text" >/dev/null || {

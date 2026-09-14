@@ -31,7 +31,7 @@ Every `prod`, `beta`, `rc`, or `dev` release MUST publish `TelevyBackup-<version
 
 ### REQ-MRD-002: Native build matrix
 
-arm64 assets MUST be built on `macos-15`; x86_64 assets MUST be built on `macos-15-intel`. Universal 2 assembly MUST combine those native slices and verify all five main embedded executables plus the nested Snapshot Access app.
+arm64 assets MUST be built on `macos-15`; x86_64 assets MUST be built on `macos-15-intel`. Universal 2 assembly MUST combine those native slices and verify all five main embedded executables plus the nested Snapshot Access app. Assembly MUST restore executable modes normalized by artifact transport without changing the bytes or identity of a reused Snapshot Access helper.
 
 ### REQ-MRD-003: Version observability
 

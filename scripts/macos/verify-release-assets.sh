@@ -357,25 +357,27 @@ for dmg in "$asset_dir/TelevyBackup-${version}.dmg" "$asset_dir/TelevyBackup-${v
   verify_dmg_helper_identity "$dmg" true
 done
 for tools_archive in "$asset_dir/televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/televybackup-tools-${version}-x86_64.tar.gz"; do
-  if tar -tzf "$tools_archive" | /usr/bin/grep -E '(^|/)(TelevyBackup Snapshot Access\.app|com\.ivan\.televybackup\.snapshot-access)' >/dev/null; then
-    echo "tools archive contains the private Snapshot Access app or service" >&2
-    exit 1
-  fi
-  expected_arches=arm64
-  [[ "$tools_archive" == *-x86_64.tar.gz ]] && expected_arches=x86_64
-  tools_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-tools-verify.XXXXXX")"
-  tar -xzf "$tools_archive" -C "$tools_dir"
-  for binary in televybackup televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
-    [[ -x "$tools_dir/TelevyBackup Tools/bin/$binary" ]] || { echo "tools binary is not executable: $binary" >&2; exit 1; }
-    info="$(lipo -info "$tools_dir/TelevyBackup Tools/bin/$binary")"
-    if [[ "$expected_arches" == arm64 ]]; then
-      [[ "$info" == *arm64* && "$info" != *x86_64* ]] || { echo "arm64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
-    else
-      [[ "$info" == *x86_64* && "$info" != *arm64* ]] || { echo "x86_64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
+  (
+    if tar -tzf "$tools_archive" | /usr/bin/grep -E '(^|/)(TelevyBackup Snapshot Access\.app|com\.ivan\.televybackup\.snapshot-access)' >/dev/null; then
+      echo "tools archive contains the private Snapshot Access app or service" >&2
+      exit 1
     fi
-    binary_signature="$(codesign -dvvv "$tools_dir/TelevyBackup Tools/bin/$binary" 2>&1 || true)"
-    [[ "$binary_signature" == *"Signature=adhoc"* ]] || { echo "tools binary is not ad-hoc signed: $binary" >&2; exit 1; }
-  done
-  rm -rf "$tools_dir"
+    expected_arches=arm64
+    [[ "$tools_archive" == *-x86_64.tar.gz ]] && expected_arches=x86_64
+    tools_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-tools-verify.XXXXXX")"
+    trap 'rm -rf "$tools_dir"' EXIT
+    tar -xzf "$tools_archive" -C "$tools_dir"
+    for binary in televybackup televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+      [[ -x "$tools_dir/TelevyBackup Tools/bin/$binary" ]] || { echo "tools binary is not executable: $binary" >&2; exit 1; }
+      info="$(lipo -info "$tools_dir/TelevyBackup Tools/bin/$binary")"
+      if [[ "$expected_arches" == arm64 ]]; then
+        [[ "$info" == *arm64* && "$info" != *x86_64* ]] || { echo "arm64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
+      else
+        [[ "$info" == *x86_64* && "$info" != *arm64* ]] || { echo "x86_64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
+      fi
+      binary_signature="$(codesign -dvvv "$tools_dir/TelevyBackup Tools/bin/$binary" 2>&1 || true)"
+      [[ "$binary_signature" == *"Signature=adhoc"* ]] || { echo "tools binary is not ad-hoc signed: $binary" >&2; exit 1; }
+    done
+  )
 done
 echo "release assets verified: ${#required[@]} files"
