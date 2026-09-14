@@ -50,6 +50,8 @@ Successful publication is reported directly to the owner by the release-owning a
 Recovery evaluates policy and helper resolution from the trusted main checkout, while its historical
 input selects the recovered product identity. Packaging and publication remain bound to that identity
 and do not silently switch to the policy checkout's commit.
+The Universal 2 assembly step applies the release-asset validator from the exact policy commit
+resolved by recovery, while its product inputs remain checked out from the recovered merge.
 
 ## Remote alignment
 

@@ -94,6 +94,18 @@ assert "preferred helper source is missing" not in release_workflow
 assert "preferred helper source manifest failed" not in release_workflow
 assert "Keep the trusted main checkout for release policy scripts" in release_workflow
 assert 'git checkout --detach "${TARGET_INPUT}"' not in release_workflow
+assert 'policy_sha: ${{ steps.release.outputs.policy_sha }}' in release_workflow
+assert 'policy_sha="$(git rev-parse HEAD)"' in release_workflow
+assert 'test "${policy_sha}" = "${main_sha}"' in release_workflow
+assert 'echo "policy_sha=${policy_sha}" >> "$GITHUB_OUTPUT"' in release_workflow
+assert 'git cat-file -e "${POLICY_SHA}^{commit}"' in release_workflow
+assert 'git worktree add --detach "${policy_checkout}" "${POLICY_SHA}"' in release_workflow
+assert 'cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"' in release_workflow
+assert 'policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"' in release_workflow
+assert 'cd "${policy_checkout}"' in release_workflow
+assert '"${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final"' in release_workflow
+assert 'git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh"' not in release_workflow
+assert 'bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final' not in release_workflow
 build_and_assembly = release_workflow.split("  build-arm64:", 1)[1].split("  macos-acceptance:", 1)[0]
 assert "gh release download" not in build_and_assembly
 assert build_and_assembly.count("name: snapshot-helper-source") == 3
@@ -112,6 +124,143 @@ assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.
 assert "needs.macos-acceptance.result == 'success'" in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
 assert "Assemble and validate final assets" in release_workflow
+PY
+
+python3 - "$root_dir" <<'PY'
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+version = (root / "VERSION").read_text(encoding="utf-8").strip()
+validator_source = root / "scripts/macos/verify-release-assets.sh"
+
+with tempfile.TemporaryDirectory() as directory:
+    temp = Path(directory)
+    policy_repo = temp / "policy-repo"
+    asset_dir = temp / "dist"
+    (policy_repo / "scripts/macos").mkdir(parents=True)
+    (policy_repo / "packaging/macos").mkdir(parents=True)
+    asset_dir.mkdir()
+    shutil.copy2(validator_source, policy_repo / "scripts/macos/verify-release-assets.sh")
+    shutil.copy2(
+        root / "scripts/macos/generate-release-manifest.sh",
+        policy_repo / "scripts/macos/generate-release-manifest.sh",
+    )
+    shutil.copy2(root / "scripts/product-version.py", policy_repo / "scripts/product-version.py")
+    (policy_repo / "VERSION").write_text("0.9.9-rc.37\n", encoding="utf-8")
+    shutil.copy2(
+        root / "packaging/macos/snapshot-components.lock.json",
+        policy_repo / "packaging/macos/snapshot-components.lock.json",
+    )
+    subprocess.run(["git", "-C", str(policy_repo), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(policy_repo), "config", "user.name", "fixture"], check=True)
+    subprocess.run(
+        ["git", "-C", str(policy_repo), "config", "user.email", "fixture@example.com"],
+        check=True,
+    )
+
+    asset_names = [
+        f"TelevyBackup-{version}.dmg",
+        f"TelevyBackup-{version}-arm64.dmg",
+        f"TelevyBackup-{version}-x86_64.dmg",
+        f"televybackup-tools-{version}-arm64.tar.gz",
+        f"televybackup-tools-{version}-x86_64.tar.gz",
+    ]
+    for name in asset_names:
+        (asset_dir / name).write_bytes(f"bootstrap fixture: {name}\n".encode())
+    subprocess.run(
+        ["git", "-C", str(policy_repo), "add", "."],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(policy_repo), "commit", "-qm", "trusted policy fixture"],
+        check=True,
+    )
+    policy_sha = subprocess.check_output(
+        ["git", "-C", str(policy_repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+    policy_checkout = temp / "policy-checkout"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(policy_repo),
+            "worktree",
+            "add",
+            "--detach",
+            str(policy_checkout),
+            policy_sha,
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert (
+            subprocess.check_output(
+                ["git", "-C", str(policy_checkout), "rev-parse", "HEAD"], text=True
+            ).strip()
+            == policy_sha
+        )
+        shutil.copy2(root / "VERSION", policy_checkout / "VERSION")
+        generation_env = dict(os.environ)
+        generation_env["TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE"] = (
+            "one-time-bootstrap-universal-build"
+        )
+        generation = subprocess.run(
+            [
+                str(policy_checkout / "scripts/macos/generate-release-manifest.sh"),
+                "--mode",
+                "release",
+                "--asset-dir",
+                str(asset_dir),
+                "--source-commit",
+                "1" * 40,
+                "--packaging-commit",
+                "2" * 40,
+                "--output",
+                str(asset_dir / "BUILD-MANIFEST.json"),
+            ],
+            cwd=policy_checkout,
+            env=generation_env,
+            capture_output=True,
+            text=True,
+        )
+        assert generation.returncode == 0, generation.stdout + generation.stderr
+        generated_manifest = json.loads(
+            (asset_dir / "BUILD-MANIFEST.json").read_text(encoding="utf-8")
+        )
+        assert generated_manifest["release_version"] == version
+        assert (
+            generated_manifest["components"]["snapshot_access"]["source"]
+            == "one-time-bootstrap-universal-build"
+        )
+        result = subprocess.run(
+            [
+                str(policy_checkout / "scripts/macos/verify-release-assets.sh"),
+                "--mode",
+                "release",
+                "--asset-dir",
+                str(asset_dir),
+                "--skip-bundle-checks",
+            ],
+            cwd=policy_checkout,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    finally:
+        subprocess.run(
+            ["git", "-C", str(policy_repo), "worktree", "remove", "--force", str(policy_checkout)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 PY
 
 python3 - "$root_dir" <<'PY'
