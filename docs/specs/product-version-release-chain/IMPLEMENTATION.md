@@ -36,7 +36,9 @@ blocks with a local Git/API fixture.
    single-parent covered commit must be an authoritatively merged main PR result, and product tags
    plus append-only identity refs must not already target it. The merge-group gate waits for all
    source required checks, refreshes the source check-runs and current PR identity/labels, then
-   invokes the same completion validator.
+   invoke the same completion validator. The PR and merge-group gates allow up to 30 minutes for
+   source required checks, covering the existing native package and Swift test matrix without
+   weakening the fail-closed timeout.
 5. Release Product verifies an existing published Release or consumed receipt as a terminal state
    before helper resolution. For an active release, it resolves and records either a verified helper
    Release for byte-identical reuse or an explicitly requested one-time bootstrap mode. Reused helper

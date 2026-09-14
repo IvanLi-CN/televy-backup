@@ -74,6 +74,8 @@ assert_contains "completion current PR labels" "$completion_text" 'jq '\''.label
 assert_contains "completion final PR revalidation" "$completion_text" 'validate_current_pr "${RUNNER_TEMP}/current-pr-final.json"'
 assert_contains "completion final PR labels" "$completion_text" 'jq '\''.labels'\'' "${RUNNER_TEMP}/current-pr-final.json"'
 assert_contains "completion non-preemptive queue" "$completion_text" "queue: max"
+assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
+assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
 assert_not_contains "completion preemptive cancellation" "$completion_text" "cancel-in-progress: true"
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
 assert_contains "release snapshot head" "$release_text" "head_sha"
@@ -134,6 +136,7 @@ final_checks_line="$(grep -n 'commits/\${verification_sha}/check-runs' "$root_di
 completion_line="$(grep -n 'python3 .github/scripts/release_completion.py' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
 assert_contains "merge-group final PR identity check" "$merge_group_text" 'test "$(jq -r '\''.head.sha'\'' "${final_pr_json}")" = "${pr_head_sha}"'
 assert_contains "merge-group final labels snapshot" "$merge_group_text" 'labels_json="$(jq -c '\''.labels'\'' "${final_pr_json}")"'
+assert_contains "merge-group source-check wait budget" "$merge_group_text" 'deadline=$((SECONDS + 1800))'
 if [[ -z "$poll_line" || -z "$final_pr_line" || -z "$final_checks_line" || -z "$completion_line" || "$poll_line" -ge "$final_pr_line" || "$final_pr_line" -ge "$final_checks_line" || "$final_checks_line" -ge "$completion_line" ]]; then
   printf 'merge-group completion must wait for required checks before validation\n' >&2
   exit 1
