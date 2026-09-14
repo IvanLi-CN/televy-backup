@@ -80,7 +80,8 @@ jobs:
         if: github.event_name == 'merge_group'
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.event.merge_group.base_sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Verify VERSION and release completion

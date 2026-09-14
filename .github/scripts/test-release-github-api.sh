@@ -114,5 +114,32 @@ module.verify_github_receipt(
     boundary_token=identity["boundaryToken"], reservation_ref_value=expected["ref"],
     repository="fixture/repo", token="token", api_root="https://fixture.invalid",
 )
+
+def assert_consumed_rejected():
+    try:
+        module.verify_github_receipt(
+            state="consumed", version="1.0.0-beta.1", merge_sha=merge,
+            reservation_id=identity["reservationId"], owner="fixture", claim_key=claim_key,
+            boundary_token=identity["boundaryToken"], reservation_ref_value=expected["ref"],
+            repository="fixture/repo", token="token", api_root="https://fixture.invalid",
+        )
+    except module.ReservationError:
+        return
+    raise AssertionError("consumed receipt bypassed immutable state ordering")
+
+bound_ref = module.receipt_ref("bound", "1.0.0-beta.1", merge)
+saved_bound = FakeGitHubRefClient.refs.pop(bound_ref)
+try:
+    assert_consumed_rejected()
+finally:
+    FakeGitHubRefClient.refs[bound_ref] = saved_bound
+
+decision_ref = module.decision_ref("1.0.0-beta.1")
+saved_decision = FakeGitHubRefClient.refs.pop(decision_ref)
+try:
+    assert_consumed_rejected()
+finally:
+    FakeGitHubRefClient.refs[decision_ref] = saved_decision
+
 print("release GitHub API mock tests passed")
 PY

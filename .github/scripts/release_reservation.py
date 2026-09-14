@@ -536,6 +536,28 @@ def decision_message(fields: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def verify_local_decision_state(
+    *, state: str, merge_sha: str, reservation: dict[str, Any], cwd: Path = ROOT
+) -> dict[str, Any]:
+    fields = decision_fields(
+        state=state, version=str(reservation["version"]), merge_sha=merge_sha, reservation=reservation
+    )
+    ref = decision_ref(str(reservation["version"]))
+    target = local_ref_target(ref, cwd)
+    if not target:
+        raise ReservationError(f"decision ref is missing: {ref}")
+    return verify_decision_commit(target, fields, reservation, cwd)
+
+
+def verify_github_decision_state(
+    *, state: str, merge_sha: str, reservation: dict[str, Any], client: GitHubRefClient
+) -> dict[str, Any]:
+    fields = decision_fields(
+        state=state, version=str(reservation["version"]), merge_sha=merge_sha, reservation=reservation
+    )
+    return verify_github_decision(client=client, fields=fields, reservation=reservation)
+
+
 def verify_decision_commit(
     ref_target: str, fields: dict[str, str], reservation: dict[str, Any], cwd: Path = ROOT
 ) -> dict[str, Any]:
@@ -691,14 +713,20 @@ def create_local_receipt(
         if not bound_target:
             raise ReservationError("consumed receipt requires a matching bound receipt")
         verify_receipt_commit(bound_target, {**fields, "Receipt-State": "bound"}, cwd)
+        verify_local_decision_state(state="bound", merge_sha=merge, reservation=reservation, cwd=cwd)
     if state == "released" and (bound_target or consumed_target):
         raise ReservationError("released receipt is only valid for an unbound claim")
-    if state in {"bound", "consumed"}:
+    if state == "bound":
         verify_local_merge_identity(
             merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
             channel=reservation["channel"], reservation=reservation, cwd=cwd,
         )
         create_local_decision(state="bound", merge_sha=merge, reservation=reservation, cwd=cwd)
+    elif state == "consumed":
+        verify_local_merge_identity(
+            merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
+            channel=reservation["channel"], reservation=reservation, cwd=cwd,
+        )
     elif state == "released":
         create_local_decision(state="released", merge_sha=merge, reservation=reservation, cwd=cwd)
     existing = local_ref_target(ref, cwd)
@@ -752,14 +780,20 @@ def create_github_receipt(
             claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
             repository=repository, token=token, api_root=api_root,
         )
+        verify_github_decision_state(state="bound", merge_sha=merge, reservation=reservation, client=client)
     if state == "released" and (bound_target or consumed_target):
         raise ReservationError("released receipt is only valid for an unbound claim")
-    if state in {"bound", "consumed"}:
+    if state == "bound":
         verify_github_merge_identity(
             client=client, merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
             channel=reservation["channel"], reservation=reservation,
         )
         create_github_decision(state="bound", merge_sha=merge, reservation=reservation, client=client)
+    elif state == "consumed":
+        verify_github_merge_identity(
+            client=client, merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
+            channel=reservation["channel"], reservation=reservation,
+        )
     elif state == "released":
         create_github_decision(state="released", merge_sha=merge, reservation=reservation, client=client)
     existing = client.ref_target(ref)
@@ -803,13 +837,28 @@ def verify_local_receipt(
         state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
         claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
     )
-    verify_local_reservation_claim(
+    reservation = verify_local_reservation_claim(
         reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
         owner=owner, claim_key=claim_key, boundary_token=boundary_token, cwd=cwd,
     )
     target = local_ref_target(ref, cwd)
     if not target:
         raise ReservationError(f"receipt ref is missing: {ref}")
+    bound_ref = receipt_ref("bound", version, merge)
+    consumed_ref = receipt_ref("consumed", version, merge)
+    bound_target = local_ref_target(bound_ref, cwd)
+    consumed_target = local_ref_target(consumed_ref, cwd)
+    if state == "bound":
+        verify_local_decision_state(state="bound", merge_sha=merge, reservation=reservation, cwd=cwd)
+    elif state == "consumed":
+        if not bound_target:
+            raise ReservationError("consumed receipt requires a matching bound receipt")
+        verify_receipt_commit(bound_target, {**fields, "Receipt-State": "bound"}, cwd)
+        verify_local_decision_state(state="bound", merge_sha=merge, reservation=reservation, cwd=cwd)
+    elif state == "released":
+        if bound_target or consumed_target:
+            raise ReservationError("released receipt is only valid for an unbound claim")
+        verify_local_decision_state(state="released", merge_sha=merge, reservation=reservation, cwd=cwd)
     return {"ref": ref, **verify_receipt_commit(target, fields, cwd)}
 
 
@@ -824,7 +873,7 @@ def verify_github_receipt(
         state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
         claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
     )
-    verify_github_reservation_claim(
+    reservation = verify_github_reservation_claim(
         reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
         owner=owner, claim_key=claim_key, boundary_token=boundary_token, repository=repository,
         token=token, api_root=api_root,
@@ -833,6 +882,25 @@ def verify_github_receipt(
     target = client.ref_target(ref)
     if not target:
         raise ReservationError(f"receipt ref is missing: {ref}")
+    bound_ref = receipt_ref("bound", version, merge)
+    consumed_ref = receipt_ref("consumed", version, merge)
+    bound_target = client.ref_target(bound_ref)
+    consumed_target = client.ref_target(consumed_ref)
+    if state == "bound":
+        verify_github_decision_state(state="bound", merge_sha=merge, reservation=reservation, client=client)
+    elif state == "consumed":
+        if not bound_target:
+            raise ReservationError("consumed receipt requires a matching bound receipt")
+        verify_github_receipt(
+            state="bound", version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
+            claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+            repository=repository, token=token, api_root=api_root,
+        )
+        verify_github_decision_state(state="bound", merge_sha=merge, reservation=reservation, client=client)
+    elif state == "released":
+        if bound_target or consumed_target:
+            raise ReservationError("released receipt is only valid for an unbound claim")
+        verify_github_decision_state(state="released", merge_sha=merge, reservation=reservation, client=client)
     info = client.commit_info(target)
     merge_info = client.commit_info(merge)
     parents = [parent.get("sha") for parent in info.get("parents", [])]

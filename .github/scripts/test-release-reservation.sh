@@ -78,6 +78,19 @@ consumed="$(python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
 [[ "$(printf '%s' "$bound" | jq -r .ref)" == refs/tags/release-bound/* ]]
 [[ "$(printf '%s' "$consumed" | jq -r .ref)" == refs/tags/release-consumed/* ]]
 
+decision_ref="refs/tags/release-decision/v1.0.0-beta.1"
+decision_target="$(git -C "$repo_dir" rev-parse "$decision_ref")"
+git -C "$repo_dir" update-ref -d "$decision_ref"
+if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
+  --local-root "$repo_dir" --state consumed --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
+  --reservation-id "$(printf '%s' "$first" | jq -r .reservationId)" --owner fixture \
+  --claim-key "$claim_key" --boundary-token "$(printf '%s' "$first" | jq -r '."Reservation-Boundary-Token"')" \
+  --reservation-ref refs/tags/release-reservation/v1.0.0-beta.1 >/dev/null 2>&1; then
+  echo "consumed receipt bypassed the decision ref" >&2
+  exit 1
+fi
+git -C "$repo_dir" update-ref "$decision_ref" "$decision_target"
+
 if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
   --local-root "$repo_dir" --state bound --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
   --reservation-id "$(printf '%s' "$first" | jq -r .reservationId)" --owner foreign \
