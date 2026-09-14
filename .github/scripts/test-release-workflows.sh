@@ -50,6 +50,11 @@ assert_contains "notifier recovery candidate output" "$notify_text" "recovery_ca
 assert_contains "notifier superseded handling" "$notify_text" "not-applicable: superseded_by_product_tag"
 assert_contains "notifier intent artifact resolver" "$notify_text" "load_release_intent"
 assert_contains "notifier fail-closed target" "$notify_text" 'target_sha: ${{ needs.resolve_release_context.outputs.merge_sha }}'
+assert_contains "notifier canonical merge identity" "$notify_text" 'merge_commit_sha: ${{ needs.resolve_release_context.outputs.merge_commit_sha }}'
+assert_contains "notifier immutable reservation validation" "$notify_text" "verify_reservation"
+assert_contains "notifier immutable bound receipt validation" "$notify_text" "verify_bound_receipt"
+assert_contains "notifier optional product tag validation" "$notify_text" "api_json_optional"
+assert_contains "notifier product tag status" "$notify_text" 'tag_status: ${{ needs.resolve_release_context.outputs.tag_status }}'
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
 assert_contains "release full history checkout" "$release_text" "fetch-depth: 0"
 assert_contains "release full tag fetch" "$release_text" "git fetch --force origin main '+refs/tags/*:refs/tags/*'"

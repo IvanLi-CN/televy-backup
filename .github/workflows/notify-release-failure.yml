@@ -18,16 +18,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: read
+      contents: read
+      pull-requests: read
     outputs:
       ref_label: ${{ steps.resolve.outputs.ref_label }}
       head_sha: ${{ steps.resolve.outputs.head_sha }}
       merge_sha: ${{ steps.resolve.outputs.merge_sha }}
+      merge_commit_sha: ${{ steps.resolve.outputs.merge_commit_sha }}
+      preparation_commit_sha: ${{ steps.resolve.outputs.preparation_commit_sha }}
       actor: ${{ steps.resolve.outputs.actor }}
       identity_status: ${{ steps.resolve.outputs.identity_status }}
       extra_details: ${{ steps.resolve.outputs.extra_details }}
       version: ${{ steps.resolve.outputs.version }}
       channel: ${{ steps.resolve.outputs.channel }}
       tag: ${{ steps.resolve.outputs.tag }}
+      tag_status: ${{ steps.resolve.outputs.tag_status }}
       reservation_ref: ${{ steps.resolve.outputs.reservation_ref }}
       recovery_candidate: ${{ steps.resolve.outputs.recovery_candidate }}
       pull_request: ${{ steps.resolve.outputs.pull_request }}
@@ -67,6 +72,7 @@ jobs:
           import re
           import zipfile
           from io import BytesIO
+          from urllib import error
           from urllib import request
 
           api_root = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
@@ -96,6 +102,14 @@ jobs:
           def api_json(path: str) -> dict:
               return json.loads(api_request(path).decode('utf-8'))
 
+          def api_json_optional(path: str) -> dict | None:
+              try:
+                  return api_json(path)
+              except error.HTTPError as exc:
+                  if exc.code == 404:
+                      return None
+                  raise
+
           def api_text(path: str) -> str:
               return api_request(path).decode('utf-8', errors='replace')
 
@@ -123,48 +137,186 @@ jobs:
                       return str(pull['number'])
               raise RuntimeError('merged pull request is unavailable for the release identity')
 
+          def commit_snapshot(sha: str) -> dict[str, object]:
+              payload = api_json(f'/repos/{repository}/commits/{sha}')
+              commit = payload.get('commit')
+              if not isinstance(commit, dict):
+                  raise RuntimeError(f'commit metadata is unavailable: {sha}')
+              tree = commit.get('tree')
+              parents = payload.get('parents')
+              if not isinstance(tree, dict) or not isinstance(tree.get('sha'), str) or not isinstance(parents, list):
+                  raise RuntimeError(f'commit provenance is incomplete: {sha}')
+              parent_shas = [item.get('sha') for item in parents if isinstance(item, dict)]
+              if len(parent_shas) != len(parents) or any(not isinstance(item, str) for item in parent_shas):
+                  raise RuntimeError(f'commit parents are incomplete: {sha}')
+              return {
+                  'sha': sha,
+                  'tree': str(tree['sha']),
+                  'parents': parent_shas,
+                  'message': str(commit.get('message', '')),
+                  'verification': commit.get('verification'),
+              }
+
+          def trailers(message: object) -> dict[str, str]:
+              values: dict[str, str] = {}
+              for line in str(message).splitlines():
+                  if ':' in line:
+                      key, value = line.split(':', 1)
+                      if key.strip() and value.strip():
+                          values[key.strip()] = value.strip()
+              return values
+
+          def require_sha(value: object, label: str) -> str:
+              normalized = str(value or '').strip()
+              if not re.fullmatch(r'[0-9a-f]{40}', normalized):
+                  raise RuntimeError(f'{label} is not a full SHA')
+              return normalized
+
+          def verify_preparation(intent: dict, source_sha: str, merge_sha: str) -> tuple[str, bool]:
+              preparation_sha = require_sha(intent.get('preparation_commit_sha'), 'preparation commit SHA')
+              preparation = commit_snapshot(preparation_sha)
+              if preparation['parents'] != [source_sha]:
+                  raise RuntimeError('preparation commit parent does not match source SHA')
+              verification = preparation.get('verification')
+              if not isinstance(verification, dict) or verification.get('verified') is not True:
+                  raise RuntimeError('preparation commit GitHub signature is not verified')
+              merge = commit_snapshot(merge_sha)
+              if preparation_sha not in merge['parents']:
+                  raise RuntimeError('merge commit does not contain the preparation commit')
+              return preparation_sha, True
+
+          def verify_reservation(intent: dict, source_sha: str, version: str, channel: str) -> tuple[dict[str, str], dict[str, object]]:
+              reservation = intent.get('reservation')
+              if not isinstance(reservation, dict):
+                  raise RuntimeError('release intent reservation is incomplete')
+              required = ('id', 'ref', 'owner', 'claim_key', 'boundary_token', 'state', 'merge_commit_sha')
+              if any(not str(reservation.get(key, '')).strip() for key in required):
+                  raise RuntimeError('release intent reservation is incomplete')
+              expected_ref = f'refs/tags/release-reservation/v{version}'
+              if reservation['ref'] != expected_ref or reservation['state'] != 'bound':
+                  raise RuntimeError('release intent reservation ref or state is invalid')
+              reservation_ref = api_json(f'/repos/{repository}/git/ref/{expected_ref.removeprefix("refs/")}')
+              reservation_sha = require_sha(reservation_ref.get('object', {}).get('sha'), 'reservation ref target')
+              reservation_commit = commit_snapshot(reservation_sha)
+              source = commit_snapshot(source_sha)
+              if reservation_commit['parents'] != [source_sha] or reservation_commit['tree'] != source['tree']:
+                  raise RuntimeError('reservation commit provenance does not match source SHA')
+              reservation_trailers = trailers(reservation_commit['message'])
+              expected_trailers = {
+                  'Reservation-Id': str(reservation['id']),
+                  'Reservation-Owner': str(reservation['owner']),
+                  'Reservation-Claim-Key': str(reservation['claim_key']),
+                  'Reservation-Boundary-Token': str(reservation['boundary_token']),
+                  'Release-Version': version,
+                  'Release-Channel': channel,
+                  'Reservation-State': 'claimed',
+              }
+              if any(reservation_trailers.get(key) != value for key, value in expected_trailers.items()):
+                  raise RuntimeError('reservation commit trailers do not match the release identity')
+              return {
+                  'id': str(reservation['id']),
+                  'ref': expected_ref,
+                  'owner': reservation_trailers['Reservation-Owner'],
+                  'claim_key': reservation_trailers['Reservation-Claim-Key'],
+                  'boundary_token': reservation_trailers['Reservation-Boundary-Token'],
+                  'merge_commit_sha': require_sha(reservation['merge_commit_sha'], 'reservation merge SHA'),
+              }, reservation_commit
+
+          def verify_bound_receipt(intent: dict, merge_sha: str, version: str, reservation: dict[str, str], merge: dict[str, object]) -> dict[str, object]:
+              expected_ref = f'refs/tags/release-bound/v{version}/{merge_sha}'
+              receipt_ref = api_json(f'/repos/{repository}/git/ref/{expected_ref.removeprefix("refs/")}')
+              receipt_sha = require_sha(receipt_ref.get('object', {}).get('sha'), 'bound receipt target')
+              receipt = commit_snapshot(receipt_sha)
+              if receipt['parents'] != [merge_sha] or receipt['tree'] != merge['tree']:
+                  raise RuntimeError('bound receipt provenance does not match merge SHA')
+              receipt_trailers = trailers(receipt['message'])
+              expected_trailers = {
+                  'Receipt-State': 'bound',
+                  'Release-Version': version,
+                  'Release-Merge-SHA': merge_sha,
+                  'Release-Reservation-Id': reservation['id'],
+                  'Release-Owner': reservation['owner'],
+                  'Release-Claim-Key': reservation['claim_key'],
+                  'Release-Boundary-Token': reservation['boundary_token'],
+                  'Release-Reservation-Ref': reservation['ref'],
+                  'Receipt-Provenance': 'immutable-receipt',
+              }
+              if any(receipt_trailers.get(key) != value for key, value in expected_trailers.items()):
+                  raise RuntimeError('bound receipt trailers do not match the release identity')
+              if reservation['merge_commit_sha'] != merge_sha:
+                  raise RuntimeError('reservation merge SHA does not match the bound receipt')
+              return receipt
+
+          def product_tag_target(tag_name: str) -> str | None:
+              tag_ref = api_json_optional(f'/repos/{repository}/git/ref/tags/{tag_name}')
+              if tag_ref is None:
+                  return None
+              tag_object = tag_ref.get('object')
+              if not isinstance(tag_object, dict):
+                  raise RuntimeError('product tag object is incomplete')
+              target = require_sha(tag_object.get('sha'), 'product tag target')
+              if tag_object.get('type') == 'tag':
+                  annotated = api_json(f'/repos/{repository}/git/tags/{target}')
+                  annotated_object = annotated.get('object')
+                  if not isinstance(annotated_object, dict):
+                      raise RuntimeError('annotated product tag target is incomplete')
+                  target = require_sha(annotated_object.get('sha'), 'annotated product tag target')
+              return target
+
           def validate_intent(intent: dict) -> dict[str, str]:
               sha_re = re.compile(r'^[0-9a-f]{40}$')
-              reservation = intent.get('reservation')
               provenance = intent.get('provenance')
               artifacts = intent.get('artifact_names')
-              required = ('source_sha', 'merge_sha', 'branch_head', 'release_mode', 'type', 'channel', 'version', 'tag', 'tag_target_sha', 'tag_owner', 'run_url', 'recovery_instruction')
+              required = ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'branch_head', 'release_mode', 'type', 'channel', 'version', 'tag', 'tag_target_sha', 'run_url', 'recovery_instruction')
               if any(not str(intent.get(key, '')).strip() for key in required):
                   raise RuntimeError('release intent is incomplete')
-              if not isinstance(reservation, dict) or any(not str(reservation.get(key, '')).strip() for key in ('id', 'ref', 'owner', 'claim_key', 'boundary_token', 'state', 'merge_commit_sha')):
-                  raise RuntimeError('release intent reservation is incomplete')
-              if not isinstance(provenance, dict) or provenance.get('provenance_verified') is not True or provenance.get('signature_verified') is not True:
-                  raise RuntimeError('release intent provenance is not verified')
               if not isinstance(artifacts, list) or not artifacts or any(not isinstance(item, str) or not item for item in artifacts):
                   raise RuntimeError('release intent artifact names are incomplete')
-              for key in ('source_sha', 'merge_sha', 'branch_head', 'tag_target_sha'):
+              for key in ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'branch_head', 'tag_target_sha'):
                   if not sha_re.fullmatch(str(intent[key])):
                       raise RuntimeError(f'release intent {key} is not a full SHA')
-              if intent['tag'] != f"v{intent['version']}" or reservation['state'] != 'bound' or reservation['merge_commit_sha'] != intent['merge_sha']:
+              if intent['tag'] != f"v{intent['version']}" or intent['merge_commit_sha'] != intent['merge_sha'] or intent['branch_head'] != intent['merge_sha'] or intent['tag_target_sha'] != intent['merge_sha']:
                   raise RuntimeError('release intent identity fields do not agree')
-              if intent['branch_head'] != intent['merge_sha'] or provenance.get('tag_owner') != intent['tag_owner']:
-                  raise RuntimeError('release intent branch or tag ownership is not bound to the identity')
-              tag = api_json(f"/repos/{repository}/git/ref/tags/{intent['tag']}")
-              tag_target_sha = str(tag.get('object', {}).get('sha', ''))
-              if tag_target_sha != intent['merge_sha']:
+              if not re.fullmatch(r'\d+\.\d+\.\d+(?:-(?:beta|rc|dev)\.[1-9]\d*)?', str(intent['version'])):
+                  raise RuntimeError('release intent version is not a valid product version')
+              if str(intent['channel']) not in {'prod', 'beta', 'rc', 'dev'}:
+                  raise RuntimeError('release intent channel is not a supported release channel')
+              source_sha = require_sha(intent['source_sha'], 'source SHA')
+              merge_sha = require_sha(intent['merge_sha'], 'merge SHA')
+              preparation_sha, signature_verified = verify_preparation(intent, source_sha, merge_sha)
+              reservation, _ = verify_reservation(intent, source_sha, str(intent['version']), str(intent['channel']))
+              merge = commit_snapshot(merge_sha)
+              verify_bound_receipt(intent, merge_sha, str(intent['version']), reservation, merge)
+              tag_target_sha = product_tag_target(str(intent['tag']))
+              if tag_target_sha is not None and tag_target_sha != merge_sha:
                   raise RuntimeError('product tag target does not match release identity')
+              tag_status = 'present' if tag_target_sha is not None else 'not-created'
+              if tag_target_sha is None:
+                  tag_target_sha = merge_sha
+              if not isinstance(provenance, dict) or provenance.get('identity') != 'release_chain_and_reservation_refs':
+                  raise RuntimeError('release intent provenance identity is not recognized')
+              if merge_sha not in str(intent['recovery_instruction']):
+                  raise RuntimeError('release recovery instruction is not bound to the merge SHA')
               return {
-                  'pull_request': resolve_pull_request(intent['merge_sha'], intent.get('pull_request')),
-                  'source_sha': str(intent['source_sha']),
-                  'merge_sha': str(intent['merge_sha']),
+                  'pull_request': resolve_pull_request(merge_sha, intent.get('pull_request')),
+                  'source_sha': source_sha,
+                  'preparation_commit_sha': preparation_sha,
+                  'merge_sha': merge_sha,
+                  'merge_commit_sha': merge_sha,
                   'release_type': str(intent['type']),
                   'channel': str(intent['channel']),
                   'version': str(intent['version']),
                   'tag': str(intent['tag']),
+                  'tag_status': tag_status,
                   'tag_target_sha': tag_target_sha,
-                  'tag_owner': str(intent['tag_owner']),
-                  'reservation_id': str(reservation['id']),
-                  'reservation_ref': str(reservation['ref']),
-                  'reservation_owner': str(reservation['owner']),
-                  'reservation_state': str(reservation['state']),
-                  'reservation_merge_commit_sha': str(reservation['merge_commit_sha']),
+                  'tag_owner': reservation['owner'],
+                  'reservation_id': reservation['id'],
+                  'reservation_ref': reservation['ref'],
+                  'reservation_owner': reservation['owner'],
+                  'reservation_state': 'bound',
+                  'reservation_merge_commit_sha': merge_sha,
                   'provenance_verified': 'true',
-                  'signature_verified': 'true',
+                  'signature_verified': 'true' if signature_verified else 'false',
                   'branch_head': str(intent['branch_head']),
                   'artifact_names': ','.join(artifacts),
                   'recovery_instruction': str(intent['recovery_instruction']),
@@ -203,32 +355,43 @@ jobs:
               except Exception:
                   identity_status = 'resolver-error'
                   merge_sha = version = channel = tag = ''
+                  merge_commit_sha = preparation_commit_sha = ''
+                  tag_status = ''
                   recovery = ''
                   extra = 'Release identity resolver failed closed; no version or tag was inferred'
               else:
                   identity_status = 'resolved'
                   merge_sha = identity['merge_sha']
+                  merge_commit_sha = identity['merge_commit_sha']
+                  preparation_commit_sha = identity['preparation_commit_sha']
                   version = identity['version']
                   channel = identity['channel']
                   tag = identity['tag']
+                  tag_status = identity['tag_status']
                   recovery = identity['recovery_instruction']
-                  extra = 'locked merged identity recovered from release-intent artifact and product tag'
+                  extra = f"locked merged identity recovered from reservation and bound receipt (product tag: {tag_status})"
           elif 'superseded_by_product_tag' in text:
               identity_status = 'no-identity'
               merge_sha = ''
+              merge_commit_sha = preparation_commit_sha = ''
               version = channel = tag = ''
+              tag_status = ''
               recovery = ''
               extra = 'not-applicable: superseded_by_product_tag; no release identity was published'
           elif no_identity:
               identity_status = 'no-identity'
               merge_sha = ''
+              merge_commit_sha = preparation_commit_sha = ''
               version = channel = tag = ''
+              tag_status = ''
               recovery = ''
               extra = 'Release Product reached a merge without a release identity'
           else:
               identity_status = 'resolver-error'
               merge_sha = ''
+              merge_commit_sha = preparation_commit_sha = ''
               version = channel = tag = ''
+              tag_status = ''
               recovery = ''
               extra = 'Release identity could not be resolved; no version or tag was inferred'
           ref_label = f'branch: {head_branch}' if head_branch else 'ref: unavailable from workflow_run payload'
@@ -236,17 +399,20 @@ jobs:
               handle.write(f'ref_label={ref_label}\n')
               handle.write(f'head_sha={fallback_head_sha}\n')
               handle.write(f'merge_sha={merge_sha}\n')
+              handle.write(f'merge_commit_sha={merge_commit_sha}\n')
+              handle.write(f'preparation_commit_sha={preparation_commit_sha}\n')
               handle.write(f'actor={actor}\n')
               handle.write(f'identity_status={identity_status}\n')
               handle.write(f'version={version}\n')
               handle.write(f'channel={channel}\n')
               handle.write(f'tag={tag}\n')
+              handle.write(f'tag_status={tag_status}\n')
               handle.write(f'reservation_ref={identity.get("reservation_ref", "")}\n')
               handle.write('extra_details<<EOF\n')
               handle.write(extra)
               handle.write('\nEOF\n')
               handle.write(f'recovery_candidate={recovery}\n')
-              for key in ('pull_request', 'source_sha', 'release_type', 'tag_target_sha', 'tag_owner', 'reservation_id', 'reservation_owner', 'reservation_state', 'reservation_merge_commit_sha', 'provenance_verified', 'signature_verified', 'branch_head', 'artifact_names', 'recovery_instruction'):
+              for key in ('pull_request', 'source_sha', 'preparation_commit_sha', 'merge_commit_sha', 'release_type', 'tag_status', 'tag_target_sha', 'tag_owner', 'reservation_id', 'reservation_owner', 'reservation_state', 'reservation_merge_commit_sha', 'provenance_verified', 'signature_verified', 'branch_head', 'artifact_names', 'recovery_instruction'):
                   handle.write(f'{key}={identity.get(key, "")}\n')
           PYCODE
 
@@ -268,6 +434,8 @@ jobs:
         head_sha: ${{ needs.resolve_release_context.outputs.head_sha }}
         target_sha: ${{ needs.resolve_release_context.outputs.merge_sha }}
         merge_sha: ${{ needs.resolve_release_context.outputs.merge_sha }}
+        merge_commit_sha: ${{ needs.resolve_release_context.outputs.merge_commit_sha }}
+        preparation_commit_sha: ${{ needs.resolve_release_context.outputs.preparation_commit_sha }}
         run_attempt: ${{ github.event.workflow_run.run_attempt }}
         actor: ${{ needs.resolve_release_context.outputs.actor }}
         run_url: ${{ github.event.workflow_run.html_url }}
@@ -276,6 +444,7 @@ jobs:
         version: ${{ needs.resolve_release_context.outputs.version }}
         channel: ${{ needs.resolve_release_context.outputs.channel }}
         tag: ${{ needs.resolve_release_context.outputs.tag }}
+        tag_status: ${{ needs.resolve_release_context.outputs.tag_status }}
         reservation_ref: ${{ needs.resolve_release_context.outputs.reservation_ref }}
         recovery_candidate: ${{ needs.resolve_release_context.outputs.recovery_candidate }}
         pull_request: ${{ needs.resolve_release_context.outputs.pull_request }}
