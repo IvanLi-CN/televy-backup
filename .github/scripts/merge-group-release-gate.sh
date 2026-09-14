@@ -114,32 +114,29 @@ for pr_number in ${pr_numbers}; do
         completion_args+=(--covered-merge-sha "$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)")
       fi
     fi
+    required=("quality" "macOS Swift tests" "arm64 native package" "x86_64 native package" "Universal 2 assembly")
+    deadline=$((SECONDS + 540))
+    while :; do
+      pending=()
+      for name in "${required[@]}"; do
+        case "$(check_state "${head_sha}" "${name}")" in
+          success) ;;
+          pending) pending+=("${name}") ;;
+          missing) pending+=("${name}") ;;
+          failed) echo "merge-group gate: required check failed: ${name}" >&2; exit 1 ;;
+          *) echo "merge-group gate: unexpected check state for ${name}" >&2; exit 1 ;;
+        esac
+      done
+      if (( ${#pending[@]} == 0 )); then
+        break
+      fi
+      if (( SECONDS >= deadline )); then
+        echo "merge-group gate: timed out waiting for ${pending[*]} on ${head_sha}" >&2
+        exit 1
+      fi
+      sleep 10
+    done
     python3 .github/scripts/release_completion.py "${completion_args[@]}" \
       --allow-migration --migration-version 0.9.2
   fi
 done
-
-if [[ "${mode}" == completion ]]; then
-  required=("quality" "macOS Swift tests" "arm64 native package" "x86_64 native package" "Universal 2 assembly")
-  deadline=$((SECONDS + 540))
-  while :; do
-    pending=()
-    for name in "${required[@]}"; do
-      case "$(check_state "${head_sha}" "${name}")" in
-        success) ;;
-        pending) pending+=("${name}") ;;
-        missing) pending+=("${name}") ;;
-        failed) echo "merge-group gate: required check failed: ${name}" >&2; exit 1 ;;
-        *) echo "merge-group gate: unexpected check state for ${name}" >&2; exit 1 ;;
-      esac
-    done
-    if (( ${#pending[@]} == 0 )); then
-      break
-    fi
-    if (( SECONDS >= deadline )); then
-      echo "merge-group gate: timed out waiting for ${pending[*]} on ${head_sha}" >&2
-      exit 1
-    fi
-    sleep 10
-  done
-fi

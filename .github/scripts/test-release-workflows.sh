@@ -128,6 +128,12 @@ assert_contains "label merge-group immutable checkout" "$label_gate_text" "githu
 merge_group_text="$(<"$root_dir/.github/scripts/merge-group-release-gate.sh")"
 assert_not_contains "merge-group pull request API suppression" "$merge_group_text" "|| true"
 assert_contains "merge-group failed check state" "$merge_group_text" 'failed) echo "merge-group gate: required check failed'
+poll_line="$(grep -n 'required=("quality"' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
+completion_line="$(grep -n 'python3 .github/scripts/release_completion.py' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
+if [[ -z "$poll_line" || -z "$completion_line" || "$poll_line" -ge "$completion_line" ]]; then
+  printf 'merge-group completion must wait for required checks before validation\n' >&2
+  exit 1
+fi
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion native signature gate" "$completion_text" "--require-github-verification"
 assert_contains "completion reservation provenance gate" "$completion_text" "--reservation-json"
