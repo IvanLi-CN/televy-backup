@@ -73,6 +73,7 @@ jobs:
       - name: Verify VERSION and release completion
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
         run: |
@@ -137,6 +138,8 @@ jobs:
               *) echo "unexpected source check state: ${state}" >&2; exit 1 ;;
             esac
           done
+          current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          test "${current_head}" = "${HEAD_SHA}"
           completion_args=(
             --repo-root .
             --commit "${HEAD_SHA}"

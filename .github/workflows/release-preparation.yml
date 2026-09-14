@@ -242,7 +242,7 @@ jobs:
         if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'
         env:
           PREPARED_SHA: ${{ steps.create-version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}
-          SOURCE_SHA: ${{ steps.pr.outputs.source_sha }}
+          SOURCE_SHA: ${{ steps.prepare.outputs.source_sha }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           set -euo pipefail
