@@ -60,6 +60,9 @@ universal_access_app="$universal_app/$access_relative_path"
 arm_access_binary="$arm_access_app/Contents/MacOS/televybackup-snapshot-access"
 x86_access_binary="$x86_access_app/Contents/MacOS/televybackup-snapshot-access"
 universal_access_binary="$universal_access_app/Contents/MacOS/televybackup-snapshot-access"
+# Reused Universal helper bundles can arrive from downloaded artifacts with
+# normalized file modes; restore the executable bit before embedding them.
+chmod 755 "$universal_access_binary"
 arm_arches="$(lipo -info "$arm_access_binary")"
 x86_arches="$(lipo -info "$x86_access_binary")"
 if [[ "$arm_arches" == *"arm64"* && "$arm_arches" == *"x86_64"* && "$x86_arches" == *"arm64"* && "$x86_arches" == *"x86_64"* ]]; then
@@ -93,6 +96,7 @@ repackage_native_app() {
   rm -rf "$native_access_app"
   mkdir -p "$(dirname "$native_access_app")"
   ditto "$universal_access_app" "$native_access_app"
+  chmod 755 "$native_access_app/Contents/MacOS/televybackup-snapshot-access"
   for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
     chmod 755 "$native_app/Contents/MacOS/$binary"
   done

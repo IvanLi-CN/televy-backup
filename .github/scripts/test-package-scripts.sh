@@ -105,6 +105,10 @@ grep -F 'chmod 755 "$native_app/Contents/MacOS/$binary"' <<<"$assemble_text" >/d
   echo "Native DMG repackage must preserve executable modes for every main binary" >&2
   exit 1
 }
+grep -F 'chmod 755 "$native_access_app/Contents/MacOS/televybackup-snapshot-access"' <<<"$assemble_text" >/dev/null || {
+  echo "Native DMG repackage must preserve the nested helper executable mode" >&2
+  exit 1
+}
 grep -F 'access_relative_path="Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"' <<<"$assemble_text" >/dev/null || {
   echo "Universal assembly must keep Snapshot Access nested in the main app" >&2
   exit 1
