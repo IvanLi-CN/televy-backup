@@ -85,7 +85,9 @@ completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion native signature gate" "$completion_text" "--require-github-verification"
 assert_contains "completion reservation provenance gate" "$completion_text" "--reservation-json"
 assert_contains "completion GitHub verification fetch" "$completion_text" 'gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}"'
-assert_contains "completion GitHub verification evidence" "$completion_text" "--github-verification-json"
+assert_contains "completion GitHub verification SHA gate" "$completion_text" 'jq -e --arg commit "${HEAD_SHA}"'
+assert_contains "completion GitHub verification status gate" "$completion_text" '.commit.verification.verified == true'
+assert_not_contains "completion trusted-base-only verification argument" "$completion_text" "--github-verification-json"
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
 assert_contains "completion workflow dispatch input" "$completion_text" "pr_number:"
