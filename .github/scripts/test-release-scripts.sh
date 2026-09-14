@@ -92,6 +92,8 @@ assert "name: snapshot-helper-source" in release_workflow
 assert "skipping helper candidate with incompatible immutable assets" in release_workflow
 assert "preferred helper source is missing" not in release_workflow
 assert "preferred helper source manifest failed" not in release_workflow
+assert "Keep the trusted main checkout for release policy scripts" in release_workflow
+assert 'git checkout --detach "${TARGET_INPUT}"' not in release_workflow
 build_and_assembly = release_workflow.split("  build-arm64:", 1)[1].split("  macos-acceptance:", 1)[0]
 assert "gh release download" not in build_and_assembly
 assert build_and_assembly.count("name: snapshot-helper-source") == 3

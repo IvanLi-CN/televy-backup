@@ -39,3 +39,5 @@ reconstructed from immutable Git refs, commit trailers and product tags. Same-SH
 the existing bound identity and never calculates a new version. Helper bootstrap is permitted only
 when no approved helper Release is available and the recovery input explicitly requests it. No
 identity is reported as an unresolved state and cannot produce a fabricated tag or recovery command.
+Recovery keeps the trusted main checkout for policy and helper scripts; the historical recovery
+input remains the product identity passed through resolved outputs for packaging and publication.
