@@ -7,3 +7,5 @@
 - Mainline release identity is recorded by append-only bound and consumed receipts. Git notes,
   control branches, external stores, release queues, history backfill, and automatic recovery PRs
   are outside the topic.
+- Pre-provenance lightweight prerelease tags remain historical ordinal occupancy when reachable
+  from `main`; they are not identity, recovery, or publication proof.
