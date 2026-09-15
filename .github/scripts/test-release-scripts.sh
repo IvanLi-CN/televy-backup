@@ -55,7 +55,8 @@ assert contract["helper_bootstrap"]["immutable_source_artifact"]["release_redown
 assert contract["identity_refs"]["write_policy"] == "append-only-create"
 assert contract["identity_refs"]["state_order"] == "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound"
 assert contract["identity_refs"]["receipt_validation"] == "independently-verify-reservation-provenance"
-assert contract["recovery"]["dispatch_requires_existing_bound"] is True
+assert contract["recovery"]["dispatch_requires_existing_bound"] is False
+assert contract["recovery"]["dispatch_bound_repair"] == "append-only-after-same-sha-provenance"
 for gate in ("label_gate", "completion"):
     scheduling = contract["required_gate_scheduling"][gate]
     assert scheduling["queue"] == "max"

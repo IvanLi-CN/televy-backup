@@ -54,9 +54,11 @@ blocks with a local Git/API fixture. Release state is read through the GitHub RE
 
 The `release-intent.json` artifact is convenient run context only. A missing or expired artifact is
 reconstructed from immutable Git refs, commit trailers and product tags. Same-SHA recovery requires
-the existing bound identity and never calculates a new version. Helper bootstrap is permitted only
-when no approved helper Release is available and the recovery input explicitly requests it. No
-identity is reported as an unresolved state and cannot produce a fabricated tag or recovery command.
+the existing merged identity and matching reservation; when the bound receipt is missing, the
+trusted recovery path can append it atomically after re-verifying the same-SHA provenance. It
+never calculates a new version or changes an existing ref. Helper bootstrap is permitted only when
+no approved helper Release is available and the recovery input explicitly requests it. No identity
+is reported as an unresolved state and cannot produce a fabricated tag or recovery command.
 Recovery keeps the trusted main checkout for policy and helper scripts; the historical recovery
 input remains the product identity passed through resolved outputs for packaging and publication.
 The assembly job likewise evaluates release-asset validation from the exact trusted policy commit

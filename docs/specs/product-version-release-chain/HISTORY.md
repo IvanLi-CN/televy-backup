@@ -7,5 +7,7 @@
 - Mainline release identity is recorded by append-only bound and consumed receipts. Git notes,
   control branches, external stores, release queues, history backfill, and automatic recovery PRs
   are outside the topic.
+- Same-SHA recovery may append a missing bound receipt only after reservation, preparation, and
+  merge provenance are re-verified; it never allocates a successor or mutates an existing ref.
 - Pre-provenance lightweight prerelease tags remain historical ordinal occupancy when reachable
   from `main`; they are not identity, recovery, or publication proof.

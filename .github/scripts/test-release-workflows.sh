@@ -111,6 +111,9 @@ assert_contains "release sequence gate" "$release_text" "verify-release-sequence
 assert_contains "release reservation verification" "$release_text" "verify_github_reservation"
 assert_contains "recovery existing bound verification" "$release_text" "verify_github_receipt"
 assert_contains "release bound receipt" "$release_text" "--state bound"
+assert_contains "recovery missing bound repair" "$release_text" "RELEASE_RECOVERY_BOUND_REPAIR"
+assert_contains "recovery repair uses same merge SHA" "$release_text" '--merge-sha "${merge_sha}"'
+assert_contains "bound state after append" "$release_text" "bound_state=present"
 assert_contains "release consumed receipt" "$release_text" "--state consumed"
 assert_contains "release intent artifact" "$release_text" "name: release-intent"
 assert_contains "release intent covered merge" "$release_text" "covered_merge_sha"
