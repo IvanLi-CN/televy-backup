@@ -46,7 +46,10 @@ def json_response(value: object) -> Response:
 
 
 def intent(
-    declared_pull_request: str = "7", release_type: str = "type:patch", run_attempt: str = "1"
+    declared_pull_request: str = "7",
+    release_type: str = "type:patch",
+    run_attempt: str = "1",
+    artifact_names: list[str] | None = None,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -83,7 +86,7 @@ def intent(
             "tag_owner": "protected-release-automation",
             "identity": "release_chain_and_reservation_refs",
         },
-        "artifact_names": ["release-package-arm64", "release-package-x86_64", "release-assets"],
+        "artifact_names": artifact_names if artifact_names is not None else ["release-package-arm64", "release-package-x86_64", "release-assets"],
         "run_id": "7",
         "run_attempt": run_attempt,
         "run_url": "https://github.example/run/7",
@@ -177,6 +180,7 @@ class GitHubMock:
         trusted_resolver: bool = True,
         artifact_run_attempt: str = "1",
         artifact_url: str = "https://api.fixture/archive",
+        artifact_names: list[str] | None = None,
     ):
         self.tag_mode = tag_mode
         self.declared_pull_request = declared_pull_request
@@ -187,7 +191,7 @@ class GitHubMock:
         with zipfile.ZipFile(archive, "w") as bundle:
             bundle.writestr(
                 "release-intent.json",
-                json.dumps(intent(declared_pull_request, release_type, artifact_run_attempt)),
+                json.dumps(intent(declared_pull_request, release_type, artifact_run_attempt, artifact_names)),
             )
         self.archive = archive.getvalue()
 
@@ -241,6 +245,7 @@ def run_case(
     trusted_resolver: bool = True,
     artifact_run_attempt: str = "1",
     artifact_url: str = "https://api.fixture/archive",
+    artifact_names: list[str] | None = None,
 ) -> str:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     source = workflow.split("          python3 - <<'PYCODE'\n", 1)[1].split("\n          PYCODE", 1)[0]
@@ -272,6 +277,7 @@ def run_case(
                 trusted_resolver,
                 artifact_run_attempt,
                 artifact_url,
+                artifact_names,
             ),
         ):
             exec(compile(textwrap.dedent(source), str(WORKFLOW), "exec"), {"__name__": "__main__"})
@@ -305,4 +311,7 @@ assert "version=\n" in untrusted_marker
 untrusted_archive = run_case("missing", "7", artifact_url="https://evil.invalid/archive")
 assert "identity_status=resolver-error" in untrusted_archive
 assert "evil.invalid" not in untrusted_archive
+injected_artifacts = run_case("missing", "7", artifact_names=["release-assets\nforged=1"])
+assert "identity_status=resolver-error" in injected_artifacts
+assert "forged=1" not in injected_artifacts
 print("release failure resolver mock tests passed")

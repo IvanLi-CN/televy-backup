@@ -69,13 +69,6 @@ jobs:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: git fetch --no-tags origin "${HEAD_SHA}"
 
-      - name: Fetch immutable release identity refs
-        run: git fetch --force --tags origin
-
-      - name: Verify dispatched workflow comes from trusted main
-        if: github.event_name == 'workflow_dispatch'
-        run: test "${GITHUB_REF}" = "refs/heads/main"
-
       - name: Checkout trusted merge-group gate scripts
         if: github.event_name == 'merge_group'
         uses: actions/checkout@v4
@@ -83,6 +76,13 @@ jobs:
           ref: ${{ github.event.merge_group.base_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Fetch immutable release identity refs
+        run: git fetch --force --tags origin
+
+      - name: Verify dispatched workflow comes from trusted main
+        if: github.event_name == 'workflow_dispatch'
+        run: test "${GITHUB_REF}" = "refs/heads/main"
 
       - name: Verify VERSION and release completion
         if: github.event_name != 'merge_group'
@@ -112,14 +112,11 @@ jobs:
           }
           validate_current_pr "${RUNNER_TEMP}/current-pr.json"
           jq '.labels' "${RUNNER_TEMP}/current-pr.json" > "${RUNNER_TEMP}/labels.json"
-          verification_sha="${HEAD_SHA}"
           prepared_json=''
-          if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then
-            verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
-          fi
+          prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null || true)"
           deadline=$((SECONDS + 1800))
           while :; do
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
             state="$(python3 - "${RUNNER_TEMP}/source-checks.json" <<'PY'
           import json
           import sys

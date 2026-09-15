@@ -71,6 +71,12 @@ assert_contains "completion ready-for-review trigger" "$completion_text" "ready_
 assert_contains "completion merge-group validation" "$completion_text" "merge-group-release-gate.sh completion"
 assert_not_contains "completion merge-group echo bridge" "$completion_text" "reuses Release completion"
 assert_contains "completion merge-group full history" "$completion_text" "fetch-depth: 0"
+merge_group_checkout_line="$(grep -n 'name: Checkout trusted merge-group gate scripts' "$root_dir/.github/workflows/release-completion.yml" | cut -d: -f1)"
+immutable_fetch_line="$(grep -n 'name: Fetch immutable release identity refs' "$root_dir/.github/workflows/release-completion.yml" | cut -d: -f1)"
+if [[ -z "$merge_group_checkout_line" || -z "$immutable_fetch_line" || "$merge_group_checkout_line" -ge "$immutable_fetch_line" ]]; then
+  printf 'merge-group completion must checkout before fetching immutable refs\n' >&2
+  exit 1
+fi
 assert_contains "completion current PR API snapshot" "$completion_text" 'gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}"'
 assert_contains "completion current PR head validation" "$completion_text" 'current PR head changed while Release completion was queued'
 assert_contains "completion current PR labels" "$completion_text" 'jq '\''.labels'\'' "${RUNNER_TEMP}/current-pr.json"'
@@ -133,13 +139,14 @@ assert_contains "label merge-group immutable checkout" "$label_gate_text" "githu
 merge_group_text="$(<"$root_dir/.github/scripts/merge-group-release-gate.sh")"
 assert_not_contains "merge-group pull request API suppression" "$merge_group_text" "|| true"
 assert_contains "merge-group failed check state" "$merge_group_text" 'failed) echo "merge-group gate: required check failed'
-poll_line="$(grep -n 'required=("quality"' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
+poll_line="$(grep -n 'required=("Release intent label gate"' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
 final_pr_line="$(grep -n 'merge-group-final-pr' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
 final_checks_line="$(grep -n 'commits/\${head_sha}/check-runs' "$root_dir/.github/scripts/merge-group-release-gate.sh" | tail -1 | cut -d: -f1)"
 completion_line="$(grep -n 'python3 .github/scripts/release_completion.py' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
 assert_contains "merge-group final PR identity check" "$merge_group_text" 'test "$(jq -r '\''.head.sha'\'' "${final_pr_json}")" = "${pr_head_sha}"'
 assert_contains "merge-group final labels snapshot" "$merge_group_text" 'labels_json="$(jq -c '\''.labels'\'' "${final_pr_json}")"'
 assert_contains "merge-group source-check wait budget" "$merge_group_text" 'deadline=$((SECONDS + 1800))'
+assert_contains "merge-group waits for label gate" "$merge_group_text" 'required=("Release intent label gate"'
 assert_contains "merge-group verification fetch" "$merge_group_text" 'gh api "repos/${repository}/commits/${pr_head_sha}"'
 assert_contains "merge-group verification argument" "$merge_group_text" "--github-verification-json"
 assert_contains "merge-group checks bind to merge head" "$merge_group_text" 'gh api "repos/${repository}/commits/${head_sha}/check-runs?filter=latest&per_page=100"'
@@ -158,6 +165,8 @@ assert_contains "completion GitHub verification argument" "$completion_text" "--
 assert_contains "completion product-only verification selector" "$completion_text" 'product_release='
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
+assert_contains "completion checks bind to current head" "$completion_text" 'commits/${HEAD_SHA}/check-runs'
+assert_not_contains "completion checks bind to source SHA" "$completion_text" 'verification_sha="$(printf'
 assert_contains "completion immutable identity refs" "$completion_text" "git fetch --force --tags origin"
 assert_contains "completion covered PR association" "$completion_text" 'commits/${covered_merge_sha}/pulls'
 assert_contains "completion covered merge proof argument" "$completion_text" "--covered-merge-proof-json"

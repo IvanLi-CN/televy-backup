@@ -119,7 +119,7 @@ for pr_number in ${pr_numbers}; do
         completion_args+=(--covered-merge-sha "$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)")
       fi
     fi
-    required=("quality" "macOS Swift tests" "arm64 native package" "x86_64 native package" "Universal 2 assembly")
+    required=("Release intent label gate" "quality" "macOS Swift tests" "arm64 native package" "x86_64 native package" "Universal 2 assembly")
     deadline=$((SECONDS + 1800))
     while :; do
       pending=()
