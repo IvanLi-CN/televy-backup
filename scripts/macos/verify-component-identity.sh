@@ -99,16 +99,20 @@ candidate_requirement="$(codesign -d -r- "$candidate" 2>&1 | sed -n '/designated
 if [[ -n "$manifest" ]]; then
   reference_cdhash="$(printf '%s\n' "$reference_signature" | awk -F= '/^cdhash=/{print $2}')"
   reference_sha256="$reference_sha"
-  python3 - "$manifest" "$reference_sha256" "$reference_artifact_sha" "$reference_cdhash" "$reference_requirement" "$candidate_metadata" <<'PY'
+  # A DMG mount can normalize bundle file modes differently on Intel and
+  # Apple Silicon. The source Release manifest is verified against the
+  # immutable DMG before extraction; here it is used for content/signature
+  # identity, while reference/candidate still require an exact local bundle
+  # digest match above.
+  python3 - "$manifest" "$reference_sha256" "$reference_cdhash" "$reference_requirement" "$candidate_metadata" <<'PY'
 import json
 import sys
 
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
 assert component["sha256"] == sys.argv[2]
-assert component["artifact_sha256"] == sys.argv[3]
-assert component["cdhash"] == sys.argv[4]
-assert component["designated_requirement"] == sys.argv[5]
-metadata = json.loads(sys.argv[6])
+assert component["cdhash"] == sys.argv[3]
+assert component["designated_requirement"] == sys.argv[4]
+metadata = json.loads(sys.argv[5])
 assert component["bundle_id"] == metadata["bundleId"]
 assert component["relative_path"] == metadata["relativePath"]
 assert component["component_version"] == metadata["componentVersion"]
