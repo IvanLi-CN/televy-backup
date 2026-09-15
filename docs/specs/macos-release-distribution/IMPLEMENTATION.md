@@ -26,8 +26,8 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - `scripts/macos/verify-app-icon-assets.sh`, asset catalog `actool` compilation, and bundle `Info.plist`/resource inspection
 - nested helper component lock, SHA-256/CDHash/designated-requirement comparison (including
   architecture-independent canonicalization of the `codesign` `# ` marker, non-quoted whitespace,
-  and commutative CDHash alternatives), legacy artifact-digest compatibility, and RC artifact reuse
-  inspection
+  commutative CDHash alternatives, and native-runner projection of Universal CDHash alternatives),
+  legacy artifact-digest compatibility, and RC artifact reuse inspection
 - helper source resolution independent of the product RC ordinal; published Release manifest
   discovery and explicit no-source bootstrap mode are covered by resolver fixtures
 - `snapshot-components.lock.json` bootstrap-tag preference for helper reuse across ordinary product
