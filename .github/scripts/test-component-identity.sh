@@ -34,7 +34,7 @@ set -euo pipefail
 if [[ "${1:-}" == "-dvvv" ]]; then
   printf '%s\n' 'Signature=adhoc' 'Identifier=com.ivan.televybackup.snapshot-access' 'CDHash=2222222222222222222222222222222222222222' >&2
 elif [[ "${1:-}" == "-d" && "${2:-}" == "-r-" ]]; then
-  printf '%s\n' 'designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")' >&2
+  printf '%s\n' 'designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"2222222222222222222222222222222222222222" or cdhash H"1111111111111111111111111111111111111111")' >&2
 else
   exit 2
 fi
@@ -90,7 +90,7 @@ payload = {
             "sha256": hashlib.sha256(open(binary, "rb").read()).hexdigest(),
             "artifact_sha256": digest(bundle, True),
             "cdhash": "1111111111111111111111111111111111111111",
-            "designated_requirement": 'designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")',
+            "designated_requirement": '# designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")',
             "bundle_id": "com.ivan.televybackup.snapshot-access",
             "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
             "component_version": "0.2.0",
@@ -109,6 +109,38 @@ PATH="$fake_bin:$PATH" bash "$identity_script" \
   --reference "$reference" \
   --candidate "$candidate" \
   --manifest "$manifest" >/dev/null
+
+python3 - "$manifest" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["components"]["snapshot_access"]["designated_requirement"] = payload["components"]["snapshot_access"]["designated_requirement"].replace(
+    "com.ivan.televybackup.snapshot-access", "com.example.untrusted"
+)
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+if PATH="$fake_bin:$PATH" bash "$identity_script" \
+  --reference "$reference" \
+  --candidate "$candidate" \
+  --manifest "$manifest" >/dev/null 2>&1; then
+  echo "component identity accepted a changed designated requirement" >&2
+  exit 1
+fi
+python3 - "$manifest" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["components"]["snapshot_access"]["designated_requirement"] = payload["components"]["snapshot_access"]["designated_requirement"].replace(
+    "com.example.untrusted", "com.ivan.televybackup.snapshot-access"
+)
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
 
 python3 - "$manifest" <<'PY'
 import json

@@ -100,8 +100,31 @@ candidate_signature="$(signature_value "$candidate")"
   exit 1
 }
 
-reference_requirement="$(codesign -d -r- "$reference" 2>&1 | sed -n '/designated =>/p')"
-candidate_requirement="$(codesign -d -r- "$candidate" 2>&1 | sed -n '/designated =>/p')"
+# Universal ad-hoc signatures can print the commutative cdhash alternatives in
+# slice-dependent order. Normalize only that presentation detail and the
+# non-semantic comment marker; keep the rest of the requirement exact.
+normalize_requirement() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+
+requirement = sys.argv[1].strip()
+requirement = re.sub(r"^#\s*", "", requirement)
+cdhash_term = r'cdhash\s+H"([0-9A-Fa-f]+)"'
+cdhash_or = re.compile(rf"{cdhash_term}(?:\s+or\s+{cdhash_term})+")
+
+def sort_cdhash_alternatives(match):
+    values = re.findall(cdhash_term, match.group(0))
+    return " or ".join(f'cdhash H"{value.lower()}"' for value in sorted(values, key=str.lower))
+
+print(cdhash_or.sub(sort_cdhash_alternatives, requirement))
+PY
+}
+
+reference_requirement_raw="$(codesign -d -r- "$reference" 2>&1 | sed -n '/designated =>/p')"
+candidate_requirement_raw="$(codesign -d -r- "$candidate" 2>&1 | sed -n '/designated =>/p')"
+reference_requirement="$(normalize_requirement "$reference_requirement_raw")"
+candidate_requirement="$(normalize_requirement "$candidate_requirement_raw")"
 [[ -n "$reference_requirement" && "$reference_requirement" == "$candidate_requirement" ]] || {
   echo "Snapshot Access designated requirement changed" >&2
   exit 1
@@ -140,8 +163,22 @@ require(
     and {component["cdhash"].lower(), sys.argv[5].lower()} <= requirement_cdhashes,
     "Snapshot Access CodeDirectory identity does not match the manifest requirement",
 )
+manifest_requirement = component.get("designated_requirement")
 require(
-    component["designated_requirement"] == sys.argv[6],
+    isinstance(manifest_requirement, str) and manifest_requirement,
+    "Snapshot Access designated requirement is missing from the manifest",
+)
+manifest_requirement = re.sub(r"^#\s*", "", manifest_requirement.strip())
+cdhash_term = r'cdhash\s+H"([0-9A-Fa-f]+)"'
+cdhash_or = re.compile(rf"{cdhash_term}(?:\s+or\s+{cdhash_term})+")
+def sort_cdhash_alternatives(match):
+    values = re.findall(cdhash_term, match.group(0))
+    return " or ".join(f'cdhash H"{value.lower()}"' for value in sorted(values, key=str.lower))
+manifest_requirement = cdhash_or.sub(sort_cdhash_alternatives, manifest_requirement)
+actual_requirement = re.sub(r"^#\s*", "", sys.argv[6].strip())
+actual_requirement = cdhash_or.sub(sort_cdhash_alternatives, actual_requirement)
+require(
+    manifest_requirement == actual_requirement,
     "Snapshot Access designated requirement does not match the manifest",
 )
 metadata = json.loads(sys.argv[7])

@@ -72,7 +72,9 @@ Universal 2 helpers, the manifest CDHash and the hash selected by the verifying 
 members of that designated requirement's CDHash set. A historical helper manifest MAY expose a
 legacy bundle digest alongside its canonical digest; RC acceptance MAY match either explicitly
 recorded digest, but MUST continue to require exact executable SHA-256, component metadata,
-protocol, CDHash-set, and designated-requirement identity. The resolve job MUST download and verify those
+protocol, CDHash-set, and designated-requirement identity. Requirement comparison MAY canonicalize
+only the non-semantic `codesign` `# ` prefix and the order of commutative `cdhash ... or ...`
+alternatives; identifiers and all other requirement syntax MUST remain equal. The resolve job MUST download and verify those
 three source assets, including the tag-bound
 source commit and manifest/checksum relationships, then upload the exact files as the immutable
 `snapshot-helper-source` workflow artifact. Native build and assembly jobs MUST consume that artifact
