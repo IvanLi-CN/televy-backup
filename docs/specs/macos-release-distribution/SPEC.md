@@ -69,7 +69,10 @@ discovered by its verified `BUILD-MANIFEST.json`. Every reused source MUST provi
 DMG, `BUILD-MANIFEST.json`, and `SHA256SUMS`; its component metadata, executable SHA-256, complete
 artifact digest, and complete designated requirement MUST match the lock and downloaded bundle. For
 Universal 2 helpers, the manifest CDHash and the hash selected by the verifying runner MUST both be
-members of that designated requirement's CDHash set. The resolve job MUST download and verify those
+members of that designated requirement's CDHash set. A historical helper manifest MAY expose a
+legacy bundle digest alongside its canonical digest; RC acceptance MAY match either explicitly
+recorded digest, but MUST continue to require exact executable SHA-256, component metadata,
+protocol, CDHash-set, and designated-requirement identity. The resolve job MUST download and verify those
 three source assets, including the tag-bound
 source commit and manifest/checksum relationships, then upload the exact files as the immutable
 `snapshot-helper-source` workflow artifact. Native build and assembly jobs MUST consume that artifact
