@@ -193,8 +193,8 @@ requirement_cdhashes = {
 }
 require(
     requirement_cdhashes
-    and {component["cdhash"].lower(), sys.argv[5].lower()} <= requirement_cdhashes,
-    "Snapshot Access CodeDirectory identity does not match the manifest requirement",
+    and sys.argv[5].lower() in requirement_cdhashes,
+    "Snapshot Access observed CodeDirectory identity is not covered by its requirement",
 )
 manifest_requirement = component.get("designated_requirement")
 require(
@@ -233,17 +233,34 @@ def normalize_space(value):
     return "".join(result).strip()
 
 manifest_requirement = normalize_space(manifest_requirement)
+actual_requirement = normalize_space(sys.argv[6])
 cdhash_term = r'cdhash\s+H"([0-9A-Fa-f]+)"'
-cdhash_or = re.compile(rf"{cdhash_term}(?:\s+or\s+{cdhash_term})+")
-def sort_cdhash_alternatives(match):
-    values = re.findall(cdhash_term, match.group(0))
-    return " or ".join(f'cdhash H"{value.lower()}"' for value in sorted(values, key=str.lower))
-manifest_requirement = cdhash_or.sub(sort_cdhash_alternatives, manifest_requirement)
-actual_requirement = re.sub(r"^#\s*", "", sys.argv[6].strip())
-actual_requirement = normalize_space(actual_requirement)
-actual_requirement = cdhash_or.sub(sort_cdhash_alternatives, actual_requirement)
+manifest_cdhashes = {
+    value.lower() for value in re.findall(cdhash_term, manifest_requirement)
+}
+actual_cdhashes = {
+    value.lower() for value in re.findall(cdhash_term, actual_requirement)
+}
+require(actual_cdhashes, "Snapshot Access designated requirement has no CDHash identities")
 require(
-    manifest_requirement == actual_requirement,
+    actual_cdhashes <= manifest_cdhashes,
+    "Snapshot Access native requirement contains a CDHash not recorded in the manifest",
+)
+require(
+    {component["cdhash"].lower(), sys.argv[5].lower()} <= manifest_cdhashes,
+    "Snapshot Access CodeDirectory identity does not match the manifest requirement",
+)
+require(
+    sys.argv[5].lower() in actual_cdhashes,
+    "Snapshot Access observed CodeDirectory hash is not covered by its designated requirement",
+)
+
+cdhash_expression = re.compile(rf"{cdhash_term}(?:\s+or\s+{cdhash_term})*")
+def requirement_shape(value):
+    return cdhash_expression.sub("__SNAPSHOT_ACCESS_CDHASHES__", value)
+
+require(
+    requirement_shape(manifest_requirement) == requirement_shape(actual_requirement),
     "Snapshot Access designated requirement does not match the manifest",
 )
 metadata = json.loads(sys.argv[7])
