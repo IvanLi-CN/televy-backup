@@ -5,6 +5,7 @@
 - [PR-local VERSION preparation](../../adr/0004-pr-local-version-preparation.md)
 - [Immutable release identity reservation](../../adr/0010-release-identity-reservation.md)
 - [Independent helper bootstrap state](../../adr/0012-helper-bootstrap-state.md)
+- [Same-SHA recovery bound repair](../../adr/0013-release-recovery-bound-repair.md)
 
 ## Context and Scope
 
@@ -82,12 +83,15 @@ are prereleases and never update stable latest.
 
 ### REQ-PVR-007: Recovery is same-SHA or an explicit new PR
 
-Same-SHA recovery accepts only an existing bound identity and retries missing publish or receipt
-work. A manual recovery run must find and verify that bound receipt before doing publish work; it
-cannot create the first bound identity. It never writes VERSION, computes a successor, changes a channel, or retags. A historical
-merge with no identity is not a recovery input; it can be released only through a new,
-version-only-release-pr. History scanning, queues, trains, backfill and automatic PR creation are
-not part of this contract. Recovery policy evaluation uses the current trusted main workflow
+Same-SHA recovery accepts only an existing merged release identity: the exact merge SHA, the
+prepared VERSION/channel identity, and its matching reservation. It retries missing bound or
+consumed receipts and missing publish work. A manual recovery run may append a missing bound
+receipt only after the current trusted scripts verify the reservation, preparation provenance, and
+merge identity; the append-only operation never allocates a version or changes an existing ref.
+Once bound exists, recovery verifies it before doing publish work. It never writes VERSION,
+computes a successor, changes a channel, or retags. A historical merge with no identity is not a
+recovery input; it can be released only through a new, version-only-release-pr. History scanning,
+queues, trains, backfill and automatic PR creation are not part of this contract. Recovery policy evaluation uses the current trusted main workflow
 scripts, while packaging and publication remain bound to the recovered merge identity.
 
 ### REQ-PVR-008: Intent snapshots and failure context are non-authoritative

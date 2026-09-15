@@ -317,26 +317,15 @@ jobs:
             echo "RELEASE_TERMINAL state=consumed version=${version} merge_sha=${merge_sha}"
           else
             if [[ "${EVENT_NAME}" == workflow_dispatch ]]; then
-              python3 - "${version}" "${merge_sha}" "${reservation_id}" "${reservation_owner}" \
-                "${claim_key}" "${boundary_token}" "${reservation_ref}" "${GITHUB_REPOSITORY}" \
-                "${GH_TOKEN}" "${GITHUB_API_URL}" <<'PY'
-          import sys
-          sys.path.insert(0, '.github/scripts')
-          import release_reservation
-          release_reservation.verify_github_receipt(
-              state='bound', version=sys.argv[1], merge_sha=sys.argv[2], reservation_id=sys.argv[3],
-              owner=sys.argv[4], claim_key=sys.argv[5], boundary_token=sys.argv[6],
-              reservation_ref_value=sys.argv[7], repository=sys.argv[8], token=sys.argv[9], api_root=sys.argv[10],
-          )
-          PY
-            else
-              python3 .github/scripts/release_reservation.py receipt \
-                --state bound --version "${version}" --merge-sha "${merge_sha}" \
-                --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
-                --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
-                --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
-                --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
+              echo "RELEASE_RECOVERY_BOUND_REPAIR version=${version} merge_sha=${merge_sha}"
             fi
+            python3 .github/scripts/release_reservation.py receipt \
+              --state bound --version "${version}" --merge-sha "${merge_sha}" \
+              --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
+              --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
+              --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
+              --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
+            bound_state=present
             if [[ "${release_state}" == published ]]; then
               python3 .github/scripts/release_reservation.py receipt \
                 --state consumed --version "${version}" --merge-sha "${merge_sha}" \

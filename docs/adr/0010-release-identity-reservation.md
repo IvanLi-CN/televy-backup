@@ -3,6 +3,8 @@
 - Status: accepted
 - Date: 2026-09-14
 
+The recovery detail is refined by [ADR 0013](0013-release-recovery-bound-repair.md).
+
 ## Context
 
 The previous release flow treated the committed `VERSION` as a version counter. That allows two
@@ -34,9 +36,9 @@ decision with another state or identity fails closed. This closes the cross-ref 
 receipt names cannot solve by read-before-create checks alone.
 
 Every receipt writer independently verifies the reservation's parent, tree, and trailers. The
-`bound` receipt must exist before `consumed` is created; a recovery run may only verify an existing
-`bound` receipt and may not create the first one. A `released` receipt is rejected once a bound or
-consumed receipt exists.
+`bound` receipt must exist before `consumed` is created; the constrained same-SHA recovery path may
+append the first `bound` receipt only after re-verifying the merged preparation identity and the
+reservation. A `released` receipt is rejected once a bound or consumed receipt exists.
 
 The release intent JSON is an Actions artifact snapshot only. Recovery reconstructs identity from
 reservation and receipt refs, preparation/merge trailers, and the product tag. The normal PR mode,

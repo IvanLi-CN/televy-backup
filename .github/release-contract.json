@@ -85,7 +85,8 @@
   "recovery": {
     "same_sha_operation": "recover",
     "same_sha_identity": "bound merge SHA + VERSION + channel + matching reservation",
-    "dispatch_requires_existing_bound": true,
+    "dispatch_requires_existing_bound": false,
+    "dispatch_bound_repair": "append-only-after-same-sha-provenance",
     "version_only_release_pr": "new non-empty VERSION-only PR with new merge identity",
     "historical_backfill": false,
     "queue": false,
