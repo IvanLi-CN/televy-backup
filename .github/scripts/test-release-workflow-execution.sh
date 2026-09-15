@@ -62,6 +62,27 @@ if [[ "${1:-}" == api ]]; then
       *) shift ;;
     esac
   done
+  if [[ "$method" == GET && "$endpoint" == */releases/latest ]]; then
+    latest_tag=""
+    if [[ -f "$state_dir/latest" ]]; then
+      latest_tag="$(<"$state_dir/latest")"
+    fi
+    if [[ -z "$latest_tag" || ! -f "$state_dir/$latest_tag" ]]; then
+      echo "HTTP 404: Not Found" >&2
+      exit 1
+    fi
+    printf '{"tag_name":"%s"}\n' "$latest_tag"
+    exit 0
+  fi
+  if [[ "$method" == GET && "$endpoint" == */releases/tags/* ]]; then
+    tag="${endpoint##*/releases/tags/}"
+    if [[ ! -f "$state_dir/$tag" ]]; then
+      echo "HTTP 404: Not Found" >&2
+      exit 1
+    fi
+    cat "$state_dir/$tag"
+    exit 0
+  fi
   if [[ "$method" == POST && "$endpoint" == */git/tags ]]; then
     git -C "$repo_dir" -c user.name='github-actions[bot]' \
       -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
@@ -78,29 +99,24 @@ if [[ "${1:-}" == api ]]; then
   echo "unsupported fixture gh api call: $method $endpoint" >&2
   exit 1
 fi
-if [[ "$1" == release && "$2" == view ]]; then
-  tag="$3"
-  if [[ ! -f "$state_dir/$tag" ]]; then
-    echo "HTTP 404: Not Found" >&2
-    exit 1
-  fi
-  cat "$state_dir/$tag"
-  exit 0
-fi
 if [[ "$1" == release && "$2" == create ]]; then
   tag="$3"
   printf '%s\n' "$*" > "$state_dir/$tag.created"
-  printf '{"isDraft":false,"isPrerelease":%s,"isLatest":%s}\n' \
-    "$([[ "$*" == *'--prerelease'* ]] && echo true || echo false)" \
-    "$([[ "$*" == *'--latest=true'* ]] && echo true || echo false)" > "$state_dir/$tag"
+  printf '{"tag_name":"%s","draft":false,"prerelease":%s}\n' "$tag" \
+    "$([[ "$*" == *'--prerelease'* ]] && echo true || echo false)" > "$state_dir/$tag"
+  if [[ "$*" == *'--latest=true'* ]]; then
+    printf '%s\n' "$tag" > "$state_dir/latest"
+  fi
   exit 0
 fi
 if [[ "$1" == release && "$2" == upload ]]; then exit 0; fi
 if [[ "$1" == release && "$2" == edit ]]; then
   tag="$3"
-  printf '{"isDraft":false,"isPrerelease":%s,"isLatest":%s}\n' \
-    "$([[ "$*" == *'--prerelease'* ]] && echo true || echo false)" \
-    "$([[ "$*" == *'--latest=true'* ]] && echo true || echo false)" > "$state_dir/$tag"
+  printf '{"tag_name":"%s","draft":false,"prerelease":%s}\n' "$tag" \
+    "$([[ "$*" == *'--prerelease'* ]] && echo true || echo false)" > "$state_dir/$tag"
+  if [[ "$*" == *'--latest=true'* ]]; then
+    printf '%s\n' "$tag" > "$state_dir/latest"
+  fi
   exit 0
 fi
 echo "unsupported fixture gh call: $*" >&2
