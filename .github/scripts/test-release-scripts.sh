@@ -282,8 +282,8 @@ verifier = root / ".github/scripts/verify-macos-rc-acceptance.py"
 identity = {
     "sha256": "",
     "artifact_sha256": "",
-    "cdhash": "helper-cdhash",
-    "designated_requirement": "designated => identifier \"com.ivan.televybackup.snapshot-access\"",
+    "cdhash": "1111111111111111111111111111111111111111",
+    "designated_requirement": "designated => identifier \"com.ivan.televybackup.snapshot-access\" and (cdhash H\"1111111111111111111111111111111111111111\" or cdhash H\"2222222222222222222222222222222222222222\")",
     "bundle_id": "com.ivan.televybackup.snapshot-access",
     "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
     "binary": "Contents/MacOS/televybackup-snapshot-access",
@@ -370,9 +370,9 @@ fi
 set -eu
 if [ "$1" = -dvvv ]; then
   echo 'Signature=adhoc' >&2
-  echo 'CDHash=helper-cdhash' >&2
+  echo 'CDHash=2222222222222222222222222222222222222222' >&2
 elif [ "$1" = -d ] && [ "$2" = -r- ]; then
-  echo 'designated => identifier "com.ivan.televybackup.snapshot-access"' >&2
+  echo 'designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")' >&2
 else
   exit 2
 fi

@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat as stat_module
 import subprocess
 import sys
@@ -22,23 +23,52 @@ def required_string(value, name: str) -> str:
     return value
 
 
+def requirement_cdhashes(requirement: str, name: str) -> set[str]:
+    values = {
+        value.lower()
+        for value in re.findall(r'\bcdhash\s+H"([0-9A-Fa-f]+)"', requirement)
+    }
+    if not values:
+        fail(f"{name} designated requirement has no CDHash identities")
+    return values
+
+
+def validate_cdhash_identity(expected, actual, requirement: str, name: str) -> None:
+    expected_value = required_string(expected, f"{name}.manifest_cdhash")
+    actual_value = required_string(actual, f"{name}.actual_cdhash")
+    values = requirement_cdhashes(requirement, name)
+    if {expected_value.lower(), actual_value.lower()} - values:
+        fail(f"{name} CDHash identity is not covered by its designated requirement")
+
+
 def required_identity(evidence, manifest, name: str, fields: tuple[str, ...]) -> None:
     if not isinstance(evidence, dict):
         fail(f"{name} identity must be an object")
+    manifest_requirement = required_string(
+        manifest.get("designated_requirement"), f"manifest {name}.designated_requirement"
+    )
     for field in fields:
         evidence_value = required_string(evidence.get(field), f"{name}.{field}")
         manifest_value = required_string(manifest.get(field), f"manifest {name}.{field}")
-        if evidence_value != manifest_value:
+        if field == "cdhash":
+            validate_cdhash_identity(manifest_value, evidence_value, manifest_requirement, name)
+        elif evidence_value != manifest_value:
             fail(f"{name}.{field} does not match BUILD-MANIFEST.json")
 
 
 def equal_identity(first, second, name: str, fields: tuple[str, ...]) -> None:
     if not isinstance(first, dict) or not isinstance(second, dict):
         fail(f"{name} RC identities must be objects")
+    first_requirement = required_string(first.get("designated_requirement"), f"{name}.rc1.designated_requirement")
+    second_requirement = required_string(second.get("designated_requirement"), f"{name}.rc2.designated_requirement")
     for field in fields:
         first_value = required_string(first.get(field), f"{name}.rc1.{field}")
         second_value = required_string(second.get(field), f"{name}.rc2.{field}")
-        if first_value != second_value:
+        if field == "cdhash":
+            if first_requirement != second_requirement:
+                fail(f"{name}.designated_requirement changed between RC1 and RC2")
+            validate_cdhash_identity(first_value, second_value, first_requirement, name)
+        elif first_value != second_value:
             fail(f"{name}.{field} changed between RC1 and RC2")
 
 
@@ -143,6 +173,9 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
         )
         if not cdhash or not requirement:
             fail(f"{name} Snapshot Access signature identity is incomplete")
+        cdhash_set = requirement_cdhashes(requirement, f"{name} Snapshot Access")
+        if cdhash.lower() not in cdhash_set:
+            fail(f"{name} Snapshot Access CDHash is not covered by its designated requirement")
         try:
             metadata = json.loads(
                 command_output([str(binary), "--component-metadata"], f"{name} Snapshot Access metadata")
@@ -326,11 +359,19 @@ def verify_rc_artifact(
             matches_canonical = expected == actual["artifact_sha256"]
             if not (matches_canonical or matches_legacy):
                 fail(f"{name}. Snapshot Access {field} does not match its BUILD-MANIFEST.json")
+        elif field == "cdhash":
+            validate_cdhash_identity(expected, actual[field], actual["designated_requirement"], f"{name}.snapshot_access")
         elif actual[field] != expected:
             fail(f"{name}. Snapshot Access {field} does not match its BUILD-MANIFEST.json")
     if helper.get("protocol_version") != actual["protocol_version"]:
         fail(f"{name}. Snapshot Access protocol_version does not match its BUILD-MANIFEST.json")
-    return tuple(str(actual[field]) for field in identity_fields)
+    actual_cdhashes = tuple(sorted(requirement_cdhashes(
+        actual["designated_requirement"], f"{name} Snapshot Access"
+    )))
+    return tuple(
+        actual_cdhashes if field == "cdhash" else str(actual[field])
+        for field in identity_fields
+    )
 
 
 rc_args = (
@@ -350,9 +391,21 @@ if all(value is not None for value in rc_args):
     )
     if rc1_identity != rc2_identity:
         fail("Snapshot Access helper identity changed between the RC release artifacts")
-    final_identity = tuple(required_string(components["snapshot_access"].get(field), f"manifest snapshot_access.{field}") for field in (
-        "sha256", "artifact_sha256", "cdhash", "designated_requirement"
-    ))
+    final_manifest_identity = components["snapshot_access"]
+    final_requirement = required_string(
+        final_manifest_identity.get("designated_requirement"),
+        "manifest snapshot_access.designated_requirement",
+    )
+    final_cdhash = required_string(final_manifest_identity.get("cdhash"), "manifest snapshot_access.cdhash")
+    final_cdhashes = tuple(sorted(requirement_cdhashes(final_requirement, "manifest snapshot_access")))
+    if final_cdhash.lower() not in final_cdhashes:
+        fail("manifest snapshot_access.cdhash is not covered by its designated requirement")
+    final_identity = tuple(
+        final_cdhashes if field == "cdhash" else required_string(
+            final_manifest_identity.get(field), f"manifest snapshot_access.{field}"
+        )
+        for field in ("sha256", "artifact_sha256", "cdhash", "designated_requirement")
+    )
     if final_identity != rc1_identity:
         fail("stable Snapshot Access identity does not match the accepted RC artifacts")
 

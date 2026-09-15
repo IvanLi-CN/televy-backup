@@ -32,9 +32,9 @@ cat > "$fake_bin/codesign" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "-dvvv" ]]; then
-  printf '%s\n' 'Signature=adhoc' 'Identifier=com.ivan.televybackup.snapshot-access' 'CDHash=fixture-cdhash' >&2
+  printf '%s\n' 'Signature=adhoc' 'Identifier=com.ivan.televybackup.snapshot-access' 'CDHash=2222222222222222222222222222222222222222' >&2
 elif [[ "${1:-}" == "-d" && "${2:-}" == "-r-" ]]; then
-  printf '%s\n' 'designated => identifier "com.ivan.televybackup.snapshot-access"' >&2
+  printf '%s\n' 'designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")' >&2
 else
   exit 2
 fi
@@ -89,8 +89,8 @@ payload = {
         "snapshot_access": {
             "sha256": hashlib.sha256(open(binary, "rb").read()).hexdigest(),
             "artifact_sha256": digest(bundle, True),
-            "cdhash": "fixture-cdhash",
-            "designated_requirement": 'designated => identifier "com.ivan.televybackup.snapshot-access"',
+            "cdhash": "1111111111111111111111111111111111111111",
+            "designated_requirement": 'designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")',
             "bundle_id": "com.ivan.televybackup.snapshot-access",
             "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
             "component_version": "0.2.0",
@@ -109,6 +109,34 @@ PATH="$fake_bin:$PATH" bash "$identity_script" \
   --reference "$reference" \
   --candidate "$candidate" \
   --manifest "$manifest" >/dev/null
+
+python3 - "$manifest" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["components"]["snapshot_access"]["cdhash"] = "0" * 40
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+if PATH="$fake_bin:$PATH" bash "$identity_script" \
+  --reference "$reference" \
+  --candidate "$candidate" \
+  --manifest "$manifest" >/dev/null 2>&1; then
+  echo "component identity accepted a CDHash outside the designated requirement" >&2
+  exit 1
+fi
+python3 - "$manifest" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["components"]["snapshot_access"]["cdhash"] = "1" * 40
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
 
 printf '%s\n' changed >> "$candidate/Contents/Info.plist"
 if PATH="$fake_bin:$PATH" bash "$identity_script" \
