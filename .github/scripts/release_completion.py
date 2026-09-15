@@ -27,6 +27,24 @@ class CompletionError(RuntimeError):
     """Raised when a PR cannot become merge-ready."""
 
 
+IDENTITY_REF_PREFIXES = (
+    "refs/tags/release-reservation",
+    "refs/tags/release-bound",
+    "refs/tags/release-consumed",
+    "refs/tags/release-released",
+)
+RELEASE_IDENTITY_TRAILERS = {
+    "Release-Source-SHA",
+    "Product-Version",
+    "Release-Reservation-Id",
+    "Release-Reservation-Ref",
+    "Release-Reservation-Owner",
+    "Release-Claim-Key",
+    "Release-Boundary-Token",
+    "Release-Provenance",
+}
+
+
 def labels(path: Path) -> dict[str, str]:
     try:
         return CHAIN.intent_from_labels(json.loads(path.read_text(encoding="utf-8")))
@@ -61,7 +79,45 @@ def verify_migration(commit: str, base: str, version: str) -> None:
         raise CompletionError("migration PR must add only VERSION")
 
 
-def verify_version_only_covered_merge(covered: str, current_main: str) -> None:
+def verify_no_existing_covered_identity(covered: str) -> None:
+    product_tags = [row["tag"] for row in CHAIN.product_tags() if row.get("target") == covered]
+    identity_refs: list[str] = []
+    for ref in CHAIN.git("for-each-ref", "--format=%(refname)", *IDENTITY_REF_PREFIXES).splitlines():
+        try:
+            target = CHAIN.git("rev-parse", f"{ref}^{{commit}}")
+            parents = CHAIN.git("show", "-s", "--format=%P", target).split()
+        except CHAIN.ReleaseChainError:
+            continue
+        if target == covered or covered in parents or ref.endswith(f"/{covered}"):
+            identity_refs.append(ref)
+    if product_tags or identity_refs:
+        found = ", ".join(product_tags + identity_refs)
+        raise CompletionError(f"covered merge already has a release identity: {found}")
+
+
+def verify_squash_merge_proof(path: Path, covered: str, repository: str | None) -> None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CompletionError(f"cannot read covered merge proof: {error}") from error
+    if not isinstance(payload, list):
+        raise CompletionError("covered merge proof must be a GitHub pull request array")
+    for row in payload:
+        if not isinstance(row, dict) or row.get("merge_commit_sha") != covered or not row.get("merged_at"):
+            continue
+        base = row.get("base")
+        base_repo = base.get("repo") if isinstance(base, dict) else None
+        if not isinstance(base, dict) or base.get("ref") != "main":
+            continue
+        if repository and (not isinstance(base_repo, dict) or base_repo.get("full_name") != repository):
+            continue
+        return
+    raise CompletionError("covered single-parent commit is not an authoritative merged PR result")
+
+
+def verify_version_only_covered_merge(
+    covered: str, current_main: str, proof_path: Path | None = None, repository: str | None = None
+) -> None:
     if not CHAIN.SHA_RE.fullmatch(covered):
         raise CompletionError("covered merge SHA must be a full commit SHA")
     parents = CHAIN.git("show", "-s", "--format=%P", covered).split()
@@ -69,14 +125,20 @@ def verify_version_only_covered_merge(covered: str, current_main: str) -> None:
         raise CompletionError("covered merge SHA must identify a mainline commit")
     if not CHAIN.is_ancestor(covered, current_main):
         raise CompletionError("covered merge SHA must belong to the current mainline ancestry")
-    try:
-        CHAIN.verify_prepared(covered)
-    except CHAIN.ReleaseChainError:
-        pass
+    verify_no_existing_covered_identity(covered)
+    covered_trailers = CHAIN.trailers(covered)
+    if len(parents) == 1:
+        if proof_path is None:
+            raise CompletionError("single-parent covered merge requires authoritative PR proof")
+        verify_squash_merge_proof(proof_path, covered, repository)
+        try:
+            CHAIN.verify_prepared(covered)
+        except CHAIN.ReleaseChainError:
+            if RELEASE_IDENTITY_TRAILERS.intersection(covered_trailers):
+                raise CompletionError("covered single-parent commit has incomplete release identity")
     else:
-        raise CompletionError("covered merge already has a release identity")
-    if len(parents) == 2 and CHAIN.verify_merged(covered).get("prepared") == "true":
-        raise CompletionError("covered merge already has a release identity")
+        if CHAIN.verify_merged(covered).get("prepared") == "true":
+            raise CompletionError("covered merge already has a release identity")
 
 
 def verify_reservation(
@@ -143,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-root", default="https://api.github.com")
     parser.add_argument("--require-github-verification", action="store_true")
     parser.add_argument("--github-verification-json", type=Path)
+    parser.add_argument("--covered-merge-proof-json", type=Path)
     parser.add_argument("--allow-migration", action="store_true")
     parser.add_argument("--migration-version")
     args = parser.parse_args(argv)
@@ -184,7 +247,9 @@ def main(argv: list[str] | None = None) -> int:
             covered = args.covered_merge_sha or prepared["coveredMergeSha"]
             if not covered or covered != prepared["coveredMergeSha"]:
                 raise CompletionError("version-only-release-pr covered merge SHA is not frozen")
-            verify_version_only_covered_merge(covered, args.base)
+            verify_version_only_covered_merge(
+                covered, args.base, args.covered_merge_proof_json, args.repository
+            )
             if changed != ["VERSION"]:
                 raise CompletionError("version-only-release-pr must be a non-empty VERSION-only PR")
         print(json.dumps({"status": "ready", **prepared}, sort_keys=True))

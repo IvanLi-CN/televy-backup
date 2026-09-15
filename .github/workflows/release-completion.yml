@@ -66,6 +66,9 @@ jobs:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: git fetch --no-tags origin "${HEAD_SHA}"
 
+      - name: Fetch immutable release identity refs
+        run: git fetch --force --tags origin
+
       - name: Verify dispatched workflow comes from trusted main
         if: github.event_name == 'workflow_dispatch'
         run: test "${GITHUB_REF}" = "refs/heads/main"
@@ -181,7 +184,15 @@ jobs:
           PY
             completion_args+=(--release-mode "${release_mode}")
             if [[ "${release_mode}" == version-only-release-pr ]]; then
-              completion_args+=(--covered-merge-sha "$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)")
+              covered_merge_sha="$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)"
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                "repos/${GITHUB_REPOSITORY}/commits/${covered_merge_sha}/pulls" \
+                > "${RUNNER_TEMP}/covered-merge-pulls.json"
+              completion_args+=(
+                --covered-merge-sha "${covered_merge_sha}"
+                --covered-merge-proof-json "${RUNNER_TEMP}/covered-merge-pulls.json"
+              )
             fi
           fi
           python3 .github/scripts/release_completion.py "${completion_args[@]}" \
