@@ -42,7 +42,7 @@ def equal_identity(first, second, name: str, fields: tuple[str, ...]) -> None:
             fail(f"{name}.{field} changed between RC1 and RC2")
 
 
-def artifact_sha256(path: Path) -> str:
+def artifact_sha256(path: Path, canonical: bool = True) -> str:
     digest = hashlib.sha256()
     if path.is_file():
         digest.update(path.read_bytes())
@@ -57,13 +57,16 @@ def artifact_sha256(path: Path) -> str:
             entry = Path(root) / name
             relative = os.path.join(relative_root, name)
             entry_stat = os.lstat(entry)
-            if stat_module.S_ISLNK(entry_stat.st_mode):
-                permissions = 0o777
-            elif stat_module.S_ISDIR(entry_stat.st_mode) or entry_stat.st_mode & 0o111:
-                permissions = 0o755
+            if canonical:
+                if stat_module.S_ISLNK(entry_stat.st_mode):
+                    permissions = 0o777
+                elif stat_module.S_ISDIR(entry_stat.st_mode) or entry_stat.st_mode & 0o111:
+                    permissions = 0o755
+                else:
+                    permissions = 0o644
+                mode = (entry_stat.st_mode & ~0o777) | permissions
             else:
-                permissions = 0o644
-            mode = (entry_stat.st_mode & ~0o777) | permissions
+                mode = entry_stat.st_mode
             digest.update(b"entry\0" + relative.encode() + b"\0")
             digest.update(str(mode).encode() + b"\0")
             if os.path.islink(entry):
@@ -149,6 +152,7 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
         return {
             "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
             "artifact_sha256": artifact_sha256(helper),
+            "artifact_sha256_legacy": artifact_sha256(helper, canonical=False),
             "cdhash": cdhash,
             "designated_requirement": requirement,
             "binary": "Contents/MacOS/televybackup-snapshot-access",
@@ -317,7 +321,12 @@ def verify_rc_artifact(
     actual = helper_identity_from_dmg(dmg_path, name)
     for field in identity_fields + ("binary", "bundle_id", "relative_path", "component_version"):
         expected = required_string(helper.get(field), f"{name}.snapshot_access.{field}")
-        if actual[field] != expected:
+        if field == "artifact_sha256":
+            matches_legacy = expected == actual["artifact_sha256_legacy"]
+            matches_canonical = expected == actual["artifact_sha256"]
+            if not (matches_canonical or matches_legacy):
+                fail(f"{name}. Snapshot Access {field} does not match its BUILD-MANIFEST.json")
+        elif actual[field] != expected:
             fail(f"{name}. Snapshot Access {field} does not match its BUILD-MANIFEST.json")
     if helper.get("protocol_version") != actual["protocol_version"]:
         fail(f"{name}. Snapshot Access protocol_version does not match its BUILD-MANIFEST.json")

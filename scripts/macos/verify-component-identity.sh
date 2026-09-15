@@ -121,15 +121,31 @@ import json
 import sys
 
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
-assert component["sha256"] == sys.argv[2]
-assert component["artifact_sha256"] in {sys.argv[3], sys.argv[4]}
-assert component["cdhash"] == sys.argv[5]
-assert component["designated_requirement"] == sys.argv[6]
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
+require(component["sha256"] == sys.argv[2], "Snapshot Access binary identity does not match the manifest")
+require(
+    component["artifact_sha256"] in {sys.argv[3], sys.argv[4]},
+    "Snapshot Access bundle identity does not match the manifest",
+)
+require(component["cdhash"] == sys.argv[5], "Snapshot Access CodeDirectory identity does not match the manifest")
+require(
+    component["designated_requirement"] == sys.argv[6],
+    "Snapshot Access designated requirement does not match the manifest",
+)
 metadata = json.loads(sys.argv[7])
-assert component["bundle_id"] == metadata["bundleId"]
-assert component["relative_path"] == metadata["relativePath"]
-assert component["component_version"] == metadata["componentVersion"]
-assert component["protocol_version"] == metadata["protocolVersion"]
+require(component["bundle_id"] == metadata["bundleId"], "Snapshot Access bundle id does not match the manifest")
+require(component["relative_path"] == metadata["relativePath"], "Snapshot Access relative path does not match the manifest")
+require(
+    component["component_version"] == metadata["componentVersion"],
+    "Snapshot Access component version does not match the manifest",
+)
+require(
+    component["protocol_version"] == metadata["protocolVersion"],
+    "Snapshot Access protocol version does not match the manifest",
+)
 PY
 fi
 

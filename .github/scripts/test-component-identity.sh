@@ -159,5 +159,12 @@ if PATH="$fake_bin:$PATH" bash "$identity_script" \
   echo "component identity accepted a mismatched source artifact digest" >&2
   exit 1
 fi
+if PYTHONOPTIMIZE=1 PATH="$fake_bin:$PATH" bash "$identity_script" \
+  --reference "$reference" \
+  --candidate "$candidate" \
+  --manifest "$manifest" >/dev/null 2>&1; then
+  echo "component identity accepted a mismatched source artifact digest in optimized Python" >&2
+  exit 1
+fi
 
 echo "component identity fixture tests passed"

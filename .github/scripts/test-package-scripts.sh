@@ -79,10 +79,14 @@ grep -F 'reference_legacy_artifact_sha="$(artifact_sha "$reference" raw)"' <<<"$
   echo "component identity verification must retain legacy manifest compatibility" >&2
   exit 1
 }
-grep -F 'assert component["artifact_sha256"] in {sys.argv[3], sys.argv[4]}' <<<"$identity_text" >/dev/null || {
+grep -F 'component["artifact_sha256"] in {sys.argv[3], sys.argv[4]}' <<<"$identity_text" >/dev/null || {
   echo "component identity verification must bind canonical or legacy bundle digest to the source manifest" >&2
   exit 1
 }
+if grep -E '(^|[[:space:]])assert[[:space:]]' <<<"$identity_text" >/dev/null; then
+  echo "component identity verification must not use optimizable Python assertions" >&2
+  exit 1
+fi
 [[ "$verify_release_text" == *'one-time-bootstrap-universal-build'* ]] || {
   echo "release asset verifier must recognize the explicit helper bootstrap source" >&2
   exit 1
