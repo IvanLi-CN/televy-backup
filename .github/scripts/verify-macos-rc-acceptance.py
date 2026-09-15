@@ -368,9 +368,12 @@ def verify_rc_artifact(
     actual_cdhashes = tuple(sorted(requirement_cdhashes(
         actual["designated_requirement"], f"{name} Snapshot Access"
     )))
-    return tuple(
-        actual_cdhashes if field == "cdhash" else str(actual[field])
-        for field in identity_fields
+    return (
+        tuple(
+            actual_cdhashes if field == "cdhash" else str(actual[field])
+            for field in identity_fields
+        ),
+        {actual["artifact_sha256"], actual["artifact_sha256_legacy"]},
     )
 
 
@@ -381,11 +384,11 @@ rc_args = (
 if any(value is not None for value in rc_args) and not all(value is not None for value in rc_args):
     fail("RC artifact verification arguments must be supplied as a complete pair")
 if all(value is not None for value in rc_args):
-    rc1_identity = verify_rc_artifact(
+    rc1_identity, rc1_artifact_digests = verify_rc_artifact(
         args.rc1_manifest, args.rc1_checksums, args.rc1_dmg,
         f"{args.stable_version}-rc.1", args.rc1_source_commit, "RC1",
     )
-    rc2_identity = verify_rc_artifact(
+    rc2_identity, _ = verify_rc_artifact(
         args.rc2_manifest, args.rc2_checksums, args.rc2_dmg,
         f"{args.stable_version}-rc.2", args.rc2_source_commit, "RC2",
     )
@@ -406,7 +409,9 @@ if all(value is not None for value in rc_args):
         )
         for field in ("sha256", "artifact_sha256", "cdhash", "designated_requirement")
     )
-    if final_identity != rc1_identity:
+    if final_identity[0] != rc1_identity[0] or final_identity[2:] != rc1_identity[2:]:
         fail("stable Snapshot Access identity does not match the accepted RC artifacts")
+    if final_identity[1] not in rc1_artifact_digests:
+        fail("stable Snapshot Access artifact digest does not match the accepted RC artifacts")
 
 print("macOS RC1 to RC2 acceptance evidence verified")
