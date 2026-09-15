@@ -166,6 +166,15 @@ xcrun swiftc "${swiftc_args[@]}" \
   -o "$macos_dir/$executable_name" \
   "$src_dir"/*.swift
 
+# Cargo copies and compiler outputs do not guarantee executable bits after
+# packaging. Keep every main bundle entrypoint executable before signing.
+chmod 755 \
+  "$macos_dir/TelevyBackup" \
+  "$macos_dir/televybackup-cli" \
+  "$macos_dir/televybackupd" \
+  "$macos_dir/televybackup-mtproto-helper" \
+  "$macos_dir/televybackup-snapshot-mount-helper"
+
 cat > "$contents_dir/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

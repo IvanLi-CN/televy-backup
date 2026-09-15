@@ -5,9 +5,15 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled, edited]
   merge_group:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open in-repository product PR to validate
+        required: true
+        type: string
 
 concurrency:
-  group: release-completion-${{ github.event.pull_request.number }}
+  group: release-completion-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -20,31 +26,71 @@ jobs:
     name: Release completion
     if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
     steps:
       - name: Checkout trusted base
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.sha || 'main' }}
           fetch-depth: 0
 
+      - name: Resolve pull request context
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_PATH: ${{ github.event_path }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number || '' }}
+        run: |
+          set -euo pipefail
+          pr_number="${INPUT_PR_NUMBER}"
+          if [[ -z "${pr_number}" ]]; then
+            pr_number="$(jq -r '.pull_request.number // empty' "${EVENT_PATH}")"
+          fi
+          [[ "${pr_number}" =~ ^[0-9]+$ ]]
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" > "${RUNNER_TEMP}/pull-request.json"
+          test "$(jq -r '.state' "${RUNNER_TEMP}/pull-request.json")" = open
+          test "$(jq -r '.base.ref' "${RUNNER_TEMP}/pull-request.json")" = main
+          test "$(jq -r '.head.repo.full_name // empty' "${RUNNER_TEMP}/pull-request.json")" = "${GITHUB_REPOSITORY}"
+          head_ref="$(jq -r '.head.ref' "${RUNNER_TEMP}/pull-request.json")"
+          git check-ref-format --branch "${head_ref}" >/dev/null
+          {
+            echo "number=${pr_number}"
+            echo "head_sha=$(jq -r '.head.sha' "${RUNNER_TEMP}/pull-request.json")"
+            echo "base_sha=$(jq -r '.base.sha' "${RUNNER_TEMP}/pull-request.json")"
+            echo "head_ref=${head_ref}"
+          } >> "$GITHUB_OUTPUT"
+          jq '.labels' "${RUNNER_TEMP}/pull-request.json" > "${RUNNER_TEMP}/labels.json"
+
       - name: Fetch pull request head
-        run: git fetch --no-tags origin "${{ github.event.pull_request.head.sha }}"
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: git fetch --no-tags origin "${HEAD_SHA}"
+
+      - name: Verify dispatched workflow comes from trusted main
+        if: github.event_name == 'workflow_dispatch'
+        run: test "${GITHUB_REF}" = "refs/heads/main"
 
       - name: Verify VERSION and release completion
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
         run: |
           set -euo pipefail
-          jq '.pull_request.labels' "${GITHUB_EVENT_PATH}" > "${RUNNER_TEMP}/labels.json"
           verification_sha="${HEAD_SHA}"
           prepared_json=''
           if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then
             verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
           fi
-          deadline=$((SECONDS + 540))
+          product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
+          if [[ "${product_release}" == true ]]; then
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"
+            jq -e --arg commit "${HEAD_SHA}" \
+              '.sha == $commit and .commit.verification.verified == true' \
+              "${RUNNER_TEMP}/github-verification.json" >/dev/null
+          fi
+          deadline=$((SECONDS + 1800))
           while :; do
             gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
             state="$(python3 - "${RUNNER_TEMP}/source-checks.json" <<'PY'
@@ -92,6 +138,8 @@ jobs:
               *) echo "unexpected source check state: ${state}" >&2; exit 1 ;;
             esac
           done
+          current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          test "${current_head}" = "${HEAD_SHA}"
           completion_args=(
             --repo-root .
             --commit "${HEAD_SHA}"
@@ -99,6 +147,10 @@ jobs:
             --labels-json "${RUNNER_TEMP}/labels.json"
             --checks-json "${RUNNER_TEMP}/source-checks.json"
           )
+          if [[ "${product_release}" == true ]] && \
+             python3 .github/scripts/release_completion.py --help 2>&1 | grep -Fq -- "--github-verification-json"; then
+            completion_args+=(--github-verification-json "${RUNNER_TEMP}/github-verification.json")
+          fi
           if [[ -n "${prepared_json}" ]]; then
             release_mode="$(printf '%s' "${prepared_json}" | jq -r .mode)"
             jq -n \

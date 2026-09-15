@@ -37,4 +37,6 @@ existing="$(python3 "$root_dir/.github/scripts/release_preparation.py" \
   --repo-root "$repo_dir" --source-sha "$prepared_sha" --base-sha "$source_sha" \
   --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" --mode allocate)"
 [[ "$existing" == *'"prepared": "existing"'* ]]
+existing_source_sha="$(printf '%s' "$existing" | python3 -c 'import json,sys; print(json.load(sys.stdin)["source_sha"])')"
+[[ "$existing_source_sha" == "$source_sha" ]]
 echo "release preparation fixture tests passed"

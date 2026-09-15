@@ -35,6 +35,9 @@ for workflow in release-preparation.yml release.yml; do
 done
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
 assert_contains "release preparation expectedHeadOid" "$preparation_text" "expectedHeadOid"
+assert_contains "prepared-head gate dispatch permission" "$preparation_text" "actions: write"
+assert_contains "prepared-head label gate dispatch" "$preparation_text" "gh workflow run label-gate.yml"
+assert_contains "prepared-head completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
 label_gate_text="$(<"$root_dir/.github/workflows/label-gate.yml")"
 assert_contains "release intent label gate job" "$label_gate_text" "name: Release intent label gate"
 notify_text="$(<"$root_dir/.github/workflows/notify-release-failure.yml")"
@@ -81,6 +84,23 @@ assert_contains "prerelease release behavior" "$release_text" "--prerelease --la
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion native signature gate" "$completion_text" "--require-github-verification"
 assert_contains "completion reservation provenance gate" "$completion_text" "--reservation-json"
+assert_contains "completion GitHub verification fetch" "$completion_text" 'gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}"'
+assert_contains "completion GitHub verification SHA gate" "$completion_text" 'jq -e --arg commit "${HEAD_SHA}"'
+assert_contains "completion GitHub verification status gate" "$completion_text" '.commit.verification.verified == true'
+assert_contains "completion GitHub verification compatibility probe" "$completion_text" 'release_completion.py --help'
+assert_contains "completion GitHub verification argument" "$completion_text" "--github-verification-json"
+assert_contains "completion product-only verification selector" "$completion_text" 'product_release='
+assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
+assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
+assert_contains "completion current PR head recheck" "$completion_text" 'current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '\''.head.sha'\'')"'
+assert_contains "completion current PR head match" "$completion_text" 'test "${current_head}" = "${HEAD_SHA}"'
+assert_contains "completion workflow dispatch input" "$completion_text" "pr_number:"
+assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${pr_number}'
+assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/main'
+preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
+assert_contains "prepared-head gates use trusted main" "$preparation_text" "--ref main"
+assert_not_contains "prepared-head gates use mutable PR workflow" "$preparation_text" '--ref "${HEAD_REF}"'
+assert_contains "existing preparation verification source" "$preparation_text" 'SOURCE_SHA: ${{ steps.prepare.outputs.source_sha }}'
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'
 release = YAML.load_file(ARGV.fetch(0))
 expected_permissions = {"contents" => "write"}

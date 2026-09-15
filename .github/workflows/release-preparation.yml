@@ -32,6 +32,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: write
   contents: write
   pull-requests: read
   checks: read
@@ -241,7 +242,7 @@ jobs:
         if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'
         env:
           PREPARED_SHA: ${{ steps.create-version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}
-          SOURCE_SHA: ${{ steps.pr.outputs.source_sha }}
+          SOURCE_SHA: ${{ steps.prepare.outputs.source_sha }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           set -euo pipefail
@@ -255,3 +256,22 @@ jobs:
             sleep 2
           done
           test "${verified}" = true
+
+      - name: Dispatch prepared-head merge gates
+        if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          PREPARED_SHA: ${{ steps.create-version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${PREPARED_SHA}"
+          gh workflow run label-gate.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref main \
+            --raw-field "pr_number=${PR_NUMBER}"
+          gh workflow run release-completion.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref main \
+            --raw-field "pr_number=${PR_NUMBER}"

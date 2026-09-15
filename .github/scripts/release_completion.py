@@ -111,6 +111,18 @@ def verify_reservation(
         raise CompletionError(f"reservation provenance is not verified: {error}") from error
 
 
+def verify_github_verification(path: Path, commit: str) -> None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CompletionError(f"cannot read GitHub commit verification: {error}") from error
+    if not isinstance(payload, dict) or payload.get("sha") != commit:
+        raise CompletionError("GitHub commit verification does not match the preparation commit")
+    verification = payload.get("commit", {}).get("verification") if isinstance(payload.get("commit"), dict) else None
+    if not isinstance(verification, dict) or verification.get("verified") is not True:
+        raise CompletionError("preparation commit is not GitHub-verified")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", type=Path)
@@ -125,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token")
     parser.add_argument("--api-root", default="https://api.github.com")
     parser.add_argument("--require-github-verification", action="store_true")
+    parser.add_argument("--github-verification-json", type=Path)
     parser.add_argument("--allow-migration", action="store_true")
     parser.add_argument("--migration-version")
     args = parser.parse_args(argv)
@@ -145,8 +158,12 @@ def main(argv: list[str] | None = None) -> int:
         if not checks_ready(args.checks_json):
             raise CompletionError("source PR checks are not all successful")
         prepared = CHAIN.verify_prepared(args.commit)
-        if args.require_github_verification and prepared["provenance"] != "github-native-verified":
-            raise CompletionError("production completion requires a GitHub-native verified preparation commit")
+        if args.require_github_verification:
+            if not args.github_verification_json:
+                raise CompletionError("production completion requires GitHub commit verification evidence")
+            verify_github_verification(args.github_verification_json, args.commit)
+            if prepared["provenance"] != "github-native-verified":
+                raise CompletionError("production completion requires a GitHub-native verified preparation commit")
         if not args.reservation_json:
             raise CompletionError("product release completion requires reservation provenance")
         verify_reservation(

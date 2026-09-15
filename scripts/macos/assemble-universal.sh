@@ -60,6 +60,15 @@ universal_access_app="$universal_app/$access_relative_path"
 arm_access_binary="$arm_access_app/Contents/MacOS/televybackup-snapshot-access"
 x86_access_binary="$x86_access_app/Contents/MacOS/televybackup-snapshot-access"
 universal_access_binary="$universal_access_app/Contents/MacOS/televybackup-snapshot-access"
+# actions/upload-artifact normalizes file modes. Restore the mode on the
+# downloaded native copies before carrying the signed helper into the output.
+chmod 755 "$arm_access_binary" "$x86_access_binary" "$universal_access_binary"
+for access_binary in "$arm_access_binary" "$x86_access_binary"; do
+  [[ -x "$access_binary" ]] || {
+    echo "Snapshot Access source executable is not executable: $access_binary" >&2
+    exit 1
+  }
+done
 arm_arches="$(lipo -info "$arm_access_binary")"
 x86_arches="$(lipo -info "$x86_access_binary")"
 if [[ "$arm_arches" == *"arm64"* && "$arm_arches" == *"x86_64"* && "$x86_arches" == *"arm64"* && "$x86_arches" == *"x86_64"* ]]; then
@@ -82,6 +91,10 @@ else
   codesign --force --sign - "$universal_access_app"
   codesign --verify --strict "$universal_access_app"
 fi
+[[ -x "$universal_access_binary" ]] || {
+  echo "Universal Snapshot Access executable is not executable" >&2
+  exit 1
+}
 
 # Native DMGs are user-installable release assets too. Once the Universal helper
 # identity exists, embed that exact signed bundle in both native app copies so
@@ -93,6 +106,14 @@ repackage_native_app() {
   rm -rf "$native_access_app"
   mkdir -p "$(dirname "$native_access_app")"
   ditto "$universal_access_app" "$native_access_app"
+  chmod 755 "$native_access_app/Contents/MacOS/televybackup-snapshot-access"
+  [[ -x "$native_access_app/Contents/MacOS/televybackup-snapshot-access" ]] || {
+    echo "Native Snapshot Access executable is not executable: $native_access_app" >&2
+    exit 1
+  }
+  for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+    chmod 755 "$native_app/Contents/MacOS/$binary"
+  done
   rm -rf "$native_app/Contents/_CodeSignature"
   codesign --force --sign - "$native_app"
   codesign --verify --deep --strict "$native_app"

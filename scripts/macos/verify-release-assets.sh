@@ -130,6 +130,11 @@ app="$asset_dir/TelevyBackup.app"
   echo "Snapshot Access must not be a top-level installable app" >&2
   exit 1
 }
+bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")"
+[[ "$bundle_id" == "com.ivan.televybackup" ]] || {
+  echo "release asset must use the prod app bundle id: $bundle_id" >&2
+  exit 1
+}
 if [[ -d "$app" ]]; then
   codesign --verify --deep --strict "$app"
   app_signature="$(codesign -dvvv "$app" 2>&1 || true)"
@@ -164,10 +169,10 @@ if [[ -d "$app" ]]; then
     }
   done
   for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+    [[ -x "$app/Contents/MacOS/$binary" ]] || { echo "main app binary is not executable: $binary" >&2; exit 1; }
     info="$(lipo -info "$app/Contents/MacOS/$binary")"
     [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "universal binary missing slice: $binary" >&2; exit 1; }
   done
-  [[ -x "$app/Contents/MacOS/televybackup-snapshot-mount-helper" ]] || { echo "snapshot mount helper missing" >&2; exit 1; }
   root_helper_binary="$app/Contents/MacOS/televybackup-snapshot-mount-helper"
   root_helper_signature="$(codesign -dvvv "$root_helper_binary" 2>&1 || true)"
   [[ "$root_helper_signature" == *"Signature=adhoc"* ]] || { echo "snapshot mount helper must use an ad-hoc signature" >&2; exit 1; }
@@ -250,6 +255,11 @@ verify_dmg_helper_identity() (
   mounted=true
   app="$mount_point/TelevyBackup.app"
   [[ -d "$app" ]] || { echo "DMG is missing TelevyBackup.app: $local_dmg" >&2; exit 1; }
+  bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")"
+  [[ "$bundle_id" == "com.ivan.televybackup" ]] || {
+    echo "DMG must use the prod app bundle id: $local_dmg" >&2
+    exit 1
+  }
   codesign --verify --deep --strict "$app"
   app_signature="$(codesign -dvvv "$app" 2>&1 || true)"
   [[ "$app_signature" == *"Signature=adhoc"* ]] || { echo "DMG main app must use an ad-hoc signature: $local_dmg" >&2; exit 1; }
@@ -270,6 +280,7 @@ verify_dmg_helper_identity() (
     *) echo "unexpected TelevyBackup DMG name: $local_dmg" >&2; exit 1 ;;
   esac
   for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+    [[ -x "$app/Contents/MacOS/$binary" ]] || { echo "DMG main binary is not executable: $binary" >&2; exit 1; }
     info="$(lipo -info "$app/Contents/MacOS/$binary")"
     case "$expected_arches" in
       universal) [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "Universal DMG binary is missing a slice: $binary" >&2; exit 1; } ;;
@@ -356,24 +367,27 @@ for dmg in "$asset_dir/TelevyBackup-${version}.dmg" "$asset_dir/TelevyBackup-${v
   verify_dmg_helper_identity "$dmg" true
 done
 for tools_archive in "$asset_dir/televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/televybackup-tools-${version}-x86_64.tar.gz"; do
-  if tar -tzf "$tools_archive" | /usr/bin/grep -E '(^|/)(TelevyBackup Snapshot Access\.app|com\.ivan\.televybackup\.snapshot-access)' >/dev/null; then
-    echo "tools archive contains the private Snapshot Access app or service" >&2
-    exit 1
-  fi
-  expected_arches=arm64
-  [[ "$tools_archive" == *-x86_64.tar.gz ]] && expected_arches=x86_64
-  tools_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-tools-verify.XXXXXX")"
-  tar -xzf "$tools_archive" -C "$tools_dir"
-  for binary in televybackup televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
-    info="$(lipo -info "$tools_dir/TelevyBackup Tools/bin/$binary")"
-    if [[ "$expected_arches" == arm64 ]]; then
-      [[ "$info" == *arm64* && "$info" != *x86_64* ]] || { echo "arm64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
-    else
-      [[ "$info" == *x86_64* && "$info" != *arm64* ]] || { echo "x86_64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
+  (
+    if tar -tzf "$tools_archive" | /usr/bin/grep -E '(^|/)(TelevyBackup Snapshot Access\.app|com\.ivan\.televybackup\.snapshot-access)' >/dev/null; then
+      echo "tools archive contains the private Snapshot Access app or service" >&2
+      exit 1
     fi
-    binary_signature="$(codesign -dvvv "$tools_dir/TelevyBackup Tools/bin/$binary" 2>&1 || true)"
-    [[ "$binary_signature" == *"Signature=adhoc"* ]] || { echo "tools binary is not ad-hoc signed: $binary" >&2; exit 1; }
-  done
-  rm -rf "$tools_dir"
+    expected_arches=arm64
+    [[ "$tools_archive" == *-x86_64.tar.gz ]] && expected_arches=x86_64
+    tools_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-tools-verify.XXXXXX")"
+    trap 'rm -rf "$tools_dir"' EXIT
+    tar -xzf "$tools_archive" -C "$tools_dir"
+    for binary in televybackup televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
+      [[ -x "$tools_dir/TelevyBackup Tools/bin/$binary" ]] || { echo "tools binary is not executable: $binary" >&2; exit 1; }
+      info="$(lipo -info "$tools_dir/TelevyBackup Tools/bin/$binary")"
+      if [[ "$expected_arches" == arm64 ]]; then
+        [[ "$info" == *arm64* && "$info" != *x86_64* ]] || { echo "arm64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
+      else
+        [[ "$info" == *x86_64* && "$info" != *arm64* ]] || { echo "x86_64 tools archive contains an unexpected binary architecture: $binary" >&2; exit 1; }
+      fi
+      binary_signature="$(codesign -dvvv "$tools_dir/TelevyBackup Tools/bin/$binary" 2>&1 || true)"
+      [[ "$binary_signature" == *"Signature=adhoc"* ]] || { echo "tools binary is not ad-hoc signed: $binary" >&2; exit 1; }
+    done
+  )
 done
 echo "release assets verified: ${#required[@]} files"
