@@ -34,6 +34,9 @@ def product_tag(name: str, target: str) -> None:
         check=True,
     )
 
+def legacy_prerelease_tag(name: str, target: str) -> None:
+    subprocess.run(["git", "-C", str(repo), "tag", name, target], check=True)
+
 product_tag("v0.9.3", source)
 
 spec = importlib.util.spec_from_file_location("release_chain", root / ".github/scripts/release_chain.py")
@@ -127,6 +130,13 @@ product_tag("v0.9.8", source)
 assert_sequence_rejected("0.9.8", chain.git("rev-parse", "HEAD"), "product_tag_conflict")
 product_tag("v0.9.9-beta", source)
 assert all(item["tag"] != "v0.9.9-beta" for item in chain.product_tags())
+legacy_prerelease_tag("v0.9.9-rc.38", source)
+legacy = next(item for item in chain.product_tags() if item["tag"] == "v0.9.9-rc.38")
+assert legacy["owner"] == "legacy-prerelease"
+assert chain.allocate_version(
+    chain.product_tags(), "type:patch", "channel:rc", chain.occupied_identity_versions()
+)["version"] == "0.9.9-rc.39"
+assert_sequence_rejected("0.9.9-rc.38", source, "missing protected-release-automation")
 
 # A matching product tag outside mainline cannot be ignored: doing so would
 # let final-tag-first allocation reuse an identity that already exists.

@@ -298,6 +298,18 @@ def verify_tag(version: str, expected_sha: str | None = None, allow_existing: bo
     raise ReleaseChainError(f"product tag {tag} is already owned by {target}")
 
 
+def product_tag_provenance(tag: str, version: str) -> dict[str, str]:
+    ref = f"refs/tags/{tag}"
+    if git("cat-file", "-t", ref, check=False) != "tag":
+        parsed = PRODUCT_VERSION.parse_version(version)
+        if parsed["kind"] is None:
+            raise ReleaseChainError(
+                f"product tag {tag} is missing {PRODUCT_TAG_OWNER} annotated-tag provenance"
+            )
+        return {"owner": "legacy-prerelease", "tagger": ""}
+    return verify_product_tag_provenance(tag)
+
+
 def compare_versions(left: str, right: str) -> int:
     left_parsed = PRODUCT_VERSION.parse_version(left)
     right_parsed = PRODUCT_VERSION.parse_version(right)
@@ -337,7 +349,7 @@ def product_tags() -> list[dict[str, str]]:
             raise ReleaseChainError(f"product tag {tag} has no commit target")
         if not is_ancestor(target, mainline):
             raise ReleaseChainError(f"product tag {tag} targets an unreachable commit")
-        provenance = verify_product_tag_provenance(tag)
+        provenance = product_tag_provenance(tag, version)
         values.append({"tag": tag, "version": version, "target": target, **provenance})
     return values
 
@@ -429,6 +441,8 @@ def verify_release_sequence(version: str, expected_sha: str) -> dict[str, str]:
         raise ReleaseChainError(
             f"product_tag_conflict: {candidate_tag} points to {candidate_target}, expected {expected}"
         )
+    if candidate_target is not None:
+        verify_product_tag_provenance(candidate_tag)
     return {
         "status": "matching" if candidate_target is not None else "available",
         "tag": candidate_tag,

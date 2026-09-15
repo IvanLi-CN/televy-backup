@@ -5,7 +5,7 @@
 | Component | Location |
 | --- | --- |
 | Formal and local version grammar | `scripts/product-version.py` |
-| Final-tag-first allocation and annotated product-tag provenance | `.github/scripts/release_chain.py`, `.github/workflows/release.yml` |
+| Final-tag-first allocation and product-tag provenance | `.github/scripts/release_chain.py`, `.github/workflows/release.yml` |
 | Append-only reservation, receipt and intent snapshot | `.github/scripts/release_reservation.py` |
 | Independent Snapshot Access helper source resolution | `.github/scripts/release_helper.py`, `.github/workflows/release.yml` |
 | Label policy | `.github/scripts/label-gate.sh`, `.github/release-contract.json` |
@@ -25,9 +25,10 @@ blocks with a local Git/API fixture.
 1. Label Gate validates one product type and one new channel, or channel-free docs/skip.
    Label Gate and Release completion are required per-PR gates with non-preemptive `queue: max`
    scheduling; completion re-reads the current PR labels after verifying the queued head/base.
-2. Preparation enumerates fetched annotated product tags, verifies the GitHub Actions tagger and
-   main reachability, calculates the candidate from the highest final tag, and creates the
-   reservation before writing VERSION.
+2. Preparation enumerates fetched product tags, requires annotated GitHub Actions provenance for
+   final tags, retains reachable pre-policy lightweight prerelease tags only for ordinal occupancy,
+   calculates the candidate from the highest final tag, and creates the reservation before writing
+   VERSION.
 3. The same PR branch receives one GitHub verified VERSION-only commit guarded by
    `expectedHeadOid`.
 4. Release completion freezes the reservation and provenance, and production completion verifies
