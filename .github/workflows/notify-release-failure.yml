@@ -175,6 +175,7 @@ jobs:
                   'state': 'bound',
                   'merge_commit_sha': merge_sha,
               }
+              verify_decision(merge_sha, version, reservation, reservation_commit)
               return {
                   'schema_version': 1,
                   'pull_request': '',
@@ -339,6 +340,28 @@ jobs:
                   raise RuntimeError('reservation merge SHA does not match the bound receipt')
               return receipt
 
+          def verify_decision(merge_sha: str, version: str, reservation: dict[str, str], reservation_commit: dict[str, object]) -> None:
+              expected_ref = f'refs/tags/release-decision/v{version}'
+              decision_ref_payload = api_json(f'/repos/{repository}/git/ref/{expected_ref.removeprefix("refs/")}')
+              decision_sha = require_sha(decision_ref_payload.get('object', {}).get('sha'), 'decision ref target')
+              decision = commit_snapshot(decision_sha)
+              if decision['parents'] != [reservation_commit['sha']] or decision['tree'] != reservation_commit['tree']:
+                  raise RuntimeError('decision provenance does not match the reservation')
+              decision_trailers = trailers(decision['message'])
+              expected_trailers = {
+                  'Decision-State': 'bound',
+                  'Release-Version': version,
+                  'Release-Merge-SHA': merge_sha,
+                  'Release-Reservation-Id': reservation['id'],
+                  'Release-Owner': reservation['owner'],
+                  'Release-Claim-Key': reservation['claim_key'],
+                  'Release-Boundary-Token': reservation['boundary_token'],
+                  'Release-Reservation-Ref': reservation['ref'],
+                  'Decision-Provenance': 'immutable-decision',
+              }
+              if any(decision_trailers.get(key) != value for key, value in expected_trailers.items()):
+                  raise RuntimeError('decision trailers do not match the release identity')
+
           def product_tag_target(tag_name: str) -> str | None:
               tag_ref = api_json_optional(f'/repos/{repository}/git/ref/tags/{tag_name}')
               if tag_ref is None:
@@ -403,7 +426,8 @@ jobs:
               preparation_sha, signature_verified = verify_preparation(intent, source_sha, merge_sha)
               if preparation_sha != require_sha(intent['head_sha'], 'release head SHA'):
                   raise RuntimeError('release head SHA does not match the preparation commit')
-              reservation, _ = verify_reservation(intent, source_sha, str(intent['version']), str(intent['channel']))
+              reservation, reservation_commit = verify_reservation(intent, source_sha, str(intent['version']), str(intent['channel']))
+              verify_decision(merge_sha, str(intent['version']), reservation, reservation_commit)
               merge = commit_snapshot(merge_sha)
               verify_bound_receipt(intent, merge_sha, str(intent['version']), reservation, merge)
               tag_target_sha = product_tag_target(str(intent['tag']))

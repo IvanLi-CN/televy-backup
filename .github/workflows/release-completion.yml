@@ -75,7 +75,7 @@ jobs:
         with:
           ref: ${{ github.event.merge_group.base_sha || github.sha }}
           fetch-depth: 0
-          persist-credentials: false
+          persist-credentials: true
 
       - name: Fetch immutable release identity refs
         run: git fetch --force --tags origin
@@ -164,6 +164,7 @@ jobs:
           done
           validate_current_pr "${RUNNER_TEMP}/current-pr-final.json"
           jq '.labels' "${RUNNER_TEMP}/current-pr-final.json" > "${RUNNER_TEMP}/labels.json"
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
           product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
           if [[ "${product_release}" == true ]]; then
             gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"

@@ -21,6 +21,8 @@ done
 [[ "$text" == *'declared pull request is not associated with the merge SHA'* ]]
 [[ "$text" == *'reservation commit provenance does not match source SHA'* ]]
 [[ "$text" == *'bound receipt provenance does not match merge SHA'* ]]
+[[ "$text" == *'verify_decision'* ]]
+[[ "$text" == *'release-decision/v'* ]]
 [[ "$text" == *'product_tag_target'* ]]
 [[ "$text" == *"product tag: {tag_status}"* ]]
 [[ "$text" != *'outputs.merge_sha || needs.resolve_release_context.outputs.head_sha'* ]]

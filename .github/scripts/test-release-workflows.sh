@@ -45,6 +45,7 @@ assert_contains "prepared-head completion dispatch" "$preparation_text" "gh work
 label_gate_text="$(<"$root_dir/.github/workflows/label-gate.yml")"
 assert_contains "release intent label gate job" "$label_gate_text" "name: Release intent label gate"
 assert_contains "label gate merge-group validation" "$label_gate_text" "merge-group-release-gate.sh labels"
+assert_contains "label gate merge-group fetch credentials" "$label_gate_text" "persist-credentials: true"
 assert_not_contains "label gate merge-group echo bridge" "$label_gate_text" "reuses the Release intent label gate"
 assert_contains "label gate non-preemptive queue" "$label_gate_text" "queue: max"
 assert_not_contains "label gate preemptive cancellation" "$label_gate_text" "cancel-in-progress: true"
@@ -69,6 +70,7 @@ assert_not_contains "notifier raw log exception" "$notify_text" "logs_error = f"
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion ready-for-review trigger" "$completion_text" "ready_for_review"
 assert_contains "completion merge-group validation" "$completion_text" "merge-group-release-gate.sh completion"
+assert_contains "completion merge-group fetch credentials" "$completion_text" "persist-credentials: true"
 assert_not_contains "completion merge-group echo bridge" "$completion_text" "reuses Release completion"
 assert_contains "completion merge-group full history" "$completion_text" "fetch-depth: 0"
 merge_group_checkout_line="$(grep -n 'name: Checkout trusted merge-group gate scripts' "$root_dir/.github/workflows/release-completion.yml" | cut -d: -f1)"
@@ -82,6 +84,12 @@ assert_contains "completion current PR head validation" "$completion_text" 'curr
 assert_contains "completion current PR labels" "$completion_text" 'jq '\''.labels'\'' "${RUNNER_TEMP}/current-pr.json"'
 assert_contains "completion final PR revalidation" "$completion_text" 'validate_current_pr "${RUNNER_TEMP}/current-pr-final.json"'
 assert_contains "completion final PR labels" "$completion_text" 'jq '\''.labels'\'' "${RUNNER_TEMP}/current-pr-final.json"'
+final_pr_validation_line="$(grep -n 'current-pr-final.json' "$root_dir/.github/workflows/release-completion.yml" | head -1 | cut -d: -f1)"
+final_checks_refresh_line="$(grep -n 'commits/${HEAD_SHA}/check-runs' "$root_dir/.github/workflows/release-completion.yml" | tail -1 | cut -d: -f1)"
+if [[ -z "$final_pr_validation_line" || -z "$final_checks_refresh_line" || "$final_pr_validation_line" -ge "$final_checks_refresh_line" ]]; then
+  printf 'completion must refresh checks after final PR identity validation\n' >&2
+  exit 1
+fi
 assert_contains "completion non-preemptive queue" "$completion_text" "queue: max"
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
@@ -138,6 +146,8 @@ assert_contains "prerelease release behavior" "$release_text" "--prerelease --la
 assert_contains "label merge-group immutable checkout" "$label_gate_text" "github.event.merge_group.base_sha || github.sha"
 merge_group_text="$(<"$root_dir/.github/scripts/merge-group-release-gate.sh")"
 assert_not_contains "merge-group pull request API suppression" "$merge_group_text" "|| true"
+assert_contains "merge-group covered merge proof" "$merge_group_text" "merge-group-covered-merge-pulls"
+assert_contains "merge-group proof argument" "$merge_group_text" "--covered-merge-proof-json"
 assert_contains "merge-group failed check state" "$merge_group_text" 'failed) echo "merge-group gate: required check failed'
 poll_line="$(grep -n 'required=("Release intent label gate"' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
 final_pr_line="$(grep -n 'merge-group-final-pr' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"

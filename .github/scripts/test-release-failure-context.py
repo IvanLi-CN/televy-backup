@@ -22,6 +22,7 @@ PREPARATION = "b" * 40
 MERGE = "c" * 40
 RESERVATION_COMMIT = "d" * 40
 BOUND_COMMIT = "e" * 40
+DECISION_COMMIT = "5" * 40
 SOURCE_TREE = "1" * 40
 MERGE_TREE = "2" * 40
 TAG_OBJECT = "3" * 40
@@ -158,6 +159,22 @@ Release-Reservation-Ref: refs/tags/release-reservation/v1.2.3-rc.1
 Receipt-Provenance: immutable-receipt
 """
         verification = {"verified": False}
+    elif sha == DECISION_COMMIT:
+        parents = [RESERVATION_COMMIT]
+        tree = SOURCE_TREE
+        message = f"""release: immutable identity decision
+
+Decision-State: bound
+Release-Version: 1.2.3-rc.1
+Release-Merge-SHA: {MERGE}
+Release-Reservation-Id: res-1
+Release-Owner: github-actions[bot]
+Release-Claim-Key: pr:7:source:a:type:patch:channel:rc
+Release-Boundary-Token: bnd-1
+Release-Reservation-Ref: refs/tags/release-reservation/v1.2.3-rc.1
+Decision-Provenance: immutable-decision
+"""
+        verification = {"verified": False}
     else:
         raise AssertionError(f"unexpected commit {sha}")
     return {
@@ -181,12 +198,14 @@ class GitHubMock:
         artifact_run_attempt: str = "1",
         artifact_url: str = "https://api.fixture/archive",
         artifact_names: list[str] | None = None,
+        decision_mode: str = "valid",
     ):
         self.tag_mode = tag_mode
         self.declared_pull_request = declared_pull_request
         self.artifact_available = artifact_available
         self.trusted_resolver = trusted_resolver
         self.artifact_url = artifact_url
+        self.decision_mode = decision_mode
         archive = BytesIO()
         with zipfile.ZipFile(archive, "w") as bundle:
             bundle.writestr(
@@ -218,12 +237,23 @@ class GitHubMock:
             return json_response([{"number": 7, "merge_commit_sha": MERGE}])
         if path.endswith("/pulls/7"):
             return json_response({"number": 7, "merge_commit_sha": MERGE, "head": {"sha": PREPARATION}})
+        if path.endswith(f"/commits/{DECISION_COMMIT}"):
+            payload = commit_payload(DECISION_COMMIT)
+            if self.decision_mode == "mismatched":
+                payload["commit"]["message"] = payload["commit"]["message"].replace(
+                    f"Release-Merge-SHA: {MERGE}", f"Release-Merge-SHA: {'6' * 40}"
+                )
+            return json_response(payload)
         if "/commits/" in path:
             return json_response(commit_payload(path.rsplit("/", 1)[-1]))
         if path.endswith("release-reservation/v1.2.3-rc.1"):
             return json_response({"object": {"sha": RESERVATION_COMMIT, "type": "commit"}})
         if path.endswith("release-bound/v1.2.3-rc.1/" + MERGE):
             return json_response({"object": {"sha": BOUND_COMMIT, "type": "commit"}})
+        if path.endswith("release-decision/v1.2.3-rc.1"):
+            if self.decision_mode == "missing":
+                raise urllib.error.HTTPError(req.full_url, 404, "missing", {}, BytesIO())
+            return json_response({"object": {"sha": DECISION_COMMIT, "type": "commit"}})
         if path.endswith("/git/ref/tags/v1.2.3-rc.1"):
             if self.tag_mode == "missing":
                 raise urllib.error.HTTPError(req.full_url, 404, "missing", {}, BytesIO())
@@ -246,6 +276,7 @@ def run_case(
     artifact_run_attempt: str = "1",
     artifact_url: str = "https://api.fixture/archive",
     artifact_names: list[str] | None = None,
+    decision_mode: str = "valid",
 ) -> str:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     source = workflow.split("          python3 - <<'PYCODE'\n", 1)[1].split("\n          PYCODE", 1)[0]
@@ -278,6 +309,7 @@ def run_case(
                 artifact_run_attempt,
                 artifact_url,
                 artifact_names,
+                decision_mode,
             ),
         ):
             exec(compile(textwrap.dedent(source), str(WORKFLOW), "exec"), {"__name__": "__main__"})
@@ -314,4 +346,8 @@ assert "evil.invalid" not in untrusted_archive
 injected_artifacts = run_case("missing", "7", artifact_names=["release-assets\nforged=1"])
 assert "identity_status=resolver-error" in injected_artifacts
 assert "forged=1" not in injected_artifacts
+missing_decision = run_case("missing", "7", decision_mode="missing")
+assert "identity_status=resolver-error" in missing_decision
+mismatched_decision = run_case("missing", "7", artifact_available=False, decision_mode="mismatched")
+assert "identity_status=resolver-error" in mismatched_decision
 print("release failure resolver mock tests passed")

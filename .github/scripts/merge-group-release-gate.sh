@@ -116,7 +116,15 @@ for pr_number in ${pr_numbers}; do
         "${verification_json}" >/dev/null
       completion_args+=(--github-verification-json "${verification_json}")
       if [[ "${release_mode}" == version-only-release-pr ]]; then
-        completion_args+=(--covered-merge-sha "$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)")
+        covered_merge_sha="$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)"
+        gh api \
+          -H "Accept: application/vnd.github+json" \
+          "repos/${repository}/commits/${covered_merge_sha}/pulls" \
+          > "${RUNNER_TEMP:-/tmp}/merge-group-covered-merge-pulls-${pr_number}.json"
+        completion_args+=(
+          --covered-merge-sha "${covered_merge_sha}"
+          --covered-merge-proof-json "${RUNNER_TEMP:-/tmp}/merge-group-covered-merge-pulls-${pr_number}.json"
+        )
       fi
     fi
     required=("Release intent label gate" "quality" "macOS Swift tests" "arm64 native package" "x86_64 native package" "Universal 2 assembly")
