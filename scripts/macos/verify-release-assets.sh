@@ -70,10 +70,14 @@ import hashlib, json, os, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 lock = json.load(open(sys.argv[3], encoding="utf-8"))
 asset_dir = sys.argv[4]
-assert manifest["release_version"] == sys.argv[2]
-assert manifest["signing"] == "ad-hoc"
-assert {"arm64", "x86_64", "universal2"}.issubset(set(manifest["architectures"]))
-assert manifest["assets"]
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
+require(manifest["release_version"] == sys.argv[2], "manifest release version mismatch")
+require(manifest["signing"] == "ad-hoc", "manifest signing mode mismatch")
+require({"arm64", "x86_64", "universal2"}.issubset(set(manifest["architectures"])), "manifest architectures are incomplete")
+require(manifest["assets"], "manifest assets are missing")
 expected_asset_names = {
     f"TelevyBackup-{sys.argv[2]}.dmg",
     f"TelevyBackup-{sys.argv[2]}-arm64.dmg",
@@ -82,50 +86,50 @@ expected_asset_names = {
     f"televybackup-tools-{sys.argv[2]}-x86_64.tar.gz",
 }
 asset_records = {asset["name"]: asset for asset in manifest["assets"]}
-assert set(asset_records) == expected_asset_names
+require(set(asset_records) == expected_asset_names, "manifest asset names mismatch")
 for name in expected_asset_names:
     with open(os.path.join(asset_dir, name), "rb") as handle:
         data = handle.read()
-    assert asset_records[name]["sha256"] == hashlib.sha256(data).hexdigest()
-    assert asset_records[name]["bytes"] == len(data)
+    require(asset_records[name]["sha256"] == hashlib.sha256(data).hexdigest(), f"asset digest mismatch: {name}")
+    require(asset_records[name]["bytes"] == len(data), f"asset size mismatch: {name}")
 component = manifest["components"]["snapshot_access"]
 locked = lock["components"]["snapshot_access"]
-assert component["bundle_id"] == "com.ivan.televybackup.snapshot-access"
-assert component["relative_path"] == "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
-assert component["binary"] == locked["binary"]
-assert component["component_version"] == locked["component_version"]
-assert component["protocol_version"] == 2
-assert component["reuse_policy"] == locked["reuse_policy"]
-assert locked["identity"]["sha256"] == "BUILD-MANIFEST.json#/components/snapshot_access/sha256"
-assert locked["identity"]["artifact_sha256"] == "BUILD-MANIFEST.json#/components/snapshot_access/artifact_sha256"
-assert locked["identity"]["cdhash"] == "BUILD-MANIFEST.json#/components/snapshot_access/cdhash"
-assert locked["identity"]["designated_requirement"] == "BUILD-MANIFEST.json#/components/snapshot_access/designated_requirement"
+require(component["bundle_id"] == "com.ivan.televybackup.snapshot-access", "Snapshot Access bundle id mismatch")
+require(component["relative_path"] == "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app", "Snapshot Access path mismatch")
+require(component["binary"] == locked["binary"], "Snapshot Access binary mismatch")
+require(component["component_version"] == locked["component_version"], "Snapshot Access component version mismatch")
+require(component["protocol_version"] == 2, "Snapshot Access protocol version mismatch")
+require(component["reuse_policy"] == locked["reuse_policy"], "Snapshot Access reuse policy mismatch")
+require(locked["identity"]["sha256"] == "BUILD-MANIFEST.json#/components/snapshot_access/sha256", "Snapshot Access SHA-256 lock reference mismatch")
+require(locked["identity"]["artifact_sha256"] == "BUILD-MANIFEST.json#/components/snapshot_access/artifact_sha256", "Snapshot Access artifact lock reference mismatch")
+require(locked["identity"]["cdhash"] == "BUILD-MANIFEST.json#/components/snapshot_access/cdhash", "Snapshot Access CDHash lock reference mismatch")
+require(locked["identity"]["designated_requirement"] == "BUILD-MANIFEST.json#/components/snapshot_access/designated_requirement", "Snapshot Access requirement lock reference mismatch")
 mount_component = manifest["components"]["snapshot_mount_helper"]
 locked_mount_component = lock["components"]["snapshot_mount_helper"]
-assert mount_component["label"] == locked_mount_component["label"]
-assert mount_component["install_path"] == locked_mount_component["install_path"]
-assert mount_component["component_version"] == locked_mount_component["component_version"]
-assert mount_component["compatible_component_versions"] == locked_mount_component["compatible_component_versions"]
-assert mount_component["protocol_version"] == locked_mount_component["protocol_version"]
-assert mount_component["binary"] == locked_mount_component["binary"]
-assert mount_component["source"] == locked_mount_component["source"]
-assert mount_component["identity_source"] == locked_mount_component["identity_source"]
-assert mount_component["installed_observation"] == locked_mount_component["installed_observation"]
-assert mount_component["update_policy"] == locked_mount_component["update_policy"]
-assert locked_mount_component["identity"]["sha256"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/sha256"
-assert locked_mount_component["identity"]["artifact_sha256"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/artifact_sha256"
-assert locked_mount_component["identity"]["cdhash"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/cdhash"
-assert locked_mount_component["identity"]["designated_requirement"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/designated_requirement"
+require(mount_component["label"] == locked_mount_component["label"], "mount helper label mismatch")
+require(mount_component["install_path"] == locked_mount_component["install_path"], "mount helper install path mismatch")
+require(mount_component["component_version"] == locked_mount_component["component_version"], "mount helper component version mismatch")
+require(mount_component["compatible_component_versions"] == locked_mount_component["compatible_component_versions"], "mount helper compatible versions mismatch")
+require(mount_component["protocol_version"] == locked_mount_component["protocol_version"], "mount helper protocol version mismatch")
+require(mount_component["binary"] == locked_mount_component["binary"], "mount helper binary mismatch")
+require(mount_component["source"] == locked_mount_component["source"], "mount helper source mismatch")
+require(mount_component["identity_source"] == locked_mount_component["identity_source"], "mount helper identity source mismatch")
+require(mount_component["installed_observation"] == locked_mount_component["installed_observation"], "mount helper observation mismatch")
+require(mount_component["update_policy"] == locked_mount_component["update_policy"], "mount helper update policy mismatch")
+require(locked_mount_component["identity"]["sha256"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/sha256", "mount helper SHA-256 lock reference mismatch")
+require(locked_mount_component["identity"]["artifact_sha256"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/artifact_sha256", "mount helper artifact lock reference mismatch")
+require(locked_mount_component["identity"]["cdhash"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/cdhash", "mount helper CDHash lock reference mismatch")
+require(locked_mount_component["identity"]["designated_requirement"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/designated_requirement", "mount helper requirement lock reference mismatch")
 if sys.argv[5] != "true":
-    assert mount_component["sha256"]
-    assert mount_component["cdhash"]
-    assert mount_component["designated_requirement"]
+    require(mount_component["sha256"], "mount helper SHA-256 is missing")
+    require(mount_component["cdhash"], "mount helper CDHash is missing")
+    require(mount_component["designated_requirement"], "mount helper designated requirement is missing")
 if component["source"] == "one-time-bootstrap-universal-build":
-    assert component["reuse_policy"] == "byte-identical-no-rebuild-no-lipo-no-resign"
+    require(component["reuse_policy"] == "byte-identical-no-rebuild-no-lipo-no-resign", "bootstrap reuse policy mismatch")
 elif sys.argv[2].endswith("-rc.1"):
-    assert component["source"] in {"fresh-rc1-build", "rc1-universal-artifact"}
+    require(component["source"] in {"fresh-rc1-build", "rc1-universal-artifact"}, "RC1 helper source is invalid")
 else:
-    assert component["source"] == "rc1-universal-artifact"
+    require(component["source"] == "rc1-universal-artifact", "reused helper source is invalid")
 PY
 if [[ "$skip_bundle_checks" == true ]]; then
   echo "release metadata verified (bundle checks skipped)"
@@ -193,16 +197,20 @@ if [[ -d "$app" ]]; then
   }
   python3 - "$asset_dir/BUILD-MANIFEST.json" "$root_helper_sha256" "$root_helper_artifact_sha256" "$root_helper_cdhash" "$root_helper_requirement" <<'PY'
 import json, re, sys
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_mount_helper"]
-assert component["sha256"] == sys.argv[2]
-assert component["artifact_sha256"] == sys.argv[3]
+require(component["sha256"] == sys.argv[2], "mount helper SHA-256 mismatch")
+require(component["artifact_sha256"] == sys.argv[3], "mount helper artifact digest mismatch")
 requirement_cdhashes = {
     value.lower()
     for value in re.findall(r'\bcdhash\s+H"([0-9A-Fa-f]+)"', sys.argv[5])
 }
-assert requirement_cdhashes
-assert {component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes
-assert component["designated_requirement"] == sys.argv[5]
+require(requirement_cdhashes, "mount helper designated requirement has no CDHash identities")
+require({component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes, "mount helper CDHash mismatch")
+require(component["designated_requirement"] == sys.argv[5], "mount helper designated requirement mismatch")
 PY
   launch_agent="$app/Contents/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist"
   [[ -s "$launch_agent" ]] || { echo "embedded Snapshot Access LaunchAgent missing" >&2; exit 1; }
@@ -238,21 +246,25 @@ if [[ -d "$access_app" ]]; then
   access_metadata="$("$access_app/Contents/MacOS/televybackup-snapshot-access" --component-metadata)"
   python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_artifact_sha256" "$actual_cdhash" "$actual_requirement" "$access_metadata" <<'PY'
 import json, re, sys
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
-assert component["sha256"] == sys.argv[2]
-assert component["artifact_sha256"] == sys.argv[3]
+require(component["sha256"] == sys.argv[2], "Snapshot Access SHA-256 mismatch")
+require(component["artifact_sha256"] == sys.argv[3], "Snapshot Access artifact digest mismatch")
 requirement_cdhashes = {
     value.lower()
     for value in re.findall(r'\bcdhash\s+H"([0-9A-Fa-f]+)"', sys.argv[5])
 }
-assert requirement_cdhashes
-assert {component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes
-assert component["designated_requirement"] == sys.argv[5]
+require(requirement_cdhashes, "Snapshot Access designated requirement has no CDHash identities")
+require({component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes, "Snapshot Access CDHash mismatch")
+require(component["designated_requirement"] == sys.argv[5], "Snapshot Access designated requirement mismatch")
 metadata = json.loads(sys.argv[6])
-assert component["bundle_id"] == metadata["bundleId"]
-assert component["relative_path"] == metadata["relativePath"]
-assert component["component_version"] == metadata["componentVersion"]
-assert component["protocol_version"] == metadata["protocolVersion"]
+require(component["bundle_id"] == metadata["bundleId"], "Snapshot Access bundle id mismatch")
+require(component["relative_path"] == metadata["relativePath"], "Snapshot Access relative path mismatch")
+require(component["component_version"] == metadata["componentVersion"], "Snapshot Access component version mismatch")
+require(component["protocol_version"] == metadata["protocolVersion"], "Snapshot Access protocol version mismatch")
 PY
 fi
 verify_dmg_helper_identity() (
@@ -339,21 +351,25 @@ verify_dmg_helper_identity() (
   if [[ "$require_manifest_identity" == true ]]; then
     python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_artifact_sha256" "$actual_cdhash" "$actual_requirement" "$access_metadata" <<'PY'
 import json, re, sys
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
-assert component["sha256"] == sys.argv[2]
-assert component["artifact_sha256"] == sys.argv[3]
+require(component["sha256"] == sys.argv[2], "Snapshot Access SHA-256 mismatch")
+require(component["artifact_sha256"] == sys.argv[3], "Snapshot Access artifact digest mismatch")
 requirement_cdhashes = {
     value.lower()
     for value in re.findall(r'\bcdhash\s+H"([0-9A-Fa-f]+)"', sys.argv[5])
 }
-assert requirement_cdhashes
-assert {component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes
-assert component["designated_requirement"] == sys.argv[5]
+require(requirement_cdhashes, "Snapshot Access designated requirement has no CDHash identities")
+require({component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes, "Snapshot Access CDHash mismatch")
+require(component["designated_requirement"] == sys.argv[5], "Snapshot Access designated requirement mismatch")
 metadata = json.loads(sys.argv[6])
-assert component["bundle_id"] == metadata["bundleId"]
-assert component["relative_path"] == metadata["relativePath"]
-assert component["component_version"] == metadata["componentVersion"]
-assert component["protocol_version"] == metadata["protocolVersion"]
+require(component["bundle_id"] == metadata["bundleId"], "Snapshot Access bundle id mismatch")
+require(component["relative_path"] == metadata["relativePath"], "Snapshot Access relative path mismatch")
+require(component["component_version"] == metadata["componentVersion"], "Snapshot Access component version mismatch")
+require(component["protocol_version"] == metadata["protocolVersion"], "Snapshot Access protocol version mismatch")
 PY
   fi
   mounted=false

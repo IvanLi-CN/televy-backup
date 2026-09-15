@@ -211,6 +211,22 @@ assert payload["components"]["snapshot_access"]["source"] == "one-time-bootstrap
 assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.1.0", "0.9.8"]
 PY
 
+python3 - "$tmp_dir/BUILD-MANIFEST.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["release_version"] = "0.0.0"
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+if PYTHONOPTIMIZE=1 bash "$root_dir/scripts/macos/verify-release-assets.sh" \
+  --mode release --asset-dir "$tmp_dir" --skip-bundle-checks >/dev/null 2>&1; then
+  echo "release asset verifier accepted a mismatched manifest under optimized Python" >&2
+  exit 1
+fi
+
 python3 - "$root_dir/packaging/macos/snapshot-components.lock.json" <<'PY'
 import json
 import sys
