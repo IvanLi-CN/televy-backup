@@ -25,6 +25,8 @@ chmod 700 "$reference" "$reference/Contents" "$reference/Contents/MacOS" "$refer
 
 mkdir -p "$(dirname "$candidate")"
 cp -R "$reference" "$candidate"
+chmod 755 "$candidate" "$candidate/Contents" "$candidate/Contents/MacOS" "$candidate/Contents/_CodeSignature"
+chmod 644 "$candidate/Contents/Info.plist" "$candidate/Contents/_CodeSignature/CodeResources"
 
 cat > "$fake_bin/codesign" <<'SH'
 #!/usr/bin/env bash
@@ -48,7 +50,7 @@ import sys
 
 manifest_path, bundle = sys.argv[1:]
 
-def digest(path):
+def digest(path, canonical):
     result = hashlib.sha256()
     for root, directories, files in os.walk(path, followlinks=False):
         directories.sort()
@@ -60,13 +62,16 @@ def digest(path):
             entry = os.path.join(root, name)
             relative = os.path.join(relative_root, name)
             entry_stat = os.lstat(entry)
-            if stat.S_ISLNK(entry_stat.st_mode):
-                permissions = 0o777
-            elif stat.S_ISDIR(entry_stat.st_mode) or entry_stat.st_mode & 0o111:
-                permissions = 0o755
+            if canonical:
+                if stat.S_ISLNK(entry_stat.st_mode):
+                    permissions = 0o777
+                elif stat.S_ISDIR(entry_stat.st_mode) or entry_stat.st_mode & 0o111:
+                    permissions = 0o755
+                else:
+                    permissions = 0o644
+                mode = (entry_stat.st_mode & ~0o777) | permissions
             else:
-                permissions = 0o644
-            mode = (entry_stat.st_mode & ~0o777) | permissions
+                mode = entry_stat.st_mode
             result.update(b"entry\0" + relative.encode() + b"\0")
             result.update(str(mode).encode() + b"\0")
             if os.path.islink(entry):
@@ -83,7 +88,7 @@ payload = {
     "components": {
         "snapshot_access": {
             "sha256": hashlib.sha256(open(binary, "rb").read()).hexdigest(),
-            "artifact_sha256": digest(bundle),
+            "artifact_sha256": digest(bundle, True),
             "cdhash": "fixture-cdhash",
             "designated_requirement": 'designated => identifier "com.ivan.televybackup.snapshot-access"',
             "bundle_id": "com.ivan.televybackup.snapshot-access",
@@ -95,6 +100,8 @@ payload = {
 }
 with open(manifest_path, "w", encoding="utf-8") as handle:
     json.dump(payload, handle)
+with open(manifest_path + ".raw", "w", encoding="utf-8") as handle:
+    handle.write(digest(bundle, False))
 PY
 
 identity_script="$root_dir/scripts/macos/verify-component-identity.sh"
@@ -112,7 +119,29 @@ if PATH="$fake_bin:$PATH" bash "$identity_script" \
   exit 1
 fi
 
+rm -rf "$candidate"
 cp -R "$reference" "$candidate"
+python3 - "$manifest" "$manifest.raw" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    payload["components"]["snapshot_access"]["artifact_sha256"] = handle.read().strip()
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+if PATH="$fake_bin:$PATH" bash "$identity_script" \
+  --reference "$reference" \
+  --candidate "$candidate" \
+  --manifest "$manifest" >/dev/null; then
+  :
+else
+  echo "component identity rejected a legacy source artifact digest" >&2
+  exit 1
+fi
+
 python3 - "$manifest" <<'PY'
 import json
 import sys

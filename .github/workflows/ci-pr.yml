@@ -108,7 +108,6 @@ jobs:
         run: bash ./.github/scripts/test-package-scripts.sh
 
       - name: Component identity fixture tests
-        if: needs.classify.outputs.kind == 'source'
         run: bash ./.github/scripts/test-component-identity.sh
 
       - name: Daemon service contract tests

@@ -71,16 +71,16 @@ verify_release_text="$(<"$root_dir/scripts/macos/verify-release-assets.sh")"
   exit 1
 }
 identity_text="$(<"$root_dir/scripts/macos/verify-component-identity.sh")"
-grep -F '[[ "$reference_artifact_sha" == "$candidate_artifact_sha" ]]' <<<"$identity_text" >/dev/null || {
-  echo "component identity verification must compare reference and candidate bundle digests" >&2
+grep -F 'reference_artifact_sha="$(artifact_sha "$reference" canonical)"' <<<"$identity_text" >/dev/null || {
+  echo "component identity verification must compare canonical reference and candidate bundle digests" >&2
   exit 1
 }
-grep -F 'reference_manifest_artifact_sha="$(artifact_sha "$reference" canonical)"' <<<"$identity_text" >/dev/null || {
-  echo "component identity verification must canonicalize mounted bundle modes" >&2
+grep -F 'reference_legacy_artifact_sha="$(artifact_sha "$reference" raw)"' <<<"$identity_text" >/dev/null || {
+  echo "component identity verification must retain legacy manifest compatibility" >&2
   exit 1
 }
-grep -F 'assert component["artifact_sha256"] == sys.argv[3]' <<<"$identity_text" >/dev/null || {
-  echo "component identity verification must bind the canonical bundle digest to the source manifest" >&2
+grep -F 'assert component["artifact_sha256"] in {sys.argv[3], sys.argv[4]}' <<<"$identity_text" >/dev/null || {
+  echo "component identity verification must bind canonical or legacy bundle digest to the source manifest" >&2
   exit 1
 }
 [[ "$verify_release_text" == *'one-time-bootstrap-universal-build'* ]] || {
