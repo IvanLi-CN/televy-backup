@@ -34,7 +34,7 @@ set -euo pipefail
 if [[ "${1:-}" == "-dvvv" ]]; then
   printf '%s\n' 'Signature=adhoc' 'Identifier=com.ivan.televybackup.snapshot-access' 'CDHash=2222222222222222222222222222222222222222' >&2
 elif [[ "${1:-}" == "-d" && "${2:-}" == "-r-" ]]; then
-  printf '%s\n' 'designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"2222222222222222222222222222222222222222" or cdhash H"1111111111111111111111111111111111111111")' >&2
+  printf '%s\n' 'designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"2222222222222222222222222222222222222222"   or   cdhash H"1111111111111111111111111111111111111111")' >&2
 else
   exit 2
 fi
