@@ -101,8 +101,24 @@ candidate_signature="$(signature_value "$candidate")"
 }
 
 # Universal ad-hoc signatures can print the commutative cdhash alternatives in
-# slice-dependent order. Normalize only that presentation detail and the
-# non-semantic comment marker; keep the rest of the requirement exact.
+# slice-dependent order, and older macOS runners can wrap the requirement over
+# multiple output lines. Reconstruct the complete requirement first, then
+# normalize only those presentation details; keep the rest exact.
+extract_requirement() {
+  codesign -d -r- "$1" 2>&1 | python3 -c '
+import sys
+
+marker = "designated =>"
+lines = sys.stdin.read().splitlines()
+for index, line in enumerate(lines):
+    if marker in line:
+        parts = [line[line.index(marker):]]
+        parts.extend(lines[index + 1:])
+        print(" ".join(part.strip() for part in parts if part.strip()))
+        break
+'
+}
+
 normalize_requirement() {
   python3 - "$1" <<'PY'
 import re
@@ -152,8 +168,8 @@ print(cdhash_or.sub(sort_cdhash_alternatives, requirement))
 PY
 }
 
-reference_requirement_raw="$(codesign -d -r- "$reference" 2>&1 | sed -n '/designated =>/p')"
-candidate_requirement_raw="$(codesign -d -r- "$candidate" 2>&1 | sed -n '/designated =>/p')"
+reference_requirement_raw="$(extract_requirement "$reference")"
+candidate_requirement_raw="$(extract_requirement "$candidate")"
 reference_requirement="$(normalize_requirement "$reference_requirement_raw")"
 candidate_requirement="$(normalize_requirement "$candidate_requirement_raw")"
 [[ -n "$reference_requirement" && "$reference_requirement" == "$candidate_requirement" ]] || {

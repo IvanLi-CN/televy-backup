@@ -76,8 +76,9 @@ historical helper manifest MAY expose a
 legacy bundle digest alongside its canonical digest; RC acceptance MAY match either explicitly
 recorded digest, but MUST continue to require exact executable SHA-256, component metadata,
 protocol, CDHash-set, and designated-requirement identity. Requirement comparison MAY canonicalize
-only non-semantic `codesign` formatting: the `# ` prefix, whitespace outside quoted strings, and the order of commutative `cdhash ... or ...`
-alternatives. When a native runner projects a Universal requirement to one architecture, only the
+only non-semantic `codesign` formatting: wrapped requirement output, the `# ` prefix, whitespace
+outside quoted strings, and the order of commutative `cdhash ... or ...` alternatives. When a
+native runner projects a Universal requirement to one architecture, only the
 CDHash alternative set may differ; identifiers and all other requirement syntax MUST remain equal.
 The resolve job MUST download and verify those
 three source assets, including the tag-bound
