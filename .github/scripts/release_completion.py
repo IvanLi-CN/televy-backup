@@ -65,12 +65,17 @@ def verify_version_only_covered_merge(covered: str, current_main: str) -> None:
     if not CHAIN.SHA_RE.fullmatch(covered):
         raise CompletionError("covered merge SHA must be a full commit SHA")
     parents = CHAIN.git("show", "-s", "--format=%P", covered).split()
-    if len(parents) != 2:
-        raise CompletionError("covered merge SHA must identify a two-parent merge commit")
+    if len(parents) not in {1, 2}:
+        raise CompletionError("covered merge SHA must identify a mainline commit")
     if not CHAIN.is_ancestor(covered, current_main):
         raise CompletionError("covered merge SHA must belong to the current mainline ancestry")
-    identity = CHAIN.verify_merged(covered)
-    if identity.get("prepared") == "true":
+    try:
+        CHAIN.verify_prepared(covered)
+    except CHAIN.ReleaseChainError:
+        pass
+    else:
+        raise CompletionError("covered merge already has a release identity")
+    if len(parents) == 2 and CHAIN.verify_merged(covered).get("prepared") == "true":
         raise CompletionError("covered merge already has a release identity")
 
 

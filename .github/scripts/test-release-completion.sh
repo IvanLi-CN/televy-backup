@@ -80,6 +80,41 @@ skip_out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --commit "$source_sha" --base "$source_sha" --labels-json "$tmp_dir/skip-labels.json" --checks-json "$tmp_dir/skip-checks.json")"
 [[ "$skip_out" == *'"status": "skip"'* ]]
 
+squash_dir="$tmp_dir/squash"
+mkdir -p "$squash_dir"
+git -C "$squash_dir" init -q
+git -C "$squash_dir" config user.name fixture
+git -C "$squash_dir" config user.email fixture@example.com
+printf '0.9.2\n' > "$squash_dir/VERSION"
+printf 'base\n' > "$squash_dir/README"
+git -C "$squash_dir" add .
+git -C "$squash_dir" commit -qm "squash base"
+squash_base_sha="$(git -C "$squash_dir" rev-parse HEAD)"
+printf 'squashed product fix\n' > "$squash_dir/README"
+git -C "$squash_dir" add README
+git -C "$squash_dir" commit -qm "squashed product fix"
+squash_covered_sha="$(git -C "$squash_dir" rev-parse HEAD)"
+printf '0.9.9-rc.1\n' > "$squash_dir/VERSION"
+git -C "$squash_dir" add VERSION
+git -C "$squash_dir" commit -qm "stage squash recovery"
+squash_source_sha="$(git -C "$squash_dir" rev-parse HEAD)"
+python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$squash_dir" --source-sha "$squash_source_sha" --version 0.0.1 --channel prod \
+  --owner fixture --claim-key "squash:${squash_source_sha}" \
+  --output "$tmp_dir/squash-reservation.json" >/dev/null
+python3 "$root_dir/.github/scripts/release_preparation.py" \
+  --repo-root "$squash_dir" --source-sha "$squash_source_sha" --base-sha "$squash_covered_sha" \
+  --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" --mode allocate \
+  --release-mode version-only-release-pr --covered-merge-sha "$squash_covered_sha" \
+  --reservation-json "$tmp_dir/squash-reservation.json" --provenance fixture-verified >/dev/null
+squash_prepared_sha="$(git -C "$squash_dir" rev-parse HEAD)"
+squash_out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
+  --repo-root "$squash_dir" --commit "$squash_prepared_sha" --base "$squash_covered_sha" \
+  --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --reservation-json "$tmp_dir/squash-reservation.json" \
+  --release-mode version-only-release-pr --covered-merge-sha "$squash_covered_sha")"
+[[ "$squash_out" == *'"status": "ready"'* ]]
+
 migration_dir="$tmp_dir/migration"
 mkdir -p "$migration_dir"
 git -C "$migration_dir" init -q
