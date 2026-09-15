@@ -110,6 +110,37 @@ import sys
 
 requirement = sys.argv[1].strip()
 requirement = re.sub(r"^#\s*", "", requirement)
+
+def normalize_space(value):
+    result = []
+    pending_space = False
+    in_quote = False
+    escaped = False
+    for character in value:
+        if in_quote:
+            result.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_quote = False
+        elif character == '"':
+            if pending_space and result:
+                result.append(" ")
+                pending_space = False
+            result.append(character)
+            in_quote = True
+        elif character.isspace():
+            pending_space = True
+        else:
+            if pending_space and result:
+                result.append(" ")
+            pending_space = False
+            result.append(character)
+    return "".join(result).strip()
+
+requirement = normalize_space(requirement)
 cdhash_term = r'cdhash\s+H"([0-9A-Fa-f]+)"'
 cdhash_or = re.compile(rf"{cdhash_term}(?:\s+or\s+{cdhash_term})+")
 
@@ -127,6 +158,8 @@ reference_requirement="$(normalize_requirement "$reference_requirement_raw")"
 candidate_requirement="$(normalize_requirement "$candidate_requirement_raw")"
 [[ -n "$reference_requirement" && "$reference_requirement" == "$candidate_requirement" ]] || {
   echo "Snapshot Access designated requirement changed" >&2
+  printf 'reference_requirement=%q\n' "$reference_requirement" >&2
+  printf 'candidate_requirement=%q\n' "$candidate_requirement" >&2
   exit 1
 }
 
@@ -169,6 +202,37 @@ require(
     "Snapshot Access designated requirement is missing from the manifest",
 )
 manifest_requirement = re.sub(r"^#\s*", "", manifest_requirement.strip())
+
+def normalize_space(value):
+    result = []
+    pending_space = False
+    in_quote = False
+    escaped = False
+    for character in value:
+        if in_quote:
+            result.append(character)
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_quote = False
+        elif character == '"':
+            if pending_space and result:
+                result.append(" ")
+                pending_space = False
+            result.append(character)
+            in_quote = True
+        elif character.isspace():
+            pending_space = True
+        else:
+            if pending_space and result:
+                result.append(" ")
+            pending_space = False
+            result.append(character)
+    return "".join(result).strip()
+
+manifest_requirement = normalize_space(manifest_requirement)
 cdhash_term = r'cdhash\s+H"([0-9A-Fa-f]+)"'
 cdhash_or = re.compile(rf"{cdhash_term}(?:\s+or\s+{cdhash_term})+")
 def sort_cdhash_alternatives(match):
@@ -176,6 +240,7 @@ def sort_cdhash_alternatives(match):
     return " or ".join(f'cdhash H"{value.lower()}"' for value in sorted(values, key=str.lower))
 manifest_requirement = cdhash_or.sub(sort_cdhash_alternatives, manifest_requirement)
 actual_requirement = re.sub(r"^#\s*", "", sys.argv[6].strip())
+actual_requirement = normalize_space(actual_requirement)
 actual_requirement = cdhash_or.sub(sort_cdhash_alternatives, actual_requirement)
 require(
     manifest_requirement == actual_requirement,
