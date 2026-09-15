@@ -26,9 +26,11 @@ candidate_binary="$candidate/Contents/MacOS/televybackup-snapshot-access"
 }
 
 artifact_sha() {
-  python3 - "$1" <<'PY'
+  python3 - "$1" "${2:-raw}" <<'PY'
 import hashlib, os, sys
+import stat as stat_module
 path = sys.argv[1]
+mode_policy = sys.argv[2]
 digest = hashlib.sha256()
 if os.path.isfile(path):
     with open(path, 'rb') as handle:
@@ -43,9 +45,18 @@ else:
         for name in directories + files:
             entry = os.path.join(root, name)
             relative = os.path.join(relative_root, name)
-            stat = os.lstat(entry)
+            entry_stat = os.lstat(entry)
+            mode = entry_stat.st_mode
+            if mode_policy == 'canonical':
+                if stat_module.S_ISLNK(mode):
+                    permissions = 0o777
+                elif stat_module.S_ISDIR(mode) or mode & 0o111:
+                    permissions = 0o755
+                else:
+                    permissions = 0o644
+                mode = (mode & ~0o777) | permissions
             digest.update(b'entry\0' + relative.encode() + b'\0')
-            digest.update(str(stat.st_mode).encode() + b'\0')
+            digest.update(str(mode).encode() + b'\0')
             if os.path.islink(entry):
                 digest.update(b'link\0' + os.readlink(entry).encode() + b'\0')
             elif os.path.isfile(entry):
@@ -63,8 +74,8 @@ candidate_sha="$(shasum -a 256 "$candidate_binary" | awk '{print $1}')"
   echo "Snapshot Access SHA-256 changed: $reference_sha != $candidate_sha" >&2
   exit 1
 }
-reference_artifact_sha="$(artifact_sha "$reference")"
-candidate_artifact_sha="$(artifact_sha "$candidate")"
+reference_artifact_sha="$(artifact_sha "$reference" canonical)"
+candidate_artifact_sha="$(artifact_sha "$candidate" canonical)"
 [[ "$reference_artifact_sha" == "$candidate_artifact_sha" ]] || {
   echo "Snapshot Access bundle artifact changed: $reference_artifact_sha != $candidate_artifact_sha" >&2
   exit 1
@@ -99,20 +110,42 @@ candidate_requirement="$(codesign -d -r- "$candidate" 2>&1 | sed -n '/designated
 if [[ -n "$manifest" ]]; then
   reference_cdhash="$(printf '%s\n' "$reference_signature" | awk -F= '/^cdhash=/{print $2}')"
   reference_sha256="$reference_sha"
-  python3 - "$manifest" "$reference_sha256" "$reference_artifact_sha" "$reference_cdhash" "$reference_requirement" "$candidate_metadata" <<'PY'
+  # A DMG mount can normalize bundle file modes differently on Intel and
+  # Apple Silicon. The manifest identity uses canonical bundle modes, while
+  # reference/candidate require the same canonical local bundle digest. Keep
+  # the raw digest as a compatibility path for older manifests generated
+  # before canonical mode normalization.
+  reference_legacy_artifact_sha="$(artifact_sha "$reference" raw)"
+  python3 - "$manifest" "$reference_sha256" "$reference_artifact_sha" "$reference_legacy_artifact_sha" "$reference_cdhash" "$reference_requirement" "$candidate_metadata" <<'PY'
 import json
 import sys
 
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
-assert component["sha256"] == sys.argv[2]
-assert component["artifact_sha256"] == sys.argv[3]
-assert component["cdhash"] == sys.argv[4]
-assert component["designated_requirement"] == sys.argv[5]
-metadata = json.loads(sys.argv[6])
-assert component["bundle_id"] == metadata["bundleId"]
-assert component["relative_path"] == metadata["relativePath"]
-assert component["component_version"] == metadata["componentVersion"]
-assert component["protocol_version"] == metadata["protocolVersion"]
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
+require(component["sha256"] == sys.argv[2], "Snapshot Access binary identity does not match the manifest")
+require(
+    component["artifact_sha256"] in {sys.argv[3], sys.argv[4]},
+    "Snapshot Access bundle identity does not match the manifest",
+)
+require(component["cdhash"] == sys.argv[5], "Snapshot Access CodeDirectory identity does not match the manifest")
+require(
+    component["designated_requirement"] == sys.argv[6],
+    "Snapshot Access designated requirement does not match the manifest",
+)
+metadata = json.loads(sys.argv[7])
+require(component["bundle_id"] == metadata["bundleId"], "Snapshot Access bundle id does not match the manifest")
+require(component["relative_path"] == metadata["relativePath"], "Snapshot Access relative path does not match the manifest")
+require(
+    component["component_version"] == metadata["componentVersion"],
+    "Snapshot Access component version does not match the manifest",
+)
+require(
+    component["protocol_version"] == metadata["protocolVersion"],
+    "Snapshot Access protocol version does not match the manifest",
+)
 PY
 fi
 

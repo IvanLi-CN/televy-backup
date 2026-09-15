@@ -58,6 +58,10 @@ access_contents_dir="$access_app_dir/Contents"
 access_macos_dir="$access_contents_dir/MacOS"
 access_agent_plist="$launch_agents_dir/com.ivan.televybackup.snapshot-access.plist"
 
+# The release reuse path validates its bundle before the first cargo build,
+# so the output root must exist on a fresh runner.
+mkdir -p "$out_root"
+
 if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
   reuse_bundle="${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE}"
   [[ -d "$reuse_bundle" ]] || { echo "missing reusable Snapshot Access bundle: $reuse_bundle" >&2; exit 1; }

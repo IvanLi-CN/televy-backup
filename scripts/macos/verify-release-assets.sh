@@ -19,7 +19,7 @@ version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --sourc
 
 artifact_sha256() {
   python3 - "$1" <<'PY'
-import hashlib, os, sys
+import hashlib, os, stat as stat_module, sys
 path = sys.argv[1]
 digest = hashlib.sha256()
 if os.path.isfile(path):
@@ -35,9 +35,16 @@ else:
         for name in directories + files:
             entry = os.path.join(root, name)
             relative = os.path.join(relative_root, name)
-            stat = os.lstat(entry)
+            entry_stat = os.lstat(entry)
+            if stat_module.S_ISLNK(entry_stat.st_mode):
+                permissions = 0o777
+            elif stat_module.S_ISDIR(entry_stat.st_mode) or entry_stat.st_mode & 0o111:
+                permissions = 0o755
+            else:
+                permissions = 0o644
+            mode = (entry_stat.st_mode & ~0o777) | permissions
             digest.update(b'entry\0' + relative.encode() + b'\0')
-            digest.update(str(stat.st_mode).encode() + b'\0')
+            digest.update(str(mode).encode() + b'\0')
             if os.path.islink(entry):
                 digest.update(b'link\0' + os.readlink(entry).encode() + b'\0')
             elif os.path.isfile(entry):

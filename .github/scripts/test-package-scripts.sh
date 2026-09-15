@@ -37,6 +37,10 @@ verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
   echo "Snapshot Access bundle is missing the full product identity metadata" >&2
   exit 1
 }
+grep -F 'mkdir -p "$out_root"' <<<"$build_text" >/dev/null || {
+  echo "build-app.sh must initialize the output root before validating a reusable bundle" >&2
+  exit 1
+}
 [[ "$build_text" == *'bundle_id.daemon'* && "$build_text" == *'televybackupd'* ]] || {
   echo "The daemon must be signed before the outer app bundle" >&2
   exit 1
@@ -66,6 +70,23 @@ verify_release_text="$(<"$root_dir/scripts/macos/verify-release-assets.sh")"
   echo "Snapshot Access mode check must parse stat output as octal" >&2
   exit 1
 }
+identity_text="$(<"$root_dir/scripts/macos/verify-component-identity.sh")"
+grep -F 'reference_artifact_sha="$(artifact_sha "$reference" canonical)"' <<<"$identity_text" >/dev/null || {
+  echo "component identity verification must compare canonical reference and candidate bundle digests" >&2
+  exit 1
+}
+grep -F 'reference_legacy_artifact_sha="$(artifact_sha "$reference" raw)"' <<<"$identity_text" >/dev/null || {
+  echo "component identity verification must retain legacy manifest compatibility" >&2
+  exit 1
+}
+grep -F 'component["artifact_sha256"] in {sys.argv[3], sys.argv[4]}' <<<"$identity_text" >/dev/null || {
+  echo "component identity verification must bind canonical or legacy bundle digest to the source manifest" >&2
+  exit 1
+}
+if grep -E '(^|[[:space:]])assert[[:space:]]' <<<"$identity_text" >/dev/null; then
+  echo "component identity verification must not use optimizable Python assertions" >&2
+  exit 1
+fi
 [[ "$verify_release_text" == *'one-time-bootstrap-universal-build'* ]] || {
   echo "release asset verifier must recognize the explicit helper bootstrap source" >&2
   exit 1
