@@ -63,6 +63,9 @@ assert_contains "notifier immutable reservation validation" "$notify_text" "veri
 assert_contains "notifier immutable bound receipt validation" "$notify_text" "verify_bound_receipt"
 assert_contains "notifier optional product tag validation" "$notify_text" "api_json_optional"
 assert_contains "notifier product tag status" "$notify_text" 'tag_status: ${{ needs.resolve_release_context.outputs.tag_status }}'
+assert_contains "notifier artifact origin validation" "$notify_text" "GitHub API URL origin mismatch"
+assert_not_contains "notifier raw resolver exception" "$notify_text" "resolver_error = f"
+assert_not_contains "notifier raw log exception" "$notify_text" "logs_error = f"
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion ready-for-review trigger" "$completion_text" "ready_for_review"
 assert_contains "completion merge-group validation" "$completion_text" "merge-group-release-gate.sh completion"
@@ -132,11 +135,14 @@ assert_not_contains "merge-group pull request API suppression" "$merge_group_tex
 assert_contains "merge-group failed check state" "$merge_group_text" 'failed) echo "merge-group gate: required check failed'
 poll_line="$(grep -n 'required=("quality"' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
 final_pr_line="$(grep -n 'merge-group-final-pr' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
-final_checks_line="$(grep -n 'commits/\${verification_sha}/check-runs' "$root_dir/.github/scripts/merge-group-release-gate.sh" | tail -1 | cut -d: -f1)"
+final_checks_line="$(grep -n 'commits/\${head_sha}/check-runs' "$root_dir/.github/scripts/merge-group-release-gate.sh" | tail -1 | cut -d: -f1)"
 completion_line="$(grep -n 'python3 .github/scripts/release_completion.py' "$root_dir/.github/scripts/merge-group-release-gate.sh" | cut -d: -f1)"
 assert_contains "merge-group final PR identity check" "$merge_group_text" 'test "$(jq -r '\''.head.sha'\'' "${final_pr_json}")" = "${pr_head_sha}"'
 assert_contains "merge-group final labels snapshot" "$merge_group_text" 'labels_json="$(jq -c '\''.labels'\'' "${final_pr_json}")"'
 assert_contains "merge-group source-check wait budget" "$merge_group_text" 'deadline=$((SECONDS + 1800))'
+assert_contains "merge-group verification fetch" "$merge_group_text" 'gh api "repos/${repository}/commits/${pr_head_sha}"'
+assert_contains "merge-group verification argument" "$merge_group_text" "--github-verification-json"
+assert_contains "merge-group checks bind to merge head" "$merge_group_text" 'gh api "repos/${repository}/commits/${head_sha}/check-runs?filter=latest&per_page=100"'
 if [[ -z "$poll_line" || -z "$final_pr_line" || -z "$final_checks_line" || -z "$completion_line" || "$poll_line" -ge "$final_pr_line" || "$final_pr_line" -ge "$final_checks_line" || "$final_checks_line" -ge "$completion_line" ]]; then
   printf 'merge-group completion must wait for required checks before validation\n' >&2
   exit 1

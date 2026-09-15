@@ -74,8 +74,10 @@ jobs:
           from io import BytesIO
           from urllib import error
           from urllib import request
+          from urllib.parse import urlsplit
 
           api_root = os.environ.get('GITHUB_API_URL', 'https://api.github.com').rstrip('/')
+          api_origin = urlsplit(api_root)
           token = os.environ['GH_TOKEN']
           repository = os.environ['REPOSITORY']
           run_id = os.environ['RUN_ID']
@@ -86,7 +88,13 @@ jobs:
           output_path = os.environ['GITHUB_OUTPUT']
 
           def api_request(path: str) -> bytes:
-              url = path if path.startswith('http://') or path.startswith('https://') else f'{api_root}{path}'
+              if path.startswith('http://') or path.startswith('https://'):
+                  candidate = urlsplit(path)
+                  if (candidate.scheme, candidate.netloc) != (api_origin.scheme, api_origin.netloc):
+                      raise RuntimeError('GitHub API URL origin mismatch')
+                  url = path
+              else:
+                  url = f'{api_root}{path}'
               req = request.Request(
                   url,
                   headers={
@@ -442,8 +450,8 @@ jobs:
                   jobs = api_json(f'/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}/jobs?per_page=100').get('jobs', [])
               else:
                   jobs = api_json(f'/repos/{repository}/actions/runs/{run_id}/jobs?per_page=100').get('jobs', [])
-          except Exception as exc:
-              resolver_error = f'Unable to resolve the exact workflow attempt jobs: {exc}'
+          except Exception:
+              resolver_error = 'Release resolver failed while loading workflow attempt jobs'
 
           resolver_jobs = [
               job for job in jobs
@@ -460,8 +468,8 @@ jobs:
               try:
                   logs.append(api_text(f"/repos/{repository}/actions/jobs/{resolver_jobs[0]['id']}/logs"))
                   logs_error = ''
-              except Exception as exc:
-                  logs_error = f'Unable to resolve the trusted resolver job log: {exc}'
+              except Exception:
+                  logs_error = 'Release resolver failed while loading the trusted resolver job log'
           else:
               logs_error = ''
           text = '\n'.join(logs)

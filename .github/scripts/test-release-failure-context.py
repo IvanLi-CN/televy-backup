@@ -176,11 +176,13 @@ class GitHubMock:
         release_type: str,
         trusted_resolver: bool = True,
         artifact_run_attempt: str = "1",
+        artifact_url: str = "https://api.fixture/archive",
     ):
         self.tag_mode = tag_mode
         self.declared_pull_request = declared_pull_request
         self.artifact_available = artifact_available
         self.trusted_resolver = trusted_resolver
+        self.artifact_url = artifact_url
         archive = BytesIO()
         with zipfile.ZipFile(archive, "w") as bundle:
             bundle.writestr(
@@ -195,7 +197,7 @@ class GitHubMock:
         if path.endswith("/actions/runs/7/artifacts"):
             artifacts = []
             if self.artifact_available:
-                artifacts = [{"name": "release-intent", "expired": False, "archive_download_url": "https://fixture/archive"}]
+                artifacts = [{"name": "release-intent", "expired": False, "archive_download_url": self.artifact_url}]
             return json_response({"artifacts": artifacts})
         if path == "/archive":
             return Response(self.archive)
@@ -238,6 +240,7 @@ def run_case(
     release_type: str = "type:patch",
     trusted_resolver: bool = True,
     artifact_run_attempt: str = "1",
+    artifact_url: str = "https://api.fixture/archive",
 ) -> str:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     source = workflow.split("          python3 - <<'PYCODE'\n", 1)[1].split("\n          PYCODE", 1)[0]
@@ -268,6 +271,7 @@ def run_case(
                 release_type,
                 trusted_resolver,
                 artifact_run_attempt,
+                artifact_url,
             ),
         ):
             exec(compile(textwrap.dedent(source), str(WORKFLOW), "exec"), {"__name__": "__main__"})
@@ -298,4 +302,7 @@ assert "identity_status=resolver-error" in stale_artifact
 untrusted_marker = run_case("missing", "7", trusted_resolver=False)
 assert "identity_status=resolver-error" in untrusted_marker
 assert "version=\n" in untrusted_marker
+untrusted_archive = run_case("missing", "7", artifact_url="https://evil.invalid/archive")
+assert "identity_status=resolver-error" in untrusted_archive
+assert "evil.invalid" not in untrusted_archive
 print("release failure resolver mock tests passed")

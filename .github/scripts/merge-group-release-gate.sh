@@ -80,7 +80,6 @@ for pr_number in ${pr_numbers}; do
       verification_sha="$(printf '%s' "${prepared_json}" | jq -r .sourceSha)"
     fi
     checks_json="${RUNNER_TEMP:-/tmp}/merge-group-checks-${pr_number}.json"
-    gh api "repos/${repository}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${checks_json}"
     labels_file="${RUNNER_TEMP:-/tmp}/merge-group-labels-${pr_number}.json"
     printf '%s' "${labels_json}" > "${labels_file}"
     completion_args=(
@@ -110,6 +109,12 @@ for pr_number in ${pr_numbers}; do
       completion_args+=(--reservation-json "${reservation_json}")
       release_mode="$(printf '%s' "${prepared_json}" | jq -r .mode)"
       completion_args+=(--release-mode "${release_mode}")
+      verification_json="${RUNNER_TEMP:-/tmp}/merge-group-verification-${pr_number}.json"
+      gh api "repos/${repository}/commits/${pr_head_sha}" > "${verification_json}"
+      jq -e --arg commit "${pr_head_sha}" \
+        '.sha == $commit and .commit.verification.verified == true' \
+        "${verification_json}" >/dev/null
+      completion_args+=(--github-verification-json "${verification_json}")
       if [[ "${release_mode}" == version-only-release-pr ]]; then
         completion_args+=(--covered-merge-sha "$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)")
       fi
@@ -145,7 +150,7 @@ for pr_number in ${pr_numbers}; do
     test "$(jq -r '.base.sha' "${final_pr_json}")" = "${base_sha}"
     labels_json="$(jq -c '.labels' "${final_pr_json}")"
     printf '%s' "${labels_json}" > "${labels_file}"
-    gh api "repos/${repository}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${checks_json}"
+    gh api "repos/${repository}/commits/${head_sha}/check-runs?filter=latest&per_page=100" > "${checks_json}"
     python3 .github/scripts/release_completion.py "${completion_args[@]}" \
       --allow-migration --migration-version 0.9.2
   fi
