@@ -136,6 +136,8 @@ def verify_version_only_covered_merge(
         except CHAIN.ReleaseChainError:
             if RELEASE_IDENTITY_TRAILERS.intersection(covered_trailers):
                 raise CompletionError("covered single-parent commit has incomplete release identity")
+        else:
+            raise CompletionError("covered single-parent commit already has a release identity")
     else:
         if CHAIN.verify_merged(covered).get("prepared") == "true":
             raise CompletionError("covered merge already has a release identity")

@@ -60,7 +60,12 @@ assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 module.CHAIN.ROOT = repo
-module.verify_version_only_covered_merge(covered.name, covered.name, proof, "fixture/repo")
+try:
+    module.verify_version_only_covered_merge(covered.name, covered.name, proof, "fixture/repo")
+except module.CompletionError as error:
+    assert "already has a release identity" in str(error)
+else:
+    raise AssertionError("prepared single-parent covered commit was accepted")
 PY
 out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \

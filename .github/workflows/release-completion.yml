@@ -86,13 +86,6 @@ jobs:
           if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then
             verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
           fi
-          product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
-          if [[ "${product_release}" == true ]]; then
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"
-            jq -e --arg commit "${HEAD_SHA}" \
-              '.sha == $commit and .commit.verification.verified == true' \
-              "${RUNNER_TEMP}/github-verification.json" >/dev/null
-          fi
           deadline=$((SECONDS + 1800))
           while :; do
             gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
@@ -141,8 +134,17 @@ jobs:
               *) echo "unexpected source check state: ${state}" >&2; exit 1 ;;
             esac
           done
-          current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/final-pull-request.json"
+          current_head="$(jq -r '.head.sha' "${RUNNER_TEMP}/final-pull-request.json")"
           test "${current_head}" = "${HEAD_SHA}"
+          jq '.labels' "${RUNNER_TEMP}/final-pull-request.json" > "${RUNNER_TEMP}/labels.json"
+          product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
+          if [[ "${product_release}" == true ]]; then
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"
+            jq -e --arg commit "${HEAD_SHA}" \
+              '.sha == $commit and .commit.verification.verified == true' \
+              "${RUNNER_TEMP}/github-verification.json" >/dev/null
+          fi
           completion_args=(
             --repo-root .
             --commit "${HEAD_SHA}"
