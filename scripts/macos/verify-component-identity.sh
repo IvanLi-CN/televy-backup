@@ -255,13 +255,30 @@ require(
     "Snapshot Access observed CodeDirectory hash is not covered by its designated requirement",
 )
 
-cdhash_expression = re.compile(rf"{cdhash_term}(?:\s+or\s+{cdhash_term})*")
-def requirement_shape(value):
-    return cdhash_expression.sub("__SNAPSHOT_ACCESS_CDHASHES__", value)
+cdhash_pattern = re.compile(cdhash_term, re.IGNORECASE)
+cdhash_expression = re.compile(
+    rf"{cdhash_term}(?:\s+or\s+{cdhash_term})*",
+    re.IGNORECASE,
+)
+def requirement_shape(value, name):
+    matches = list(cdhash_pattern.finditer(value))
+    require(matches, f"{name} designated requirement has no CDHash identities")
+    first = matches[0]
+    last = matches[-1]
+    segment = value[first.start():last.end()]
+    require(
+        cdhash_expression.fullmatch(segment) is not None,
+        f"{name} designated requirement has invalid CDHash alternative syntax",
+    )
+    return value[:first.start()] + "__SNAPSHOT_ACCESS_CDHASHES__" + value[last.end():]
+
+manifest_shape = requirement_shape(manifest_requirement, "manifest")
+actual_shape = requirement_shape(actual_requirement, "actual")
 
 require(
-    requirement_shape(manifest_requirement) == requirement_shape(actual_requirement),
-    "Snapshot Access designated requirement does not match the manifest",
+    manifest_shape == actual_shape,
+    "Snapshot Access designated requirement does not match the manifest\n"
+    f"manifest_shape={manifest_shape!r}\nactual_shape={actual_shape!r}",
 )
 metadata = json.loads(sys.argv[7])
 require(component["bundle_id"] == metadata["bundleId"], "Snapshot Access bundle id does not match the manifest")
