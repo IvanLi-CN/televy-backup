@@ -223,19 +223,33 @@ jobs:
           fi
           release_state=missing
           release_output=""
-          if release_output="$(gh release view "${tag}" --json isDraft,isPrerelease,isLatest 2>&1)"; then
+          if release_output="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" 2>&1)"; then
             if [[ "${tag_status}" != matching ]]; then
               echo "release_state_conflict: Release exists without a matching product tag" >&2
               exit 1
             fi
-            is_draft="$(printf '%s' "${release_output}" | jq -r '.isDraft | tostring')"
-            is_prerelease="$(printf '%s' "${release_output}" | jq -r '.isPrerelease | tostring')"
-            is_latest="$(printf '%s' "${release_output}" | jq -r '.isLatest | tostring')"
+            is_draft="$(printf '%s' "${release_output}" | jq -r '.draft | tostring')"
+            is_prerelease="$(printf '%s' "${release_output}" | jq -r '.prerelease | tostring')"
+            is_latest=false
             expected_prerelease=false
             expected_latest=false
             if [[ "${channel}" != prod ]]; then
               expected_prerelease=true
             elif [[ "${is_draft}" == false ]]; then
+              latest_output=""
+              if ! latest_output="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" 2>&1)"; then
+                printf '%s\n' "${latest_output}" >&2
+                echo "release_state_conflict: unable to resolve latest GitHub Release" >&2
+                exit 1
+              fi
+              latest_tag="$(printf '%s' "${latest_output}" | jq -r '.tag_name // empty')"
+              if [[ -z "${latest_tag}" ]]; then
+                echo "release_state_conflict: latest GitHub Release has no tag" >&2
+                exit 1
+              fi
+              if [[ "${latest_tag}" == "${tag}" ]]; then
+                is_latest=true
+              fi
               expected_latest=true
             fi
             if [[ "${is_prerelease}" != "${expected_prerelease}" || "${is_latest}" != "${expected_latest}" ]]; then
@@ -834,15 +848,29 @@ jobs:
           set -euo pipefail
           runtime_state="${RELEASE_STATE}"
           release_output=""
-          if release_output="$(gh release view "${PRODUCT_TAG}" --json isDraft,isPrerelease,isLatest 2>&1)"; then
-            is_draft="$(printf '%s' "${release_output}" | jq -r '.isDraft | tostring')"
-            is_prerelease="$(printf '%s' "${release_output}" | jq -r '.isPrerelease | tostring')"
-            is_latest="$(printf '%s' "${release_output}" | jq -r '.isLatest | tostring')"
+          if release_output="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+            is_draft="$(printf '%s' "${release_output}" | jq -r '.draft | tostring')"
+            is_prerelease="$(printf '%s' "${release_output}" | jq -r '.prerelease | tostring')"
+            is_latest=false
             expected_prerelease=false
             expected_latest=false
             if [[ "${PRODUCT_CHANNEL}" != prod ]]; then
               expected_prerelease=true
             elif [[ "${is_draft}" == false ]]; then
+              latest_output=""
+              if ! latest_output="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" 2>&1)"; then
+                printf '%s\n' "${latest_output}" >&2
+                echo "release_state_conflict: unable to resolve latest GitHub Release" >&2
+                exit 1
+              fi
+              latest_tag="$(printf '%s' "${latest_output}" | jq -r '.tag_name // empty')"
+              if [[ -z "${latest_tag}" ]]; then
+                echo "release_state_conflict: latest GitHub Release has no tag" >&2
+                exit 1
+              fi
+              if [[ "${latest_tag}" == "${PRODUCT_TAG}" ]]; then
+                is_latest=true
+              fi
               expected_latest=true
             fi
             if [[ "${is_prerelease}" != "${expected_prerelease}" || "${is_latest}" != "${expected_latest}" ]]; then

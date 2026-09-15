@@ -18,7 +18,9 @@
 The failure resolver is bound to the exact `Release Product` workflow attempt and verifies
 annotated product-tag tagger provenance before exposing a recovery candidate. The publish tag,
 channel, and terminal published-release paths are exercised from the checked-in workflow `run`
-blocks with a local Git/API fixture.
+blocks with a local Git/API fixture. Release state is read through the GitHub REST API using
+`/releases/tags/<tag>` (`draft` and `prerelease`) and, for stable releases, `/releases/latest`
+(`tag_name`) instead of CLI-specific release JSON fields.
 
 ## Identity flow
 
