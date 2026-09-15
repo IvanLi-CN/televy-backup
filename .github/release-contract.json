@@ -1,8 +1,13 @@
 {
   "schema_version": 2,
-  "source_of_truth": "trusted-preparation VERSION plus immutable repository identity refs",
+  "source_of_truth": "immutable repository identity refs plus trusted preparation provenance",
   "version_file": "VERSION",
   "numeric_baseline": "highest eligible final remote product tag vX.Y.Z",
+  "eligible_final_tag_provenance": {
+    "owner": "protected-release-automation",
+    "object_type": "annotated-tag",
+    "tagger": "github-actions[bot]"
+  },
   "virtual_final_baseline": "0.0.0",
   "version_grammar": {
     "prod": "X.Y.Z",
@@ -42,6 +47,20 @@
     "release": "Release Product",
     "failure_notification": "Notify failed release"
   },
+  "required_gate_scheduling": {
+    "label_gate": {
+      "group": "per-pull-request",
+      "queue": "max",
+      "cancel_in_progress": false,
+      "labels_source": "current GitHub pull request API snapshot"
+    },
+    "completion": {
+      "group": "per-pull-request",
+      "queue": "max",
+      "cancel_in_progress": false,
+      "labels_source": "current GitHub pull request API snapshot after head/base match"
+    }
+  },
   "preparation": {
     "modes": ["normal", "version-only-release-pr"],
     "write_api": "createCommitOnBranch",
@@ -55,11 +74,12 @@
   },
   "identity_refs": {
     "reservation": "refs/tags/release-reservation/v<version>",
+    "decision": "refs/tags/release-decision/v<version>",
     "bound": "refs/tags/release-bound/v<version>/<merge-sha>",
     "consumed": "refs/tags/release-consumed/v<version>/<merge-sha>",
     "released": "refs/tags/release-released/v<version>/<reservation-id>",
     "write_policy": "append-only-create",
-    "state_order": "bound-before-consumed;released-only-when-unbound",
+    "state_order": "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound",
     "receipt_validation": "independently-verify-reservation-provenance"
   },
   "recovery": {
@@ -85,6 +105,11 @@
     "missing": "build-and-create",
     "draft": "build-upload-and-publish",
     "published": "idempotent-success-without-build-or-overwrite"
+  },
+  "intent_snapshot": {
+    "artifact_policy": "snapshot-only; immutable refs and trailers remain authoritative",
+    "run_binding": ["run_id", "run_attempt"],
+    "notifier_acceptance": "artifact run_id and run_attempt must match the failed Release Product workflow run"
   },
   "helper_bootstrap": {
     "resolver": "published-prerelease-release-plus-verified-build-manifest",

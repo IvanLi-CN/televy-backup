@@ -5,7 +5,7 @@
 | Component | Location |
 | --- | --- |
 | Formal and local version grammar | `scripts/product-version.py` |
-| Final-tag-first allocation and provenance | `.github/scripts/release_chain.py` |
+| Final-tag-first allocation and annotated product-tag provenance | `.github/scripts/release_chain.py`, `.github/workflows/release.yml` |
 | Append-only reservation, receipt and intent snapshot | `.github/scripts/release_reservation.py` |
 | Independent Snapshot Access helper source resolution | `.github/scripts/release_helper.py`, `.github/workflows/release.yml` |
 | Label policy | `.github/scripts/label-gate.sh`, `.github/release-contract.json` |
@@ -15,18 +15,31 @@
 | Failure context delivery | `.github/workflows/notify-release-failure.yml` |
 | Required-check declaration | `.github/quality-gates.json`, `docs/quality-gates.md` |
 
+The failure resolver is bound to the exact `Release Product` workflow attempt and verifies
+annotated product-tag tagger provenance before exposing a recovery candidate. The publish tag,
+channel, and terminal published-release paths are exercised from the checked-in workflow `run`
+blocks with a local Git/API fixture.
+
 ## Identity flow
 
 1. Label Gate validates one product type and one new channel, or channel-free docs/skip.
-2. Preparation enumerates fetched product tags and reservation refs, calculates the candidate from
-   the highest final tag, and creates the reservation before writing VERSION.
+   Label Gate and Release completion are required per-PR gates with non-preemptive `queue: max`
+   scheduling; completion re-reads the current PR labels after verifying the queued head/base.
+2. Preparation enumerates fetched annotated product tags, verifies the GitHub Actions tagger and
+   main reachability, calculates the candidate from the highest final tag, and creates the
+   reservation before writing VERSION.
 3. The same PR branch receives one GitHub verified VERSION-only commit guarded by
    `expectedHeadOid`.
 4. Release completion freezes the reservation and provenance, and production completion verifies
    the GitHub API signature state for the prepared commit. A normal PR merge creates the candidate's
    merged identity; a version-only release PR creates a new identity for one covered old merge. A
    single-parent covered commit must be an authoritatively merged main PR result, and product tags
-   plus append-only identity refs must not already target it.
+   plus append-only identity refs must not already target it. The merge-group gate waits for all
+   required check-runs on the current candidate head, while the merge-group gate waits for the
+   merge-group head, refreshes the current PR identity/labels, and passes that immutable check
+   snapshot to the same completion validator. The PR and merge-group gates allow up to 30 minutes
+   for source required checks, covering the existing native package and Swift test matrix without
+   weakening the fail-closed timeout.
 5. Release Product verifies an existing published Release or consumed receipt as a terminal state
    before helper resolution. For an active release, it resolves and records either a verified helper
    Release for byte-identical reuse or an explicitly requested one-time bootstrap mode. Reused helper

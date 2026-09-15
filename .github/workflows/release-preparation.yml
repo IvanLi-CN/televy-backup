@@ -204,6 +204,9 @@ jobs:
             --release-mode "${RELEASE_MODE}" \
             --covered-merge-sha "${COVERED_MERGE_SHA}" \
             --reservation-json "${RUNNER_TEMP}/reservation.json" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --token "${GH_TOKEN}" \
+            --api-root "${GITHUB_API_URL}" \
             --provenance github-native-verified \
             --github-output "$GITHUB_OUTPUT"
 

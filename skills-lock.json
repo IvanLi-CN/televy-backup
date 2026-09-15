@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "pr-label-release": {
+      "source": "IvanLi-CN/style-playbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/policies/pr-label-release/SKILL.md",
+      "computedHash": "03ac0da07048d87b2da9f8f602d2aa7ac0956c51364b5bbb4e653b72f6d83a7e"
+    },
+    "quality-gates": {
+      "source": "IvanLi-CN/style-playbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/policies/quality-gates/SKILL.md",
+      "computedHash": "9d30b7d455e8079ff194291a944b865f3cd2e60ac604279f2b9bad0ef6d2ef00"
+    },
+    "release-failure-notification": {
+      "source": "IvanLi-CN/style-playbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/policies/release-failure-notification/SKILL.md",
+      "computedHash": "2eb902fd7f0e5f7e8b1e1ea55671ef62763049a12341df2e13fd7b111a079cc2"
+    },
+    "semver-change-governance": {
+      "source": "IvanLi-CN/style-playbook-skills",
+      "sourceType": "github",
+      "skillPath": "skills/policies/semver-change-governance/SKILL.md",
+      "computedHash": "26eee27bcb0d08d9a3da9723bb9a8fb0d72c28cba3b0cedb5f80889d5426be5e"
+    }
+  }
+}

@@ -26,12 +26,15 @@ PRODUCT_TYPES = VALID_TYPES - {"type:docs", "type:skip"}
 VALID_CHANNELS = {"channel:prod", "channel:beta", "channel:rc", "channel:dev"}
 LEGACY_LABELS = {"channel:stable", "channel:canary", "type:none"}
 PRODUCT_TAG_RE = re.compile(
-    r"^v(?P<version>\d+\.\d+\.\d+(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$"
+    r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$"
 )
 IDENTITY_REF_RE = re.compile(
-    r"^refs/tags/release-(?:reservation|bound|consumed|released)/v(?P<version>\d+\.\d+\.\d+(?:-(?:beta|rc|dev)\.[1-9]\d*)?)(?:/|$)"
+    r"^refs/tags/release-(?:reservation|decision|bound|consumed|released)/v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)(?:/|$)"
 )
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+PRODUCT_TAG_OWNER = "protected-release-automation"
+PRODUCT_TAGGER = "github-actions[bot]"
+PRODUCT_TAGGER_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com"
 
 
 class ReleaseChainError(RuntimeError):
@@ -265,15 +268,33 @@ def tag_target(tag: str) -> str | None:
     return git("rev-parse", f"refs/tags/{tag}^{{commit}}")
 
 
+def verify_product_tag_provenance(tag: str) -> dict[str, str]:
+    ref = f"refs/tags/{tag}"
+    if git("cat-file", "-t", ref, check=False) != "tag":
+        raise ReleaseChainError(
+            f"product tag {tag} is missing {PRODUCT_TAG_OWNER} annotated-tag provenance"
+        )
+    raw = git_raw("cat-file", "-p", ref)
+    lines = raw.splitlines()
+    object_type = next((line.split(" ", 1)[1] for line in lines if line.startswith("type ")), "")
+    tagger = next((line.removeprefix("tagger ") for line in lines if line.startswith("tagger ")), "")
+    if object_type != "commit" or not tagger.startswith(f"{PRODUCT_TAGGER} <{PRODUCT_TAGGER_EMAIL}>"):
+        raise ReleaseChainError(
+            f"product tag {tag} has foreign or incomplete {PRODUCT_TAG_OWNER} provenance"
+        )
+    return {"owner": PRODUCT_TAG_OWNER, "tagger": tagger}
+
+
 def verify_tag(version: str, expected_sha: str | None = None, allow_existing: bool = False) -> dict[str, str]:
     PRODUCT_VERSION.parse_version(version)
     tag = f"v{version}"
     target = tag_target(tag)
     if target is None:
         return {"tag": tag, "status": "available"}
+    provenance = verify_product_tag_provenance(tag)
     expected = git("rev-parse", f"{expected_sha}^{{commit}}") if expected_sha else None
     if allow_existing and expected and target == expected:
-        return {"tag": tag, "status": "matching", "target": target}
+        return {"tag": tag, "status": "matching", "target": target, **provenance}
     raise ReleaseChainError(f"product tag {tag} is already owned by {target}")
 
 
@@ -295,14 +316,29 @@ def compare_versions(left: str, right: str) -> int:
     )
 
 
+def mainline_sha() -> str:
+    for ref in ("refs/remotes/origin/main", "refs/heads/main"):
+        value = git("rev-parse", f"{ref}^{{commit}}", check=False)
+        if SHA_RE.fullmatch(value):
+            return value
+    return git("rev-parse", "HEAD^{commit}")
+
+
 def product_tags() -> list[dict[str, str]]:
+    mainline = mainline_sha()
     values: list[dict[str, str]] = []
     for tag in git("tag", "--list", "v*").splitlines():
         match = PRODUCT_TAG_RE.fullmatch(tag)
         if match is None:
             continue
         version = match.group("version")
-        values.append({"tag": tag, "version": version, "target": tag_target(tag) or ""})
+        target = tag_target(tag)
+        if not target:
+            raise ReleaseChainError(f"product tag {tag} has no commit target")
+        if not is_ancestor(target, mainline):
+            raise ReleaseChainError(f"product tag {tag} targets an unreachable commit")
+        provenance = verify_product_tag_provenance(tag)
+        values.append({"tag": tag, "version": version, "target": target, **provenance})
     return values
 
 
@@ -310,6 +346,7 @@ def occupied_identity_versions() -> list[str]:
     """Return versions already claimed by any append-only release identity ref."""
     prefixes = (
         "refs/tags/release-reservation",
+        "refs/tags/release-decision",
         "refs/tags/release-bound",
         "refs/tags/release-consumed",
         "refs/tags/release-released",

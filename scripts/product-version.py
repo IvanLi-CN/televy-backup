@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VERSION_PATH = ROOT / "VERSION"
 FORMAL_VERSION_RE = re.compile(
-    r"^(?P<core>\d+\.\d+\.\d+)(?:-(?P<kind>beta|rc|dev)\.(?P<ordinal>[1-9]\d*))?$"
+    r"^(?P<core>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(?:-(?P<kind>beta|rc|dev)\.(?P<ordinal>[1-9]\d*))?$"
 )
 
 

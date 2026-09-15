@@ -13,9 +13,9 @@ from typing import Any
 
 
 VERSION_RE = re.compile(
-    r"^(?P<core>\d+\.\d+\.\d+)(?:-(?P<channel>beta|rc|dev)\.(?P<ordinal>[1-9]\d*))?$"
+    r"^(?P<core>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(?:-(?P<channel>beta|rc|dev)\.(?P<ordinal>[1-9]\d*))?$"
 )
-TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$")
+TAG_RE = re.compile(r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$")
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 CDHASH_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40}$")

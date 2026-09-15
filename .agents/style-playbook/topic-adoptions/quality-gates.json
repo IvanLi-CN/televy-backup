@@ -1,0 +1,17 @@
+{
+  "evidence": [
+    ".github/quality-gates.json",
+    ".agents/skills/quality-gates/SKILL.md"
+  ],
+  "implementation_commit": "7478d505249a840092a986f0292d79ae8260b02a",
+  "playbook_commit": "e4a632b742af7611f6cd73635f37bea9ff55b46c",
+  "policy_observations": [
+    {
+      "reason": "package-and-lock-verified",
+      "slug": "quality-gates",
+      "state": "installed"
+    }
+  ],
+  "schema_version": 1,
+  "topic": "quality-gates"
+}

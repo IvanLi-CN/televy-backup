@@ -3,7 +3,7 @@ name: Release completion
 on:
   pull_request_target:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited, ready_for_review]
   merge_group:
   workflow_dispatch:
     inputs:
@@ -13,8 +13,8 @@ on:
         type: string
 
 concurrency:
-  group: release-completion-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
-  cancel-in-progress: true
+  group: release-completion-${{ github.event.pull_request.number || inputs.pr_number || github.event.merge_group.head_sha || github.ref }}
+  queue: max
 
 permissions:
   checks: read
@@ -24,11 +24,12 @@ permissions:
 jobs:
   release-completion:
     name: Release completion
-    if: github.event_name != 'merge_group'
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
       - name: Checkout trusted base
+        if: github.event_name != 'merge_group'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha || 'main' }}
@@ -36,6 +37,7 @@ jobs:
 
       - name: Resolve pull request context
         id: pr
+        if: github.event_name != 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT_PATH: ${{ github.event_path }}
@@ -62,9 +64,18 @@ jobs:
           jq '.labels' "${RUNNER_TEMP}/pull-request.json" > "${RUNNER_TEMP}/labels.json"
 
       - name: Fetch pull request head
+        if: github.event_name != 'merge_group'
         env:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: git fetch --no-tags origin "${HEAD_SHA}"
+
+      - name: Checkout trusted merge-group gate scripts
+        if: github.event_name == 'merge_group'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.merge_group.base_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Fetch immutable release identity refs
         run: git fetch --force --tags origin
@@ -74,6 +85,7 @@ jobs:
         run: test "${GITHUB_REF}" = "refs/heads/main"
 
       - name: Verify VERSION and release completion
+        if: github.event_name != 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
@@ -81,14 +93,30 @@ jobs:
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
         run: |
           set -euo pipefail
-          verification_sha="${HEAD_SHA}"
+          validate_current_pr() {
+            local current_pr_path="$1"
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${current_pr_path}"
+            python3 - "${current_pr_path}" <<'PY'
+          import json
+          import os
+          import sys
+
+          current = json.load(open(sys.argv[1], encoding="utf-8"))
+          if current.get("state") != "open" or current.get("base", {}).get("ref") != "main":
+              raise SystemExit("current PR is not an open PR targeting main")
+          if current.get("head", {}).get("sha") != os.environ["HEAD_SHA"]:
+              raise SystemExit("current PR head changed while Release completion was queued")
+          if current.get("base", {}).get("sha") != os.environ["BASE_SHA"]:
+              raise SystemExit("current PR base changed while Release completion was queued")
+          PY
+          }
+          validate_current_pr "${RUNNER_TEMP}/current-pr.json"
+          jq '.labels' "${RUNNER_TEMP}/current-pr.json" > "${RUNNER_TEMP}/labels.json"
           prepared_json=''
-          if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then
-            verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
-          fi
+          prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null || true)"
           deadline=$((SECONDS + 1800))
           while :; do
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
             state="$(python3 - "${RUNNER_TEMP}/source-checks.json" <<'PY'
           import json
           import sys
@@ -134,10 +162,9 @@ jobs:
               *) echo "unexpected source check state: ${state}" >&2; exit 1 ;;
             esac
           done
-          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/final-pull-request.json"
-          current_head="$(jq -r '.head.sha' "${RUNNER_TEMP}/final-pull-request.json")"
-          test "${current_head}" = "${HEAD_SHA}"
-          jq '.labels' "${RUNNER_TEMP}/final-pull-request.json" > "${RUNNER_TEMP}/labels.json"
+          validate_current_pr "${RUNNER_TEMP}/current-pr-final.json"
+          jq '.labels' "${RUNNER_TEMP}/current-pr-final.json" > "${RUNNER_TEMP}/labels.json"
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
           product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
           if [[ "${product_release}" == true ]]; then
             gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"
@@ -205,3 +232,10 @@ jobs:
             --token "${GH_TOKEN}" \
             --api-root "${GITHUB_API_URL}" \
             --require-github-verification
+
+      - name: Validate merge-group release completion
+        if: github.event_name == 'merge_group'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: bash ./.github/scripts/merge-group-release-gate.sh completion

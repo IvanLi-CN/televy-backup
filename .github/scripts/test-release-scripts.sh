@@ -4,6 +4,7 @@ set -euo pipefail
 root_dir="$(git rev-parse --show-toplevel)"
 
 bash -n "$root_dir/.github/scripts/label-gate.sh"
+bash -n "$root_dir/.github/scripts/merge-group-release-gate.sh"
 python3 -m py_compile \
   "$root_dir/.github/scripts/release_chain.py" \
   "$root_dir/.github/scripts/release_reservation.py" \
@@ -52,15 +53,19 @@ assert contract["helper_bootstrap"]["terminal_states_before_resolution"] == ["pu
 assert contract["helper_bootstrap"]["immutable_source_artifact"]["name"] == "snapshot-helper-source"
 assert contract["helper_bootstrap"]["immutable_source_artifact"]["release_redownload_after_resolve"] is False
 assert contract["identity_refs"]["write_policy"] == "append-only-create"
-assert contract["identity_refs"]["state_order"] == "bound-before-consumed;released-only-when-unbound"
+assert contract["identity_refs"]["state_order"] == "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound"
 assert contract["identity_refs"]["receipt_validation"] == "independently-verify-reservation-provenance"
 assert contract["recovery"]["dispatch_requires_existing_bound"] is True
+for gate in ("label_gate", "completion"):
+    scheduling = contract["required_gate_scheduling"][gate]
+    assert scheduling["queue"] == "max"
+    assert scheduling["cancel_in_progress"] is False
 
 workflow_text = "\n".join(
     (root / ".github/workflows" / name).read_text(encoding="utf-8")
     for name in ("release-preparation.yml", "release-completion.yml", "release.yml")
 )
-for forbidden in ("GPG", "release-backfill", "backfill", "queue"):
+for forbidden in ("GPG", "release-backfill", "backfill"):
     assert forbidden not in workflow_text, forbidden
 assert "createCommitOnBranch" in workflow_text
 assert "expectedHeadOid" in workflow_text

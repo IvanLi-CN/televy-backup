@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "kind": "version-impact-record",
+  "change": {
+    "description": "Align TelevyBackup release identity, required gates, and failure notification with the installed release Policy Skills.",
+    "release_unit_description": "TelevyBackup release identity, label, quality-gate, and failure-notification implementation and policy surfaces.",
+    "affected_contracts": [
+      "release-policy"
+    ]
+  },
+  "classification": {
+    "allowed_impacts": [
+      "patch",
+      "minor",
+      "major"
+    ],
+    "planned": {
+      "impact": "patch",
+      "reasoning": "The change affects checked-in delivery policy and workflow enforcement only; it does not change the application API or persisted application data format.",
+      "assessed_at": "2026-09-14T00:00:00Z",
+      "evidence": [
+        ".github/release-contract.json",
+        ".github/quality-gates.json"
+      ]
+    },
+    "current": {
+      "impact": "patch",
+      "scope_drift": {
+        "detected": false,
+        "description": "No scope drift; the approved release-policy alignment includes workflow enforcement, immutable identity resolution, and required-check execution."
+      },
+      "reasoning": "The implementation changes only CI/release workflow behavior and notification provenance; it does not alter product runtime behavior or persisted application state.",
+      "reassessed_at": "2026-09-14T00:00:00Z",
+      "evidence": [
+        ".github/pr-label-release.json",
+        ".github/workflows/release.yml",
+        ".github/workflows/notify-release-failure.yml",
+        ".github/workflows/label-gate.yml",
+        ".github/workflows/release-completion.yml",
+        ".github/quality-gates.json",
+        ".github/scripts/test-release-failure-context.sh",
+        ".github/scripts/test-release-failure-context.py",
+        ".github/scripts/test-release-workflows.sh",
+        "docs/specs/product-version-release-chain/SPEC.md",
+        "docs/specs/release-failure-telegram-alerts/SPEC.md"
+      ]
+    },
+    "verified": {
+      "impact": "patch",
+      "reasoning": "Verified as a patch-level delivery-policy change: public API is unchanged and no persistent application state is introduced or migrated.",
+      "verified_at": "2026-09-14T00:00:00Z",
+      "evidence": [
+        "skills-lock.json",
+        ".agents/skills/quality-gates/SKILL.md",
+        ".agents/skills/pr-label-release/SKILL.md",
+        ".agents/skills/release-failure-notification/SKILL.md",
+        ".github/workflows/release.yml",
+        ".github/workflows/notify-release-failure.yml",
+        ".github/workflows/label-gate.yml",
+        ".github/workflows/release-completion.yml",
+        ".github/scripts/test-release-failure-context.py"
+      ]
+    }
+  },
+  "compatibility_evidence": {
+    "public_api": {
+      "change": "none",
+      "supported_consumer_range": "All existing TelevyBackup consumers; no public API changes.",
+      "evidence": [
+        ".github/release-contract.json",
+        "docs/specs/product-version-release-chain/SPEC.md"
+      ]
+    },
+    "persistent_state": {
+      "applicable": false,
+      "state_description": "Not applicable; no application database, file format, queue, or device state is changed.",
+      "source_program_compatibility_range": "Not applicable",
+      "evidence": [
+        "docs/specs/product-version-release-chain/SPEC.md"
+      ]
+    }
+  },
+  "release_unit": {
+    "member_change_records": [
+      "release-policy-skill-adoption",
+      "release-identity-workflow-alignment"
+    ],
+    "maximum_verified_impact": "patch",
+    "calculation_evidence": [
+      ".github/pr-label-release.json",
+      "docs/specs/release-failure-telegram-alerts/transport-gate.json",
+      ".github/quality-gates.json",
+      ".github/workflows/release.yml",
+      ".github/workflows/notify-release-failure.yml"
+    ]
+  }
+}

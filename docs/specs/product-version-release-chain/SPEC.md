@@ -17,10 +17,13 @@ GitHub remote policy is reconciled only at the PR-ready delivery boundary.
 
 ### REQ-PVR-001: Final tags are the numeric baseline
 
-The highest eligible final product tag `vX.Y.Z` is the only numeric baseline. If no final tag
-exists, the virtual baseline is `0.0.0`. `VERSION`, Cargo manifests, environment variables and
-merge order are never successor inputs. `type:major`, `type:minor` and `type:patch` advance that
-baseline once; prerelease tags do not advance it.
+The highest eligible final product tag `vX.Y.Z` is the only numeric baseline. An eligible product
+tag must be an annotated tag created by `github-actions[bot]` under the protected
+`protected-release-automation` namespace and must point to a commit reachable from `main`.
+Foreign, lightweight, incomplete, or unreachable product tags fail closed. If no final tag exists,
+the virtual baseline is `0.0.0`. `VERSION`, Cargo manifests, environment variables and merge order
+are never successor inputs. `type:major`, `type:minor` and `type:patch` advance that baseline once;
+prerelease tags do not advance it.
 
 ### REQ-PVR-002: Channels have one formal grammar
 
@@ -43,7 +46,10 @@ Before VERSION preparation, the trusted controller creates
 source SHA and whose tree equals the source tree. Its trailers record reservation id, owner, claim
 key, boundary token, version, channel, and `claimed` state. First creation wins; an identical claim
 is idempotent; foreign ownership, stale state, provenance mismatch and tag conflict fail closed.
-No reservation or receipt ref is updated, deleted, or force-pushed. Receipt creation independently
+Before the first `bound` or explicitly confirmed `released` transition, the controller also creates
+the immutable arbitration ref `refs/tags/release-decision/v<version>`. First decision creation wins;
+a decision for the other state or identity fails closed. No reservation, decision, or receipt ref is
+updated, deleted, or force-pushed. Receipt creation independently
 re-verifies reservation parent/tree/trailers; `bound` must exist before `consumed`, while `released`
 is allowed only for an unbound claim with explicit maintainer confirmation.
 
@@ -85,7 +91,9 @@ scripts, while packaging and publication remain bound to the recovered merge ide
 
 Each resolved run writes and uploads `release-intent.json` containing PR/source/merge SHA, mode,
 covered merge, type/channel/version/tag, helper source mode/tag, all reservation fields, provenance,
-artifact names, run URL and recovery instruction. Reused helper resolution also uploads the exact
+artifact names, `run_id`, `run_attempt`, run URL and recovery instruction. The failure notifier accepts
+the snapshot only when both run fields match the failed `Release Product` workflow attempt; otherwise
+it fails closed and reconstructs only from immutable repository facts. Reused helper resolution also uploads the exact
 Universal DMG, `BUILD-MANIFEST.json`, and `SHA256SUMS` as the immutable `snapshot-helper-source`
 workflow artifact consumed by every macOS build/assembly job. It is an Actions artifact snapshot, not
 product code and not the only fact source. Recovery reconstructs identity from immutable Git refs,
@@ -96,6 +104,16 @@ notification distinguishes publish failure, no-identity and resolver error; unre
 never fabricates a version, tag, or recovery command.
 
 The release-owning agent MUST report successful publication directly to the owner, and Release Product MUST NOT create or update a result comment on the source PR.
+
+### REQ-PVR-009: Required gates preserve queued evaluations
+
+`Release intent label gate` and `Release completion` are required PR gates and use a per-PR
+non-preemptive `queue: max` concurrency policy. They MUST NOT use `cancel-in-progress: true`.
+`Release completion` MUST fetch the current pull request through the GitHub API at execution time,
+verify that its open head and base still match the event-bound SHAs, and pass that current labels
+snapshot to the validator. After waiting for source checks, it MUST repeat the head/base and labels
+validation immediately before invoking the completion validator. Event-payload labels are trigger
+metadata, not an authoritative input for a queued completion evaluation.
 
 ## Verification
 
@@ -123,9 +141,9 @@ independent helper bootstrap state, and no automatic history backfill.
 
 ### VER-PVR-005
 
-Covers: REQ-PVR-008. Failure-context and workflow contract tests verify locked identity payloads,
-no-identity/resolver-error distinction, unresolved identity fail-closed behavior, and intent artifact
-generation.
+Covers: REQ-PVR-008, REQ-PVR-009. Failure-context and workflow contract tests verify locked identity
+payloads, no-identity/resolver-error distinction, unresolved identity fail-closed behavior, intent
+artifact generation, required-gate scheduling, and current PR label revalidation.
 
 ## Verification Map
 
@@ -136,6 +154,7 @@ generation.
 | REQ-PVR-005 | VER-PVR-003 |
 | REQ-PVR-006, 007 | VER-PVR-004 |
 | REQ-PVR-008 | VER-PVR-005 |
+| REQ-PVR-009 | `.github/scripts/test-release-workflows.sh` |
 
 ## Acceptance evidence
 
@@ -146,6 +165,7 @@ generation.
 - `.github/scripts/test-release-preparation.sh`
 - `.github/scripts/test-release-completion.sh`
 - `.github/scripts/test-release-workflows.sh`
+- `.github/scripts/test-release-workflow-execution.sh`
 - `.github/scripts/test-release-helper.sh`
 - `.github/scripts/test-package-scripts.sh`
 - `.github/quality-gates.json`

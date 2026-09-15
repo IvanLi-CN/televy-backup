@@ -1,0 +1,434 @@
+{
+  "schema_version": 2,
+  "policy": {
+    "source_of_truth": "pull-request-labels",
+    "trusted_gate_workflow": "Label Gate",
+    "release_workflow": "Release",
+    "failure_notification_workflow": "Notify release failure",
+    "label_contract": {
+      "type_labels": [
+        "type:major",
+        "type:minor",
+        "type:patch",
+        "type:docs",
+        "type:skip"
+      ],
+      "product_types": [
+        "type:major",
+        "type:minor",
+        "type:patch"
+      ],
+      "non_product_types": [
+        "type:docs",
+        "type:skip"
+      ],
+      "channel_labels": [
+        "channel:prod",
+        "channel:rc",
+        "channel:beta",
+        "channel:dev"
+      ],
+      "product_channel_cardinality": "exactly-one",
+      "non_product_channel": "forbidden",
+      "unknown_or_legacy_values": "fail"
+    },
+    "version_contract": {
+      "version_file": "VERSION",
+      "numeric_baseline": "highest-eligible-final-tag",
+      "eligible_final_tag_pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+      "version_patterns": {
+        "final": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$",
+        "prerelease": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)-(beta|rc|dev)\\.[1-9][0-9]*$"
+      },
+      "eligible_final_tag_requires_main_reachability": true,
+      "eligible_final_tag_owner": "protected-release-automation",
+      "empty_history_baseline": "0.0.0",
+      "formats": {
+        "channel:prod": "<base>",
+        "channel:beta": "<base>-beta.N",
+        "channel:rc": "<base>-rc.N",
+        "channel:dev": "<base>-dev.N"
+      },
+      "base_operations": {
+        "type:major": "(X+1).0.0",
+        "type:minor": "X.(Y+1).0",
+        "type:patch": "X.Y.(Z+1)"
+      },
+      "prerelease_sequence": "max-published-sequence-plus-one-within-same-base-and-channel",
+      "first_prerelease_sequence": 1,
+      "prerelease_advances_final_baseline": false,
+      "tag_format": "v<version>"
+    },
+    "release_identity": {
+      "fields": [
+        "merge_commit_sha",
+        "version",
+        "channel",
+        "tag"
+      ],
+      "one_per_merge_sha_version_channel": true,
+      "identity_claim_key": "pull_request_number+source_sha+type+channel",
+      "post_merge_identity_key": "merge_commit_sha+version+channel",
+      "one_per_merge_boundary": true,
+      "duplicate_merge_boundary": "reuse-existing-identity-or-fail-closed",
+      "reservation_claim": "atomic-compare-and-claim",
+      "reservation_lifecycle": {
+        "id_field": "reservation_id",
+        "owner_field": "reservation_owner",
+        "claim_key_field": "reservation_claim_key",
+        "boundary_token_field": "pre_merge_boundary_token",
+        "identity_fields": [
+          "version",
+          "channel",
+          "reservation_merge_commit_sha"
+        ],
+        "state_field": "reservation_state",
+        "states": [
+          "claimed",
+          "bound",
+          "consumed",
+          "released"
+        ],
+        "pre_merge_retry_requires_state": "claimed",
+        "claimed_requires_reservation_merge_commit_sha_null": true,
+        "recovery_requires_state": "bound",
+        "merge_binding_transition": "mainline-release-atomic-claimed-to-bound-when-reservation_merge_commit_sha-is-recorded-and-pre_merge_boundary_token-matches",
+        "consumption_transition": "atomic-bound-to-consumed-after-publication-completes",
+        "release_transition": "atomic-claimed-to-released-only-if-reservation_merge_commit_sha-is-null-and-pre_merge_boundary_token-is-not-merged",
+        "released_reservation_recovery": "forbidden",
+        "merge_binding": "mainline-release-atomic-claimed-to-bound-when-reservation_merge_commit_sha-is-recorded-and-pre_merge_boundary_token-matches"
+      },
+      "tag_ownership": {
+        "reserve_before_preparation": true,
+        "same_sha_existing_tag_requires_owner": true,
+        "same_sha_reservation_requires_owner": true,
+        "same_sha_existing_tag": "same-sha-recovery-only",
+        "same_sha_unconsumed_reservation": "same-sha-recovery-only",
+        "different_sha_existing_tag": "fail-closed",
+        "foreign_tag_owner": "fail-closed",
+        "incomplete_provenance": "fail-closed",
+        "label_channel_mismatch": "fail-closed",
+        "unverified_signature": "fail-closed"
+      },
+      "recovery_reuses_identity": true,
+      "recovery_reallocates_version": false
+    },
+    "channel_publication": {
+      "channel:prod": {
+        "release_class": "final",
+        "deploy_surface": "prod",
+        "github_release_prerelease": false,
+        "updates_default_surface": true,
+        "updates_stable_latest": true,
+        "image_tag_policy": "exact-version-tag"
+      },
+      "channel:rc": {
+        "release_class": "prerelease",
+        "deploy_surface": "rc",
+        "github_release_prerelease": true,
+        "updates_default_surface": false,
+        "updates_stable_latest": false,
+        "image_tag_policy": "exact-version-tag-only"
+      },
+      "channel:beta": {
+        "release_class": "prerelease",
+        "deploy_surface": "beta",
+        "github_release_prerelease": true,
+        "updates_default_surface": false,
+        "updates_stable_latest": false,
+        "image_tag_policy": "exact-version-tag-only"
+      },
+      "channel:dev": {
+        "release_class": "prerelease",
+        "deploy_surface": "dev",
+        "github_release_prerelease": true,
+        "updates_default_surface": false,
+        "updates_stable_latest": false,
+        "image_tag_policy": "exact-version-tag-only"
+      }
+    },
+    "contract_update_scope": {
+      "task_owned_surfaces": [
+        "CONTEXT.md",
+        "docs/adr/0003-tag-derived-release-baseline.md",
+        "TOPIC.md",
+        "pr-label-release.example.json"
+      ],
+      "real_release_mutations": "forbidden"
+    },
+    "legacy_migrations": {
+      "accepted_only_for_migration": true,
+      "accepted_by_new_gate": false,
+      "map": {
+        "type:none": "type:skip",
+        "channel:stable": "channel:prod",
+        "channel:canary": "channel:dev"
+      }
+    },
+    "failure_notification_transport_gate": {
+      "selection_required": true,
+      "accepted_selection_evidence": [
+        "checked-in-project-contract",
+        "explicit-owner-decision"
+      ],
+      "when_unselected": "block-rollout",
+      "implicit_external_notifier": "forbidden",
+      "missing_selected_configuration": "fail"
+    },
+    "failure_notification": {
+      "required_identity_fields": [
+        "pull_request",
+        "source_sha",
+        "merge_commit_sha",
+        "type",
+        "channel",
+        "version",
+        "tag",
+        "tag_target_sha",
+        "tag_owner",
+        "reservation_id",
+        "reservation_owner",
+        "reservation_state",
+        "reservation_merge_commit_sha",
+        "provenance_verified",
+        "signature_verified",
+        "branch_head",
+        "artifact_names",
+        "run_url",
+        "recovery_instruction"
+      ],
+      "recovery_evidence_any_of": [
+        [
+          "tag",
+          "tag_target_sha",
+          "tag_owner"
+        ],
+        [
+          "reservation_id",
+          "reservation_owner",
+          "reservation_state:bound",
+          "reservation_merge_commit_sha"
+        ]
+      ]
+    },
+    "unknown_release_labels": "fail",
+    "duplicate_release_labels": "fail",
+    "missing_required_release_labels": "fail",
+    "release_identity_modes": {
+      "normal_product_pr_preparation": {
+        "allowed": true,
+        "input": "unmerged-product-pr-after-full-pr-ci-and-label-gate",
+        "output": "same-pr-branch-child-commit-that-modifies-version-only",
+        "required_provenance": [
+          "source-sha",
+          "product-version",
+          "channel",
+          "frozen-release-intent",
+          "signed-trailers",
+          "branch-head",
+          "pr-base",
+          "source-ci",
+          "tag-reservation",
+          "tag-owner",
+          "signature-verified"
+        ],
+        "forbidden": [
+          "post-merge-preparation",
+          "direct-main-write",
+          "product-code-change",
+          "multiple-parent-commit"
+        ]
+      },
+      "version_only_release_pr": {
+        "allowed": true,
+        "implementation_status": "proposal-requires-project-workflow-and-test-adoption",
+        "recommended_when": [
+          "exactly-one-unprepared-product-boundary-on-mainline",
+          "no-preparation-identity-for-that-boundary",
+          "no-release-identity-for-that-boundary"
+        ],
+        "allows_explicit_nonempty_pull_request": true,
+        "change_scope": [
+          "VERSION"
+        ],
+        "required_checks": [
+          "full-pr-ci",
+          "Label Gate",
+          "tag-reservation",
+          "Release completion"
+        ],
+        "required_provenance": [
+          "covered-product-merge-sha",
+          "product-version",
+          "channel",
+          "frozen-release-intent",
+          "release-mode:version-only-release-pr",
+          "signed-trailers",
+          "branch-head",
+          "pr-base",
+          "source-ci",
+          "tag-reservation",
+          "tag-owner",
+          "signature-verified"
+        ],
+        "release_identity": "new-version-only-release-pr-merge-sha-version-channel",
+        "release_identity_is_mode_name": true,
+        "release_identity_semantics": "canonical-fields-below",
+        "release_identity_fields": [
+          "merge_commit_sha",
+          "version",
+          "channel"
+        ],
+        "forbidden": [
+          "empty-pull-request",
+          "same-sha-recovery",
+          "historical-backfill",
+          "direct-main-write",
+          "tag-rewrite",
+          "multiple-product-pr-aggregation",
+          "release-queue",
+          "release-train"
+        ]
+      },
+      "same_sha_recovery": {
+        "allowed": true,
+        "input": "existing-immutable-merged-sha-version-channel-identity-with-same-sha-tag-or-unconsumed-reservation-and-incomplete-publication",
+        "output": "retry-publication-for-the-same-sha-version-channel-identity",
+        "entrypoint": "workflow_dispatch",
+        "requires": [
+          "same-sha-tag-or-unconsumed-reservation",
+          "verified-tag-owner-or-reservation-owner",
+          "complete-provenance"
+        ],
+        "tag_branch_requires": [
+          "same-sha-tag",
+          "verified-tag-owner"
+        ],
+        "reservation_branch_requires": [
+          "reservation-id-and-bound-state",
+          "verified-reservation-owner",
+          "reservation-claim-key-matches",
+          "reservation-version-and-channel-match",
+          "reservation-merge-sha-equals-recovery-sha"
+        ],
+        "forbidden": [
+          "VERSION-write",
+          "new-pull-request",
+          "successor-version",
+          "preparation-rebuild",
+          "tag-rewrite",
+          "other-pr-merge"
+        ]
+      },
+      "historical_backfill": {
+        "allowed": false,
+        "output": "non-release-audit-or-history-record-only",
+        "forbidden": [
+          "VERSION-write",
+          "version-allocation",
+          "tag-or-asset-publication",
+          "workflow-dispatch-release-entrypoint"
+        ]
+      },
+      "release_queue_or_train": {
+        "allowed": false,
+        "output": "fail-closed-before-version-allocation",
+        "forbidden": [
+          "next-pending-selection",
+          "multi-product-pr-aggregation",
+          "product-pr-reordering",
+          "version-reallocation"
+        ]
+      }
+    },
+    "persist_release_intent": {
+      "mode": "per-release-identity-snapshot",
+      "snapshot_artifact": "release-intent.json",
+      "recovery_entrypoint": "workflow_dispatch",
+      "historical_backfill": "forbidden",
+      "queue_strategy": "forbidden",
+      "release_train": "forbidden"
+    }
+  },
+  "label_groups": [
+    {
+      "name": "type",
+      "prefix": "type:",
+      "required": true,
+      "cardinality": "exactly-one",
+      "allowed": [
+        "type:major",
+        "type:minor",
+        "type:patch",
+        "type:docs",
+        "type:skip"
+      ]
+    },
+    {
+      "name": "channel",
+      "prefix": "channel:",
+      "required": false,
+      "cardinality": "exactly-one-for-product-types",
+      "required_when_type_in": [
+        "type:major",
+        "type:minor",
+        "type:patch"
+      ],
+      "forbidden_when_type_in": [
+        "type:docs",
+        "type:skip"
+      ],
+      "allowed": [
+        "channel:prod",
+        "channel:rc",
+        "channel:beta",
+        "channel:dev"
+      ]
+    },
+    {
+      "name": "component",
+      "prefix": "component:",
+      "required": false,
+      "cardinality": "zero-or-more",
+      "allowed": [
+        "component:app",
+        "component:web",
+        "component:firmware",
+        "component:docs"
+      ]
+    }
+  ],
+  "release_snapshot": {
+    "fields": [
+      "pull_request",
+      "source_sha",
+      "merge_commit_sha",
+      "head_sha",
+      "branch_head",
+      "release_mode",
+      "preparation_commit_sha",
+      "covered_product_merge_sha",
+      "labels",
+      "type",
+      "channel",
+      "components",
+      "version",
+      "tag",
+      "tag_target_sha",
+      "tag_owner",
+      "reservation_id",
+      "reservation_owner",
+      "reservation_state",
+      "reservation_merge_commit_sha",
+      "provenance_verified",
+      "signature_verified",
+      "artifact_names",
+      "run_url",
+      "recovery_instruction"
+    ]
+  },
+  "required_quality_gate": {
+    "check_name": "Label Gate",
+    "quality_gates_declaration": ".github/quality-gates.json"
+  }
+}

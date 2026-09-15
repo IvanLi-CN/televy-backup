@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "transport_selection": {
+    "selection_status": "selected",
+    "transport": "Oidrune reusable workflow",
+    "selection_evidence": [
+      "docs/specs/release-failure-telegram-alerts/SPEC.md",
+      "docs/specs/release-failure-telegram-alerts/IMPLEMENTATION.md"
+    ],
+    "transport_owner": "IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b",
+    "configuration_owner": ".github/workflows/notify-release-failure.yml",
+    "required_secrets": [],
+    "selection_required_before_rollout": true,
+    "accepted_selection_evidence": [
+      "checked-in-project-contract",
+      "explicit-owner-decision"
+    ],
+    "required_record": [
+      "selection_evidence",
+      "transport_owner",
+      "configuration_owner",
+      "required_secrets"
+    ],
+    "when_unselected": "block-rollout",
+    "implicit_external_notifier": "forbidden",
+    "missing_selected_configuration": "fail"
+  }
+}
