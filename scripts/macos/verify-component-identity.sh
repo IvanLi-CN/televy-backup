@@ -118,6 +118,7 @@ if [[ -n "$manifest" ]]; then
   reference_legacy_artifact_sha="$(artifact_sha "$reference" raw)"
   python3 - "$manifest" "$reference_sha256" "$reference_artifact_sha" "$reference_legacy_artifact_sha" "$reference_cdhash" "$reference_requirement" "$candidate_metadata" <<'PY'
 import json
+import re
 import sys
 
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
@@ -130,7 +131,15 @@ require(
     component["artifact_sha256"] in {sys.argv[3], sys.argv[4]},
     "Snapshot Access bundle identity does not match the manifest",
 )
-require(component["cdhash"] == sys.argv[5], "Snapshot Access CodeDirectory identity does not match the manifest")
+requirement_cdhashes = {
+    value.lower()
+    for value in re.findall(r'\bcdhash\s+H"([0-9A-Fa-f]+)"', sys.argv[6])
+}
+require(
+    requirement_cdhashes
+    and {component["cdhash"].lower(), sys.argv[5].lower()} <= requirement_cdhashes,
+    "Snapshot Access CodeDirectory identity does not match the manifest requirement",
+)
 require(
     component["designated_requirement"] == sys.argv[6],
     "Snapshot Access designated requirement does not match the manifest",

@@ -192,11 +192,16 @@ if [[ -d "$app" ]]; then
     exit 1
   }
   python3 - "$asset_dir/BUILD-MANIFEST.json" "$root_helper_sha256" "$root_helper_artifact_sha256" "$root_helper_cdhash" "$root_helper_requirement" <<'PY'
-import json, sys
+import json, re, sys
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_mount_helper"]
 assert component["sha256"] == sys.argv[2]
 assert component["artifact_sha256"] == sys.argv[3]
-assert component["cdhash"] == sys.argv[4]
+requirement_cdhashes = {
+    value.lower()
+    for value in re.findall(r'\bcdhash\s+H"([0-9A-Fa-f]+)"', sys.argv[5])
+}
+assert requirement_cdhashes
+assert {component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes
 assert component["designated_requirement"] == sys.argv[5]
 PY
   launch_agent="$app/Contents/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist"
@@ -232,11 +237,16 @@ if [[ -d "$access_app" ]]; then
   actual_requirement="$(codesign -d -r- "$access_app" 2>&1 | sed -n '/designated =>/p')"
   access_metadata="$("$access_app/Contents/MacOS/televybackup-snapshot-access" --component-metadata)"
   python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_artifact_sha256" "$actual_cdhash" "$actual_requirement" "$access_metadata" <<'PY'
-import json, sys
+import json, re, sys
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
 assert component["sha256"] == sys.argv[2]
 assert component["artifact_sha256"] == sys.argv[3]
-assert component["cdhash"] == sys.argv[4]
+requirement_cdhashes = {
+    value.lower()
+    for value in re.findall(r'\bcdhash\s+H"([0-9A-Fa-f]+)"', sys.argv[5])
+}
+assert requirement_cdhashes
+assert {component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes
 assert component["designated_requirement"] == sys.argv[5]
 metadata = json.loads(sys.argv[6])
 assert component["bundle_id"] == metadata["bundleId"]
@@ -328,11 +338,16 @@ verify_dmg_helper_identity() (
   }
   if [[ "$require_manifest_identity" == true ]]; then
     python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_artifact_sha256" "$actual_cdhash" "$actual_requirement" "$access_metadata" <<'PY'
-import json, sys
+import json, re, sys
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
 assert component["sha256"] == sys.argv[2]
 assert component["artifact_sha256"] == sys.argv[3]
-assert component["cdhash"] == sys.argv[4]
+requirement_cdhashes = {
+    value.lower()
+    for value in re.findall(r'\bcdhash\s+H"([0-9A-Fa-f]+)"', sys.argv[5])
+}
+assert requirement_cdhashes
+assert {component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes
 assert component["designated_requirement"] == sys.argv[5]
 metadata = json.loads(sys.argv[6])
 assert component["bundle_id"] == metadata["bundleId"]
