@@ -18,6 +18,7 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 - **Snapshot Access app**: the private embedded user-session `LSUIElement` bundle labeled `com.ivan.televybackup.snapshot-access`; the user grants FDA to its exact path.
 - **Private Access helper**: the Snapshot Access app at `TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app`; it is not a second user-installable product.
 - **Authorization-stable helper artifact**: a helper bundle reused byte-for-byte across ordinary main-app releases, including across product-version boundaries, with its SHA-256, CodeDirectory hash, and designated requirement.
+- **Universal CodeDirectory identity**: the observed `codesign` CDHash for a Universal 2 helper may be either architecture slice's hash; the manifest hash and observed hash MUST both occur in the complete designated requirement's CDHash set.
 - **Snapshot mount helper**: the separate root-only `televybackup-snapshot-mount-helper` installed as a system LaunchDaemon; it only mounts/unmounts and UUID-cleans APFS leases.
 - **Environment**: the exact config and data directory pair passed to the daemon.
 - **Universal 2**: a Mach-O binary containing both arm64 and x86_64 slices.
@@ -66,8 +67,13 @@ Product MUST prefer the current product-version RC1, then the artifact named by
 `snapshot-components.lock.json`'s `bootstrap_release_tag`, then a published prerelease Release
 discovered by its verified `BUILD-MANIFEST.json`. Every reused source MUST provide its Universal
 DMG, `BUILD-MANIFEST.json`, and `SHA256SUMS`; its component metadata, executable SHA-256, complete
-artifact digest, CodeDirectory hash, and designated requirement MUST match the lock and downloaded
-bundle. The resolve job MUST download and verify those three source assets, including the tag-bound
+artifact digest, and complete designated requirement MUST match the lock and downloaded bundle. For
+Universal 2 helpers, the manifest CDHash and the hash selected by the verifying runner MUST both be
+members of that designated requirement's CDHash set. A historical helper manifest MAY expose a
+legacy bundle digest alongside its canonical digest; RC acceptance MAY match either explicitly
+recorded digest, but MUST continue to require exact executable SHA-256, component metadata,
+protocol, CDHash-set, and designated-requirement identity. The resolve job MUST download and verify those
+three source assets, including the tag-bound
 source commit and manifest/checksum relationships, then upload the exact files as the immutable
 `snapshot-helper-source` workflow artifact. Native build and assembly jobs MUST consume that artifact
 and MUST NOT redownload helper assets from the Release. Any unavailable, incomplete, or invalid
@@ -102,8 +108,9 @@ The protected evidence object MUST contain `schema_version: 1`, `product`, `stab
 `rc1_tag`, `rc2_tag`, `legacy_registration_migrated`, `strict_backup_rc1`,
 `strict_backup_rc2`, `fda_grants: 1`, `fda_regrant_requested: false`,
 `root_mount_helper_unchanged`, and `snapshot_access`/`root_mount_helper` identity objects. The
-Snapshot Access identity includes the SHA-256, complete artifact digest, CDHash, and designated
-requirement recorded in the final manifest. The root helper identity in that manifest is a bundled
+Snapshot Access identity includes the SHA-256, complete artifact digest, the Universal CodeDirectory
+identity, and complete designated requirement recorded in the final manifest. The root helper identity
+in that manifest is a bundled
 compatibility reference; the evidence MUST include `root_mount_helper.rc1` and `.rc2` observations
 from its stable system path and those two identities MUST be equal.
 

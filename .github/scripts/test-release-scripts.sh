@@ -282,8 +282,8 @@ verifier = root / ".github/scripts/verify-macos-rc-acceptance.py"
 identity = {
     "sha256": "",
     "artifact_sha256": "",
-    "cdhash": "helper-cdhash",
-    "designated_requirement": "designated => identifier \"com.ivan.televybackup.snapshot-access\"",
+    "cdhash": "1111111111111111111111111111111111111111",
+    "designated_requirement": "designated => identifier \"com.ivan.televybackup.snapshot-access\" and (cdhash H\"1111111111111111111111111111111111111111\" or cdhash H\"2222222222222222222222222222222222222222\")",
     "bundle_id": "com.ivan.televybackup.snapshot-access",
     "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
     "binary": "Contents/MacOS/televybackup-snapshot-access",
@@ -342,6 +342,7 @@ if [ "$1" = attach ]; then
   done
   mkdir -p "$mount_point"
   cp -R "${source}.tree/TelevyBackup.app" "$mount_point/"
+  chmod 600 "$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/Info.plist"
 elif [ "$1" = detach ]; then
   rm -rf "$2/TelevyBackup.app"
 else
@@ -370,9 +371,9 @@ fi
 set -eu
 if [ "$1" = -dvvv ]; then
   echo 'Signature=adhoc' >&2
-  echo 'CDHash=helper-cdhash' >&2
+  echo 'CDHash=2222222222222222222222222222222222222222' >&2
 elif [ "$1" = -d ] && [ "$2" = -r- ]; then
-  echo 'designated => identifier "com.ivan.televybackup.snapshot-access"' >&2
+  echo 'designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")' >&2
 else
   exit 2
 fi
@@ -468,6 +469,23 @@ fi
         "--rc1-tag", "v1.0.0-rc.1", "--rc2-tag", "v1.0.0-rc.2",
         "--stable-source-commit", "stable-source", *rc_args,
     ]
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence["root_mount_helper"]["rc2"]["cdhash"] = "2222222222222222222222222222222222222222"
+    common[3] = json.dumps(evidence)
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    evidence["root_mount_helper"]["rc2"] = identity.copy()
+    common[3] = json.dumps(evidence)
+    info_path = helper_paths[0] / "Contents/Info.plist"
+    original_mode = info_path.stat().st_mode & 0o777
+    info_path.chmod(0o600)
+    legacy_artifact = artifact_sha256(helper_paths[0])
+    info_path.chmod(original_mode)
+    stable_manifest["components"]["snapshot_access"]["artifact_sha256"] = legacy_artifact
+    evidence["snapshot_access"]["artifact_sha256"] = legacy_artifact
+    stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    common[3] = json.dumps(evidence)
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     lipo_path.write_text(
