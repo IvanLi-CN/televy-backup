@@ -18,7 +18,7 @@ done
 root_dir="$(git rev-parse --show-toplevel)"
 version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
 python3 - "$version" "$asset_dir" "$source_commit" "$packaging_commit" "$output" <<'PY'
-import hashlib, json, os, platform, subprocess, sys
+import hashlib, json, os, platform, stat as stat_module, subprocess, sys
 version, asset_dir, source, packaging, output = sys.argv[1:]
 names = sorted(name for name in os.listdir(asset_dir) if name.endswith(('.dmg', '.tar.gz')))
 assets = []
@@ -46,9 +46,16 @@ def artifact_digest(path):
         for name in directories + files:
             entry = os.path.join(root, name)
             relative = os.path.join(relative_root, name)
-            stat = os.lstat(entry)
+            entry_stat = os.lstat(entry)
+            if stat_module.S_ISLNK(entry_stat.st_mode):
+                permissions = 0o777
+            elif stat_module.S_ISDIR(entry_stat.st_mode) or entry_stat.st_mode & 0o111:
+                permissions = 0o755
+            else:
+                permissions = 0o644
+            mode = (entry_stat.st_mode & ~0o777) | permissions
             digest.update(b'entry\0' + relative.encode() + b'\0')
-            digest.update(str(stat.st_mode).encode() + b'\0')
+            digest.update(str(mode).encode() + b'\0')
             if os.path.islink(entry):
                 digest.update(b'link\0' + os.readlink(entry).encode() + b'\0')
             elif os.path.isfile(entry):

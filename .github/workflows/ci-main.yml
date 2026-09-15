@@ -55,6 +55,9 @@ jobs:
       - name: Release script contract tests
         run: bash ./.github/scripts/test-release-scripts.sh
 
+      - name: Component identity fixture tests
+        run: bash ./.github/scripts/test-component-identity.sh
+
       - name: Release chain fixture tests
         run: |
           bash ./.github/scripts/test-release-chain.sh

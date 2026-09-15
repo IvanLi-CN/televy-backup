@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat as stat_module
 import subprocess
 import sys
 import tempfile
@@ -55,9 +56,16 @@ def artifact_sha256(path: Path) -> str:
         for name in directories + files:
             entry = Path(root) / name
             relative = os.path.join(relative_root, name)
-            stat = os.lstat(entry)
+            entry_stat = os.lstat(entry)
+            if stat_module.S_ISLNK(entry_stat.st_mode):
+                permissions = 0o777
+            elif stat_module.S_ISDIR(entry_stat.st_mode) or entry_stat.st_mode & 0o111:
+                permissions = 0o755
+            else:
+                permissions = 0o644
+            mode = (entry_stat.st_mode & ~0o777) | permissions
             digest.update(b"entry\0" + relative.encode() + b"\0")
-            digest.update(str(stat.st_mode).encode() + b"\0")
+            digest.update(str(mode).encode() + b"\0")
             if os.path.islink(entry):
                 digest.update(b"link\0" + os.readlink(entry).encode() + b"\0")
             elif entry.is_file():

@@ -75,10 +75,14 @@ grep -F '[[ "$reference_artifact_sha" == "$candidate_artifact_sha" ]]' <<<"$iden
   echo "component identity verification must compare reference and candidate bundle digests" >&2
   exit 1
 }
-if grep -F 'assert component["artifact_sha256"]' <<<"$identity_text" >/dev/null; then
-  echo "component identity verification must not bind a mounted bundle mode digest to the source manifest" >&2
+grep -F 'reference_manifest_artifact_sha="$(artifact_sha "$reference" canonical)"' <<<"$identity_text" >/dev/null || {
+  echo "component identity verification must canonicalize mounted bundle modes" >&2
   exit 1
-fi
+}
+grep -F 'assert component["artifact_sha256"] == sys.argv[3]' <<<"$identity_text" >/dev/null || {
+  echo "component identity verification must bind the canonical bundle digest to the source manifest" >&2
+  exit 1
+}
 [[ "$verify_release_text" == *'one-time-bootstrap-universal-build'* ]] || {
   echo "release asset verifier must recognize the explicit helper bootstrap source" >&2
   exit 1

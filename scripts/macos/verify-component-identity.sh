@@ -26,9 +26,11 @@ candidate_binary="$candidate/Contents/MacOS/televybackup-snapshot-access"
 }
 
 artifact_sha() {
-  python3 - "$1" <<'PY'
+  python3 - "$1" "${2:-raw}" <<'PY'
 import hashlib, os, sys
+import stat as stat_module
 path = sys.argv[1]
+mode_policy = sys.argv[2]
 digest = hashlib.sha256()
 if os.path.isfile(path):
     with open(path, 'rb') as handle:
@@ -43,9 +45,18 @@ else:
         for name in directories + files:
             entry = os.path.join(root, name)
             relative = os.path.join(relative_root, name)
-            stat = os.lstat(entry)
+            entry_stat = os.lstat(entry)
+            mode = entry_stat.st_mode
+            if mode_policy == 'canonical':
+                if stat_module.S_ISLNK(mode):
+                    permissions = 0o777
+                elif stat_module.S_ISDIR(mode) or mode & 0o111:
+                    permissions = 0o755
+                else:
+                    permissions = 0o644
+                mode = (mode & ~0o777) | permissions
             digest.update(b'entry\0' + relative.encode() + b'\0')
-            digest.update(str(stat.st_mode).encode() + b'\0')
+            digest.update(str(mode).encode() + b'\0')
             if os.path.islink(entry):
                 digest.update(b'link\0' + os.readlink(entry).encode() + b'\0')
             elif os.path.isfile(entry):
@@ -100,19 +111,19 @@ if [[ -n "$manifest" ]]; then
   reference_cdhash="$(printf '%s\n' "$reference_signature" | awk -F= '/^cdhash=/{print $2}')"
   reference_sha256="$reference_sha"
   # A DMG mount can normalize bundle file modes differently on Intel and
-  # Apple Silicon. The source Release manifest is verified against the
-  # immutable DMG before extraction; here it is used for content/signature
-  # identity, while reference/candidate still require an exact local bundle
-  # digest match above.
-  python3 - "$manifest" "$reference_sha256" "$reference_cdhash" "$reference_requirement" "$candidate_metadata" <<'PY'
+  # Apple Silicon. The manifest identity uses canonical bundle modes, while
+  # reference/candidate still require an exact local bundle digest match.
+  reference_manifest_artifact_sha="$(artifact_sha "$reference" canonical)"
+  python3 - "$manifest" "$reference_sha256" "$reference_manifest_artifact_sha" "$reference_cdhash" "$reference_requirement" "$candidate_metadata" <<'PY'
 import json
 import sys
 
 component = json.load(open(sys.argv[1], encoding="utf-8"))["components"]["snapshot_access"]
 assert component["sha256"] == sys.argv[2]
-assert component["cdhash"] == sys.argv[3]
-assert component["designated_requirement"] == sys.argv[4]
-metadata = json.loads(sys.argv[5])
+assert component["artifact_sha256"] == sys.argv[3]
+assert component["cdhash"] == sys.argv[4]
+assert component["designated_requirement"] == sys.argv[5]
+metadata = json.loads(sys.argv[6])
 assert component["bundle_id"] == metadata["bundleId"]
 assert component["relative_path"] == metadata["relativePath"]
 assert component["component_version"] == metadata["componentVersion"]
