@@ -59,16 +59,10 @@ def required_identity(evidence, manifest, name: str, fields: tuple[str, ...]) ->
 def equal_identity(first, second, name: str, fields: tuple[str, ...]) -> None:
     if not isinstance(first, dict) or not isinstance(second, dict):
         fail(f"{name} RC identities must be objects")
-    first_requirement = required_string(first.get("designated_requirement"), f"{name}.rc1.designated_requirement")
-    second_requirement = required_string(second.get("designated_requirement"), f"{name}.rc2.designated_requirement")
     for field in fields:
         first_value = required_string(first.get(field), f"{name}.rc1.{field}")
         second_value = required_string(second.get(field), f"{name}.rc2.{field}")
-        if field == "cdhash":
-            if first_requirement != second_requirement:
-                fail(f"{name}.designated_requirement changed between RC1 and RC2")
-            validate_cdhash_identity(first_value, second_value, first_requirement, name)
-        elif first_value != second_value:
+        if first_value != second_value:
             fail(f"{name}.{field} changed between RC1 and RC2")
 
 

@@ -471,6 +471,12 @@ fi
     ]
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    evidence["root_mount_helper"]["rc2"]["cdhash"] = "2222222222222222222222222222222222222222"
+    common[3] = json.dumps(evidence)
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    evidence["root_mount_helper"]["rc2"] = identity.copy()
+    common[3] = json.dumps(evidence)
     info_path = helper_paths[0] / "Contents/Info.plist"
     original_mode = info_path.stat().st_mode & 0o777
     info_path.chmod(0o600)
