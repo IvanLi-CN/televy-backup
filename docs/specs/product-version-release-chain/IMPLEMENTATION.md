@@ -24,7 +24,9 @@
    `expectedHeadOid`.
 4. Release completion freezes the reservation and provenance, and production completion verifies
    the GitHub API signature state for the prepared commit. A normal PR merge creates the candidate's
-   merged identity; a version-only release PR creates a new identity for one covered old merge.
+   merged identity; a version-only release PR creates a new identity for one covered old merge. A
+   single-parent covered commit must be an authoritatively merged main PR result, and product tags
+   plus append-only identity refs must not already target it.
 5. Release Product verifies an existing published Release or consumed receipt as a terminal state
    before helper resolution. For an active release, it resolves and records either a verified helper
    Release for byte-identical reuse or an explicitly requested one-time bootstrap mode. Reused helper

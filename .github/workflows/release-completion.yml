@@ -66,6 +66,9 @@ jobs:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: git fetch --no-tags origin "${HEAD_SHA}"
 
+      - name: Fetch immutable release identity refs
+        run: git fetch --force --tags origin
+
       - name: Verify dispatched workflow comes from trusted main
         if: github.event_name == 'workflow_dispatch'
         run: test "${GITHUB_REF}" = "refs/heads/main"
@@ -82,13 +85,6 @@ jobs:
           prepared_json=''
           if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null)"; then
             verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
-          fi
-          product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
-          if [[ "${product_release}" == true ]]; then
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"
-            jq -e --arg commit "${HEAD_SHA}" \
-              '.sha == $commit and .commit.verification.verified == true' \
-              "${RUNNER_TEMP}/github-verification.json" >/dev/null
           fi
           deadline=$((SECONDS + 1800))
           while :; do
@@ -138,8 +134,17 @@ jobs:
               *) echo "unexpected source check state: ${state}" >&2; exit 1 ;;
             esac
           done
-          current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/final-pull-request.json"
+          current_head="$(jq -r '.head.sha' "${RUNNER_TEMP}/final-pull-request.json")"
           test "${current_head}" = "${HEAD_SHA}"
+          jq '.labels' "${RUNNER_TEMP}/final-pull-request.json" > "${RUNNER_TEMP}/labels.json"
+          product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
+          if [[ "${product_release}" == true ]]; then
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"
+            jq -e --arg commit "${HEAD_SHA}" \
+              '.sha == $commit and .commit.verification.verified == true' \
+              "${RUNNER_TEMP}/github-verification.json" >/dev/null
+          fi
           completion_args=(
             --repo-root .
             --commit "${HEAD_SHA}"
@@ -181,7 +186,15 @@ jobs:
           PY
             completion_args+=(--release-mode "${release_mode}")
             if [[ "${release_mode}" == version-only-release-pr ]]; then
-              completion_args+=(--covered-merge-sha "$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)")
+              covered_merge_sha="$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)"
+              gh api \
+                -H "Accept: application/vnd.github+json" \
+                "repos/${GITHUB_REPOSITORY}/commits/${covered_merge_sha}/pulls" \
+                > "${RUNNER_TEMP}/covered-merge-pulls.json"
+              completion_args+=(
+                --covered-merge-sha "${covered_merge_sha}"
+                --covered-merge-proof-json "${RUNNER_TEMP}/covered-merge-pulls.json"
+              )
             fi
           fi
           python3 .github/scripts/release_completion.py "${completion_args[@]}" \

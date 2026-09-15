@@ -92,8 +92,13 @@ assert_contains "completion GitHub verification argument" "$completion_text" "--
 assert_contains "completion product-only verification selector" "$completion_text" 'product_release='
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
-assert_contains "completion current PR head recheck" "$completion_text" 'current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '\''.head.sha'\'')"'
+assert_contains "completion current PR refetch" "$completion_text" 'final-pull-request.json'
+assert_contains "completion current PR head recheck" "$completion_text" 'current_head="$(jq -r '\''.head.sha'\'' "${RUNNER_TEMP}/final-pull-request.json")"'
 assert_contains "completion current PR head match" "$completion_text" 'test "${current_head}" = "${HEAD_SHA}"'
+assert_contains "completion final labels recheck" "$completion_text" 'jq '\''.labels'\'' "${RUNNER_TEMP}/final-pull-request.json" > "${RUNNER_TEMP}/labels.json"'
+assert_contains "completion immutable identity refs" "$completion_text" "git fetch --force --tags origin"
+assert_contains "completion covered PR association" "$completion_text" 'commits/${covered_merge_sha}/pulls'
+assert_contains "completion covered merge proof argument" "$completion_text" "--covered-merge-proof-json"
 assert_contains "completion workflow dispatch input" "$completion_text" "pr_number:"
 assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${pr_number}'
 assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/main'

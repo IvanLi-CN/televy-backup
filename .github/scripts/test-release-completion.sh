@@ -48,6 +48,25 @@ python3 "$root_dir/.github/scripts/release_preparation.py" \
   --reservation-json "$tmp_dir/reservation.json" --provenance github-native-verified >/dev/null
 prepared_sha="$(git -C "$repo_dir" rev-parse HEAD)"
 printf '{"sha":"%s","commit":{"verification":{"verified":true}}}\n' "$prepared_sha" > "$tmp_dir/github-verification.json"
+printf '[{"merge_commit_sha":"%s","merged_at":"2026-09-07T11:29:21Z","base":{"ref":"main","repo":{"full_name":"fixture/repo"}}}]\n' "$prepared_sha" > "$tmp_dir/prepared-pulls.json"
+python3 - "$root_dir" "$repo_dir" "$prepared_sha" "$tmp_dir/prepared-pulls.json" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+root, repo, covered, proof = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("release_completion", root / ".github/scripts/release_completion.py")
+assert spec and spec.loader
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.CHAIN.ROOT = repo
+try:
+    module.verify_version_only_covered_merge(covered.name, covered.name, proof, "fixture/repo")
+except module.CompletionError as error:
+    assert "already has a release identity" in str(error)
+else:
+    raise AssertionError("prepared single-parent covered commit was accepted")
+PY
 out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \
   --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
@@ -79,6 +98,77 @@ skip_out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \
   --commit "$source_sha" --base "$source_sha" --labels-json "$tmp_dir/skip-labels.json" --checks-json "$tmp_dir/skip-checks.json")"
 [[ "$skip_out" == *'"status": "skip"'* ]]
+
+squash_dir="$tmp_dir/squash"
+mkdir -p "$squash_dir"
+git -C "$squash_dir" init -q
+git -C "$squash_dir" config user.name fixture
+git -C "$squash_dir" config user.email fixture@example.com
+printf '0.9.2\n' > "$squash_dir/VERSION"
+printf 'base\n' > "$squash_dir/README"
+git -C "$squash_dir" add .
+git -C "$squash_dir" commit -qm "squash base"
+squash_base_sha="$(git -C "$squash_dir" rev-parse HEAD)"
+printf 'squashed product fix\n' > "$squash_dir/README"
+git -C "$squash_dir" add README
+git -C "$squash_dir" commit -qm "squashed product fix"
+squash_covered_sha="$(git -C "$squash_dir" rev-parse HEAD)"
+printf '0.9.9-rc.1\n' > "$squash_dir/VERSION"
+git -C "$squash_dir" add VERSION
+git -C "$squash_dir" commit -qm "stage squash recovery"
+squash_source_sha="$(git -C "$squash_dir" rev-parse HEAD)"
+python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$squash_dir" --source-sha "$squash_source_sha" --version 0.0.1 --channel prod \
+  --owner fixture --claim-key "squash:${squash_source_sha}" \
+  --output "$tmp_dir/squash-reservation.json" >/dev/null
+python3 "$root_dir/.github/scripts/release_preparation.py" \
+  --repo-root "$squash_dir" --source-sha "$squash_source_sha" --base-sha "$squash_covered_sha" \
+  --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" --mode allocate \
+  --release-mode version-only-release-pr --covered-merge-sha "$squash_covered_sha" \
+  --reservation-json "$tmp_dir/squash-reservation.json" --provenance fixture-verified >/dev/null
+squash_prepared_sha="$(git -C "$squash_dir" rev-parse HEAD)"
+cat > "$tmp_dir/squash-pulls.json" <<JSON
+[{"merge_commit_sha":"$squash_covered_sha","merged_at":"2026-09-07T11:29:21Z","base":{"ref":"main","repo":{"full_name":"fixture/repo"}}}]
+JSON
+if python3 "$root_dir/.github/scripts/release_completion.py" \
+  --repo-root "$squash_dir" --commit "$squash_prepared_sha" --base "$squash_covered_sha" \
+  --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --reservation-json "$tmp_dir/squash-reservation.json" \
+  --release-mode version-only-release-pr --covered-merge-sha "$squash_covered_sha" >/dev/null 2>&1; then
+  echo "single-parent covered commit passed without authoritative PR proof" >&2
+  exit 1
+fi
+squash_out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
+  --repo-root "$squash_dir" --commit "$squash_prepared_sha" --base "$squash_covered_sha" \
+  --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --reservation-json "$tmp_dir/squash-reservation.json" \
+  --repository fixture/repo --covered-merge-proof-json "$tmp_dir/squash-pulls.json" \
+  --release-mode version-only-release-pr --covered-merge-sha "$squash_covered_sha")"
+[[ "$squash_out" == *'"status": "ready"'* ]]
+git -C "$squash_dir" tag v9.9.9 "$squash_covered_sha"
+if python3 "$root_dir/.github/scripts/release_completion.py" \
+  --repo-root "$squash_dir" --commit "$squash_prepared_sha" --base "$squash_covered_sha" \
+  --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --reservation-json "$tmp_dir/squash-reservation.json" --repository fixture/repo \
+  --covered-merge-proof-json "$tmp_dir/squash-pulls.json" \
+  --release-mode version-only-release-pr --covered-merge-sha "$squash_covered_sha" >/dev/null 2>&1; then
+  echo "product tag targeting covered commit was accepted" >&2
+  exit 1
+fi
+git -C "$squash_dir" tag -d v9.9.9 >/dev/null
+python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$squash_dir" --source-sha "$squash_covered_sha" --version 0.0.2 --channel prod \
+  --owner fixture --claim-key "covered:${squash_covered_sha}" \
+  --output "$tmp_dir/covered-reservation.json" >/dev/null
+if python3 "$root_dir/.github/scripts/release_completion.py" \
+  --repo-root "$squash_dir" --commit "$squash_prepared_sha" --base "$squash_covered_sha" \
+  --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --reservation-json "$tmp_dir/squash-reservation.json" --repository fixture/repo \
+  --covered-merge-proof-json "$tmp_dir/squash-pulls.json" \
+  --release-mode version-only-release-pr --covered-merge-sha "$squash_covered_sha" >/dev/null 2>&1; then
+  echo "append-only identity ref targeting covered commit was accepted" >&2
+  exit 1
+fi
 
 migration_dir="$tmp_dir/migration"
 mkdir -p "$migration_dir"
