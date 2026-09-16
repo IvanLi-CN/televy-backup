@@ -9,7 +9,9 @@ bash -n \
   "$root_dir/scripts/macos/build-app.sh" \
   "$root_dir/scripts/macos/package-release.sh" \
   "$root_dir/scripts/macos/assemble-universal.sh" \
+  "$root_dir/scripts/macos/build-dmg.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh" \
+  "$root_dir/scripts/macos/finder-dmg-acceptance.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
   "$root_dir/scripts/macos/verify-dmg-layout.sh" \
   "$root_dir/scripts/macos/verify-component-identity.sh" \
@@ -335,6 +337,10 @@ grep -F -- '--expected-source-commit "$(git rev-parse HEAD)"' <<<"$package_workf
   echo "package verification must bind the manifest source commit" >&2
   exit 1
 }
+grep -F -- '--expected-packaging-commit "$GITHUB_SHA"' <<<"$package_workflow_text" >/dev/null || {
+  echo "package verification must bind the manifest packaging commit" >&2
+  exit 1
+}
 grep -F 'echo "source_sha=$(git rev-parse HEAD)"' <<<"$package_workflow_text" >/dev/null || {
   echo "package classification must record the checked-out source SHA" >&2
   exit 1
@@ -367,17 +373,18 @@ printf '%s\n' "$version" > "$tmp_dir/VERSION"
 git -C "$tmp_dir" add VERSION scripts
 git -C "$tmp_dir" commit -qm fixture
 fixture_source_commit="$(git -C "$tmp_dir" rev-parse HEAD)"
+fixture_packaging_commit="$(git -C "$root_dir" rev-parse HEAD)"
 
 TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=one-time-bootstrap-universal-build \
   bash "$root_dir/scripts/macos/generate-release-manifest.sh" \
   --mode release \
   --asset-dir "$tmp_dir" \
   --source-commit "$(git -C "$tmp_dir" rev-parse HEAD)" \
-  --packaging-commit "$(git -C "$root_dir" rev-parse HEAD)" \
+  --packaging-commit "$fixture_packaging_commit" \
   --output "$tmp_dir/BUILD-MANIFEST.json"
 # This contract fixture runs on Linux and deliberately verifies metadata only;
 # macOS package/release jobs run the default bundle checks.
-bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --skip-bundle-checks
+bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --expected-packaging-commit "$fixture_packaging_commit" --skip-bundle-checks
 
 python3 - "$tmp_dir/BUILD-MANIFEST.json" "$version" <<'PY'
 import json
@@ -413,7 +420,7 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(payload, handle)
 PY
 if bash "$root_dir/scripts/macos/verify-release-assets.sh" \
-  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --skip-bundle-checks >/dev/null 2>&1; then
+  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --expected-packaging-commit "$fixture_packaging_commit" --skip-bundle-checks >/dev/null 2>&1; then
   echo "release asset verifier accepted a mismatched manifest source commit" >&2
   exit 1
 fi
@@ -430,7 +437,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle)
 PY
 if bash "$root_dir/scripts/macos/verify-release-assets.sh" \
-  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --skip-bundle-checks >/dev/null 2>&1; then
+  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --expected-packaging-commit "$fixture_packaging_commit" --skip-bundle-checks >/dev/null 2>&1; then
   echo "release asset verifier accepted a mismatched DMG layout digest" >&2
   exit 1
 fi
@@ -446,8 +453,16 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle)
 PY
 if PYTHONOPTIMIZE=1 bash "$root_dir/scripts/macos/verify-release-assets.sh" \
-  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --skip-bundle-checks >/dev/null 2>&1; then
+  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --expected-packaging-commit "$fixture_packaging_commit" --skip-bundle-checks >/dev/null 2>&1; then
   echo "release asset verifier accepted a mismatched manifest under optimized Python" >&2
+  exit 1
+fi
+
+printf 'not-a-dmg' > "$tmp_dir/not-a-dmg"
+mkdir -p "$tmp_dir/finder-evidence"
+if TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=0 bash "$root_dir/scripts/macos/finder-dmg-acceptance.sh" \
+  --dmg "$tmp_dir/not-a-dmg" --evidence-dir "$tmp_dir/finder-evidence" >/dev/null 2>&1; then
+  echo "Finder acceptance must refuse an uncontrolled session" >&2
   exit 1
 fi
 

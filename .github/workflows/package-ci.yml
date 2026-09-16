@@ -137,7 +137,7 @@ jobs:
           cp dist/arm64/televybackup-tools-*-arm64.tar.gz dist/final/
           cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
           bash scripts/macos/generate-release-manifest.sh --mode development --asset-dir dist/final --source-commit "$(git rev-parse HEAD)" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
-          bash scripts/macos/verify-release-assets.sh --mode development --asset-dir dist/final --expected-source-commit "$(git rev-parse HEAD)"
+          bash scripts/macos/verify-release-assets.sh --mode development --asset-dir dist/final --expected-source-commit "$(git rev-parse HEAD)" --expected-packaging-commit "$GITHUB_SHA"
       - name: Verify daemon-owned WebDAV service
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-webdav-snapshot-browsing.sh

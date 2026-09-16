@@ -131,7 +131,7 @@ assert 'git worktree add --detach "${policy_checkout}" "${POLICY_SHA}"' in relea
 assert 'cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"' in release_workflow
 assert 'policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"' in release_workflow
 assert 'cd "${policy_checkout}"' in release_workflow
-assert '"${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}"' in release_workflow
+assert '"${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"' in release_workflow
 assert 'git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh"' not in release_workflow
 assert 'bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final' not in release_workflow
 build_and_assembly = release_workflow.split("  build-arm64:", 1)[1].split("  macos-acceptance:", 1)[0]
@@ -281,6 +281,8 @@ with tempfile.TemporaryDirectory() as directory:
                 str(asset_dir),
                 "--expected-source-commit",
                 "1" * 40,
+                "--expected-packaging-commit",
+                "2" * 40,
                 "--skip-bundle-checks",
             ],
             cwd=policy_checkout,

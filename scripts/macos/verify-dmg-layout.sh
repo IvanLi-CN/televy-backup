@@ -21,14 +21,31 @@ mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-dmg-layout.XXXXXX")"
 mount_point="$(cd "$mount_point" && pwd -P)"
 attached_device=""
 mounted=false
+resolve_device_for_mount() {
+  hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+entities = list(payload.get("system-entities", []))
+for image in payload.get("images", []):
+    entities.extend(image.get("system-entities", []))
+for entity in entities:
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"])
+        raise SystemExit(0)' "$1" 2>/dev/null || true
+}
 cleanup() {
   original_status=$?
   cleanup_failed=false
-  if [[ -n "$attached_device" ]]; then
-    if ! hdiutil detach "$attached_device" >/dev/null 2>&1; then
-      echo "failed to detach DMG verification device: $attached_device" >&2
+  cleanup_device="$attached_device"
+  [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
+  if [[ -n "$cleanup_device" ]]; then
+    if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
+      echo "failed to detach DMG verification device: $cleanup_device" >&2
       cleanup_failed=true
     fi
+  elif [[ "$mounted" == true ]]; then
+    echo "failed to resolve DMG verification device for cleanup: $mount_point" >&2
+    cleanup_failed=true
   fi
   if ! rmdir "$mount_point" >/dev/null 2>&1; then
     echo "failed to remove DMG verification mount point: $mount_point" >&2
@@ -42,6 +59,7 @@ trap cleanup EXIT
 
 hdiutil verify "$dmg"
 attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"
+mounted=true
 read -r attached_device attached_mount < <(
   python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]

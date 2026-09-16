@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() { echo "usage: verify-release-assets.sh --mode release|development --asset-dir DIR --expected-source-commit SHA [--skip-bundle-checks]" >&2; exit 2; }
-mode=""; asset_dir=""; expected_source_commit=""; skip_bundle_checks=false
+usage() { echo "usage: verify-release-assets.sh --mode release|development --asset-dir DIR --expected-source-commit SHA --expected-packaging-commit SHA [--skip-bundle-checks]" >&2; exit 2; }
+mode=""; asset_dir=""; expected_source_commit=""; expected_packaging_commit=""; skip_bundle_checks=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) mode="${2:-}"; shift 2 ;;
     --asset-dir) asset_dir="${2:-}"; shift 2 ;;
     --expected-source-commit) expected_source_commit="${2:-}"; shift 2 ;;
+    --expected-packaging-commit) expected_packaging_commit="${2:-}"; shift 2 ;;
     --skip-bundle-checks) skip_bundle_checks=true; shift ;;
     *) usage ;;
   esac
 done
-[[ -n "$mode" && -d "$asset_dir" && -n "$expected_source_commit" ]] || usage
+[[ -n "$mode" && -d "$asset_dir" && -n "$expected_source_commit" && -n "$expected_packaging_commit" ]] || usage
 [[ "$mode" == "release" || "$mode" == "development" ]] || usage
 [[ "$expected_source_commit" =~ ^[0-9a-fA-F]{40}$ ]] || {
   echo "expected source commit must be a 40-character SHA" >&2
+  exit 2
+}
+[[ "$expected_packaging_commit" =~ ^[0-9a-fA-F]{40}$ ]] || {
+  echo "expected packaging commit must be a 40-character SHA" >&2
   exit 2
 }
 root_dir="$(git rev-parse --show-toplevel)"
@@ -74,6 +79,18 @@ print(json.dumps({
 }, sort_keys=True))
 PY
 }
+resolve_device_for_mount() {
+  hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+entities = list(payload.get("system-entities", []))
+for image in payload.get("images", []):
+    entities.extend(image.get("system-entities", []))
+for entity in entities:
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"])
+        raise SystemExit(0)' "$1" 2>/dev/null || true
+}
 
 attach_dmg_readonly() {
   local dmg="$1"
@@ -82,6 +99,7 @@ attach_dmg_readonly() {
   ATTACHED_MOUNT=""
   local attach_plist
   attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"
+  ATTACHED_MOUNT="$mount_point"
   read -r ATTACHED_DEVICE ATTACHED_MOUNT < <(
     python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
@@ -132,7 +150,7 @@ grep -F "televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/SHA256SUMS" >/d
   cd "$asset_dir"
   shasum -a 256 -c SHA256SUMS
 )
-python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" "$root_dir/assets/brand/macos/dmg/layout.json" "$skip_bundle_checks" "$expected_source_commit" <<'PY'
+python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" "$root_dir/assets/brand/macos/dmg/layout.json" "$skip_bundle_checks" "$expected_source_commit" "$expected_packaging_commit" <<'PY'
 import hashlib, json, os, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 lock = json.load(open(sys.argv[3], encoding="utf-8"))
@@ -179,6 +197,7 @@ require(expected_dmg_layout["format"] == "UDZO", "DMG format is not UDZO")
 
 require(manifest["release_version"] == sys.argv[2], "manifest release version mismatch")
 require(manifest.get("source_commit") == sys.argv[7], "manifest source_commit does not match expected source commit")
+require(manifest.get("packaging_commit") == sys.argv[8], "manifest packaging_commit does not match expected packaging commit")
 require(manifest["signing"] == "ad-hoc", "manifest signing mode mismatch")
 require({"arm64", "x86_64", "universal2"}.issubset(set(manifest["architectures"])), "manifest architectures are incomplete")
 require(manifest["assets"], "manifest assets are missing")
@@ -403,11 +422,15 @@ verify_dmg_helper_identity() (
     cleanup_failed=false
     cleanup_device="$attached_device"
     [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
+    [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
     if [[ -n "$cleanup_device" ]]; then
       if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
         echo "failed to detach Snapshot Access verification device: $cleanup_device" >&2
         cleanup_failed=true
       fi
+    elif [[ "$mounted" == true || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
+      echo "failed to resolve Snapshot Access verification device for cleanup: $mount_point" >&2
+      cleanup_failed=true
     fi
     if ! rmdir "$mount_point" >/dev/null 2>&1; then
       echo "failed to remove Snapshot Access verification mount point: $mount_point" >&2
@@ -517,6 +540,7 @@ PY
   detach_dmg_exact "$local_dmg" "$mount_point" "$attached_device"
   attached_device=""
   ATTACHED_DEVICE=""
+  ATTACHED_MOUNT=""
   echo "DMG Snapshot Access verified: $local_dmg"
 )
 check_dmg_layout() {
@@ -531,11 +555,15 @@ check_dmg_layout() {
     cleanup_failed=false
     cleanup_device="$attached_device"
     [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
+    [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
     if [[ -n "$cleanup_device" ]]; then
       if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
         echo "failed to detach DMG layout verification device: $cleanup_device" >&2
         cleanup_failed=true
       fi
+    elif [[ "$mounted" == true || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
+      echo "failed to resolve DMG layout verification device for cleanup: $mount_point" >&2
+      cleanup_failed=true
     fi
     if ! rmdir "$mount_point" >/dev/null 2>&1; then
       echo "failed to remove DMG layout verification mount point: $mount_point" >&2
@@ -601,6 +629,7 @@ PY
   detach_dmg_exact "$dmg" "$mount_point" "$attached_device"
   attached_device=""
   ATTACHED_DEVICE=""
+  ATTACHED_MOUNT=""
 }
 for dmg in "$asset_dir/TelevyBackup-${version}.dmg" "$asset_dir/TelevyBackup-${version}-arm64.dmg" "$asset_dir/TelevyBackup-${version}-x86_64.dmg"; do
   check_dmg_layout "$dmg"

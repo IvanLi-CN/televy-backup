@@ -698,7 +698,7 @@ jobs:
           cp dist/x86_64/TelevyBackup-*-x86_64.dmg dist/final/
           cp dist/arm64/televybackup-tools-*-arm64.tar.gz dist/final/
           cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
-          bash scripts/macos/generate-release-manifest.sh --mode release --asset-dir dist/final --source-commit "${{ needs.resolve.outputs.merge_sha }}" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
+          bash scripts/macos/generate-release-manifest.sh --mode release --asset-dir dist/final --source-commit "${{ needs.resolve.outputs.merge_sha }}" --packaging-commit "${POLICY_SHA}" --output dist/final/BUILD-MANIFEST.json
           # Keep product inputs on the recovered merge checkout, but evaluate the
           # release asset policy from the exact trusted main commit resolved above.
           test -n "${POLICY_SHA}"
@@ -716,7 +716,7 @@ jobs:
           policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"
           (
             cd "${policy_checkout}"
-            "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}"
+            "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"
           )
           if [[ "${HELPER_SOURCE_MODE}" == reuse ]]; then
             bash "${policy_checkout}/scripts/macos/verify-component-identity.sh" \
