@@ -250,7 +250,7 @@ grep -F 'source_checksums_path="$source_asset_dir/SHA256SUMS"' <<<"$finder_text"
   echo "Finder acceptance must bind evidence to adjacent SHA256SUMS" >&2
   exit 1
 }
-grep -F 'mkdir "$lock_dir"' <<<"$finder_text" >/dev/null || {
+grep -F '/usr/bin/lockf -s -t 0 9' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must serialize access to the Finder session and evidence directory" >&2
   exit 1
 }

@@ -22,35 +22,21 @@ done
 }
 mkdir -p "$evidence_dir"
 lock_dir="${TMPDIR:-/tmp}/televybackup-finder-dmg-acceptance.lock"
-lock_pid_path="$lock_dir/pid"
-lock_held=true
+lock_held=false
 snapshot_dir=""
-acquire_lock() {
-  if mkdir "$lock_dir" 2>/dev/null; then
-    printf '%s\n' "$$" > "$lock_pid_path"
-    return 0
-  fi
-  owner_pid=""
-  if [[ -s "$lock_pid_path" ]]; then
-    owner_pid="$(<"$lock_pid_path")"
-  fi
-  if [[ "$owner_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$owner_pid" >/dev/null 2>&1; then
-    rm -f "$lock_pid_path"
-    rmdir "$lock_dir" 2>/dev/null || true
-    if mkdir "$lock_dir" 2>/dev/null; then
-      printf '%s\n' "$$" > "$lock_pid_path"
-      return 0
-    fi
-  fi
+if ! exec 9>"$lock_dir"; then
+  echo "could not open Finder acceptance lock: $lock_dir" >&2
+  exit 1
+fi
+if ! /usr/bin/lockf -s -t 0 9; then
+  exec 9>&-
   echo "another Finder acceptance run already owns the Finder session: $lock_dir" >&2
   exit 1
-}
-acquire_lock
+fi
+lock_held=true
 release_lock() {
   if [[ "$lock_held" == true ]]; then
-    [[ -s "$lock_pid_path" && "$(<"$lock_pid_path")" == "$$" ]] || return 1
-    rm -f "$lock_pid_path" || return 1
-    rmdir "$lock_dir" >/dev/null 2>&1 || return 1
+    exec 9>&-
     lock_held=false
   fi
 }
