@@ -368,9 +368,13 @@ verify_dmg_helper_identity() (
     cleanup_device="$attached_device"
     [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
     if [[ -n "$cleanup_device" ]]; then
-      hdiutil detach "$cleanup_device" >/dev/null 2>&1 || true
+      if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
+        echo "failed to detach Snapshot Access verification device: $cleanup_device" >&2
+      fi
     fi
-    rmdir "$mount_point" >/dev/null 2>&1 || true
+    if ! rmdir "$mount_point" >/dev/null 2>&1; then
+      echo "failed to remove Snapshot Access verification mount point: $mount_point" >&2
+    fi
   }
   trap cleanup EXIT
   hdiutil verify "$local_dmg"
@@ -485,9 +489,13 @@ check_dmg_layout() {
     cleanup_device="$attached_device"
     [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
     if [[ -n "$cleanup_device" ]]; then
-      hdiutil detach "$cleanup_device" >/dev/null 2>&1 || true
+      if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
+        echo "failed to detach DMG layout verification device: $cleanup_device" >&2
+      fi
     fi
-    rmdir "$mount_point" >/dev/null 2>&1 || true
+    if ! rmdir "$mount_point" >/dev/null 2>&1; then
+      echo "failed to remove DMG layout verification mount point: $mount_point" >&2
+    fi
   }
   trap cleanup RETURN
   hdiutil verify "$dmg"

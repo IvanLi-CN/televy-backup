@@ -23,6 +23,8 @@ done
 mkdir -p "$evidence_dir"
 root_dir="$(git rev-parse --show-toplevel)"
 layout_path="$root_dir/assets/brand/macos/dmg/layout.json"
+"$root_dir/scripts/macos/verify-dmg-layout.sh" --dmg "$dmg"
+dmg_sha256="$(shasum -a 256 "$dmg" | awk '{print $1}')"
 macos_version="$(sw_vers -productVersion)"
 machine_arch="$(uname -m)"
 mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-finder-acceptance.XXXXXX")"
@@ -40,9 +42,13 @@ cleanup() {
     killall Finder >/dev/null 2>&1 || true
   fi
   if [[ -n "$attached_device" ]]; then
-    hdiutil detach "$attached_device" >/dev/null 2>&1 || true
+    if ! hdiutil detach "$attached_device" >/dev/null 2>&1; then
+      echo "failed to detach Finder acceptance device: $attached_device" >&2
+    fi
   fi
-  rmdir "$mount_point" >/dev/null 2>&1 || true
+  if ! rmdir "$mount_point" >/dev/null 2>&1; then
+    echo "failed to remove Finder acceptance mount point: $mount_point" >&2
+  fi
 }
 trap cleanup EXIT
 
@@ -149,20 +155,59 @@ if tuple(observation["app_position"]) != expected_app:
 if tuple(observation["applications_position"]) != expected_applications:
     raise SystemExit(f"Applications position differs from schema: {observation['applications_position']!r}")
 PY
-python3 - "$attached_device" "$dmg" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" <<'PY' > "$evidence_dir/acceptance.json"
+python3 - "$attached_device" "$dmg" "$dmg_sha256" "$layout_path" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" <<'PY' > "$evidence_dir/acceptance.json"
+import hashlib
 import json
+import pathlib
 import sys
 
-hidden = json.load(open(sys.argv[6], encoding="utf-8"))
+hidden = json.load(open(sys.argv[8], encoding="utf-8"))
+layout = json.load(open(sys.argv[4], encoding="utf-8"))
+canonical_layout = {
+    "schema_version": layout["schema_version"],
+    "builder": layout["builder"],
+    "format": layout["format"],
+    "filesystem": layout["filesystem"],
+    "window": layout["window"],
+    "icon_size": layout["icon_size"],
+    "icon_locations": layout["icon_locations"],
+    "overlay": layout["overlay"],
+    "resources": {
+        "background": layout["background"],
+        "overlay": layout["overlay_asset"],
+        "composed_background": layout["composed_background"],
+        "digests": layout["asset_digests"],
+    },
+    "hidden_resource_allowlist": sorted(layout["hidden_resource_allowlist"]),
+    "symlinks": layout["symlinks"],
+}
+semantic_layout_digest = hashlib.sha256(json.dumps(canonical_layout, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+dmg_path = pathlib.Path(sys.argv[2])
+manifest_path = dmg_path.with_name("BUILD-MANIFEST.json")
+manifest_sha256 = ""
+manifest_verified = False
+if manifest_path.is_file():
+    manifest_bytes = manifest_path.read_bytes()
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    manifest = json.loads(manifest_bytes.decode())
+    record = next((asset for asset in manifest.get("assets", []) if asset.get("name") == dmg_path.name), None)
+    if record is None or record.get("sha256") != sys.argv[3] or record.get("dmg_layout_digest") != semantic_layout_digest:
+        raise SystemExit("Finder acceptance DMG does not match its adjacent BUILD-MANIFEST.json")
+    manifest_verified = True
 print(json.dumps({
-    "architecture": sys.argv[4],
+    "architecture": sys.argv[6],
     "capture_scope": "finder-window-only",
     "device": sys.argv[1],
     "dmg": sys.argv[2],
+    "dmg_sha256": sys.argv[3],
     "event": "finder_acceptance",
+    "manifest": str(manifest_path) if manifest_verified else None,
+    "manifest_sha256": manifest_sha256 or None,
+    "manifest_verified": manifest_verified,
+    "semantic_layout_digest": semantic_layout_digest,
     "show_all_files": hidden,
-    "macos_version": sys.argv[5],
-    "screenshot": sys.argv[3],
+    "macos_version": sys.argv[7],
+    "screenshot": sys.argv[5],
 }, sort_keys=True))
 PY
 echo "Finder DMG acceptance evidence: $evidence_dir"

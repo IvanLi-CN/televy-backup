@@ -158,6 +158,19 @@ settings_text="$(<"$root_dir/scripts/macos/dmgbuild-settings.py")"
   echo "dmgbuild settings must consume the shared layout schema" >&2
   exit 1
 }
+TELEVYBACKUP_ROOT_DIR="$root_dir" \
+TELEVYBACKUP_DMG_SOURCE_DIR="$root_dir" \
+TELEVYBACKUP_DMG_VOLUME_NAME=fixture \
+TELEVYBACKUP_DMG_OUTPUT="$tmp_dir/fixture.dmg" \
+  python3 - "$root_dir/scripts/macos/dmgbuild-settings.py" <<'PY'
+import runpy
+import sys
+
+settings = runpy.run_path(sys.argv[1])
+assert settings["icon_size"] == 128
+assert settings["icon_locations"]["TelevyBackup.app"] == (210, 270)
+assert settings["icon_locations"]["Applications"] == (550, 270)
+PY
 assemble_text="$(<"$root_dir/scripts/macos/assemble-universal.sh")"
 grep -F 'chmod 755 "$universal_app/Contents/MacOS/"*' <<<"$assemble_text" >/dev/null || {
   echo "Universal main binaries must remain executable after lipo" >&2
@@ -206,6 +219,18 @@ grep -F 'screencapture -x -l "$window_id"' <<<"$finder_text" >/dev/null || {
 }
 grep -F 'defaults write com.apple.finder AppleShowAllFiles' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must restore the AppleShowAllFiles preference" >&2
+  exit 1
+}
+grep -F 'verify-dmg-layout.sh" --dmg "$dmg"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must verify the exact DMG before GUI evidence" >&2
+  exit 1
+}
+grep -F '"dmg_sha256": sys.argv[3]' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance evidence must record the DMG digest" >&2
+  exit 1
+}
+grep -F '"semantic_layout_digest": semantic_layout_digest' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance evidence must record the semantic layout digest" >&2
   exit 1
 }
 grep -F 'hdiutil attach -plist' <<<"$finder_text" >/dev/null || {

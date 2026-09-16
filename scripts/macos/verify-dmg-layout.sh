@@ -23,9 +23,13 @@ attached_device=""
 mounted=false
 cleanup() {
   if [[ -n "$attached_device" ]]; then
-    hdiutil detach "$attached_device" >/dev/null 2>&1 || true
+    if ! hdiutil detach "$attached_device" >/dev/null 2>&1; then
+      echo "failed to detach DMG verification device: $attached_device" >&2
+    fi
   fi
-  rmdir "$mount_point" >/dev/null 2>&1 || true
+  if ! rmdir "$mount_point" >/dev/null 2>&1; then
+    echo "failed to remove DMG verification mount point: $mount_point" >&2
+  fi
 }
 trap cleanup EXIT
 
