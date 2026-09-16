@@ -46,7 +46,12 @@ cleanup() {
       cleanup_failed=true
     fi
   else
-    defaults delete com.apple.finder AppleShowAllFiles >/dev/null 2>&1 || true
+    if ! defaults delete com.apple.finder AppleShowAllFiles >/dev/null 2>&1; then
+      if defaults read com.apple.finder AppleShowAllFiles >/dev/null 2>&1; then
+        echo "failed to remove Finder AppleShowAllFiles preference" >&2
+        cleanup_failed=true
+      fi
+    fi
   fi
   if [[ -n "$previous_show_all" || "$finder_was_visible_changed" == true ]]; then
     if ! killall Finder >/dev/null 2>&1; then
@@ -114,7 +119,14 @@ done
 }
 osascript -e 'tell application "Finder" to set selection of front window to {}' >/dev/null 2>&1 || true
 
-window_id="$(osascript -e 'tell application "Finder" to id of front window' 2>/dev/null || true)"
+window_id="$(python3 - "$finder_json" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8")).get("window_id")
+print(value if isinstance(value, int) else "")
+PY
+)"
 [[ "$window_id" =~ ^[0-9]+$ ]] || window_id=""
 [[ -n "$window_id" ]] || {
   echo "Finder window was not found; refusing an unscoped screenshot" >&2

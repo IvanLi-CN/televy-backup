@@ -171,15 +171,21 @@ expected_asset_names = {
     f"televybackup-tools-{sys.argv[2]}-arm64.tar.gz",
     f"televybackup-tools-{sys.argv[2]}-x86_64.tar.gz",
 }
+manifest_asset_names = [asset.get("name") for asset in manifest["assets"]]
+require(len(manifest_asset_names) == len(set(manifest_asset_names)), "manifest contains duplicate asset names")
 asset_records = {asset["name"]: asset for asset in manifest["assets"]}
 require(set(asset_records) == expected_asset_names, "manifest asset names mismatch")
 checksum_records = {}
+checksum_names = []
 for line in open(os.path.join(asset_dir, "SHA256SUMS"), encoding="utf-8"):
     fields = line.strip().split(maxsplit=1)
     if not fields:
         continue
     require(len(fields) == 2, "malformed SHA256SUMS entry")
-    checksum_records[fields[1].lstrip("*")] = fields[0]
+    name = fields[1].lstrip("*")
+    checksum_names.append(name)
+    checksum_records[name] = fields[0]
+require(len(checksum_names) == len(set(checksum_names)), "SHA256SUMS contains duplicate asset names")
 require(set(checksum_records) == expected_asset_names, "SHA256SUMS asset names mismatch")
 for name in expected_asset_names:
     with open(os.path.join(asset_dir, name), "rb") as handle:

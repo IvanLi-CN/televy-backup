@@ -250,6 +250,10 @@ grep -F 'instruction_text' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must pass the schema instruction to the observer" >&2
   exit 1
 }
+grep -F 'get("window_id")' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must capture the observed Finder window id" >&2
+  exit 1
+}
 grep -F 'hdiutil attach -plist' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must use machine-readable attach output" >&2
   exit 1
