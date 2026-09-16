@@ -68,22 +68,52 @@ checksums_path="$snapshot_dir/SHA256SUMS"
 cp "$source_dmg" "$dmg"
 cp "$source_manifest_path" "$manifest_path"
 cp "$source_checksums_path" "$checksums_path"
-dmg_sha256="$(shasum -a 256 "$dmg" | awk '{print $1}')"
-"$root_dir/scripts/macos/verify-dmg-layout.sh" --dmg "$dmg"
-python3 - "$checksums_path" "$(basename "$dmg")" "$dmg_sha256" <<'PY'
+while IFS= read -r asset_name; do
+  [[ "$asset_name" != */* && "$asset_name" != .* ]] || {
+    echo "Finder acceptance manifest contains an unsafe asset name: $asset_name" >&2
+    exit 1
+  }
+  cp "$source_asset_dir/$asset_name" "$snapshot_dir/$asset_name"
+done < <(python3 - "$source_manifest_path" <<'PY'
+import json
 import sys
 
-checksums_path, dmg_name, expected_digest = sys.argv[1:]
-records = {}
-for line in open(checksums_path, encoding="utf-8"):
-    fields = line.rstrip("\n").split(maxsplit=1)
+for asset in json.load(open(sys.argv[1], encoding="utf-8")).get("assets", []):
+    print(asset["name"])
+PY
+)
+dmg_sha256="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+"$root_dir/scripts/macos/verify-dmg-layout.sh" --dmg "$dmg"
+python3 - "$manifest_path" "$checksums_path" "$snapshot_dir" "$(basename "$dmg")" "$dmg_sha256" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest_path, checksums_path, asset_dir, dmg_name, expected_digest = sys.argv[1:]
+manifest = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+manifest_records = {record.get("name"): record for record in manifest.get("assets", [])}
+checksum_records = {}
+for line in pathlib.Path(checksums_path).read_text(encoding="utf-8").splitlines():
+    fields = line.split(maxsplit=1)
     if len(fields) != 2:
         raise SystemExit("malformed SHA256SUMS entry")
     name = fields[1].removeprefix("*")
-    if name in records:
+    if name in checksum_records:
         raise SystemExit(f"duplicate SHA256SUMS entry: {name}")
-    records[name] = fields[0]
-if records.get(dmg_name) != expected_digest:
+    checksum_records[name] = fields[0].lower()
+if set(manifest_records) != set(checksum_records):
+    raise SystemExit("BUILD-MANIFEST.json and SHA256SUMS asset sets differ")
+for name, record in manifest_records.items():
+    path = pathlib.Path(asset_dir) / name
+    if not path.is_file():
+        raise SystemExit(f"manifest asset is missing from acceptance input: {name}")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if record.get("sha256") != digest or checksum_records[name] != digest:
+        raise SystemExit(f"manifest/checksum digest mismatch: {name}")
+    if record.get("bytes") != path.stat().st_size:
+        raise SystemExit(f"manifest byte count mismatch: {name}")
+if checksum_records.get(dmg_name) != expected_digest:
     raise SystemExit("Finder acceptance DMG does not match adjacent SHA256SUMS")
 PY
 macos_version="$(sw_vers -productVersion)"
@@ -183,6 +213,24 @@ for entity in payload.get("system-entities", []):
         raise SystemExit(0)
 print(fallback, "")' "$mount_point" "$attach_plist"
   )
+if [[ -z "$attached_device" ]]; then
+  read -r attached_device attached_mount < <(
+    hdiutil info -plist | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+entities = list(payload.get("system-entities", []))
+for image in payload.get("images", []):
+    entities.extend(image.get("system-entities", []))
+fallback = ""
+for entity in entities:
+    if entity.get("dev-entry") and not fallback:
+        fallback = entity["dev-entry"]
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"], entity["mount-point"])
+        raise SystemExit(0)
+print(fallback, "")' "$mount_point"
+  )
+fi
 [[ "$attached_mount" == "$mount_point" && -n "$attached_device" ]] || {
   echo "could not resolve exact attached Finder device" >&2
   exit 1
@@ -195,12 +243,11 @@ osascript -e 'tell application "Finder" to activate'
 sleep 2
 finder_json="$evidence_dir/finder-observation.json"
 rm -f "$finder_json"
-instruction_text="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["overlay"]["instruction"])' "$layout_path")"
 for attempt in 1 2 3 4 5; do
   if [[ "$attempt" -gt 1 ]]; then
     open "$mount_point" >/dev/null 2>&1 || true
   fi
-  if osascript "$root_dir/scripts/macos/finder-dmg-observe.applescript" "$mount_point" "$finder_json" "$instruction_text"; then
+  if osascript "$root_dir/scripts/macos/finder-dmg-observe.applescript" "$mount_point" "$finder_json"; then
     break
   fi
   sleep 1
@@ -228,6 +275,10 @@ screencapture -x -l "$window_id" "$evidence_dir/finder-window.png"
 [[ -s "$evidence_dir/finder-window.png" ]] || {
   echo "Finder window screenshot was not created" >&2
   exit 1
+}
+[[ "${TELEVYBACKUP_FINDER_VISUAL_REVIEW:-}" == "approved" ]] || {
+  echo "set TELEVYBACKUP_FINDER_VISUAL_REVIEW=approved after inspecting the scoped Finder screenshot" >&2
+  exit 2
 }
 
 defaults write com.apple.finder AppleShowAllFiles -bool true
@@ -268,9 +319,7 @@ if observation["app_name"] != "TelevyBackup.app":
 if observation["applications_name"] != "Applications":
     raise SystemExit("Finder observation is missing Applications")
 if observation["drag_direction"] != "right":
-    raise SystemExit("Finder observation does not show the expected drag direction")
-if observation["instruction"] != layout["overlay"]["instruction"]:
-    raise SystemExit("Finder observation instruction differs from the layout schema")
+    raise SystemExit("Finder icon positions do not show the expected drag direction")
 expected_app = tuple(layout["icon_locations"]["TelevyBackup.app"])
 expected_applications = tuple(layout["icon_locations"]["Applications"])
 if tuple(observation["app_position"]) != expected_app:
@@ -330,6 +379,13 @@ print(json.dumps({
     "checksums": str(checksums_path),
     "checksums_sha256": checksums_sha256,
     "checksums_verified": True,
+    "visual_review": {
+        "status": "approved",
+        "method": "scoped-human-review",
+        "instruction": layout["overlay"]["instruction"],
+        "arrow_direction": "right",
+        "asset_digest": layout["asset_digests"][layout["composed_background"]],
+    },
     "show_all_files": hidden,
     "macos_version": sys.argv[10],
     "screenshot": sys.argv[8],

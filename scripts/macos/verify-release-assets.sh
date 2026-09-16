@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() { echo "usage: verify-release-assets.sh --mode release|development --asset-dir DIR [--skip-bundle-checks]" >&2; exit 2; }
-mode=""; asset_dir=""; skip_bundle_checks=false
+usage() { echo "usage: verify-release-assets.sh --mode release|development --asset-dir DIR --expected-source-commit SHA [--skip-bundle-checks]" >&2; exit 2; }
+mode=""; asset_dir=""; expected_source_commit=""; skip_bundle_checks=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) mode="${2:-}"; shift 2 ;;
     --asset-dir) asset_dir="${2:-}"; shift 2 ;;
+    --expected-source-commit) expected_source_commit="${2:-}"; shift 2 ;;
     --skip-bundle-checks) skip_bundle_checks=true; shift ;;
     *) usage ;;
   esac
 done
-[[ -n "$mode" && -d "$asset_dir" ]] || usage
+[[ -n "$mode" && -d "$asset_dir" && -n "$expected_source_commit" ]] || usage
 [[ "$mode" == "release" || "$mode" == "development" ]] || usage
+[[ "$expected_source_commit" =~ ^[0-9a-fA-F]{40}$ ]] || {
+  echo "expected source commit must be a 40-character SHA" >&2
+  exit 2
+}
 root_dir="$(git rev-parse --show-toplevel)"
 source_commit="$(git rev-parse HEAD)"
 version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
@@ -90,6 +95,24 @@ for entity in payload.get("system-entities", []):
         raise SystemExit(0)
 print(fallback, "")' "$mount_point" "$attach_plist"
   )
+  if [[ -z "$ATTACHED_DEVICE" ]]; then
+    read -r ATTACHED_DEVICE ATTACHED_MOUNT < <(
+      hdiutil info -plist | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+entities = list(payload.get("system-entities", []))
+for image in payload.get("images", []):
+    entities.extend(image.get("system-entities", []))
+fallback = ""
+for entity in entities:
+    if entity.get("dev-entry") and not fallback:
+        fallback = entity["dev-entry"]
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"], entity["mount-point"])
+        raise SystemExit(0)
+print(fallback, "")' "$mount_point"
+    )
+  fi
   [[ "$ATTACHED_MOUNT" == "$mount_point" && -n "$ATTACHED_DEVICE" ]] || {
     echo "hdiutil attach plist did not resolve an exact device: $dmg" >&2
     return 1
@@ -115,7 +138,7 @@ grep -F "televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/SHA256SUMS" >/d
   cd "$asset_dir"
   shasum -a 256 -c SHA256SUMS
 )
-python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" "$root_dir/assets/brand/macos/dmg/layout.json" "$skip_bundle_checks" <<'PY'
+python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" "$root_dir/assets/brand/macos/dmg/layout.json" "$skip_bundle_checks" "$expected_source_commit" <<'PY'
 import hashlib, json, os, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 lock = json.load(open(sys.argv[3], encoding="utf-8"))
@@ -161,6 +184,7 @@ require(expected_dmg_layout["builder"] == {"name": "dmgbuild", "version": "1.6.7
 require(expected_dmg_layout["format"] == "UDZO", "DMG format is not UDZO")
 
 require(manifest["release_version"] == sys.argv[2], "manifest release version mismatch")
+require(manifest.get("source_commit") == sys.argv[7], "manifest source_commit does not match expected source commit")
 require(manifest["signing"] == "ad-hoc", "manifest signing mode mismatch")
 require({"arm64", "x86_64", "universal2"}.issubset(set(manifest["architectures"])), "manifest architectures are incomplete")
 require(manifest["assets"], "manifest assets are missing")

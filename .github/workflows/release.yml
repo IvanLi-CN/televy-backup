@@ -716,7 +716,7 @@ jobs:
           policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"
           (
             cd "${policy_checkout}"
-            "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final"
+            "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}"
           )
           if [[ "${HELPER_SOURCE_MODE}" == reuse ]]; then
             bash "${policy_checkout}/scripts/macos/verify-component-identity.sh" \

@@ -46,8 +46,9 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - controlled Finder acceptance on macOS 15 and the current supported macOS with scoped first-open screenshots
 
 The controlled acceptance entrypoint is `scripts/macos/finder-dmg-acceptance.sh`. It is intentionally
-manual-only, requires `TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1`, and writes Finder-window-scoped
-evidence rather than running in release CI.
+manual-only, requires `TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1` and an explicit
+`TELEVYBACKUP_FINDER_VISUAL_REVIEW=approved` after inspecting the Finder-only screenshot, and writes
+evidence with complete manifest/checksum binding rather than running in release CI.
 
 ## Visual Evidence
 

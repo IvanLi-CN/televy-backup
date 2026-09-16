@@ -270,8 +270,12 @@ grep -F '"semantic_layout_digest": semantic_layout_digest' <<<"$finder_text" >/d
   echo "Finder acceptance evidence must record the semantic layout digest" >&2
   exit 1
 }
-grep -F 'instruction_text' <<<"$finder_text" >/dev/null || {
-  echo "Finder acceptance must pass the schema instruction to the observer" >&2
+grep -F 'TELEVYBACKUP_FINDER_VISUAL_REVIEW' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must require explicit scoped visual review" >&2
+  exit 1
+}
+grep -F 'method": "scoped-human-review"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must record the scoped visual review method" >&2
   exit 1
 }
 grep -F 'get("window_id")' <<<"$finder_text" >/dev/null || {
@@ -298,6 +302,10 @@ grep -F 'fallback = ""' <<<"$verify_release_text" >/dev/null || {
   echo "DMG attach verification must retain a fallback device for cleanup" >&2
   exit 1
 }
+grep -F -- '--expected-source-commit' <<<"$verify_release_text" >/dev/null || {
+  echo "release asset verification must bind the manifest source commit" >&2
+  exit 1
+}
 grep -F 'tarfile' <<<"$verify_release_text" >/dev/null || {
   echo "tools archive verification must reject unsafe member paths before extraction" >&2
   exit 1
@@ -317,6 +325,10 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
 }
 grep -F 'source_sha: ${{ steps.classify.outputs.source_sha }}' <<<"$package_workflow_text" >/dev/null || {
   echo "package classification must expose an immutable source SHA" >&2
+  exit 1
+}
+grep -F -- '--expected-source-commit "$(git rev-parse HEAD)"' <<<"$package_workflow_text" >/dev/null || {
+  echo "package verification must bind the manifest source commit" >&2
   exit 1
 }
 grep -F 'echo "source_sha=$(git rev-parse HEAD)"' <<<"$package_workflow_text" >/dev/null || {
@@ -350,6 +362,7 @@ git -C "$tmp_dir" config user.email test@example.com
 printf '%s\n' "$version" > "$tmp_dir/VERSION"
 git -C "$tmp_dir" add VERSION scripts
 git -C "$tmp_dir" commit -qm fixture
+fixture_source_commit="$(git -C "$tmp_dir" rev-parse HEAD)"
 
 TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=one-time-bootstrap-universal-build \
   bash "$root_dir/scripts/macos/generate-release-manifest.sh" \
@@ -360,7 +373,7 @@ TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=one-time-bootstrap-universal-build \
   --output "$tmp_dir/BUILD-MANIFEST.json"
 # This contract fixture runs on Linux and deliberately verifies metadata only;
 # macOS package/release jobs run the default bundle checks.
-bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir" --skip-bundle-checks
+bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --skip-bundle-checks
 
 python3 - "$tmp_dir/BUILD-MANIFEST.json" "$version" <<'PY'
 import json
@@ -383,6 +396,25 @@ assert len(layout["semantic_layout_digest"]) == 64
 assert all("dmg_layout_digest" in asset for asset in payload["assets"] if asset["name"].endswith(".dmg"))
 PY
 
+cp "$tmp_dir/BUILD-MANIFEST.json" "$tmp_dir/BUILD-MANIFEST.original.json"
+python3 - "$tmp_dir/BUILD-MANIFEST.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["source_commit"] = "0" * 40
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+if bash "$root_dir/scripts/macos/verify-release-assets.sh" \
+  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --skip-bundle-checks >/dev/null 2>&1; then
+  echo "release asset verifier accepted a mismatched manifest source commit" >&2
+  exit 1
+fi
+cp "$tmp_dir/BUILD-MANIFEST.original.json" "$tmp_dir/BUILD-MANIFEST.json"
+
 python3 - "$tmp_dir/BUILD-MANIFEST.json" <<'PY'
 import json
 import sys
@@ -394,7 +426,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle)
 PY
 if bash "$root_dir/scripts/macos/verify-release-assets.sh" \
-  --mode release --asset-dir "$tmp_dir" --skip-bundle-checks >/dev/null 2>&1; then
+  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --skip-bundle-checks >/dev/null 2>&1; then
   echo "release asset verifier accepted a mismatched DMG layout digest" >&2
   exit 1
 fi
@@ -410,7 +442,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle)
 PY
 if PYTHONOPTIMIZE=1 bash "$root_dir/scripts/macos/verify-release-assets.sh" \
-  --mode release --asset-dir "$tmp_dir" --skip-bundle-checks >/dev/null 2>&1; then
+  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --skip-bundle-checks >/dev/null 2>&1; then
   echo "release asset verifier accepted a mismatched manifest under optimized Python" >&2
   exit 1
 fi
