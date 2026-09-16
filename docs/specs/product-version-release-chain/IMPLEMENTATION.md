@@ -13,6 +13,7 @@
 | Completion gate | `.github/workflows/release-completion.yml`, `.github/scripts/release_completion.py` |
 | Mainline bind, build and publish | `.github/workflows/release.yml` |
 | Failure context delivery | `.github/workflows/notify-release-failure.yml` |
+| Protected release authority | `actions/create-github-app-token@v1` in `.github/workflows/release-preparation.yml` and `.github/workflows/release.yml` |
 | Required-check declaration | `.github/quality-gates.json`, `docs/quality-gates.md` |
 
 The failure resolver is bound to the exact `Release Product` workflow attempt and verifies
@@ -29,8 +30,8 @@ blocks with a local Git/API fixture. Release state is read through the GitHub RE
    scheduling; completion re-reads the current PR labels after verifying the queued head/base.
 2. Preparation enumerates fetched product tags, requires annotated GitHub Actions provenance for
    final tags, retains reachable pre-policy lightweight prerelease tags only for ordinal occupancy,
-   calculates the candidate from the highest final tag, and creates the reservation before writing
-   VERSION.
+   calculates the candidate from the highest final tag, and uses the Protected Release Authority
+   to create the reservation before writing VERSION.
 3. The same PR branch receives one GitHub verified VERSION-only commit guarded by
    `expectedHeadOid`.
 4. Release completion freezes the reservation and provenance, and production completion verifies
@@ -48,7 +49,18 @@ blocks with a local Git/API fixture. Release state is read through the GitHub RE
    Release for byte-identical reuse or an explicitly requested one-time bootstrap mode. Reused helper
    assets are downloaded and verified once in `resolve`, uploaded as `snapshot-helper-source`, and
    consumed by the native build and assembly jobs. It then verifies the merged identity, appends bound,
-   builds once, creates the product tag and GitHub Release, then appends consumed.
+   builds once, creates the product tag and GitHub Release with the default Actions identity, then
+   appends consumed with the Protected Release Authority. The App bypass is constrained by the
+   append-only receipt writer and never authorizes a successor version.
+
+## Protected release authority setup
+
+The repository must define the `TELEVYBACKUP_RELEASE_APP_ID` variable and
+`TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY` secret. The corresponding GitHub App is installed only on
+this repository with `Contents: read and write`, and is the only bypass actor for the protected
+release tag ruleset. The private key is never committed or passed as a repository file. Product
+tag creation deliberately remains on `GITHUB_TOKEN` to preserve the required
+`github-actions[bot]` annotated-tag provenance.
 
 ## Recovery boundaries
 

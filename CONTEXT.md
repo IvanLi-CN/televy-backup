@@ -108,6 +108,17 @@ The release identity bound to a specific mainline merge SHA after the reservatio
 merge boundary.
 _Avoid_: source SHA, preparation SHA
 
+**Protected Release Authority**:
+The narrowly scoped automation identity allowed to append protected release identity refs under the
+repository's immutable tag policy. It is distinct from the default workflow token and a maintainer's
+personal identity.
+_Avoid_: GITHUB_TOKEN, personal PAT
+
+**Consumed Receipt**:
+The immutable release identity record proving that a published product Release completed its
+reservation, merge, and publication chain.
+_Avoid_: workflow success, release status
+
 **Same-SHA Recovery**:
 A retry of publish or receipt work for an existing merged identity without recalculating a version,
 changing VERSION, or creating a new identity.

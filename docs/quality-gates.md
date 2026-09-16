@@ -24,6 +24,11 @@ complete merged identity is rechecked. The intent artifact is also bound to the 
 `Release Product` run attempt; a prior attempt's snapshot or resolver job cannot supply notification
 identity.
 
+Protected reservation and receipt refs are written with the dedicated Protected Release Authority,
+not the default Actions token. Its App ID, private key, repository installation, and ruleset bypass
+must be configured before a product release; missing configuration fails closed. Product annotated
+tags remain created by `github-actions[bot]` to preserve tag provenance.
+
 ## Release checks
 
 `Label Gate` enforces exactly one product `type:*` and one `channel:prod|beta|rc|dev` label, or a

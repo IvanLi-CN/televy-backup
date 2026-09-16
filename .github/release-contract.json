@@ -82,6 +82,14 @@
     "state_order": "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound",
     "receipt_validation": "independently-verify-reservation-provenance"
   },
+  "protected_ref_authority": {
+    "automation": "dedicated-github-app-installation",
+    "repository_variable": "TELEVYBACKUP_RELEASE_APP_ID",
+    "repository_secret": "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY",
+    "permission": "contents:write",
+    "ruleset": "must be an explicit bypass actor for protected release refs",
+    "product_tag_provenance": "product annotated tags remain created by github-actions[bot]"
+  },
   "recovery": {
     "same_sha_operation": "recover",
     "same_sha_identity": "bound merge SHA + VERSION + channel + matching reservation",

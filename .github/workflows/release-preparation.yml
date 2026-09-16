@@ -113,6 +113,33 @@ jobs:
             echo "release_action=$(printf '%s' "${intent_json}" | jq -r .action)"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Require protected release authority configuration
+        if: steps.pr.outputs.release_action != 'skip'
+        env:
+          RELEASE_APP_ID: ${{ vars.TELEVYBACKUP_RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "${RELEASE_APP_ID}" || {
+            echo "missing repository variable TELEVYBACKUP_RELEASE_APP_ID" >&2
+            exit 1
+          }
+          test -n "${RELEASE_APP_PRIVATE_KEY}" || {
+            echo "missing repository secret TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY" >&2
+            exit 1
+          }
+
+      - name: Mint protected release authority token
+        if: steps.pr.outputs.release_action != 'skip'
+        id: release-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.TELEVYBACKUP_RELEASE_APP_ID }}
+          private-key: ${{ secrets.TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
       - name: Reserve final-tag-first release identity
         id: reserve
         if: steps.pr.outputs.release_action != 'skip'
@@ -122,6 +149,7 @@ jobs:
           RELEASE_TYPE: ${{ steps.pr.outputs.release_type }}
           RELEASE_CHANNEL: ${{ steps.pr.outputs.release_channel }}
           LABELS_PATH: ${{ runner.temp }}/labels.json
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
         run: |
           set -euo pipefail
           if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${SOURCE_SHA}" 2>/dev/null)"; then

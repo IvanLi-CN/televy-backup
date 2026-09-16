@@ -26,5 +26,6 @@ branch-protection configuration is reconciled separately at PR-ready Step 5C.
 
 - Reviewers can inspect the exact version commit in the PR before merge.
 - A head race fails the native commit mutation instead of silently releasing a different source.
-- Release workflows need only the scoped `GITHUB_TOKEN`; no GPG secret, dedicated account, or bypass is introduced.
+- The preparation commit still uses the scoped `GITHUB_TOKEN`; protected release identity refs use a
+  separate narrowly scoped release authority, so no personal PAT or GPG secret is introduced.
 - Preparation heads can run structural checks while source heads retain the complete validation matrix.
