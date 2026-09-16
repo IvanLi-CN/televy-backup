@@ -94,6 +94,13 @@ if [[ -z "$final_pr_validation_line" || -z "$final_checks_refresh_line" || "$fin
   printf 'completion must refresh checks after final PR identity validation\n' >&2
   exit 1
 fi
+preparation_refresh_line="$(grep -n 'prepared_json=.*find-prepared' "$root_dir/.github/workflows/release-completion.yml" | tail -1 | cut -d: -f1)"
+preparation_sha_line="$(grep -n 'preparation_sha=.*preparationSha' "$root_dir/.github/workflows/release-completion.yml" | head -1 | cut -d: -f1)"
+if [[ -z "$preparation_refresh_line" || -z "$preparation_sha_line" || "$preparation_refresh_line" -le "$final_checks_refresh_line" || "$preparation_refresh_line" -ge "$preparation_sha_line" ]]; then
+  printf 'completion must refresh preparation after final source checks and before using its SHA\n' >&2
+  exit 1
+fi
+assert_contains "completion missing preparation fail-closed message" "$completion_text" "product release is missing a valid VERSION preparation commit"
 assert_contains "completion non-preemptive queue" "$completion_text" "queue: max"
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
