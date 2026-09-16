@@ -107,14 +107,21 @@ cleanup() {
     exit 1
   fi
 }
-trap cleanup EXIT
-
 previous_show_all="$(defaults read com.apple.finder AppleShowAllFiles 2>/dev/null || true)"
 previous_show_all_type="$(defaults read-type com.apple.finder AppleShowAllFiles 2>/dev/null | awk '$1 == "Type" && $2 == "is" { print $3; exit }' || true)"
 if [[ -n "$previous_show_all_type" ]]; then
   previous_show_all_present=true
+  case "$previous_show_all_type" in
+    boolean|integer|real|string) ;;
+    *)
+      echo "unsupported Finder AppleShowAllFiles preference type: $previous_show_all_type" >&2
+      rmdir "$mount_point"
+      exit 1
+      ;;
+  esac
 fi
 finder_was_visible_changed=false
+trap cleanup EXIT
 hdiutil verify "$dmg" >/dev/null
 attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"
 read -r attached_device attached_mount < <(

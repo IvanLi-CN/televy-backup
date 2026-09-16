@@ -238,6 +238,10 @@ grep -F 'defaults read-type com.apple.finder AppleShowAllFiles' <<<"$finder_text
   echo "Finder acceptance must preserve the AppleShowAllFiles preference type" >&2
   exit 1
 }
+grep -F 'rmdir "$mount_point"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must cleanly reject unsupported preference types" >&2
+  exit 1
+}
 grep -F 'rm -f "$finder_json"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must discard stale observation evidence" >&2
   exit 1
