@@ -32,9 +32,11 @@ blocks with a local Git/API fixture. Release state is read through the GitHub RE
    calculates the candidate from the highest final tag, and creates the reservation before writing
    VERSION.
 3. The same PR branch receives one GitHub verified VERSION-only commit guarded by
-   `expectedHeadOid`.
+   `expectedHeadOid`. Later source commits may follow it; `release_chain.py find-prepared` resolves
+   the first-parent preparation commit within the current `base..head` range and rejects a changed
+   current VERSION.
 4. Release completion freezes the reservation and provenance, and production completion verifies
-   the GitHub API signature state for the prepared commit. A normal PR merge creates the candidate's
+   the GitHub API signature state for the resolved preparation commit. A normal PR merge creates the candidate's
    merged identity; a version-only release PR creates a new identity for one covered old merge. A
    single-parent covered commit must be an authoritatively merged main PR result, and product tags
    plus append-only identity refs must not already target it. The merge-group gate waits for all

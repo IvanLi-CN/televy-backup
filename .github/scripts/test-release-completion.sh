@@ -48,6 +48,10 @@ python3 "$root_dir/.github/scripts/release_preparation.py" \
   --reservation-json "$tmp_dir/reservation.json" --provenance github-native-verified >/dev/null
 prepared_sha="$(git -C "$repo_dir" rev-parse HEAD)"
 printf '{"sha":"%s","commit":{"verification":{"verified":true}}}\n' "$prepared_sha" > "$tmp_dir/github-verification.json"
+printf 'source update after preparation\n' > "$repo_dir/POST_PREPARATION"
+git -C "$repo_dir" add POST_PREPARATION
+git -C "$repo_dir" commit -qm "source update after preparation"
+head_sha="$(git -C "$repo_dir" rev-parse HEAD)"
 printf '[{"merge_commit_sha":"%s","merged_at":"2026-09-07T11:29:21Z","base":{"ref":"main","repo":{"full_name":"fixture/repo"}}}]\n' "$prepared_sha" > "$tmp_dir/prepared-pulls.json"
 python3 - "$root_dir" "$repo_dir" "$prepared_sha" "$tmp_dir/prepared-pulls.json" <<'PY'
 import importlib.util
@@ -69,14 +73,14 @@ else:
 PY
 out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \
-  --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --commit "$head_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
   --reservation-json "$tmp_dir/reservation.json" --require-github-verification \
   --github-verification-json "$tmp_dir/github-verification.json")"
 [[ "$out" == *'"status": "ready"'* ]]
 
 if python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \
-  --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --commit "$head_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
   --reservation-json "$tmp_dir/reservation.json" --require-github-verification >/dev/null 2>&1; then
   echo "production completion accepted missing GitHub verification evidence" >&2
   exit 1
@@ -85,7 +89,7 @@ fi
 printf '{"sha":"%s","commit":{"verification":{"verified":false}}}\n' "$prepared_sha" > "$tmp_dir/github-verification.json"
 if python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \
-  --commit "$prepared_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
+  --commit "$head_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \
   --reservation-json "$tmp_dir/reservation.json" --require-github-verification \
   --github-verification-json "$tmp_dir/github-verification.json" >/dev/null 2>&1; then
   echo "unverified preparation passed the production completion gate" >&2

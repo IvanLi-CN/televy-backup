@@ -98,8 +98,11 @@ jobs:
           PY
           )"
           verification_sha="${source_sha}"
-          if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${source_sha}" 2>/dev/null)"; then
-            verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
+          if prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${source_sha}" --base "${base_sha}" 2>/dev/null)"; then
+            preparation_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["preparationSha"])')"
+            if [[ "${preparation_sha}" == "${source_sha}" ]]; then
+              verification_sha="$(printf '%s' "${prepared_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
+            fi
           fi
           gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/check-runs.json"
           {
@@ -124,7 +127,7 @@ jobs:
           LABELS_PATH: ${{ runner.temp }}/labels.json
         run: |
           set -euo pipefail
-          if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${SOURCE_SHA}" 2>/dev/null)"; then
+          if prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${SOURCE_SHA}" --base "${{ steps.pr.outputs.base_sha }}" 2>/dev/null)"; then
             printf '%s\n' "${prepared_json}" > "${RUNNER_TEMP}/reservation.json"
             jq -n \
               --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r .sourceSha)" \
@@ -249,8 +252,10 @@ jobs:
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           set -euo pipefail
-          test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${PREPARED_SHA}"
-          git fetch --no-tags origin "${PREPARED_SHA}"
+          current_sha="$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')"
+          test -n "${current_sha}"
+          git fetch --no-tags origin "${PREPARED_SHA}" "${current_sha}"
+          git merge-base --is-ancestor "${PREPARED_SHA}" "${current_sha}"
           python3 .github/scripts/release_chain.py verify-prepared --commit "${PREPARED_SHA}" --source-sha "${SOURCE_SHA}"
           verified=false
           for _ in $(seq 1 30); do
@@ -269,7 +274,10 @@ jobs:
           PREPARED_SHA: ${{ steps.create-version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}
         run: |
           set -euo pipefail
-          test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${PREPARED_SHA}"
+          current_sha="$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')"
+          test -n "${current_sha}"
+          git fetch --no-tags origin "${PREPARED_SHA}" "${current_sha}"
+          git merge-base --is-ancestor "${PREPARED_SHA}" "${current_sha}"
           gh workflow run label-gate.yml \
             --repo "${GITHUB_REPOSITORY}" \
             --ref main \

@@ -233,6 +233,30 @@ def verify_prepared(
     return values
 
 
+def find_prepared(commit: str, base: str | None = None) -> dict[str, str]:
+    """Find the current PR's preparation commit while preserving its identity."""
+    release_sha = git("rev-parse", f"{commit}^{{commit}}")
+    current_version = commit_version(release_sha)
+    revisions = [release_sha]
+    if base:
+        base_sha = git("rev-parse", f"{base}^{{commit}}")
+        revisions = git("rev-list", "--first-parent", f"{base_sha}..{release_sha}").splitlines()
+    else:
+        revisions = git("rev-list", "--first-parent", release_sha).splitlines()
+    for candidate in revisions:
+        try:
+            prepared = verify_prepared(candidate)
+        except (ReleaseChainError, PRODUCT_VERSION.VersionError):
+            continue
+        if prepared["version"] != current_version:
+            raise ReleaseChainError(
+                "current VERSION does not match the preparation commit"
+            )
+        prepared["preparationSha"] = prepared["releaseSha"]
+        return prepared
+    raise ReleaseChainError("no valid preparation commit found in the current PR ancestry")
+
+
 def verify_merged(commit: str) -> dict[str, str]:
     merge_sha = git("rev-parse", f"{commit}^{{commit}}")
     parents = git("show", "-s", "--format=%P", merge_sha).split()
@@ -518,6 +542,9 @@ def main(argv: list[str] | None = None) -> int:
     prepared.add_argument("--commit", default="HEAD")
     prepared.add_argument("--source-sha")
     prepared.add_argument("--version")
+    found = sub.add_parser("find-prepared")
+    found.add_argument("--commit", default="HEAD")
+    found.add_argument("--base")
     merged = sub.add_parser("verify-merged")
     merged.add_argument("--commit", default="HEAD")
     tag = sub.add_parser("verify-tag")
@@ -549,6 +576,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "verify-prepared":
             print(json.dumps(verify_prepared(args.commit, args.source_sha, args.version), sort_keys=True))
+        elif args.command == "find-prepared":
+            print(json.dumps(find_prepared(args.commit, args.base), sort_keys=True))
         elif args.command == "verify-merged":
             print(json.dumps(verify_merged(args.commit), sort_keys=True))
         elif args.command == "verify-tag":

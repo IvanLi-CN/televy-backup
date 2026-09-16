@@ -65,6 +65,10 @@ channel, reservation ref, owner, claim key, boundary token, release mode and pro
 completion validates those fields, source checks, ancestry, and reservation provenance.
 The production completion gate additionally requires the preparation commit's GitHub-native
 verification state; fixture provenance cannot enter the merge gate.
+The preparation commit may be followed by additional source commits on the same PR. In that case,
+the trusted validators MUST resolve the first-parent preparation commit in the `base..head` range,
+require the current `VERSION` to equal its prepared version, and verify the preparation commit's
+signature rather than treating the current source head as the preparation commit.
 
 `version-only-release-pr` is a separate mode. It is a non-empty PR changing only VERSION and
 records one covered merge SHA that does not already have a release identity. Its new merge SHA is

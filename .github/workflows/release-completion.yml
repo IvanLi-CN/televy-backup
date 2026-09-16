@@ -113,7 +113,7 @@ jobs:
           validate_current_pr "${RUNNER_TEMP}/current-pr.json"
           jq '.labels' "${RUNNER_TEMP}/current-pr.json" > "${RUNNER_TEMP}/labels.json"
           prepared_json=''
-          prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null || true)"
+          prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}" 2>/dev/null || true)"
           deadline=$((SECONDS + 1800))
           while :; do
             gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
@@ -167,8 +167,9 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
           product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
           if [[ "${product_release}" == true ]]; then
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"
-            jq -e --arg commit "${HEAD_SHA}" \
+            preparation_sha="$(printf '%s' "${prepared_json}" | jq -r .preparationSha)"
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${preparation_sha}" > "${RUNNER_TEMP}/github-verification.json"
+            jq -e --arg commit "${preparation_sha}" \
               '.sha == $commit and .commit.verification.verified == true' \
               "${RUNNER_TEMP}/github-verification.json" >/dev/null
           fi

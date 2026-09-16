@@ -164,7 +164,7 @@ assert_contains "merge-group final PR identity check" "$merge_group_text" 'test 
 assert_contains "merge-group final labels snapshot" "$merge_group_text" 'labels_json="$(jq -c '\''.labels'\'' "${final_pr_json}")"'
 assert_contains "merge-group source-check wait budget" "$merge_group_text" 'deadline=$((SECONDS + 1800))'
 assert_contains "merge-group waits for label gate" "$merge_group_text" 'required=("Release intent label gate"'
-assert_contains "merge-group verification fetch" "$merge_group_text" 'gh api "repos/${repository}/commits/${pr_head_sha}"'
+assert_contains "merge-group verification fetch" "$merge_group_text" 'gh api "repos/${repository}/commits/${preparation_sha}"'
 assert_contains "merge-group verification argument" "$merge_group_text" "--github-verification-json"
 assert_contains "merge-group checks bind to merge head" "$merge_group_text" 'gh api "repos/${repository}/commits/${head_sha}/check-runs?filter=latest&per_page=100"'
 if [[ -z "$poll_line" || -z "$final_pr_line" || -z "$final_checks_line" || -z "$completion_line" || "$poll_line" -ge "$final_pr_line" || "$final_pr_line" -ge "$final_checks_line" || "$final_checks_line" -ge "$completion_line" ]]; then
@@ -174,8 +174,8 @@ fi
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion native signature gate" "$completion_text" "--require-github-verification"
 assert_contains "completion reservation provenance gate" "$completion_text" "--reservation-json"
-assert_contains "completion GitHub verification fetch" "$completion_text" 'gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}"'
-assert_contains "completion GitHub verification SHA gate" "$completion_text" 'jq -e --arg commit "${HEAD_SHA}"'
+assert_contains "completion GitHub verification fetch" "$completion_text" 'gh api "repos/${GITHUB_REPOSITORY}/commits/${preparation_sha}"'
+assert_contains "completion GitHub verification SHA gate" "$completion_text" 'jq -e --arg commit "${preparation_sha}"'
 assert_contains "completion GitHub verification status gate" "$completion_text" '.commit.verification.verified == true'
 assert_contains "completion GitHub verification compatibility probe" "$completion_text" 'release_completion.py --help'
 assert_contains "completion GitHub verification argument" "$completion_text" "--github-verification-json"

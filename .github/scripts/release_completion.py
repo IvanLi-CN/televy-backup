@@ -227,11 +227,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not checks_ready(args.checks_json):
             raise CompletionError("source PR checks are not all successful")
-        prepared = CHAIN.verify_prepared(args.commit)
+        prepared = CHAIN.find_prepared(args.commit, args.base)
         if args.require_github_verification:
             if not args.github_verification_json:
                 raise CompletionError("production completion requires GitHub commit verification evidence")
-            verify_github_verification(args.github_verification_json, args.commit)
+            verify_github_verification(args.github_verification_json, prepared["preparationSha"])
             if prepared["provenance"] != "github-native-verified":
                 raise CompletionError("production completion requires a GitHub-native verified preparation commit")
         if not args.reservation_json:

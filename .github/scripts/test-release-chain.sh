@@ -87,6 +87,16 @@ assert prepared["tag"] == "v0.9.4"
 assert chain.diff_names(chain.git("rev-parse", "HEAD")) == ["VERSION"]
 preparation_sha = chain.git("rev-parse", "HEAD")
 
+# A preparation commit remains valid when later source commits keep VERSION
+# unchanged. The lookup must stay inside the current PR range.
+(repo / "POST_PREPARATION").write_text("source update\n", encoding="utf-8")
+subprocess.run(["git", "-C", str(repo), "add", "POST_PREPARATION"], check=True)
+subprocess.run(["git", "-C", str(repo), "commit", "-qm", "source update after preparation"], check=True)
+post_preparation = chain.git("rev-parse", "HEAD")
+found = chain.find_prepared(post_preparation, source)
+assert found["preparationSha"] == preparation_sha
+assert found["sourceSha"] == source
+
 def assert_sequence_rejected(version: str, expected: str, marker: str) -> None:
     try:
         chain.verify_release_sequence(version, expected)
