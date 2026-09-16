@@ -39,7 +39,7 @@ cleanup() {
   if [[ -n "$previous_show_all" || "$finder_was_visible_changed" == true ]]; then
     killall Finder >/dev/null 2>&1 || true
   fi
-  if [[ "$mounted" == true ]]; then
+  if [[ -n "$attached_device" ]]; then
     hdiutil detach "$attached_device" >/dev/null 2>&1 || true
   fi
   rmdir "$mount_point" >/dev/null 2>&1 || true
@@ -54,11 +54,14 @@ read -r attached_device attached_mount < <(
   python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
 payload = plistlib.loads(sys.argv[2].encode())
+fallback = ""
 for entity in payload.get("system-entities", []):
+    if entity.get("dev-entry") and not fallback:
+        fallback = entity["dev-entry"]
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"], entity["mount-point"])
         raise SystemExit(0)
-raise SystemExit("attach plist did not identify the requested Finder mount")' "$mount_point" "$attach_plist"
+print(fallback, "")' "$mount_point" "$attach_plist"
   )
 [[ "$attached_mount" == "$mount_point" && -n "$attached_device" ]] || {
   echo "could not resolve exact attached Finder device" >&2
@@ -139,10 +142,12 @@ if observation["drag_direction"] != "right":
     raise SystemExit("Finder observation does not show the expected drag direction")
 if observation["instruction"] != layout["overlay"]["instruction"]:
     raise SystemExit("Finder observation instruction differs from the layout schema")
-app_x, app_y = observation["app_position"]
-applications_x, applications_y = observation["applications_position"]
-if abs((applications_x - app_x) - 340) > 50 or abs(applications_y - app_y) > 50:
-    raise SystemExit("Finder icon positions differ materially from the layout schema")
+expected_app = tuple(layout["icon_locations"]["TelevyBackup.app"])
+expected_applications = tuple(layout["icon_locations"]["Applications"])
+if tuple(observation["app_position"]) != expected_app:
+    raise SystemExit(f"TelevyBackup.app position differs from schema: {observation['app_position']!r}")
+if tuple(observation["applications_position"]) != expected_applications:
+    raise SystemExit(f"Applications position differs from schema: {observation['applications_position']!r}")
 PY
 python3 - "$attached_device" "$dmg" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" <<'PY' > "$evidence_dir/acceptance.json"
 import json

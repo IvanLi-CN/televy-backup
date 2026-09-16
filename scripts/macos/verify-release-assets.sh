@@ -73,21 +73,26 @@ PY
 attach_dmg_readonly() {
   local dmg="$1"
   local mount_point="$2"
+  ATTACHED_DEVICE=""
+  ATTACHED_MOUNT=""
   local attach_plist
   attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"
   read -r ATTACHED_DEVICE ATTACHED_MOUNT < <(
     python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
 payload = plistlib.loads(sys.argv[2].encode())
+fallback = ""
 for entity in payload.get("system-entities", []):
+    if entity.get("dev-entry") and not fallback:
+        fallback = entity["dev-entry"]
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"], entity["mount-point"])
         raise SystemExit(0)
-raise SystemExit("hdiutil attach plist did not identify the requested mount point")' "$mount_point" "$attach_plist"
+print(fallback, "")' "$mount_point" "$attach_plist"
   )
   [[ "$ATTACHED_MOUNT" == "$mount_point" && -n "$ATTACHED_DEVICE" ]] || {
     echo "hdiutil attach plist did not resolve an exact device: $dmg" >&2
-    exit 1
+    return 1
   }
   emit_dmg_event dmg_attach "$dmg" "$ATTACHED_MOUNT" "$ATTACHED_DEVICE"
 }
@@ -360,8 +365,10 @@ verify_dmg_helper_identity() (
   attached_device=""
   mounted=false
   cleanup() {
-    if [[ "$mounted" == true ]]; then
-      hdiutil detach "$attached_device" >/dev/null 2>&1 || true
+    cleanup_device="$attached_device"
+    [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
+    if [[ -n "$cleanup_device" ]]; then
+      hdiutil detach "$cleanup_device" >/dev/null 2>&1 || true
     fi
     rmdir "$mount_point" >/dev/null 2>&1 || true
   }
@@ -463,6 +470,8 @@ PY
   diskutil verifyVolume "$attached_device"
   mounted=false
   detach_dmg_exact "$local_dmg" "$mount_point" "$attached_device"
+  attached_device=""
+  ATTACHED_DEVICE=""
   echo "DMG Snapshot Access verified: $local_dmg"
 )
 check_dmg_layout() {
@@ -473,8 +482,10 @@ check_dmg_layout() {
   local attached_device=""
   local mounted=false
   cleanup() {
-    if [[ "$mounted" == true ]]; then
-      hdiutil detach "$attached_device" >/dev/null 2>&1 || true
+    cleanup_device="$attached_device"
+    [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
+    if [[ -n "$cleanup_device" ]]; then
+      hdiutil detach "$cleanup_device" >/dev/null 2>&1 || true
     fi
     rmdir "$mount_point" >/dev/null 2>&1 || true
   }
@@ -497,6 +508,7 @@ check_dmg_layout() {
     return 1
   fi
   python3 - "$mount_point" "$root_dir/assets/brand/macos/dmg/layout.json" <<'PY'
+import hashlib
 import json
 import os
 import sys
@@ -516,6 +528,11 @@ if logical_hidden != allowlist:
     raise SystemExit(f"DMG hidden-resource allowlist mismatch: {hidden!r}")
 if not os.path.isfile(os.path.join(mount_point, ".background" + background_suffix)):
     raise SystemExit("DMG .background resource is missing")
+background_path = os.path.join(mount_point, ".background" + background_suffix)
+expected_background = layout["asset_digests"][layout["composed_background"]]
+actual_background = hashlib.sha256(open(background_path, "rb").read()).hexdigest()
+if actual_background != expected_background:
+    raise SystemExit(f"DMG background digest mismatch: {actual_background} != {expected_background}")
 if not os.path.isfile(os.path.join(mount_point, ".DS_Store")):
     raise SystemExit("DMG .DS_Store resource is missing")
 applications = os.path.join(mount_point, "Applications")
@@ -526,6 +543,8 @@ if set(logical_hidden) & set(layout["icon_locations"]):
 PY
   mounted=false
   detach_dmg_exact "$dmg" "$mount_point" "$attached_device"
+  attached_device=""
+  ATTACHED_DEVICE=""
 }
 for dmg in "$asset_dir/TelevyBackup-${version}.dmg" "$asset_dir/TelevyBackup-${version}-arm64.dmg" "$asset_dir/TelevyBackup-${version}-x86_64.dmg"; do
   check_dmg_layout "$dmg"

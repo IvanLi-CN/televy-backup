@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 2
       - id: classify
         run: |

@@ -212,9 +212,29 @@ grep -F 'hdiutil attach -plist' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must use machine-readable attach output" >&2
   exit 1
 }
+grep -F 'expected_app = tuple(layout["icon_locations"]["TelevyBackup.app"])' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must compare the app position with the layout schema" >&2
+  exit 1
+}
+grep -F 'expected_applications = tuple(layout["icon_locations"]["Applications"])' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must compare the Applications position with the layout schema" >&2
+  exit 1
+}
+grep -F 'expected_background = layout["asset_digests"][layout["composed_background"]]' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must compare the mounted background digest with the layout resource" >&2
+  exit 1
+}
+grep -F 'fallback = ""' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG attach verification must retain a fallback device for cleanup" >&2
+  exit 1
+}
 package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
 [[ "$(grep -Fc 'verify-dmg-layout.sh' <<<"$package_workflow_text")" -ge 2 ]] || {
   echo "native package CI jobs must expose the shared DMG layout verifier" >&2
+  exit 1
+}
+grep -F 'ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}' <<<"$package_workflow_text" >/dev/null || {
+  echo "package classification must use the same source_ref as package jobs" >&2
   exit 1
 }
 grep -F 'repackage_native_app "$x86_app" x86_64' <<<"$assemble_text" >/dev/null || {

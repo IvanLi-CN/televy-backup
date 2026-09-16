@@ -22,7 +22,7 @@ mount_point="$(cd "$mount_point" && pwd -P)"
 attached_device=""
 mounted=false
 cleanup() {
-  if [[ "$mounted" == true ]]; then
+  if [[ -n "$attached_device" ]]; then
     hdiutil detach "$attached_device" >/dev/null 2>&1 || true
   fi
   rmdir "$mount_point" >/dev/null 2>&1 || true
@@ -35,11 +35,14 @@ read -r attached_device attached_mount < <(
   python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
 payload = plistlib.loads(sys.argv[2].encode())
+fallback = ""
 for entity in payload.get("system-entities", []):
+    if entity.get("dev-entry") and not fallback:
+        fallback = entity["dev-entry"]
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"], entity["mount-point"])
         raise SystemExit(0)
-raise SystemExit("hdiutil attach plist did not identify the requested mount point")' "$mount_point" "$attach_plist"
+print(fallback, "")' "$mount_point" "$attach_plist"
   )
 [[ "$attached_mount" == "$mount_point" && -n "$attached_device" ]] || {
   echo "hdiutil attach plist did not resolve an exact device: $dmg" >&2
@@ -47,6 +50,7 @@ raise SystemExit("hdiutil attach plist did not identify the requested mount poin
 }
 mounted=true
 python3 - "$dmg" "$mount_point" "$attached_device" "$layout_path" <<'PY'
+import hashlib
 import json
 import os
 import sys
@@ -66,6 +70,11 @@ if logical_hidden != allowlist:
     raise SystemExit(f"DMG hidden-resource allowlist mismatch: {hidden!r}")
 if not os.path.isfile(os.path.join(mount_point, ".background" + background_suffix)):
     raise SystemExit("DMG .background resource is missing")
+background_path = os.path.join(mount_point, ".background" + background_suffix)
+expected_background = layout["asset_digests"][layout["composed_background"]]
+actual_background = hashlib.sha256(open(background_path, "rb").read()).hexdigest()
+if actual_background != expected_background:
+    raise SystemExit(f"DMG background digest mismatch: {actual_background} != {expected_background}")
 if not os.path.isfile(os.path.join(mount_point, ".DS_Store")):
     raise SystemExit("DMG .DS_Store resource is missing")
 applications = os.path.join(mount_point, "Applications")
@@ -88,4 +97,5 @@ print(json.dumps({
     "mount_point": sys.argv[3],
 }, sort_keys=True))
 PY
+attached_device=""
 echo "DMG layout verified: $dmg"
