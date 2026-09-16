@@ -258,8 +258,16 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
   echo "native package CI jobs must expose the shared DMG layout verifier" >&2
   exit 1
 }
-grep -F 'ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}' <<<"$package_workflow_text" >/dev/null || {
-  echo "package classification must use the same source_ref as package jobs" >&2
+grep -F 'source_sha: ${{ steps.classify.outputs.source_sha }}' <<<"$package_workflow_text" >/dev/null || {
+  echo "package classification must expose an immutable source SHA" >&2
+  exit 1
+}
+grep -F 'echo "source_sha=$(git rev-parse HEAD)"' <<<"$package_workflow_text" >/dev/null || {
+  echo "package classification must record the checked-out source SHA" >&2
+  exit 1
+}
+[[ "$(grep -Fc 'ref: ${{ needs.classify.outputs.source_sha }}' <<<"$package_workflow_text")" -eq 3 ]] || {
+  echo "all package jobs must checkout the classified immutable source SHA" >&2
   exit 1
 }
 grep -F 'repackage_native_app "$x86_app" x86_64' <<<"$assemble_text" >/dev/null || {

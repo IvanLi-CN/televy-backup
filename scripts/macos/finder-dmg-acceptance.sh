@@ -25,6 +25,11 @@ root_dir="$(git rev-parse --show-toplevel)"
 layout_path="$root_dir/assets/brand/macos/dmg/layout.json"
 "$root_dir/scripts/macos/verify-dmg-layout.sh" --dmg "$dmg"
 dmg_sha256="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+manifest_path="$(dirname "$dmg")/BUILD-MANIFEST.json"
+[[ -s "$manifest_path" ]] || {
+  echo "Finder acceptance requires the adjacent BUILD-MANIFEST.json" >&2
+  exit 1
+}
 macos_version="$(sw_vers -productVersion)"
 machine_arch="$(uname -m)"
 mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-finder-acceptance.XXXXXX")"
@@ -183,17 +188,14 @@ canonical_layout = {
 }
 semantic_layout_digest = hashlib.sha256(json.dumps(canonical_layout, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 dmg_path = pathlib.Path(sys.argv[2])
-manifest_path = dmg_path.with_name("BUILD-MANIFEST.json")
 manifest_sha256 = ""
-manifest_verified = False
-if manifest_path.is_file():
-    manifest_bytes = manifest_path.read_bytes()
-    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-    manifest = json.loads(manifest_bytes.decode())
-    record = next((asset for asset in manifest.get("assets", []) if asset.get("name") == dmg_path.name), None)
-    if record is None or record.get("sha256") != sys.argv[3] or record.get("dmg_layout_digest") != semantic_layout_digest:
-        raise SystemExit("Finder acceptance DMG does not match its adjacent BUILD-MANIFEST.json")
-    manifest_verified = True
+manifest_path = dmg_path.with_name("BUILD-MANIFEST.json")
+manifest_bytes = manifest_path.read_bytes()
+manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+manifest = json.loads(manifest_bytes.decode())
+record = next((asset for asset in manifest.get("assets", []) if asset.get("name") == dmg_path.name), None)
+if record is None or record.get("sha256") != sys.argv[3] or record.get("dmg_layout_digest") != semantic_layout_digest:
+    raise SystemExit("Finder acceptance DMG does not match its adjacent BUILD-MANIFEST.json")
 print(json.dumps({
     "architecture": sys.argv[6],
     "capture_scope": "finder-window-only",
@@ -201,9 +203,9 @@ print(json.dumps({
     "dmg": sys.argv[2],
     "dmg_sha256": sys.argv[3],
     "event": "finder_acceptance",
-    "manifest": str(manifest_path) if manifest_verified else None,
-    "manifest_sha256": manifest_sha256 or None,
-    "manifest_verified": manifest_verified,
+    "manifest": str(manifest_path),
+    "manifest_sha256": manifest_sha256,
+    "manifest_verified": True,
     "semantic_layout_digest": semantic_layout_digest,
     "show_all_files": hidden,
     "macos_version": sys.argv[7],

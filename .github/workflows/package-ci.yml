@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       kind: ${{ steps.classify.outputs.kind }}
+      source_sha: ${{ steps.classify.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,6 +33,7 @@ jobs:
           else
             echo "kind=source" >> "$GITHUB_OUTPUT"
           fi
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   arm64:
     needs: classify
@@ -41,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ needs.classify.outputs.source_sha }}
           fetch-depth: 0
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
@@ -71,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ needs.classify.outputs.source_sha }}
           fetch-depth: 0
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
@@ -101,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ needs.classify.outputs.source_sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@v1
         if: needs.classify.outputs.kind == 'source'
