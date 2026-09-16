@@ -298,10 +298,14 @@ grep -F 'expected_background = layout["asset_digests"][layout["composed_backgrou
   echo "DMG verification must compare the mounted background digest with the layout resource" >&2
   exit 1
 }
-grep -F 'fallback = ""' <<<"$verify_release_text" >/dev/null || {
-  echo "DMG attach verification must retain a fallback device for cleanup" >&2
+grep -F 'if entity.get("mount-point") == expected_mount' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG attach verification must resolve the exact mounted device" >&2
   exit 1
 }
+if grep -F 'fallback = ""' <<<"$verify_release_text" >/dev/null; then
+  echo "DMG attach verification must not retain an unrelated fallback device" >&2
+  exit 1
+fi
 grep -F -- '--expected-source-commit' <<<"$verify_release_text" >/dev/null || {
   echo "release asset verification must bind the manifest source commit" >&2
   exit 1

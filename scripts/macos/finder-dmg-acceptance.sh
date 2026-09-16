@@ -204,14 +204,11 @@ read -r attached_device attached_mount < <(
   python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
 payload = plistlib.loads(sys.argv[2].encode())
-fallback = ""
 for entity in payload.get("system-entities", []):
-    if entity.get("dev-entry") and not fallback:
-        fallback = entity["dev-entry"]
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"], entity["mount-point"])
         raise SystemExit(0)
-print(fallback, "")' "$mount_point" "$attach_plist"
+print("", "")' "$mount_point" "$attach_plist"
   )
 if [[ -z "$attached_device" ]]; then
   read -r attached_device attached_mount < <(
@@ -221,14 +218,11 @@ payload = plistlib.loads(sys.stdin.buffer.read())
 entities = list(payload.get("system-entities", []))
 for image in payload.get("images", []):
     entities.extend(image.get("system-entities", []))
-fallback = ""
 for entity in entities:
-    if entity.get("dev-entry") and not fallback:
-        fallback = entity["dev-entry"]
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"], entity["mount-point"])
         raise SystemExit(0)
-print(fallback, "")' "$mount_point"
+print("", "")' "$mount_point"
   )
 fi
 [[ "$attached_mount" == "$mount_point" && -n "$attached_device" ]] || {
@@ -276,10 +270,31 @@ screencapture -x -l "$window_id" "$evidence_dir/finder-window.png"
   echo "Finder window screenshot was not created" >&2
   exit 1
 }
-[[ "${TELEVYBACKUP_FINDER_VISUAL_REVIEW:-}" == "approved" ]] || {
-  echo "set TELEVYBACKUP_FINDER_VISUAL_REVIEW=approved after inspecting the scoped Finder screenshot" >&2
+[[ -n "${TELEVYBACKUP_FINDER_VISUAL_REVIEW:-}" ]] || {
+  echo "set TELEVYBACKUP_FINDER_VISUAL_REVIEW to the approved JSON checklist after inspecting the scoped Finder screenshot" >&2
   exit 2
 }
+visual_review_json="$(TELEVYBACKUP_FINDER_VISUAL_REVIEW="${TELEVYBACKUP_FINDER_VISUAL_REVIEW}" python3 - <<'PY'
+import json
+import os
+
+required = {
+    "instruction_readable",
+    "instruction_contrast",
+    "arrow_visible",
+    "arrow_direction_correct",
+    "labels_visible",
+    "no_occlusion",
+}
+try:
+    review = json.loads(os.environ["TELEVYBACKUP_FINDER_VISUAL_REVIEW"])
+except (KeyError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid Finder visual review JSON: {error}")
+if set(review) != required or any(value is not True for value in review.values()):
+    raise SystemExit("Finder visual review checklist must contain exactly six true checks")
+print(json.dumps(review, sort_keys=True))
+PY
+)"
 
 defaults write com.apple.finder AppleShowAllFiles -bool true
 finder_was_visible_changed=true
@@ -327,13 +342,15 @@ if tuple(observation["app_position"]) != expected_app:
 if tuple(observation["applications_position"]) != expected_applications:
     raise SystemExit(f"Applications position differs from schema: {observation['applications_position']!r}")
 PY
-python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" <<'PY' > "$evidence_dir/acceptance.json"
+python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" <<'PY' > "$evidence_dir/acceptance.json"
 import hashlib
 import json
 import pathlib
 import sys
 
 hidden = json.load(open(sys.argv[11], encoding="utf-8"))
+observation = json.load(open(sys.argv[12], encoding="utf-8"))
+visual_review = json.loads(sys.argv[13])
 layout = json.load(open(sys.argv[7], encoding="utf-8"))
 canonical_layout = {
     "schema_version": layout["schema_version"],
@@ -382,8 +399,9 @@ print(json.dumps({
     "visual_review": {
         "status": "approved",
         "method": "scoped-human-review",
+        "checklist": visual_review,
         "instruction": layout["overlay"]["instruction"],
-        "arrow_direction": "right",
+        "arrow_direction": observation["drag_direction"],
         "asset_digest": layout["asset_digests"][layout["composed_background"]],
     },
     "show_all_files": hidden,

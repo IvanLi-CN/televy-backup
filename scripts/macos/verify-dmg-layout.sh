@@ -46,14 +46,11 @@ read -r attached_device attached_mount < <(
   python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
 payload = plistlib.loads(sys.argv[2].encode())
-fallback = ""
 for entity in payload.get("system-entities", []):
-    if entity.get("dev-entry") and not fallback:
-        fallback = entity["dev-entry"]
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"], entity["mount-point"])
         raise SystemExit(0)
-print(fallback, "")' "$mount_point" "$attach_plist"
+print("", "")' "$mount_point" "$attach_plist"
   )
 if [[ -z "$attached_device" ]]; then
   read -r attached_device attached_mount < <(
@@ -63,14 +60,11 @@ payload = plistlib.loads(sys.stdin.buffer.read())
 entities = list(payload.get("system-entities", []))
 for image in payload.get("images", []):
     entities.extend(image.get("system-entities", []))
-fallback = ""
 for entity in entities:
-    if entity.get("dev-entry") and not fallback:
-        fallback = entity["dev-entry"]
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"], entity["mount-point"])
         raise SystemExit(0)
-print(fallback, "")' "$mount_point"
+print("", "")' "$mount_point"
   )
 fi
 [[ "$attached_mount" == "$mount_point" && -n "$attached_device" ]] || {
