@@ -27,7 +27,10 @@ blocks with a local Git/API fixture. Release state is read through the GitHub RE
 
 1. Label Gate validates one product type and one new channel, or channel-free docs/skip.
    Label Gate and Release completion are required per-PR gates with non-preemptive `queue: max`
-   scheduling; completion re-reads the current PR labels after verifying the queued head/base.
+   scheduling; after preparation, their manual runs target the prepared PR head so the required
+   check-runs stay attached to that candidate. Dispatch mode checks out trusted `main`, verifies
+   the selected branch/SHA against the current in-repository PR, and completion re-reads the
+   current PR labels after verifying the queued head/base.
 2. Preparation enumerates fetched product tags, requires annotated GitHub Actions provenance for
    final tags, retains reachable pre-policy lightweight prerelease tags only for ordinal occupancy,
    calculates the candidate from the highest final tag, and uses the default `GITHUB_TOKEN` to

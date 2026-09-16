@@ -80,9 +80,16 @@ jobs:
       - name: Fetch immutable release identity refs
         run: git fetch --force --tags origin
 
-      - name: Verify dispatched workflow comes from trusted main
+      - name: Verify dispatched workflow uses trusted main checkout
         if: github.event_name == 'workflow_dispatch'
-        run: test "${GITHUB_REF}" = "refs/heads/main"
+        env:
+          EXPECTED_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/${EXPECTED_HEAD_REF}"
+          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
 
       - name: Verify VERSION and release completion
         if: github.event_name != 'merge_group'

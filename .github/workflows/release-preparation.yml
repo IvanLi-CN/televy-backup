@@ -272,9 +272,9 @@ jobs:
           test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${PREPARED_SHA}"
           gh workflow run label-gate.yml \
             --repo "${GITHUB_REPOSITORY}" \
-            --ref main \
+            --ref "${HEAD_REF}" \
             --raw-field "pr_number=${PR_NUMBER}"
           gh workflow run release-completion.yml \
             --repo "${GITHUB_REPOSITORY}" \
-            --ref main \
+            --ref "${HEAD_REF}" \
             --raw-field "pr_number=${PR_NUMBER}"
