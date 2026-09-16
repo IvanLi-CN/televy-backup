@@ -151,6 +151,10 @@ with tempfile.TemporaryDirectory() as directory:
     asset_dir = temp / "dist"
     (policy_repo / "scripts/macos").mkdir(parents=True)
     (policy_repo / "packaging/macos").mkdir(parents=True)
+    shutil.copytree(
+        root / "assets/brand/macos/dmg",
+        policy_repo / "assets/brand/macos/dmg",
+    )
     asset_dir.mkdir()
     shutil.copy2(validator_source, policy_repo / "scripts/macos/verify-release-assets.sh")
     shutil.copy2(
