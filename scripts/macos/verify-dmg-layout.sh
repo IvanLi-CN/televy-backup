@@ -79,9 +79,9 @@ if entries != expected:
 logical_hidden = sorted(".background" if name.startswith(".background.") else name for name in hidden)
 if logical_hidden != allowlist:
     raise SystemExit(f"DMG hidden-resource allowlist mismatch: {hidden!r}")
-if not os.path.isfile(os.path.join(mount_point, ".background" + background_suffix)):
-    raise SystemExit("DMG .background resource is missing")
 background_path = os.path.join(mount_point, ".background" + background_suffix)
+if os.path.islink(background_path) or not os.path.isfile(background_path):
+    raise SystemExit("DMG .background resource is missing")
 expected_background = layout["asset_digests"][layout["composed_background"]]
 actual_background = hashlib.sha256(open(background_path, "rb").read()).hexdigest()
 if actual_background != expected_background:

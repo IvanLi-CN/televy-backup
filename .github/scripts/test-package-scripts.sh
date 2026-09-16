@@ -234,6 +234,18 @@ grep -F 'defaults write com.apple.finder AppleShowAllFiles' <<<"$finder_text" >/
   echo "Finder acceptance must restore the AppleShowAllFiles preference" >&2
   exit 1
 }
+grep -F 'defaults read-type com.apple.finder AppleShowAllFiles' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must preserve the AppleShowAllFiles preference type" >&2
+  exit 1
+}
+grep -F 'rm -f "$finder_json"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must discard stale observation evidence" >&2
+  exit 1
+}
+grep -F 'checksums_path="$(dirname "$dmg")/SHA256SUMS"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must bind evidence to adjacent SHA256SUMS" >&2
+  exit 1
+}
 grep -F 'verify-dmg-layout.sh" --dmg "$dmg"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must verify the exact DMG before GUI evidence" >&2
   exit 1
@@ -276,6 +288,14 @@ grep -F 'fallback = ""' <<<"$verify_release_text" >/dev/null || {
 }
 grep -F 'tarfile' <<<"$verify_release_text" >/dev/null || {
   echo "tools archive verification must reject unsafe member paths before extraction" >&2
+  exit 1
+}
+grep -F 'member.isfifo()' <<<"$verify_release_text" >/dev/null || {
+  echo "tools archive verification must reject FIFO members before extraction" >&2
+  exit 1
+}
+grep -F 'os.path.islink(background_path)' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must reject symlinked background resources" >&2
   exit 1
 }
 package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"

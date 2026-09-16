@@ -564,9 +564,9 @@ if entries != expected:
 logical_hidden = sorted(".background" if name.startswith(".background.") else name for name in hidden)
 if logical_hidden != allowlist:
     raise SystemExit(f"DMG hidden-resource allowlist mismatch: {hidden!r}")
-if not os.path.isfile(os.path.join(mount_point, ".background" + background_suffix)):
-    raise SystemExit("DMG .background resource is missing")
 background_path = os.path.join(mount_point, ".background" + background_suffix)
+if os.path.islink(background_path) or not os.path.isfile(background_path):
+    raise SystemExit("DMG .background resource is missing")
 expected_background = layout["asset_digests"][layout["composed_background"]]
 actual_background = hashlib.sha256(open(background_path, "rb").read()).hexdigest()
 if actual_background != expected_background:
@@ -610,7 +610,7 @@ with tarfile.open(archive, "r:gz") as handle:
         normalized = posixpath.normpath(name)
         if name.startswith("/") or normalized == ".." or normalized.startswith("../"):
             raise SystemExit(f"unsafe tools archive member path: {name}")
-        if member.issym() or member.islnk() or member.isdev():
+        if member.issym() or member.islnk() or member.isdev() or member.isfifo():
             raise SystemExit(f"unsupported tools archive member type: {name}")
 PY
     tar -xzf "$tools_archive" -C "$tools_dir"

@@ -30,6 +30,27 @@ manifest_path="$(dirname "$dmg")/BUILD-MANIFEST.json"
   echo "Finder acceptance requires the adjacent BUILD-MANIFEST.json" >&2
   exit 1
 }
+checksums_path="$(dirname "$dmg")/SHA256SUMS"
+[[ -s "$checksums_path" ]] || {
+  echo "Finder acceptance requires the adjacent SHA256SUMS" >&2
+  exit 1
+}
+python3 - "$checksums_path" "$(basename "$dmg")" "$dmg_sha256" <<'PY'
+import sys
+
+checksums_path, dmg_name, expected_digest = sys.argv[1:]
+records = {}
+for line in open(checksums_path, encoding="utf-8"):
+    fields = line.rstrip("\n").split(maxsplit=1)
+    if len(fields) != 2:
+        raise SystemExit("malformed SHA256SUMS entry")
+    name = fields[1].removeprefix("*")
+    if name in records:
+        raise SystemExit(f"duplicate SHA256SUMS entry: {name}")
+    records[name] = fields[0]
+if records.get(dmg_name) != expected_digest:
+    raise SystemExit("Finder acceptance DMG does not match adjacent SHA256SUMS")
+PY
 macos_version="$(sw_vers -productVersion)"
 machine_arch="$(uname -m)"
 mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-finder-acceptance.XXXXXX")"
@@ -37,11 +58,24 @@ mount_point="$(cd "$mount_point" && pwd -P)"
 attached_device=""
 mounted=false
 previous_show_all=""
+previous_show_all_type=""
+previous_show_all_present=false
 cleanup() {
   original_status=$?
   cleanup_failed=false
-  if [[ -n "$previous_show_all" ]]; then
-    if ! defaults write com.apple.finder AppleShowAllFiles "$previous_show_all" >/dev/null 2>&1; then
+  if [[ "$previous_show_all_present" == true ]]; then
+    case "$previous_show_all_type" in
+      boolean) restore_command=(defaults write com.apple.finder AppleShowAllFiles -bool "$previous_show_all") ;;
+      integer) restore_command=(defaults write com.apple.finder AppleShowAllFiles -int "$previous_show_all") ;;
+      real) restore_command=(defaults write com.apple.finder AppleShowAllFiles -float "$previous_show_all") ;;
+      string) restore_command=(defaults write com.apple.finder AppleShowAllFiles -string "$previous_show_all") ;;
+      *)
+        echo "unsupported Finder AppleShowAllFiles preference type: $previous_show_all_type" >&2
+        cleanup_failed=true
+        restore_command=()
+        ;;
+    esac
+    if [[ "${#restore_command[@]}" -gt 0 ]] && ! "${restore_command[@]}" >/dev/null 2>&1; then
       echo "failed to restore Finder AppleShowAllFiles preference" >&2
       cleanup_failed=true
     fi
@@ -53,7 +87,7 @@ cleanup() {
       fi
     fi
   fi
-  if [[ -n "$previous_show_all" || "$finder_was_visible_changed" == true ]]; then
+  if [[ "$previous_show_all_present" == true || "$finder_was_visible_changed" == true ]]; then
     if ! killall Finder >/dev/null 2>&1; then
       echo "failed to restart Finder after restoring preferences" >&2
       cleanup_failed=true
@@ -76,6 +110,10 @@ cleanup() {
 trap cleanup EXIT
 
 previous_show_all="$(defaults read com.apple.finder AppleShowAllFiles 2>/dev/null || true)"
+previous_show_all_type="$(defaults read-type com.apple.finder AppleShowAllFiles 2>/dev/null | awk '$1 == "Type" && $2 == "is" { print $3; exit }' || true)"
+if [[ -n "$previous_show_all_type" ]]; then
+  previous_show_all_present=true
+fi
 finder_was_visible_changed=false
 hdiutil verify "$dmg" >/dev/null
 attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"
@@ -103,6 +141,7 @@ open "$mount_point"
 osascript -e 'tell application "Finder" to activate'
 sleep 2
 finder_json="$evidence_dir/finder-observation.json"
+rm -f "$finder_json"
 instruction_text="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["overlay"]["instruction"])' "$layout_path")"
 for attempt in 1 2 3 4 5; do
   if [[ "$attempt" -gt 1 ]]; then
@@ -218,6 +257,8 @@ manifest_sha256 = ""
 manifest_path = dmg_path.with_name("BUILD-MANIFEST.json")
 manifest_bytes = manifest_path.read_bytes()
 manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+checksums_path = dmg_path.with_name("SHA256SUMS")
+checksums_sha256 = hashlib.sha256(checksums_path.read_bytes()).hexdigest()
 manifest = json.loads(manifest_bytes.decode())
 record = next((asset for asset in manifest.get("assets", []) if asset.get("name") == dmg_path.name), None)
 if record is None or record.get("sha256") != sys.argv[3] or record.get("dmg_layout_digest") != semantic_layout_digest:
@@ -233,6 +274,9 @@ print(json.dumps({
     "manifest_sha256": manifest_sha256,
     "manifest_verified": True,
     "semantic_layout_digest": semantic_layout_digest,
+    "checksums": str(checksums_path),
+    "checksums_sha256": checksums_sha256,
+    "checksums_verified": True,
     "show_all_files": hidden,
     "macos_version": sys.argv[7],
     "screenshot": sys.argv[5],
