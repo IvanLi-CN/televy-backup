@@ -34,12 +34,28 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
-      - name: Checkout workflow branch (bootstrap dispatch)
+      - name: Checkout trusted gate scripts (bootstrap dispatch)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: main
           persist-credentials: false
+
+      - name: Verify workflow dispatch targets current pull request head
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          test -n "${PR_NUMBER}"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/dispatch-pr.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg head_ref "${GITHUB_REF_NAME}" \
+            --arg head_sha "${GITHUB_SHA}" \
+            '.state == "open" and .base.ref == "main" and .head.repo.full_name == $repository and .head.ref == $head_ref and .head.sha == $head_sha' \
+            "${RUNNER_TEMP}/dispatch-pr.json" >/dev/null
 
       - name: Checkout trusted merge-group gate scripts
         if: github.event_name == 'merge_group'

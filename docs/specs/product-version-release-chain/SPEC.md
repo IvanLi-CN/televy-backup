@@ -122,6 +122,10 @@ The release-owning agent MUST report successful publication directly to the owne
 
 `Release intent label gate` and `Release completion` are required PR gates and use a per-PR
 non-preemptive `queue: max` concurrency policy. They MUST NOT use `cancel-in-progress: true`.
+When trusted preparation creates a new PR head, any manually dispatched gate runs MUST be bound to
+that prepared head ref and SHA so their check-runs satisfy the same PR-local required checks. The
+dispatch-mode workflows MUST execute gate scripts from trusted `main` and MUST verify that the
+selected ref and SHA still match the current in-repository PR head before evaluating it.
 `Release completion` MUST fetch the current pull request through the GitHub API at execution time,
 verify that its open head and base still match the event-bound SHAs, and pass that current labels
 snapshot to the validator. After waiting for source checks, it MUST repeat the head/base and labels
