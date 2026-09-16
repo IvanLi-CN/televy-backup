@@ -105,12 +105,21 @@ jobs:
             fi
           fi
           gh api "repos/${GITHUB_REPOSITORY}/commits/${verification_sha}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/check-runs.json"
+          source_checks_ready="$(python3 - "${RUNNER_TEMP}/check-runs.json" <<'PY'
+          import json
+          import sys
+          sys.path.insert(0, '.github/scripts')
+          from release_preparation import source_checks_ready
+          print(str(source_checks_ready(json.load(open(sys.argv[1], encoding='utf-8')))).lower())
+          PY
+          )"
           {
             echo "number=${pr_number}"
             echo "source_sha=${source_sha}"
             echo "verification_sha=${verification_sha}"
             echo "base_sha=${base_sha}"
             echo "head_ref=${head_ref}"
+            echo "source_checks_ready=${source_checks_ready}"
             echo "release_type=$(printf '%s' "${intent_json}" | jq -r .type)"
             echo "release_channel=$(printf '%s' "${intent_json}" | jq -r .channel)"
             echo "release_action=$(printf '%s' "${intent_json}" | jq -r .action)"
@@ -118,7 +127,7 @@ jobs:
 
       - name: Reserve final-tag-first release identity
         id: reserve
-        if: steps.pr.outputs.release_action != 'skip'
+        if: steps.pr.outputs.release_action != 'skip' && steps.pr.outputs.source_checks_ready == 'true'
         env:
           SOURCE_SHA: ${{ steps.pr.outputs.source_sha }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}

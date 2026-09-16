@@ -42,6 +42,8 @@ assert_contains "release preparation expectedHeadOid" "$preparation_text" "expec
 assert_contains "prepared-head gate dispatch permission" "$preparation_text" "actions: write"
 assert_contains "prepared-head label gate dispatch" "$preparation_text" "gh workflow run label-gate.yml"
 assert_contains "prepared-head completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
+assert_contains "preparation source check readiness output" "$preparation_text" 'echo "source_checks_ready=${source_checks_ready}"'
+assert_contains "preparation reserve requires ready source checks" "$preparation_text" "steps.pr.outputs.source_checks_ready == 'true'"
 assert_contains "preparation reservation uses Actions token" "$preparation_text" 'GH_TOKEN: ${{ github.token }}'
 assert_not_contains "preparation App token" "$preparation_text" "actions/create-github-app-token@v1"
 assert_not_contains "preparation extra credential variable" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_ID"
