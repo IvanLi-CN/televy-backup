@@ -72,7 +72,8 @@ trusted recovery path can append it atomically after re-verifying the same-SHA p
 never calculates a new version or changes an existing ref. Helper bootstrap is permitted only when
 no approved helper Release is available and the recovery input explicitly requests it. No identity
 is reported as an unresolved state and cannot produce a fabricated tag or recovery command.
-Recovery keeps the trusted main checkout for policy and helper scripts; the historical recovery
-input remains the product identity passed through resolved outputs for packaging and publication.
-The assembly job likewise evaluates release-asset validation from the exact trusted policy commit
-resolved by the workflow while keeping the recovered merge checkout as the product input.
+Recovery and publication keep the trusted main checkout for policy and helper scripts; the historical
+recovery input remains the product identity passed through resolved outputs for packaging and
+publication. The write-capable publish job does not execute policy scripts from the product
+checkout. The assembly job likewise evaluates release-asset validation from the exact trusted policy
+commit resolved by the workflow while keeping the recovered merge checkout as the product input.

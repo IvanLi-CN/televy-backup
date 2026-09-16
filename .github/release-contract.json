@@ -47,6 +47,11 @@
     "release": "Release Product",
     "failure_notification": "Notify failed release"
   },
+  "execution_authority": {
+    "release_policy": "trusted-main-checkout",
+    "product_inputs": "resolved-merge-identity-and-release-artifacts",
+    "write_capable_product_checkout": false
+  },
   "required_gate_scheduling": {
     "label_gate": {
       "group": "per-pull-request",
@@ -91,7 +96,7 @@
       "refs/tags/release-consumed/*",
       "refs/tags/release-released/*"
     ],
-    "application_enforcement": "release_reservation.py rejects deletion, overwrite, foreign provenance, and invalid state order",
+    "application_enforcement": "release_reservation.py enforces append-only create semantics, same-claim idempotency, provenance, and state order; out-of-band deletion of excluded identity refs is outside application observability",
     "no_additional_ci_credentials": true,
     "product_tag_provenance": "product annotated tags remain created by github-actions[bot]"
   },

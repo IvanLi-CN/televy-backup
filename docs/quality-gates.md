@@ -17,7 +17,8 @@ The exact workflow mapping is declared in `.github/quality-gates.json` and is va
 Release Product treats the highest eligible final product tag as the numeric baseline. Eligible
 product tags are protected annotated tags created by `github-actions[bot]` and reachable from
 `main`; foreign, lightweight, incomplete, or unreachable tags fail closed. Prerelease ordinals are
-allocated only within their base/channel. Reservation, bound, and consumed refs are append-only;
+allocated only within their base/channel. Reservation, bound, and consumed refs use append-only
+application write paths;
 any provenance or ownership conflict fails before packaging. A matching published Release is
 terminal and is not rebuilt or overwritten. Failure alerts use `recovery_candidate` only after a
 complete merged identity is rechecked. The intent artifact is also bound to the exact failed
@@ -28,8 +29,9 @@ Product tag refs (`refs/tags/v*`) remain server-protected and are created as ann
 `github-actions[bot]`. The five release identity namespaces are intentionally outside that
 product-tag ruleset so reservation and receipt writes can use the existing default `GITHUB_TOKEN`;
 no PAT, GitHub App, deploy key, or other CI credential is part of the release contract. Their
-append-only state, provenance, ownership, and transition rules are enforced by
-`.github/scripts/release_reservation.py`.
+append-only create semantics, provenance, ownership, and transition rules are enforced by
+`.github/scripts/release_reservation.py`; out-of-band deletion of an excluded identity ref is not
+observable by that application-level authority.
 
 ## Release checks
 
@@ -56,9 +58,10 @@ Release source.
 
 After a normal merge, `Release Product` reads only the committed merged identity and its reservation ref. Its manual entry is restricted to same-identity `recover`. Successful publication is reported directly to the owner by the release-owning agent; Release Product does not write a result comment to the source PR. Failed releases are handled by `Notify failed release`, which reports locked identity context only when it can be resolved.
 
-Recovery evaluates policy and helper resolution from the trusted main checkout, while its historical
-input selects the recovered product identity. Packaging and publication remain bound to that identity
-and do not silently switch to the policy checkout's commit.
+Recovery and publication evaluate policy and helper resolution from the trusted main checkout, while
+their historical input selects the recovered product identity. Packaging and publication remain bound
+to that identity and do not silently switch product inputs to the policy checkout's commit. The
+write-capable publish job never executes policy scripts from the product checkout.
 The Universal 2 assembly step applies the release-asset validator from the exact policy commit
 resolved by recovery, while its product inputs remain checked out from the recovered merge.
 

@@ -42,6 +42,8 @@ assert "append-only repository identity refs" in contract["source_of_truth"]
 assert contract["preparation"]["write_api"] == "createCommitOnBranch"
 assert contract["preparation"]["expected_head_oid"] is True
 assert contract["preparation"]["no_gpg_secrets"] is True
+assert contract["execution_authority"]["release_policy"] == "trusted-main-checkout"
+assert contract["execution_authority"]["write_capable_product_checkout"] is False
 assert contract["recovery"]["historical_backfill"] is False
 assert contract["release_sequence"]["final_baseline"] == "highest final vX.Y.Z only"
 assert contract["release_states"]["published"] == "idempotent-success-without-build-or-overwrite"
