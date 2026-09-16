@@ -55,6 +55,51 @@ else:
 print(digest.hexdigest())
 PY
 }
+emit_dmg_event() {
+  python3 - "$@" <<'PY'
+import json
+import sys
+
+event, dmg, mount_point, device = sys.argv[1:]
+print(json.dumps({
+    "device": device,
+    "dmg": dmg,
+    "event": event,
+    "mount_point": mount_point,
+}, sort_keys=True))
+PY
+}
+
+attach_dmg_readonly() {
+  local dmg="$1"
+  local mount_point="$2"
+  local attach_plist
+  attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"
+  read -r ATTACHED_DEVICE ATTACHED_MOUNT < <(
+    python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.argv[2].encode())
+for entity in payload.get("system-entities", []):
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"], entity["mount-point"])
+        raise SystemExit(0)
+raise SystemExit("hdiutil attach plist did not identify the requested mount point")' "$mount_point" "$attach_plist"
+  )
+  [[ "$ATTACHED_MOUNT" == "$mount_point" && -n "$ATTACHED_DEVICE" ]] || {
+    echo "hdiutil attach plist did not resolve an exact device: $dmg" >&2
+    exit 1
+  }
+  emit_dmg_event dmg_attach "$dmg" "$ATTACHED_MOUNT" "$ATTACHED_DEVICE"
+}
+
+detach_dmg_exact() {
+  local dmg="$1"
+  local mount_point="$2"
+  local device="$3"
+  hdiutil detach "$device"
+  emit_dmg_event dmg_detach "$dmg" "$mount_point" "$device"
+}
+
 required=("TelevyBackup-${version}.dmg" "TelevyBackup-${version}-arm64.dmg" "TelevyBackup-${version}-x86_64.dmg" "televybackup-tools-${version}-arm64.tar.gz" "televybackup-tools-${version}-x86_64.tar.gz" "SHA256SUMS" "BUILD-MANIFEST.json")
 for name in "${required[@]}"; do
   [[ -s "$asset_dir/$name" ]] || { echo "missing or empty asset: $name" >&2; exit 1; }
@@ -65,14 +110,50 @@ grep -F "televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/SHA256SUMS" >/d
   cd "$asset_dir"
   shasum -a 256 -c SHA256SUMS
 )
-python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" "$skip_bundle_checks" <<'PY'
+python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" "$root_dir/assets/brand/macos/dmg/layout.json" "$skip_bundle_checks" <<'PY'
 import hashlib, json, os, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 lock = json.load(open(sys.argv[3], encoding="utf-8"))
 asset_dir = sys.argv[4]
+layout_path = sys.argv[5]
 def require(condition, message):
     if not condition:
         raise SystemExit(message)
+
+layout = json.load(open(layout_path, encoding="utf-8"))
+def canonical_json(value):
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
+resource_digests = {}
+for name, expected in layout["asset_digests"].items():
+    resource_path = os.path.join(os.path.dirname(layout_path), name)
+    with open(resource_path, "rb") as handle:
+        actual = hashlib.sha256(handle.read()).hexdigest()
+    require(actual == expected, f"DMG layout resource digest mismatch: {name}")
+    resource_digests[name] = actual
+
+expected_dmg_layout = {
+    "schema_version": layout["schema_version"],
+    "builder": layout["builder"],
+    "format": layout["format"],
+    "filesystem": layout["filesystem"],
+    "window": layout["window"],
+    "icon_size": layout["icon_size"],
+    "icon_locations": layout["icon_locations"],
+    "overlay": layout["overlay"],
+    "resources": {
+        "background": layout["background"],
+        "overlay": layout["overlay_asset"],
+        "composed_background": layout["composed_background"],
+        "digests": resource_digests,
+    },
+    "hidden_resource_allowlist": sorted(layout["hidden_resource_allowlist"]),
+    "symlinks": layout["symlinks"],
+}
+expected_dmg_layout["semantic_layout_digest"] = hashlib.sha256(canonical_json(expected_dmg_layout)).hexdigest()
+require(manifest["dmg_layout"] == expected_dmg_layout, "manifest DMG layout contract mismatch")
+require(expected_dmg_layout["builder"] == {"name": "dmgbuild", "version": "1.6.7"}, "DMG builder is not pinned")
+require(expected_dmg_layout["format"] == "UDZO", "DMG format is not UDZO")
 
 require(manifest["release_version"] == sys.argv[2], "manifest release version mismatch")
 require(manifest["signing"] == "ad-hoc", "manifest signing mode mismatch")
@@ -92,6 +173,9 @@ for name in expected_asset_names:
         data = handle.read()
     require(asset_records[name]["sha256"] == hashlib.sha256(data).hexdigest(), f"asset digest mismatch: {name}")
     require(asset_records[name]["bytes"] == len(data), f"asset size mismatch: {name}")
+for name, record in asset_records.items():
+    if name.endswith(".dmg"):
+        require(record.get("dmg_layout_digest") == expected_dmg_layout["semantic_layout_digest"], f"DMG layout digest mismatch: {name}")
 component = manifest["components"]["snapshot_access"]
 locked = lock["components"]["snapshot_access"]
 require(component["bundle_id"] == "com.ivan.televybackup.snapshot-access", "Snapshot Access bundle id mismatch")
@@ -120,7 +204,7 @@ require(locked_mount_component["identity"]["sha256"] == "BUILD-MANIFEST.json#/co
 require(locked_mount_component["identity"]["artifact_sha256"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/artifact_sha256", "mount helper artifact lock reference mismatch")
 require(locked_mount_component["identity"]["cdhash"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/cdhash", "mount helper CDHash lock reference mismatch")
 require(locked_mount_component["identity"]["designated_requirement"] == "BUILD-MANIFEST.json#/components/snapshot_mount_helper/designated_requirement", "mount helper requirement lock reference mismatch")
-if sys.argv[5] != "true":
+if sys.argv[6] != "true":
     require(mount_component["sha256"], "mount helper SHA-256 is missing")
     require(mount_component["cdhash"], "mount helper CDHash is missing")
     require(mount_component["designated_requirement"], "mount helper designated requirement is missing")
@@ -272,15 +356,19 @@ verify_dmg_helper_identity() (
   local_dmg="$1"
   require_manifest_identity="$2"
   mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-helper-verify.XXXXXX")"
+  mount_point="$(cd "$mount_point" && pwd -P)"
+  attached_device=""
   mounted=false
   cleanup() {
     if [[ "$mounted" == true ]]; then
-      hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+      hdiutil detach "$attached_device" >/dev/null 2>&1 || true
     fi
     rmdir "$mount_point" >/dev/null 2>&1 || true
   }
   trap cleanup EXIT
-  hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$local_dmg" >/dev/null
+  hdiutil verify "$local_dmg"
+  attach_dmg_readonly "$local_dmg" "$mount_point"
+  attached_device="$ATTACHED_DEVICE"
   mounted=true
   app="$mount_point/TelevyBackup.app"
   [[ -d "$app" ]] || { echo "DMG is missing TelevyBackup.app: $local_dmg" >&2; exit 1; }
@@ -372,33 +460,72 @@ require(component["component_version"] == metadata["componentVersion"], "Snapsho
 require(component["protocol_version"] == metadata["protocolVersion"], "Snapshot Access protocol version mismatch")
 PY
   fi
+  diskutil verifyVolume "$attached_device"
   mounted=false
-  hdiutil detach "$mount_point" >/dev/null
+  detach_dmg_exact "$local_dmg" "$mount_point" "$attached_device"
   echo "DMG Snapshot Access verified: $local_dmg"
 )
 check_dmg_layout() {
   local dmg="$1"
   local mount_point
   mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-verify.XXXXXX")"
-  hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg" >/dev/null
+  mount_point="$(cd "$mount_point" && pwd -P)"
+  local attached_device=""
+  local mounted=false
+  cleanup() {
+    if [[ "$mounted" == true ]]; then
+      hdiutil detach "$attached_device" >/dev/null 2>&1 || true
+    fi
+    rmdir "$mount_point" >/dev/null 2>&1 || true
+  }
+  trap cleanup RETURN
+  hdiutil verify "$dmg"
+  attach_dmg_readonly "$dmg" "$mount_point"
+  attached_device="$ATTACHED_DEVICE"
+  mounted=true
+  diskutil verifyVolume "$attached_device"
   local top_level_apps=()
   while IFS= read -r app_path; do
     top_level_apps+=("$app_path")
   done < <(find "$mount_point" -maxdepth 1 -type d -name '*.app' -print)
   if [[ "${#top_level_apps[@]}" -ne 1 || "${top_level_apps[0]}" != "$mount_point/TelevyBackup.app" ]]; then
-    hdiutil detach "$mount_point" >/dev/null 2>&1 || true
-    rmdir "$mount_point" >/dev/null 2>&1 || true
     echo "DMG must contain exactly one top-level TelevyBackup.app: $dmg" >&2
     return 1
   fi
   if [[ -d "$mount_point/TelevyBackup Snapshot Access.app" ]]; then
-    hdiutil detach "$mount_point" >/dev/null 2>&1 || true
-    rmdir "$mount_point" >/dev/null 2>&1 || true
     echo "DMG contains a second top-level Snapshot Access app: $dmg" >&2
     return 1
   fi
-  hdiutil detach "$mount_point" >/dev/null
-  rmdir "$mount_point" >/dev/null 2>&1 || true
+  python3 - "$mount_point" "$root_dir/assets/brand/macos/dmg/layout.json" <<'PY'
+import json
+import os
+import sys
+
+mount_point, layout_path = sys.argv[1:]
+layout = json.load(open(layout_path, encoding="utf-8"))
+allowlist = sorted(layout["hidden_resource_allowlist"])
+entries = sorted(os.listdir(mount_point))
+hidden = sorted(name for name in entries if name.startswith("."))
+background_suffix = os.path.splitext(layout["composed_background"])[1]
+expected_hidden = sorted([".DS_Store", ".background" + background_suffix])
+expected = sorted(["TelevyBackup.app", "Applications"] + expected_hidden)
+if entries != expected:
+    raise SystemExit(f"DMG top-level entries mismatch: {entries!r}")
+logical_hidden = sorted(".background" if name.startswith(".background.") else name for name in hidden)
+if logical_hidden != allowlist:
+    raise SystemExit(f"DMG hidden-resource allowlist mismatch: {hidden!r}")
+if not os.path.isfile(os.path.join(mount_point, ".background" + background_suffix)):
+    raise SystemExit("DMG .background resource is missing")
+if not os.path.isfile(os.path.join(mount_point, ".DS_Store")):
+    raise SystemExit("DMG .DS_Store resource is missing")
+applications = os.path.join(mount_point, "Applications")
+if not os.path.islink(applications) or os.readlink(applications) != "/Applications":
+    raise SystemExit("DMG Applications alias does not resolve to /Applications")
+if set(logical_hidden) & set(layout["icon_locations"]):
+    raise SystemExit("hidden DMG resources have Finder icon locations")
+PY
+  mounted=false
+  detach_dmg_exact "$dmg" "$mount_point" "$attached_device"
 }
 for dmg in "$asset_dir/TelevyBackup-${version}.dmg" "$asset_dir/TelevyBackup-${version}-arm64.dmg" "$asset_dir/TelevyBackup-${version}-x86_64.dmg"; do
   check_dmg_layout "$dmg"

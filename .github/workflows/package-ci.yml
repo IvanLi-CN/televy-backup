@@ -55,6 +55,8 @@ jobs:
         run: bash scripts/macos/package-release.sh --mode development --arch arm64 --output-dir dist/arm64
       - if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/arm64/TelevyBackup.app
+      - if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/verify-dmg-layout.sh --dmg "$(find dist/arm64 -maxdepth 1 -name 'TelevyBackup-*-arm64.dmg' -print -quit)"
       - uses: actions/upload-artifact@v4
         if: needs.classify.outputs.kind == 'source'
         with:
@@ -83,6 +85,8 @@ jobs:
         run: bash scripts/macos/package-release.sh --mode development --arch x86_64 --output-dir dist/x86_64
       - if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/x86_64/TelevyBackup.app
+      - if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/verify-dmg-layout.sh --dmg "$(find dist/x86_64 -maxdepth 1 -name 'TelevyBackup-*-x86_64.dmg' -print -quit)"
       - uses: actions/upload-artifact@v4
         if: needs.classify.outputs.kind == 'source'
         with:

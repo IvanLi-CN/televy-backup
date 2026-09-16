@@ -49,7 +49,11 @@ trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/TelevyBackup" "$staging/TelevyBackup Tools/bin" "$staging/TelevyBackup Tools/LaunchAgents"
 cp -R "$app_dest" "$staging/TelevyBackup/"
 ln -s /Applications "$staging/TelevyBackup/Applications"
-hdiutil create -quiet -volname "TelevyBackup $version" -srcfolder "$staging/TelevyBackup" -format UDZO -ov "$output_dir/$dmg_name"
+bash "$root_dir/scripts/macos/build-dmg.sh" \
+  --source-dir "$staging/TelevyBackup" \
+  --volume-name "TelevyBackup $version" \
+  --output "$output_dir/$dmg_name"
+bash "$root_dir/scripts/macos/verify-dmg-layout.sh" --dmg "$output_dir/$dmg_name"
 
 cp "$app_dest/Contents/MacOS/televybackup-cli" "$staging/TelevyBackup Tools/bin/televybackup"
 cp "$app_dest/Contents/MacOS/televybackupd" "$staging/TelevyBackup Tools/bin/televybackupd"

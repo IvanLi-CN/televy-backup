@@ -1,0 +1,43 @@
+# ADR 0014: Deterministic macOS DMG Guided Layout
+
+## Status
+
+Accepted.
+
+## Context
+
+The release pipeline currently creates DMGs with `hdiutil create`, which packages the
+payload but does not provide a durable contract for Finder window metadata. Finder
+coordinates and `.DS_Store` state are otherwise vulnerable to runner timing, local Finder
+automation, and drift between native and Universal packaging paths. The release also needs to
+keep the private Snapshot Access helper nested and identity-stable while making the first-open
+DMG understandable to users.
+
+## Decision
+
+Use pinned `dmgbuild==1.6.7` as the single DMG builder for arm64, x86_64, and Universal 2
+outputs. A checked-in layout schema supplies the window size, icon locations, background,
+deterministic English overlay, `Applications -> /Applications` symlink, UDZO format, and the
+allowlist of hidden resources. The builder writes Finder metadata during image construction;
+release CI does not use Finder AppleScript or online image generation.
+
+The final artifact records a semantic layout digest and the builder/resource identities in
+`BUILD-MANIFEST.json`. Verification attaches the final UDZO with `hdiutil -plist`, resolves the
+actual mount and device identifiers from the plist, checks the filesystem with
+`diskutil verifyVolume`, verifies the image with `hdiutil verify`, reads back the mounted tree,
+and detaches the exact device. A separate controlled GUI acceptance remains required for
+macOS 15 and the current supported macOS because structural metadata checks cannot prove the
+first-open Finder appearance.
+
+The top level contains exactly one `TelevyBackup.app` and the Applications symlink. Snapshot
+Access remains only at its existing nested private helper path. Strict ad-hoc signing is
+unchanged; Developer ID signing, notarization, stapling, and quarantine clearing remain out of
+scope.
+
+## Consequences
+
+All three DMGs share one auditable layout contract while their outer app architecture can
+remain native or Universal as required. DMG bytes and `.DS_Store` bytes are not promised to be
+identical, but the semantic layout, resource hashes, visible payload, and helper identity are
+checked consistently. Finder GUI evidence requires a logged-in controlled macOS session and
+cannot be replaced by a headless Linux or image-only test.

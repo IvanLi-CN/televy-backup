@@ -11,6 +11,7 @@ bash -n \
   "$root_dir/scripts/macos/assemble-universal.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
+  "$root_dir/scripts/macos/verify-dmg-layout.sh" \
   "$root_dir/scripts/macos/verify-component-identity.sh" \
   "$root_dir/scripts/macos/verify-webdav-snapshot-browsing.sh" \
   "$root_dir/scripts/macos/generate-brand-variants.sh" \
@@ -68,6 +69,18 @@ verify_icon_text="$(<"$root_dir/scripts/macos/verify-app-icon-assets.sh")"
 verify_release_text="$(<"$root_dir/scripts/macos/verify-release-assets.sh")"
 [[ "$verify_release_text" == *'0$access_mode & 022'* ]] || {
   echo "Snapshot Access mode check must parse stat output as octal" >&2
+  exit 1
+}
+grep -F 'hdiutil attach -plist' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must consume machine-readable attach output" >&2
+  exit 1
+}
+grep -F 'diskutil verifyVolume "$attached_device"' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must verify the attached filesystem" >&2
+  exit 1
+}
+grep -F 'detach_dmg_exact' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must detach the exact plist-resolved device" >&2
   exit 1
 }
 identity_text="$(<"$root_dir/scripts/macos/verify-component-identity.sh")"
@@ -131,6 +144,20 @@ package_text="$(<"$root_dir/scripts/macos/package-release.sh")"
 [[ "$package_text" != *'access_dest="$output_dir/TelevyBackup Snapshot Access.app"'* ]]
 [[ "$package_text" != *'REPLACE_WITH_SNAPSHOT_ACCESS_APP'* ]]
 [[ "$package_text" != *'--version'* ]]
+grep -F 'verify-dmg-layout.sh' <<<"$package_text" >/dev/null || {
+  echo "native package creation must run the shared DMG layout verifier" >&2
+  exit 1
+}
+build_dmg_text="$(<"$root_dir/scripts/macos/build-dmg.sh")"
+[[ "$build_dmg_text" == *'dmgbuild-requirements.txt'* && "$build_dmg_text" == *'dmgbuild.__version__'* && "$build_dmg_text" == *'1.6.7'* ]] || {
+  echo "DMG builder must use the pinned dmgbuild dependency and version check" >&2
+  exit 1
+}
+settings_text="$(<"$root_dir/scripts/macos/dmgbuild-settings.py")"
+[[ "$settings_text" == *'layout.json'* && "$settings_text" == *'background'* && "$settings_text" == *'icon_locations'* ]] || {
+  echo "dmgbuild settings must consume the shared layout schema" >&2
+  exit 1
+}
 assemble_text="$(<"$root_dir/scripts/macos/assemble-universal.sh")"
 grep -F 'chmod 755 "$universal_app/Contents/MacOS/"*' <<<"$assemble_text" >/dev/null || {
   echo "Universal main binaries must remain executable after lipo" >&2
@@ -162,6 +189,32 @@ grep -F 'access_relative_path="Contents/Library/LoginItems/TelevyBackup Snapshot
 }
 grep -F 'repackage_native_app "$arm_app" arm64' <<<"$assemble_text" >/dev/null || {
   echo "Native arm64 DMG must reuse the Universal Snapshot Access identity" >&2
+  exit 1
+}
+grep -F 'verify-dmg-layout.sh' <<<"$assemble_text" >/dev/null || {
+  echo "Universal assembly must run the shared DMG layout verifier" >&2
+  exit 1
+}
+finder_text="$(<"$root_dir/scripts/macos/finder-dmg-acceptance.sh")"
+grep -F 'TELEVYBACKUP_RUN_FINDER_ACCEPTANCE' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must require explicit controlled-session opt-in" >&2
+  exit 1
+}
+grep -F 'screencapture -x -l "$window_id"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must capture only the verified Finder window" >&2
+  exit 1
+}
+grep -F 'defaults write com.apple.finder AppleShowAllFiles' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must restore the AppleShowAllFiles preference" >&2
+  exit 1
+}
+grep -F 'hdiutil attach -plist' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must use machine-readable attach output" >&2
+  exit 1
+}
+package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
+[[ "$(grep -Fc 'verify-dmg-layout.sh' <<<"$package_workflow_text")" -ge 2 ]] || {
+  echo "native package CI jobs must expose the shared DMG layout verifier" >&2
   exit 1
 }
 grep -F 'repackage_native_app "$x86_app" x86_64' <<<"$assemble_text" >/dev/null || {
@@ -209,7 +262,32 @@ assert payload["signing"] == "ad-hoc"
 assert len(payload["assets"]) == 5
 assert payload["components"]["snapshot_access"]["source"] == "one-time-bootstrap-universal-build"
 assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.1.0", "0.9.8"]
+layout = payload["dmg_layout"]
+assert layout["builder"] == {"name": "dmgbuild", "version": "1.6.7"}
+assert layout["format"] == "UDZO"
+assert layout["window"] == {"height": 520, "origin": [100, 100], "width": 760}
+assert layout["icon_locations"]["TelevyBackup.app"] == [210, 270]
+assert layout["icon_locations"]["Applications"] == [550, 270]
+assert layout["hidden_resource_allowlist"] == [".DS_Store", ".background"]
+assert len(layout["semantic_layout_digest"]) == 64
+assert all("dmg_layout_digest" in asset for asset in payload["assets"] if asset["name"].endswith(".dmg"))
 PY
+
+python3 - "$tmp_dir/BUILD-MANIFEST.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["dmg_layout"]["semantic_layout_digest"] = "0" * 64
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+if bash "$root_dir/scripts/macos/verify-release-assets.sh" \
+  --mode release --asset-dir "$tmp_dir" --skip-bundle-checks >/dev/null 2>&1; then
+  echo "release asset verifier accepted a mismatched DMG layout digest" >&2
+  exit 1
+fi
 
 python3 - "$tmp_dir/BUILD-MANIFEST.json" <<'PY'
 import json

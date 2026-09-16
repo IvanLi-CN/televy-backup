@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "window": {
+    "origin": [100, 100],
+    "width": 760,
+    "height": 520
+  },
+  "icon_size": 128,
+  "icon_locations": {
+    "Applications": [550, 270],
+    "TelevyBackup.app": [210, 270]
+  },
+  "overlay": {
+    "brand_text": "TELEVYBACKUP",
+    "instruction": "Drag TelevyBackup to Applications",
+    "instruction_center": [380, 100],
+    "arrow_start": [300, 270],
+    "arrow_end": [460, 270]
+  },
+  "background": "background.png",
+  "overlay_asset": "overlay.png",
+  "composed_background": "background-composed.png",
+  "asset_digests": {
+    "background.png": "5271cfbdb6de1f4c30575b8a993af79b080b402dc93b9113b9d61ac327375677",
+    "background-composed.png": "aee408d0f90a81313ce9a594fca6c439705a17805c4bd9632f47cb67400b20f0",
+    "overlay.png": "ea917bb82a6d3807892ab1d536b7378ccfe5e49722e5a9f8b014dfab4209c38b"
+  },
+  "hidden_resource_allowlist": [
+    ".DS_Store",
+    ".background"
+  ],
+  "filesystem": "HFS+",
+  "builder": {
+    "name": "dmgbuild",
+    "version": "1.6.7"
+  },
+  "format": "UDZO",
+  "symlinks": {
+    "Applications": "/Applications"
+  }
+}
