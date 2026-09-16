@@ -246,15 +246,23 @@ grep -F 'rm -f "$finder_json"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must discard stale observation evidence" >&2
   exit 1
 }
-grep -F 'checksums_path="$(dirname "$dmg")/SHA256SUMS"' <<<"$finder_text" >/dev/null || {
+grep -F 'source_checksums_path="$source_asset_dir/SHA256SUMS"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must bind evidence to adjacent SHA256SUMS" >&2
+  exit 1
+}
+grep -F 'mkdir "$lock_dir"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must serialize access to the Finder session and evidence directory" >&2
+  exit 1
+}
+grep -F 'snapshot_dir="$(mktemp -d' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must use an immutable DMG input snapshot" >&2
   exit 1
 }
 grep -F 'verify-dmg-layout.sh" --dmg "$dmg"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must verify the exact DMG before GUI evidence" >&2
   exit 1
 }
-grep -F '"dmg_sha256": sys.argv[3]' <<<"$finder_text" >/dev/null || {
+grep -F '"dmg_sha256": sys.argv[4]' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance evidence must record the DMG digest" >&2
   exit 1
 }

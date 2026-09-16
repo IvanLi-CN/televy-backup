@@ -21,20 +21,49 @@ done
   exit 2
 }
 mkdir -p "$evidence_dir"
+lock_dir="$evidence_dir/.finder-dmg-acceptance.lock"
+if ! mkdir "$lock_dir" 2>/dev/null; then
+  echo "another Finder acceptance run already owns the evidence directory: $evidence_dir" >&2
+  exit 1
+fi
+lock_held=true
+snapshot_dir=""
+release_lock() {
+  if [[ "$lock_held" == true ]]; then
+    rmdir "$lock_dir" >/dev/null 2>&1 || return 1
+    lock_held=false
+  fi
+}
+cleanup_preflight() {
+  if [[ -n "$snapshot_dir" ]]; then
+    rm -rf "$snapshot_dir"
+  fi
+  release_lock || true
+}
+trap cleanup_preflight EXIT
 root_dir="$(git rev-parse --show-toplevel)"
 layout_path="$root_dir/assets/brand/macos/dmg/layout.json"
-"$root_dir/scripts/macos/verify-dmg-layout.sh" --dmg "$dmg"
-dmg_sha256="$(shasum -a 256 "$dmg" | awk '{print $1}')"
-manifest_path="$(dirname "$dmg")/BUILD-MANIFEST.json"
-[[ -s "$manifest_path" ]] || {
+source_dmg="$dmg"
+source_asset_dir="$(dirname "$source_dmg")"
+source_manifest_path="$source_asset_dir/BUILD-MANIFEST.json"
+source_checksums_path="$source_asset_dir/SHA256SUMS"
+[[ -s "$source_manifest_path" ]] || {
   echo "Finder acceptance requires the adjacent BUILD-MANIFEST.json" >&2
   exit 1
 }
-checksums_path="$(dirname "$dmg")/SHA256SUMS"
-[[ -s "$checksums_path" ]] || {
+[[ -s "$source_checksums_path" ]] || {
   echo "Finder acceptance requires the adjacent SHA256SUMS" >&2
   exit 1
 }
+snapshot_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-finder-acceptance-input.XXXXXX")"
+dmg="$snapshot_dir/$(basename "$source_dmg")"
+manifest_path="$snapshot_dir/BUILD-MANIFEST.json"
+checksums_path="$snapshot_dir/SHA256SUMS"
+cp "$source_dmg" "$dmg"
+cp "$source_manifest_path" "$manifest_path"
+cp "$source_checksums_path" "$checksums_path"
+dmg_sha256="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+"$root_dir/scripts/macos/verify-dmg-layout.sh" --dmg "$dmg"
 python3 - "$checksums_path" "$(basename "$dmg")" "$dmg_sha256" <<'PY'
 import sys
 
@@ -101,6 +130,17 @@ cleanup() {
   fi
   if ! rmdir "$mount_point" >/dev/null 2>&1; then
     echo "failed to remove Finder acceptance mount point: $mount_point" >&2
+    cleanup_failed=true
+  fi
+  if [[ -n "$snapshot_dir" ]]; then
+    if ! rm -rf "$snapshot_dir"; then
+      echo "failed to remove Finder acceptance input snapshot: $snapshot_dir" >&2
+      cleanup_failed=true
+    fi
+    snapshot_dir=""
+  fi
+  if ! release_lock; then
+    echo "failed to release Finder acceptance evidence lock: $lock_dir" >&2
     cleanup_failed=true
   fi
   if [[ "$cleanup_failed" == true && "$original_status" -eq 0 ]]; then
@@ -232,14 +272,14 @@ if tuple(observation["app_position"]) != expected_app:
 if tuple(observation["applications_position"]) != expected_applications:
     raise SystemExit(f"Applications position differs from schema: {observation['applications_position']!r}")
 PY
-python3 - "$attached_device" "$dmg" "$dmg_sha256" "$layout_path" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" <<'PY' > "$evidence_dir/acceptance.json"
+python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" <<'PY' > "$evidence_dir/acceptance.json"
 import hashlib
 import json
 import pathlib
 import sys
 
-hidden = json.load(open(sys.argv[8], encoding="utf-8"))
-layout = json.load(open(sys.argv[4], encoding="utf-8"))
+hidden = json.load(open(sys.argv[11], encoding="utf-8"))
+layout = json.load(open(sys.argv[7], encoding="utf-8"))
 canonical_layout = {
     "schema_version": layout["schema_version"],
     "builder": layout["builder"],
@@ -260,22 +300,22 @@ canonical_layout = {
 }
 semantic_layout_digest = hashlib.sha256(json.dumps(canonical_layout, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 dmg_path = pathlib.Path(sys.argv[2])
-manifest_sha256 = ""
-manifest_path = dmg_path.with_name("BUILD-MANIFEST.json")
+verified_dmg_path = pathlib.Path(sys.argv[3])
+manifest_path = pathlib.Path(sys.argv[5])
+checksums_path = pathlib.Path(sys.argv[6])
 manifest_bytes = manifest_path.read_bytes()
 manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-checksums_path = dmg_path.with_name("SHA256SUMS")
 checksums_sha256 = hashlib.sha256(checksums_path.read_bytes()).hexdigest()
 manifest = json.loads(manifest_bytes.decode())
-record = next((asset for asset in manifest.get("assets", []) if asset.get("name") == dmg_path.name), None)
-if record is None or record.get("sha256") != sys.argv[3] or record.get("dmg_layout_digest") != semantic_layout_digest:
+record = next((asset for asset in manifest.get("assets", []) if asset.get("name") == verified_dmg_path.name), None)
+if record is None or record.get("sha256") != sys.argv[4] or record.get("dmg_layout_digest") != semantic_layout_digest:
     raise SystemExit("Finder acceptance DMG does not match its adjacent BUILD-MANIFEST.json")
 print(json.dumps({
-    "architecture": sys.argv[6],
+    "architecture": sys.argv[9],
     "capture_scope": "finder-window-only",
     "device": sys.argv[1],
     "dmg": sys.argv[2],
-    "dmg_sha256": sys.argv[3],
+    "dmg_sha256": sys.argv[4],
     "event": "finder_acceptance",
     "manifest": str(manifest_path),
     "manifest_sha256": manifest_sha256,
@@ -285,8 +325,8 @@ print(json.dumps({
     "checksums_sha256": checksums_sha256,
     "checksums_verified": True,
     "show_all_files": hidden,
-    "macos_version": sys.argv[7],
-    "screenshot": sys.argv[5],
+    "macos_version": sys.argv[10],
+    "screenshot": sys.argv[8],
 }, sort_keys=True))
 PY
 echo "Finder DMG acceptance evidence: $evidence_dir"
