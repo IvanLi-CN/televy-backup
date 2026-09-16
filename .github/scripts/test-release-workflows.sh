@@ -105,6 +105,8 @@ assert_contains "release full history checkout" "$release_text" "fetch-depth: 0"
 assert_contains "release full tag fetch" "$release_text" "git fetch --force origin main '+refs/tags/*:refs/tags/*'"
 assert_contains "release trusted main API lookup" "$release_text" "git/ref/heads/main"
 assert_contains "release immutable policy checkout" "$release_text" 'ref: ${{ steps.trusted-main.outputs.sha }}'
+assert_contains "native helper identity policy SHA" "$release_text" 'git show "${POLICY_SHA}:scripts/macos/verify-component-identity.sh"'
+assert_contains "native helper identity policy invocation" "$release_text" 'bash "$TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY"'
 assert_contains "release PR merge association" "$release_text" "merge_commit_sha // empty"
 assert_contains "release PR preparation association" "$release_text" 'pull_request_head_sha}" = "${preparation_sha}'
 assert_contains "release sequence gate" "$release_text" "verify-release-sequence"

@@ -31,6 +31,8 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
   legacy artifact-digest compatibility, and RC artifact reuse inspection
 - helper source resolution independent of the product RC ordinal; published Release manifest
   discovery and explicit no-source bootstrap mode are covered by resolver fixtures
+- historical product checkouts use the trusted main policy SHA for Snapshot Access identity
+  gates, so recovery repairs are applied without changing the recovered product source
 - `snapshot-components.lock.json` bootstrap-tag preference for helper reuse across ordinary product
   versions, plus verified published prerelease `BUILD-MANIFEST.json` anchoring for RC2/stable reuse,
   including the final Universal bundle
