@@ -157,8 +157,8 @@ build_dmg_text="$(<"$root_dir/scripts/macos/build-dmg.sh")"
   echo "DMG builder must use the pinned dmgbuild dependency and version check" >&2
   exit 1
 }
-[[ "$build_dmg_text" == *'xcrun swift'* && "$build_dmg_text" == *'generated-overlay.png'* && "$build_dmg_text" == *'expected_overlay_digest'* && "$build_dmg_text" == *'generated-background-composed.png'* && "$build_dmg_text" == *'expected_background_digest'* ]] || {
-  echo "DMG builder must validate the generated schema-driven background digest" >&2
+[[ "$build_dmg_text" == *'generated-overlay.png'* && "$build_dmg_text" == *'overlay_asset'* && "$build_dmg_text" == *'expected_overlay_digest'* && "$build_dmg_text" == *'generated-background-composed.png'* && "$build_dmg_text" == *'composed_background_asset'* && "$build_dmg_text" == *'expected_background_digest'* ]] || {
+  echo "DMG builder must validate the checked-in schema-driven bitmap digests" >&2
   exit 1
 }
 settings_text="$(<"$root_dir/scripts/macos/dmgbuild-settings.py")"

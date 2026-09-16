@@ -59,19 +59,16 @@ dmg_version="$("$venv_dir/bin/python" -c 'import dmgbuild; print(dmgbuild.__vers
 }
 generated_background="$venv_dir/generated-background-composed.png"
 generated_overlay="$venv_dir/generated-overlay.png"
-xcrun swift "$root_dir/scripts/macos/generate-dmg-overlay.swift" \
-  --layout "$layout_path" \
-  "$generated_overlay"
+overlay_asset="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["overlay_asset"])' "$layout_path")"
+composed_background_asset="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["composed_background"])' "$layout_path")"
+cp "$asset_dir/$overlay_asset" "$generated_overlay"
 expected_overlay_digest="$(python3 -c 'import json,sys; l=json.load(open(sys.argv[1])); print(l["asset_digests"][l["overlay_asset"]])' "$layout_path")"
 actual_overlay_digest="$(shasum -a 256 "$generated_overlay" | awk '{print $1}')"
 [[ "$actual_overlay_digest" == "$expected_overlay_digest" ]] || {
   echo "generated DMG overlay does not match the checked-in layout digest" >&2
   exit 1
 }
-xcrun swift "$root_dir/scripts/macos/generate-dmg-overlay.swift" \
-  --layout "$layout_path" \
-  --background "$asset_dir/$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["background"])' "$layout_path")" \
-  "$generated_background"
+cp "$asset_dir/$composed_background_asset" "$generated_background"
 expected_background_digest="$(python3 -c 'import json,sys; l=json.load(open(sys.argv[1])); print(l["asset_digests"][l["composed_background"]])' "$layout_path")"
 actual_background_digest="$(shasum -a 256 "$generated_background" | awk '{print $1}')"
 [[ "$actual_background_digest" == "$expected_background_digest" ]] || {

@@ -41,7 +41,7 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - real macOS RC1-to-RC2 migration check: one manual FDA grant after the old registration migration, then no FDA regrant for the ordinary main-app update
 - stable publication approval through the `macos-release-acceptance` GitHub environment and the structured `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` value, validated against the final manifest
 - shared testbox full-feature Rust validation
-- pinned `dmgbuild==1.6.7` settings, deterministic overlay generation, semantic layout digest, hidden-resource allowlist, and native/Universal DMG parity
+- pinned `dmgbuild==1.6.7` settings, checked-in deterministic overlay/background bitmap digests (with the Swift generator retained for asset maintenance), semantic layout digest, hidden-resource allowlist, and native/Universal DMG parity
 - final UDZO `hdiutil verify`, `diskutil verifyVolume`, plist attach, exact-device detach, and post-compression readback
 - controlled Finder acceptance on macOS 15 and the current supported macOS with scoped first-open screenshots
 
