@@ -58,6 +58,16 @@ dmg_version="$("$venv_dir/bin/python" -c 'import dmgbuild; print(dmgbuild.__vers
   exit 1
 }
 generated_background="$venv_dir/generated-background-composed.png"
+generated_overlay="$venv_dir/generated-overlay.png"
+xcrun swift "$root_dir/scripts/macos/generate-dmg-overlay.swift" \
+  --layout "$layout_path" \
+  "$generated_overlay"
+expected_overlay_digest="$(python3 -c 'import json,sys; l=json.load(open(sys.argv[1])); print(l["asset_digests"][l["overlay_asset"]])' "$layout_path")"
+actual_overlay_digest="$(shasum -a 256 "$generated_overlay" | awk '{print $1}')"
+[[ "$actual_overlay_digest" == "$expected_overlay_digest" ]] || {
+  echo "generated DMG overlay does not match the checked-in layout digest" >&2
+  exit 1
+}
 xcrun swift "$root_dir/scripts/macos/generate-dmg-overlay.swift" \
   --layout "$layout_path" \
   --background "$asset_dir/$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["background"])' "$layout_path")" \
@@ -68,5 +78,6 @@ actual_background_digest="$(shasum -a 256 "$generated_background" | awk '{print 
   echo "generated DMG background does not match the checked-in layout digest" >&2
   exit 1
 }
+export TELEVYBACKUP_DMG_BACKGROUND="$generated_background"
 "$venv_dir/bin/dmgbuild" -s "$root_dir/scripts/macos/dmgbuild-settings.py" "$volume_name" "$TELEVYBACKUP_DMG_OUTPUT"
 echo "built $(basename "$output") with dmgbuild $dmg_version"

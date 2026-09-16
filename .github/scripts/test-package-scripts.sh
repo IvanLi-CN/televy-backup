@@ -157,7 +157,7 @@ build_dmg_text="$(<"$root_dir/scripts/macos/build-dmg.sh")"
   echo "DMG builder must use the pinned dmgbuild dependency and version check" >&2
   exit 1
 }
-[[ "$build_dmg_text" == *'xcrun swift'* && "$build_dmg_text" == *'generated-background-composed.png'* && "$build_dmg_text" == *'expected_background_digest'* ]] || {
+[[ "$build_dmg_text" == *'xcrun swift'* && "$build_dmg_text" == *'generated-overlay.png'* && "$build_dmg_text" == *'expected_overlay_digest'* && "$build_dmg_text" == *'generated-background-composed.png'* && "$build_dmg_text" == *'expected_background_digest'* ]] || {
   echo "DMG builder must validate the generated schema-driven background digest" >&2
   exit 1
 }
@@ -246,6 +246,10 @@ grep -F '"semantic_layout_digest": semantic_layout_digest' <<<"$finder_text" >/d
   echo "Finder acceptance evidence must record the semantic layout digest" >&2
   exit 1
 }
+grep -F 'instruction_text' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must pass the schema instruction to the observer" >&2
+  exit 1
+}
 grep -F 'hdiutil attach -plist' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must use machine-readable attach output" >&2
   exit 1
@@ -264,6 +268,10 @@ grep -F 'expected_background = layout["asset_digests"][layout["composed_backgrou
 }
 grep -F 'fallback = ""' <<<"$verify_release_text" >/dev/null || {
   echo "DMG attach verification must retain a fallback device for cleanup" >&2
+  exit 1
+}
+grep -F 'tarfile' <<<"$verify_release_text" >/dev/null || {
+  echo "tools archive verification must reject unsafe member paths before extraction" >&2
   exit 1
 }
 package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"

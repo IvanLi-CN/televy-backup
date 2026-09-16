@@ -1,6 +1,7 @@
 on run argv
     set mountPath to item 1 of argv
     set outputPath to item 2 of argv
+    set instructionText to item 3 of argv
     tell application "Finder"
         set targetWindow to front window
         set windowTarget to POSIX path of (target of targetWindow as alias)
@@ -9,7 +10,6 @@ on run argv
         set applicationsItem to item "Applications" of targetWindow
         set appPosition to position of appItem
         set applicationsPosition to position of applicationsItem
-        set instructionText to "Drag TelevyBackup to Applications"
         set direction to "right"
         if (item 1 of applicationsPosition) is less than or equal to (item 1 of appPosition) then set direction to "left"
         set q to ASCII character 34

@@ -592,6 +592,21 @@ for tools_archive in "$asset_dir/televybackup-tools-${version}-arm64.tar.gz" "$a
     [[ "$tools_archive" == *-x86_64.tar.gz ]] && expected_arches=x86_64
     tools_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-tools-verify.XXXXXX")"
     trap 'rm -rf "$tools_dir"' EXIT
+    python3 - "$tools_archive" <<'PY'
+import posixpath
+import sys
+import tarfile
+
+archive = sys.argv[1]
+with tarfile.open(archive, "r:gz") as handle:
+    for member in handle.getmembers():
+        name = member.name
+        normalized = posixpath.normpath(name)
+        if name.startswith("/") or normalized == ".." or normalized.startswith("../"):
+            raise SystemExit(f"unsafe tools archive member path: {name}")
+        if member.issym() or member.islnk() or member.isdev():
+            raise SystemExit(f"unsupported tools archive member type: {name}")
+PY
     tar -xzf "$tools_archive" -C "$tools_dir"
     for binary in televybackup televybackupd televybackup-mtproto-helper televybackup-snapshot-mount-helper; do
       [[ -x "$tools_dir/TelevyBackup Tools/bin/$binary" ]] || { echo "tools binary is not executable: $binary" >&2; exit 1; }

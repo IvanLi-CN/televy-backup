@@ -41,12 +41,18 @@ cleanup() {
   original_status=$?
   cleanup_failed=false
   if [[ -n "$previous_show_all" ]]; then
-    defaults write com.apple.finder AppleShowAllFiles "$previous_show_all" >/dev/null 2>&1 || true
+    if ! defaults write com.apple.finder AppleShowAllFiles "$previous_show_all" >/dev/null 2>&1; then
+      echo "failed to restore Finder AppleShowAllFiles preference" >&2
+      cleanup_failed=true
+    fi
   else
     defaults delete com.apple.finder AppleShowAllFiles >/dev/null 2>&1 || true
   fi
   if [[ -n "$previous_show_all" || "$finder_was_visible_changed" == true ]]; then
-    killall Finder >/dev/null 2>&1 || true
+    if ! killall Finder >/dev/null 2>&1; then
+      echo "failed to restart Finder after restoring preferences" >&2
+      cleanup_failed=true
+    fi
   fi
   if [[ -n "$attached_device" ]]; then
     if ! hdiutil detach "$attached_device" >/dev/null 2>&1; then
@@ -92,11 +98,12 @@ open "$mount_point"
 osascript -e 'tell application "Finder" to activate'
 sleep 2
 finder_json="$evidence_dir/finder-observation.json"
+instruction_text="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["overlay"]["instruction"])' "$layout_path")"
 for attempt in 1 2 3 4 5; do
   if [[ "$attempt" -gt 1 ]]; then
     open "$mount_point" >/dev/null 2>&1 || true
   fi
-  if osascript "$root_dir/scripts/macos/finder-dmg-observe.applescript" "$mount_point" "$finder_json"; then
+  if osascript "$root_dir/scripts/macos/finder-dmg-observe.applescript" "$mount_point" "$finder_json" "$instruction_text"; then
     break
   fi
   sleep 1

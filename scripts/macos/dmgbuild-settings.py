@@ -18,7 +18,7 @@ icon_locations = {
 
 files = [(str(source_dir / "TelevyBackup.app"), "TelevyBackup.app")]
 symlinks = dict(layout["symlinks"])
-background_path = asset_dir / layout["composed_background"]
+background_path = Path(os.environ.get("TELEVYBACKUP_DMG_BACKGROUND", str(asset_dir / layout["composed_background"])))
 background = str(background_path)
 
 volume_name = os.environ["TELEVYBACKUP_DMG_VOLUME_NAME"]
