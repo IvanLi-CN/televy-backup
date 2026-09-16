@@ -51,12 +51,20 @@ if let backgroundURL, let background = NSImage(contentsOf: backgroundURL) {
 
 let titleFont = NSFont(name: "Helvetica Neue", size: 18) ?? NSFont.systemFont(ofSize: 18)
 let brandFont = NSFont(name: "Helvetica Neue", size: 13) ?? NSFont.systemFont(ofSize: 13)
+let textShadow: NSShadow = {
+    let shadow = NSShadow()
+    shadow.shadowColor = NSColor(calibratedWhite: 0.0, alpha: 0.72)
+    shadow.shadowBlurRadius = 3
+    shadow.shadowOffset = NSSize(width: 0, height: -1)
+    return shadow
+}()
 let title = NSAttributedString(
     string: "Drag TelevyBackup to Applications",
     attributes: [
         .font: titleFont,
         .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.94),
         .kern: 0.2,
+        .shadow: textShadow,
     ]
 )
 let brand = NSAttributedString(
@@ -65,29 +73,53 @@ let brand = NSAttributedString(
         .font: brandFont,
         .foregroundColor: NSColor(calibratedRed: 0.48, green: 0.82, blue: 1.0, alpha: 0.92),
         .kern: 2.0,
+        .shadow: textShadow,
     ]
 )
 
-let titleRect = NSRect(x: 380 - title.size().width / 2, y: 91, width: title.size().width, height: title.size().height)
+func drawLabelBackplate(center: NSPoint) {
+    let plate = NSRect(x: center.x - 80, y: center.y - 14, width: 160, height: 28)
+    let path = NSBezierPath(roundedRect: plate, xRadius: 14, yRadius: 14)
+    let gradient = NSGradient(colors: [
+        NSColor(calibratedWhite: 1.0, alpha: 0.60),
+        NSColor(calibratedWhite: 0.94, alpha: 0.28),
+    ])
+    gradient?.draw(in: path, angle: 90)
+    NSColor(calibratedWhite: 1.0, alpha: 0.18).setStroke()
+    path.lineWidth = 1
+    path.stroke()
+}
+
+drawLabelBackplate(center: NSPoint(x: 210, y: 160))
+drawLabelBackplate(center: NSPoint(x: 550, y: 160))
+
+let titleRect = NSRect(x: 380 - title.size().width / 2, y: 420 - title.size().height / 2, width: title.size().width, height: title.size().height)
 title.draw(in: titleRect)
-let brandRect = NSRect(x: 380 - brand.size().width / 2, y: 52, width: brand.size().width, height: brand.size().height)
+let brandRect = NSRect(x: 380 - brand.size().width / 2, y: 382 - brand.size().height / 2, width: brand.size().width, height: brand.size().height)
 brand.draw(in: brandRect)
 
-let arrow = NSBezierPath()
-arrow.lineWidth = 3
-arrow.lineCapStyle = .round
-arrow.move(to: NSPoint(x: 300, y: 270))
-arrow.line(to: NSPoint(x: 460, y: 270))
-NSColor(calibratedRed: 0.48, green: 0.82, blue: 1.0, alpha: 0.95).setStroke()
-arrow.stroke()
+func drawArrow(lineWidth: CGFloat, color: NSColor) {
+    let shaft = NSBezierPath()
+    shaft.lineWidth = lineWidth
+    shaft.lineCapStyle = .round
+    shaft.move(to: NSPoint(x: 300, y: 270))
+    shaft.line(to: NSPoint(x: 460, y: 270))
+    color.setStroke()
+    shaft.stroke()
 
-let head = NSBezierPath()
-head.lineWidth = 3
-head.lineCapStyle = .round
-head.move(to: NSPoint(x: 447, y: 282))
-head.line(to: NSPoint(x: 460, y: 270))
-head.line(to: NSPoint(x: 447, y: 258))
-head.stroke()
+    let head = NSBezierPath()
+    head.lineWidth = lineWidth
+    head.lineCapStyle = .round
+    head.lineJoinStyle = .round
+    head.move(to: NSPoint(x: 445, y: 285))
+    head.line(to: NSPoint(x: 460, y: 270))
+    head.line(to: NSPoint(x: 445, y: 255))
+    head.stroke()
+}
+
+drawArrow(lineWidth: 10, color: NSColor(calibratedWhite: 0.0, alpha: 0.38))
+drawArrow(lineWidth: 7, color: NSColor(calibratedRed: 0.26, green: 0.73, blue: 0.96, alpha: 0.92))
+drawArrow(lineWidth: 3, color: NSColor(calibratedWhite: 0.92, alpha: 0.96))
 
 NSGraphicsContext.restoreGraphicsState()
 
