@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_of_truth": "immutable repository identity refs plus trusted preparation provenance",
+  "source_of_truth": "append-only repository identity refs plus trusted preparation provenance",
   "version_file": "VERSION",
   "numeric_baseline": "highest eligible final remote product tag vX.Y.Z",
   "eligible_final_tag_provenance": {
@@ -47,6 +47,11 @@
     "release": "Release Product",
     "failure_notification": "Notify failed release"
   },
+  "execution_authority": {
+    "release_policy": "trusted-main-checkout",
+    "product_inputs": "resolved-merge-identity-and-release-artifacts",
+    "write_capable_product_checkout": false
+  },
   "required_gate_scheduling": {
     "label_gate": {
       "group": "per-pull-request",
@@ -80,7 +85,20 @@
     "released": "refs/tags/release-released/v<version>/<reservation-id>",
     "write_policy": "append-only-create",
     "state_order": "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound",
-    "receipt_validation": "independently-verify-reservation-provenance"
+    "receipt_validation": "independently-verify-reservation-provenance",
+    "automation": "default-github-actions-token",
+    "server_protection": "product-tags-only",
+    "ruleset_product_pattern": "refs/tags/v*",
+    "ruleset_excluded_identity_patterns": [
+      "refs/tags/release-reservation/*",
+      "refs/tags/release-decision/*",
+      "refs/tags/release-bound/*",
+      "refs/tags/release-consumed/*",
+      "refs/tags/release-released/*"
+    ],
+    "application_enforcement": "release_reservation.py enforces append-only create semantics, same-claim idempotency, provenance, and state order; out-of-band deletion of excluded identity refs is outside application observability",
+    "no_additional_ci_credentials": true,
+    "product_tag_provenance": "product annotated tags remain created by github-actions[bot]"
   },
   "recovery": {
     "same_sha_operation": "recover",

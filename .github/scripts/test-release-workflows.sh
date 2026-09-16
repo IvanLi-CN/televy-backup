@@ -42,6 +42,10 @@ assert_contains "release preparation expectedHeadOid" "$preparation_text" "expec
 assert_contains "prepared-head gate dispatch permission" "$preparation_text" "actions: write"
 assert_contains "prepared-head label gate dispatch" "$preparation_text" "gh workflow run label-gate.yml"
 assert_contains "prepared-head completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
+assert_contains "preparation reservation uses Actions token" "$preparation_text" 'GH_TOKEN: ${{ github.token }}'
+assert_not_contains "preparation App token" "$preparation_text" "actions/create-github-app-token@v1"
+assert_not_contains "preparation extra credential variable" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_ID"
+assert_not_contains "preparation extra credential secret" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY"
 label_gate_text="$(<"$root_dir/.github/workflows/label-gate.yml")"
 assert_contains "release intent label gate job" "$label_gate_text" "name: Release intent label gate"
 assert_contains "label gate merge-group validation" "$label_gate_text" "merge-group-release-gate.sh labels"
@@ -129,6 +133,12 @@ assert_contains "release latest tag lookup" "$release_text" "/releases/latest"
 assert_not_contains "unsupported gh release latest field" "$release_text" "isLatest"
 assert_contains "release intent verified provenance" "$release_text" "provenance_verified:true"
 assert_contains "release publish recheck" "$release_text" "Create or verify immutable product tag"
+assert_contains "release identity writes use Actions token" "$release_text" '--token "${GH_TOKEN}"'
+assert_contains "release consumed receipt uses Actions token" "$release_text" 'GH_TOKEN: ${{ github.token }}'
+assert_not_contains "release App token" "$release_text" "actions/create-github-app-token@v1"
+assert_not_contains "release extra credential variable" "$release_text" "TELEVYBACKUP_RELEASE_APP_ID"
+assert_not_contains "release extra credential secret" "$release_text" "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY"
+assert_not_contains "release alternate ref token" "$release_text" "RELEASE_REF_TOKEN"
 assert_contains "release state fail closed" "$release_text" "unable to resolve GitHub Release state"
 if [[ "$release_text" == *'Product release became published for "${PRODUCT_TAG}"; no asset overwrite'*$'\n'*'exit 0'* ]]; then
   printf 'published release path exits before consumed receipt\n' >&2
@@ -201,6 +211,9 @@ resolve_permissions = release.fetch("jobs").fetch("resolve").fetch("permissions"
 abort "release resolver must be able to read PR metadata" unless resolve_permissions == {"contents" => "write", "pull-requests" => "read"}
 expected_permissions = {"contents" => "write"}
 abort "publish job permissions are broader than contents: write" unless release.fetch("jobs").fetch("publish").fetch("permissions") == expected_permissions
+publish_checkout = release.fetch("jobs").fetch("publish").fetch("steps").find { |step| step["uses"] == "actions/checkout@v4" }
+abort "publish job must use the trusted policy checkout" unless publish_checkout&.fetch("with", {}).fetch("ref", nil) == '${{ needs.resolve.outputs.policy_sha }}'
+abort "publish checkout must not persist repository credentials" unless publish_checkout.fetch("with", {}).fetch("persist-credentials", nil) == false
 
 notify = YAML.load_file(ARGV.fetch(1))
 workflow_run = notify.fetch(true).fetch("workflow_run")

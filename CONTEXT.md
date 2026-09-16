@@ -94,7 +94,7 @@ formal dev version and is never inferred from merge order.
 _Avoid_: patch number, short SHA
 
 **Reservation**:
-An immutable repository tag under `release-reservation/` that claims one version and records its
+An append-only repository tag under `release-reservation/` that claims one version and records its
 pre-merge provenance before VERSION preparation.
 _Avoid_: queue entry, mutable lock, Git note
 
@@ -107,6 +107,23 @@ _Avoid_: workflow run ID, artifact ID
 The release identity bound to a specific mainline merge SHA after the reservation has crossed the
 merge boundary.
 _Avoid_: source SHA, preparation SHA
+
+**Release Identity Ref**:
+An append-only repository tag under `release-reservation/`, `release-decision/`, `release-bound/`,
+`release-consumed/`, or `release-released/` that records one release claim or state transition.
+Its integrity comes from the release identity contract and provenance checks, not from being a
+product tag.
+_Avoid_: product tag, mutable branch, release queue
+
+**Product Tag Protection**:
+The server-protected `vX.Y.Z` or prerelease product tag namespace whose annotated tag provenance,
+target commit, deletion, and non-fast-forward behavior define the published product boundary.
+_Avoid_: release identity ref, receipt
+
+**Consumed Receipt**:
+The append-only release identity record proving that a published product Release completed its
+reservation, merge, and publication chain.
+_Avoid_: workflow success, release status
 
 **Same-SHA Recovery**:
 A retry of publish or receipt work for an existing merged identity without recalculating a version,
