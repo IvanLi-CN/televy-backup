@@ -531,6 +531,7 @@ jobs:
         env:
           HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
           HELPER_SOURCE_COMMIT: ${{ needs.resolve.outputs.helper_source_commit }}
+          POLICY_SHA: ${{ needs.resolve.outputs.policy_sha }}
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
@@ -543,7 +544,14 @@ jobs:
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
-          bash scripts/macos/verify-component-identity.sh \
+          test -n "${POLICY_SHA}"
+          git fetch --force origin main
+          git cat-file -e "${POLICY_SHA}^{commit}"
+          policy_verify_component_identity="$RUNNER_TEMP/verify-component-identity.sh"
+          git show "${POLICY_SHA}:scripts/macos/verify-component-identity.sh" > "${policy_verify_component_identity}"
+          chmod 755 "${policy_verify_component_identity}"
+          echo "TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY=${policy_verify_component_identity}" >> "$GITHUB_ENV"
+          bash "${policy_verify_component_identity}" \
             --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
             --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
             --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
@@ -551,7 +559,7 @@ jobs:
       - run: bash scripts/macos/package-release.sh --mode release --arch arm64 --output-dir dist/arm64
       - name: Verify reused Snapshot Access identity
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
-        run: bash scripts/macos/verify-component-identity.sh --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/arm64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
+        run: bash "$TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY" --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/arm64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
       - uses: actions/upload-artifact@v4
         with:
           name: release-package-arm64
@@ -582,6 +590,7 @@ jobs:
         env:
           HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
           HELPER_SOURCE_COMMIT: ${{ needs.resolve.outputs.helper_source_commit }}
+          POLICY_SHA: ${{ needs.resolve.outputs.policy_sha }}
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
@@ -594,7 +603,14 @@ jobs:
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
-          bash scripts/macos/verify-component-identity.sh \
+          test -n "${POLICY_SHA}"
+          git fetch --force origin main
+          git cat-file -e "${POLICY_SHA}^{commit}"
+          policy_verify_component_identity="$RUNNER_TEMP/verify-component-identity.sh"
+          git show "${POLICY_SHA}:scripts/macos/verify-component-identity.sh" > "${policy_verify_component_identity}"
+          chmod 755 "${policy_verify_component_identity}"
+          echo "TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY=${policy_verify_component_identity}" >> "$GITHUB_ENV"
+          bash "${policy_verify_component_identity}" \
             --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
             --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
             --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
@@ -602,7 +618,7 @@ jobs:
       - run: bash scripts/macos/package-release.sh --mode release --arch x86_64 --output-dir dist/x86_64
       - name: Verify reused Snapshot Access identity
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
-        run: bash scripts/macos/verify-component-identity.sh --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/x86_64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
+        run: bash "$TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY" --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/x86_64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
       - uses: actions/upload-artifact@v4
         with:
           name: release-package-x86_64
@@ -637,6 +653,7 @@ jobs:
         env:
           HELPER_SOURCE_TAG: ${{ needs.resolve.outputs.helper_source_tag }}
           HELPER_SOURCE_COMMIT: ${{ needs.resolve.outputs.helper_source_commit }}
+          POLICY_SHA: ${{ needs.resolve.outputs.policy_sha }}
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
@@ -649,7 +666,14 @@ jobs:
           hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
           ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
           hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
-          bash scripts/macos/verify-component-identity.sh \
+          test -n "${POLICY_SHA}"
+          git fetch --force origin main
+          git cat-file -e "${POLICY_SHA}^{commit}"
+          policy_verify_component_identity="$RUNNER_TEMP/verify-component-identity.sh"
+          git show "${POLICY_SHA}:scripts/macos/verify-component-identity.sh" > "${policy_verify_component_identity}"
+          chmod 755 "${policy_verify_component_identity}"
+          echo "TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY=${policy_verify_component_identity}" >> "$GITHUB_ENV"
+          bash "${policy_verify_component_identity}" \
             --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
             --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
             --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
@@ -695,7 +719,7 @@ jobs:
             "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final"
           )
           if [[ "${HELPER_SOURCE_MODE}" == reuse ]]; then
-            bash scripts/macos/verify-component-identity.sh \
+            bash "${policy_checkout}/scripts/macos/verify-component-identity.sh" \
               --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
               --candidate "dist/final/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" \
               --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
