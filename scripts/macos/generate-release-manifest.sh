@@ -17,16 +17,54 @@ done
 [[ "$mode" == "release" || "$mode" == "development" ]] || usage
 root_dir="$(git rev-parse --show-toplevel)"
 version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
-python3 - "$version" "$asset_dir" "$source_commit" "$packaging_commit" "$output" <<'PY'
+python3 - "$version" "$asset_dir" "$source_commit" "$packaging_commit" "$output" "$root_dir/assets/brand/macos/dmg/layout.json" <<'PY'
 import hashlib, json, os, platform, stat as stat_module, subprocess, sys
-version, asset_dir, source, packaging, output = sys.argv[1:]
+version, asset_dir, source, packaging, output, layout_path = sys.argv[1:]
+
+def canonical_json(value):
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
+with open(layout_path, encoding='utf-8') as handle:
+    layout = json.load(handle)
+layout_dir = os.path.dirname(layout_path)
+resource_digests = {}
+for name, expected in layout['asset_digests'].items():
+    resource_path = os.path.join(layout_dir, name)
+    with open(resource_path, 'rb') as handle:
+        actual = hashlib.sha256(handle.read()).hexdigest()
+    if actual != expected:
+        raise RuntimeError(f'DMG layout resource digest mismatch: {name}')
+    resource_digests[name] = actual
+
+dmg_layout = {
+    'schema_version': layout['schema_version'],
+    'builder': layout['builder'],
+    'format': layout['format'],
+    'filesystem': layout['filesystem'],
+    'window': layout['window'],
+    'icon_size': layout['icon_size'],
+    'icon_locations': layout['icon_locations'],
+    'overlay': layout['overlay'],
+    'resources': {
+        'background': layout['background'],
+        'overlay': layout['overlay_asset'],
+        'composed_background': layout['composed_background'],
+        'digests': resource_digests,
+    },
+    'hidden_resource_allowlist': sorted(layout['hidden_resource_allowlist']),
+    'symlinks': layout['symlinks'],
+}
+dmg_layout['semantic_layout_digest'] = hashlib.sha256(canonical_json(dmg_layout)).hexdigest()
 names = sorted(name for name in os.listdir(asset_dir) if name.endswith(('.dmg', '.tar.gz')))
 assets = []
 for name in names:
     path = os.path.join(asset_dir, name)
     with open(path, 'rb') as handle:
         digest = hashlib.sha256(handle.read()).hexdigest()
-    assets.append({'name': name, 'sha256': digest, 'bytes': os.path.getsize(path)})
+    record = {'name': name, 'sha256': digest, 'bytes': os.path.getsize(path)}
+    if name.endswith('.dmg'):
+        record['dmg_layout_digest'] = dmg_layout['semantic_layout_digest']
+    assets.append(record)
 with open(os.path.join(asset_dir, 'SHA256SUMS'), 'w', encoding='utf-8') as handle:
     for asset in assets:
         handle.write(f"{asset['sha256']}  {asset['name']}\n")
@@ -165,6 +203,7 @@ manifest = {
     'runner': platform.platform(),
     'architectures': ['arm64', 'x86_64', 'universal2'],
     'signing': 'ad-hoc',
+    'dmg_layout': dmg_layout,
     'components': components,
     'assets': assets,
 }

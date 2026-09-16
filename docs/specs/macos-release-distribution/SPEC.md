@@ -135,6 +135,19 @@ include the light UI, dark UI, and monochrome template SVGs under
 `Contents/Resources/Brand`. The iconset, asset catalog, and runtime SVGs MUST be
 generated from the selected Graphite Azure geometry without embedded raster data.
 
+### REQ-MRD-011: Guided DMG layout
+
+Every GUI DMG MUST be built by the pinned `dmgbuild==1.6.7` path from the checked-in layout
+schema. The arm64, x86_64, and Universal 2 DMGs MUST use the same window size, icon locations,
+English instruction overlay, background asset, and `Applications -> /Applications` symlink.
+Each DMG MUST contain exactly one top-level `TelevyBackup.app`; Snapshot Access MUST remain at
+`Contents/Library/LoginItems/TelevyBackup Snapshot Access.app` and MUST NOT appear at the volume
+root. The schema MUST define the `.background` and `.DS_Store` hidden-resource allowlist, and
+the final manifest MUST record the builder version, resource digests, and semantic layout digest.
+The final UDZO MUST pass `hdiutil verify`, `diskutil verifyVolume`, and a read-only attach/detach
+roundtrip. Release CI MUST NOT generate background imagery online or use Finder AppleScript to
+construct the artifact.
+
 ## Compatibility
 
 The `v0.9.0` backfill is built from source commit `0f283ce8ccbc30c56728c1d6c0366b76d8972772` and may only add packaging metadata and a manual LaunchAgent template. Full service commands, GUI switch, and version interfaces begin with the next patch release. Existing Homebrew services remain detectable for a migration warning but are not maintained by this topic.
@@ -186,6 +199,12 @@ mutation or Developer ID/notarization step is permitted.
 Covers: REQ-MRD-009. The app build, brand asset verifier, App Icon verifier, and release bundle
 inspection provide the evidence for the required icon, catalog, and SVG resources.
 
+### VER-MRD-009: Guided DMG layout
+
+Covers: REQ-MRD-011. Shared builder settings, manifest layout metadata, package script tests,
+UDIF/filesystem verification, hidden-resource readback, and controlled Finder acceptance on
+macOS 15 and the current supported macOS provide the evidence.
+
 ## Verification Map
 
 | Requirement | Verification |
@@ -198,6 +217,7 @@ inspection provide the evidence for the required icon, catalog, and SVG resource
 | REQ-MRD-009 | app build; brand and App Icon asset verifiers; bundle inspection |
 | REQ-MRD-010 | package verifier; CLI Snapshot Access transaction tests; LaunchAgent plist inspection |
 | REQ-MRD-010 authorization continuity | controlled macOS 15 RC1/RC2 migration and protected-source FDA acceptance |
+| REQ-MRD-011 | shared dmgbuild layout; manifest and package verifier; UDIF/filesystem roundtrip; Finder acceptance |
 
 ## Related ADRs
 
@@ -205,6 +225,7 @@ inspection provide the evidence for the required icon, catalog, and SVG resource
 - [0003-product-managed-daemon-launchagent](../../adr/0003-product-managed-daemon-launchagent.md)
 - [0010-identity-stable-single-product-release](../../adr/0010-identity-stable-single-product-release.md)
 - [0012-helper-bootstrap-state](../../adr/0012-helper-bootstrap-state.md)
+- [0014-macos-dmg-guided-layout](../../adr/0014-macos-dmg-guided-layout.md)
 
 ## Visual Evidence
 
@@ -224,3 +245,8 @@ visual evidence in the related UI Specs.
 App Icon review references are stored under
 `assets/brand/macos/previews/`: Default, Dark, and Mono/Tinted appearances are
 shown at 48px, 128px, and 512px with rounded, squircle, and circle masks.
+
+The DMG guided-layout evidence is produced from the checked-in background and deterministic
+overlay assets. The positive acceptance surface is the first-open Finder window on macOS 15 and
+the current supported macOS; structure-only mounts are supporting evidence and are not a visual
+substitute.

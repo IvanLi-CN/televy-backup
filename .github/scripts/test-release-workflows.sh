@@ -42,6 +42,8 @@ assert_contains "release preparation expectedHeadOid" "$preparation_text" "expec
 assert_contains "prepared-head gate dispatch permission" "$preparation_text" "actions: write"
 assert_contains "prepared-head label gate dispatch" "$preparation_text" "gh workflow run label-gate.yml"
 assert_contains "prepared-head completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
+assert_contains "preparation source check readiness output" "$preparation_text" 'echo "source_checks_ready=${source_checks_ready}"'
+assert_contains "preparation reserve requires ready source checks" "$preparation_text" "steps.pr.outputs.source_checks_ready == 'true'"
 assert_contains "preparation reservation uses Actions token" "$preparation_text" 'GH_TOKEN: ${{ github.token }}'
 assert_not_contains "preparation App token" "$preparation_text" "actions/create-github-app-token@v1"
 assert_not_contains "preparation extra credential variable" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_ID"
@@ -94,6 +96,13 @@ if [[ -z "$final_pr_validation_line" || -z "$final_checks_refresh_line" || "$fin
   printf 'completion must refresh checks after final PR identity validation\n' >&2
   exit 1
 fi
+preparation_refresh_line="$(grep -n 'prepared_json=.*find-prepared' "$root_dir/.github/workflows/release-completion.yml" | tail -1 | cut -d: -f1)"
+preparation_sha_line="$(grep -n 'preparation_sha=.*preparationSha' "$root_dir/.github/workflows/release-completion.yml" | head -1 | cut -d: -f1)"
+if [[ -z "$preparation_refresh_line" || -z "$preparation_sha_line" || "$preparation_refresh_line" -le "$final_checks_refresh_line" || "$preparation_refresh_line" -ge "$preparation_sha_line" ]]; then
+  printf 'completion must refresh preparation after final source checks and before using its SHA\n' >&2
+  exit 1
+fi
+assert_contains "completion missing preparation fail-closed message" "$completion_text" "product release is missing a valid VERSION preparation commit"
 assert_contains "completion non-preemptive queue" "$completion_text" "queue: max"
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
@@ -174,7 +183,7 @@ assert_contains "merge-group final PR identity check" "$merge_group_text" 'test 
 assert_contains "merge-group final labels snapshot" "$merge_group_text" 'labels_json="$(jq -c '\''.labels'\'' "${final_pr_json}")"'
 assert_contains "merge-group source-check wait budget" "$merge_group_text" 'deadline=$((SECONDS + 1800))'
 assert_contains "merge-group waits for label gate" "$merge_group_text" 'required=("Release intent label gate"'
-assert_contains "merge-group verification fetch" "$merge_group_text" 'gh api "repos/${repository}/commits/${pr_head_sha}"'
+assert_contains "merge-group verification fetch" "$merge_group_text" 'gh api "repos/${repository}/commits/${preparation_sha}"'
 assert_contains "merge-group verification argument" "$merge_group_text" "--github-verification-json"
 assert_contains "merge-group checks bind to merge head" "$merge_group_text" 'gh api "repos/${repository}/commits/${head_sha}/check-runs?filter=latest&per_page=100"'
 if [[ -z "$poll_line" || -z "$final_pr_line" || -z "$final_checks_line" || -z "$completion_line" || "$poll_line" -ge "$final_pr_line" || "$final_pr_line" -ge "$final_checks_line" || "$final_checks_line" -ge "$completion_line" ]]; then
@@ -184,8 +193,8 @@ fi
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion native signature gate" "$completion_text" "--require-github-verification"
 assert_contains "completion reservation provenance gate" "$completion_text" "--reservation-json"
-assert_contains "completion GitHub verification fetch" "$completion_text" 'gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}"'
-assert_contains "completion GitHub verification SHA gate" "$completion_text" 'jq -e --arg commit "${HEAD_SHA}"'
+assert_contains "completion GitHub verification fetch" "$completion_text" 'gh api "repos/${GITHUB_REPOSITORY}/commits/${preparation_sha}"'
+assert_contains "completion GitHub verification SHA gate" "$completion_text" 'jq -e --arg commit "${preparation_sha}"'
 assert_contains "completion GitHub verification status gate" "$completion_text" '.commit.verification.verified == true'
 assert_contains "completion GitHub verification compatibility probe" "$completion_text" 'release_completion.py --help'
 assert_contains "completion GitHub verification argument" "$completion_text" "--github-verification-json"
@@ -197,10 +206,13 @@ assert_not_contains "completion checks bind to source SHA" "$completion_text" 'v
 assert_contains "completion immutable identity refs" "$completion_text" "git fetch --force --tags origin"
 assert_contains "completion covered PR association" "$completion_text" 'commits/${covered_merge_sha}/pulls'
 assert_contains "completion covered merge proof argument" "$completion_text" "--covered-merge-proof-json"
+assert_contains "completion prepared-head trusted-base fallback" "$completion_text" 'if [[ "${GITHUB_EVENT_NAME}" == workflow_dispatch ]]; then'
+assert_contains "completion prepared-head direct verification" "$completion_text" 'verify-prepared --commit "${HEAD_SHA}"'
+assert_contains "completion prepared-head identity binding" "$completion_text" 'preparation_sha="${HEAD_SHA}"'
+assert_contains "completion source-head preparation lookup" "$completion_text" 'find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}"'
 assert_contains "completion workflow dispatch input" "$completion_text" "pr_number:"
 assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${pr_number}'
 assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/${EXPECTED_HEAD_REF}'
-assert_contains "completion dispatch head SHA" "$completion_text" 'test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"'
 assert_contains "completion dispatch trusted checkout" "$completion_text" 'git rev-parse refs/remotes/origin/main'
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
 assert_contains "prepared-head gates use prepared ref" "$preparation_text" '--ref "${HEAD_REF}"'

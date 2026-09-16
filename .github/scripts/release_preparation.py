@@ -95,7 +95,7 @@ def prepare(args: argparse.Namespace) -> None:
         output({"prepared": "waiting", "release_action": intent["action"], "source_sha": args.source_sha}, args.github_output)
         return
     try:
-        existing = CHAIN.verify_prepared(args.source_sha)
+        existing = CHAIN.find_prepared(args.source_sha, args.base_sha)
     except CHAIN.ReleaseChainError:
         existing = None
     if existing is not None:
@@ -106,6 +106,7 @@ def prepare(args: argparse.Namespace) -> None:
                 "prepared": "existing",
                 "release_action": existing["action"],
                 "release_sha": existing["releaseSha"],
+                "preparation_sha": existing["preparationSha"],
                 "source_sha": existing["sourceSha"],
                 "version": existing["version"],
                 "tag": existing["tag"],

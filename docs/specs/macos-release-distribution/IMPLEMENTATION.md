@@ -9,7 +9,7 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 | Component | Location | Contract |
 | --- | --- | --- |
 | Build metadata | `crates/*/build.rs`, binary entrypoints | REQ-MRD-003 |
-| macOS package assembly | `scripts/macos/package-release.sh`, `assemble-universal.sh`, `verify-component-identity.sh`, `verify-release-assets.sh` | REQ-MRD-001, 002, 004, 010 |
+| macOS package assembly | `scripts/macos/package-release.sh`, `assemble-universal.sh`, shared dmgbuild builder, `verify-dmg-layout.sh`, `verify-component-identity.sh`, `verify-release-assets.sh` | REQ-MRD-001, 002, 004, 010, 011 |
 | Product brand bundle | `assets/brand/`, `scripts/macos/generate-app-icon-assets.sh`, `scripts/macos/generate-app-icon-previews.sh`, `scripts/macos/build-app.sh` | REQ-MRD-009 |
 | Managed service | `crates/cli/src/service.rs` | REQ-MRD-005, 006 |
 | Snapshot Access and mount services | `crates/snapshot-helper/`, `crates/cli/src/snapshot_service.rs`, `crates/cli/src/snapshot_mount_service.rs` | REQ-MRD-010 |
@@ -41,6 +41,13 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - real macOS RC1-to-RC2 migration check: one manual FDA grant after the old registration migration, then no FDA regrant for the ordinary main-app update
 - stable publication approval through the `macos-release-acceptance` GitHub environment and the structured `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` value, validated against the final manifest
 - shared testbox full-feature Rust validation
+- pinned `dmgbuild==1.6.7` settings, checked-in deterministic overlay/background bitmap digests (with the Swift generator retained for asset maintenance), semantic layout digest, hidden-resource allowlist, and native/Universal DMG parity
+- final UDZO `hdiutil verify`, `diskutil verifyVolume`, plist attach, exact-device detach, and post-compression readback
+- controlled Finder acceptance on macOS 15 and the current supported macOS with scoped first-open screenshots
+
+The controlled acceptance entrypoint is `scripts/macos/finder-dmg-acceptance.sh`. It is intentionally
+manual-only, requires `TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1`, and writes Finder-window-scoped
+evidence rather than running in release CI.
 
 ## Visual Evidence
 

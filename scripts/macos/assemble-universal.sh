@@ -123,9 +123,12 @@ repackage_native_app() {
   mkdir -p "$native_staging/TelevyBackup"
   cp -R "$native_app" "$native_staging/TelevyBackup/"
   ln -s /Applications "$native_staging/TelevyBackup/Applications"
-  hdiutil create -quiet -volname "TelevyBackup $version" \
-    -srcfolder "$native_staging/TelevyBackup" -format UDZO -ov \
-    "$(dirname "$native_app")/TelevyBackup-${version}-${arch}.dmg"
+  bash "$root_dir/scripts/macos/build-dmg.sh" \
+    --source-dir "$native_staging/TelevyBackup" \
+    --volume-name "TelevyBackup $version" \
+    --output "$(dirname "$native_app")/TelevyBackup-${version}-${arch}.dmg"
+  bash "$root_dir/scripts/macos/verify-dmg-layout.sh" \
+    --dmg "$(dirname "$native_app")/TelevyBackup-${version}-${arch}.dmg"
   rm -rf "$native_staging"
 }
 
@@ -140,5 +143,10 @@ trap 'rm -rf "$staging"' EXIT
 mkdir -p "$staging/TelevyBackup"
 cp -R "$universal_app" "$staging/TelevyBackup/"
 ln -s /Applications "$staging/TelevyBackup/Applications"
-hdiutil create -quiet -volname "TelevyBackup $version" -srcfolder "$staging/TelevyBackup" -format UDZO -ov "$output_dir/TelevyBackup-${version}.dmg"
+bash "$root_dir/scripts/macos/build-dmg.sh" \
+  --source-dir "$staging/TelevyBackup" \
+  --volume-name "TelevyBackup $version" \
+  --output "$output_dir/TelevyBackup-${version}.dmg"
+bash "$root_dir/scripts/macos/verify-dmg-layout.sh" \
+  --dmg "$output_dir/TelevyBackup-${version}.dmg"
 echo "assembled universal app and TelevyBackup-${version}.dmg"

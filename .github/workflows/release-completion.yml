@@ -84,11 +84,9 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           EXPECTED_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
-          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -euo pipefail
           test "${GITHUB_REF}" = "refs/heads/${EXPECTED_HEAD_REF}"
-          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
           test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
 
       - name: Verify VERSION and release completion
@@ -119,8 +117,6 @@ jobs:
           }
           validate_current_pr "${RUNNER_TEMP}/current-pr.json"
           jq '.labels' "${RUNNER_TEMP}/current-pr.json" > "${RUNNER_TEMP}/labels.json"
-          prepared_json=''
-          prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null || true)"
           deadline=$((SECONDS + 1800))
           while :; do
             gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
@@ -174,8 +170,20 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
           product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
           if [[ "${product_release}" == true ]]; then
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}" > "${RUNNER_TEMP}/github-verification.json"
-            jq -e --arg commit "${HEAD_SHA}" \
+            if [[ "${GITHUB_EVENT_NAME}" == workflow_dispatch ]]; then
+              # Dispatches run against a prepared VERSION head; the trusted base script can verify it directly.
+              prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null || true)"
+              preparation_sha="${HEAD_SHA}"
+            else
+              prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}" 2>/dev/null || true)"
+              preparation_sha="$(printf '%s' "${prepared_json}" | jq -r .preparationSha)"
+            fi
+            if [[ -z "${prepared_json}" ]]; then
+              echo "product release is missing a valid VERSION preparation commit" >&2
+              exit 1
+            fi
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${preparation_sha}" > "${RUNNER_TEMP}/github-verification.json"
+            jq -e --arg commit "${preparation_sha}" \
               '.sha == $commit and .commit.verification.verified == true' \
               "${RUNNER_TEMP}/github-verification.json" >/dev/null
           fi

@@ -76,8 +76,11 @@ for pr_number in ${pr_numbers}; do
     git fetch --no-tags origin "${pr_head_sha}" "${base_sha}"
     verification_sha="${pr_head_sha}"
     prepared_json=''
-    if prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${pr_head_sha}" 2>/dev/null)"; then
-      verification_sha="$(printf '%s' "${prepared_json}" | jq -r .sourceSha)"
+    if prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${pr_head_sha}" --base "${base_sha}" 2>/dev/null)"; then
+      preparation_sha="$(printf '%s' "${prepared_json}" | jq -r .preparationSha)"
+      if [[ "${preparation_sha}" == "${pr_head_sha}" ]]; then
+        verification_sha="$(printf '%s' "${prepared_json}" | jq -r .sourceSha)"
+      fi
     fi
     checks_json="${RUNNER_TEMP:-/tmp}/merge-group-checks-${pr_number}.json"
     labels_file="${RUNNER_TEMP:-/tmp}/merge-group-labels-${pr_number}.json"
@@ -110,8 +113,9 @@ for pr_number in ${pr_numbers}; do
       release_mode="$(printf '%s' "${prepared_json}" | jq -r .mode)"
       completion_args+=(--release-mode "${release_mode}")
       verification_json="${RUNNER_TEMP:-/tmp}/merge-group-verification-${pr_number}.json"
-      gh api "repos/${repository}/commits/${pr_head_sha}" > "${verification_json}"
-      jq -e --arg commit "${pr_head_sha}" \
+      preparation_sha="$(printf '%s' "${prepared_json}" | jq -r .preparationSha)"
+      gh api "repos/${repository}/commits/${preparation_sha}" > "${verification_json}"
+      jq -e --arg commit "${preparation_sha}" \
         '.sha == $commit and .commit.verification.verified == true' \
         "${verification_json}" >/dev/null
       completion_args+=(--github-verification-json "${verification_json}")

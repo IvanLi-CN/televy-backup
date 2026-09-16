@@ -20,10 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       kind: ${{ steps.classify.outputs.kind }}
+      source_sha: ${{ steps.classify.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 2
       - id: classify
         run: |
@@ -32,6 +33,7 @@ jobs:
           else
             echo "kind=source" >> "$GITHUB_OUTPUT"
           fi
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
   arm64:
     needs: classify
@@ -41,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ needs.classify.outputs.source_sha }}
           fetch-depth: 0
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
@@ -55,6 +57,8 @@ jobs:
         run: bash scripts/macos/package-release.sh --mode development --arch arm64 --output-dir dist/arm64
       - if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/arm64/TelevyBackup.app
+      - if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/verify-dmg-layout.sh --dmg "$(find dist/arm64 -maxdepth 1 -name 'TelevyBackup-*-arm64.dmg' -print -quit)"
       - uses: actions/upload-artifact@v4
         if: needs.classify.outputs.kind == 'source'
         with:
@@ -69,7 +73,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ needs.classify.outputs.source_sha }}
           fetch-depth: 0
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
@@ -83,6 +87,8 @@ jobs:
         run: bash scripts/macos/package-release.sh --mode development --arch x86_64 --output-dir dist/x86_64
       - if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/x86_64/TelevyBackup.app
+      - if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/verify-dmg-layout.sh --dmg "$(find dist/x86_64 -maxdepth 1 -name 'TelevyBackup-*-x86_64.dmg' -print -quit)"
       - uses: actions/upload-artifact@v4
         if: needs.classify.outputs.kind == 'source'
         with:
@@ -97,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ needs.classify.outputs.source_sha }}
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@v1
         if: needs.classify.outputs.kind == 'source'

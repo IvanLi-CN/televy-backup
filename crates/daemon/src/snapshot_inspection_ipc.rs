@@ -1349,8 +1349,8 @@ mod tests {
         .unwrap();
         drop(endpoint);
 
-        let mut storage = serde_json::Value::Null;
-        for _ in 0..50 {
+        let mut storage = None;
+        for _ in 0..100 {
             let response = service
                 .handle(&ControlRequest::new(
                     "storage",
@@ -1360,13 +1360,17 @@ mod tests {
                 .await;
             assert!(response.ok);
             let result = response.result.unwrap();
-            if result["state"] == "ready" {
-                storage = result["page"].clone();
-                break;
+            match result["state"].as_str() {
+                Some("ready") => {
+                    storage = Some(result["page"].clone());
+                    break;
+                }
+                Some("failed") => panic!("storage index preparation failed: {result}"),
+                _ => {}
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(!storage.is_null());
+        let storage = storage.expect("storage index preparation did not become ready");
         let entry = &storage["entries"][0];
         let storage_id = entry["storageId"].as_str().unwrap().to_string();
         assert!(storage_id.starts_with("sto_"));
