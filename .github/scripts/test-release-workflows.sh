@@ -189,10 +189,11 @@ assert_contains "completion covered PR association" "$completion_text" 'commits/
 assert_contains "completion covered merge proof argument" "$completion_text" "--covered-merge-proof-json"
 assert_contains "completion workflow dispatch input" "$completion_text" "pr_number:"
 assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${pr_number}'
-assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/main'
+assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/${EXPECTED_HEAD_REF}'
+assert_contains "completion dispatch trusted checkout" "$completion_text" 'git rev-parse refs/remotes/origin/main'
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
-assert_contains "prepared-head gates use trusted main" "$preparation_text" "--ref main"
-assert_not_contains "prepared-head gates use mutable PR workflow" "$preparation_text" '--ref "${HEAD_REF}"'
+assert_contains "prepared-head gates use prepared ref" "$preparation_text" '--ref "${HEAD_REF}"'
+assert_not_contains "prepared-head gates dispatch to main" "$preparation_text" "--ref main"
 assert_contains "existing preparation verification source" "$preparation_text" 'SOURCE_SHA: ${{ steps.prepare.outputs.source_sha }}'
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'
 release = YAML.load_file(ARGV.fetch(0))
