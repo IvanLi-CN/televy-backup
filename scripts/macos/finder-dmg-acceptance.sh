@@ -38,6 +38,8 @@ attached_device=""
 mounted=false
 previous_show_all=""
 cleanup() {
+  original_status=$?
+  cleanup_failed=false
   if [[ -n "$previous_show_all" ]]; then
     defaults write com.apple.finder AppleShowAllFiles "$previous_show_all" >/dev/null 2>&1 || true
   else
@@ -49,10 +51,15 @@ cleanup() {
   if [[ -n "$attached_device" ]]; then
     if ! hdiutil detach "$attached_device" >/dev/null 2>&1; then
       echo "failed to detach Finder acceptance device: $attached_device" >&2
+      cleanup_failed=true
     fi
   fi
   if ! rmdir "$mount_point" >/dev/null 2>&1; then
     echo "failed to remove Finder acceptance mount point: $mount_point" >&2
+    cleanup_failed=true
+  fi
+  if [[ "$cleanup_failed" == true && "$original_status" -eq 0 ]]; then
+    exit 1
   fi
 }
 trap cleanup EXIT

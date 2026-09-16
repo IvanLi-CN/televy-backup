@@ -1,20 +1,63 @@
 import AppKit
 import Foundation
 
+struct WindowLayout: Decodable {
+    let width: Int
+    let height: Int
+}
+
+struct OverlayLayout: Decodable {
+    let brandText: String
+    let instruction: String
+    let instructionCenter: [Double]
+    let brandCenter: [Double]
+    let labelBackplateCenters: [[Double]]
+    let arrowStart: [Double]
+    let arrowEnd: [Double]
+}
+
+struct DMGLayout: Decodable {
+    let window: WindowLayout
+    let overlay: OverlayLayout
+}
+
 let arguments = CommandLine.arguments
+let layoutURL: URL
 let backgroundURL: URL?
 let outputURL: URL
-if arguments.count == 2 {
+if arguments.count == 4 && arguments[1] == "--layout" {
+    layoutURL = URL(fileURLWithPath: arguments[2])
     backgroundURL = nil
-    outputURL = URL(fileURLWithPath: arguments[1])
-} else if arguments.count == 4 && arguments[1] == "--background" {
-    backgroundURL = URL(fileURLWithPath: arguments[2])
     outputURL = URL(fileURLWithPath: arguments[3])
+} else if arguments.count == 6 && arguments[1] == "--layout" && arguments[3] == "--background" {
+    layoutURL = URL(fileURLWithPath: arguments[2])
+    backgroundURL = URL(fileURLWithPath: arguments[4])
+    outputURL = URL(fileURLWithPath: arguments[5])
 } else {
-    fputs("usage: generate-dmg-overlay.swift [--background BACKGROUND] OUTPUT\n", stderr)
+    fputs("usage: generate-dmg-overlay.swift --layout LAYOUT [--background BACKGROUND] OUTPUT\n", stderr)
     exit(2)
 }
-let canvas = NSSize(width: 760, height: 520)
+
+let layout: DMGLayout
+do {
+    let data = try Data(contentsOf: layoutURL)
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    layout = try decoder.decode(DMGLayout.self, from: data)
+} catch {
+    fputs("failed to read DMG layout: \(error)\n", stderr)
+    exit(1)
+}
+
+func point(_ values: [Double], name: String) -> NSPoint {
+    guard values.count == 2 else {
+        fputs("DMG layout point must contain two values: \(name)\n", stderr)
+        exit(1)
+    }
+    return NSPoint(x: values[0], y: values[1])
+}
+
+let canvas = NSSize(width: layout.window.width, height: layout.window.height)
 let bitmap = NSBitmapImageRep(
     bitmapDataPlanes: nil,
     pixelsWide: Int(canvas.width),
@@ -59,7 +102,7 @@ let textShadow: NSShadow = {
     return shadow
 }()
 let title = NSAttributedString(
-    string: "Drag TelevyBackup to Applications",
+    string: layout.overlay.instruction,
     attributes: [
         .font: titleFont,
         .foregroundColor: NSColor(calibratedWhite: 1.0, alpha: 0.94),
@@ -68,7 +111,7 @@ let title = NSAttributedString(
     ]
 )
 let brand = NSAttributedString(
-    string: "TELEVYBACKUP",
+    string: layout.overlay.brandText,
     attributes: [
         .font: brandFont,
         .foregroundColor: NSColor(calibratedRed: 0.48, green: 0.82, blue: 1.0, alpha: 0.92),
@@ -90,20 +133,26 @@ func drawLabelBackplate(center: NSPoint) {
     path.stroke()
 }
 
-drawLabelBackplate(center: NSPoint(x: 210, y: 160))
-drawLabelBackplate(center: NSPoint(x: 550, y: 160))
+for (index, center) in layout.overlay.labelBackplateCenters.enumerated() {
+    drawLabelBackplate(center: point(center, name: "overlay.label_backplate_centers[\(index)]"))
+}
 
-let titleRect = NSRect(x: 380 - title.size().width / 2, y: 420 - title.size().height / 2, width: title.size().width, height: title.size().height)
+let instructionCenter = point(layout.overlay.instructionCenter, name: "overlay.instruction_center")
+let brandCenter = point(layout.overlay.brandCenter, name: "overlay.brand_center")
+let titleRect = NSRect(x: instructionCenter.x - title.size().width / 2, y: instructionCenter.y - title.size().height / 2, width: title.size().width, height: title.size().height)
 title.draw(in: titleRect)
-let brandRect = NSRect(x: 380 - brand.size().width / 2, y: 382 - brand.size().height / 2, width: brand.size().width, height: brand.size().height)
+let brandRect = NSRect(x: brandCenter.x - brand.size().width / 2, y: brandCenter.y - brand.size().height / 2, width: brand.size().width, height: brand.size().height)
 brand.draw(in: brandRect)
 
 func drawArrow(lineWidth: CGFloat, color: NSColor) {
+    let start = point(layout.overlay.arrowStart, name: "overlay.arrow_start")
+    let end = point(layout.overlay.arrowEnd, name: "overlay.arrow_end")
+    let headLength: CGFloat = 15
     let shaft = NSBezierPath()
     shaft.lineWidth = lineWidth
     shaft.lineCapStyle = .round
-    shaft.move(to: NSPoint(x: 300, y: 270))
-    shaft.line(to: NSPoint(x: 460, y: 270))
+    shaft.move(to: start)
+    shaft.line(to: end)
     color.setStroke()
     shaft.stroke()
 
@@ -111,9 +160,9 @@ func drawArrow(lineWidth: CGFloat, color: NSColor) {
     head.lineWidth = lineWidth
     head.lineCapStyle = .round
     head.lineJoinStyle = .round
-    head.move(to: NSPoint(x: 445, y: 285))
-    head.line(to: NSPoint(x: 460, y: 270))
-    head.line(to: NSPoint(x: 445, y: 255))
+    head.move(to: NSPoint(x: end.x - headLength, y: end.y + headLength))
+    head.line(to: end)
+    head.line(to: NSPoint(x: end.x - headLength, y: end.y - headLength))
     head.stroke()
 }
 

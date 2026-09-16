@@ -22,13 +22,20 @@ mount_point="$(cd "$mount_point" && pwd -P)"
 attached_device=""
 mounted=false
 cleanup() {
+  original_status=$?
+  cleanup_failed=false
   if [[ -n "$attached_device" ]]; then
     if ! hdiutil detach "$attached_device" >/dev/null 2>&1; then
       echo "failed to detach DMG verification device: $attached_device" >&2
+      cleanup_failed=true
     fi
   fi
   if ! rmdir "$mount_point" >/dev/null 2>&1; then
     echo "failed to remove DMG verification mount point: $mount_point" >&2
+    cleanup_failed=true
+  fi
+  if [[ "$cleanup_failed" == true && "$original_status" -eq 0 ]]; then
+    exit 1
   fi
 }
 trap cleanup EXIT

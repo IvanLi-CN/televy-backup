@@ -71,6 +71,10 @@ verify_release_text="$(<"$root_dir/scripts/macos/verify-release-assets.sh")"
   echo "Snapshot Access mode check must parse stat output as octal" >&2
   exit 1
 }
+grep -F 'checksum_records' <<<"$verify_release_text" >/dev/null || {
+  echo "release asset verification must bind SHA256SUMS to the manifest asset set" >&2
+  exit 1
+}
 grep -F 'hdiutil attach -plist' <<<"$verify_release_text" >/dev/null || {
   echo "DMG verification must consume machine-readable attach output" >&2
   exit 1
@@ -153,6 +157,10 @@ build_dmg_text="$(<"$root_dir/scripts/macos/build-dmg.sh")"
   echo "DMG builder must use the pinned dmgbuild dependency and version check" >&2
   exit 1
 }
+[[ "$build_dmg_text" == *'xcrun swift'* && "$build_dmg_text" == *'generated-background-composed.png'* && "$build_dmg_text" == *'expected_background_digest'* ]] || {
+  echo "DMG builder must validate the generated schema-driven background digest" >&2
+  exit 1
+}
 settings_text="$(<"$root_dir/scripts/macos/dmgbuild-settings.py")"
 [[ "$settings_text" == *'layout.json'* && "$settings_text" == *'background'* && "$settings_text" == *'icon_locations'* ]] || {
   echo "dmgbuild settings must consume the shared layout schema" >&2
@@ -171,6 +179,11 @@ assert settings["icon_size"] == 128
 assert settings["icon_locations"]["TelevyBackup.app"] == (210, 270)
 assert settings["icon_locations"]["Applications"] == (550, 270)
 PY
+overlay_text="$(<"$root_dir/scripts/macos/generate-dmg-overlay.swift")"
+[[ "$overlay_text" == *'--layout LAYOUT'* && "$overlay_text" == *'layout.overlay.instruction'* && "$overlay_text" == *'layout.overlay.arrowStart'* ]] || {
+  echo "DMG overlay generation must consume the checked-in layout schema" >&2
+  exit 1
+}
 assemble_text="$(<"$root_dir/scripts/macos/assemble-universal.sh")"
 grep -F 'chmod 755 "$universal_app/Contents/MacOS/"*' <<<"$assemble_text" >/dev/null || {
   echo "Universal main binaries must remain executable after lipo" >&2

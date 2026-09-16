@@ -173,10 +173,20 @@ expected_asset_names = {
 }
 asset_records = {asset["name"]: asset for asset in manifest["assets"]}
 require(set(asset_records) == expected_asset_names, "manifest asset names mismatch")
+checksum_records = {}
+for line in open(os.path.join(asset_dir, "SHA256SUMS"), encoding="utf-8"):
+    fields = line.strip().split(maxsplit=1)
+    if not fields:
+        continue
+    require(len(fields) == 2, "malformed SHA256SUMS entry")
+    checksum_records[fields[1].lstrip("*")] = fields[0]
+require(set(checksum_records) == expected_asset_names, "SHA256SUMS asset names mismatch")
 for name in expected_asset_names:
     with open(os.path.join(asset_dir, name), "rb") as handle:
         data = handle.read()
-    require(asset_records[name]["sha256"] == hashlib.sha256(data).hexdigest(), f"asset digest mismatch: {name}")
+    digest = hashlib.sha256(data).hexdigest()
+    require(asset_records[name]["sha256"] == digest, f"asset digest mismatch: {name}")
+    require(checksum_records[name] == digest, f"SHA256SUMS digest mismatch: {name}")
     require(asset_records[name]["bytes"] == len(data), f"asset size mismatch: {name}")
 for name, record in asset_records.items():
     if name.endswith(".dmg"):
@@ -365,15 +375,22 @@ verify_dmg_helper_identity() (
   attached_device=""
   mounted=false
   cleanup() {
+    original_status=$?
+    cleanup_failed=false
     cleanup_device="$attached_device"
     [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
     if [[ -n "$cleanup_device" ]]; then
       if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
         echo "failed to detach Snapshot Access verification device: $cleanup_device" >&2
+        cleanup_failed=true
       fi
     fi
     if ! rmdir "$mount_point" >/dev/null 2>&1; then
       echo "failed to remove Snapshot Access verification mount point: $mount_point" >&2
+      cleanup_failed=true
+    fi
+    if [[ "$cleanup_failed" == true && "$original_status" -eq 0 ]]; then
+      exit 1
     fi
   }
   trap cleanup EXIT
@@ -486,15 +503,22 @@ check_dmg_layout() {
   local attached_device=""
   local mounted=false
   cleanup() {
+    original_status=$?
+    cleanup_failed=false
     cleanup_device="$attached_device"
     [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
     if [[ -n "$cleanup_device" ]]; then
       if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
         echo "failed to detach DMG layout verification device: $cleanup_device" >&2
+        cleanup_failed=true
       fi
     fi
     if ! rmdir "$mount_point" >/dev/null 2>&1; then
       echo "failed to remove DMG layout verification mount point: $mount_point" >&2
+      cleanup_failed=true
+    fi
+    if [[ "$cleanup_failed" == true && "$original_status" -eq 0 ]]; then
+      exit 1
     fi
   }
   trap cleanup RETURN
