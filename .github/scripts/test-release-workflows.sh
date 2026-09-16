@@ -208,6 +208,7 @@ assert_contains "completion covered PR association" "$completion_text" 'commits/
 assert_contains "completion covered merge proof argument" "$completion_text" "--covered-merge-proof-json"
 assert_contains "completion prepared-head trusted-base fallback" "$completion_text" 'if [[ "${GITHUB_EVENT_NAME}" == workflow_dispatch ]]; then'
 assert_contains "completion prepared-head direct verification" "$completion_text" 'verify-prepared --commit "${HEAD_SHA}"'
+assert_contains "completion prepared-head identity binding" "$completion_text" 'preparation_sha="${HEAD_SHA}"'
 assert_contains "completion source-head preparation lookup" "$completion_text" 'find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}"'
 assert_contains "completion workflow dispatch input" "$completion_text" "pr_number:"
 assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${pr_number}'
