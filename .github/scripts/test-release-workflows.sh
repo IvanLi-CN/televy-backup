@@ -42,10 +42,10 @@ assert_contains "release preparation expectedHeadOid" "$preparation_text" "expec
 assert_contains "prepared-head gate dispatch permission" "$preparation_text" "actions: write"
 assert_contains "prepared-head label gate dispatch" "$preparation_text" "gh workflow run label-gate.yml"
 assert_contains "prepared-head completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
-assert_contains "preparation protected authority variable" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_ID"
-assert_contains "preparation protected authority secret" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY"
-assert_contains "preparation protected authority token" "$preparation_text" "actions/create-github-app-token@v1"
-assert_contains "preparation reservation uses protected token" "$preparation_text" 'GH_TOKEN: ${{ steps.release-token.outputs.token }}'
+assert_contains "preparation reservation uses Actions token" "$preparation_text" 'GH_TOKEN: ${{ github.token }}'
+assert_not_contains "preparation App token" "$preparation_text" "actions/create-github-app-token@v1"
+assert_not_contains "preparation extra credential variable" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_ID"
+assert_not_contains "preparation extra credential secret" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY"
 label_gate_text="$(<"$root_dir/.github/workflows/label-gate.yml")"
 assert_contains "release intent label gate job" "$label_gate_text" "name: Release intent label gate"
 assert_contains "label gate merge-group validation" "$label_gate_text" "merge-group-release-gate.sh labels"
@@ -133,14 +133,12 @@ assert_contains "release latest tag lookup" "$release_text" "/releases/latest"
 assert_not_contains "unsupported gh release latest field" "$release_text" "isLatest"
 assert_contains "release intent verified provenance" "$release_text" "provenance_verified:true"
 assert_contains "release publish recheck" "$release_text" "Create or verify immutable product tag"
-assert_contains "release protected authority variable" "$release_text" "TELEVYBACKUP_RELEASE_APP_ID"
-assert_contains "release protected authority secret" "$release_text" "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY"
-assert_contains "release protected authority token" "$release_text" "actions/create-github-app-token@v1"
-assert_contains "release authority need gate" "$release_text" "Determine whether protected release authority is required"
-assert_contains "release authority skip condition" "$release_text" "steps.release-need.outputs.required == 'true'"
-assert_contains "release identity writes use protected token" "$release_text" 'RELEASE_REF_TOKEN: ${{ steps.release-token.outputs.token }}'
-assert_contains "release consumed receipt uses protected token" "$release_text" 'GH_TOKEN: ${{ steps.release-token.outputs.token }}'
-assert_contains "product tag keeps Actions token" "$release_text" 'GH_TOKEN: ${{ github.token }}'
+assert_contains "release identity writes use Actions token" "$release_text" '--token "${GH_TOKEN}"'
+assert_contains "release consumed receipt uses Actions token" "$release_text" 'GH_TOKEN: ${{ github.token }}'
+assert_not_contains "release App token" "$release_text" "actions/create-github-app-token@v1"
+assert_not_contains "release extra credential variable" "$release_text" "TELEVYBACKUP_RELEASE_APP_ID"
+assert_not_contains "release extra credential secret" "$release_text" "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY"
+assert_not_contains "release alternate ref token" "$release_text" "RELEASE_REF_TOKEN"
 assert_contains "release state fail closed" "$release_text" "unable to resolve GitHub Release state"
 if [[ "$release_text" == *'Product release became published for "${PRODUCT_TAG}"; no asset overwrite'*$'\n'*'exit 0'* ]]; then
   printf 'published release path exits before consumed receipt\n' >&2

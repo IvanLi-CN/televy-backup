@@ -24,10 +24,12 @@ complete merged identity is rechecked. The intent artifact is also bound to the 
 `Release Product` run attempt; a prior attempt's snapshot or resolver job cannot supply notification
 identity.
 
-Protected reservation and receipt refs are written with the dedicated Protected Release Authority,
-not the default Actions token. Its App ID, private key, repository installation, and ruleset bypass
-must be configured before a product release; missing configuration fails closed. Product annotated
-tags remain created by `github-actions[bot]` to preserve tag provenance.
+Product tag refs (`refs/tags/v*`) remain server-protected and are created as annotated tags by
+`github-actions[bot]`. The five release identity namespaces are intentionally outside that
+product-tag ruleset so reservation and receipt writes can use the existing default `GITHUB_TOKEN`;
+no PAT, GitHub App, deploy key, or other CI credential is part of the release contract. Their
+append-only state, provenance, ownership, and transition rules are enforced by
+`.github/scripts/release_reservation.py`.
 
 ## Release checks
 
@@ -63,9 +65,11 @@ resolved by recovery, while its product inputs remain checked out from the recov
 ## Remote alignment
 
 The declaration is the repository source of truth. GitHub labels, required checks, signed commits,
-main branch rules, and reservation/receipt/product tag protection are reconciled only at PR-ready
-Step 5C by the release-owning agent. Unrelated rules are preserved and insufficient permissions
-remain an explicit blocker.
+main branch rules, and product tag protection are reconciled only at PR-ready Step 5C by the
+release-owning agent. The remote tag ruleset must protect `refs/tags/v*` and exclude
+`release-reservation/*`, `release-decision/*`, `release-bound/*`, `release-consumed/*`, and
+`release-released/*`; this change does not edit remote settings. Unrelated rules are preserved and
+insufficient permissions remain an explicit blocker.
 
 ## Local verification
 

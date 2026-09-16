@@ -1,16 +1,32 @@
-# Protected Release Authority
+# Release Identity Ref Protection
 
 - Status: accepted
 - Date: 2026-09-16
 
-The release identity chain must keep server-side deletion and non-fast-forward protection while GitHub's default Actions integration cannot bypass the repository's personal-account tag ruleset. Use a dedicated GitHub App installation with only `Contents: read and write` on this repository as the protected release authority, and configure that App explicitly as the ruleset bypass actor. The workflow must fail before release work when the App configuration is missing. Product annotated tags continue to use the default `GITHUB_TOKEN` so their required `github-actions[bot]` provenance remains unchanged; the App token is used for reservation and receipt refs only. The receipt writer remains append-only and idempotent at the application layer because a bypass actor is exempt from the server ruleset.
+Release CI must use the existing default `GITHUB_TOKEN`. The repository must not add a PAT,
+GitHub App, deploy key, or any other credential solely to write release identity refs.
+
+Keep server-side protection on product tag refs (`refs/tags/v*`) so a published product tag cannot
+be deleted, force-updated, or created without the required annotated-tag provenance. Exclude the
+release identity namespaces from that product-tag ruleset: `release-reservation/*`,
+`release-decision/*`, `release-bound/*`, `release-consumed/*`, and `release-released/*`.
+The existing `release_reservation.py` writer is the application-level authority for those refs:
+it permits only append-only creation, identical-claim retries, and valid state transitions after
+independent provenance checks.
 
 ## Considered Options
 
-- A maintainer-only receipt write provides the smallest automation authority but makes the release chain partially manual.
-- Removing receipt refs from the ruleset weakens the immutable audit chain.
-- A personal PAT expands credential scope and is harder to rotate safely.
+- Adding a second CI credential would preserve server-side protection for identity refs but violates
+  the repository's credential boundary and creates a new rotation and bypass surface.
+- Requiring a maintainer to append every identity ref avoids the ruleset change but makes the release
+  chain partially manual and is outside the existing automated flow.
+- Keeping the identity namespaces in the product-tag ruleset makes the default token fail with
+  `403 Resource not accessible by integration`, so the workflow cannot complete automatically.
 
 ## Consequences
 
-The repository must maintain `TELEVYBACKUP_RELEASE_APP_ID`, `TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY`, and the App's ruleset bypass membership. Missing or invalid configuration fails closed before packaging. Same-SHA recovery remains the only repair path; a failed receipt never allocates a successor version.
+Product tags retain server-level protection, while identity refs rely on repository code, workflow
+permissions, and the append-only writer rather than server-level immutability. The remote ruleset
+must therefore cover the product tag namespace and exclude the five identity namespaces before
+automated release can succeed. This code change does not mutate remote GitHub settings. Same-SHA
+recovery remains the only repair path; a failed receipt never allocates a successor version.

@@ -89,48 +89,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Determine whether protected release authority is required
-        id: release-need
-        env:
-          TARGET_INPUT: ${{ github.event.workflow_run.head_sha || inputs.commit_sha }}
-        run: |
-          set -euo pipefail
-          required=false
-          prepared_json=""
-          if prepared_json="$(python3 .github/scripts/release_chain.py verify-merged --commit "${TARGET_INPUT}" 2>/dev/null)"; then
-            if [[ "$(printf '%s' "${prepared_json}" | jq -r '.prepared // false')" == true ]]; then
-              required=true
-            fi
-          fi
-          echo "required=${required}" >> "$GITHUB_OUTPUT"
-
-      - name: Require protected release authority configuration
-        if: steps.release-need.outputs.required == 'true'
-        env:
-          RELEASE_APP_ID: ${{ vars.TELEVYBACKUP_RELEASE_APP_ID }}
-          RELEASE_APP_PRIVATE_KEY: ${{ secrets.TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "${RELEASE_APP_ID}" || {
-            echo "missing repository variable TELEVYBACKUP_RELEASE_APP_ID" >&2
-            exit 1
-          }
-          test -n "${RELEASE_APP_PRIVATE_KEY}" || {
-            echo "missing repository secret TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY" >&2
-            exit 1
-          }
-
-      - name: Mint protected release authority token
-        if: steps.release-need.outputs.required == 'true'
-        id: release-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ vars.TELEVYBACKUP_RELEASE_APP_ID }}
-          private-key: ${{ secrets.TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-
       - name: Resolve and bind immutable merged identity
         id: release
         env:
@@ -141,7 +99,6 @@ jobs:
           OPERATION: ${{ inputs.operation || 'publish' }}
           HELPER_MODE: ${{ inputs.helper_mode || 'auto' }}
           GH_TOKEN: ${{ github.token }}
-          RELEASE_REF_TOKEN: ${{ steps.release-token.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -367,7 +324,7 @@ jobs:
               --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
               --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
               --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
-              --token "${RELEASE_REF_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
+              --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
             bound_state=present
             if [[ "${release_state}" == published ]]; then
               python3 .github/scripts/release_reservation.py receipt \
@@ -375,7 +332,7 @@ jobs:
                 --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
                 --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
                 --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
-                --token "${RELEASE_REF_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
+                --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
               enabled=false
               reason=already_published
             else
@@ -879,29 +836,6 @@ jobs:
         with:
           name: release-intent
           path: release-intent
-      - name: Require protected release authority configuration
-        env:
-          RELEASE_APP_ID: ${{ vars.TELEVYBACKUP_RELEASE_APP_ID }}
-          RELEASE_APP_PRIVATE_KEY: ${{ secrets.TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          test -n "${RELEASE_APP_ID}" || {
-            echo "missing repository variable TELEVYBACKUP_RELEASE_APP_ID" >&2
-            exit 1
-          }
-          test -n "${RELEASE_APP_PRIVATE_KEY}" || {
-            echo "missing repository secret TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY" >&2
-            exit 1
-          }
-      - name: Mint protected release authority token
-        id: release-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ vars.TELEVYBACKUP_RELEASE_APP_ID }}
-          private-key: ${{ secrets.TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
       - name: Create or verify immutable product tag
         run: |
           set -euo pipefail
@@ -993,8 +927,6 @@ jobs:
             fi
           fi
       - name: Append consumed receipt
-        env:
-          GH_TOKEN: ${{ steps.release-token.outputs.token }}
         run: |
           set -euo pipefail
           python3 .github/scripts/release_reservation.py receipt \

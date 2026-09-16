@@ -6,7 +6,7 @@
 - [Immutable release identity reservation](../../adr/0010-release-identity-reservation.md)
 - [Independent helper bootstrap state](../../adr/0012-helper-bootstrap-state.md)
 - [Same-SHA recovery bound repair](../../adr/0013-release-recovery-bound-repair.md)
-- [Protected release authority](../../adr/0014-protected-release-authority.md)
+- [Release identity ref protection](../../adr/0014-protected-release-authority.md)
 
 ## Context and Scope
 
@@ -57,9 +57,11 @@ a decision for the other state or identity fails closed. No reservation, decisio
 updated, deleted, or force-pushed. Receipt creation independently
 re-verifies reservation parent/tree/trailers; `bound` must exist before `consumed`, while `released`
 is allowed only for an unbound claim with explicit maintainer confirmation.
-Protected identity refs are appended only with the configured Protected Release Authority; the
-default workflow token is not a protected-ref writer. Product annotated tags remain created by
-`github-actions[bot]` so their provenance contract is unchanged.
+The release workflows append identity refs with the default `GITHUB_TOKEN`; no additional CI
+credential is permitted. Product annotated tags remain created by `github-actions[bot]` and remain
+covered by the server-protected `refs/tags/v*` namespace. The identity namespaces are outside that
+product-tag ruleset, and their append-only, provenance, ownership, and state-order guarantees are
+enforced by the receipt writer.
 
 ### REQ-PVR-005: Preparation and completion preserve identity
 
@@ -126,13 +128,15 @@ snapshot to the validator. After waiting for source checks, it MUST repeat the h
 validation immediately before invoking the completion validator. Event-payload labels are trigger
 metadata, not an authoritative input for a queued completion evaluation.
 
-### REQ-PVR-010: Protected release authority is explicit
+### REQ-PVR-010: Release identity protection uses no extra CI authorization
 
-Reservation and receipt writes MUST use the dedicated protected release authority configured for
-the repository. Release workflows MUST fail before packaging when its App ID or private key is
-missing. The authority MAY bypass the tag ruleset only as the explicitly configured GitHub App; the
-application-level writer MUST continue to reject deletion, overwrites, foreign provenance, and
-successor allocation. Product annotated tags MUST continue to be created by `github-actions[bot]`.
+Reservation and receipt writes MUST use the existing default `GITHUB_TOKEN`; no PAT, GitHub App,
+deploy key, or other additional CI credential may be introduced for release identity writes. The
+remote ruleset MUST protect product refs matching `refs/tags/v*` and MUST exclude
+`release-reservation/*`, `release-decision/*`, `release-bound/*`, `release-consumed/*`, and
+`release-released/*` so the default token can append them. The application-level writer MUST reject
+deletion, overwrites, foreign provenance, invalid state order, and successor allocation. Product
+annotated tags MUST continue to be created by `github-actions[bot]`.
 
 ## Verification
 
@@ -166,9 +170,9 @@ artifact generation, required-gate scheduling, and current PR label revalidation
 
 ### VER-PVR-006
 
-Covers: REQ-PVR-010. Release workflow contract tests verify explicit App configuration checks, App
-token minting for protected identity refs, default Actions provenance for product tags, and no
-personal PAT fallback.
+Covers: REQ-PVR-010. Release workflow and contract tests verify the default Actions token for
+identity writes, absence of additional CI credentials, product-tag ruleset scope, append-only
+application enforcement, and default Actions provenance for product tags.
 
 ## Verification Map
 
