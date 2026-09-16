@@ -826,8 +826,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.merge_sha }}
+          ref: ${{ needs.resolve.outputs.policy_sha }}
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: release-assets

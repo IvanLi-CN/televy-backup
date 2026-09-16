@@ -38,10 +38,12 @@ import sys
 
 root = Path(sys.argv[1])
 contract = json.loads((root / ".github/release-contract.json").read_text(encoding="utf-8"))
-assert "immutable repository identity refs" in contract["source_of_truth"]
+assert "append-only repository identity refs" in contract["source_of_truth"]
 assert contract["preparation"]["write_api"] == "createCommitOnBranch"
 assert contract["preparation"]["expected_head_oid"] is True
 assert contract["preparation"]["no_gpg_secrets"] is True
+assert contract["execution_authority"]["release_policy"] == "trusted-main-checkout"
+assert contract["execution_authority"]["write_capable_product_checkout"] is False
 assert contract["recovery"]["historical_backfill"] is False
 assert contract["release_sequence"]["final_baseline"] == "highest final vX.Y.Z only"
 assert contract["release_states"]["published"] == "idempotent-success-without-build-or-overwrite"
@@ -55,6 +57,17 @@ assert contract["helper_bootstrap"]["immutable_source_artifact"]["release_redown
 assert contract["identity_refs"]["write_policy"] == "append-only-create"
 assert contract["identity_refs"]["state_order"] == "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound"
 assert contract["identity_refs"]["receipt_validation"] == "independently-verify-reservation-provenance"
+assert contract["identity_refs"]["automation"] == "default-github-actions-token"
+assert contract["identity_refs"]["server_protection"] == "product-tags-only"
+assert contract["identity_refs"]["ruleset_product_pattern"] == "refs/tags/v*"
+assert contract["identity_refs"]["ruleset_excluded_identity_patterns"] == [
+    "refs/tags/release-reservation/*",
+    "refs/tags/release-decision/*",
+    "refs/tags/release-bound/*",
+    "refs/tags/release-consumed/*",
+    "refs/tags/release-released/*",
+]
+assert contract["identity_refs"]["no_additional_ci_credentials"] is True
 assert contract["recovery"]["dispatch_requires_existing_bound"] is False
 assert contract["recovery"]["dispatch_bound_repair"] == "append-only-after-same-sha-provenance"
 for gate in ("label_gate", "completion"):
@@ -66,7 +79,15 @@ workflow_text = "\n".join(
     (root / ".github/workflows" / name).read_text(encoding="utf-8")
     for name in ("release-preparation.yml", "release-completion.yml", "release.yml")
 )
-for forbidden in ("GPG", "release-backfill", "backfill"):
+for forbidden in (
+    "GPG",
+    "release-backfill",
+    "backfill",
+    "create-github-app-token",
+    "TELEVYBACKUP_RELEASE_APP_ID",
+    "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY",
+    "RELEASE_REF_TOKEN",
+):
     assert forbidden not in workflow_text, forbidden
 assert "createCommitOnBranch" in workflow_text
 assert "expectedHeadOid" in workflow_text

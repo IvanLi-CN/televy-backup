@@ -13,6 +13,7 @@
 | Completion gate | `.github/workflows/release-completion.yml`, `.github/scripts/release_completion.py` |
 | Mainline bind, build and publish | `.github/workflows/release.yml` |
 | Failure context delivery | `.github/workflows/notify-release-failure.yml` |
+| Release identity ref enforcement | `.github/scripts/release_reservation.py`, `.github/release-contract.json`, `.github/workflows/release-preparation.yml`, `.github/workflows/release.yml` |
 | Required-check declaration | `.github/quality-gates.json`, `docs/quality-gates.md` |
 
 The failure resolver is bound to the exact `Release Product` workflow attempt and verifies
@@ -26,11 +27,14 @@ blocks with a local Git/API fixture. Release state is read through the GitHub RE
 
 1. Label Gate validates one product type and one new channel, or channel-free docs/skip.
    Label Gate and Release completion are required per-PR gates with non-preemptive `queue: max`
-   scheduling; completion re-reads the current PR labels after verifying the queued head/base.
+   scheduling; after preparation, their manual runs target the prepared PR head so the required
+   check-runs stay attached to that candidate. Dispatch mode checks out trusted `main`, verifies
+   the selected branch/SHA against the current in-repository PR, and completion re-reads the
+   current PR labels after verifying the queued head/base.
 2. Preparation enumerates fetched product tags, requires annotated GitHub Actions provenance for
    final tags, retains reachable pre-policy lightweight prerelease tags only for ordinal occupancy,
-   calculates the candidate from the highest final tag, and creates the reservation before writing
-   VERSION.
+   calculates the candidate from the highest final tag, and uses the default `GITHUB_TOKEN` to
+   create the reservation before writing VERSION.
 3. The same PR branch receives one GitHub verified VERSION-only commit guarded by
    `expectedHeadOid`. Later source commits may follow it; `release_chain.py find-prepared` resolves
    the first-parent preparation commit within the current `base..head` range and rejects a changed
@@ -50,7 +54,19 @@ blocks with a local Git/API fixture. Release state is read through the GitHub RE
    Release for byte-identical reuse or an explicitly requested one-time bootstrap mode. Reused helper
    assets are downloaded and verified once in `resolve`, uploaded as `snapshot-helper-source`, and
    consumed by the native build and assembly jobs. It then verifies the merged identity, appends bound,
-   builds once, creates the product tag and GitHub Release, then appends consumed.
+   builds once, creates the product tag and GitHub Release, then appends consumed with the default
+   `GITHUB_TOKEN`. The append-only receipt writer rejects foreign provenance, overwrites, invalid
+   transitions, and successor allocation.
+
+## Release identity ref protection
+
+No additional CI credential is required or permitted. The remote ruleset protects product tags
+matching `refs/tags/v*` and excludes `release-reservation/*`, `release-decision/*`,
+`release-bound/*`, `release-consumed/*`, and `release-released/*`. This lets both workflows use
+their existing `GITHUB_TOKEN`; the application-level writer in `release_reservation.py` remains
+responsible for append-only creation, idempotent same-claim retries, provenance validation, and
+state ordering. Product tag creation continues to use the default Actions identity so the required
+`github-actions[bot]` annotated-tag provenance is preserved.
 
 ## Recovery boundaries
 
@@ -61,7 +77,8 @@ trusted recovery path can append it atomically after re-verifying the same-SHA p
 never calculates a new version or changes an existing ref. Helper bootstrap is permitted only when
 no approved helper Release is available and the recovery input explicitly requests it. No identity
 is reported as an unresolved state and cannot produce a fabricated tag or recovery command.
-Recovery keeps the trusted main checkout for policy and helper scripts; the historical recovery
-input remains the product identity passed through resolved outputs for packaging and publication.
-The assembly job likewise evaluates release-asset validation from the exact trusted policy commit
-resolved by the workflow while keeping the recovered merge checkout as the product input.
+Recovery and publication keep the trusted main checkout for policy and helper scripts; the historical
+recovery input remains the product identity passed through resolved outputs for packaging and
+publication. The write-capable publish job does not execute policy scripts from the product
+checkout. The assembly job likewise evaluates release-asset validation from the exact trusted policy
+commit resolved by the workflow while keeping the recovered merge checkout as the product input.
