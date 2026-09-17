@@ -30,7 +30,7 @@
 
 - 不做 notarization / 发行签名链路。
 - 不修改 Rust crates 的包名或二进制名（`televybackup*` 维持现状）。
-- 不变更 Homebrew/cask 模板（仍指向 prod）。
+- 不改变现有 macOS release packaging contract。
 
 ## 范围（In/Out）
 

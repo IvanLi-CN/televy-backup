@@ -18,3 +18,14 @@
    GUI, CLI, and `televybackupd` remain non-root and do not need FDA. Scheduled backups do not authenticate. Removing a managed service does not remove configuration or backup data.
 
 Developer ID signing, notarization, automatic updates, and Homebrew formula updates are not part of this distribution.
+
+## Homebrew GUI app
+
+The Cask downloads the latest stable Universal 2 DMG and verifies it against its SHA-256 before installing the app:
+
+```sh
+brew tap IvanLi-CN/televy-backup https://github.com/IvanLi-CN/televy-backup.git
+brew install --cask IvanLi-CN/televy-backup/televybackup
+```
+
+Homebrew leaves quarantine intact. If macOS blocks the first launch, use Finder to open the app and approve it through Gatekeeper (for example, **System Settings > Privacy & Security > Open Anyway**). Do not remove quarantine. The Cask installs only `TelevyBackup.app`; it does not install or configure the daemon, mount helper, FDA permission, configuration, or backup data.

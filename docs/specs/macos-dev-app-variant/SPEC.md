@@ -25,7 +25,7 @@
 
 - 不做 notarization / 发行签名链路。
 - 不修改 Rust crates 的包名或二进制名（`televybackup*` 维持现状）。
-- 不变更 Homebrew/cask 模板（仍指向 prod）。
+- 不改变现有 macOS release packaging contract。
 
 
 ## 范围（In/Out）
@@ -48,3 +48,7 @@
 - Given 同时运行 dev + prod，When 执行 `scripts/macos/run-app.sh` 的重启/清理逻辑，Then 只影响 dev，不误杀 prod。
 - Given 启动 dev 变体（无额外参数），When app 启动并拉起 daemon/CLI，Then 默认 `TELEVYBACKUP_DISABLE_KEYCHAIN=1`（禁用 Keychain）；如显式传 `--enable-keychain` 则允许启用 Keychain 用于测试。
 - Given 未设置 `TELEVYBACKUP_APP_VARIANT` 且运行 `build-app.sh`，Then 默认产物与当前仓库行为一致（`TelevyBackup.app`，bundle id 为 prod）。
+
+## Related ADRs
+
+None
