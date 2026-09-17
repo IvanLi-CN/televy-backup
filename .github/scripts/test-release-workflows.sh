@@ -200,6 +200,17 @@ assert_contains "release DMG evidence upload" "$release_text" "name: release-dmg
 assert_contains "release DMG evidence binding" "$release_text" 'DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl"'
 assert_contains "release Finder screenshot upload" "$release_text" 'gh release upload "${rc2_tag}" "${screenshot_dir}/${screenshot_name}"'
 assert_contains "release product icon verifier" "$release_text" 'policy_verify_app_icon_assets="${policy_checkout}/scripts/macos/verify-app-icon-assets.sh"'
+assert_contains "release RC layout verifier" "$release_text" 'bash scripts/macos/verify-dmg-layout.sh'
+ruby -ryaml - "$root_dir/.github/workflows/release.yml" <<'RUBY'
+workflow = YAML.load_file(ARGV.fetch(0))
+checkout = workflow.fetch("jobs").fetch("macos-acceptance").fetch("steps").find { |step| step["uses"] == "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" }
+abort "macOS acceptance must use the trusted policy checkout" unless checkout&.fetch("with", {}).fetch("ref", nil) == '${{ needs.resolve.outputs.policy_sha }}'
+RUBY
+ruby -ryaml - "$root_dir/.github/workflows/release.yml" <<'RUBY'
+workflow = YAML.load_file(ARGV.fetch(0))
+permissions = workflow.fetch("jobs").fetch("macos-acceptance").fetch("permissions")
+abort "macOS acceptance must be able to upload Finder screenshots" unless permissions == {"contents" => "write"}
+RUBY
 assert_not_contains "source PR release comment step" "$release_text" "Upsert PR release version comment"
 assert_not_contains "source PR release comment marker" "$release_text" "televybackup-release-version-comment"
 assert_not_contains "source PR lookup" "$release_text" "/commits/\${TARGET_INPUT}/pulls"

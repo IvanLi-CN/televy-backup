@@ -25,6 +25,27 @@ done
 }
 root_dir="$(git rev-parse --show-toplevel)"
 metadata_verifier="$root_dir/scripts/macos/verify-dmg-metadata.py"
+verify_nested_helper_path() {
+  local app="$1"
+  local helper="$2"
+  [[ ! -L "$helper" && -d "$helper" ]] || {
+    echo "embedded Snapshot Access path must be a real directory: $helper" >&2
+    exit 1
+  }
+  local app_real
+  local helper_real
+  app_real="$(cd "$app" && pwd -P)"
+  helper_real="$(cd "$helper" && pwd -P)"
+  [[ "$helper_real" == "$app_real/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" ]] || {
+    echo "embedded Snapshot Access path escapes the main app bundle: $helper" >&2
+    exit 1
+  }
+  local binary="$helper/Contents/MacOS/televybackup-snapshot-access"
+  [[ ! -L "$binary" && -f "$binary" ]] || {
+    echo "embedded Snapshot Access executable must be a real file: $binary" >&2
+    exit 1
+  }
+}
 prepare_evidence_path() {
   local path="$1"
   [[ ! -L "$path" ]] || {
@@ -428,7 +449,7 @@ PY
   }
 fi
 access_app="$app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
-[[ -d "$access_app" ]] || { echo "missing embedded Snapshot Access app bundle: $access_app" >&2; exit 1; }
+verify_nested_helper_path "$app" "$access_app"
 if [[ -d "$access_app" ]]; then
   codesign --verify --strict "$access_app"
   bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$access_app/Contents/Info.plist")"
@@ -548,7 +569,7 @@ verify_dmg_helper_identity() (
     [[ "$binary_signature" == *"Signature=adhoc"* ]] || { echo "DMG binary is not ad-hoc signed: $binary" >&2; exit 1; }
   done
   helper="$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
-  [[ -d "$helper" ]] || { echo "DMG is missing embedded Snapshot Access: $local_dmg" >&2; exit 1; }
+  verify_nested_helper_path "$mount_point/TelevyBackup.app" "$helper"
   codesign --verify --strict "$helper"
   bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$helper/Contents/Info.plist")"
   [[ "$bundle_id" == "com.ivan.televybackup.snapshot-access" ]] || {

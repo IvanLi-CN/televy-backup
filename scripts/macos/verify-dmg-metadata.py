@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import plistlib
+import re
 from pathlib import Path
 
 
@@ -32,15 +33,18 @@ def main() -> int:
         )
 
     filesystem_info = load_plist(args.filesystem_info)
-    observed = " ".join(
-        str(filesystem_info.get(key, ""))
+    observed = {
+        re.sub(r"[^a-z0-9]", "", str(filesystem_info.get(key, "")).lower())
         for key in ("FilesystemType", "FilesystemPersonality", "FilesystemName")
-    ).lower()
-    expected = args.expected_filesystem.lower().replace("+", "")
-    if not expected or expected not in observed.replace("+", ""):
+    }
+    expected = re.sub(r"[^a-z0-9]", "", args.expected_filesystem.lower())
+    accepted = {expected}
+    if expected == "hfs":
+        accepted.update({"journaledhfs", "macosextendedjournaled"})
+    if not expected or not observed.intersection(accepted):
         raise SystemExit(
             "attached filesystem mismatch: "
-            f"observed={observed!r}, expected={args.expected_filesystem!r}"
+            f"observed={sorted(observed)!r}, expected={args.expected_filesystem!r}"
         )
     return 0
 

@@ -804,13 +804,15 @@ jobs:
     needs: [resolve, assemble]
     if: needs.resolve.outputs.enabled == 'true' && needs.resolve.outputs.channel == 'prod'
     runs-on: macos-15
+    permissions:
+      contents: write
     environment:
       name: macos-release-acceptance
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.resolve.outputs.source_sha }}
-          fetch-depth: 1
+          ref: ${{ needs.resolve.outputs.policy_sha }}
+          fetch-depth: 0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-assets
@@ -836,6 +838,14 @@ jobs:
             python3 .github/scripts/release_chain.py verify-tag-provenance --tag "${rc_tag}"
             source_commit="$(git rev-list -n 1 "${rc_tag}^{commit}")"
             echo "RC${rc_number}_SOURCE_COMMIT=${source_commit}" >> "$GITHUB_ENV"
+          done
+      - name: Verify downloaded RC DMG layouts
+        run: |
+          set -euo pipefail
+          core_version="${{ needs.resolve.outputs.version }}"
+          for rc_number in 1 2; do
+            bash scripts/macos/verify-dmg-layout.sh \
+              --dmg "release-rc/rc${rc_number}/TelevyBackup-${core_version}-rc.${rc_number}.dmg"
           done
       - name: Verify manual RC1 to RC2 acceptance evidence
         env:

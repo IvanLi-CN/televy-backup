@@ -115,6 +115,10 @@ grep -F 'verify-dmg-metadata.py' <<<"$verify_release_text" >/dev/null || {
   echo "DMG verification must inspect attached filesystem metadata" >&2
   exit 1
 }
+grep -F 'verify_nested_helper_path' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must reject symlinked or escaping nested helpers" >&2
+  exit 1
+}
 python3 - "$root_dir/scripts/macos/verify-dmg-metadata.py" "$tmp_dir" <<'PY'
 import plistlib
 import subprocess
@@ -152,6 +156,7 @@ def run_case(image_format, filesystem_type, expected):
 run_case("UDZO", "hfs", True)
 run_case("UDRO", "hfs", False)
 run_case("UDZO", "apfs", False)
+run_case("UDZO", "not-hfs", False)
 PY
 identity_text="$(<"$root_dir/scripts/macos/verify-component-identity.sh")"
 grep -F 'reference_artifact_sha="$(artifact_sha "$reference" canonical)"' <<<"$identity_text" >/dev/null || {

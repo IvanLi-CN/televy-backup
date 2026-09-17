@@ -251,6 +251,7 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
     mount_path = Path(tempfile.mkdtemp(prefix="televybackup-rc-"))
     mounted = False
     try:
+        mounted = True
         command_output(
             [
                 "hdiutil",
@@ -263,7 +264,6 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
             ],
             f"{name} DMG mount",
         )
-        mounted = True
         top_level_apps = sorted(
             path.name
             for path in mount_path.iterdir()
@@ -276,10 +276,15 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
             fail(f"{name} DMG is missing the main TelevyBackup executable")
         require_universal2(main_binary, f"{name} main app")
         helper = mount_path / "TelevyBackup.app" / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
-        if not helper.is_dir():
+        if helper.is_symlink() or not helper.is_dir():
             fail(f"{name} DMG is missing the embedded Snapshot Access app")
+        app_real = (mount_path / "TelevyBackup.app").resolve(strict=True)
+        helper_real = helper.resolve(strict=True)
+        expected_helper = app_real / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+        if helper_real != expected_helper:
+            fail(f"{name} embedded Snapshot Access path escapes the main app bundle")
         binary = helper / "Contents/MacOS/televybackup-snapshot-access"
-        if not binary.is_file():
+        if binary.is_symlink() or not binary.is_file():
             fail(f"{name} DMG is missing the Snapshot Access executable")
         require_universal2(binary, f"{name} Snapshot Access")
         signature = command_output(["codesign", "-dvvv", str(helper)], f"{name} Snapshot Access signature")
