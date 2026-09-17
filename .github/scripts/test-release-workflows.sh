@@ -244,7 +244,8 @@ assert_contains "completion covered merge proof argument" "$completion_text" "--
 assert_not_contains "completion prepared-head direct verification" "$completion_text" 'verify-prepared --commit "${HEAD_SHA}"'
 assert_not_contains "completion prepared-head identity binding" "$completion_text" 'preparation_sha="${HEAD_SHA}"'
 assert_contains "completion source-head preparation lookup" "$completion_text" 'find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}"'
-assert_contains "completion reservation source ancestry" "$completion_text" '.reservationSourceSha // .sourceSha'
+assert_contains "completion reservation source trailer" "$completion_text" 'Release-Reservation-Source-SHA:'
+assert_contains "completion reservation source fallback" "$completion_text" '.reservationSourceSha // .sourceSha'
 assert_contains "completion workflow dispatch input" "$completion_text" "pr_number:"
 assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${pr_number}'
 assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/${EXPECTED_HEAD_REF}'

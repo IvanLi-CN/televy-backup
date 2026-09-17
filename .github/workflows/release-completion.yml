@@ -194,9 +194,13 @@ jobs:
           fi
           if [[ -n "${prepared_json}" ]]; then
             release_mode="$(printf '%s' "${prepared_json}" | jq -r .mode)"
+            reservation_source_sha="$(git show -s --format=%B "${preparation_sha}" | sed -n 's/^Release-Reservation-Source-SHA: //p' | head -1)"
+            if [[ -z "${reservation_source_sha}" ]]; then
+              reservation_source_sha="$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')"
+            fi
             jq -n \
               --arg ref "$(printf '%s' "${prepared_json}" | jq -r .reservationRef)" \
-              --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')" \
+              --arg sourceSha "${reservation_source_sha}" \
               --arg version "$(printf '%s' "${prepared_json}" | jq -r .version)" \
               --arg channel "$(printf '%s' "${prepared_json}" | jq -r .channel | sed 's/^channel://')" \
               --arg reservationId "$(printf '%s' "${prepared_json}" | jq -r .reservationId)" \
