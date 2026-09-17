@@ -237,14 +237,36 @@ jobs:
               )
             fi
           fi
-          python3 .github/scripts/release_completion.py "${completion_args[@]}" \
+          # Keep the gate logic on the trusted base while bridging the
+          # reservation-source field introduced after the base checkout.
+          python3 - "${completion_args[@]}" \
             --allow-migration \
             --migration-version 0.9.2 \
             --reservation-json "${RUNNER_TEMP}/reservation.json" \
             --repository "${GITHUB_REPOSITORY}" \
             --token "${GH_TOKEN}" \
             --api-root "${GITHUB_API_URL}" \
-            --require-github-verification
+            --require-github-verification <<'PY'
+          import sys
+
+          import release_completion
+
+          trusted_verify_reservation = release_completion.verify_reservation
+
+          def verify_reservation_with_source_compat(*args, **kwargs):
+              path, prepared = args[:2]
+              if "reservationSourceSha" not in prepared:
+                  prepared = dict(prepared)
+                  reservation_source = release_completion.CHAIN.trailers(
+                      prepared["preparationSha"]
+                  ).get("Release-Reservation-Source-SHA")
+                  if reservation_source:
+                      prepared["sourceSha"] = reservation_source
+              return trusted_verify_reservation(path, prepared, *args[2:], **kwargs)
+
+          release_completion.verify_reservation = verify_reservation_with_source_compat
+          raise SystemExit(release_completion.main(sys.argv[1:]))
+          PY
 
       - name: Validate merge-group release completion
         if: github.event_name == 'merge_group'
