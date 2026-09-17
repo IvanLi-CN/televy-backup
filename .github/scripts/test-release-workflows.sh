@@ -108,12 +108,17 @@ assert_contains "completion job timeout covers native CI" "$completion_text" "ti
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
 assert_not_contains "completion preemptive cancellation" "$completion_text" "cancel-in-progress: true"
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
-[[ "$(grep -Fc 'timeout-minutes: 30' <<<"$release_text")" -eq 2 ]] || {
-  printf 'release native package jobs must have a 30-minute timeout\n' >&2
+[[ "$(grep -Fc 'timeout-minutes: 15' <<<"$release_text")" -eq 2 ]] || {
+  printf 'release native package jobs must have a 15-minute timeout\n' >&2
   exit 1
 }
-[[ "$(grep -Fc 'timeout-minutes: 20' <<<"$release_text")" -eq 1 ]] || {
-  printf 'release Universal 2 assembly must have a 20-minute timeout\n' >&2
+[[ "$(grep -Fc 'uses: actions/cache@v4' <<<"$release_text")" -ge 2 ]] || {
+  printf 'release native package jobs must cache build dependencies\n' >&2
+  exit 1
+}
+assert_contains "release dependency cache architecture key" "$release_text" "runner.arch"
+[[ "$(grep -Fc 'timeout-minutes: 10' <<<"$release_text")" -eq 1 ]] || {
+  printf 'release Universal 2 assembly must have a 10-minute timeout\n' >&2
   exit 1
 }
 assert_contains "release arm64 package retry limit" "$release_text" "Build arm64 package (up to 2 attempts)"

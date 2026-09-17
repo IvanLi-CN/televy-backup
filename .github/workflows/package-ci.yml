@@ -40,7 +40,7 @@ jobs:
     if: needs.classify.result == 'success'
     name: arm64 native package
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,6 +54,20 @@ jobs:
         with:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
+      - name: Cache macOS arm64 build dependencies
+        if: needs.classify.outputs.kind == 'source'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/pip
+            ~/Library/Caches/pip
+            target
+            crates/mtproto-helper/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
       - name: Build arm64 package (up to 2 attempts)
         if: needs.classify.outputs.kind == 'source'
         run: |
@@ -83,7 +97,7 @@ jobs:
     if: needs.classify.result == 'success'
     name: x86_64 native package
     runs-on: macos-15-intel
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -97,6 +111,20 @@ jobs:
         with:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
+      - name: Cache macOS x86_64 build dependencies
+        if: needs.classify.outputs.kind == 'source'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/pip
+            ~/Library/Caches/pip
+            target
+            crates/mtproto-helper/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
       - name: Build x86_64 package (up to 2 attempts)
         if: needs.classify.outputs.kind == 'source'
         run: |
@@ -124,7 +152,7 @@ jobs:
   universal2:
     name: Universal 2 assembly
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 10
     needs: [classify, arm64, x86_64]
     if: needs.classify.result == 'success'
     steps:
