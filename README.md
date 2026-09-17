@@ -282,7 +282,16 @@ prompt after setup. Service reachability does not itself prove that the helper h
 mode fails closed if either component cannot complete its operation. See
 [the macOS installation guide](packaging/INSTALL.md) for the exact setup steps.
 
-Release DMGs and native tool archives are built by the macOS package workflow. Verify `SHA256SUMS` before following the ad-hoc Gatekeeper instructions in [`packaging/INSTALL.md`](packaging/INSTALL.md). Homebrew templates under `packaging/homebrew/` are legacy compatibility artifacts and are not maintained by the release flow.
+Release DMGs and native tool archives are built by the macOS package workflow. Verify `SHA256SUMS` before following the ad-hoc Gatekeeper instructions in [`packaging/INSTALL.md`](packaging/INSTALL.md). The legacy Homebrew daemon Formula under `packaging/homebrew/` is not maintained by the release flow.
+
+The Homebrew Cask installs the GUI app from the latest stable Universal 2 release. The source repository is also the tap, so include its GitHub URL when adding it:
+
+```sh
+brew tap IvanLi-CN/televy-backup https://github.com/IvanLi-CN/televy-backup.git
+brew install --cask IvanLi-CN/televy-backup/televybackup
+```
+
+Homebrew verifies the DMG checksum and preserves quarantine. Since releases are ad-hoc signed and not notarized, the first launch may require manual approval in macOS Gatekeeper. The Cask installs only `TelevyBackup.app`; the daemon Formula remains a separate legacy path. After a stable Release, the same-repository workflow uses GitHub's built-in `GITHUB_TOKEN` to create the Cask PR, run exact-head checks, and merge it; no PAT, App, or repository secret is required.
 
 ## Docs
 

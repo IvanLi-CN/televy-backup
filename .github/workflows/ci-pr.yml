@@ -4,6 +4,12 @@ on:
   pull_request:
     branches: [main]
   merge_group:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open same-repository PR to validate
+        required: true
+        type: string
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -27,9 +33,32 @@ jobs:
       kind: ${{ steps.classify.outputs.kind }}
     steps:
       - name: Checkout pull request head
+        if: github.event_name != 'workflow_dispatch'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+
+      - name: Verify workflow dispatch targets current pull request head
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/ci-pr.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg head_ref "${GITHUB_REF_NAME}" \
+            --arg head_sha "${GITHUB_SHA}" \
+            '.state == "open" and .base.ref == "main" and .head.repo.full_name == $repository and .head.ref == $head_ref and .head.sha == $head_sha' \
+            "${RUNNER_TEMP}/ci-pr.json" >/dev/null
+
+      - name: Checkout dispatched pull request head
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
           fetch-depth: 2
 
       - name: Classify VERSION preparation commit
@@ -102,6 +131,10 @@ jobs:
           bash ./.github/scripts/test-release-preparation.sh
           bash ./.github/scripts/test-release-completion.sh
           bash ./.github/scripts/test-release-workflows.sh
+
+      - name: Homebrew Cask contract tests
+        if: needs.classify.outputs.kind == 'source'
+        run: bash ./.github/scripts/test-homebrew-cask.sh
 
       - name: Package script contract tests
         if: needs.classify.outputs.kind == 'source'

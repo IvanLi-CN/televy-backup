@@ -23,7 +23,7 @@ assert_not_contains() {
   fi
 }
 
-for workflow in ci-pr.yml ci-main.yml label-gate.yml package-ci.yml release-preparation.yml release-completion.yml release.yml notify-release-failure.yml; do
+for workflow in ci-pr.yml ci-main.yml label-gate.yml package-ci.yml release-preparation.yml release-completion.yml release.yml notify-release-failure.yml homebrew-cask.yml homebrew-cask-update.yml; do
   ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$root_dir/.github/workflows/$workflow"
 done
 python3 "$root_dir/.agents/skills/quality-gates/assets/scripts/check_quality_gates.py" \
@@ -74,6 +74,8 @@ assert_contains "notifier artifact origin validation" "$notify_text" "GitHub API
 assert_not_contains "notifier raw resolver exception" "$notify_text" "resolver_error = f"
 assert_not_contains "notifier raw log exception" "$notify_text" "logs_error = f"
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
+assert_contains "release completion initializes prepared release state" "$completion_text" 'prepared_json=""'
+assert_contains "release completion initializes preparation SHA" "$completion_text" 'preparation_sha=""'
 assert_contains "completion ready-for-review trigger" "$completion_text" "ready_for_review"
 assert_contains "completion merge-group validation" "$completion_text" "merge-group-release-gate.sh completion"
 assert_contains "completion merge-group fetch credentials" "$completion_text" "persist-credentials: true"

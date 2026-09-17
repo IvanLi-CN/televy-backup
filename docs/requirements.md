@@ -91,7 +91,8 @@
     - 开发期可选：`TELEVYBACKUP_DISABLE_KEYCHAIN=1` 时由 daemon 以 `vault.key` 文件承载 vault key（安全性降级）。
   - secrets store（`secrets.enc`）：保存 bot token / master key / MTProto 凭据与 session（加密落盘）。
 - **Packaging**
-  - Homebrew：formula（daemon）+ cask（GUI app）。
+  - macOS release DMG, native tool archives, and a same-repository Homebrew Cask for the GUI app;
+    the legacy Homebrew daemon Formula is retained only for existing users.
   - 升级不丢数据：配置与 SQLite 目录固定，secrets store 不需要重新输入（除非用户主动清除）。
 
 ## 8) Data & interfaces (if applicable)
