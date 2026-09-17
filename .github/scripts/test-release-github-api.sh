@@ -94,6 +94,24 @@ created = module.create_github_reservation(expected, repository="fixture/repo", 
 assert created["target"] == fake_reservation
 assert module.create_github_reservation(expected, repository="fixture/repo", token="token", api_root="https://fixture.invalid")["target"] == fake_reservation
 
+class MissingSourceGitHubRefClient(FakeGitHubRefClient):
+    def commit_info(self, sha):
+        if sha == source:
+            raise module.ReservationError(
+                "GitHub API GET /repos/fixture/repo/git/commits/" + source
+                + " returned 422: {'message': 'No commit found for SHA: " + source + "'}"
+            )
+        return super().commit_info(sha)
+
+module.GitHubRefClient = MissingSourceGitHubRefClient
+expected_with_tree = dict(expected, sourceTreeSha=tree)
+verified = module.verify_github_reservation(
+    expected_with_tree, repository="fixture/repo", token="token", api_root="https://fixture.invalid"
+)
+assert verified["target"] == fake_reservation
+
+module.GitHubRefClient = FakeGitHubRefClient
+
 bound = module.create_github_receipt(
     state="bound", version="1.0.0-beta.1", merge_sha=merge,
     reservation_id=identity["reservationId"], owner="fixture", claim_key=claim_key,

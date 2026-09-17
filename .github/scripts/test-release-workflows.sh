@@ -280,6 +280,9 @@ assert_not_contains "completion prepared-head identity binding" "$completion_tex
 assert_contains "completion source-head preparation lookup" "$completion_text" 'find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}"'
 assert_contains "completion reservation source trailer" "$completion_text" 'Release-Reservation-Source-SHA:'
 assert_contains "completion reservation source fallback" "$completion_text" '.reservationSourceSha // .sourceSha'
+assert_contains "completion reservation source tree" "$completion_text" 'sourceTreeSha'
+preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
+assert_contains "preparation reservation source tree" "$preparation_text" 'sourceTreeSha'
 assert_contains "completion workflow dispatch input" "$completion_text" "pr_number:"
 assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${pr_number}'
 assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/${EXPECTED_HEAD_REF}'

@@ -160,8 +160,11 @@ jobs:
           set -euo pipefail
           if prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${SOURCE_SHA}" --base "${{ steps.pr.outputs.base_sha }}" 2>/dev/null)"; then
             printf '%s\n' "${prepared_json}" > "${RUNNER_TEMP}/reservation.json"
+            reservation_source_sha="$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')"
+            reservation_source_tree="$(git rev-parse "${reservation_source_sha}^{tree}" 2>/dev/null || true)"
             jq -n \
-              --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')" \
+              --arg sourceSha "${reservation_source_sha}" \
+              --arg sourceTreeSha "${reservation_source_tree}" \
               --arg channel "$(printf '%s' "${prepared_json}" | jq -r .channel | sed 's/^channel://')" \
               --arg version "$(printf '%s' "${prepared_json}" | jq -r .version)" \
               --arg reservation_id "$(printf '%s' "${prepared_json}" | jq -r .reservationId)" \
@@ -169,7 +172,7 @@ jobs:
               --arg owner "github-actions[bot]" \
               --arg claim_key "$(printf '%s' "${prepared_json}" | jq -r .claimKey)" \
               --arg boundary_token "$(printf '%s' "${prepared_json}" | jq -r .boundaryToken)" \
-              '{sourceSha:$sourceSha,channel:$channel,version:$version,reservationId:$reservation_id,ref:$ref,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claim_key,"Reservation-Boundary-Token":$boundary_token}' \
+              '{sourceSha:$sourceSha,sourceTreeSha:$sourceTreeSha,channel:$channel,version:$version,reservationId:$reservation_id,ref:$ref,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claim_key,"Reservation-Boundary-Token":$boundary_token}' \
               > "${RUNNER_TEMP}/reservation.json"
             python3 - "${RUNNER_TEMP}/reservation.json" <<'PY'
           import json
