@@ -169,7 +169,63 @@ jobs:
           PY
           else
             git fetch --force origin '+refs/tags/*:refs/tags/*'
-            allocation="$(python3 - <<'PY'
+            recovered_reservation="$(python3 - "${SOURCE_SHA}" "${PR_NUMBER}" "${RELEASE_TYPE}" "${RELEASE_CHANNEL}" <<'PY'
+          import json
+          import re
+          import subprocess
+          import sys
+
+          source_sha, pr_number, release_type, release_channel = sys.argv[1:]
+          suffix = f":{release_type}:{release_channel}"
+          refs = subprocess.check_output(
+              ["git", "for-each-ref", "--format=%(refname)", "refs/tags/release-reservation"],
+              text=True,
+          ).splitlines()
+          for ref in refs:
+              target = subprocess.check_output(["git", "rev-parse", f"{ref}^{{commit}}"], text=True).strip()
+              parents = subprocess.check_output(["git", "show", "-s", "--format=%P", target], text=True).split()
+              if len(parents) != 1:
+                  continue
+              trailers = {}
+              for line in subprocess.check_output(["git", "show", "-s", "--format=%B", target], text=True).splitlines():
+                  if ":" in line:
+                      key, value = line.split(":", 1)
+                      trailers[key.strip()] = value.strip()
+              claim = trailers.get("Reservation-Claim-Key", "")
+              if not claim.startswith(f"pr:{pr_number}:source:") or not claim.endswith(suffix):
+                  continue
+              if trailers.get("Reservation-Owner") != "github-actions[bot]":
+                  continue
+              reserved_source = parents[0]
+              claim_source = claim[len(f"pr:{pr_number}:source:"):-len(suffix)]
+              if not re.fullmatch(r"[0-9a-fA-F]{40}", claim_source) or claim_source.lower() != reserved_source.lower():
+                  continue
+              subprocess.run(
+                  ["git", "fetch", "--no-tags", "origin", reserved_source],
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  check=False,
+              )
+              if subprocess.run(["git", "merge-base", "--is-ancestor", reserved_source, source_sha]).returncode != 0:
+                  continue
+              print(json.dumps({
+                  "ref": ref,
+                  "sourceSha": reserved_source,
+                  "version": trailers.get("Release-Version", ""),
+                  "channel": trailers.get("Release-Channel", ""),
+                  "reservationId": trailers.get("Reservation-Id", ""),
+                  "Reservation-Owner": trailers.get("Reservation-Owner", ""),
+                  "Reservation-Claim-Key": claim,
+                  "Reservation-Boundary-Token": trailers.get("Reservation-Boundary-Token", ""),
+              }, sort_keys=True))
+              break
+          PY
+          )"
+            if [[ -n "${recovered_reservation}" ]]; then
+              printf '%s\n' "${recovered_reservation}" > "${RUNNER_TEMP}/reservation.json"
+              echo "reusing descendant-compatible reservation: $(jq -r .ref "${RUNNER_TEMP}/reservation.json")"
+            else
+              allocation="$(python3 - <<'PY'
           import json
           import os
           import sys
@@ -181,18 +237,19 @@ jobs:
           occupied = release_chain.occupied_identity_versions()
           print(json.dumps(release_chain.allocate_version(release_chain.product_tags(), intent['type'], intent['channel'], occupied)))
           PY
-          )"
-            claim_key="pr:${PR_NUMBER}:source:${SOURCE_SHA}:${RELEASE_TYPE}:${RELEASE_CHANNEL}"
-            python3 .github/scripts/release_reservation.py reserve \
-              --source-sha "${SOURCE_SHA}" \
-              --version "$(printf '%s' "${allocation}" | jq -r .version)" \
-              --channel "${RELEASE_CHANNEL#channel:}" \
-              --owner github-actions[bot] \
-              --claim-key "${claim_key}" \
-              --repository "${GITHUB_REPOSITORY}" \
-              --token "${GH_TOKEN}" \
-              --api-root "${GITHUB_API_URL}" \
-              --output "${RUNNER_TEMP}/reservation.json"
+              )"
+              claim_key="pr:${PR_NUMBER}:source:${SOURCE_SHA}:${RELEASE_TYPE}:${RELEASE_CHANNEL}"
+              python3 .github/scripts/release_reservation.py reserve \
+                --source-sha "${SOURCE_SHA}" \
+                --version "$(printf '%s' "${allocation}" | jq -r .version)" \
+                --channel "${RELEASE_CHANNEL#channel:}" \
+                --owner github-actions[bot] \
+                --claim-key "${claim_key}" \
+                --repository "${GITHUB_REPOSITORY}" \
+                --token "${GH_TOKEN}" \
+                --api-root "${GITHUB_API_URL}" \
+                --output "${RUNNER_TEMP}/reservation.json"
+            fi
           fi
           jq -e '.version and .reservationId and .ref and ."Reservation-Claim-Key" and ."Reservation-Boundary-Token"' "${RUNNER_TEMP}/reservation.json" >/dev/null
           {
