@@ -24,6 +24,9 @@ done
   exit 2
 }
 root_dir="$(git rev-parse --show-toplevel)"
+if [[ -n "${DMG_EVIDENCE_FILE:-}" ]]; then
+  : > "$DMG_EVIDENCE_FILE"
+fi
 source_commit="$(git rev-parse HEAD)"
 version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
 
@@ -86,7 +89,8 @@ PY
   fi
 }
 resolve_device_for_mount() {
-  hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
+  local device
+  device="$(hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
 payload = plistlib.loads(sys.stdin.buffer.read())
 entities = list(payload.get("system-entities", []))
@@ -96,6 +100,18 @@ for entity in entities:
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"])
         raise SystemExit(0)' "$1" 2>/dev/null || true
+  )"
+  if [[ -n "$device" ]]; then
+    printf '%s\n' "$device"
+    return 0
+  fi
+  diskutil info -plist "$1" 2>/dev/null | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+mount = payload.get("MountPoint") or payload.get("mount-point")
+device = payload.get("DeviceNode") or payload.get("dev-entry")
+if mount == expected_mount and device:
+    print(device)' "$1" 2>/dev/null || true
 }
 
 attach_dmg_readonly() {
@@ -103,6 +119,7 @@ attach_dmg_readonly() {
   local mount_point="$2"
   ATTACHED_DEVICE=""
   ATTACHED_MOUNT=""
+  local attached_mount_from_plist
   local attach_plist
   local attach_status=0
   if attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"; then
@@ -125,6 +142,7 @@ print("", "")' "$mount_point" "$attach_plist" 2>/dev/null || true
     if [[ -z "$ATTACHED_DEVICE" ]]; then
       ATTACHED_DEVICE="$(resolve_device_for_mount "$mount_point")"
     fi
+    ATTACHED_MOUNT="$mount_point"
     echo "hdiutil attach failed for $dmg (status $attach_status); cleanup will detach $ATTACHED_DEVICE" >&2
     return "$attach_status"
   fi
@@ -153,7 +171,9 @@ for entity in entities:
 print("", "")' "$mount_point"
     )
   fi
-  [[ "$ATTACHED_MOUNT" == "$mount_point" && -n "$ATTACHED_DEVICE" ]] || {
+  attached_mount_from_plist="$ATTACHED_MOUNT"
+  ATTACHED_MOUNT="$mount_point"
+  [[ "$attached_mount_from_plist" == "$mount_point" && -n "$ATTACHED_DEVICE" ]] || {
     echo "hdiutil attach plist did not resolve an exact device: $dmg" >&2
     return 1
   }
@@ -449,7 +469,7 @@ verify_dmg_helper_identity() (
   cleanup() {
     original_status=$?
     cleanup_failed=false
-    if [[ "$mounted" == true || -n "$attached_device" || -n "${ATTACHED_DEVICE:-}" ]]; then
+    if [[ "$mounted" == true || -n "$attached_device" || -n "${ATTACHED_DEVICE:-}" || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
       cleanup_device="$attached_device"
       [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
       [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
@@ -591,7 +611,7 @@ check_dmg_layout() {
   cleanup() {
     original_status=$?
     cleanup_failed=false
-    if [[ "$mounted" == true || -n "$attached_device" || -n "${ATTACHED_DEVICE:-}" ]]; then
+    if [[ "$mounted" == true || -n "$attached_device" || -n "${ATTACHED_DEVICE:-}" || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
       cleanup_device="$attached_device"
       [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
       [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"

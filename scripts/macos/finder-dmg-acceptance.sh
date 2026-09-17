@@ -21,6 +21,18 @@ done
   exit 2
 }
 mkdir -p "$evidence_dir"
+[[ ! -L "$evidence_dir" ]] || {
+  echo "Finder acceptance evidence directory must not be a symlink" >&2
+  exit 1
+}
+prepare_evidence_path() {
+  local path="$1"
+  [[ ! -L "$path" ]] || {
+    echo "Finder acceptance evidence path must not be a symlink: $path" >&2
+    exit 1
+  }
+  rm -f "$path"
+}
 lock_dir="${TMPDIR:-/tmp}/televybackup-finder-dmg-acceptance.lock"
 lock_held=false
 snapshot_dir=""
@@ -286,7 +298,7 @@ open "$mount_point"
 osascript -e 'tell application "Finder" to activate'
 sleep 2
 finder_json="$evidence_dir/finder-observation.json"
-rm -f "$finder_json"
+prepare_evidence_path "$finder_json"
 for attempt in 1 2 3 4 5; do
   if [[ "$attempt" -gt 1 ]]; then
     open "$mount_point" >/dev/null 2>&1 || true
@@ -315,6 +327,7 @@ PY
   echo "Finder window was not found; refusing an unscoped screenshot" >&2
   exit 1
 }
+prepare_evidence_path "$evidence_dir/finder-window.png"
 screencapture -x -l "$window_id" "$evidence_dir/finder-window.png"
 [[ -s "$evidence_dir/finder-window.png" ]] || {
   echo "Finder window screenshot was not created" >&2
@@ -352,6 +365,7 @@ killall Finder >/dev/null 2>&1 || true
 sleep 1
 open "$mount_point"
 hidden_json="$evidence_dir/show-all-files.json"
+prepare_evidence_path "$hidden_json"
 python3 - "$mount_point" "$layout_path" <<'PY' > "$hidden_json"
 import json
 import os
@@ -392,7 +406,9 @@ if tuple(observation["app_position"]) != expected_app:
 if tuple(observation["applications_position"]) != expected_applications:
     raise SystemExit(f"Applications position differs from schema: {observation['applications_position']!r}")
 PY
-python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" <<'PY' > "$evidence_dir/acceptance.json"
+acceptance_path="$evidence_dir/acceptance.json"
+prepare_evidence_path "$acceptance_path"
+python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" <<'PY' > "$acceptance_path"
 import hashlib
 import json
 import pathlib
@@ -437,8 +453,10 @@ print(json.dumps({
     "capture_scope": "finder-window-only",
     "device": sys.argv[1],
     "dmg": sys.argv[2],
+    "dmg_name": pathlib.Path(sys.argv[3]).name,
     "dmg_sha256": sys.argv[4],
     "event": "finder_acceptance",
+    "finder_observation": observation,
     "manifest": str(manifest_path),
     "manifest_sha256": manifest_sha256,
     "manifest_verified": True,

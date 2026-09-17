@@ -61,9 +61,12 @@ class DSStoreReader:
             pos += 4
             value = block[pos : pos + value_length]
             pos += value_length
-        elif type_code == b"long" or type_code == b"shor":
+        elif type_code == b"long":
             value = block[pos : pos + 4]
             pos += 4
+        elif type_code == b"shor":
+            value = block[pos : pos + 2]
+            pos += 2
         elif type_code == b"bool":
             value = block[pos : pos + 1]
             pos += 1

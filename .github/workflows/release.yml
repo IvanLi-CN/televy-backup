@@ -159,7 +159,7 @@ jobs:
           test "${verified}" = true
           reservation_json="${RUNNER_TEMP}/reservation.json"
           jq -n \
-            --arg ref "${reservation_ref}" --arg sourceSha "${source_sha}" --arg version "${version}" \
+            --arg ref "${reservation_ref}" --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')" --arg version "${version}" \
             --arg channel "${channel}" --arg reservationId "${reservation_id}" --arg owner "${reservation_owner}" \
             --arg claimKey "${claim_key}" --arg boundaryToken "${boundary_token}" \
             '{ref:$ref,sourceSha:$sourceSha,version:$version,channel:$channel,reservationId:$reservationId,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claimKey,"Reservation-Boundary-Token":$boundaryToken}' \

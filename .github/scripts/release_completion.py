@@ -153,7 +153,7 @@ def verify_reservation(
     if not isinstance(value, dict):
         raise CompletionError("reservation JSON must be an object")
     expected = {
-        "sourceSha": prepared["sourceSha"],
+        "sourceSha": prepared.get("reservationSourceSha", prepared["sourceSha"]),
         "version": prepared["version"],
         "channel": prepared["channel"].removeprefix("channel:"),
         "reservationId": prepared["reservationId"],

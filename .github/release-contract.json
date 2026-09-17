@@ -75,7 +75,8 @@
     "only_path": "VERSION",
     "no_gpg_secrets": true,
     "allocation": "final-tag-first",
-    "reservation_before_version": true
+    "reservation_before_version": true,
+    "descendant_retry": "reuse exact same-PR claim when reservation source is an ancestor of the current source"
   },
   "identity_refs": {
     "reservation": "refs/tags/release-reservation/v<version>",

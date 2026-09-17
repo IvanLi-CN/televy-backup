@@ -78,6 +78,25 @@ out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --github-verification-json "$tmp_dir/github-verification.json")"
 [[ "$out" == *'"status": "ready"'* ]]
 
+python3 - "$root_dir" "$repo_dir" "$tmp_dir/reservation.json" "$source_sha" "$head_sha" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+
+root, repo, reservation_path, reservation_source, current_source = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("release_completion", root / ".github/scripts/release_completion.py")
+assert spec and spec.loader
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.CHAIN.ROOT = repo
+prepared = module.CHAIN.find_prepared(current_source.name, reservation_source.name)
+assert prepared["sourceSha"] == reservation_source.name
+prepared["sourceSha"] = current_source.name
+prepared["reservationSourceSha"] = reservation_source.name
+module.verify_reservation(reservation_path, prepared, repository=None, token=None, api_root="https://api.github.com")
+PY
+
 if python3 "$root_dir/.github/scripts/release_completion.py" \
   --repo-root "$repo_dir" \
   --commit "$head_sha" --base "$source_sha" --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" \

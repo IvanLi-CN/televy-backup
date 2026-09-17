@@ -42,6 +42,7 @@ assert "append-only repository identity refs" in contract["source_of_truth"]
 assert contract["preparation"]["write_api"] == "createCommitOnBranch"
 assert contract["preparation"]["expected_head_oid"] is True
 assert contract["preparation"]["no_gpg_secrets"] is True
+assert "descendant_retry" in contract["preparation"]
 assert contract["execution_authority"]["release_policy"] == "trusted-main-checkout"
 assert contract["execution_authority"]["write_capable_product_checkout"] is False
 assert contract["recovery"]["historical_backfill"] is False
@@ -154,6 +155,9 @@ assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.
 assert "needs.macos-acceptance.result == 'success'" in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
 assert "Assemble and validate final assets" in release_workflow
+assert "reusing descendant-compatible reservation" in (root / ".github/workflows/release-preparation.yml").read_text(encoding="utf-8")
+assert "reservationSourceSha // .sourceSha" in (root / ".github/workflows/release-completion.yml").read_text(encoding="utf-8")
+assert "reservationSourceSha // .sourceSha" in release_workflow
 PY
 
 python3 - "$root_dir" <<'PY'
@@ -312,6 +316,28 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 verifier = root / ".github/scripts/verify-macos-rc-acceptance.py"
+layout_source = json.loads((root / "assets/brand/macos/dmg/layout.json").read_text(encoding="utf-8"))
+layout_contract = {
+    "schema_version": layout_source["schema_version"],
+    "builder": layout_source["builder"],
+    "format": layout_source["format"],
+    "filesystem": layout_source["filesystem"],
+    "window": layout_source["window"],
+    "icon_size": layout_source["icon_size"],
+    "icon_locations": layout_source["icon_locations"],
+    "overlay": layout_source["overlay"],
+    "resources": {
+        "background": layout_source["background"],
+        "overlay": layout_source["overlay_asset"],
+        "composed_background": layout_source["composed_background"],
+        "digests": layout_source["asset_digests"],
+    },
+    "hidden_resource_allowlist": sorted(layout_source["hidden_resource_allowlist"]),
+    "symlinks": layout_source["symlinks"],
+}
+layout_contract["semantic_layout_digest"] = hashlib.sha256(
+    json.dumps(layout_contract, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
 identity = {
     "sha256": "",
     "artifact_sha256": "",
@@ -331,6 +357,7 @@ def manifest(version, source_commit, dmg_name, dmg_digest):
         "source_commit": source_commit,
         "components": {"snapshot_access": identity.copy()},
         "assets": [{"name": dmg_name, "sha256": dmg_digest, "bytes": 4}],
+        "dmg_layout": layout_contract,
     }
 
 evidence = {
@@ -353,6 +380,72 @@ evidence = {
         "rc1": identity.copy(),
         "rc2": identity.copy(),
     },
+    "finder_acceptance": [
+        {
+            "macos_version": "15.7",
+            "capture_scope": "finder-window-only",
+            "dmg_name": "TelevyBackup-1.0.0.dmg",
+            "dmg_sha256": "",
+            "semantic_layout_digest": layout_contract["semantic_layout_digest"],
+            "manifest_verified": True,
+            "checksums_verified": True,
+            "screenshot": "finder-macos-15.png",
+            "finder_observation": {
+                "window_role": "Finder",
+                "app_name": "TelevyBackup.app",
+                "applications_name": "Applications",
+                "drag_direction": "right",
+                "app_position": [210, 270],
+                "applications_position": [550, 270],
+            },
+            "show_all_files": {
+                "allowlist": [".DS_Store", ".background"],
+                "observed": [".DS_Store", ".background"],
+                "visible_window_region": "outside-default-icon-region",
+            },
+            "visual_review": {
+                "status": "approved",
+                "method": "scoped-human-review",
+                "checklist": {key: True for key in (
+                    "instruction_readable", "instruction_contrast", "arrow_visible",
+                    "arrow_direction_correct", "labels_visible", "no_occlusion",
+                )},
+                "arrow_direction": "right",
+            },
+        },
+        {
+            "macos_version": "26.6.2",
+            "capture_scope": "finder-window-only",
+            "dmg_name": "TelevyBackup-1.0.0.dmg",
+            "dmg_sha256": "",
+            "semantic_layout_digest": layout_contract["semantic_layout_digest"],
+            "manifest_verified": True,
+            "checksums_verified": True,
+            "screenshot": "finder-current.png",
+            "finder_observation": {
+                "window_role": "Finder",
+                "app_name": "TelevyBackup.app",
+                "applications_name": "Applications",
+                "drag_direction": "right",
+                "app_position": [210, 270],
+                "applications_position": [550, 270],
+            },
+            "show_all_files": {
+                "allowlist": [".DS_Store", ".background"],
+                "observed": [".DS_Store", ".background"],
+                "visible_window_region": "outside-default-icon-region",
+            },
+            "visual_review": {
+                "status": "approved",
+                "method": "scoped-human-review",
+                "checklist": {key: True for key in (
+                    "instruction_readable", "instruction_contrast", "arrow_visible",
+                    "arrow_direction_correct", "labels_visible", "no_occlusion",
+                )},
+                "arrow_direction": "right",
+            },
+        },
+    ],
 }
 
 with tempfile.TemporaryDirectory() as directory:
@@ -474,7 +567,14 @@ fi
                 **root_identity,
             },
         },
+        "dmg_layout": layout_contract,
     }
+    stable_dmg = temp / "TelevyBackup-1.0.0.dmg"
+    stable_dmg.write_bytes(b"dmg\n")
+    stable_digest = hashlib.sha256(stable_dmg.read_bytes()).hexdigest()
+    stable_manifest["assets"] = [{"name": stable_dmg.name, "sha256": stable_digest, "bytes": 4}]
+    for record in evidence["finder_acceptance"]:
+        record["dmg_sha256"] = stable_digest
     stable_path = temp / "stable.json"
     stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
     rc_args = []

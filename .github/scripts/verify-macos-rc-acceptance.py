@@ -66,6 +66,88 @@ def equal_identity(first, second, name: str, fields: tuple[str, ...]) -> None:
             fail(f"{name}.{field} changed between RC1 and RC2")
 
 
+def verify_finder_acceptance(evidence, manifest, stable_version: str) -> None:
+    records = evidence.get("finder_acceptance")
+    if not isinstance(records, list) or len(records) != 2:
+        fail("finder_acceptance must contain exactly macOS 15 and current-platform records")
+    versions = []
+    layout = manifest.get("dmg_layout")
+    if not isinstance(layout, dict):
+        fail("BUILD-MANIFEST.json dmg_layout is missing")
+    expected_layout_digest = required_string(
+        layout.get("semantic_layout_digest"), "manifest dmg_layout.semantic_layout_digest"
+    )
+    expected_dmg_name = f"TelevyBackup-{stable_version}.dmg"
+    expected_asset = next(
+        (asset for asset in manifest.get("assets", []) if asset.get("name") == expected_dmg_name),
+        None,
+    )
+    if not isinstance(expected_asset, dict):
+        fail("BUILD-MANIFEST.json is missing the Universal DMG asset")
+    expected_dmg_digest = required_string(expected_asset.get("sha256"), "manifest Universal DMG.sha256")
+    expected_locations = layout.get("icon_locations")
+    expected_window = layout.get("window")
+    expected_allowlist = sorted(layout.get("hidden_resource_allowlist", []))
+    if not isinstance(expected_locations, dict) or not isinstance(expected_window, dict):
+        fail("manifest dmg_layout geometry is incomplete")
+    required_checks = {
+        "instruction_readable",
+        "instruction_contrast",
+        "arrow_visible",
+        "arrow_direction_correct",
+        "labels_visible",
+        "no_occlusion",
+    }
+    for index, record in enumerate(records):
+        name = f"finder_acceptance[{index}]"
+        if not isinstance(record, dict):
+            fail(f"{name} must be an object")
+        version = required_string(record.get("macos_version"), f"{name}.macos_version")
+        versions.append(version)
+        if record.get("capture_scope") != "finder-window-only":
+            fail(f"{name}.capture_scope must be finder-window-only")
+        if record.get("dmg_name") != expected_dmg_name:
+            fail(f"{name}.dmg_name does not match the stable Universal DMG")
+        if record.get("dmg_sha256") != expected_dmg_digest:
+            fail(f"{name}.dmg_sha256 does not match BUILD-MANIFEST.json")
+        if record.get("semantic_layout_digest") != expected_layout_digest:
+            fail(f"{name}.semantic_layout_digest does not match BUILD-MANIFEST.json")
+        if record.get("manifest_verified") is not True or record.get("checksums_verified") is not True:
+            fail(f"{name} manifest/checksum verification is incomplete")
+        if not required_string(record.get("screenshot"), f"{name}.screenshot"):
+            fail(f"{name}.screenshot is missing")
+        observation = record.get("finder_observation")
+        if not isinstance(observation, dict):
+            fail(f"{name}.finder_observation is missing")
+        if observation.get("window_role") != "Finder":
+            fail(f"{name}.finder_observation is not a Finder window")
+        if observation.get("app_name") != "TelevyBackup.app" or observation.get("applications_name") != "Applications":
+            fail(f"{name}.finder_observation is missing the expected labels")
+        if observation.get("drag_direction") != "right":
+            fail(f"{name}.finder_observation has the wrong drag direction")
+        if observation.get("app_position") != expected_locations.get("TelevyBackup.app"):
+            fail(f"{name}.finder_observation app position differs from the schema")
+        if observation.get("applications_position") != expected_locations.get("Applications"):
+            fail(f"{name}.finder_observation Applications position differs from the schema")
+        hidden = record.get("show_all_files")
+        if not isinstance(hidden, dict) or sorted(hidden.get("allowlist", [])) != expected_allowlist:
+            fail(f"{name}.show_all_files allowlist is invalid")
+        if sorted(hidden.get("observed", [])) != expected_allowlist:
+            fail(f"{name}.show_all_files observed resources are invalid")
+        if hidden.get("visible_window_region") != "outside-default-icon-region":
+            fail(f"{name}.show_all_files visible region is invalid")
+        visual = record.get("visual_review")
+        checklist = visual.get("checklist") if isinstance(visual, dict) else None
+        if not isinstance(visual, dict) or visual.get("status") != "approved" or visual.get("method") != "scoped-human-review":
+            fail(f"{name}.visual_review is not an approved scoped review")
+        if set(checklist or {}) != required_checks or any(value is not True for value in checklist.values()):
+            fail(f"{name}.visual_review checklist is incomplete")
+        if visual.get("arrow_direction") != "right":
+            fail(f"{name}.visual_review arrow direction is invalid")
+    if len(set(versions)) != 2 or not any(version.startswith("15.") for version in versions):
+        fail("finder_acceptance must cover distinct macOS 15 and current-platform versions")
+
+
 def artifact_sha256(path: Path, canonical: bool = True) -> str:
     digest = hashlib.sha256()
     if path.is_file():
@@ -237,6 +319,7 @@ if manifest.get("release_version") != args.stable_version:
     fail("BUILD-MANIFEST.json has the wrong stable version")
 if args.stable_source_commit and manifest.get("source_commit") != args.stable_source_commit:
     fail("BUILD-MANIFEST.json source_commit does not match the stable release source")
+verify_finder_acceptance(evidence, manifest, args.stable_version)
 
 for field in (
     "legacy_registration_migrated",

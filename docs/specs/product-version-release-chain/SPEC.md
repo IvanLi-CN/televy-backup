@@ -57,6 +57,11 @@ a decision for the other state or identity fails closed. No reservation, decisio
 updated, deleted, or force-pushed. Receipt creation independently
 re-verifies reservation parent/tree/trailers; `bound` must exist before `consumed`, while `released`
 is allowed only for an unbound claim with explicit maintainer confirmation.
+If the same PR source head advances after a reservation is created, preparation may reuse only the
+exact reservation claim when its immutable reservation source is an ancestor of the new source
+head. The preparation records that reservation source separately and completion re-verifies the
+remote reservation against it; unrelated claims, changed intent, and non-descendant heads fail
+closed. This retry rule preserves the original claim and never updates or replaces its ref.
 The release workflows append identity refs with the default `GITHUB_TOKEN`; no additional CI
 credential is permitted. Product annotated tags remain created by `github-actions[bot]` and remain
 covered by the server-protected `refs/tags/v*` namespace. The identity namespaces are outside that
@@ -69,6 +74,9 @@ Normal preparation uses GitHub `createCommitOnBranch` with `expectedHeadOid`, ch
 and requires a GitHub-native verified commit. The commit records source SHA, final version, type,
 channel, reservation ref, owner, claim key, boundary token, release mode and provenance. Release
 completion validates those fields, source checks, ancestry, and reservation provenance.
+When a retry reuses an earlier exact claim, the preparation also records
+`Release-Reservation-Source-SHA`; it must identify the immutable reservation parent and be an
+ancestor of the preparation source SHA.
 The production completion gate additionally requires the preparation commit's GitHub-native
 verification state; fixture provenance cannot enter the merge gate.
 The preparation commit may be followed by additional source commits on the same PR. In that case,

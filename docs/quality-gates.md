@@ -44,6 +44,10 @@ reservation provenance, and the explicit version-only release PR mode. At runtim
 PR from the GitHub API, verifies the event-bound head/base still match, and validates that current
 labels snapshot both before waiting for source checks and immediately before completion validation;
 queued event-payload labels are not authoritative.
+If source checks finish after the PR advances, preparation may recover only the exact same-PR
+reservation whose immutable source is an ancestor of the current head; it records that original
+source and re-verifies the remote claim before creating the signed VERSION commit. A stale or
+unrelated reservation cannot allocate a successor or bypass the claim contract.
 
 Release Product resolves Snapshot Access helper state separately from the product RC ordinal. It
 reuses only a published prerelease Release whose Universal artifact, manifest, checksums, and helper

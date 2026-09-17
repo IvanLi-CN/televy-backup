@@ -34,11 +34,15 @@ blocks with a local Git/API fixture. Release state is read through the GitHub RE
 2. Preparation enumerates fetched product tags, requires annotated GitHub Actions provenance for
    final tags, retains reachable pre-policy lightweight prerelease tags only for ordinal occupancy,
    calculates the candidate from the highest final tag, and uses the default `GITHUB_TOKEN` to
-   create the reservation before writing VERSION.
+   create the reservation before writing VERSION. A retry after the source head advances scans only
+   immutable reservation refs whose claim key identifies the same PR and intent, requires the
+   reservation parent to be an ancestor of the current source, and reuses the exact claim without
+   creating a successor identity.
 3. The same PR branch receives one GitHub verified VERSION-only commit guarded by
    `expectedHeadOid`. Later source commits may follow it; `release_chain.py find-prepared` resolves
    the first-parent preparation commit within the current `base..head` range and rejects a changed
-   current VERSION.
+   current VERSION. Descendant-compatible retries record `Release-Reservation-Source-SHA`, which
+   completion and mainline release use to re-verify the original reservation parent.
 4. Release completion freezes the reservation and provenance, and production completion verifies
    the GitHub API signature state for the resolved preparation commit. A normal PR merge creates the candidate's
    merged identity; a version-only release PR creates a new identity for one covered old merge. A

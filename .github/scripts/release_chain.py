@@ -191,6 +191,10 @@ def verify_provenance(commit: str, version: str, parent: str) -> dict[str, str]:
             raise ReleaseChainError(f"preparation provenance is missing {label}")
     if values.get("Release-Provenance") not in {"github-native-verified", "fixture-verified"}:
         raise ReleaseChainError("preparation provenance is not verified")
+    reservation_source = values.get("Release-Reservation-Source-SHA", parent)
+    reservation_source = canonical_sha(reservation_source, "reservation source SHA")
+    if not is_ancestor(reservation_source, parent):
+        raise ReleaseChainError("reservation source must be an ancestor of the preparation source")
     if mode == "version-only-release-pr" and not values.get("Release-Covered-Merge-SHA"):
         raise ReleaseChainError("version-only-release-pr must record one covered merge SHA")
     return {
@@ -201,6 +205,7 @@ def verify_provenance(commit: str, version: str, parent: str) -> dict[str, str]:
         "claimKey": values["Release-Claim-Key"],
         "boundaryToken": values["Release-Boundary-Token"],
         "provenance": values["Release-Provenance"],
+        "reservationSourceSha": reservation_source,
         "coveredMergeSha": values.get("Release-Covered-Merge-SHA", ""),
     }
 
@@ -525,6 +530,11 @@ def stage(args: argparse.Namespace) -> None:
         f"Release-Boundary-Token: {args.boundary_token}",
         f"Release-Provenance: {getattr(args, 'provenance', 'fixture-verified')}",
     ]
+    reservation_source_sha = getattr(args, "reservation_source_sha", "")
+    if reservation_source_sha and reservation_source_sha != source_sha:
+        if not is_ancestor(reservation_source_sha, source_sha):
+            raise ReleaseChainError("reservation source must be an ancestor of the preparation source")
+        metadata.append(f"Release-Reservation-Source-SHA: {reservation_source_sha}")
     if getattr(args, "covered_merge_sha", ""):
         metadata.append(f"Release-Covered-Merge-SHA: {args.covered_merge_sha}")
     subprocess.run(

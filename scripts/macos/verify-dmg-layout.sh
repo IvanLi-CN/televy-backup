@@ -23,6 +23,9 @@ attached_device=""
 mounted=false
 attach_attempted=false
 attach_completed=false
+if [[ -n "${DMG_EVIDENCE_FILE:-}" ]]; then
+  : > "$DMG_EVIDENCE_FILE"
+fi
 emit_dmg_event() {
   local event="$1"
   local dmg_path="$2"
@@ -47,7 +50,8 @@ PY
   fi
 }
 resolve_device_for_mount() {
-  hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
+  local device
+  device="$(hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
 payload = plistlib.loads(sys.stdin.buffer.read())
 entities = list(payload.get("system-entities", []))
@@ -57,6 +61,18 @@ for entity in entities:
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"])
         raise SystemExit(0)' "$1" 2>/dev/null || true
+  )"
+  if [[ -n "$device" ]]; then
+    printf '%s\n' "$device"
+    return 0
+  fi
+  diskutil info -plist "$1" 2>/dev/null | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+mount = payload.get("MountPoint") or payload.get("mount-point")
+device = payload.get("DeviceNode") or payload.get("dev-entry")
+if mount == expected_mount and device:
+    print(device)' "$1" 2>/dev/null || true
 }
 cleanup() {
   original_status=$?
@@ -163,6 +179,9 @@ expected_hidden = sorted([".DS_Store", ".background" + background_suffix])
 expected = sorted(["TelevyBackup.app", "Applications"] + expected_hidden)
 if entries != expected:
     raise SystemExit(f"DMG top-level entries mismatch: {entries!r}")
+app_path = os.path.join(mount_point, "TelevyBackup.app")
+if os.path.islink(app_path) or not os.path.isdir(app_path):
+    raise SystemExit("DMG TelevyBackup.app must be a real directory")
 logical_hidden = sorted(".background" if name.startswith(".background.") else name for name in hidden)
 if logical_hidden != allowlist:
     raise SystemExit(f"DMG hidden-resource allowlist mismatch: {hidden!r}")
