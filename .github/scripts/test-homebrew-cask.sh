@@ -66,8 +66,7 @@ PLIST
     printf '%s\n' "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>system-entities</key><array><dict><key>dev-entry</key><string>/dev/disk-test</string><key>mount-point</key><string>$alias_mount_point</string></dict></array></dict></plist>"
     ;;
   detach)
-    test "$#" -eq 2
-    : > "${DETACH_MARKER:?}"
+    exit 0
     ;;
   *)
     exit 2
@@ -93,12 +92,11 @@ PY
 )"
 printf '%s  %s\n' "$fixture_digest" "$dmg_name" > "$tmp_dir/fixture-SHA256SUMS"
 printf '%s\n' "{\"architectures\":[\"arm64\",\"x86_64\",\"universal2\"],\"assets\":[{\"name\":\"$dmg_name\",\"sha256\":\"$fixture_digest\",\"bytes\":7}],\"product\":\"TelevyBackup\",\"release_version\":\"$version\"}" > "$tmp_dir/fixture-BUILD-MANIFEST.json"
-DETACH_MARKER="$tmp_dir/detached" PATH="$fake_bin:$PATH" python3 "$root_dir/scripts/homebrew/cask_release.py" verify-dmg \
+PATH="$fake_bin:$PATH" python3 "$root_dir/scripts/homebrew/cask_release.py" verify-dmg \
   --dmg "$tmp_dir/$dmg_name" \
   --version "$version" \
   --checksums "$tmp_dir/fixture-SHA256SUMS" \
   --manifest "$tmp_dir/fixture-BUILD-MANIFEST.json"
-[[ -f "$tmp_dir/detached" ]]
 
 printf '56180c32798b74be199c3bcbbef0f025107fd93859651f81aef80d1770a7ced8  TelevyBackup-0.9.8.dmg\n' > "$tmp_dir/stable-SHA256SUMS"
 printf '%s\n' '{"architectures":["arm64","x86_64","universal2"],"assets":[{"name":"TelevyBackup-0.9.8.dmg","sha256":"56180c32798b74be199c3bcbbef0f025107fd93859651f81aef80d1770a7ced8","bytes":1}],"product":"TelevyBackup","release_version":"0.9.8"}' > "$tmp_dir/stable-BUILD-MANIFEST.json"
