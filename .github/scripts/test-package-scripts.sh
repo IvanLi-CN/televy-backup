@@ -341,6 +341,10 @@ grep -F 'runner.arch' <<<"$package_workflow_text" >/dev/null || {
   echo "package dependency cache must be architecture-specific" >&2
   exit 1
 }
+[[ "$(grep -Fc '${{ runner.os }}-ARM64-cargo-macos-' <<<"$package_workflow_text")" -eq 2 && "$(grep -Fc '${{ runner.os }}-X64-cargo-macos-' <<<"$package_workflow_text")" -eq 2 ]] || {
+  echo "package dependency cache must fall back across architecture-specific caches" >&2
+  exit 1
+}
 [[ "$(grep -Fc 'timeout-minutes: 10' <<<"$package_workflow_text")" -eq 1 ]] || {
   echo "Universal package CI must have a 10-minute timeout" >&2
   exit 1
