@@ -887,9 +887,6 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --pattern "${screenshot_name}" \
               --dir "${screenshot_dir}"
-            gh release upload "${rc2_tag}" "${screenshot_dir}/${screenshot_name}" \
-              --repo "$GITHUB_REPOSITORY" \
-              --clobber
           done
           rc1_json="$(gh release view "$rc1_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
           rc2_json="$(gh release view "$rc2_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"

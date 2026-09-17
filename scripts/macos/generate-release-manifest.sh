@@ -17,9 +17,9 @@ done
 [[ "$mode" == "release" || "$mode" == "development" ]] || usage
 root_dir="$(git rev-parse --show-toplevel)"
 version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
-python3 - "$version" "$asset_dir" "$source_commit" "$packaging_commit" "$output" "$root_dir/assets/brand/macos/dmg/layout.json" <<'PY'
+python3 - "$version" "$asset_dir" "$source_commit" "$packaging_commit" "$output" "$root_dir/assets/brand/macos/dmg/layout.json" "$root_dir/scripts/macos/normalize-designated-requirement.py" <<'PY'
 import hashlib, json, os, platform, stat as stat_module, subprocess, sys
-version, asset_dir, source, packaging, output, layout_path = sys.argv[1:]
+version, asset_dir, source, packaging, output, layout_path, requirement_normalizer = sys.argv[1:]
 
 def canonical_json(value):
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode('utf-8')
@@ -117,14 +117,14 @@ def signing_identity(path, hash_path=None, artifact_path=None):
         None,
     )
     requirement = subprocess.run(['codesign', '-d', '-r-', path], capture_output=True, text=True)
-    designated_requirement = next(
-        (
-            line
-            for line in (requirement.stdout + requirement.stderr).splitlines()
-            if 'designated =>' in line
-        ),
-        None,
+    normalized = subprocess.run(
+        [sys.executable, requirement_normalizer],
+        input=requirement.stdout + requirement.stderr,
+        capture_output=True,
+        text=True,
+        check=False,
     )
+    designated_requirement = normalized.stdout.strip() if normalized.returncode == 0 else None
     with open(hash_path or path, 'rb') as handle:
         sha256 = hashlib.sha256(handle.read()).hexdigest()
     return {

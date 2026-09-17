@@ -25,6 +25,10 @@ done
 }
 root_dir="$(git rev-parse --show-toplevel)"
 metadata_verifier="$root_dir/scripts/macos/verify-dmg-metadata.py"
+requirement_normalizer="$root_dir/scripts/macos/normalize-designated-requirement.py"
+read_designated_requirement() {
+  codesign -d -r- "$1" 2>&1 | python3 "$requirement_normalizer"
+}
 verify_nested_helper_path() {
   local app="$1"
   local helper="$2"
@@ -356,7 +360,7 @@ if [[ "$skip_bundle_checks" == true ]]; then
   exit 0
 fi
 app="$asset_dir/TelevyBackup.app"
-[[ -d "$app" ]] || { echo "missing main app bundle: $app" >&2; exit 1; }
+[[ ! -L "$app" && -d "$app" ]] || { echo "missing main app bundle or symlinked app: $app" >&2; exit 1; }
 [[ ! -d "$asset_dir/TelevyBackup Snapshot Access.app" ]] || {
   echo "Snapshot Access must not be a top-level installable app" >&2
   exit 1
@@ -409,7 +413,7 @@ if [[ -d "$app" ]]; then
   [[ "$root_helper_signature" == *"Signature=adhoc"* ]] || { echo "snapshot mount helper must use an ad-hoc signature" >&2; exit 1; }
   root_helper_sha256="$(shasum -a 256 "$root_helper_binary" | awk '{print $1}')"
   root_helper_cdhash="$(printf '%s\n' "$root_helper_signature" | awk -F= '/^CDHash=/{print $2}')"
-  root_helper_requirement="$(codesign -d -r- "$root_helper_binary" 2>&1 | sed -n '/designated =>/p')"
+  root_helper_requirement="$(read_designated_requirement "$root_helper_binary")"
   root_helper_artifact_sha256="$(artifact_sha256 "$root_helper_binary")"
   [[ -n "$root_helper_cdhash" && -n "$root_helper_requirement" ]] || {
     echo "snapshot mount helper signature identity is incomplete" >&2
@@ -462,7 +466,7 @@ if [[ -d "$access_app" ]]; then
   actual_sha256="$(shasum -a 256 "$access_app/Contents/MacOS/televybackup-snapshot-access" | awk '{print $1}')"
   actual_artifact_sha256="$(artifact_sha256 "$access_app")"
   actual_cdhash="$(printf '%s\n' "$signature" | awk -F= '/^CDHash=/{print $2}')"
-  actual_requirement="$(codesign -d -r- "$access_app" 2>&1 | sed -n '/designated =>/p')"
+  actual_requirement="$(read_designated_requirement "$access_app")"
   access_metadata="$("$access_app/Contents/MacOS/televybackup-snapshot-access" --component-metadata)"
   python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_artifact_sha256" "$actual_cdhash" "$actual_requirement" "$access_metadata" <<'PY'
 import json, re, sys
@@ -532,7 +536,7 @@ verify_dmg_helper_identity() (
   mounted=true
   attach_completed=true
   app="$mount_point/TelevyBackup.app"
-  [[ -d "$app" ]] || { echo "DMG is missing TelevyBackup.app: $local_dmg" >&2; exit 1; }
+  [[ ! -L "$app" && -d "$app" ]] || { echo "DMG is missing a real TelevyBackup.app: $local_dmg" >&2; exit 1; }
   bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")"
   [[ "$bundle_id" == "com.ivan.televybackup" ]] || {
     echo "DMG must use the prod app bundle id: $local_dmg" >&2
@@ -584,7 +588,7 @@ verify_dmg_helper_identity() (
   actual_sha256="$(shasum -a 256 "$helper/Contents/MacOS/televybackup-snapshot-access" | awk '{print $1}')"
   actual_artifact_sha256="$(artifact_sha256 "$helper")"
   actual_cdhash="$(printf '%s\n' "$signature" | awk -F= '/^CDHash=/{print $2}')"
-  actual_requirement="$(codesign -d -r- "$helper" 2>&1 | sed -n '/designated =>/p')"
+  actual_requirement="$(read_designated_requirement "$helper")"
   helper_arches="$(lipo -info "$helper/Contents/MacOS/televybackup-snapshot-access")"
   # Snapshot Access is the identity-stable component. Native DMGs carry the exact same
   # Universal helper as the Universal DMG, even though their outer app is thin.

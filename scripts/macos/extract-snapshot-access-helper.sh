@@ -101,6 +101,25 @@ fi
 }
 
 helper_path="$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+[[ ! -L "$mount_point/TelevyBackup.app" && -d "$mount_point/TelevyBackup.app" ]] || {
+  echo "Snapshot Access extraction requires a real TelevyBackup.app directory" >&2
+  exit 1
+}
+[[ ! -L "$helper_path" && -d "$helper_path" ]] || {
+  echo "Snapshot Access extraction requires a real nested helper directory" >&2
+  exit 1
+}
+app_real="$(cd "$mount_point/TelevyBackup.app" && pwd -P)"
+helper_real="$(cd "$helper_path" && pwd -P)"
+[[ "$helper_real" == "$app_real/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" ]] || {
+  echo "Snapshot Access extraction path escapes the main app bundle" >&2
+  exit 1
+}
+helper_binary="$helper_path/Contents/MacOS/televybackup-snapshot-access"
+[[ ! -L "$helper_binary" && -f "$helper_binary" ]] || {
+  echo "Snapshot Access extraction requires a real helper executable" >&2
+  exit 1
+}
 ditto "$helper_path" "$output_dir/TelevyBackup Snapshot Access.app"
 python3 - "$attached_device" "$dmg" "$mount_point" <<'PY'
 import json

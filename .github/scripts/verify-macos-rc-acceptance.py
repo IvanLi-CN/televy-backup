@@ -14,6 +14,9 @@ import tempfile
 from pathlib import Path
 
 
+REQUIREMENT_NORMALIZER = Path(__file__).resolve().parents[2] / "scripts/macos/normalize-designated-requirement.py"
+
+
 def fail(message: str) -> "NoReturn":
     raise SystemExit(f"macOS RC acceptance evidence rejected: {message}")
 
@@ -241,6 +244,19 @@ def command_output(command: list[str], name: str) -> str:
     return result.stdout + result.stderr
 
 
+def designated_requirement(path: Path, name: str) -> str:
+    raw = command_output(["codesign", "-d", "-r-", str(path)], f"{name} designated requirement")
+    result = subprocess.run(
+        [sys.executable, str(REQUIREMENT_NORMALIZER)],
+        input=raw,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        fail(f"{name} designated requirement is incomplete")
+    return result.stdout.strip()
+
+
 def require_universal2(path: Path, name: str) -> None:
     architectures = command_output(["lipo", "-info", str(path)], f"{name} architecture check")
     if "arm64" not in architectures or "x86_64" not in architectures:
@@ -294,13 +310,7 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
             (line.split("=", 1)[1].strip() for line in signature.splitlines() if line.startswith("CDHash=")),
             "",
         )
-        requirement = next(
-            (line.strip() for line in command_output(
-                ["codesign", "-d", "-r-", str(helper)],
-                f"{name} Snapshot Access designated requirement",
-            ).splitlines() if line.startswith("designated =>")),
-            "",
-        )
+        requirement = designated_requirement(helper, f"{name} Snapshot Access")
         if not cdhash or not requirement:
             fail(f"{name} Snapshot Access signature identity is incomplete")
         cdhash_set = requirement_cdhashes(requirement, f"{name} Snapshot Access")

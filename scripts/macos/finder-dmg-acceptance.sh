@@ -2,20 +2,29 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: finder-dmg-acceptance.sh --dmg FILE --evidence-dir DIR" >&2
+  echo "usage: finder-dmg-acceptance.sh --dmg FILE --evidence-dir DIR [--upload-rc2-tag TAG]" >&2
   exit 2
 }
 
 dmg=""
 evidence_dir=""
+rc2_tag=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dmg) dmg="${2:-}"; shift 2 ;;
     --evidence-dir) evidence_dir="${2:-}"; shift 2 ;;
+    --upload-rc2-tag) rc2_tag="${2:-}"; shift 2 ;;
     *) usage ;;
   esac
 done
 [[ -s "$dmg" && -n "$evidence_dir" ]] || usage
+if [[ -n "$rc2_tag" ]]; then
+  [[ "$rc2_tag" == v*-rc.2 ]] || usage
+  [[ -n "${GITHUB_REPOSITORY:-}" && -n "${GH_TOKEN:-}" ]] || {
+    echo "RC2 screenshot upload requires GITHUB_REPOSITORY and GH_TOKEN" >&2
+    exit 2
+  }
+fi
 [[ "${TELEVYBACKUP_RUN_FINDER_ACCEPTANCE:-0}" == "1" ]] || {
   echo "set TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1 in the controlled GUI session" >&2
   exit 2
@@ -364,6 +373,12 @@ if set(review) != required or any(value is not True for value in review.values()
 print(json.dumps(review, sort_keys=True))
 PY
 )"
+
+if [[ -n "$rc2_tag" ]]; then
+  gh release upload "$rc2_tag" "$finder_screenshot" \
+    --repo "$GITHUB_REPOSITORY" \
+    --clobber
+fi
 
 defaults write com.apple.finder AppleShowAllFiles -bool true
 finder_was_visible_changed=true

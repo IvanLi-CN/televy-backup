@@ -27,6 +27,14 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve trusted main SHA
+        if: github.event_name == 'workflow_dispatch'
+        id: trusted-main
+        run: |
+          set -euo pipefail
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${main_sha}" =~ ^[0-9a-fA-F]{40}$ ]]
+          echo "sha=${main_sha}" >> "$GITHUB_OUTPUT"
       - name: Checkout trusted gate scripts (base)
         if: github.event_name == 'pull_request_target'
         uses: actions/checkout@v4
@@ -38,7 +46,7 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ steps.trusted-main.outputs.sha }}
           persist-credentials: false
 
       - name: Verify workflow dispatch targets current pull request head
@@ -48,6 +56,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ steps.trusted-main.outputs.sha }}"
           test -n "${PR_NUMBER}"
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/dispatch-pr.json"
           jq -e \

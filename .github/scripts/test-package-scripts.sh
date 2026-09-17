@@ -22,7 +22,18 @@ bash -n \
   "$root_dir/scripts/macos/generate-app-icon-assets.sh" \
   "$root_dir/scripts/macos/generate-app-icon-previews.sh" \
   "$root_dir/scripts/macos/verify-app-icon-assets.sh"
-python3 -m py_compile "$root_dir/scripts/macos/verify-dmg-metadata.py"
+python3 -m py_compile \
+  "$root_dir/scripts/macos/normalize-designated-requirement.py" \
+  "$root_dir/scripts/macos/verify-dmg-metadata.py"
+normalized_requirement="$(printf '%s\n' \
+  'codesign: warning: blah' \
+  'designated => identifier "com.example.helper" and (cdhash H"2222222222222222222222222222222222222222" or' \
+  '  cdhash H"1111111111111111111111111111111111111111")' \
+  | python3 "$root_dir/scripts/macos/normalize-designated-requirement.py")"
+[[ "$normalized_requirement" == 'designated => identifier "com.example.helper" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")' ]] || {
+  echo "designated requirement normalizer must reconstruct wrapped codesign output" >&2
+  exit 1
+}
 
 build_text="$(<"$root_dir/scripts/macos/build-app.sh")"
 verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
@@ -304,6 +315,14 @@ grep -F 'device_from_plist' <<<"$extract_helper_text" >/dev/null || {
 }
 grep -F 'trap cleanup EXIT' <<<"$extract_helper_text" >/dev/null || {
   echo "Snapshot Access extraction must clean up mounts on every exit path" >&2
+  exit 1
+}
+grep -F 'helper_real' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must enforce nested helper containment" >&2
+  exit 1
+}
+grep -F 'gh release upload "$rc2_tag" "$finder_screenshot"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must upload newly captured screenshots to RC2" >&2
   exit 1
 }
 for attach_text in "$verify_release_text" "$finder_text"; do

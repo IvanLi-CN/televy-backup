@@ -198,9 +198,10 @@ fi
 assert_contains "release regular-file collection" "$release_text" "find release-assets -maxdepth 1 -type f"
 assert_contains "release DMG evidence upload" "$release_text" "name: release-dmg-verification"
 assert_contains "release DMG evidence binding" "$release_text" 'DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl"'
-assert_contains "release Finder screenshot upload" "$release_text" 'gh release upload "${rc2_tag}" "${screenshot_dir}/${screenshot_name}"'
+assert_not_contains "release acceptance screenshot reupload" "$release_text" 'gh release upload "${rc2_tag}" "${screenshot_dir}/${screenshot_name}"'
 assert_contains "release product icon verifier" "$release_text" 'policy_verify_app_icon_assets="${policy_checkout}/scripts/macos/verify-app-icon-assets.sh"'
 assert_contains "release RC layout verifier" "$release_text" 'bash scripts/macos/verify-dmg-layout.sh'
+assert_contains "release complete requirement verifier" "$release_text" 'verify-macos-rc-acceptance.py'
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" <<'RUBY'
 workflow = YAML.load_file(ARGV.fetch(0))
 checkout = workflow.fetch("jobs").fetch("macos-acceptance").fetch("steps").find { |step| step["uses"] == "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" }
@@ -265,11 +266,12 @@ assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${
 assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/${EXPECTED_HEAD_REF}'
 assert_contains "completion dispatch trusted checkout" "$completion_text" 'git rev-parse refs/remotes/origin/main'
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
-assert_contains "preparation trusted main checkout" "$preparation_text" "ref: main"
+assert_contains "preparation trusted main resolver" "$preparation_text" 'main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '\''.object.sha'\'')"'
+assert_contains "preparation immutable policy checkout" "$preparation_text" 'ref: ${{ steps.trusted-main.outputs.sha }}'
 assert_contains "prepared-head gates use prepared ref" "$preparation_text" '--ref "${HEAD_REF}"'
 assert_not_contains "prepared-head gates dispatch to main" "$preparation_text" "--ref main"
 assert_contains "existing preparation verification source" "$preparation_text" 'SOURCE_SHA: ${{ steps.prepare.outputs.source_sha }}'
-assert_contains "label dispatch trusted checkout" "$label_gate_text" "ref: main"
+assert_contains "label dispatch trusted main resolver" "$label_gate_text" 'main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '\''.object.sha'\'')"'
 assert_contains "label dispatch head verification" "$label_gate_text" '"${GITHUB_SHA}"'
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'
 release = YAML.load_file(ARGV.fetch(0))
