@@ -502,8 +502,28 @@ print(json.dumps({
 }, sort_keys=True))
 PY
 if [[ -n "$rc2_tag" ]]; then
-  gh release upload "$rc2_tag" "$finder_screenshot" \
-    --repo "$GITHUB_REPOSITORY" \
-    --clobber
+  rc2_release=""
+  if ! rc2_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${rc2_tag}" 2>&1)"; then
+    printf '%s\n' "$rc2_release" >&2
+    echo "Finder acceptance could not read the RC2 Release assets" >&2
+    exit 1
+  fi
+  screenshot_name="$(basename "$finder_screenshot")"
+  screenshot_digest="$(shasum -a 256 "$finder_screenshot" | awk '{print $1}')"
+  screenshot_count="$(printf '%s' "$rc2_release" | jq --arg name "$screenshot_name" '[.assets[]? | select(.name == $name)] | length')"
+  if [[ "$screenshot_count" != 0 && "$screenshot_count" != 1 ]]; then
+    echo "Finder acceptance found duplicate RC2 screenshot assets: $screenshot_name" >&2
+    exit 1
+  elif [[ "$screenshot_count" == 1 ]]; then
+    existing_screenshot_digest="$(printf '%s' "$rc2_release" | jq -r --arg name "$screenshot_name" '.assets[] | select(.name == $name) | .digest // empty')"
+    [[ "$existing_screenshot_digest" == "sha256:$screenshot_digest" ]] || {
+      echo "Finder acceptance found a conflicting RC2 screenshot asset: $screenshot_name" >&2
+      exit 1
+    }
+    echo "reusing matching RC2 Finder screenshot asset: $screenshot_name"
+  else
+    gh release upload "$rc2_tag" "$finder_screenshot" \
+      --repo "$GITHUB_REPOSITORY"
+  fi
 fi
 echo "Finder DMG acceptance evidence: $evidence_dir"

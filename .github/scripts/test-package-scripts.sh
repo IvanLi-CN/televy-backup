@@ -355,6 +355,15 @@ grep -F 'gh release upload "$rc2_tag" "$finder_screenshot"' <<<"$finder_text" >/
   echo "Finder acceptance must upload newly captured screenshots to RC2" >&2
   exit 1
 }
+grep -F 'reusing matching RC2 Finder screenshot asset' <<<"$finder_text" >/dev/null &&
+  grep -F 'conflicting RC2 screenshot asset' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must make RC2 screenshot uploads digest-idempotent" >&2
+  exit 1
+}
+if grep -F -- '--clobber' <<<"$finder_text" >/dev/null; then
+  echo "Finder acceptance must not overwrite an existing RC2 screenshot" >&2
+  exit 1
+fi
 for attach_text in "$verify_release_text" "$finder_text"; do
   grep -F 'attach_status=0' <<<"$attach_text" >/dev/null || {
     echo "DMG attach paths must preserve cleanup when hdiutil attach fails" >&2

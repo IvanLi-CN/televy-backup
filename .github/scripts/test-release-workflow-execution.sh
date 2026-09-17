@@ -111,6 +111,9 @@ if [[ "$1" == release && "$2" == create ]]; then
 fi
 if [[ "$1" == release && "$2" == upload ]]; then
   printf '%s\n' "$*" >> "$state_dir/uploads"
+  if [[ "${GH_FIXTURE_PUBLISH_ON_UPLOAD:-0}" == 1 ]]; then
+    printf '{"tag_name":"%s","draft":false,"prerelease":false}\n' "$3" > "$state_dir/$3"
+  fi
   exit 0
 fi
 if [[ "$1" == release && "$2" == edit ]]; then
@@ -181,5 +184,41 @@ rm -f "$tmp_dir/state/uploads"
   bash "$tmp_dir/release.sh"
   [[ ! -f "$tmp_dir/state/uploads" ]]
 )
+
+conflict_tag="v1.2.6"
+printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[{"name":"asset.txt","digest":"sha256:%064d"}]}\n' \
+  "$conflict_tag" 0 > "$tmp_dir/state/$conflict_tag"
+if (
+  cd "$repo_dir"
+  export PATH="$bin_dir:$PATH"
+  export GH_FIXTURE_REPO="$repo_dir" GH_FIXTURE_STATE="$tmp_dir/state"
+  export GITHUB_REPOSITORY=fixture/repo GITHUB_API_URL=https://fixture.invalid GH_TOKEN=fixture
+  export PRODUCT_TAG="$conflict_tag" PRODUCT_VERSION=1.2.6 PRODUCT_CHANNEL=prod
+  export RELEASE_SHA="$release_sha" RELEASE_STATE=draft BOUND_IDENTITY=present
+  bash "$tmp_dir/release.sh"
+); then
+  echo "draft publication accepted a conflicting existing asset digest" >&2
+  exit 1
+fi
+
+race_tag="v1.2.7"
+printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[]}\n' \
+  "$race_tag" > "$tmp_dir/state/$race_tag"
+printf 'second asset\n' > "$repo_dir/release-assets/second.txt"
+rm -f "$tmp_dir/state/uploads"
+if (
+  cd "$repo_dir"
+  export PATH="$bin_dir:$PATH"
+  export GH_FIXTURE_REPO="$repo_dir" GH_FIXTURE_STATE="$tmp_dir/state"
+  export GITHUB_REPOSITORY=fixture/repo GITHUB_API_URL=https://fixture.invalid GH_TOKEN=fixture
+  export PRODUCT_TAG="$race_tag" PRODUCT_VERSION=1.2.7 PRODUCT_CHANNEL=prod
+  export RELEASE_SHA="$release_sha" RELEASE_STATE=draft BOUND_IDENTITY=present
+  export GH_FIXTURE_PUBLISH_ON_UPLOAD=1
+  bash "$tmp_dir/release.sh"
+); then
+  echo "draft publication ignored a Release publication race" >&2
+  exit 1
+fi
+[[ "$(wc -l < "$tmp_dir/state/uploads")" -eq 1 ]]
 
 echo "release workflow execution fixture tests passed"

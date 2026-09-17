@@ -1057,6 +1057,16 @@ jobs:
                     fi
                     echo "reusing matching draft Release asset ${asset_name}"
                   else
+                    current_release=""
+                    if ! current_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+                      printf '%s\n' "${current_release}" >&2
+                      echo "release_state_conflict: unable to recheck draft Release before asset upload" >&2
+                      return 1
+                    fi
+                    if [[ "$(printf '%s' "${current_release}" | jq -r '.draft | tostring')" != true ]]; then
+                      echo "release_state_conflict: Release became published before uploading ${asset_name}" >&2
+                      return 1
+                    fi
                     gh release upload "${PRODUCT_TAG}" "${asset}"
                   fi
                 done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)

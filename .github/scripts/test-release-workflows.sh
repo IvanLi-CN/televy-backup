@@ -194,6 +194,7 @@ assert_contains "draft publication rechecks state before upload" "$release_text"
 assert_contains "draft publication rechecks state after upload" "$release_text" 'Release became published during asset upload'
 assert_contains "draft publication reuses matching assets" "$release_text" 'reusing matching draft Release asset'
 assert_contains "draft publication checks existing asset digest" "$release_text" 'existing asset digest mismatch'
+assert_contains "draft publication rechecks state before each upload" "$release_text" 'Release became published before uploading'
 assert_not_contains "draft publication uses one bulk upload" "$release_text" 'gh release upload "${PRODUCT_TAG}" "${release_files[@]}"'
 if (( $(printf '%s' "$release_text" | grep -Fc 'verify-release-sequence') < 2 )); then
   printf 'release workflow must verify sequence before and during publication\n' >&2
