@@ -43,29 +43,29 @@ existing_source_sha="$(printf '%s' "$existing" | python3 -c 'import json,sys; pr
 # A retry may advance the source head after reservation, but only along the
 # same ancestry; the immutable reservation source remains the verification key.
 retry_dir="$tmp_dir/retry"
-cp -R "$repo_dir" "$retry_dir"
+mkdir -p "$retry_dir"
+git -C "$retry_dir" init -q
+git -C "$retry_dir" config user.name fixture
+git -C "$retry_dir" config user.email fixture@example.com
+printf '0.9.2\n' > "$retry_dir/VERSION"
+git -C "$retry_dir" add VERSION
+git -C "$retry_dir" commit -qm retry-source
+retry_base_sha="$(git -C "$retry_dir" rev-parse HEAD)"
+python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$retry_dir" --source-sha "$retry_base_sha" --version 0.0.1 --channel prod \
+  --owner fixture --claim-key "pr:1:source:${retry_base_sha}:type:type:patch:channel:channel:prod" \
+  --output "$tmp_dir/retry-reservation.json" >/dev/null
 printf 'source update after reservation\n' > "$retry_dir/RETRY"
 git -C "$retry_dir" add RETRY
 git -C "$retry_dir" commit -qm "source update after reservation"
 retry_source_sha="$(git -C "$retry_dir" rev-parse HEAD)"
 retry_reservation="$tmp_dir/retry-reservation.json"
-python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
-  --local-root "$retry_dir" --source-sha "$source_sha" --version 0.0.2 --channel prod \
-  --owner fixture --claim-key "retry:${source_sha}" --output "$retry_reservation" >/dev/null
-retry_out="$(python3 - "$retry_reservation" "$source_sha" "$retry_source_sha" <<'PY'
-import json
-import sys
-value = json.load(open(sys.argv[1], encoding="utf-8"))
-value["sourceSha"] = sys.argv[2]
-value["reservationSourceSha"] = sys.argv[2]
-json.dump(value, open(sys.argv[1], "w", encoding="utf-8"))
-PY
-python3 "$root_dir/.github/scripts/release_preparation.py" \
-  --repo-root "$retry_dir" --source-sha "$retry_source_sha" --base-sha "$source_sha" \
+retry_out="$(python3 "$root_dir/.github/scripts/release_preparation.py" \
+  --repo-root "$retry_dir" --source-sha "$retry_source_sha" --base-sha "$retry_base_sha" \
   --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" --mode allocate \
   --reservation-json "$retry_reservation")"
 [[ "$retry_out" == *'"prepared": "created"'* ]]
 retry_prepared_sha="$(git -C "$retry_dir" rev-parse HEAD)"
 retry_source_recorded="$(git -C "$retry_dir" show -s --format='%(trailers:key=Release-Reservation-Source-SHA,valueonly)' "$retry_prepared_sha")"
-[[ "$retry_source_recorded" == "$source_sha" ]]
+[[ "$retry_source_recorded" == "$retry_base_sha" ]]
 echo "release preparation fixture tests passed"
