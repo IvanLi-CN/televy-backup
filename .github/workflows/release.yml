@@ -366,6 +366,11 @@ jobs:
                   echo "skipping helper candidate with incomplete assets: ${candidate}"
                   continue
                 fi
+                if ! git fetch --force origin "refs/tags/${candidate}:refs/tags/${candidate}" || \
+                  ! python3 .github/scripts/release_chain.py verify-tag-provenance --tag "${candidate}"; then
+                  echo "skipping helper candidate without protected annotated-tag provenance: ${candidate}"
+                  continue
+                fi
                 candidate_asset_dir="${source_download_dir}/${helper_version}"
                 mkdir -p "${candidate_asset_dir}"
                 if ! gh release download "${candidate}" --repo "$GITHUB_REPOSITORY" \
@@ -549,15 +554,14 @@ jobs:
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
-          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount"
           python3 .github/scripts/release_helper.py verify-assets \
             --asset-dir "$RUNNER_TEMP/snapshot-helper" \
             --lock packaging/macos/snapshot-components.lock.json \
             --source-tag "$HELPER_SOURCE_TAG" \
             --expected-source-commit "$HELPER_SOURCE_COMMIT"
-          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
-          ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
-          hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
+          bash scripts/macos/extract-snapshot-access-helper.sh \
+            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
+            --output-dir "$RUNNER_TEMP/snapshot-helper"
           test -n "${POLICY_SHA}"
           git fetch --force origin main
           git cat-file -e "${POLICY_SHA}^{commit}"
@@ -634,15 +638,14 @@ jobs:
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
-          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount"
           python3 .github/scripts/release_helper.py verify-assets \
             --asset-dir "$RUNNER_TEMP/snapshot-helper" \
             --lock packaging/macos/snapshot-components.lock.json \
             --source-tag "$HELPER_SOURCE_TAG" \
             --expected-source-commit "$HELPER_SOURCE_COMMIT"
-          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
-          ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
-          hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
+          bash scripts/macos/extract-snapshot-access-helper.sh \
+            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
+            --output-dir "$RUNNER_TEMP/snapshot-helper"
           test -n "${POLICY_SHA}"
           git fetch --force origin main
           git cat-file -e "${POLICY_SHA}^{commit}"
@@ -710,15 +713,14 @@ jobs:
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
-          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount"
           python3 .github/scripts/release_helper.py verify-assets \
             --asset-dir "$RUNNER_TEMP/snapshot-helper" \
             --lock packaging/macos/snapshot-components.lock.json \
             --source-tag "$HELPER_SOURCE_TAG" \
             --expected-source-commit "$HELPER_SOURCE_COMMIT"
-          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
-          ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
-          hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
+          bash scripts/macos/extract-snapshot-access-helper.sh \
+            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
+            --output-dir "$RUNNER_TEMP/snapshot-helper"
           test -n "${POLICY_SHA}"
           git fetch --force origin main
           git cat-file -e "${POLICY_SHA}^{commit}"
@@ -816,6 +818,7 @@ jobs:
               --pattern "SHA256SUMS" \
               --dir "${rc_dir}"
             git fetch --force origin "refs/tags/${rc_tag}:refs/tags/${rc_tag}"
+            python3 .github/scripts/release_chain.py verify-tag-provenance --tag "${rc_tag}"
             source_commit="$(git rev-list -n 1 "${rc_tag}^{commit}")"
             echo "RC${rc_number}_SOURCE_COMMIT=${source_commit}" >> "$GITHUB_ENV"
           done

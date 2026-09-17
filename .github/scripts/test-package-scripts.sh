@@ -10,6 +10,7 @@ bash -n \
   "$root_dir/scripts/macos/package-release.sh" \
   "$root_dir/scripts/macos/assemble-universal.sh" \
   "$root_dir/scripts/macos/build-dmg.sh" \
+  "$root_dir/scripts/macos/extract-snapshot-access-helper.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh" \
   "$root_dir/scripts/macos/finder-dmg-acceptance.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
@@ -240,6 +241,19 @@ grep -F 'verify-dmg-layout.sh' <<<"$assemble_text" >/dev/null || {
   exit 1
 }
 finder_text="$(<"$root_dir/scripts/macos/finder-dmg-acceptance.sh")"
+extract_helper_text="$(<"$root_dir/scripts/macos/extract-snapshot-access-helper.sh")"
+grep -F 'hdiutil attach -plist' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must use machine-readable attach output" >&2
+  exit 1
+}
+grep -F 'device_from_plist' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must resolve the exact attached device" >&2
+  exit 1
+}
+grep -F 'trap cleanup EXIT' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must clean up mounts on every exit path" >&2
+  exit 1
+}
 for attach_text in "$verify_release_text" "$finder_text"; do
   grep -F 'attach_status=0' <<<"$attach_text" >/dev/null || {
     echo "DMG attach paths must preserve cleanup when hdiutil attach fails" >&2

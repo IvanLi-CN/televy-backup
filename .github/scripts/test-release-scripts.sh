@@ -98,7 +98,9 @@ release_workflow = (root / ".github/workflows/release.yml").read_text(encoding="
 assert "options: [recover]" in release_workflow
 assert "helper_source_mode" in release_workflow
 assert "helper_source_tag" in release_workflow
-assert "hdiutil attach" in release_workflow
+assert "extract-snapshot-access-helper.sh" in release_workflow
+assert "verify-tag-provenance --tag \"${candidate}\"" in release_workflow
+assert "verify-tag-provenance --tag \"${rc_tag}\"" in release_workflow
 assert "verify-component-identity.sh" in release_workflow
 assert "stable release requires a previously published RC" in release_workflow
 assert "gh release list" in release_workflow

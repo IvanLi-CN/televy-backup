@@ -44,6 +44,7 @@ assert spec and spec.loader
 chain = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(chain)
 chain.ROOT = repo
+assert chain.verify_product_tag_provenance("v0.9.3")["owner"] == "protected-release-automation"
 
 reservation_spec = importlib.util.spec_from_file_location("release_reservation", root / ".github/scripts/release_reservation.py")
 assert reservation_spec and reservation_spec.loader

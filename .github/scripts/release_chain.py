@@ -554,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
     sequence = sub.add_parser("verify-release-sequence")
     sequence.add_argument("--version", required=True)
     sequence.add_argument("--expected-sha", required=True)
+    provenance = sub.add_parser("verify-tag-provenance")
+    provenance.add_argument("--tag", required=True)
     allocation = sub.add_parser("allocate-version")
     allocation.add_argument("--type", dest="intent_type", required=True)
     allocation.add_argument("--channel", dest="intent_channel", required=True)
@@ -584,6 +586,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(verify_tag(args.version, args.expected_sha, args.allow_existing), sort_keys=True))
         elif args.command == "verify-release-sequence":
             print(json.dumps(verify_release_sequence(args.version, args.expected_sha), sort_keys=True))
+        elif args.command == "verify-tag-provenance":
+            print(json.dumps(verify_product_tag_provenance(args.tag), sort_keys=True))
         elif args.command == "allocate-version":
             print(
                 json.dumps(

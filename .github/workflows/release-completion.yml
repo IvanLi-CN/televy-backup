@@ -30,7 +30,7 @@ jobs:
     steps:
       - name: Checkout trusted base
         if: github.event_name != 'merge_group'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.event.pull_request.base.sha || 'main' }}
           fetch-depth: 0
@@ -71,7 +71,7 @@ jobs:
 
       - name: Checkout trusted merge-group gate scripts
         if: github.event_name == 'merge_group'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.event.merge_group.base_sha || github.sha }}
           fetch-depth: 0

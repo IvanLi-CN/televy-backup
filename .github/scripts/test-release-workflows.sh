@@ -37,6 +37,12 @@ for workflow in release-preparation.yml release.yml; do
     exit 1
   fi
 done
+for workflow in package-ci.yml release-preparation.yml release-completion.yml release.yml; do
+  if grep -nE 'uses: [^[:space:]]+@(v[0-9]+|main|master)$' "$root_dir/.github/workflows/$workflow" >/dev/null; then
+    printf 'release-gate workflow contains a mutable action reference: %s\n' "$workflow" >&2
+    exit 1
+  fi
+done
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
 assert_contains "release preparation expectedHeadOid" "$preparation_text" "expectedHeadOid"
 assert_contains "prepared-head gate dispatch permission" "$preparation_text" "actions: write"
@@ -146,6 +152,8 @@ assert_contains "native helper identity policy invocation" "$release_text" 'bash
 assert_contains "release PR merge association" "$release_text" "merge_commit_sha // empty"
 assert_contains "release PR preparation association" "$release_text" 'pull_request_head_sha}" = "${preparation_sha}'
 assert_contains "release sequence gate" "$release_text" "verify-release-sequence"
+assert_contains "helper tag provenance gate" "$release_text" "verify-tag-provenance --tag \"\${candidate}\""
+assert_contains "RC tag provenance gate" "$release_text" "verify-tag-provenance --tag \"\${rc_tag}\""
 assert_contains "release reservation verification" "$release_text" "verify_github_reservation"
 assert_contains "recovery existing bound verification" "$release_text" "verify_github_receipt"
 assert_contains "release bound receipt" "$release_text" "--state bound"
@@ -160,6 +168,7 @@ assert_contains "release intent tag target" "$release_text" "tag_target_sha"
 assert_contains "release bound identity recovery" "$release_text" "bound_identity"
 assert_contains "release recovery skips successor sequence" "$release_text" 'if [[ "${BOUND_IDENTITY}" != present ]]'
 assert_contains "release annotated tag object" "$release_text" "git/tags"
+assert_contains "release helper extraction cleanup" "$release_text" "extract-snapshot-access-helper.sh"
 assert_contains "release channel flags" "$release_text" "/releases/tags/\${tag}"
 assert_contains "release latest tag lookup" "$release_text" "/releases/latest"
 assert_not_contains "unsupported gh release latest field" "$release_text" "isLatest"
