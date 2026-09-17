@@ -522,7 +522,7 @@ jobs:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
       - name: Cache macOS arm64 build dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
@@ -607,7 +607,7 @@ jobs:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
       - name: Cache macOS x86_64 build dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry

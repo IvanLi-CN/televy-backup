@@ -352,8 +352,12 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
   echo "native package CI jobs must have a 15-minute timeout" >&2
   exit 1
 }
-[[ "$(grep -Fc 'uses: actions/cache@v4' <<<"$package_workflow_text")" -ge 2 ]] || {
+[[ "$(grep -Fc 'uses: actions/cache@' <<<"$package_workflow_text")" -ge 2 ]] || {
   echo "native package CI jobs must cache build dependencies" >&2
+  exit 1
+}
+[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$package_workflow_text")" -eq 2 ]] || {
+  echo "package dependency cache action must be pinned to a full commit SHA" >&2
   exit 1
 }
 grep -F 'runner.arch' <<<"$package_workflow_text" >/dev/null || {
