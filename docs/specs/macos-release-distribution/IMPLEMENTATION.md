@@ -48,7 +48,8 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - protected acceptance records name one `macos-15` and one `current` platform; each distinct screenshot
   is uploaded to the RC2 Release and downloaded, type-checked, and SHA-256 verified by the stable gate
 
-The controlled acceptance entrypoint is `scripts/macos/finder-dmg-acceptance.sh`. It is intentionally
+The controlled acceptance entrypoint is `scripts/macos/finder-dmg-acceptance.sh`, and it must be run
+against the final stable Universal DMG (the captured screenshot is then uploaded to RC2). It is intentionally
 manual-only, requires `TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1` and a JSON
 `TELEVYBACKUP_FINDER_VISUAL_REVIEW` checklist with all six visual checks approved after inspecting
 the Finder-only screenshot, and writes evidence with complete manifest/checksum binding rather than

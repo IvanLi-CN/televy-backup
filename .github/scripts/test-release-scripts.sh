@@ -646,6 +646,7 @@ fi
     common = [
         sys.executable, str(verifier), "--evidence", json.dumps(evidence),
         "--manifest", str(stable_path), "--checksums", str(stable_checksums_path),
+        "--stable-dmg", str(stable_dmg),
         "--stable-version", "1.0.0",
         "--rc1-tag", "v1.0.0-rc.1", "--rc2-tag", "v1.0.0-rc.2",
         "--stable-source-commit", "stable-source", *rc_args,
@@ -653,6 +654,10 @@ fi
     ]
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    stable_dmg.write_bytes(b"tampered stable dmg\n")
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    stable_dmg.write_bytes(b"dmg\n")
     evidence["finder_acceptance"][0]["manifest_sha256"] = "0" * 64
     common[3] = json.dumps(evidence)
     result = subprocess.run(common, capture_output=True, text=True)

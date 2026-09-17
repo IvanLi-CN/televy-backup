@@ -159,6 +159,25 @@ def verify_checksums(checksums_path: Path, manifest: dict) -> str:
     return hashlib.sha256(checksums_path.read_bytes()).hexdigest()
 
 
+def verify_stable_dmg(dmg_path: Path, manifest: dict, stable_version: str) -> None:
+    expected_name = f"TelevyBackup-{stable_version}.dmg"
+    if dmg_path.name != expected_name or not dmg_path.is_file() or dmg_path.is_symlink():
+        fail("stable Universal DMG path is invalid")
+    expected_asset = next(
+        (asset for asset in manifest.get("assets", []) if isinstance(asset, dict) and asset.get("name") == expected_name),
+        None,
+    )
+    if not isinstance(expected_asset, dict):
+        fail("BUILD-MANIFEST.json is missing the stable Universal DMG")
+    dmg_bytes = dmg_path.read_bytes()
+    if hashlib.sha256(dmg_bytes).hexdigest() != required_string(
+        expected_asset.get("sha256"), "manifest stable Universal DMG.sha256"
+    ).lower():
+        fail("stable Universal DMG bytes do not match BUILD-MANIFEST.json")
+    if expected_asset.get("bytes") != len(dmg_bytes):
+        fail("stable Universal DMG size does not match BUILD-MANIFEST.json")
+
+
 def verify_finder_acceptance(
     evidence,
     manifest,
@@ -445,6 +464,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--evidence", required=True)
 parser.add_argument("--manifest", required=True)
 parser.add_argument("--checksums", required=True)
+parser.add_argument("--stable-dmg", required=True)
 parser.add_argument("--stable-version", required=True)
 parser.add_argument("--rc1-tag", required=True)
 parser.add_argument("--rc2-tag", required=True)
@@ -486,6 +506,7 @@ try:
 except OSError as error:
     fail(f"stable BUILD-MANIFEST.json cannot be read: {error}")
 stable_checksums_sha256 = verify_checksums(Path(args.checksums), manifest)
+verify_stable_dmg(Path(args.stable_dmg), manifest, args.stable_version)
 verify_finder_acceptance(
     evidence,
     manifest,

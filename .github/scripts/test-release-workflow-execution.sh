@@ -4,6 +4,8 @@ set -euo pipefail
 root_dir="$(git rev-parse --show-toplevel)"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
+export RUNNER_TEMP="$tmp_dir/runner"
+mkdir -p "$RUNNER_TEMP"
 remote_dir="$tmp_dir/remote.git"
 repo_dir="$tmp_dir/repo"
 bin_dir="$tmp_dir/bin"
@@ -113,6 +115,13 @@ if [[ "$1" == release && "$2" == upload ]]; then
   printf '%s\n' "$*" >> "$state_dir/uploads"
   if [[ "${GH_FIXTURE_PUBLISH_ON_UPLOAD:-0}" == 1 ]]; then
     printf '{"tag_name":"%s","draft":false,"prerelease":false}\n' "$3" > "$state_dir/$3"
+  else
+    release_json="$(<"$state_dir/$3")"
+    uploaded_name="$(basename "$4")"
+    uploaded_digest="sha256:$(shasum -a 256 "$4" | awk '{print $1}')"
+    printf '%s' "$release_json" | jq -c --arg name "$uploaded_name" --arg digest "$uploaded_digest" \
+      '.assets = ((.assets // []) + [{name: $name, digest: $digest}])' > "$state_dir/$3.tmp"
+    mv "$state_dir/$3.tmp" "$state_dir/$3"
   fi
   exit 0
 fi
@@ -138,6 +147,8 @@ run_publish_fixture() {
   rm -rf "$repo_dir/release-assets"
   mkdir -p "$repo_dir/release-assets"
   printf '%s\n' "$tag" > "$repo_dir/release-assets/asset.txt"
+  printf '{"assets":[{"name":"asset.txt"}]}\n' > "$repo_dir/release-assets/BUILD-MANIFEST.json"
+  printf 'placeholder  asset.txt\n' > "$repo_dir/release-assets/SHA256SUMS"
   (
     cd "$repo_dir"
     export PATH="$bin_dir:$PATH"
@@ -171,8 +182,18 @@ rm -f "$tmp_dir/state/$published_tag.created"
 
 draft_tag="v1.2.5"
 draft_asset_digest="$(shasum -a 256 "$repo_dir/release-assets/asset.txt" | awk '{print $1}')"
-printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[{"name":"asset.txt","digest":"sha256:%s"}]}\n' \
-  "$draft_tag" "$draft_asset_digest" > "$tmp_dir/state/$draft_tag"
+draft_manifest_digest="$(shasum -a 256 "$repo_dir/release-assets/BUILD-MANIFEST.json" | awk '{print $1}')"
+draft_checksums_digest="$(shasum -a 256 "$repo_dir/release-assets/SHA256SUMS" | awk '{print $1}')"
+jq -cn \
+  --arg tag "$draft_tag" \
+  --arg asset_digest "$draft_asset_digest" \
+  --arg manifest_digest "$draft_manifest_digest" \
+  --arg checksums_digest "$draft_checksums_digest" \
+  '{tag_name:$tag,draft:true,prerelease:false,assets:[
+    {name:"asset.txt",digest:("sha256:" + $asset_digest)},
+    {name:"BUILD-MANIFEST.json",digest:("sha256:" + $manifest_digest)},
+    {name:"SHA256SUMS",digest:("sha256:" + $checksums_digest)}
+  ]}' > "$tmp_dir/state/$draft_tag"
 rm -f "$tmp_dir/state/uploads"
 (
   cd "$repo_dir"
@@ -183,6 +204,39 @@ rm -f "$tmp_dir/state/uploads"
   export RELEASE_SHA="$release_sha" RELEASE_STATE=draft BOUND_IDENTITY=present
   bash "$tmp_dir/release.sh"
   [[ ! -f "$tmp_dir/state/uploads" ]]
+)
+
+extra_tag="v1.2.56"
+printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[]}\n' \
+  "$extra_tag" > "$tmp_dir/state/$extra_tag"
+printf 'unlisted asset\n' > "$repo_dir/release-assets/unlisted.txt"
+if (
+  cd "$repo_dir"
+  export PATH="$bin_dir:$PATH"
+  export GH_FIXTURE_REPO="$repo_dir" GH_FIXTURE_STATE="$tmp_dir/state"
+  export GITHUB_REPOSITORY=fixture/repo GITHUB_API_URL=https://fixture.invalid GH_TOKEN=fixture
+  export PRODUCT_TAG="$extra_tag" PRODUCT_VERSION=1.2.56 PRODUCT_CHANNEL=prod
+  export RELEASE_SHA="$release_sha" RELEASE_STATE=draft BOUND_IDENTITY=present
+  bash "$tmp_dir/release.sh"
+); then
+  echo "draft publication accepted an unlisted release asset" >&2
+  exit 1
+fi
+rm -f "$repo_dir/release-assets/unlisted.txt"
+
+upload_tag="v1.2.55"
+printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[]}\n' \
+  "$upload_tag" > "$tmp_dir/state/$upload_tag"
+rm -f "$tmp_dir/state/uploads"
+(
+  cd "$repo_dir"
+  export PATH="$bin_dir:$PATH"
+  export GH_FIXTURE_REPO="$repo_dir" GH_FIXTURE_STATE="$tmp_dir/state"
+  export GITHUB_REPOSITORY=fixture/repo GITHUB_API_URL=https://fixture.invalid GH_TOKEN=fixture
+  export PRODUCT_TAG="$upload_tag" PRODUCT_VERSION=1.2.55 PRODUCT_CHANNEL=prod
+  export RELEASE_SHA="$release_sha" RELEASE_STATE=draft BOUND_IDENTITY=present
+  bash "$tmp_dir/release.sh"
+  [[ "$(wc -l < "$tmp_dir/state/uploads")" -eq 3 ]]
 )
 
 conflict_tag="v1.2.6"
@@ -205,6 +259,8 @@ race_tag="v1.2.7"
 printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[]}\n' \
   "$race_tag" > "$tmp_dir/state/$race_tag"
 printf 'second asset\n' > "$repo_dir/release-assets/second.txt"
+jq '.assets += [{"name":"second.txt"}]' "$repo_dir/release-assets/BUILD-MANIFEST.json" > "$repo_dir/release-assets/BUILD-MANIFEST.json.tmp"
+mv "$repo_dir/release-assets/BUILD-MANIFEST.json.tmp" "$repo_dir/release-assets/BUILD-MANIFEST.json"
 rm -f "$tmp_dir/state/uploads"
 if (
   cd "$repo_dir"

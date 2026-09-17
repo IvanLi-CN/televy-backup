@@ -408,6 +408,10 @@ grep -F 'TELEVYBACKUP_RUN_FINDER_ACCEPTANCE' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must require explicit controlled-session opt-in" >&2
   exit 1
 }
+grep -F 'Finder acceptance must inspect the stable Universal DMG' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must inspect the stable Universal DMG" >&2
+  exit 1
+}
 grep -F 'screencapture -x -l "$window_id"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must capture only the verified Finder window" >&2
   exit 1

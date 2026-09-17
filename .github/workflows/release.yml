@@ -901,6 +901,7 @@ jobs:
             --evidence "$ACCEPTANCE_EVIDENCE" \
             --manifest release-assets/BUILD-MANIFEST.json \
             --checksums release-assets/SHA256SUMS \
+            --stable-dmg "release-assets/TelevyBackup-${core_version}.dmg" \
             --stable-version "$core_version" \
             --rc1-tag "$rc1_tag" \
             --rc2-tag "$rc2_tag" \
@@ -1022,7 +1023,40 @@ jobs:
             echo "Product release became published for ${PRODUCT_TAG}; no asset overwrite"
           else
             release_files=()
-            while IFS= read -r -d '' asset; do release_files+=("$asset"); done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
+            release_asset_list="${RUNNER_TEMP}/release-asset-list.txt"
+            python3 - "release-assets" > "${release_asset_list}" <<'PY'
+          import json
+          import os
+          import re
+          import stat
+          import sys
+
+          asset_dir = sys.argv[1]
+          manifest_path = os.path.join(asset_dir, "BUILD-MANIFEST.json")
+          with open(manifest_path, encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          expected = {"BUILD-MANIFEST.json", "SHA256SUMS"}
+          for asset in manifest.get("assets", []):
+              name = asset.get("name") if isinstance(asset, dict) else None
+              if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+                  raise SystemExit("BUILD-MANIFEST.json contains an unsafe release asset name")
+              if name in expected:
+                  raise SystemExit(f"BUILD-MANIFEST.json contains a reserved release asset name: {name}")
+              expected.add(name)
+          actual = set(os.listdir(asset_dir))
+          if actual != expected:
+              extra = sorted(actual - expected)
+              missing = sorted(expected - actual)
+              raise SystemExit(
+                  f"release-assets set does not match BUILD-MANIFEST.json: extra={extra!r} missing={missing!r}"
+              )
+          for name in sorted(expected):
+              path = os.path.join(asset_dir, name)
+              if not stat.S_ISREG(os.lstat(path).st_mode):
+                  raise SystemExit(f"release asset must be a regular file: {name}")
+              print(name)
+          PY
+            while IFS= read -r asset_name; do release_files+=("release-assets/${asset_name}"); done < "${release_asset_list}"
             ((${#release_files[@]} > 0))
             if [[ "${runtime_state}" == draft ]]; then
               latest_release=""
@@ -1037,7 +1071,7 @@ jobs:
               fi
               upload_missing_release_assets() {
                 local asset asset_name expected_digest existing_count existing_digest current_release
-                while IFS= read -r -d '' asset; do
+                for asset in "${release_files[@]}"; do
                   asset_name="$(basename "${asset}")"
                   expected_digest="$(shasum -a 256 "${asset}" | awk '{print $1}')"
                   current_release=""
@@ -1068,7 +1102,7 @@ jobs:
                     # fail closed for races that cannot be made atomic remotely.
                     gh release upload "${PRODUCT_TAG}" "${asset}"
                   fi
-                done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
+                done
               }
               upload_missing_release_assets
               final_release=""
@@ -1079,6 +1113,18 @@ jobs:
               fi
               if [[ "$(printf '%s' "${final_release}" | jq -r '.draft | tostring')" != true ]]; then
                 echo "release_state_conflict: Release became published during asset upload" >&2
+                exit 1
+              fi
+              expected_assets='[]'
+              for asset in "${release_files[@]}"; do
+                asset_name="$(basename "${asset}")"
+                expected_digest="$(shasum -a 256 "${asset}" | awk '{print $1}')"
+                expected_assets="$(printf '%s' "${expected_assets}" | jq -c --arg name "${asset_name}" --arg digest "sha256:${expected_digest}" '. + [{name: $name, digest: $digest}]')"
+              done
+              expected_assets="$(printf '%s' "${expected_assets}" | jq -c 'sort_by(.name)')"
+              actual_assets="$(printf '%s' "${final_release}" | jq -c '[.assets[]? | {name, digest}] | sort_by(.name)')"
+              if [[ "${actual_assets}" != "${expected_assets}" ]]; then
+                echo "release_state_conflict: final Release asset set or digest does not match release-assets" >&2
                 exit 1
               fi
               if [[ "${PRODUCT_CHANNEL}" == prod ]]; then

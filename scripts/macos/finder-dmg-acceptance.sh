@@ -95,6 +95,21 @@ checksums_path="$snapshot_dir/SHA256SUMS"
 cp "$source_dmg" "$dmg"
 cp "$source_manifest_path" "$manifest_path"
 cp "$source_checksums_path" "$checksums_path"
+stable_dmg_name="$(python3 - "$source_manifest_path" <<'PY'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+version = manifest.get("release_version")
+if not isinstance(version, str) or not version or "-rc." in version:
+    raise SystemExit("Finder acceptance requires a stable BUILD-MANIFEST.json")
+print(f"TelevyBackup-{version}.dmg")
+PY
+)"
+[[ "$(basename "$source_dmg")" == "$stable_dmg_name" ]] || {
+  echo "Finder acceptance must inspect the stable Universal DMG: $stable_dmg_name" >&2
+  exit 1
+}
 while IFS= read -r asset_name; do
   [[ "$asset_name" != */* && "$asset_name" != .* ]] || {
     echo "Finder acceptance manifest contains an unsafe asset name: $asset_name" >&2

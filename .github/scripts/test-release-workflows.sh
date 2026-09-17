@@ -196,6 +196,7 @@ assert_contains "draft publication reuses matching assets" "$release_text" 'reus
 assert_contains "draft publication checks existing asset digest" "$release_text" 'existing asset digest mismatch'
 assert_contains "draft publication rechecks state before each asset" "$release_text" 'Release became published before inspecting'
 assert_contains "draft publication documents non-atomic upload guard" "$release_text" 'no conditional draft precondition'
+assert_contains "draft publication verifies final asset set" "$release_text" 'final Release asset set or digest does not match release-assets'
 assert_not_contains "draft publication uses one bulk upload" "$release_text" 'gh release upload "${PRODUCT_TAG}" "${release_files[@]}"'
 if (( $(printf '%s' "$release_text" | grep -Fc 'verify-release-sequence') < 2 )); then
   printf 'release workflow must verify sequence before and during publication\n' >&2
@@ -205,7 +206,8 @@ if [[ "$release_text" == *"gh release upload \"\${PRODUCT_TAG}\" release-assets/
   printf 'release workflow must not pass app bundle directories to gh release\n' >&2
   exit 1
 fi
-assert_contains "release regular-file collection" "$release_text" "find release-assets -maxdepth 1 -type f"
+assert_contains "release manifest-bound asset collection" "$release_text" "release-assets set does not match BUILD-MANIFEST.json"
+assert_contains "release regular-file collection" "$release_text" "stat.S_ISREG(os.lstat(path).st_mode)"
 assert_contains "release DMG evidence upload" "$release_text" "name: release-dmg-verification"
 assert_contains "release DMG evidence binding" "$release_text" 'DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl"'
 assert_not_contains "release acceptance screenshot reupload" "$release_text" 'gh release upload "${rc2_tag}" "${screenshot_dir}/${screenshot_name}"'
