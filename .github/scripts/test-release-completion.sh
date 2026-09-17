@@ -93,7 +93,6 @@ module.CHAIN.ROOT = repo
 prepared = module.CHAIN.find_prepared(current_source.name, reservation_source.name)
 assert prepared["sourceSha"] == reservation_source.name
 prepared["sourceSha"] = current_source.name
-prepared["reservationSourceSha"] = reservation_source.name
 module.verify_reservation(reservation_path, prepared, repository=None, token=None, api_root="https://api.github.com")
 PY
 
