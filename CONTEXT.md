@@ -165,6 +165,26 @@ _Avoid_: Daemon, backup worker
 
 ## Installation And Privilege Model
 
+**Homebrew Tap**:
+The Homebrew package source from which users install TelevyBackup. It is a distribution surface,
+not a second TelevyBackup product or runtime owner.
+_Avoid_: Official Homebrew repository, separate product
+
+**TelevyBackup Cask**:
+The Homebrew installation definition for the User-Visible Product. It installs the GUI app while
+leaving daemon, system helper, configuration, backup data, and authorization ownership with TelevyBackup.
+_Avoid_: Formula, daemon package, app updater
+
+**Cask Release**:
+A stable Product Release Identity exposed through the Homebrew Tap for GUI installation.
+Prerelease identities are not part of the default Cask Release surface.
+_Avoid_: Development build, arbitrary Git revision
+
+**Gatekeeper Confirmation**:
+The user's explicit macOS approval to open an ad-hoc signed TelevyBackup Cask Release after its
+download remains quarantined.
+_Avoid_: Gatekeeper bypass, automatic quarantine removal
+
 **User-Visible Product**:
 The single `TelevyBackup.app` bundle a person downloads, moves, and updates. No second top-level companion application is presented as a separate installation or update task.
 _Avoid_: Two-app installation, standalone companion app

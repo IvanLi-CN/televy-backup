@@ -177,7 +177,7 @@
 
 ### MUST
 
-- 提供 brew 安装方式：formula（后台 daemon）+ cask（GUI app）。
+- 提供 macOS release DMG、native tool archives，以及安装 GUI app 的 Homebrew Cask；遗留 daemon Formula 仅为既有用户保留。
 - `brew services start` 能启动后台（用户级），并能按 schedule 触发一次备份（以本地 tasks/snapshots 可追溯为准）。
 - 升级后不丢数据：SQLite / config 保持可读；Keychain secrets 不需要重新输入（除非用户主动擦除）。
 - 日志路径与数据目录路径固定且可在文档中明确（不得泄露 secrets）。
