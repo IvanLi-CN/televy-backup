@@ -1024,7 +1024,7 @@ jobs:
             while IFS= read -r -d '' asset; do release_files+=("$asset"); done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
             ((${#release_files[@]} > 0))
             if [[ "${runtime_state}" == draft ]]; then
-              gh release upload "${PRODUCT_TAG}" "${release_files[@]}" --clobber
+              gh release upload "${PRODUCT_TAG}" "${release_files[@]}"
               if [[ "${PRODUCT_CHANNEL}" == prod ]]; then
                 gh release edit "${PRODUCT_TAG}" --draft=false --latest=true
               else

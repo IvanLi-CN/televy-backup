@@ -127,6 +127,8 @@ release_text="$(<"$root_dir/.github/workflows/release.yml")"
   exit 1
 }
 assert_contains "release dependency cache architecture key" "$release_text" "runner.arch"
+assert_contains "release publication is non-preemptive" "$release_text" "group: release-product-main"
+assert_contains "release publication is serialized" "$release_text" "cancel-in-progress: false"
 [[ "$(grep -Fc '${{ runner.os }}-ARM64-cargo-macos-' <<<"$release_text")" -eq 0 && "$(grep -Fc '${{ runner.os }}-X64-cargo-macos-' <<<"$release_text")" -eq 0 ]] || {
   printf 'release dependency cache must not restore host-specific artifacts across architectures\n' >&2
   exit 1
@@ -187,6 +189,7 @@ if [[ "$release_text" == *'Product release became published for "${PRODUCT_TAG}"
 fi
 assert_contains "draft release publish" "$release_text" "gh release edit \"\${PRODUCT_TAG}\" --draft=false"
 assert_contains "draft-only asset overwrite" "$release_text" '[[ "${runtime_state}" == draft ]]'
+assert_not_contains "draft publication never overwrites assets" "$release_text" 'gh release upload "${PRODUCT_TAG}" "${release_files[@]}" --clobber'
 if (( $(printf '%s' "$release_text" | grep -Fc 'verify-release-sequence') < 2 )); then
   printf 'release workflow must verify sequence before and during publication\n' >&2
   exit 1
@@ -202,6 +205,11 @@ assert_not_contains "release acceptance screenshot reupload" "$release_text" 'gh
 assert_contains "release product icon verifier" "$release_text" 'policy_verify_app_icon_assets="${policy_checkout}/scripts/macos/verify-app-icon-assets.sh"'
 assert_contains "release RC layout verifier" "$release_text" 'bash scripts/macos/verify-dmg-layout.sh'
 assert_contains "release complete requirement verifier" "$release_text" 'verify-macos-rc-acceptance.py'
+package_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
+assert_contains "package matrix checks permission" "$package_text" "checks: read"
+assert_contains "prepared package source identity" "$package_text" 'verification_sha=${verification_sha}'
+assert_contains "prepared arm64 package evidence" "$package_text" 'commits/${SOURCE_SHA}/check-runs?filter=latest&per_page=100'
+assert_contains "prepared package gate preserves verify" "$package_text" 'verify-prepared --commit HEAD'
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" <<'RUBY'
 workflow = YAML.load_file(ARGV.fetch(0))
 checkout = workflow.fetch("jobs").fetch("macos-acceptance").fetch("steps").find { |step| step["uses"] == "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" }

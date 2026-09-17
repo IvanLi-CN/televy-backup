@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  checks: read
 
 jobs:
   classify:
@@ -21,6 +22,7 @@ jobs:
     outputs:
       kind: ${{ steps.classify.outputs.kind }}
       source_sha: ${{ steps.classify.outputs.source_sha }}
+      verification_sha: ${{ steps.classify.outputs.verification_sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -30,10 +32,13 @@ jobs:
         run: |
           if python3 .github/scripts/release_chain.py verify-prepared --commit HEAD >/dev/null 2>&1; then
             echo "kind=prepared" >> "$GITHUB_OUTPUT"
+            verification_sha="$(python3 .github/scripts/release_chain.py find-prepared --commit HEAD | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
           else
             echo "kind=source" >> "$GITHUB_OUTPUT"
+            verification_sha="$(git rev-parse HEAD)"
           fi
           echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "verification_sha=${verification_sha}" >> "$GITHUB_OUTPUT"
 
   arm64:
     needs: classify
@@ -49,6 +54,15 @@ jobs:
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
         run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
+      - name: Verify source arm64 package check
+        if: needs.classify.outputs.kind == 'prepared'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.classify.outputs.verification_sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${SOURCE_SHA}/check-runs?filter=latest&per_page=100" \
+            | jq -e 'any(.check_runs[]; .name == "arm64 native package" and .status == "completed" and .conclusion == "success")' >/dev/null
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         if: needs.classify.outputs.kind == 'source'
         with:
@@ -114,6 +128,15 @@ jobs:
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
         run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
+      - name: Verify source x86_64 package check
+        if: needs.classify.outputs.kind == 'prepared'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.classify.outputs.verification_sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${SOURCE_SHA}/check-runs?filter=latest&per_page=100" \
+            | jq -e 'any(.check_runs[]; .name == "x86_64 native package" and .status == "completed" and .conclusion == "success")' >/dev/null
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         if: needs.classify.outputs.kind == 'source'
         with:
@@ -193,6 +216,15 @@ jobs:
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
         run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
+      - name: Verify source Universal 2 package check
+        if: needs.classify.outputs.kind == 'prepared'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.classify.outputs.verification_sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${SOURCE_SHA}/check-runs?filter=latest&per_page=100" \
+            | jq -e 'any(.check_runs[]; .name == "Universal 2 assembly" and .status == "completed" and .conclusion == "success")' >/dev/null
       - name: Assemble, hash, and inspect
         if: needs.classify.outputs.kind == 'source'
         env:
