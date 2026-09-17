@@ -110,7 +110,10 @@ python3 "$root_dir/scripts/homebrew/cask_release.py" render \
   --checksums "$tmp_dir/stable-SHA256SUMS" \
   --manifest "$tmp_dir/stable-BUILD-MANIFEST.json" \
   --output "$tmp_dir/stable.rb"
-cmp "$root_dir/Casks/televybackup.rb" "$tmp_dir/stable.rb"
+if ! cmp "$root_dir/Casks/televybackup.rb" "$tmp_dir/stable.rb"; then
+  diff -u "$root_dir/Casks/televybackup.rb" "$tmp_dir/stable.rb" >&2
+  exit 1
+fi
 
 if python3 "$root_dir/scripts/homebrew/cask_release.py" render \
   --version 1.2.3-rc.1 \
