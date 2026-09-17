@@ -900,6 +900,7 @@ jobs:
           python3 .github/scripts/verify-macos-rc-acceptance.py \
             --evidence "$ACCEPTANCE_EVIDENCE" \
             --manifest release-assets/BUILD-MANIFEST.json \
+            --checksums release-assets/SHA256SUMS \
             --stable-version "$core_version" \
             --rc1-tag "$rc1_tag" \
             --rc2-tag "$rc2_tag" \
@@ -1035,38 +1036,36 @@ jobs:
                 exit 1
               fi
               upload_missing_release_assets() {
-                local asset asset_name expected_digest existing_count existing_digest release_assets
-                release_assets="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)" || {
-                  printf '%s\n' "${release_assets}" >&2
-                  echo "release_state_conflict: unable to read draft Release assets" >&2
-                  return 1
-                }
+                local asset asset_name expected_digest existing_count existing_digest current_release
                 while IFS= read -r -d '' asset; do
                   asset_name="$(basename "${asset}")"
                   expected_digest="$(shasum -a 256 "${asset}" | awk '{print $1}')"
-                  existing_count="$(printf '%s' "${release_assets}" | jq --arg name "${asset_name}" '[.assets[]? | select(.name == $name)] | length')"
+                  current_release=""
+                  if ! current_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+                    printf '%s\n' "${current_release}" >&2
+                    echo "release_state_conflict: unable to read draft Release before ${asset_name}" >&2
+                    return 1
+                  fi
+                  if [[ "$(printf '%s' "${current_release}" | jq -r '.draft | tostring')" != true ]]; then
+                    echo "release_state_conflict: Release became published before inspecting ${asset_name}" >&2
+                    return 1
+                  fi
+                  existing_count="$(printf '%s' "${current_release}" | jq --arg name "${asset_name}" '[.assets[]? | select(.name == $name)] | length')"
                   if [[ "${existing_count}" != 0 && "${existing_count}" != 1 ]]; then
                     echo "release_state_conflict: duplicate Release assets named ${asset_name}" >&2
                     return 1
                   fi
                   if [[ "${existing_count}" == 1 ]]; then
-                    existing_digest="$(printf '%s' "${release_assets}" | jq -r --arg name "${asset_name}" '.assets[] | select(.name == $name) | .digest // empty')"
+                    existing_digest="$(printf '%s' "${current_release}" | jq -r --arg name "${asset_name}" '.assets[] | select(.name == $name) | .digest // empty')"
                     if [[ "${existing_digest}" != "sha256:${expected_digest}" ]]; then
                       echo "release_state_conflict: existing asset digest mismatch for ${asset_name}" >&2
                       return 1
                     fi
                     echo "reusing matching draft Release asset ${asset_name}"
                   else
-                    current_release=""
-                    if ! current_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
-                      printf '%s\n' "${current_release}" >&2
-                      echo "release_state_conflict: unable to recheck draft Release before asset upload" >&2
-                      return 1
-                    fi
-                    if [[ "$(printf '%s' "${current_release}" | jq -r '.draft | tostring')" != true ]]; then
-                      echo "release_state_conflict: Release became published before uploading ${asset_name}" >&2
-                      return 1
-                    fi
+                    # GitHub's asset upload API has no conditional draft precondition;
+                    # the immediate state check, no-clobber upload, and final recheck
+                    # fail closed for races that cannot be made atomic remotely.
                     gh release upload "${PRODUCT_TAG}" "${asset}"
                   fi
                 done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)

@@ -134,7 +134,39 @@ def equal_identity(first, second, name: str, fields: tuple[str, ...]) -> None:
             fail(f"{name}.{field} changed between RC1 and RC2")
 
 
-def verify_finder_acceptance(evidence, manifest, stable_version: str, screenshot_dir: Path) -> None:
+def verify_checksums(checksums_path: Path, manifest: dict) -> str:
+    try:
+        checksum_lines = checksums_path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        fail(f"stable SHA256SUMS cannot be read: {error}")
+    observed = {}
+    for line in checksum_lines:
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or not re.fullmatch(r"[0-9A-Fa-f]{64}", fields[0]):
+            fail("stable SHA256SUMS contains a malformed entry")
+        name = fields[1].removeprefix("*")
+        if not name or name in observed:
+            fail(f"stable SHA256SUMS contains a duplicate or empty asset name: {name}")
+        observed[name] = fields[0].lower()
+    expected = {
+        required_string(asset.get("name"), "manifest asset.name"):
+        required_string(asset.get("sha256"), "manifest asset.sha256").lower()
+        for asset in manifest.get("assets", [])
+        if isinstance(asset, dict)
+    }
+    if observed != expected:
+        fail("stable SHA256SUMS does not match BUILD-MANIFEST.json assets")
+    return hashlib.sha256(checksums_path.read_bytes()).hexdigest()
+
+
+def verify_finder_acceptance(
+    evidence,
+    manifest,
+    stable_version: str,
+    screenshot_dir: Path,
+    expected_manifest_sha256: str,
+    expected_checksums_sha256: str,
+) -> None:
     records = evidence.get("finder_acceptance")
     if not isinstance(records, list) or len(records) != 2:
         fail("finder_acceptance must contain exactly macOS 15 and current-platform records")
@@ -190,6 +222,10 @@ def verify_finder_acceptance(evidence, manifest, stable_version: str, screenshot
             fail(f"{name}.dmg_name does not match the stable Universal DMG")
         if record.get("dmg_sha256") != expected_dmg_digest:
             fail(f"{name}.dmg_sha256 does not match BUILD-MANIFEST.json")
+        if record.get("manifest_sha256") != expected_manifest_sha256:
+            fail(f"{name}.manifest_sha256 does not match the stable BUILD-MANIFEST.json")
+        if record.get("checksums_sha256") != expected_checksums_sha256:
+            fail(f"{name}.checksums_sha256 does not match the stable SHA256SUMS")
         if record.get("semantic_layout_digest") != expected_layout_digest:
             fail(f"{name}.semantic_layout_digest does not match BUILD-MANIFEST.json")
         if record.get("manifest_verified") is not True or record.get("checksums_verified") is not True:
@@ -408,6 +444,7 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
 parser = argparse.ArgumentParser()
 parser.add_argument("--evidence", required=True)
 parser.add_argument("--manifest", required=True)
+parser.add_argument("--checksums", required=True)
 parser.add_argument("--stable-version", required=True)
 parser.add_argument("--rc1-tag", required=True)
 parser.add_argument("--rc2-tag", required=True)
@@ -444,7 +481,19 @@ if manifest.get("release_version") != args.stable_version:
     fail("BUILD-MANIFEST.json has the wrong stable version")
 if args.stable_source_commit and manifest.get("source_commit") != args.stable_source_commit:
     fail("BUILD-MANIFEST.json source_commit does not match the stable release source")
-verify_finder_acceptance(evidence, manifest, args.stable_version, Path(args.screenshot_dir))
+try:
+    stable_manifest_sha256 = hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest()
+except OSError as error:
+    fail(f"stable BUILD-MANIFEST.json cannot be read: {error}")
+stable_checksums_sha256 = verify_checksums(Path(args.checksums), manifest)
+verify_finder_acceptance(
+    evidence,
+    manifest,
+    args.stable_version,
+    Path(args.screenshot_dir),
+    stable_manifest_sha256,
+    stable_checksums_sha256,
+)
 
 for field in (
     "legacy_registration_migrated",

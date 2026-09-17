@@ -617,6 +617,13 @@ fi
         record["dmg_sha256"] = stable_digest
     stable_path = temp / "stable.json"
     stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    stable_checksums_path = temp / "stable.sums"
+    stable_checksums_path.write_text(f"{stable_digest}  {stable_dmg.name}\n", encoding="utf-8")
+    stable_manifest_sha256 = hashlib.sha256(stable_path.read_bytes()).hexdigest()
+    stable_checksums_sha256 = hashlib.sha256(stable_checksums_path.read_bytes()).hexdigest()
+    for record in evidence["finder_acceptance"]:
+        record["manifest_sha256"] = stable_manifest_sha256
+        record["checksums_sha256"] = stable_checksums_sha256
     rc_args = []
     for number, source in ((1, "rc1-source"), (2, "rc2-source")):
         version = f"1.0.0-rc.{number}"
@@ -638,13 +645,19 @@ fi
     os.environ["PATH"] = f"{fake_bin}{os.pathsep}{old_path}"
     common = [
         sys.executable, str(verifier), "--evidence", json.dumps(evidence),
-        "--manifest", str(stable_path), "--stable-version", "1.0.0",
+        "--manifest", str(stable_path), "--checksums", str(stable_checksums_path),
+        "--stable-version", "1.0.0",
         "--rc1-tag", "v1.0.0-rc.1", "--rc2-tag", "v1.0.0-rc.2",
         "--stable-source-commit", "stable-source", *rc_args,
         "--screenshot-dir", str(temp),
     ]
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    evidence["finder_acceptance"][0]["manifest_sha256"] = "0" * 64
+    common[3] = json.dumps(evidence)
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    evidence["finder_acceptance"][0]["manifest_sha256"] = stable_manifest_sha256
     evidence["root_mount_helper"]["rc2"]["cdhash"] = "2222222222222222222222222222222222222222"
     common[3] = json.dumps(evidence)
     result = subprocess.run(common, capture_output=True, text=True)
@@ -659,6 +672,9 @@ fi
     stable_manifest["components"]["snapshot_access"]["artifact_sha256"] = legacy_artifact
     evidence["snapshot_access"]["artifact_sha256"] = legacy_artifact
     stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    stable_manifest_sha256 = hashlib.sha256(stable_path.read_bytes()).hexdigest()
+    for record in evidence["finder_acceptance"]:
+        record["manifest_sha256"] = stable_manifest_sha256
     common[3] = json.dumps(evidence)
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
