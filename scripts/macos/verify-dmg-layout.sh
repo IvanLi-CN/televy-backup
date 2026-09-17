@@ -23,6 +23,29 @@ attached_device=""
 mounted=false
 attach_attempted=false
 attach_completed=false
+emit_dmg_event() {
+  local event="$1"
+  local dmg_path="$2"
+  local mount_path="$3"
+  local device="$4"
+  local event_json
+  event_json="$(python3 - "$event" "$dmg_path" "$mount_path" "$device" <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "device": sys.argv[4],
+    "dmg": sys.argv[2],
+    "event": sys.argv[1],
+    "mount_point": sys.argv[3],
+}, sort_keys=True))
+PY
+)"
+  printf '%s\n' "$event_json"
+  if [[ -n "${DMG_EVIDENCE_FILE:-}" ]]; then
+    printf '%s\n' "$event_json" >> "$DMG_EVIDENCE_FILE"
+  fi
+}
 resolve_device_for_mount() {
   hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
@@ -38,7 +61,7 @@ for entity in entities:
 cleanup() {
   original_status=$?
   cleanup_failed=false
-  if [[ "$mounted" == true ]]; then
+  if [[ "$mounted" == true || -n "$attached_device" ]]; then
     cleanup_device="$attached_device"
     [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
     if [[ -n "$cleanup_device" ]]; then
@@ -65,6 +88,7 @@ cleanup() {
 trap cleanup EXIT
 
 hdiutil verify "$dmg"
+emit_dmg_event dmg_verify "$dmg" "" ""
 attach_status=0
 attach_attempted=true
 if attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"; then
@@ -121,6 +145,7 @@ fi
   echo "hdiutil attach plist did not resolve an exact device: $dmg" >&2
   exit 1
 }
+emit_dmg_event dmg_attach "$dmg" "$attached_mount" "$attached_device"
 mounted=true
 python3 - "$dmg" "$mount_point" "$attached_device" "$layout_path" <<'PY'
 import hashlib
@@ -156,7 +181,11 @@ if not os.path.islink(applications) or os.readlink(applications) != "/Applicatio
 if set(logical_hidden) & set(layout["icon_locations"]):
     raise SystemExit("hidden DMG resources have Finder icon locations")
 PY
+python3 "$root_dir/scripts/macos/read-ds-store-layout.py" \
+  --store "$mount_point/.DS_Store" \
+  --layout "$layout_path" >/dev/null
 diskutil verifyVolume "$attached_device"
+emit_dmg_event dmg_filesystem_verify "$dmg" "$mount_point" "$attached_device"
 if hdiutil detach "$attached_device"; then
   mounted=false
 else
@@ -164,16 +193,6 @@ else
   echo "failed to detach DMG verification device: $attached_device" >&2
   exit "$detach_status"
 fi
-python3 - "$attached_device" "$dmg" "$mount_point" <<'PY'
-import json
-import sys
-
-print(json.dumps({
-    "device": sys.argv[1],
-    "dmg": sys.argv[2],
-    "event": "dmg_detach",
-    "mount_point": sys.argv[3],
-}, sort_keys=True))
-PY
+emit_dmg_event dmg_detach "$dmg" "$mount_point" "$attached_device"
 attached_device=""
 echo "DMG layout verified: $dmg"

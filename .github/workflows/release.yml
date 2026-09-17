@@ -771,7 +771,8 @@ jobs:
           policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"
           (
             cd "${policy_checkout}"
-            "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"
+            DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl" \
+              "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"
           )
           if [[ "${HELPER_SOURCE_MODE}" == reuse ]]; then
             bash "${policy_checkout}/scripts/macos/verify-component-identity.sh" \
@@ -783,6 +784,12 @@ jobs:
         with:
           name: release-assets
           path: dist/final
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: release-dmg-verification
+          path: ${{ runner.temp }}/dmg-release-events.jsonl
+          if-no-files-found: error
 
   macos-acceptance:
     name: Require macOS RC acceptance for stable

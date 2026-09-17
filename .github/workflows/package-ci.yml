@@ -85,12 +85,20 @@ jobs:
       - if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/arm64/TelevyBackup.app
       - if: needs.classify.outputs.kind == 'source'
+        env:
+          DMG_EVIDENCE_FILE: ${{ runner.temp }}/dmg-layout-arm64-events.jsonl
         run: bash scripts/macos/verify-dmg-layout.sh --dmg "$(find dist/arm64 -maxdepth 1 -name 'TelevyBackup-*-arm64.dmg' -print -quit)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: needs.classify.outputs.kind == 'source'
         with:
           name: package-ci-arm64
           path: dist/arm64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && needs.classify.outputs.kind == 'source'
+        with:
+          name: package-ci-arm64-dmg-verification
+          path: ${{ runner.temp }}/dmg-layout-arm64-events.jsonl
+          if-no-files-found: error
 
   x86_64:
     needs: classify
@@ -142,12 +150,20 @@ jobs:
       - if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/x86_64/TelevyBackup.app
       - if: needs.classify.outputs.kind == 'source'
+        env:
+          DMG_EVIDENCE_FILE: ${{ runner.temp }}/dmg-layout-x86_64-events.jsonl
         run: bash scripts/macos/verify-dmg-layout.sh --dmg "$(find dist/x86_64 -maxdepth 1 -name 'TelevyBackup-*-x86_64.dmg' -print -quit)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: needs.classify.outputs.kind == 'source'
         with:
           name: package-ci-x86_64
           path: dist/x86_64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && needs.classify.outputs.kind == 'source'
+        with:
+          name: package-ci-x86_64-dmg-verification
+          path: ${{ runner.temp }}/dmg-layout-x86_64-events.jsonl
+          if-no-files-found: error
 
   universal2:
     name: Universal 2 assembly
@@ -192,7 +208,8 @@ jobs:
           cp dist/arm64/televybackup-tools-*-arm64.tar.gz dist/final/
           cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
           bash scripts/macos/generate-release-manifest.sh --mode development --asset-dir dist/final --source-commit "$(git rev-parse HEAD)" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
-          bash scripts/macos/verify-release-assets.sh --mode development --asset-dir dist/final --expected-source-commit "$(git rev-parse HEAD)" --expected-packaging-commit "$GITHUB_SHA"
+          DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl" \
+            bash scripts/macos/verify-release-assets.sh --mode development --asset-dir dist/final --expected-source-commit "$(git rev-parse HEAD)" --expected-packaging-commit "$GITHUB_SHA"
       - name: Verify daemon-owned WebDAV service
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-webdav-snapshot-browsing.sh
@@ -201,3 +218,9 @@ jobs:
         with:
           name: package-ci-universal2
           path: dist/final
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && needs.classify.outputs.kind == 'source'
+        with:
+          name: package-ci-universal2-dmg-verification
+          path: ${{ runner.temp }}/dmg-release-events.jsonl
+          if-no-files-found: error

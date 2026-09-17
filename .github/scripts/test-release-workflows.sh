@@ -196,6 +196,8 @@ if [[ "$release_text" == *"gh release upload \"\${PRODUCT_TAG}\" release-assets/
   exit 1
 fi
 assert_contains "release regular-file collection" "$release_text" "find release-assets -maxdepth 1 -type f"
+assert_contains "release DMG evidence upload" "$release_text" "name: release-dmg-verification"
+assert_contains "release DMG evidence binding" "$release_text" 'DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl"'
 assert_not_contains "source PR release comment step" "$release_text" "Upsert PR release version comment"
 assert_not_contains "source PR release comment marker" "$release_text" "televybackup-release-version-comment"
 assert_not_contains "source PR lookup" "$release_text" "/commits/\${TARGET_INPUT}/pulls"

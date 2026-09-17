@@ -172,7 +172,7 @@ cleanup() {
       cleanup_failed=true
     fi
   fi
-  if [[ "$mounted" == true ]]; then
+  if [[ "$mounted" == true || -n "$attached_device" ]]; then
     cleanup_device="$attached_device"
     [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
     if [[ -n "$cleanup_device" ]]; then

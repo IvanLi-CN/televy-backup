@@ -66,7 +66,8 @@ print(digest.hexdigest())
 PY
 }
 emit_dmg_event() {
-  python3 - "$@" <<'PY'
+  local event_json
+  event_json="$(python3 - "$@" <<'PY'
 import json
 import sys
 
@@ -78,6 +79,11 @@ print(json.dumps({
     "mount_point": mount_point,
 }, sort_keys=True))
 PY
+)"
+  printf '%s\n' "$event_json"
+  if [[ -n "${DMG_EVIDENCE_FILE:-}" ]]; then
+    printf '%s\n' "$event_json" >> "$DMG_EVIDENCE_FILE"
+  fi
 }
 resolve_device_for_mount() {
   hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
@@ -443,7 +449,7 @@ verify_dmg_helper_identity() (
   cleanup() {
     original_status=$?
     cleanup_failed=false
-    if [[ "$mounted" == true ]]; then
+    if [[ "$mounted" == true || -n "$attached_device" || -n "${ATTACHED_DEVICE:-}" ]]; then
       cleanup_device="$attached_device"
       [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
       [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
@@ -470,6 +476,7 @@ verify_dmg_helper_identity() (
   }
   trap cleanup EXIT
   hdiutil verify "$local_dmg"
+  emit_dmg_event dmg_verify "$local_dmg" "$mount_point" ""
   attach_dmg_readonly "$local_dmg" "$mount_point"
   attached_device="$ATTACHED_DEVICE"
   mounted=true
@@ -565,6 +572,7 @@ require(component["protocol_version"] == metadata["protocolVersion"], "Snapshot 
 PY
   fi
   diskutil verifyVolume "$attached_device"
+  emit_dmg_event dmg_filesystem_verify "$local_dmg" "$mount_point" "$attached_device"
   detach_dmg_exact "$local_dmg" "$mount_point" "$attached_device"
   mounted=false
   attached_device=""
@@ -583,7 +591,7 @@ check_dmg_layout() {
   cleanup() {
     original_status=$?
     cleanup_failed=false
-    if [[ "$mounted" == true ]]; then
+    if [[ "$mounted" == true || -n "$attached_device" || -n "${ATTACHED_DEVICE:-}" ]]; then
       cleanup_device="$attached_device"
       [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
       [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
@@ -610,6 +618,7 @@ check_dmg_layout() {
   }
   trap cleanup RETURN
   hdiutil verify "$dmg"
+  emit_dmg_event dmg_verify "$dmg" "$mount_point" ""
   attach_dmg_readonly "$dmg" "$mount_point"
   attached_device="$ATTACHED_DEVICE"
   mounted=true
@@ -661,6 +670,10 @@ if not os.path.islink(applications) or os.readlink(applications) != "/Applicatio
 if set(logical_hidden) & set(layout["icon_locations"]):
     raise SystemExit("hidden DMG resources have Finder icon locations")
 PY
+  python3 "$root_dir/scripts/macos/read-ds-store-layout.py" \
+    --store "$mount_point/.DS_Store" \
+    --layout "$root_dir/assets/brand/macos/dmg/layout.json" >/dev/null
+  emit_dmg_event dmg_filesystem_verify "$dmg" "$mount_point" "$attached_device"
   detach_dmg_exact "$dmg" "$mount_point" "$attached_device"
   mounted=false
   attached_device=""

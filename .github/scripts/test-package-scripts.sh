@@ -265,7 +265,7 @@ grep -F 'attach_completed=false' <<<"$layout_verify_text" >/dev/null || {
   echo "DMG layout verification must track attach completion separately from cleanup" >&2
   exit 1
 }
-grep -F 'if [[ "$mounted" == true ]]' <<<"$layout_verify_text" >/dev/null || {
+grep -F 'if [[ "$mounted" == true || -n "$attached_device" ]]' <<<"$layout_verify_text" >/dev/null || {
   echo "DMG layout cleanup must only resolve devices while a mount may remain" >&2
   exit 1
 }
@@ -281,7 +281,8 @@ if 'mounted=false\nhdiutil detach "$attached_device"' in pathlib.Path(sys.argv[1
     raise SystemExit("DMG layout verification must not clear mount state before detach")
 PY
 for cleanup_text in "$verify_release_text" "$finder_text"; do
-  grep -F 'if [[ "$mounted" == true ]]' <<<"$cleanup_text" >/dev/null || {
+  grep -F 'if [[ "$mounted" == true' <<<"$cleanup_text" >/dev/null &&
+    grep -F -- '-n "$attached_device"' <<<"$cleanup_text" >/dev/null || {
     echo "DMG cleanup must only resolve devices while a mount may remain" >&2
     exit 1
   }
@@ -393,6 +394,32 @@ grep -F 'os.path.islink(background_path)' <<<"$verify_release_text" >/dev/null |
   echo "DMG verification must reject symlinked background resources" >&2
   exit 1
 }
+grep -F 'read-ds-store-layout.py' <<<"$verify_release_text" >/dev/null || {
+  echo "release DMG verification must read back Finder geometry from .DS_Store" >&2
+  exit 1
+}
+grep -F 'read-ds-store-layout.py' <<<"$layout_verify_text" >/dev/null || {
+  echo "DMG layout verification must read back Finder geometry from .DS_Store" >&2
+  exit 1
+}
+grep -F 'DMG_EVIDENCE_FILE' <<<"$verify_release_text" >/dev/null || {
+  echo "release DMG verification must support persisted machine-readable evidence" >&2
+  exit 1
+}
+grep -F 'DMG_EVIDENCE_FILE' <<<"$layout_verify_text" >/dev/null || {
+  echo "DMG layout verification must support persisted machine-readable evidence" >&2
+  exit 1
+}
+for event_name in dmg_verify dmg_attach dmg_filesystem_verify dmg_detach; do
+  grep -F "emit_dmg_event $event_name" <<<"$layout_verify_text" >/dev/null || {
+    echo "DMG layout verification must persist $event_name evidence" >&2
+    exit 1
+  }
+  grep -F "emit_dmg_event $event_name" <<<"$verify_release_text" >/dev/null || {
+    echo "release DMG verification must persist $event_name evidence" >&2
+    exit 1
+  }
+done
 package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
 [[ "$(grep -Fc 'verify-dmg-layout.sh' <<<"$package_workflow_text")" -ge 2 ]] || {
   echo "native package CI jobs must expose the shared DMG layout verifier" >&2
@@ -412,6 +439,10 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
 }
 grep -F 'runner.arch' <<<"$package_workflow_text" >/dev/null || {
   echo "package dependency cache must be architecture-specific" >&2
+  exit 1
+}
+[[ "$(grep -Fc 'if-no-files-found: error' <<<"$package_workflow_text")" -ge 3 ]] || {
+  echo "package matrix must upload persisted DMG verification evidence" >&2
   exit 1
 }
 [[ "$(grep -Fc '${{ runner.os }}-ARM64-cargo-macos-' <<<"$package_workflow_text")" -eq 0 && "$(grep -Fc '${{ runner.os }}-X64-cargo-macos-' <<<"$package_workflow_text")" -eq 0 ]] || {

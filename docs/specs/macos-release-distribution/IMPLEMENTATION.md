@@ -43,6 +43,7 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - shared testbox full-feature Rust validation
 - pinned `dmgbuild==1.6.7` settings, checked-in deterministic overlay/background bitmap digests (with the Swift generator retained for asset maintenance), semantic layout digest, hidden-resource allowlist, and native/Universal DMG parity
 - final UDZO `hdiutil verify`, `diskutil verifyVolume`, plist attach, exact-device detach, and post-compression readback
+- mounted Finder geometry readback from `.DS_Store`, plus persisted JSONL verify/attach/filesystem-verify/detach events for package and release artifacts
 - controlled Finder acceptance on macOS 15 and the current supported macOS with scoped first-open screenshots
 
 The controlled acceptance entrypoint is `scripts/macos/finder-dmg-acceptance.sh`. It is intentionally
