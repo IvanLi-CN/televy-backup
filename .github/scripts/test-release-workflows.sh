@@ -265,12 +265,14 @@ assert_contains "completion workflow dispatch input" "$completion_text" "pr_numb
 assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${pr_number}'
 assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/${EXPECTED_HEAD_REF}'
 assert_contains "completion dispatch trusted checkout" "$completion_text" 'git rev-parse refs/remotes/origin/main'
+assert_contains "completion dispatch head SHA validation" "$completion_text" 'test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"'
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
 assert_contains "preparation trusted main resolver" "$preparation_text" 'main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '\''.object.sha'\'')"'
 assert_contains "preparation immutable policy checkout" "$preparation_text" 'ref: ${{ steps.trusted-main.outputs.sha }}'
 assert_contains "prepared-head gates use prepared ref" "$preparation_text" '--ref "${HEAD_REF}"'
 assert_not_contains "prepared-head gates dispatch to main" "$preparation_text" "--ref main"
 assert_contains "existing preparation verification source" "$preparation_text" 'SOURCE_SHA: ${{ steps.prepare.outputs.source_sha }}'
+assert_contains "preparation dispatch head SHA validation" "$preparation_text" 'test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"'
 assert_contains "label dispatch trusted main resolver" "$label_gate_text" 'main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '\''.object.sha'\'')"'
 assert_contains "label dispatch head verification" "$label_gate_text" '"${GITHUB_SHA}"'
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'

@@ -137,6 +137,16 @@ jobs:
             echo "release_action=$(printf '%s' "${intent_json}" | jq -r .action)"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Verify workflow dispatch targets current pull request head
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          EXPECTED_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = "refs/heads/${EXPECTED_HEAD_REF}"
+          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
+
       - name: Reserve final-tag-first release identity
         id: reserve
         if: steps.pr.outputs.release_action != 'skip' && steps.pr.outputs.source_checks_ready == 'true'

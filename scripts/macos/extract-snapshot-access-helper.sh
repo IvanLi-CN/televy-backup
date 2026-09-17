@@ -16,6 +16,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -s "$dmg" && -n "$output_dir" ]] || usage
+root_dir="$(git rev-parse --show-toplevel)"
+path_safety_checker="$root_dir/scripts/macos/reject-symlink-components.py"
+reject_symlink_components() {
+  python3 "$path_safety_checker" "$1"
+}
+reject_symlink_components "$dmg"
+reject_symlink_components "$output_dir"
 mkdir -p "$output_dir"
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-snapshot-helper.XXXXXX")"

@@ -84,9 +84,11 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           EXPECTED_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -euo pipefail
           test "${GITHUB_REF}" = "refs/heads/${EXPECTED_HEAD_REF}"
+          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
           test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
 
       - name: Verify VERSION and release completion

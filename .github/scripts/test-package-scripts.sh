@@ -314,6 +314,18 @@ grep -F 'verify-dmg-layout.sh' <<<"$assemble_text" >/dev/null || {
 }
 finder_text="$(<"$root_dir/scripts/macos/finder-dmg-acceptance.sh")"
 extract_helper_text="$(<"$root_dir/scripts/macos/extract-snapshot-access-helper.sh")"
+grep -F 'path_safety_checker="$root_dir/scripts/macos/reject-symlink-components.py"' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must use the shared path safety checker" >&2
+  exit 1
+}
+grep -F 'reject_symlink_components "$dmg"' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must reject symlinked DMG paths" >&2
+  exit 1
+}
+grep -F 'reject_symlink_components "$output_dir"' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must reject symlinked output paths" >&2
+  exit 1
+}
 grep -F 'hdiutil attach -plist' <<<"$extract_helper_text" >/dev/null || {
   echo "Snapshot Access extraction must use machine-readable attach output" >&2
   exit 1
