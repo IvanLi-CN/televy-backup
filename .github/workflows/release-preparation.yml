@@ -52,7 +52,9 @@ jobs:
       - name: Checkout trusted release policy
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: main
+          # Manual allocation must execute the policy revision that is being
+          # prepared; workflow_run events remain pinned to trusted main.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'main' }}
           fetch-depth: 0
           persist-credentials: false
 
