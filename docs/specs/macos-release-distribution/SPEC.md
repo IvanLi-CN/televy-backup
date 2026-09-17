@@ -6,9 +6,9 @@
 
 ## Context and Scope
 
-This topic owns the macOS distribution surface for TelevyBackup: three GUI DMGs, native arm64 and x86_64 tool archives, Universal 2 binaries, checksums, build manifests, the product-managed per-user daemon service, and the private user APFS Snapshot Access helper embedded in the product app.
+This topic owns the macOS distribution surface for TelevyBackup: three GUI DMGs, native arm64 and x86_64 tool archives, Universal 2 binaries, checksums, build manifests, the Homebrew GUI Cask, the product-managed per-user daemon service, and the private user APFS Snapshot Access helper embedded in the product app.
 
-It does not own backup formats, Telegram protocol behavior, Apple Developer ID signing, notarization, App Store delivery, automatic updates, or Homebrew formula maintenance.
+It does not own backup formats, Telegram protocol behavior, Apple Developer ID signing, notarization, App Store delivery, in-app automatic updates, or maintenance of the legacy Homebrew daemon Formula.
 
 ## Terms
 
@@ -23,6 +23,9 @@ It does not own backup formats, Telegram protocol behavior, Apple Developer ID s
 - **Environment**: the exact config and data directory pair passed to the daemon.
 - **Universal 2**: a Mach-O binary containing both arm64 and x86_64 slices.
 - **Brand bundle**: the compiled `Assets.car` App Icon catalog, the `TelevyBackup.icns` compatibility fallback, and the three runtime SVGs under `Contents/Resources/Brand`.
+- **Homebrew Tap**: this product repository when consumed by Homebrew as a source of package definitions.
+- **TelevyBackup Cask**: the tap-root GUI installation definition for the stable `TelevyBackup.app` release.
+- **Cask Release**: the latest stable `prod` Product Release Identity represented by the TelevyBackup Cask.
 
 ## Requirements
 
@@ -153,6 +156,28 @@ The final UDZO MUST pass `hdiutil verify`, `diskutil verifyVolume`, and a read-o
 roundtrip. Release CI MUST NOT generate background imagery online or use Finder AppleScript to
 construct the artifact.
 
+### REQ-MRD-012: Homebrew Cask distribution
+
+The product repository MUST also serve as the Homebrew Tap. Its only GUI Cask definition MUST be
+`Casks/televybackup.rb` at the repository root; GUI Cask definitions MUST NOT be duplicated under
+`packaging/homebrew/`. The Cask MUST track only the latest stable `prod` release and MUST use that
+release's Universal 2 DMG, version, and SHA-256 from `SHA256SUMS`. It MUST declare macOS 15 or newer
+and install only the prod `TelevyBackup.app` bundle with bundle id `com.ivan.televybackup`.
+
+The Cask MUST leave the normal Homebrew/macOS quarantine flow intact and MUST explain the manual
+Gatekeeper confirmation required for the ad-hoc signed, non-notarized app. It MUST NOT remove
+quarantine, run privileged commands, install or control a daemon/service/helper, request FDA, or
+remove configuration, Keychain entries, or backup data on uninstall.
+
+After publishing a stable GitHub Release, a trusted workflow MUST generate the Cask from that
+Release's immutable `SHA256SUMS` and `BUILD-MANIFEST.json`, create or update a same-repository PR,
+and use only the GitHub Actions-provided `GITHUB_TOKEN`; no PAT, GitHub App, fine-grained token, or
+repository secret may be required. The PR MUST receive the channel-free `type:docs` label and MUST
+run the normal required repository checks plus the dedicated Homebrew Cask audit, including release
+asset checksum and bundle-identity verification. The trusted workflow MUST merge only after all
+exact-head checks succeed, using a head-SHA-constrained squash merge. The Cask audit workflow
+remains read-only and a manual retry MUST never mutate the published Release.
+
 ## Compatibility
 
 The `v0.9.0` backfill is built from source commit `0f283ce8ccbc30c56728c1d6c0366b76d8972772` and may only add packaging metadata and a manual LaunchAgent template. Full service commands, GUI switch, and version interfaces begin with the next patch release. Existing Homebrew services remain detectable for a migration warning but are not maintained by this topic.
@@ -210,6 +235,15 @@ Covers: REQ-MRD-011. Shared builder settings, manifest layout metadata, package 
 UDIF/filesystem verification, hidden-resource readback, and controlled Finder acceptance on
 macOS 15 and the current supported macOS provide the evidence.
 
+### VER-MRD-010: Homebrew Cask release
+
+Covers: REQ-MRD-012. The Cask renderer rejects prerelease versions and mismatched release manifests
+or checksums. The Homebrew Cask workflow runs Ruby syntax validation and `brew audit --cask`, then
+downloads the referenced Universal 2 DMG, verifies its SHA-256 and manifest, inspects its prod
+bundle id and macOS minimum version, and confirms both architectures are present. The post-release
+workflow contract verifies the built-in-token-only same-repository PR path, explicit check dispatch,
+exact-head polling, and guarded squash merge.
+
 ## Verification Map
 
 | Requirement | Verification |
@@ -223,6 +257,7 @@ macOS 15 and the current supported macOS provide the evidence.
 | REQ-MRD-010 | package verifier; CLI Snapshot Access transaction tests; LaunchAgent plist inspection |
 | REQ-MRD-010 authorization continuity | controlled macOS 15 RC1/RC2 migration and protected-source FDA acceptance |
 | REQ-MRD-011 | shared dmgbuild layout; manifest and package verifier; UDIF/filesystem roundtrip; Finder acceptance |
+| REQ-MRD-012 | generated root Cask; built-in-token same-repository PR and guarded merge; read-only Homebrew audit and downloaded-asset verification |
 
 ## Related ADRs
 
@@ -231,6 +266,7 @@ macOS 15 and the current supported macOS provide the evidence.
 - [0010-identity-stable-single-product-release](../../adr/0010-identity-stable-single-product-release.md)
 - [0012-helper-bootstrap-state](../../adr/0012-helper-bootstrap-state.md)
 - [0014-macos-dmg-guided-layout](../../adr/0014-macos-dmg-guided-layout.md)
+- [0015-single-repository-homebrew-cask](../../adr/0015-single-repository-homebrew-cask.md)
 
 ## Visual Evidence
 

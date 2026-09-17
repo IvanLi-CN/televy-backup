@@ -15,6 +15,7 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 | Snapshot Access and mount services | `crates/snapshot-helper/`, `crates/cli/src/snapshot_service.rs`, `crates/cli/src/snapshot_mount_service.rs` | REQ-MRD-010 |
 | GUI service control | `macos/TelevyBackupApp/SettingsWindow.swift` | REQ-MRD-007 |
 | Release orchestration | `.github/workflows/release.yml`, `.github/workflows/release-completion.yml`, `.github/scripts/release_helper.py`, `.github/scripts/verify-macos-rc-acceptance.py` | REQ-MRD-008, REQ-MRD-010; see `product-version-release-chain` for the current VERSION-only contract |
+| Homebrew GUI Cask | `Casks/televybackup.rb`, `scripts/homebrew/cask_release.py`, `.github/workflows/homebrew-cask.yml` | REQ-MRD-012 |
 
 ## Required Evidence
 
@@ -44,6 +45,8 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - pinned `dmgbuild==1.6.7` settings, checked-in deterministic overlay/background bitmap digests (with the Swift generator retained for asset maintenance), semantic layout digest, hidden-resource allowlist, and native/Universal DMG parity
 - final UDZO `hdiutil verify`, `diskutil verifyVolume`, plist attach, exact-device detach, and post-compression readback
 - mounted Finder geometry readback from `.DS_Store`, plus persisted JSONL verify/attach/filesystem-verify/detach events for package and release artifacts
+- Homebrew Cask rendering and stable-release manifest/checksum fixtures; `brew audit --cask --strict`; downloaded Release DMG checksum, bundle-id, minimum-macOS, and Universal 2 checks
+- built-in-token same-repository Cask PR and guarded squash merge using the published `SHA256SUMS` and `BUILD-MANIFEST.json`; no PAT, App, or repository secret
 - controlled Finder acceptance on macOS 15 and the current supported macOS with scoped first-open screenshots
 - protected acceptance records name one `macos-15` and one `current` platform; each distinct screenshot
   is uploaded to the RC2 Release and downloaded, type-checked, and SHA-256 verified by the stable gate
