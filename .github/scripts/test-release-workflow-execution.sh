@@ -109,7 +109,10 @@ if [[ "$1" == release && "$2" == create ]]; then
   fi
   exit 0
 fi
-if [[ "$1" == release && "$2" == upload ]]; then exit 0; fi
+if [[ "$1" == release && "$2" == upload ]]; then
+  printf '%s\n' "$*" >> "$state_dir/uploads"
+  exit 0
+fi
 if [[ "$1" == release && "$2" == edit ]]; then
   tag="$3"
   printf '{"tag_name":"%s","draft":false,"prerelease":%s}\n' "$tag" \
@@ -161,6 +164,22 @@ rm -f "$tmp_dir/state/$published_tag.created"
   export RELEASE_SHA="$release_sha" RELEASE_STATE=published BOUND_IDENTITY=present
   bash "$tmp_dir/release.sh"
   [[ ! -f "$tmp_dir/state/$published_tag.created" ]]
+)
+
+draft_tag="v1.2.5"
+draft_asset_digest="$(shasum -a 256 "$repo_dir/release-assets/asset.txt" | awk '{print $1}')"
+printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[{"name":"asset.txt","digest":"sha256:%s"}]}\n' \
+  "$draft_tag" "$draft_asset_digest" > "$tmp_dir/state/$draft_tag"
+rm -f "$tmp_dir/state/uploads"
+(
+  cd "$repo_dir"
+  export PATH="$bin_dir:$PATH"
+  export GH_FIXTURE_REPO="$repo_dir" GH_FIXTURE_STATE="$tmp_dir/state"
+  export GITHUB_REPOSITORY=fixture/repo GITHUB_API_URL=https://fixture.invalid GH_TOKEN=fixture
+  export PRODUCT_TAG="$draft_tag" PRODUCT_VERSION=1.2.5 PRODUCT_CHANNEL=prod
+  export RELEASE_SHA="$release_sha" RELEASE_STATE=draft BOUND_IDENTITY=present
+  bash "$tmp_dir/release.sh"
+  [[ ! -f "$tmp_dir/state/uploads" ]]
 )
 
 echo "release workflow execution fixture tests passed"

@@ -129,7 +129,12 @@ reject_symlink_components "$helper_binary"
   echo "Snapshot Access extraction requires a real helper executable" >&2
   exit 1
 }
-ditto "$helper_path" "$output_dir/TelevyBackup Snapshot Access.app"
+output_helper="$output_dir/TelevyBackup Snapshot Access.app"
+[[ ! -e "$output_helper" && ! -L "$output_helper" ]] || {
+  echo "Snapshot Access extraction refuses an existing output helper path: $output_helper" >&2
+  exit 1
+}
+ditto "$helper_path" "$output_helper"
 python3 - "$attached_device" "$dmg" "$mount_point" <<'PY'
 import json
 import sys

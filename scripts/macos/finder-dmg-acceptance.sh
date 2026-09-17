@@ -380,12 +380,6 @@ print(json.dumps(review, sort_keys=True))
 PY
 )"
 
-if [[ -n "$rc2_tag" ]]; then
-  gh release upload "$rc2_tag" "$finder_screenshot" \
-    --repo "$GITHUB_REPOSITORY" \
-    --clobber
-fi
-
 defaults write com.apple.finder AppleShowAllFiles -bool true
 finder_was_visible_changed=true
 killall Finder >/dev/null 2>&1 || true
@@ -507,4 +501,9 @@ print(json.dumps({
     "screenshot_sha256": sys.argv[9],
 }, sort_keys=True))
 PY
+if [[ -n "$rc2_tag" ]]; then
+  gh release upload "$rc2_tag" "$finder_screenshot" \
+    --repo "$GITHUB_REPOSITORY" \
+    --clobber
+fi
 echo "Finder DMG acceptance evidence: $evidence_dir"

@@ -1034,7 +1034,34 @@ jobs:
                 echo "release_state_conflict: Release became published before asset upload" >&2
                 exit 1
               fi
-              gh release upload "${PRODUCT_TAG}" "${release_files[@]}"
+              upload_missing_release_assets() {
+                local asset asset_name expected_digest existing_count existing_digest release_assets
+                release_assets="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)" || {
+                  printf '%s\n' "${release_assets}" >&2
+                  echo "release_state_conflict: unable to read draft Release assets" >&2
+                  return 1
+                }
+                while IFS= read -r -d '' asset; do
+                  asset_name="$(basename "${asset}")"
+                  expected_digest="$(shasum -a 256 "${asset}" | awk '{print $1}')"
+                  existing_count="$(printf '%s' "${release_assets}" | jq --arg name "${asset_name}" '[.assets[]? | select(.name == $name)] | length')"
+                  if [[ "${existing_count}" != 0 && "${existing_count}" != 1 ]]; then
+                    echo "release_state_conflict: duplicate Release assets named ${asset_name}" >&2
+                    return 1
+                  fi
+                  if [[ "${existing_count}" == 1 ]]; then
+                    existing_digest="$(printf '%s' "${release_assets}" | jq -r --arg name "${asset_name}" '.assets[] | select(.name == $name) | .digest // empty')"
+                    if [[ "${existing_digest}" != "sha256:${expected_digest}" ]]; then
+                      echo "release_state_conflict: existing asset digest mismatch for ${asset_name}" >&2
+                      return 1
+                    fi
+                    echo "reusing matching draft Release asset ${asset_name}"
+                  else
+                    gh release upload "${PRODUCT_TAG}" "${asset}"
+                  fi
+                done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
+              }
+              upload_missing_release_assets
               final_release=""
               if ! final_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
                 printf '%s\n' "${final_release}" >&2

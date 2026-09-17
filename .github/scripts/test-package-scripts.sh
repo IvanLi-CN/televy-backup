@@ -346,6 +346,11 @@ grep -F 'reject_symlink_components "$helper_path"' <<<"$extract_helper_text" >/d
   echo "Snapshot Access extraction must reject symlinked helper components" >&2
   exit 1
 }
+grep -F 'output_helper="$output_dir/TelevyBackup Snapshot Access.app"' <<<"$extract_helper_text" >/dev/null &&
+  grep -F '[[ ! -e "$output_helper" && ! -L "$output_helper" ]]' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must reject an existing output helper path" >&2
+  exit 1
+}
 grep -F 'gh release upload "$rc2_tag" "$finder_screenshot"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must upload newly captured screenshots to RC2" >&2
   exit 1
