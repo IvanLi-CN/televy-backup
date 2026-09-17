@@ -8,6 +8,7 @@ import hashlib
 import json
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -199,8 +200,10 @@ def verify_dmg(dmg: Path, version: str, checksums_path: Path, manifest_path: Pat
     if actual_digest != expected_digest:
         raise CaskReleaseError("downloaded DMG SHA-256 does not match SHA256SUMS")
     command_output(["hdiutil", "verify", str(dmg)])
-    with tempfile.TemporaryDirectory(prefix="televybackup-cask-") as directory:
-        mount_point = Path(directory)
+    directory = Path(tempfile.mkdtemp(prefix="televybackup-cask-"))
+    mount_point = directory.resolve()
+    device: str | None = None
+    try:
         try:
             attach = command_output(
                 [
@@ -224,6 +227,17 @@ def verify_dmg(dmg: Path, version: str, checksums_path: Path, manifest_path: Pat
                 ),
                 None,
             )
+            if not isinstance(device, str):
+                device = next(
+                    (
+                        entity.get("dev-entry")
+                        for entity in entities
+                        if entity.get("dev-entry")
+                        and isinstance(entity.get("mount-point"), str)
+                        and Path(entity["mount-point"]).resolve() == mount_point
+                    ),
+                    None,
+                )
             if not isinstance(device, str):
                 raise CaskReleaseError("hdiutil did not return the exact mounted device")
             app = mount_point / "TelevyBackup.app"
@@ -257,8 +271,14 @@ def verify_dmg(dmg: Path, version: str, checksums_path: Path, manifest_path: Pat
                 )
             )
         finally:
-            if "device" in locals() and isinstance(device, str):
-                command_output(["hdiutil", "detach", device])
+            detach_target = device or str(mount_point)
+            try:
+                command_output(["hdiutil", "detach", detach_target])
+            except CaskReleaseError:
+                if device is not None:
+                    raise
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def main(argv: list[str] | None = None) -> int:

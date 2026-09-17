@@ -33,6 +33,72 @@ python3 "$root_dir/scripts/homebrew/cask_release.py" verify-cask \
   --version "$version" \
   --checksums "$tmp_dir/SHA256SUMS" \
   --manifest "$tmp_dir/BUILD-MANIFEST.json"
+
+fake_bin="$tmp_dir/fake-bin"
+mkdir -p "$fake_bin"
+cat > "$fake_bin/hdiutil" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  verify)
+    exit 0
+    ;;
+  attach)
+    mount_point=""
+    while (($#)); do
+      case "$1" in
+        -mountpoint) mount_point="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    mkdir -p "$mount_point/TelevyBackup.app/Contents/MacOS"
+    cat > "$mount_point/TelevyBackup.app/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.ivan.televybackup</string>
+<key>CFBundleExecutable</key><string>TelevyBackup</string>
+<key>LSMinimumSystemVersion</key><string>15.0</string>
+</dict></plist>
+PLIST
+    touch "$mount_point/TelevyBackup.app/Contents/MacOS/TelevyBackup"
+    alias_mount_point="$mount_point/../$(basename "$mount_point")"
+    printf '%s\n' "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict><key>system-entities</key><array><dict><key>dev-entry</key><string>/dev/disk-test</string><key>mount-point</key><string>$alias_mount_point</string></dict></array></dict></plist>"
+    ;;
+  detach)
+    target="$2"
+    [[ "$target" == /dev/disk-test || "$target" == /private/* || "$target" == /var/* ]]
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+SH
+chmod +x "$fake_bin/hdiutil"
+cat > "$fake_bin/lipo" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "-info" ]]
+printf 'Architectures in the fat file: arm64 x86_64\n'
+SH
+chmod +x "$fake_bin/lipo"
+printf 'fixture' > "$tmp_dir/$dmg_name"
+fixture_digest="$(python3 - "$tmp_dir/$dmg_name" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+printf '%s  %s\n' "$fixture_digest" "$dmg_name" > "$tmp_dir/fixture-SHA256SUMS"
+printf '%s\n' "{\"architectures\":[\"arm64\",\"x86_64\",\"universal2\"],\"assets\":[{\"name\":\"$dmg_name\",\"sha256\":\"$fixture_digest\",\"bytes\":7}],\"product\":\"TelevyBackup\",\"release_version\":\"$version\"}" > "$tmp_dir/fixture-BUILD-MANIFEST.json"
+PATH="$fake_bin:$PATH" python3 "$root_dir/scripts/homebrew/cask_release.py" verify-dmg \
+  --dmg "$tmp_dir/$dmg_name" \
+  --version "$version" \
+  --checksums "$tmp_dir/fixture-SHA256SUMS" \
+  --manifest "$tmp_dir/fixture-BUILD-MANIFEST.json"
+
 printf '56180c32798b74be199c3bcbbef0f025107fd93859651f81aef80d1770a7ced8  TelevyBackup-0.9.8.dmg\n' > "$tmp_dir/stable-SHA256SUMS"
 printf '%s\n' '{"architectures":["arm64","x86_64","universal2"],"assets":[{"name":"TelevyBackup-0.9.8.dmg","sha256":"56180c32798b74be199c3bcbbef0f025107fd93859651f81aef80d1770a7ced8","bytes":1}],"product":"TelevyBackup","release_version":"0.9.8"}' > "$tmp_dir/stable-BUILD-MANIFEST.json"
 python3 "$root_dir/scripts/homebrew/cask_release.py" render \
