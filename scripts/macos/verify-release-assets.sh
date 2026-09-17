@@ -24,6 +24,7 @@ done
   exit 2
 }
 root_dir="$(git rev-parse --show-toplevel)"
+metadata_verifier="$root_dir/scripts/macos/verify-dmg-metadata.py"
 prepare_evidence_path() {
   local path="$1"
   [[ ! -L "$path" ]] || {
@@ -610,6 +611,10 @@ PY
 )
 check_dmg_layout() {
   local dmg="$1"
+  local image_info_path
+  local filesystem_info_path
+  image_info_path="$(mktemp "${TMPDIR:-/tmp}/televybackup-dmg-image-info.XXXXXX")"
+  filesystem_info_path="$(mktemp "${TMPDIR:-/tmp}/televybackup-dmg-filesystem-info.XXXXXX")"
   local mount_point
   mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-verify.XXXXXX")"
   mount_point="$(cd "$mount_point" && pwd -P)"
@@ -640,17 +645,25 @@ check_dmg_layout() {
       echo "failed to remove DMG layout verification mount point: $mount_point" >&2
       cleanup_failed=true
     fi
+    rm -f "$image_info_path" "$filesystem_info_path"
     if [[ "$cleanup_failed" == true && "$original_status" -eq 0 ]]; then
       exit 1
     fi
   }
   trap cleanup RETURN
+  hdiutil imageinfo -plist "$dmg" > "$image_info_path"
   hdiutil verify "$dmg"
   emit_dmg_event dmg_verify "$dmg" "$mount_point" ""
   attach_dmg_readonly "$dmg" "$mount_point"
   attached_device="$ATTACHED_DEVICE"
   mounted=true
   attach_completed=true
+  diskutil info -plist "$attached_device" > "$filesystem_info_path"
+  python3 "$metadata_verifier" \
+    --image-info "$image_info_path" \
+    --filesystem-info "$filesystem_info_path" \
+    --expected-format UDZO \
+    --expected-filesystem HFS+
   diskutil verifyVolume "$attached_device"
   local top_level_apps=()
   while IFS= read -r app_path; do

@@ -198,6 +198,8 @@ fi
 assert_contains "release regular-file collection" "$release_text" "find release-assets -maxdepth 1 -type f"
 assert_contains "release DMG evidence upload" "$release_text" "name: release-dmg-verification"
 assert_contains "release DMG evidence binding" "$release_text" 'DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl"'
+assert_contains "release Finder screenshot upload" "$release_text" 'gh release upload "${rc2_tag}" "${screenshot_dir}/${screenshot_name}"'
+assert_contains "release product icon verifier" "$release_text" 'policy_verify_app_icon_assets="${policy_checkout}/scripts/macos/verify-app-icon-assets.sh"'
 assert_not_contains "source PR release comment step" "$release_text" "Upsert PR release version comment"
 assert_not_contains "source PR release comment marker" "$release_text" "televybackup-release-version-comment"
 assert_not_contains "source PR lookup" "$release_text" "/commits/\${TARGET_INPUT}/pulls"
@@ -232,6 +234,7 @@ assert_contains "completion GitHub verification fetch" "$completion_text" 'gh ap
 assert_contains "completion GitHub verification SHA gate" "$completion_text" 'jq -e --arg commit "${preparation_sha}"'
 assert_contains "completion GitHub verification status gate" "$completion_text" '.commit.verification.verified == true'
 assert_contains "completion GitHub verification compatibility probe" "$completion_text" 'release_completion.py --help'
+assert_contains "completion trusted module path" "$completion_text" 'sys.path.insert(0, ".github/scripts")'
 assert_contains "completion GitHub verification argument" "$completion_text" "--github-verification-json"
 assert_contains "completion product-only verification selector" "$completion_text" 'product_release='
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
@@ -251,6 +254,7 @@ assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${
 assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/${EXPECTED_HEAD_REF}'
 assert_contains "completion dispatch trusted checkout" "$completion_text" 'git rev-parse refs/remotes/origin/main'
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
+assert_contains "preparation trusted main checkout" "$preparation_text" "ref: main"
 assert_contains "prepared-head gates use prepared ref" "$preparation_text" '--ref "${HEAD_REF}"'
 assert_not_contains "prepared-head gates dispatch to main" "$preparation_text" "--ref main"
 assert_contains "existing preparation verification source" "$preparation_text" 'SOURCE_SHA: ${{ steps.prepare.outputs.source_sha }}'

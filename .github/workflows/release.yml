@@ -770,11 +770,18 @@ jobs:
           # materialized from the exact trusted policy commit.
           cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"
           policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"
+          policy_verify_app_icon_assets="${policy_checkout}/scripts/macos/verify-app-icon-assets.sh"
           (
             cd "${policy_checkout}"
             DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl" \
               "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"
           )
+          bash "${policy_verify_app_icon_assets}" \
+            "${policy_checkout}/assets/brand/macos/TelevyBackup.iconset" \
+            "$GITHUB_WORKSPACE/dist/final/TelevyBackup.app/Contents/Resources/TelevyBackup.icns" \
+            "$GITHUB_WORKSPACE/dist/final/TelevyBackup.app" \
+            "${policy_checkout}/assets/brand/macos/Assets.xcassets" \
+            "${policy_checkout}/assets/brand/macos/previews"
           if [[ "${HELPER_SOURCE_MODE}" == reuse ]]; then
             bash "${policy_checkout}/scripts/macos/verify-component-identity.sh" \
               --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
@@ -870,6 +877,9 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --pattern "${screenshot_name}" \
               --dir "${screenshot_dir}"
+            gh release upload "${rc2_tag}" "${screenshot_dir}/${screenshot_name}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
           done
           rc1_json="$(gh release view "$rc1_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
           rc2_json="$(gh release view "$rc2_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"

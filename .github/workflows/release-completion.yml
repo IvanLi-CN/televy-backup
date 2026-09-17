@@ -249,6 +249,7 @@ jobs:
             --require-github-verification <<'PY'
           import sys
 
+          sys.path.insert(0, ".github/scripts")
           import release_completion
 
           trusted_verify_reservation = release_completion.verify_reservation

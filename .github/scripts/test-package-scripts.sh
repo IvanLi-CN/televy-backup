@@ -22,6 +22,7 @@ bash -n \
   "$root_dir/scripts/macos/generate-app-icon-assets.sh" \
   "$root_dir/scripts/macos/generate-app-icon-previews.sh" \
   "$root_dir/scripts/macos/verify-app-icon-assets.sh"
+python3 -m py_compile "$root_dir/scripts/macos/verify-dmg-metadata.py"
 
 build_text="$(<"$root_dir/scripts/macos/build-app.sh")"
 verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
@@ -106,6 +107,52 @@ grep -F 'detach_dmg_exact' <<<"$verify_release_text" >/dev/null || {
   echo "DMG verification must detach the exact plist-resolved device" >&2
   exit 1
 }
+grep -F 'hdiutil imageinfo -plist' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must inspect the actual image format" >&2
+  exit 1
+}
+grep -F 'verify-dmg-metadata.py' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must inspect attached filesystem metadata" >&2
+  exit 1
+}
+python3 - "$root_dir/scripts/macos/verify-dmg-metadata.py" "$tmp_dir" <<'PY'
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
+
+verifier = Path(sys.argv[1])
+root = Path(sys.argv[2])
+
+def run_case(image_format, filesystem_type, expected):
+    image_info = root / f"image-{image_format}.plist"
+    filesystem_info = root / f"filesystem-{filesystem_type}.plist"
+    with image_info.open("wb") as handle:
+        plistlib.dump({"Format": image_format}, handle)
+    with filesystem_info.open("wb") as handle:
+        plistlib.dump({"FilesystemType": filesystem_type}, handle)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(verifier),
+            "--image-info",
+            str(image_info),
+            "--filesystem-info",
+            str(filesystem_info),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if (result.returncode == 0) != expected:
+        raise SystemExit(
+            f"unexpected DMG metadata result for {image_format}/{filesystem_type}: "
+            f"{result.stdout}{result.stderr}"
+        )
+
+run_case("UDZO", "hfs", True)
+run_case("UDRO", "hfs", False)
+run_case("UDZO", "apfs", False)
+PY
 identity_text="$(<"$root_dir/scripts/macos/verify-component-identity.sh")"
 grep -F 'reference_artifact_sha="$(artifact_sha "$reference" canonical)"' <<<"$identity_text" >/dev/null || {
   echo "component identity verification must compare canonical reference and candidate bundle digests" >&2

@@ -17,8 +17,11 @@ done
 
 root_dir="$(git rev-parse --show-toplevel)"
 layout_path="$root_dir/assets/brand/macos/dmg/layout.json"
+metadata_verifier="$root_dir/scripts/macos/verify-dmg-metadata.py"
 mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-dmg-layout.XXXXXX")"
 mount_point="$(cd "$mount_point" && pwd -P)"
+image_info_path="$(mktemp "${TMPDIR:-/tmp}/televybackup-dmg-image-info.XXXXXX")"
+filesystem_info_path="$(mktemp "${TMPDIR:-/tmp}/televybackup-dmg-filesystem-info.XXXXXX")"
 attached_device=""
 mounted=false
 attach_attempted=false
@@ -105,12 +108,14 @@ cleanup() {
     echo "failed to remove DMG verification mount point: $mount_point" >&2
     cleanup_failed=true
   fi
+  rm -f "$image_info_path" "$filesystem_info_path"
   if [[ "$cleanup_failed" == true && "$original_status" -eq 0 ]]; then
     exit 1
   fi
 }
 trap cleanup EXIT
 
+hdiutil imageinfo -plist "$dmg" > "$image_info_path"
 hdiutil verify "$dmg"
 emit_dmg_event dmg_verify "$dmg" "" ""
 attach_status=0
@@ -212,6 +217,12 @@ PY
 python3 "$root_dir/scripts/macos/read-ds-store-layout.py" \
   --store "$mount_point/.DS_Store" \
   --layout "$layout_path" >/dev/null
+diskutil info -plist "$attached_device" > "$filesystem_info_path"
+python3 "$metadata_verifier" \
+  --image-info "$image_info_path" \
+  --filesystem-info "$filesystem_info_path" \
+  --expected-format UDZO \
+  --expected-filesystem HFS+
 diskutil verifyVolume "$attached_device"
 emit_dmg_event dmg_filesystem_verify "$dmg" "$mount_point" "$attached_device"
 if hdiutil detach "$attached_device"; then
