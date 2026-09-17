@@ -222,6 +222,12 @@ jobs:
               claim_source = claim[len(f"pr:{pr_number}:source:"):-len(suffix)]
               if not re.fullmatch(r"[0-9a-fA-F]{40}", claim_source) or claim_source.lower() != reserved_source.lower():
                   continue
+              subprocess.run(
+                  ["git", "fetch", "--no-tags", "origin", reserved_source],
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  check=False,
+              )
               if subprocess.run(["git", "merge-base", "--is-ancestor", reserved_source, source_sha]).returncode != 0:
                   continue
               print(json.dumps({
