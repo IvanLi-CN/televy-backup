@@ -23,6 +23,31 @@ def required_string(value, name: str) -> str:
     return value
 
 
+def verify_screenshot(screenshot_dir: Path, record: dict, name: str) -> None:
+    screenshot_name = required_string(record.get("screenshot"), f"{name}.screenshot")
+    if (
+        screenshot_name != Path(screenshot_name).name
+        or screenshot_name.startswith(".")
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", screenshot_name)
+    ):
+        fail(f"{name}.screenshot must be a safe release asset basename")
+    expected_digest = required_string(record.get("screenshot_sha256"), f"{name}.screenshot_sha256")
+    if not re.fullmatch(r"[0-9A-Fa-f]{64}", expected_digest):
+        fail(f"{name}.screenshot_sha256 must be a SHA-256 digest")
+    if screenshot_dir.is_symlink() or not screenshot_dir.is_dir():
+        fail("screenshot directory must be a real directory")
+    screenshot_path = screenshot_dir / screenshot_name
+    try:
+        screenshot_stat = screenshot_path.lstat()
+    except FileNotFoundError:
+        fail(f"{name}.screenshot asset is missing")
+    if not stat_module.S_ISREG(screenshot_stat.st_mode):
+        fail(f"{name}.screenshot asset must be a regular file")
+    actual_digest = hashlib.sha256(screenshot_path.read_bytes()).hexdigest()
+    if actual_digest.lower() != expected_digest.lower():
+        fail(f"{name}.screenshot_sha256 does not match the downloaded asset")
+
+
 def requirement_cdhashes(requirement: str, name: str) -> set[str]:
     values = {
         value.lower()
@@ -66,11 +91,12 @@ def equal_identity(first, second, name: str, fields: tuple[str, ...]) -> None:
             fail(f"{name}.{field} changed between RC1 and RC2")
 
 
-def verify_finder_acceptance(evidence, manifest, stable_version: str) -> None:
+def verify_finder_acceptance(evidence, manifest, stable_version: str, screenshot_dir: Path) -> None:
     records = evidence.get("finder_acceptance")
     if not isinstance(records, list) or len(records) != 2:
         fail("finder_acceptance must contain exactly macOS 15 and current-platform records")
     versions = []
+    platforms = []
     layout = manifest.get("dmg_layout")
     if not isinstance(layout, dict):
         fail("BUILD-MANIFEST.json dmg_layout is missing")
@@ -104,6 +130,14 @@ def verify_finder_acceptance(evidence, manifest, stable_version: str) -> None:
             fail(f"{name} must be an object")
         version = required_string(record.get("macos_version"), f"{name}.macos_version")
         versions.append(version)
+        platform = required_string(record.get("platform"), f"{name}.platform")
+        if platform not in {"macos-15", "current"}:
+            fail(f"{name}.platform is invalid")
+        if platform == "macos-15" and not version.startswith("15."):
+            fail(f"{name}.platform macos-15 has a non-macOS-15 version")
+        if platform == "current" and version.startswith("15."):
+            fail(f"{name}.platform current must be distinct from macOS 15")
+        platforms.append(platform)
         if record.get("capture_scope") != "finder-window-only":
             fail(f"{name}.capture_scope must be finder-window-only")
         if record.get("dmg_name") != expected_dmg_name:
@@ -114,8 +148,7 @@ def verify_finder_acceptance(evidence, manifest, stable_version: str) -> None:
             fail(f"{name}.semantic_layout_digest does not match BUILD-MANIFEST.json")
         if record.get("manifest_verified") is not True or record.get("checksums_verified") is not True:
             fail(f"{name} manifest/checksum verification is incomplete")
-        if not required_string(record.get("screenshot"), f"{name}.screenshot"):
-            fail(f"{name}.screenshot is missing")
+        verify_screenshot(screenshot_dir, record, name)
         observation = record.get("finder_observation")
         if not isinstance(observation, dict):
             fail(f"{name}.finder_observation is missing")
@@ -144,8 +177,10 @@ def verify_finder_acceptance(evidence, manifest, stable_version: str) -> None:
             fail(f"{name}.visual_review checklist is incomplete")
         if visual.get("arrow_direction") != "right":
             fail(f"{name}.visual_review arrow direction is invalid")
-    if len(set(versions)) != 2 or not any(version.startswith("15.") for version in versions):
-        fail("finder_acceptance must cover distinct macOS 15 and current-platform versions")
+    if set(platforms) != {"macos-15", "current"} or len(set(versions)) != 2:
+        fail("finder_acceptance must cover one macOS 15 and one current-platform record")
+    if len({record.get("screenshot") for record in records}) != 2:
+        fail("finder_acceptance screenshots must be distinct release assets")
 
 
 def artifact_sha256(path: Path, canonical: bool = True) -> str:
@@ -296,6 +331,7 @@ parser.add_argument("--rc2-manifest")
 parser.add_argument("--rc2-checksums")
 parser.add_argument("--rc2-dmg")
 parser.add_argument("--rc2-source-commit")
+parser.add_argument("--screenshot-dir", required=True)
 args = parser.parse_args()
 
 try:
@@ -319,7 +355,7 @@ if manifest.get("release_version") != args.stable_version:
     fail("BUILD-MANIFEST.json has the wrong stable version")
 if args.stable_source_commit and manifest.get("source_commit") != args.stable_source_commit:
     fail("BUILD-MANIFEST.json source_commit does not match the stable release source")
-verify_finder_acceptance(evidence, manifest, args.stable_version)
+verify_finder_acceptance(evidence, manifest, args.stable_version, Path(args.screenshot_dir))
 
 for field in (
     "legacy_registration_migrated",

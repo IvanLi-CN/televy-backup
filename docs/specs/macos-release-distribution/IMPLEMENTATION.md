@@ -45,6 +45,8 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 - final UDZO `hdiutil verify`, `diskutil verifyVolume`, plist attach, exact-device detach, and post-compression readback
 - mounted Finder geometry readback from `.DS_Store`, plus persisted JSONL verify/attach/filesystem-verify/detach events for package and release artifacts
 - controlled Finder acceptance on macOS 15 and the current supported macOS with scoped first-open screenshots
+- protected acceptance records name one `macos-15` and one `current` platform; each distinct screenshot
+  is uploaded to the RC2 Release and downloaded, type-checked, and SHA-256 verified by the stable gate
 
 The controlled acceptance entrypoint is `scripts/macos/finder-dmg-acceptance.sh`. It is intentionally
 manual-only, requires `TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1` and a JSON

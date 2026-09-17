@@ -219,6 +219,7 @@ assert_contains "merge-group source-check wait budget" "$merge_group_text" 'dead
 assert_contains "merge-group waits for label gate" "$merge_group_text" 'required=("Release intent label gate"'
 assert_contains "merge-group verification fetch" "$merge_group_text" 'gh api "repos/${repository}/commits/${preparation_sha}"'
 assert_contains "merge-group verification argument" "$merge_group_text" "--github-verification-json"
+assert_contains "merge-group reservation source" "$merge_group_text" 'reservationSourceSha // .sourceSha'
 assert_contains "merge-group checks bind to merge head" "$merge_group_text" 'gh api "repos/${repository}/commits/${head_sha}/check-runs?filter=latest&per_page=100"'
 if [[ -z "$poll_line" || -z "$final_pr_line" || -z "$final_checks_line" || -z "$completion_line" || "$poll_line" -ge "$final_pr_line" || "$final_pr_line" -ge "$final_checks_line" || "$final_checks_line" -ge "$completion_line" ]]; then
   printf 'merge-group completion must wait for required checks before validation\n' >&2

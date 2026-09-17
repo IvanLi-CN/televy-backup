@@ -24,8 +24,16 @@ done
   exit 2
 }
 root_dir="$(git rev-parse --show-toplevel)"
+prepare_evidence_path() {
+  local path="$1"
+  [[ ! -L "$path" ]] || {
+    echo "DMG evidence path must not be a symlink: $path" >&2
+    exit 1
+  }
+  rm -f "$path"
+}
 if [[ -n "${DMG_EVIDENCE_FILE:-}" ]]; then
-  : > "$DMG_EVIDENCE_FILE"
+  prepare_evidence_path "$DMG_EVIDENCE_FILE"
 fi
 source_commit="$(git rev-parse HEAD)"
 version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
@@ -682,7 +690,8 @@ expected_background = layout["asset_digests"][layout["composed_background"]]
 actual_background = hashlib.sha256(open(background_path, "rb").read()).hexdigest()
 if actual_background != expected_background:
     raise SystemExit(f"DMG background digest mismatch: {actual_background} != {expected_background}")
-if not os.path.isfile(os.path.join(mount_point, ".DS_Store")):
+store_path = os.path.join(mount_point, ".DS_Store")
+if os.path.islink(store_path) or not os.path.isfile(store_path):
     raise SystemExit("DMG .DS_Store resource is missing")
 applications = os.path.join(mount_point, "Applications")
 if not os.path.islink(applications) or os.readlink(applications) != "/Applications":

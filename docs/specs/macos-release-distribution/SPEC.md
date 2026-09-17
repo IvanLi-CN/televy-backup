@@ -110,6 +110,10 @@ RC helper identities with the final stable manifest. The evidence MUST name the 
 legacy registration migration, exactly one FDA grant, strict backup success on RC1 and RC2 without
 a second grant, and an unchanged root mount helper. Its Snapshot Access and root helper identity
 fields MUST match the final `BUILD-MANIFEST.json`; arbitrary or stale non-JSON values MUST fail.
+Each `finder_acceptance` record MUST identify exactly one `platform` from `macos-15` and `current`,
+use a distinct screenshot basename, and include its SHA-256 digest. The screenshot files MUST be
+uploaded as assets on the RC2 GitHub Release; the stable gate downloads those exact assets into a
+real temporary directory and verifies regular-file type and digest before accepting the evidence.
 RC publication remains available so the real-device test can be performed before the stable gate.
 
 The protected evidence object MUST contain `schema_version: 1`, `product`, `stable_version`,

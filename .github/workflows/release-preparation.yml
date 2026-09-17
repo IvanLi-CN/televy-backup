@@ -139,7 +139,7 @@ jobs:
           if prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${SOURCE_SHA}" --base "${{ steps.pr.outputs.base_sha }}" 2>/dev/null)"; then
             printf '%s\n' "${prepared_json}" > "${RUNNER_TEMP}/reservation.json"
             jq -n \
-              --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r .sourceSha)" \
+              --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')" \
               --arg channel "$(printf '%s' "${prepared_json}" | jq -r .channel | sed 's/^channel://')" \
               --arg version "$(printf '%s' "${prepared_json}" | jq -r .version)" \
               --arg reservation_id "$(printf '%s' "${prepared_json}" | jq -r .reservationId)" \

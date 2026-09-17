@@ -167,6 +167,7 @@ jobs:
           python3 - "${reservation_json}" <<'PY'
           import json
           import pathlib
+          import re
           import sys
           sys.path.insert(0, '.github/scripts')
           import release_reservation
@@ -838,6 +839,34 @@ jobs:
           core_version="${{ needs.resolve.outputs.version }}"
           rc1_tag="v${core_version}-rc.1"
           rc2_tag="v${core_version}-rc.2"
+          screenshot_dir="${RUNNER_TEMP}/finder-acceptance-screenshots"
+          mkdir -p "${screenshot_dir}"
+          mapfile -t screenshot_names < <(python3 - "${ACCEPTANCE_EVIDENCE}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          records = json.loads(sys.argv[1]).get("finder_acceptance")
+          if not isinstance(records, list) or len(records) != 2:
+              raise SystemExit("finder_acceptance must contain exactly two records")
+          names = []
+          for record in records:
+              name = record.get("screenshot") if isinstance(record, dict) else None
+              if (not isinstance(name, str) or not name or name != pathlib.Path(name).name
+                      or name.startswith(".") or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name)):
+                  raise SystemExit("finder acceptance screenshot names must be safe basenames")
+              names.append(name)
+          if len(set(names)) != len(names):
+              raise SystemExit("finder acceptance screenshot names must be distinct")
+          print("\n".join(names))
+          PY
+          )
+          for screenshot_name in "${screenshot_names[@]}"; do
+            gh release download "${rc2_tag}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "${screenshot_name}" \
+              --dir "${screenshot_dir}"
+          done
           rc1_json="$(gh release view "$rc1_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
           rc2_json="$(gh release view "$rc2_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
           python3 - "$rc1_json" "$rc2_json" <<'PY'
@@ -861,7 +890,8 @@ jobs:
             --rc2-manifest release-rc/rc2/BUILD-MANIFEST.json \
             --rc2-checksums release-rc/rc2/SHA256SUMS \
             --rc2-dmg "release-rc/rc2/TelevyBackup-${core_version}-rc.2.dmg" \
-            --rc2-source-commit "$RC2_SOURCE_COMMIT"
+            --rc2-source-commit "$RC2_SOURCE_COMMIT" \
+            --screenshot-dir "$screenshot_dir"
 
   publish:
     name: Publish GitHub Release

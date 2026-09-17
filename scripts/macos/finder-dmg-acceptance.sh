@@ -408,7 +408,9 @@ if tuple(observation["applications_position"]) != expected_applications:
 PY
 acceptance_path="$evidence_dir/acceptance.json"
 prepare_evidence_path "$acceptance_path"
-python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" <<'PY' > "$acceptance_path"
+finder_screenshot="$evidence_dir/finder-window.png"
+finder_screenshot_sha256="$(shasum -a 256 "$finder_screenshot" | awk '{print $1}')"
+python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$finder_screenshot" "$finder_screenshot_sha256" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" <<'PY' > "$acceptance_path"
 import hashlib
 import json
 import pathlib
@@ -473,8 +475,10 @@ print(json.dumps({
         "asset_digest": layout["asset_digests"][layout["composed_background"]],
     },
     "show_all_files": hidden,
-    "macos_version": sys.argv[10],
-    "screenshot": sys.argv[8],
+    "macos_version": sys.argv[11],
+    "platform": "macos-15" if sys.argv[11].startswith("15.") else "current",
+    "screenshot": pathlib.Path(sys.argv[8]).name,
+    "screenshot_sha256": sys.argv[9],
 }, sort_keys=True))
 PY
 echo "Finder DMG acceptance evidence: $evidence_dir"

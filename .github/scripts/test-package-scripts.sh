@@ -315,8 +315,18 @@ grep -F 'rmdir "$mount_point"' <<<"$finder_text" >/dev/null || {
   exit 1
 }
 grep -F 'prepare_evidence_path()' <<<"$finder_text" >/dev/null &&
-  grep -F 'prepare_evidence_path "$finder_json"' <<<"$finder_text" >/dev/null || {
+grep -F 'prepare_evidence_path "$finder_json"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must safely discard stale observation evidence" >&2
+  exit 1
+}
+grep -F 'os.path.islink(store_path)' <<<"$layout_verify_text" >/dev/null &&
+  grep -F 'os.path.islink(store_path)' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verifiers must reject symlinked .DS_Store resources" >&2
+  exit 1
+}
+grep -F 'prepare_evidence_path "$DMG_EVIDENCE_FILE"' <<<"$layout_verify_text" >/dev/null &&
+  grep -F 'prepare_evidence_path "$DMG_EVIDENCE_FILE"' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verifiers must safely initialize evidence paths" >&2
   exit 1
 }
 grep -F 'source_checksums_path="$source_asset_dir/SHA256SUMS"' <<<"$finder_text" >/dev/null || {

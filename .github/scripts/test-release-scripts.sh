@@ -147,6 +147,8 @@ assert "consumed receipt exists without a matching product tag" in release_workf
 assert "macos-release-acceptance" in release_workflow
 assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow
 assert "verify-macos-rc-acceptance.py" in release_workflow
+assert "--screenshot-dir" in release_workflow
+assert "gh release download \"${rc2_tag}\"" in release_workflow
 assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in release_workflow
 assert 'rc1_json="$(gh release view "$rc1_tag"' in release_workflow
 assert 'rc2_json="$(gh release view "$rc2_tag"' in release_workflow
@@ -158,6 +160,7 @@ assert "Assemble and validate final assets" in release_workflow
 assert "reusing descendant-compatible reservation" in (root / ".github/workflows/release-preparation.yml").read_text(encoding="utf-8")
 assert "reservationSourceSha // .sourceSha" in (root / ".github/workflows/release-completion.yml").read_text(encoding="utf-8")
 assert "reservationSourceSha // .sourceSha" in release_workflow
+assert "reservationSourceSha // .sourceSha" in (root / ".github/scripts/merge-group-release-gate.sh").read_text(encoding="utf-8")
 PY
 
 python3 - "$root_dir" <<'PY'
@@ -383,6 +386,7 @@ evidence = {
     "finder_acceptance": [
         {
             "macos_version": "15.7",
+            "platform": "macos-15",
             "capture_scope": "finder-window-only",
             "dmg_name": "TelevyBackup-1.0.0.dmg",
             "dmg_sha256": "",
@@ -415,6 +419,7 @@ evidence = {
         },
         {
             "macos_version": "26.6.2",
+            "platform": "current",
             "capture_scope": "finder-window-only",
             "dmg_name": "TelevyBackup-1.0.0.dmg",
             "dmg_sha256": "",
@@ -450,6 +455,16 @@ evidence = {
 
 with tempfile.TemporaryDirectory() as directory:
     temp = Path(directory)
+    screenshots = {
+        "finder-macos-15.png": b"macOS 15 Finder screenshot fixture\n",
+        "finder-current.png": b"current macOS Finder screenshot fixture\n",
+    }
+    for name, content in screenshots.items():
+        (temp / name).write_bytes(content)
+    for record in evidence["finder_acceptance"]:
+        record["screenshot_sha256"] = hashlib.sha256(
+            (temp / record["screenshot"]).read_bytes()
+        ).hexdigest()
     fake_bin = temp / "bin"
     fake_bin.mkdir()
     hdiutil_path = fake_bin / "hdiutil"
@@ -601,6 +616,7 @@ fi
         "--manifest", str(stable_path), "--stable-version", "1.0.0",
         "--rc1-tag", "v1.0.0-rc.1", "--rc2-tag", "v1.0.0-rc.2",
         "--stable-source-commit", "stable-source", *rc_args,
+        "--screenshot-dir", str(temp),
     ]
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

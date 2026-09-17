@@ -100,7 +100,7 @@ for pr_number in ${pr_numbers}; do
       reservation_json="${RUNNER_TEMP:-/tmp}/merge-group-reservation-${pr_number}.json"
       jq -n \
         --arg ref "$(printf '%s' "${prepared_json}" | jq -r .reservationRef)" \
-        --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r .sourceSha)" \
+        --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')" \
         --arg version "$(printf '%s' "${prepared_json}" | jq -r .version)" \
         --arg channel "$(printf '%s' "${prepared_json}" | jq -r .channel | sed 's/^channel://')" \
         --arg reservationId "$(printf '%s' "${prepared_json}" | jq -r .reservationId)" \
