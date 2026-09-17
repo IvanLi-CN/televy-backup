@@ -32,7 +32,6 @@ jobs:
         id: source
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_PATH: ${{ github.event_path }}
           PR_NUMBER: ${{ inputs.pr_number || '' }}
         run: |
           set -euo pipefail
@@ -46,12 +45,12 @@ jobs:
               '.state == "open" and .base.ref == "main" and .head.repo.full_name == $repository and .head.ref == $head_ref and .head.sha == $head_sha' \
               "${RUNNER_TEMP}/cask-pr.json" >/dev/null
           else
-            PR_NUMBER="$(jq -r '.pull_request.number // empty' "${EVENT_PATH}")"
+            PR_NUMBER="$(jq -r '.pull_request.number // empty' "${GITHUB_EVENT_PATH}")"
             test -n "${PR_NUMBER}"
           fi
           if [[ "${GITHUB_EVENT_NAME}" == pull_request ]]; then
-            echo "repository=$(jq -r '.pull_request.head.repo.full_name // empty' "${EVENT_PATH}")" >> "$GITHUB_OUTPUT"
-            echo "sha=$(jq -r '.pull_request.head.sha' "${EVENT_PATH}")" >> "$GITHUB_OUTPUT"
+            echo "repository=$(jq -r '.pull_request.head.repo.full_name // empty' "${GITHUB_EVENT_PATH}")" >> "$GITHUB_OUTPUT"
+            echo "sha=$(jq -r '.pull_request.head.sha' "${GITHUB_EVENT_PATH}")" >> "$GITHUB_OUTPUT"
           else
             echo "repository=${GITHUB_REPOSITORY}" >> "$GITHUB_OUTPUT"
             echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"

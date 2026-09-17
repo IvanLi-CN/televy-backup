@@ -45,14 +45,13 @@ jobs:
       - name: Resolve published stable Release
         id: release
         env:
-          EVENT_PATH: ${{ github.event_path }}
           INPUT_TAG: ${{ inputs.tag || '' }}
         run: |
           set -euo pipefail
           tag="${INPUT_TAG}"
           if [[ "${GITHUB_EVENT_NAME}" == workflow_run ]]; then
-            run_id="$(jq -r '.workflow_run.id' "${EVENT_PATH}")"
-            run_attempt="$(jq -r '.workflow_run.run_attempt' "${EVENT_PATH}")"
+            run_id="$(jq -r '.workflow_run.id' "${GITHUB_EVENT_PATH}")"
+            run_attempt="$(jq -r '.workflow_run.run_attempt' "${GITHUB_EVENT_PATH}")"
             gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?name=release-intent&per_page=100" > "${RUNNER_TEMP}/release-artifacts.json"
             artifact_url="$(jq -r '.artifacts[] | select(.name == "release-intent" and .expired == false) | .archive_download_url' "${RUNNER_TEMP}/release-artifacts.json" | head -n 1)"
             if [[ -z "${artifact_url}" ]]; then
