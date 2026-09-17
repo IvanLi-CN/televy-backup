@@ -40,6 +40,7 @@ jobs:
     if: needs.classify.result == 'success'
     name: arm64 native package
     runs-on: macos-15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,8 +54,20 @@ jobs:
         with:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
-      - if: needs.classify.outputs.kind == 'source'
-        run: bash scripts/macos/package-release.sh --mode development --arch arm64 --output-dir dist/arm64
+      - name: Build arm64 package (up to 2 attempts)
+        if: needs.classify.outputs.kind == 'source'
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if bash scripts/macos/package-release.sh --mode development --arch arm64 --output-dir dist/arm64; then
+              exit 0
+            fi
+            if [[ "$attempt" -eq 2 ]]; then
+              echo "arm64 package build failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            echo "arm64 package build failed; retrying (attempt 2/2)" >&2
+          done
       - if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/arm64/TelevyBackup.app
       - if: needs.classify.outputs.kind == 'source'
@@ -70,6 +83,7 @@ jobs:
     if: needs.classify.result == 'success'
     name: x86_64 native package
     runs-on: macos-15-intel
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -83,8 +97,20 @@ jobs:
         with:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
-      - if: needs.classify.outputs.kind == 'source'
-        run: bash scripts/macos/package-release.sh --mode development --arch x86_64 --output-dir dist/x86_64
+      - name: Build x86_64 package (up to 2 attempts)
+        if: needs.classify.outputs.kind == 'source'
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if bash scripts/macos/package-release.sh --mode development --arch x86_64 --output-dir dist/x86_64; then
+              exit 0
+            fi
+            if [[ "$attempt" -eq 2 ]]; then
+              echo "x86_64 package build failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            echo "x86_64 package build failed; retrying (attempt 2/2)" >&2
+          done
       - if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-app-icon-assets.sh assets/brand/macos/TelevyBackup.iconset macos/TelevyBackupApp/Resources/TelevyBackup.icns dist/x86_64/TelevyBackup.app
       - if: needs.classify.outputs.kind == 'source'
@@ -98,6 +124,7 @@ jobs:
   universal2:
     name: Universal 2 assembly
     runs-on: macos-15
+    timeout-minutes: 30
     needs: [classify, arm64, x86_64]
     if: needs.classify.result == 'success'
     steps:
