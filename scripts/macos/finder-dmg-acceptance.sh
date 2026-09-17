@@ -327,9 +327,15 @@ PY
   echo "Finder window was not found; refusing an unscoped screenshot" >&2
   exit 1
 }
-prepare_evidence_path "$evidence_dir/finder-window.png"
-screencapture -x -l "$window_id" "$evidence_dir/finder-window.png"
-[[ -s "$evidence_dir/finder-window.png" ]] || {
+if [[ "$macos_version" == 15.* ]]; then
+  screenshot_basename="finder-acceptance-macos-15.png"
+else
+  screenshot_basename="finder-acceptance-current.png"
+fi
+finder_screenshot="$evidence_dir/$screenshot_basename"
+prepare_evidence_path "$finder_screenshot"
+screencapture -x -l "$window_id" "$finder_screenshot"
+[[ -s "$finder_screenshot" ]] || {
   echo "Finder window screenshot was not created" >&2
   exit 1
 }
@@ -408,7 +414,6 @@ if tuple(observation["applications_position"]) != expected_applications:
 PY
 acceptance_path="$evidence_dir/acceptance.json"
 prepare_evidence_path "$acceptance_path"
-finder_screenshot="$evidence_dir/finder-window.png"
 finder_screenshot_sha256="$(shasum -a 256 "$finder_screenshot" | awk '{print $1}')"
 python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$finder_screenshot" "$finder_screenshot_sha256" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" <<'PY' > "$acceptance_path"
 import hashlib

@@ -395,7 +395,7 @@ evidence = {
             "semantic_layout_digest": layout_contract["semantic_layout_digest"],
             "manifest_verified": True,
             "checksums_verified": True,
-            "screenshot": "finder-macos-15.png",
+            "screenshot": "finder-acceptance-macos-15.png",
             "finder_observation": {
                 "window_role": "Finder",
                 "app_name": "TelevyBackup.app",
@@ -406,7 +406,7 @@ evidence = {
             },
             "show_all_files": {
                 "allowlist": [".DS_Store", ".background"],
-                "observed": [".DS_Store", ".background"],
+                "observed": [".DS_Store", ".background.png"],
                 "visible_window_region": "outside-default-icon-region",
             },
             "visual_review": {
@@ -428,7 +428,7 @@ evidence = {
             "semantic_layout_digest": layout_contract["semantic_layout_digest"],
             "manifest_verified": True,
             "checksums_verified": True,
-            "screenshot": "finder-current.png",
+            "screenshot": "finder-acceptance-current.png",
             "finder_observation": {
                 "window_role": "Finder",
                 "app_name": "TelevyBackup.app",
@@ -439,7 +439,7 @@ evidence = {
             },
             "show_all_files": {
                 "allowlist": [".DS_Store", ".background"],
-                "observed": [".DS_Store", ".background"],
+                "observed": [".DS_Store", ".background.png"],
                 "visible_window_region": "outside-default-icon-region",
             },
             "visual_review": {
@@ -458,8 +458,12 @@ evidence = {
 with tempfile.TemporaryDirectory() as directory:
     temp = Path(directory)
     screenshots = {
-        "finder-macos-15.png": b"macOS 15 Finder screenshot fixture\n",
-        "finder-current.png": b"current macOS Finder screenshot fixture\n",
+        "finder-acceptance-macos-15.png": bytes.fromhex(
+            "89504e470d0a1a0a0000000d494844520000000100000001"
+        ),
+        "finder-acceptance-current.png": bytes.fromhex(
+            "89504e470d0a1a0a0000000d494844520000000100000001"
+        ),
     }
     for name, content in screenshots.items():
         (temp / name).write_bytes(content)

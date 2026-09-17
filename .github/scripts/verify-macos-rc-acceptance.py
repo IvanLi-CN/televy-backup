@@ -7,6 +7,7 @@ import json
 import os
 import re
 import stat as stat_module
+import struct
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,8 @@ def verify_screenshot(screenshot_dir: Path, record: dict, name: str) -> None:
         screenshot_name != Path(screenshot_name).name
         or screenshot_name.startswith(".")
         or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", screenshot_name)
+        or not screenshot_name.startswith("finder-acceptance-")
+        or not screenshot_name.endswith(".png")
     ):
         fail(f"{name}.screenshot must be a safe release asset basename")
     expected_digest = required_string(record.get("screenshot_sha256"), f"{name}.screenshot_sha256")
@@ -43,7 +46,12 @@ def verify_screenshot(screenshot_dir: Path, record: dict, name: str) -> None:
         fail(f"{name}.screenshot asset is missing")
     if not stat_module.S_ISREG(screenshot_stat.st_mode):
         fail(f"{name}.screenshot asset must be a regular file")
-    actual_digest = hashlib.sha256(screenshot_path.read_bytes()).hexdigest()
+    screenshot_bytes = screenshot_path.read_bytes()
+    if screenshot_bytes[:8] != b"\x89PNG\r\n\x1a\n" or screenshot_bytes[12:16] != b"IHDR":
+        fail(f"{name}.screenshot asset is not a PNG image")
+    if len(screenshot_bytes) < 24 or not all(struct.unpack(">II", screenshot_bytes[16:24])):
+        fail(f"{name}.screenshot asset has invalid PNG dimensions")
+    actual_digest = hashlib.sha256(screenshot_bytes).hexdigest()
     if actual_digest.lower() != expected_digest.lower():
         fail(f"{name}.screenshot_sha256 does not match the downloaded asset")
 
@@ -138,6 +146,9 @@ def verify_finder_acceptance(evidence, manifest, stable_version: str, screenshot
         if platform == "current" and version.startswith("15."):
             fail(f"{name}.platform current must be distinct from macOS 15")
         platforms.append(platform)
+        expected_screenshot_name = f"finder-acceptance-{platform}.png"
+        if record.get("screenshot") != expected_screenshot_name:
+            fail(f"{name}.screenshot does not match its platform")
         if record.get("capture_scope") != "finder-window-only":
             fail(f"{name}.capture_scope must be finder-window-only")
         if record.get("dmg_name") != expected_dmg_name:
@@ -165,7 +176,10 @@ def verify_finder_acceptance(evidence, manifest, stable_version: str, screenshot
         hidden = record.get("show_all_files")
         if not isinstance(hidden, dict) or sorted(hidden.get("allowlist", [])) != expected_allowlist:
             fail(f"{name}.show_all_files allowlist is invalid")
-        if sorted(hidden.get("observed", [])) != expected_allowlist:
+        resources = layout.get("resources")
+        composed_background = resources.get("composed_background") if isinstance(resources, dict) else None
+        expected_observed = sorted([".DS_Store", ".background" + Path(required_string(composed_background, "manifest dmg_layout.resources.composed_background")).suffix])
+        if sorted(hidden.get("observed", [])) != expected_observed:
             fail(f"{name}.show_all_files observed resources are invalid")
         if hidden.get("visible_window_region") != "outside-default-icon-region":
             fail(f"{name}.show_all_files visible region is invalid")
