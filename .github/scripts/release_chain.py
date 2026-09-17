@@ -191,6 +191,10 @@ def verify_provenance(commit: str, version: str, parent: str) -> dict[str, str]:
             raise ReleaseChainError(f"preparation provenance is missing {label}")
     if values.get("Release-Provenance") not in {"github-native-verified", "fixture-verified"}:
         raise ReleaseChainError("preparation provenance is not verified")
+    reservation_source = values.get("Release-Reservation-Source-SHA", parent)
+    reservation_source = canonical_sha(reservation_source, "reservation source SHA")
+    if not is_ancestor(reservation_source, parent):
+        raise ReleaseChainError("reservation source must be an ancestor of the preparation source")
     if mode == "version-only-release-pr" and not values.get("Release-Covered-Merge-SHA"):
         raise ReleaseChainError("version-only-release-pr must record one covered merge SHA")
     return {
@@ -201,6 +205,7 @@ def verify_provenance(commit: str, version: str, parent: str) -> dict[str, str]:
         "claimKey": values["Release-Claim-Key"],
         "boundaryToken": values["Release-Boundary-Token"],
         "provenance": values["Release-Provenance"],
+        "reservationSourceSha": reservation_source,
         "coveredMergeSha": values.get("Release-Covered-Merge-SHA", ""),
     }
 
