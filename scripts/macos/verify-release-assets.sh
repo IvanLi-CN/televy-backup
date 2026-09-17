@@ -36,6 +36,8 @@ read_designated_requirement() {
 verify_nested_helper_path() {
   local app="$1"
   local helper="$2"
+  reject_symlink_components "$app"
+  reject_symlink_components "$helper"
   [[ ! -L "$helper" && -d "$helper" ]] || {
     echo "embedded Snapshot Access path must be a real directory: $helper" >&2
     exit 1
@@ -49,6 +51,7 @@ verify_nested_helper_path() {
     exit 1
   }
   local binary="$helper/Contents/MacOS/televybackup-snapshot-access"
+  reject_symlink_components "$binary"
   [[ ! -L "$binary" && -f "$binary" ]] || {
     echo "embedded Snapshot Access executable must be a real file: $binary" >&2
     exit 1

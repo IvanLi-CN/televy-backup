@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import plistlib
 import re
 import stat as stat_module
 import struct
@@ -15,10 +16,41 @@ from pathlib import Path
 
 
 REQUIREMENT_NORMALIZER = Path(__file__).resolve().parents[2] / "scripts/macos/normalize-designated-requirement.py"
+ALLOWED_SYSTEM_ALIASES = {"/tmp", "/var"}
 
 
 def fail(message: str) -> "NoReturn":
     raise SystemExit(f"macOS RC acceptance evidence rejected: {message}")
+
+
+def reject_symlink_components(path: Path, name: str) -> None:
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        if current.is_symlink() and str(current) not in ALLOWED_SYSTEM_ALIASES:
+            fail(f"{name} contains a symlinked path component: {current}")
+
+
+def device_from_plist(raw: bytes, expected_mount: str) -> str:
+    try:
+        payload = plistlib.loads(raw)
+    except (plistlib.InvalidFileException, ValueError):
+        return ""
+    entities = list(payload.get("system-entities", []))
+    for image in payload.get("images", []):
+        entities.extend(image.get("system-entities", []))
+    for entity in entities:
+        if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+            return str(entity["dev-entry"])
+    return ""
+
+
+def device_from_hdiutil_info(mount_path: Path) -> str:
+    result = subprocess.run(["hdiutil", "info", "-plist"], capture_output=True, check=False)
+    if result.returncode != 0:
+        return ""
+    return device_from_plist(result.stdout, str(mount_path))
 
 
 def required_string(value, name: str) -> str:
@@ -264,42 +296,61 @@ def require_universal2(path: Path, name: str) -> None:
 
 
 def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
+    reject_symlink_components(Path(dmg_path), f"{name} DMG")
     mount_path = Path(tempfile.mkdtemp(prefix="televybackup-rc-"))
-    mounted = False
+    attached_device = ""
+    cleanup_error = ""
     try:
-        mounted = True
-        command_output(
+        attach = subprocess.run(
             [
                 "hdiutil",
                 "attach",
+                "-plist",
                 "-nobrowse",
                 "-readonly",
                 "-mountpoint",
                 str(mount_path),
                 dmg_path,
             ],
-            f"{name} DMG mount",
+            capture_output=True,
+            check=False,
         )
+        attached_device = device_from_plist(attach.stdout, str(mount_path))
+        if not attached_device:
+            attached_device = device_from_hdiutil_info(mount_path)
+        if attach.returncode != 0:
+            detail = (attach.stdout + attach.stderr).decode(errors="replace").strip()
+            fail(f"{name} DMG mount failed: {detail or attach.returncode}")
+        if not attached_device:
+            fail(f"{name} DMG mount did not resolve an exact device")
+        command_output(["diskutil", "verifyVolume", attached_device], f"{name} DMG filesystem verification")
         top_level_apps = sorted(
             path.name
             for path in mount_path.iterdir()
-            if path.is_dir() and path.name.endswith(".app")
+            if path.name.endswith(".app")
         )
         if top_level_apps != ["TelevyBackup.app"]:
             fail(f"{name} DMG must contain exactly one top-level TelevyBackup.app")
-        main_binary = mount_path / "TelevyBackup.app/Contents/MacOS/TelevyBackup"
+        app_path = mount_path / "TelevyBackup.app"
+        reject_symlink_components(app_path, f"{name} main app")
+        if app_path.is_symlink() or not app_path.is_dir():
+            fail(f"{name} DMG main app must be a real directory")
+        main_binary = app_path / "Contents/MacOS/TelevyBackup"
+        reject_symlink_components(main_binary, f"{name} main executable")
         if not main_binary.is_file():
             fail(f"{name} DMG is missing the main TelevyBackup executable")
         require_universal2(main_binary, f"{name} main app")
-        helper = mount_path / "TelevyBackup.app" / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+        helper = app_path / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+        reject_symlink_components(helper, f"{name} Snapshot Access bundle")
         if helper.is_symlink() or not helper.is_dir():
             fail(f"{name} DMG is missing the embedded Snapshot Access app")
-        app_real = (mount_path / "TelevyBackup.app").resolve(strict=True)
+        app_real = app_path.resolve(strict=True)
         helper_real = helper.resolve(strict=True)
         expected_helper = app_real / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
         if helper_real != expected_helper:
             fail(f"{name} embedded Snapshot Access path escapes the main app bundle")
         binary = helper / "Contents/MacOS/televybackup-snapshot-access"
+        reject_symlink_components(binary, f"{name} Snapshot Access executable")
         if binary.is_symlink() or not binary.is_file():
             fail(f"{name} DMG is missing the Snapshot Access executable")
         require_universal2(binary, f"{name} Snapshot Access")
@@ -335,14 +386,23 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
             "protocol_version": metadata.get("protocolVersion"),
         }
     finally:
-        if mounted:
-            subprocess.run(
-                ["hdiutil", "detach", str(mount_path)],
+        if not attached_device:
+            attached_device = device_from_hdiutil_info(mount_path)
+        if attached_device:
+            detach = subprocess.run(
+                ["hdiutil", "detach", attached_device],
                 capture_output=True,
                 text=True,
                 check=False,
             )
-        mount_path.rmdir()
+            if detach.returncode != 0:
+                cleanup_error = f"{name} DMG exact-device detach failed: {detach.stderr.strip() or detach.returncode}"
+        try:
+            mount_path.rmdir()
+        except OSError as error:
+            cleanup_error = cleanup_error or f"{name} DMG mount cleanup failed: {error}"
+        if cleanup_error:
+            fail(cleanup_error)
 
 
 parser = argparse.ArgumentParser()

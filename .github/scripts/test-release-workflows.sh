@@ -190,6 +190,8 @@ fi
 assert_contains "draft release publish" "$release_text" "gh release edit \"\${PRODUCT_TAG}\" --draft=false"
 assert_contains "draft-only asset overwrite" "$release_text" '[[ "${runtime_state}" == draft ]]'
 assert_not_contains "draft publication never overwrites assets" "$release_text" 'gh release upload "${PRODUCT_TAG}" "${release_files[@]}" --clobber'
+assert_contains "draft publication rechecks state before upload" "$release_text" 'unable to recheck draft Release state'
+assert_contains "draft publication rechecks state after upload" "$release_text" 'Release became published during asset upload'
 if (( $(printf '%s' "$release_text" | grep -Fc 'verify-release-sequence') < 2 )); then
   printf 'release workflow must verify sequence before and during publication\n' >&2
   exit 1

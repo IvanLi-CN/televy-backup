@@ -1024,7 +1024,27 @@ jobs:
             while IFS= read -r -d '' asset; do release_files+=("$asset"); done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
             ((${#release_files[@]} > 0))
             if [[ "${runtime_state}" == draft ]]; then
+              latest_release=""
+              if ! latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+                printf '%s\n' "${latest_release}" >&2
+                echo "release_state_conflict: unable to recheck draft Release state" >&2
+                exit 1
+              fi
+              if [[ "$(printf '%s' "${latest_release}" | jq -r '.draft | tostring')" != true ]]; then
+                echo "release_state_conflict: Release became published before asset upload" >&2
+                exit 1
+              fi
               gh release upload "${PRODUCT_TAG}" "${release_files[@]}"
+              final_release=""
+              if ! final_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+                printf '%s\n' "${final_release}" >&2
+                echo "release_state_conflict: unable to verify draft Release after asset upload" >&2
+                exit 1
+              fi
+              if [[ "$(printf '%s' "${final_release}" | jq -r '.draft | tostring')" != true ]]; then
+                echo "release_state_conflict: Release became published during asset upload" >&2
+                exit 1
+              fi
               if [[ "${PRODUCT_CHANNEL}" == prod ]]; then
                 gh release edit "${PRODUCT_TAG}" --draft=false --latest=true
               else

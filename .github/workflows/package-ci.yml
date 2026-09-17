@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 2
+          fetch-depth: 0
       - id: classify
         run: |
           if python3 .github/scripts/release_chain.py verify-prepared --commit HEAD >/dev/null 2>&1; then

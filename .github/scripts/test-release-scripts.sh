@@ -478,11 +478,13 @@ with tempfile.TemporaryDirectory() as directory:
         """#!/bin/sh
 set -eu
 if [ "$1" = attach ]; then
+  plist=false
   shift
   mount_point=""
   source=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      -plist) plist=true; shift ;;
       -mountpoint) mount_point="$2"; shift 2 ;;
       *) source="$1"; shift ;;
     esac
@@ -490,8 +492,16 @@ if [ "$1" = attach ]; then
   mkdir -p "$mount_point"
   cp -R "${source}.tree/TelevyBackup.app" "$mount_point/"
   chmod 600 "$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/Info.plist"
+  printf '%s\n' "$mount_point" > "$(dirname "$0")/mount-point"
+  if [ "$plist" = true ]; then
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>system-entities</key><array><dict><key>dev-entry</key><string>/dev/diskfixture</string><key>mount-point</key><string>$mount_point</string></dict></array></dict></plist>
+EOF
+  fi
 elif [ "$1" = detach ]; then
-  rm -rf "$2/TelevyBackup.app"
+  rm -rf "$(cat "$(dirname "$0")/mount-point")/TelevyBackup.app"
 else
   exit 2
 fi
@@ -499,6 +509,15 @@ fi
         encoding="utf-8",
     )
     hdiutil_path.chmod(0o755)
+    diskutil_path = fake_bin / "diskutil"
+    diskutil_path.write_text(
+        """#!/bin/sh
+set -eu
+[ "$1" = verifyVolume ] && [ "$2" = /dev/diskfixture ]
+""",
+        encoding="utf-8",
+    )
+    diskutil_path.chmod(0o755)
     lipo_path = fake_bin / "lipo"
     lipo_path.write_text(
         """#!/bin/sh

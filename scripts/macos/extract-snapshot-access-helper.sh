@@ -108,6 +108,7 @@ fi
 }
 
 helper_path="$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+reject_symlink_components "$helper_path"
 [[ ! -L "$mount_point/TelevyBackup.app" && -d "$mount_point/TelevyBackup.app" ]] || {
   echo "Snapshot Access extraction requires a real TelevyBackup.app directory" >&2
   exit 1
@@ -123,6 +124,7 @@ helper_real="$(cd "$helper_path" && pwd -P)"
   exit 1
 }
 helper_binary="$helper_path/Contents/MacOS/televybackup-snapshot-access"
+reject_symlink_components "$helper_binary"
 [[ ! -L "$helper_binary" && -f "$helper_binary" ]] || {
   echo "Snapshot Access extraction requires a real helper executable" >&2
   exit 1

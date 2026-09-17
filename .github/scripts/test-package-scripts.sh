@@ -342,6 +342,10 @@ grep -F 'helper_real' <<<"$extract_helper_text" >/dev/null || {
   echo "Snapshot Access extraction must enforce nested helper containment" >&2
   exit 1
 }
+grep -F 'reject_symlink_components "$helper_path"' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must reject symlinked helper components" >&2
+  exit 1
+}
 grep -F 'gh release upload "$rc2_tag" "$finder_screenshot"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must upload newly captured screenshots to RC2" >&2
   exit 1
