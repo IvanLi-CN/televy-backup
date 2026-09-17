@@ -200,16 +200,19 @@ jobs:
           fi
           if [[ -n "${prepared_json}" ]]; then
             release_mode="$(printf '%s' "${prepared_json}" | jq -r .mode)"
+            reservation_source_sha="$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')"
+            reservation_source_tree="$(git rev-parse "${reservation_source_sha}^{tree}" 2>/dev/null || true)"
             jq -n \
               --arg ref "$(printf '%s' "${prepared_json}" | jq -r .reservationRef)" \
-              --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r .sourceSha)" \
+              --arg sourceSha "${reservation_source_sha}" \
+              --arg sourceTreeSha "${reservation_source_tree}" \
               --arg version "$(printf '%s' "${prepared_json}" | jq -r .version)" \
               --arg channel "$(printf '%s' "${prepared_json}" | jq -r .channel | sed 's/^channel://')" \
               --arg reservationId "$(printf '%s' "${prepared_json}" | jq -r .reservationId)" \
               --arg owner "$(printf '%s' "${prepared_json}" | jq -r .reservationOwner)" \
               --arg claimKey "$(printf '%s' "${prepared_json}" | jq -r .claimKey)" \
               --arg boundaryToken "$(printf '%s' "${prepared_json}" | jq -r .boundaryToken)" \
-              '{ref:$ref,sourceSha:$sourceSha,version:$version,channel:$channel,reservationId:$reservationId,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claimKey,"Reservation-Boundary-Token":$boundaryToken}' \
+              '{ref:$ref,sourceSha:$sourceSha,sourceTreeSha:$sourceTreeSha,version:$version,channel:$channel,reservationId:$reservationId,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claimKey,"Reservation-Boundary-Token":$boundaryToken}' \
               > "${RUNNER_TEMP}/reservation.json"
             python3 - "${RUNNER_TEMP}/reservation.json" <<'PY'
           import json

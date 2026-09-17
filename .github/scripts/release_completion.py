@@ -152,8 +152,14 @@ def verify_reservation(
         raise CompletionError(f"cannot read reservation JSON: {error}") from error
     if not isinstance(value, dict):
         raise CompletionError("reservation JSON must be an object")
+    reservation_source = prepared.get("reservationSourceSha", "")
+    if not reservation_source:
+        preparation_sha = prepared.get("preparationSha", "")
+        reservation_source = CHAIN.trailers(preparation_sha).get(
+            "Release-Reservation-Source-SHA", prepared["sourceSha"]
+        )
     expected = {
-        "sourceSha": prepared["sourceSha"],
+        "sourceSha": reservation_source,
         "version": prepared["version"],
         "channel": prepared["channel"].removeprefix("channel:"),
         "reservationId": prepared["reservationId"],

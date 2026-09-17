@@ -167,6 +167,8 @@ def validate_expected_reservation(expected: dict[str, Any]) -> None:
     ):
         if not str(expected.get(key, "")).strip():
             raise ReservationError(f"reservation is missing {key}")
+    if expected.get("sourceTreeSha"):
+        normalize_sha(str(expected["sourceTreeSha"]), "source tree SHA")
 
 
 def verify_reservation_commit(ref_target: str, expected: dict[str, Any], cwd: Path = ROOT) -> dict[str, Any]:
@@ -416,8 +418,20 @@ def verify_github_reservation(expected: dict[str, Any], *, repository: str, toke
     info = client.commit_info(target)
     parents = [parent.get("sha") for parent in info.get("parents", [])]
     source = normalize_sha(str(expected["sourceSha"]), "source SHA")
-    source_info = client.commit_info(source)
-    if parents != [source] or info.get("tree", {}).get("sha") != source_info.get("tree", {}).get("sha"):
+    source_tree = ""
+    try:
+        source_info = client.commit_info(source)
+        source_tree = str(source_info.get("tree", {}).get("sha", ""))
+    except ReservationError as error:
+        # GitHub can retain a ref whose historical parent is no longer exposed
+        # by the Git Database API. The trusted checkout supplies the same tree
+        # digest captured before the ref was created; other API failures remain
+        # fatal and cannot use this recovery path.
+        message = str(error)
+        if "returned 422" not in message or "No commit found for SHA" not in message:
+            raise
+        source_tree = str(expected.get("sourceTreeSha", ""))
+    if parents != [source] or info.get("tree", {}).get("sha") != source_tree:
         raise ReservationError("remote reservation provenance does not match the claim")
     trailers = trailers_from_message(str(info.get("message", "")))
     for key, value in {
