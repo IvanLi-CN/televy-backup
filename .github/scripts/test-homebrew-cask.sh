@@ -158,6 +158,7 @@ update_workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask-update.yml")
 [[ "$update_workflow_text" == *'Homebrew Cask audit'* ]]
 [[ "$update_workflow_text" != *'homebrew-cask.git'* ]]
 [[ "$update_workflow_text" != *'secrets.'* ]]
-[[ "$update_workflow_text" != *'PAT'* ]]
+[[ "$update_workflow_text" != *'HOMEBREW_TAP_PAT'* ]]
+[[ "$update_workflow_text" != *'PERSONAL_ACCESS_TOKEN'* ]]
 
 echo "Homebrew Cask contract tests passed"
