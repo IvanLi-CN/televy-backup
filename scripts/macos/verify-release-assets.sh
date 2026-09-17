@@ -443,17 +443,22 @@ verify_dmg_helper_identity() (
   cleanup() {
     original_status=$?
     cleanup_failed=false
-    cleanup_device="$attached_device"
-    [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
-    [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
-    if [[ -n "$cleanup_device" ]]; then
-      if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
-        echo "failed to detach Snapshot Access verification device: $cleanup_device" >&2
+    if [[ "$mounted" == true ]]; then
+      cleanup_device="$attached_device"
+      [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
+      [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
+      if [[ -n "$cleanup_device" ]]; then
+        if hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
+          mounted=false
+          attached_device=""
+        else
+          echo "failed to detach Snapshot Access verification device: $cleanup_device" >&2
+          cleanup_failed=true
+        fi
+      else
+        echo "failed to resolve Snapshot Access verification device for cleanup: $mount_point" >&2
         cleanup_failed=true
       fi
-    elif [[ "$attach_completed" == true || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
-      echo "failed to resolve Snapshot Access verification device for cleanup: $mount_point" >&2
-      cleanup_failed=true
     fi
     if ! rmdir "$mount_point" >/dev/null 2>&1; then
       echo "failed to remove Snapshot Access verification mount point: $mount_point" >&2
@@ -560,8 +565,8 @@ require(component["protocol_version"] == metadata["protocolVersion"], "Snapshot 
 PY
   fi
   diskutil verifyVolume "$attached_device"
-  mounted=false
   detach_dmg_exact "$local_dmg" "$mount_point" "$attached_device"
+  mounted=false
   attached_device=""
   ATTACHED_DEVICE=""
   ATTACHED_MOUNT=""
@@ -578,17 +583,22 @@ check_dmg_layout() {
   cleanup() {
     original_status=$?
     cleanup_failed=false
-    cleanup_device="$attached_device"
-    [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
-    [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
-    if [[ -n "$cleanup_device" ]]; then
-      if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
-        echo "failed to detach DMG layout verification device: $cleanup_device" >&2
+    if [[ "$mounted" == true ]]; then
+      cleanup_device="$attached_device"
+      [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
+      [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
+      if [[ -n "$cleanup_device" ]]; then
+        if hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
+          mounted=false
+          attached_device=""
+        else
+          echo "failed to detach DMG layout verification device: $cleanup_device" >&2
+          cleanup_failed=true
+        fi
+      else
+        echo "failed to resolve DMG layout verification device for cleanup: $mount_point" >&2
         cleanup_failed=true
       fi
-    elif [[ "$attach_completed" == true || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
-      echo "failed to resolve DMG layout verification device for cleanup: $mount_point" >&2
-      cleanup_failed=true
     fi
     if ! rmdir "$mount_point" >/dev/null 2>&1; then
       echo "failed to remove DMG layout verification mount point: $mount_point" >&2
@@ -651,8 +661,8 @@ if not os.path.islink(applications) or os.readlink(applications) != "/Applicatio
 if set(logical_hidden) & set(layout["icon_locations"]):
     raise SystemExit("hidden DMG resources have Finder icon locations")
 PY
-  mounted=false
   detach_dmg_exact "$dmg" "$mount_point" "$attached_device"
+  mounted=false
   attached_device=""
   ATTACHED_DEVICE=""
   ATTACHED_MOUNT=""

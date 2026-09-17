@@ -265,6 +265,34 @@ grep -F 'attach_completed=false' <<<"$layout_verify_text" >/dev/null || {
   echo "DMG layout verification must track attach completion separately from cleanup" >&2
   exit 1
 }
+grep -F 'if [[ "$mounted" == true ]]' <<<"$layout_verify_text" >/dev/null || {
+  echo "DMG layout cleanup must only resolve devices while a mount may remain" >&2
+  exit 1
+}
+grep -F 'if hdiutil detach "$attached_device"; then' <<<"$layout_verify_text" >/dev/null || {
+  echo "DMG layout verification must update mount state only after detach succeeds" >&2
+  exit 1
+}
+python3 - "$root_dir/scripts/macos/verify-dmg-layout.sh" <<'PY'
+import pathlib
+import sys
+
+if 'mounted=false\nhdiutil detach "$attached_device"' in pathlib.Path(sys.argv[1]).read_text():
+    raise SystemExit("DMG layout verification must not clear mount state before detach")
+PY
+for cleanup_text in "$verify_release_text" "$finder_text"; do
+  grep -F 'if [[ "$mounted" == true ]]' <<<"$cleanup_text" >/dev/null || {
+    echo "DMG cleanup must only resolve devices while a mount may remain" >&2
+    exit 1
+  }
+done
+python3 - "$root_dir/scripts/macos/verify-release-assets.sh" <<'PY'
+import pathlib
+import sys
+
+if 'mounted=false\n  detach_dmg_exact' in pathlib.Path(sys.argv[1]).read_text():
+    raise SystemExit("release verification must not clear mount state before detach")
+PY
 grep -F 'TELEVYBACKUP_RUN_FINDER_ACCEPTANCE' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must require explicit controlled-session opt-in" >&2
   exit 1

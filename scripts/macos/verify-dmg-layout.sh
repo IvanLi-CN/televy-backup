@@ -38,16 +38,21 @@ for entity in entities:
 cleanup() {
   original_status=$?
   cleanup_failed=false
-  cleanup_device="$attached_device"
-  [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
-  if [[ -n "$cleanup_device" ]]; then
-    if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
-      echo "failed to detach DMG verification device: $cleanup_device" >&2
+  if [[ "$mounted" == true ]]; then
+    cleanup_device="$attached_device"
+    [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
+    if [[ -n "$cleanup_device" ]]; then
+      if hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
+        mounted=false
+        attached_device=""
+      else
+        echo "failed to detach DMG verification device: $cleanup_device" >&2
+        cleanup_failed=true
+      fi
+    else
+      echo "failed to resolve DMG verification device for cleanup: $mount_point" >&2
       cleanup_failed=true
     fi
-  elif [[ "$attach_attempted" == true ]]; then
-    echo "failed to resolve DMG verification device for cleanup: $mount_point" >&2
-    cleanup_failed=true
   fi
   if ! rmdir "$mount_point" >/dev/null 2>&1; then
     echo "failed to remove DMG verification mount point: $mount_point" >&2
@@ -152,8 +157,13 @@ if set(logical_hidden) & set(layout["icon_locations"]):
     raise SystemExit("hidden DMG resources have Finder icon locations")
 PY
 diskutil verifyVolume "$attached_device"
-mounted=false
-hdiutil detach "$attached_device"
+if hdiutil detach "$attached_device"; then
+  mounted=false
+else
+  detach_status=$?
+  echo "failed to detach DMG verification device: $attached_device" >&2
+  exit "$detach_status"
+fi
 python3 - "$attached_device" "$dmg" "$mount_point" <<'PY'
 import json
 import sys

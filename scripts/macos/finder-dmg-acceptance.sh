@@ -172,16 +172,21 @@ cleanup() {
       cleanup_failed=true
     fi
   fi
-  cleanup_device="$attached_device"
-  [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
-  if [[ -n "$cleanup_device" ]]; then
-    if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
-      echo "failed to detach Finder acceptance device: $cleanup_device" >&2
+  if [[ "$mounted" == true ]]; then
+    cleanup_device="$attached_device"
+    [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
+    if [[ -n "$cleanup_device" ]]; then
+      if hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
+        mounted=false
+        attached_device=""
+      else
+        echo "failed to detach Finder acceptance device: $cleanup_device" >&2
+        cleanup_failed=true
+      fi
+    else
+      echo "failed to resolve Finder acceptance device for cleanup: $mount_point" >&2
       cleanup_failed=true
     fi
-  elif [[ "$attach_attempted" == true ]]; then
-    echo "failed to resolve Finder acceptance device for cleanup: $mount_point" >&2
-    cleanup_failed=true
   fi
   if ! rmdir "$mount_point" >/dev/null 2>&1; then
     echo "failed to remove Finder acceptance mount point: $mount_point" >&2
