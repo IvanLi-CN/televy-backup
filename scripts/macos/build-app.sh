@@ -117,28 +117,20 @@ if [[ -n "$cargo_target" ]]; then
   binary_dir="$root_dir/target/$cargo_target/release"
 fi
 
-echo "Building CLI ($release_version, $cargo_target)..."
-if [[ -n "$cargo_target" ]]; then cargo build -p televybackup --locked --release --target "$cargo_target"; else cargo build -p televybackup --locked --release; fi
+echo "Building workspace binaries ($release_version, $cargo_target)..."
+workspace_build=(cargo build --locked --release)
+if [[ -n "$cargo_target" ]]; then
+  workspace_build+=(--target "$cargo_target")
+fi
+workspace_build+=(-p televybackup -p televybackupd -p televybackup-snapshot-access)
+if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
+  workspace_build+=(--bin televybackup-snapshot-mount-helper)
+fi
+"${workspace_build[@]}"
 cp "$binary_dir/televybackup" "$macos_dir/televybackup-cli"
 
-echo "Building daemon..."
-if [[ -n "$cargo_target" ]]; then cargo build -p televybackupd --locked --release --target "$cargo_target"; else cargo build -p televybackupd --locked --release; fi
 cp "$binary_dir/televybackupd" "$macos_dir/televybackupd"
 
-echo "Building APFS Snapshot Access..."
-if [[ -n "$cargo_target" ]]; then
-  if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
-    cargo build -p televybackup-snapshot-access --locked --bin televybackup-snapshot-mount-helper --release --target "$cargo_target"
-  else
-    cargo build -p televybackup-snapshot-access --locked --release --target "$cargo_target"
-  fi
-else
-  if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
-    cargo build -p televybackup-snapshot-access --locked --bin televybackup-snapshot-mount-helper --release
-  else
-    cargo build -p televybackup-snapshot-access --locked --release
-  fi
-fi
 snapshot_access_binary="$binary_dir/televybackup-snapshot-access"
 snapshot_mount_helper_binary="$binary_dir/televybackup-snapshot-mount-helper"
 cp "$snapshot_mount_helper_binary" "$macos_dir/televybackup-snapshot-mount-helper"
