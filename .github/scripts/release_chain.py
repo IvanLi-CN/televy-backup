@@ -264,18 +264,20 @@ def find_prepared(commit: str, base: str | None = None) -> dict[str, str]:
 
 def verify_merged(commit: str) -> dict[str, str]:
     merge_sha = git("rev-parse", f"{commit}^{{commit}}")
+    if git("rev-parse", "--is-shallow-repository") == "true":
+        raise ReleaseChainError("full repository history is required to verify a product merge")
     parents = git("show", "-s", "--format=%P", merge_sha).split()
     if len(parents) != 2:
         return {"prepared": "false", "reason": "not_merge_commit"}
-    merge_parent, preparation_sha = parents
-    if subprocess.run(["git", "diff", "--quiet", merge_sha, f"{merge_sha}^2"], cwd=ROOT).returncode != 0:
+    merge_parent, pr_head_sha = parents
+    if subprocess.run(["git", "diff", "--quiet", merge_sha, pr_head_sha], cwd=ROOT).returncode != 0:
         return {"prepared": "false", "reason": "merge_tree_differs_from_preparation"}
-    prep_trailers = trailers(preparation_sha)
-    if not ("Release-Source-SHA" in prep_trailers or "Product-Version" in prep_trailers):
+    try:
+        prepared = find_prepared(pr_head_sha, merge_parent)
+    except (ReleaseChainError, PRODUCT_VERSION.VersionError):
         return {"prepared": "false", "reason": "no_prepared_product_merge"}
-    source_sha = prep_trailers.get("Release-Source-SHA", "")
-    if not source_sha or not prep_trailers.get("Product-Version"):
-        raise ReleaseChainError("preparation identity trailers are incomplete")
+    preparation_sha = prepared["preparationSha"]
+    source_sha = prepared["sourceSha"]
     if not is_ancestor(merge_parent, source_sha):
         raise ReleaseChainError("preparation source is not based on merged main parent")
     values = verify_prepared(preparation_sha, source_sha)

@@ -34,6 +34,16 @@ class HelperResolutionError(ValueError):
     """Raised when an approved helper source cannot be proven."""
 
 
+def reject_symlink_components(path: Path) -> None:
+    """Reject redirected artifact paths while allowing macOS system aliases."""
+    absolute = Path(path.absolute())
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        if current.is_symlink() and str(current) not in {"/tmp", "/var"}:
+            raise HelperResolutionError(f"helper source path contains a symlinked component: {current}")
+
+
 def _version(value: str) -> re.Match[str]:
     match = VERSION_RE.fullmatch(value)
     if match is None:
@@ -159,6 +169,7 @@ def verify_source_assets(
     if COMMIT_RE.fullmatch(expected_source_commit) is None:
         raise HelperResolutionError("helper source commit must be a full commit SHA")
     root = Path(asset_dir)
+    reject_symlink_components(root)
     manifest_path = root / "BUILD-MANIFEST.json"
     checksums_path = root / "SHA256SUMS"
     dmg_name = f"TelevyBackup-{source_version}.dmg"

@@ -23,12 +23,21 @@ bash -n \
   "$root_dir/scripts/macos/generate-app-icon-previews.sh" \
   "$root_dir/scripts/macos/verify-app-icon-assets.sh"
 python3 -m py_compile \
+  "$root_dir/scripts/macos/reject-symlink-components.py" \
   "$root_dir/scripts/macos/normalize-designated-requirement.py" \
   "$root_dir/scripts/macos/verify-dmg-metadata.py"
+symlink_parent="$tmp_dir/symlink-parent"
+mkdir -p "$symlink_parent/real"
+ln -s "$symlink_parent/real" "$symlink_parent/redirect"
+if python3 "$root_dir/scripts/macos/reject-symlink-components.py" "$symlink_parent/redirect/artifact"; then
+  echo "path safety checker accepted a symlinked parent" >&2
+  exit 1
+fi
 normalized_requirement="$(printf '%s\n' \
   'codesign: warning: blah' \
   'designated => identifier "com.example.helper" and (cdhash H"2222222222222222222222222222222222222222" or' \
   '  cdhash H"1111111111111111111111111111111111111111")' \
+  'Executable=/private/path/helper' \
   | python3 "$root_dir/scripts/macos/normalize-designated-requirement.py")"
 [[ "$normalized_requirement" == 'designated => identifier "com.example.helper" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")' ]] || {
   echo "designated requirement normalizer must reconstruct wrapped codesign output" >&2

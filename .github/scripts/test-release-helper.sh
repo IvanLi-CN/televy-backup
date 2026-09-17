@@ -81,6 +81,16 @@ else:
 
 with tempfile.TemporaryDirectory() as directory:
     asset_dir = Path(directory)
+    redirected = asset_dir / "redirected"
+    redirected_target = asset_dir / "real"
+    redirected_target.mkdir()
+    redirected.symlink_to(redirected_target, target_is_directory=True)
+    try:
+        helper.verify_source_assets(str(redirected), lock, "v0.9.7-rc.2", "d" * 40)
+    except helper.HelperResolutionError:
+        pass
+    else:
+        raise AssertionError("symlinked helper source parent was accepted")
     source_tag = "v0.9.7-rc.2"
     source_commit = "d" * 40
     dmg_name = f"TelevyBackup-{source_tag[1:]}.dmg"

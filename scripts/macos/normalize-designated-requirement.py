@@ -42,7 +42,11 @@ def main() -> int:
         if marker not in line:
             continue
         parts = [line[line.index(marker):]]
-        parts.extend(lines[index + 1:])
+        for continuation in lines[index + 1:]:
+            if continuation.strip() and not continuation[0].isspace():
+                break
+            if continuation.strip():
+                parts.append(continuation)
         requirement = normalize_space(" ".join(part.strip() for part in parts if part.strip()))
         requirement = re.sub(r"^#\s*", "", requirement)
         cdhash_term = r'cdhash\s+H"([0-9A-Fa-f]+)"'

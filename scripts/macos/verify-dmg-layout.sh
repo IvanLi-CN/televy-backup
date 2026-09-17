@@ -18,6 +18,11 @@ done
 root_dir="$(git rev-parse --show-toplevel)"
 layout_path="$root_dir/assets/brand/macos/dmg/layout.json"
 metadata_verifier="$root_dir/scripts/macos/verify-dmg-metadata.py"
+path_safety_checker="$root_dir/scripts/macos/reject-symlink-components.py"
+reject_symlink_components() {
+  python3 "$path_safety_checker" "$1"
+}
+reject_symlink_components "$dmg"
 mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-dmg-layout.XXXXXX")"
 mount_point="$(cd "$mount_point" && pwd -P)"
 image_info_path="$(mktemp "${TMPDIR:-/tmp}/televybackup-dmg-image-info.XXXXXX")"
@@ -28,6 +33,7 @@ attach_attempted=false
 attach_completed=false
 prepare_evidence_path() {
   local path="$1"
+  reject_symlink_components "$path"
   [[ ! -L "$path" ]] || {
     echo "DMG evidence path must not be a symlink: $path" >&2
     exit 1

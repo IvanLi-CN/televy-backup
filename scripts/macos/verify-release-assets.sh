@@ -25,6 +25,10 @@ done
 }
 root_dir="$(git rev-parse --show-toplevel)"
 metadata_verifier="$root_dir/scripts/macos/verify-dmg-metadata.py"
+path_safety_checker="$root_dir/scripts/macos/reject-symlink-components.py"
+reject_symlink_components() {
+  python3 "$path_safety_checker" "$1"
+}
 requirement_normalizer="$root_dir/scripts/macos/normalize-designated-requirement.py"
 read_designated_requirement() {
   codesign -d -r- "$1" 2>&1 | python3 "$requirement_normalizer"
@@ -52,6 +56,7 @@ verify_nested_helper_path() {
 }
 prepare_evidence_path() {
   local path="$1"
+  reject_symlink_components "$path"
   [[ ! -L "$path" ]] || {
     echo "DMG evidence path must not be a symlink: $path" >&2
     exit 1
@@ -360,6 +365,7 @@ if [[ "$skip_bundle_checks" == true ]]; then
   exit 0
 fi
 app="$asset_dir/TelevyBackup.app"
+reject_symlink_components "$asset_dir"
 [[ ! -L "$app" && -d "$app" ]] || { echo "missing main app bundle or symlinked app: $app" >&2; exit 1; }
 [[ ! -d "$asset_dir/TelevyBackup Snapshot Access.app" ]] || {
   echo "Snapshot Access must not be a top-level installable app" >&2
@@ -434,7 +440,10 @@ requirement_cdhashes = {
 }
 require(requirement_cdhashes, "mount helper designated requirement has no CDHash identities")
 require({component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes, "mount helper CDHash mismatch")
-require(component["designated_requirement"] == sys.argv[5], "mount helper designated requirement mismatch")
+require(
+    component["designated_requirement"] == sys.argv[5],
+    f"mount helper designated requirement mismatch: manifest={component['designated_requirement']!r} actual={sys.argv[5]!r}",
+)
 PY
   launch_agent="$app/Contents/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist"
   [[ -s "$launch_agent" ]] || { echo "embedded Snapshot Access LaunchAgent missing" >&2; exit 1; }

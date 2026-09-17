@@ -29,6 +29,13 @@ fi
   echo "set TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1 in the controlled GUI session" >&2
   exit 2
 }
+root_dir="$(git rev-parse --show-toplevel)"
+path_safety_checker="$root_dir/scripts/macos/reject-symlink-components.py"
+reject_symlink_components() {
+  python3 "$path_safety_checker" "$1"
+}
+reject_symlink_components "$dmg"
+reject_symlink_components "$evidence_dir"
 mkdir -p "$evidence_dir"
 [[ ! -L "$evidence_dir" ]] || {
   echo "Finder acceptance evidence directory must not be a symlink" >&2
@@ -68,7 +75,6 @@ cleanup_preflight() {
   release_lock || true
 }
 trap cleanup_preflight EXIT
-root_dir="$(git rev-parse --show-toplevel)"
 layout_path="$root_dir/assets/brand/macos/dmg/layout.json"
 source_dmg="$dmg"
 source_asset_dir="$(dirname "$source_dmg")"
