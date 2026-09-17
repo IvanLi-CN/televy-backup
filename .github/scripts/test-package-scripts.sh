@@ -329,12 +329,12 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
   echo "native package CI jobs must expose the shared DMG layout verifier" >&2
   exit 1
 }
-[[ "$(grep -Fc 'timeout-minutes: 45' <<<"$package_workflow_text")" -eq 2 ]] || {
-  echo "native package CI jobs must have a 45-minute timeout" >&2
+[[ "$(grep -Fc 'timeout-minutes: 30' <<<"$package_workflow_text")" -eq 2 ]] || {
+  echo "native package CI jobs must have a 30-minute timeout" >&2
   exit 1
 }
-[[ "$(grep -Fc 'timeout-minutes: 30' <<<"$package_workflow_text")" -eq 1 ]] || {
-  echo "Universal package CI must have a 30-minute timeout" >&2
+[[ "$(grep -Fc 'timeout-minutes: 20' <<<"$package_workflow_text")" -eq 1 ]] || {
+  echo "Universal package CI must have a 20-minute timeout" >&2
   exit 1
 }
 [[ "$(grep -Fc 'Build arm64 package (up to 2 attempts)' <<<"$package_workflow_text")" -eq 1 && "$(grep -Fc 'Build x86_64 package (up to 2 attempts)' <<<"$package_workflow_text")" -eq 1 ]] || {
