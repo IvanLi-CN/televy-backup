@@ -416,9 +416,9 @@ import json
 import pathlib
 import sys
 
-hidden = json.load(open(sys.argv[11], encoding="utf-8"))
-observation = json.load(open(sys.argv[12], encoding="utf-8"))
-visual_review = json.loads(sys.argv[13])
+hidden = json.load(open(sys.argv[12], encoding="utf-8"))
+observation = json.load(open(sys.argv[13], encoding="utf-8"))
+visual_review = json.loads(sys.argv[14])
 layout = json.load(open(sys.argv[7], encoding="utf-8"))
 canonical_layout = {
     "schema_version": layout["schema_version"],
@@ -451,7 +451,7 @@ record = next((asset for asset in manifest.get("assets", []) if asset.get("name"
 if record is None or record.get("sha256") != sys.argv[4] or record.get("dmg_layout_digest") != semantic_layout_digest:
     raise SystemExit("Finder acceptance DMG does not match its adjacent BUILD-MANIFEST.json")
 print(json.dumps({
-    "architecture": sys.argv[9],
+    "architecture": sys.argv[10],
     "capture_scope": "finder-window-only",
     "device": sys.argv[1],
     "dmg": sys.argv[2],

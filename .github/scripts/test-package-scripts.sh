@@ -325,8 +325,14 @@ grep -F 'os.path.islink(store_path)' <<<"$layout_verify_text" >/dev/null &&
   exit 1
 }
 grep -F 'prepare_evidence_path "$DMG_EVIDENCE_FILE"' <<<"$layout_verify_text" >/dev/null &&
-  grep -F 'prepare_evidence_path "$DMG_EVIDENCE_FILE"' <<<"$verify_release_text" >/dev/null || {
+grep -F 'prepare_evidence_path "$DMG_EVIDENCE_FILE"' <<<"$verify_release_text" >/dev/null || {
   echo "DMG verifiers must safely initialize evidence paths" >&2
+  exit 1
+}
+grep -F 'json.load(open(sys.argv[12]' <<<"$finder_text" >/dev/null &&
+  grep -F 'json.load(open(sys.argv[13]' <<<"$finder_text" >/dev/null &&
+  grep -F 'json.loads(sys.argv[14])' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must preserve Python evidence argument mapping" >&2
   exit 1
 }
 grep -F 'source_checksums_path="$source_asset_dir/SHA256SUMS"' <<<"$finder_text" >/dev/null || {

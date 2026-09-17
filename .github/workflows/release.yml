@@ -841,9 +841,13 @@ jobs:
           rc2_tag="v${core_version}-rc.2"
           screenshot_dir="${RUNNER_TEMP}/finder-acceptance-screenshots"
           mkdir -p "${screenshot_dir}"
-          mapfile -t screenshot_names < <(python3 - "${ACCEPTANCE_EVIDENCE}" <<'PY'
+          screenshot_names=()
+          while IFS= read -r screenshot_name; do
+            [[ -n "${screenshot_name}" ]] && screenshot_names+=("${screenshot_name}")
+          done < <(python3 - "${ACCEPTANCE_EVIDENCE}" <<'PY'
           import json
           import pathlib
+          import re
           import sys
 
           records = json.loads(sys.argv[1]).get("finder_acceptance")

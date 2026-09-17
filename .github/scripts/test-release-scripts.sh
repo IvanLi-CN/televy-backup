@@ -149,6 +149,8 @@ assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow
 assert "verify-macos-rc-acceptance.py" in release_workflow
 assert "--screenshot-dir" in release_workflow
 assert "gh release download \"${rc2_tag}\"" in release_workflow
+assert "import re" in release_workflow
+assert "mapfile" not in release_workflow
 assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in release_workflow
 assert 'rc1_json="$(gh release view "$rc1_tag"' in release_workflow
 assert 'rc2_json="$(gh release view "$rc2_tag"' in release_workflow
