@@ -197,6 +197,8 @@ assert_contains "draft publication checks existing asset digest" "$release_text"
 assert_contains "draft publication rechecks state before each asset" "$release_text" 'Release became published before inspecting'
 assert_contains "draft publication documents non-atomic upload guard" "$release_text" 'no conditional draft precondition'
 assert_contains "draft publication verifies final asset set" "$release_text" 'final Release asset set or digest does not match release-assets'
+assert_contains "new release starts as draft" "$release_text" 'flags=(--draft --verify-tag --title "${PRODUCT_TAG}" --generate-notes)'
+assert_contains "new release is published after verification" "$release_text" 'runtime_state=draft'
 assert_not_contains "draft publication uses one bulk upload" "$release_text" 'gh release upload "${PRODUCT_TAG}" "${release_files[@]}"'
 if (( $(printf '%s' "$release_text" | grep -Fc 'verify-release-sequence') < 2 )); then
   printf 'release workflow must verify sequence before and during publication\n' >&2

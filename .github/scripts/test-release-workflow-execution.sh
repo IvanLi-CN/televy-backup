@@ -104,7 +104,9 @@ fi
 if [[ "$1" == release && "$2" == create ]]; then
   tag="$3"
   printf '%s\n' "$*" > "$state_dir/$tag.created"
-  printf '{"tag_name":"%s","draft":false,"prerelease":%s}\n' "$tag" \
+  draft_state=false
+  [[ "$*" == *'--draft'* ]] && draft_state=true
+  printf '{"tag_name":"%s","draft":%s,"prerelease":%s}\n' "$tag" "$draft_state" \
     "$([[ "$*" == *'--prerelease'* ]] && echo true || echo false)" > "$state_dir/$tag"
   if [[ "$*" == *'--latest=true'* ]]; then
     printf '%s\n' "$tag" > "$state_dir/latest"
@@ -154,11 +156,12 @@ run_publish_fixture() {
     export PATH="$bin_dir:$PATH"
     export GH_FIXTURE_REPO="$repo_dir" GH_FIXTURE_STATE="$tmp_dir/state"
     export GITHUB_REPOSITORY=fixture/repo GITHUB_API_URL=https://fixture.invalid GH_TOKEN=fixture
-    export PRODUCT_TAG="$tag" PRODUCT_VERSION="$version" PRODUCT_CHANNEL="$channel"
-    export RELEASE_SHA="$release_sha" RELEASE_STATE=missing BOUND_IDENTITY=present
-    bash "$tmp_dir/tag.sh"
-    bash "$tmp_dir/release.sh"
-    grep -F -- "$expected_flags" "$tmp_dir/state/$tag.created"
+  export PRODUCT_TAG="$tag" PRODUCT_VERSION="$version" PRODUCT_CHANNEL="$channel"
+  export RELEASE_SHA="$release_sha" RELEASE_STATE=missing BOUND_IDENTITY=present
+  bash "$tmp_dir/tag.sh"
+  bash "$tmp_dir/release.sh"
+  grep -F -- "$expected_flags" "$tmp_dir/state/$tag.created"
+  grep -F -- '--draft' "$tmp_dir/state/$tag.created"
     git show-ref --verify --quiet "refs/tags/$tag"
     [[ "$(git rev-parse "refs/tags/$tag^{commit}")" == "$release_sha" ]]
   )

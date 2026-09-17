@@ -1058,6 +1058,16 @@ jobs:
           PY
             while IFS= read -r asset_name; do release_files+=("release-assets/${asset_name}"); done < "${release_asset_list}"
             ((${#release_files[@]} > 0))
+            if [[ "${runtime_state}" == missing ]]; then
+              flags=(--draft --verify-tag --title "${PRODUCT_TAG}" --generate-notes)
+              if [[ "${PRODUCT_CHANNEL}" != prod ]]; then
+                flags+=(--prerelease --latest=false)
+              else
+                flags+=(--latest=true)
+              fi
+              gh release create "${PRODUCT_TAG}" "${flags[@]}"
+              runtime_state=draft
+            fi
             if [[ "${runtime_state}" == draft ]]; then
               latest_release=""
               if ! latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
@@ -1132,15 +1142,6 @@ jobs:
               else
                 gh release edit "${PRODUCT_TAG}" --draft=false --prerelease --latest=false
               fi
-            else
-              test "${runtime_state}" = missing
-              flags=(--verify-tag --title "${PRODUCT_TAG}" --generate-notes)
-              if [[ "${PRODUCT_CHANNEL}" == prod ]]; then
-                flags+=(--latest=true)
-              else
-                flags+=(--prerelease --latest=false)
-              fi
-              gh release create "${PRODUCT_TAG}" "${release_files[@]}" "${flags[@]}"
             fi
           fi
       - name: Append consumed receipt
