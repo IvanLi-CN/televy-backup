@@ -3,6 +3,7 @@ set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
 tmp_dir="$(mktemp -d)"
+trap 'printf "homebrew cask contract failed at line %s\n" "$LINENO" >&2' ERR
 trap 'rm -rf "$tmp_dir"' EXIT
 
 ruby -c "$root_dir/Casks/televybackup.rb"
