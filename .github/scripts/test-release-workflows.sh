@@ -117,8 +117,8 @@ release_text="$(<"$root_dir/.github/workflows/release.yml")"
   exit 1
 }
 assert_contains "release dependency cache architecture key" "$release_text" "runner.arch"
-[[ "$(grep -Fc '${{ runner.os }}-ARM64-cargo-macos-' <<<"$release_text")" -eq 2 && "$(grep -Fc '${{ runner.os }}-X64-cargo-macos-' <<<"$release_text")" -eq 2 ]] || {
-  printf 'release dependency cache must fall back across architecture-specific caches\n' >&2
+[[ "$(grep -Fc '${{ runner.os }}-ARM64-cargo-macos-' <<<"$release_text")" -eq 0 && "$(grep -Fc '${{ runner.os }}-X64-cargo-macos-' <<<"$release_text")" -eq 0 ]] || {
+  printf 'release dependency cache must not restore host-specific artifacts across architectures\n' >&2
   exit 1
 }
 [[ "$(grep -Fc 'timeout-minutes: 10' <<<"$release_text")" -eq 1 ]] || {

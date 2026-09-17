@@ -68,8 +68,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
-            ${{ runner.os }}-ARM64-cargo-macos-
-            ${{ runner.os }}-X64-cargo-macos-
       - name: Build arm64 package (up to 2 attempts)
         if: needs.classify.outputs.kind == 'source'
         run: |
@@ -127,8 +125,6 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
-            ${{ runner.os }}-ARM64-cargo-macos-
-            ${{ runner.os }}-X64-cargo-macos-
       - name: Build x86_64 package (up to 2 attempts)
         if: needs.classify.outputs.kind == 'source'
         run: |

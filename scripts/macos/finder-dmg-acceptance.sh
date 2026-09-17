@@ -122,6 +122,7 @@ mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-finder-acceptance.XXXXXX"
 mount_point="$(cd "$mount_point" && pwd -P)"
 attached_device=""
 mounted=false
+attach_completed=false
 resolve_device_for_mount() {
   hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
@@ -177,7 +178,7 @@ cleanup() {
       echo "failed to detach Finder acceptance device: $cleanup_device" >&2
       cleanup_failed=true
     fi
-  elif [[ "$mounted" == true ]]; then
+  elif [[ "$attach_completed" == true ]]; then
     echo "failed to resolve Finder acceptance device for cleanup: $mount_point" >&2
     cleanup_failed=true
   fi
@@ -216,8 +217,20 @@ fi
 finder_was_visible_changed=false
 trap cleanup EXIT
 hdiutil verify "$dmg" >/dev/null
-attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"
+attach_status=0
+if attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"; then
+  attach_status=0
+else
+  attach_status=$?
+fi
+if (( attach_status != 0 )); then
+  attached_device="$(resolve_device_for_mount "$mount_point")"
+  mounted=true
+  echo "hdiutil attach failed for $dmg (status $attach_status); cleanup will detach $attached_device" >&2
+  exit "$attach_status"
+fi
 mounted=true
+attach_completed=true
 read -r attached_device attached_mount < <(
   python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]

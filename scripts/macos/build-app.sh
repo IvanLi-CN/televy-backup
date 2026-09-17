@@ -120,12 +120,9 @@ fi
 echo "Building workspace binaries ($release_version, $cargo_target)..."
 workspace_build=(cargo build --locked --release)
 if [[ -n "$cargo_target" ]]; then
-  workspace_build+=(--target "$cargo_target")
+workspace_build+=(--target "$cargo_target")
 fi
 workspace_build+=(-p televybackup -p televybackupd -p televybackup-snapshot-access)
-if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
-  workspace_build+=(--bin televybackup-snapshot-mount-helper)
-fi
 "${workspace_build[@]}"
 cp "$binary_dir/televybackup" "$macos_dir/televybackup-cli"
 

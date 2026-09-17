@@ -98,8 +98,18 @@ attach_dmg_readonly() {
   ATTACHED_DEVICE=""
   ATTACHED_MOUNT=""
   local attach_plist
-  attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"
+  local attach_status=0
+  if attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"; then
+    attach_status=0
+  else
+    attach_status=$?
+  fi
   ATTACHED_MOUNT="$mount_point"
+  if (( attach_status != 0 )); then
+    ATTACHED_DEVICE="$(resolve_device_for_mount "$mount_point")"
+    echo "hdiutil attach failed for $dmg (status $attach_status); cleanup will detach $ATTACHED_DEVICE" >&2
+    return "$attach_status"
+  fi
   read -r ATTACHED_DEVICE ATTACHED_MOUNT < <(
     python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
@@ -417,6 +427,7 @@ verify_dmg_helper_identity() (
   mount_point="$(cd "$mount_point" && pwd -P)"
   attached_device=""
   mounted=false
+  attach_completed=false
   cleanup() {
     original_status=$?
     cleanup_failed=false
@@ -428,7 +439,7 @@ verify_dmg_helper_identity() (
         echo "failed to detach Snapshot Access verification device: $cleanup_device" >&2
         cleanup_failed=true
       fi
-    elif [[ "$mounted" == true || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
+    elif [[ "$attach_completed" == true || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
       echo "failed to resolve Snapshot Access verification device for cleanup: $mount_point" >&2
       cleanup_failed=true
     fi
@@ -445,6 +456,7 @@ verify_dmg_helper_identity() (
   attach_dmg_readonly "$local_dmg" "$mount_point"
   attached_device="$ATTACHED_DEVICE"
   mounted=true
+  attach_completed=true
   app="$mount_point/TelevyBackup.app"
   [[ -d "$app" ]] || { echo "DMG is missing TelevyBackup.app: $local_dmg" >&2; exit 1; }
   bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")"
@@ -550,6 +562,7 @@ check_dmg_layout() {
   mount_point="$(cd "$mount_point" && pwd -P)"
   local attached_device=""
   local mounted=false
+  local attach_completed=false
   cleanup() {
     original_status=$?
     cleanup_failed=false
@@ -561,7 +574,7 @@ check_dmg_layout() {
         echo "failed to detach DMG layout verification device: $cleanup_device" >&2
         cleanup_failed=true
       fi
-    elif [[ "$mounted" == true || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
+    elif [[ "$attach_completed" == true || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
       echo "failed to resolve DMG layout verification device for cleanup: $mount_point" >&2
       cleanup_failed=true
     fi
@@ -578,6 +591,7 @@ check_dmg_layout() {
   attach_dmg_readonly "$dmg" "$mount_point"
   attached_device="$ATTACHED_DEVICE"
   mounted=true
+  attach_completed=true
   diskutil verifyVolume "$attached_device"
   local top_level_apps=()
   while IFS= read -r app_path; do

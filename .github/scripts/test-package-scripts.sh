@@ -54,6 +54,14 @@ for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-h
     exit 1
   }
 done
+grep -F 'workspace_build+=(-p televybackup -p televybackupd -p televybackup-snapshot-access)' <<<"$build_text" >/dev/null || {
+  echo "build-app.sh must build all workspace binaries in one Cargo invocation" >&2
+  exit 1
+}
+if grep -F 'workspace_build+=(--bin' <<<"$build_text" >/dev/null; then
+  echo "build-app.sh must not filter the shared workspace build to one binary" >&2
+  exit 1
+fi
 grep -F "chmod 755 \\" <<<"$build_text" >/dev/null || {
   echo "build-app.sh must preserve executable modes for every main binary" >&2
   exit 1
@@ -224,6 +232,17 @@ grep -F 'verify-dmg-layout.sh' <<<"$assemble_text" >/dev/null || {
   exit 1
 }
 finder_text="$(<"$root_dir/scripts/macos/finder-dmg-acceptance.sh")"
+for attach_text in "$verify_release_text" "$finder_text"; do
+  grep -F 'attach_status=0' <<<"$attach_text" >/dev/null || {
+    echo "DMG attach paths must preserve cleanup when hdiutil attach fails" >&2
+    exit 1
+  }
+done
+layout_verify_text="$(<"$root_dir/scripts/macos/verify-dmg-layout.sh")"
+grep -F 'attach_completed=false' <<<"$layout_verify_text" >/dev/null || {
+  echo "DMG layout verification must track attach completion separately from cleanup" >&2
+  exit 1
+}
 grep -F 'TELEVYBACKUP_RUN_FINDER_ACCEPTANCE' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must require explicit controlled-session opt-in" >&2
   exit 1
@@ -341,8 +360,8 @@ grep -F 'runner.arch' <<<"$package_workflow_text" >/dev/null || {
   echo "package dependency cache must be architecture-specific" >&2
   exit 1
 }
-[[ "$(grep -Fc '${{ runner.os }}-ARM64-cargo-macos-' <<<"$package_workflow_text")" -eq 2 && "$(grep -Fc '${{ runner.os }}-X64-cargo-macos-' <<<"$package_workflow_text")" -eq 2 ]] || {
-  echo "package dependency cache must fall back across architecture-specific caches" >&2
+[[ "$(grep -Fc '${{ runner.os }}-ARM64-cargo-macos-' <<<"$package_workflow_text")" -eq 0 && "$(grep -Fc '${{ runner.os }}-X64-cargo-macos-' <<<"$package_workflow_text")" -eq 0 ]] || {
+  echo "package dependency cache must not restore host-specific artifacts across architectures" >&2
   exit 1
 }
 [[ "$(grep -Fc 'timeout-minutes: 10' <<<"$package_workflow_text")" -eq 1 ]] || {
