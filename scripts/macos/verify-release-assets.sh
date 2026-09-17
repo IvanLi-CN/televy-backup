@@ -106,7 +106,19 @@ attach_dmg_readonly() {
   fi
   ATTACHED_MOUNT="$mount_point"
   if (( attach_status != 0 )); then
-    ATTACHED_DEVICE="$(resolve_device_for_mount "$mount_point")"
+    read -r ATTACHED_DEVICE ATTACHED_MOUNT < <(
+      python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.argv[2].encode())
+for entity in payload.get("system-entities", []):
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"], entity["mount-point"])
+        raise SystemExit(0)
+print("", "")' "$mount_point" "$attach_plist" 2>/dev/null || true
+    )
+    if [[ -z "$ATTACHED_DEVICE" ]]; then
+      ATTACHED_DEVICE="$(resolve_device_for_mount "$mount_point")"
+    fi
     echo "hdiutil attach failed for $dmg (status $attach_status); cleanup will detach $ATTACHED_DEVICE" >&2
     return "$attach_status"
   fi

@@ -250,7 +250,7 @@ resolve_permissions = release.fetch("jobs").fetch("resolve").fetch("permissions"
 abort "release resolver must be able to read PR metadata" unless resolve_permissions == {"contents" => "write", "pull-requests" => "read"}
 expected_permissions = {"contents" => "write"}
 abort "publish job permissions are broader than contents: write" unless release.fetch("jobs").fetch("publish").fetch("permissions") == expected_permissions
-publish_checkout = release.fetch("jobs").fetch("publish").fetch("steps").find { |step| step["uses"] == "actions/checkout@v4" }
+publish_checkout = release.fetch("jobs").fetch("publish").fetch("steps").find { |step| step["uses"] == "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" }
 abort "publish job must use the trusted policy checkout" unless publish_checkout&.fetch("with", {}).fetch("ref", nil) == '${{ needs.resolve.outputs.policy_sha }}'
 abort "publish checkout must not persist repository credentials" unless publish_checkout.fetch("with", {}).fetch("persist-credentials", nil) == false
 

@@ -54,8 +54,16 @@ for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-h
     exit 1
   }
 done
-grep -F 'workspace_build+=(-p televybackup -p televybackupd -p televybackup-snapshot-access)' <<<"$build_text" >/dev/null || {
-  echo "build-app.sh must build all workspace binaries in one Cargo invocation" >&2
+grep -F 'workspace_build+=(-p televybackup -p televybackupd)' <<<"$build_text" >/dev/null || {
+  echo "build-app.sh must build CLI and daemon in one Cargo invocation" >&2
+  exit 1
+}
+grep -F 'if [[ -z "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]' <<<"$build_text" >/dev/null || {
+  echo "build-app.sh must not rebuild the reusable Snapshot Access bundle" >&2
+  exit 1
+}
+grep -F 'snapshot_build=(cargo build --locked --release -p televybackup-snapshot-access --bin televybackup-snapshot-mount-helper)' <<<"$build_text" >/dev/null || {
+  echo "build-app.sh must build the main-app Snapshot mount helper on the reuse path" >&2
   exit 1
 }
 if grep -F 'workspace_build+=(--bin' <<<"$build_text" >/dev/null; then

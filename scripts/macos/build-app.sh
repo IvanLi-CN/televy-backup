@@ -122,7 +122,10 @@ workspace_build=(cargo build --locked --release)
 if [[ -n "$cargo_target" ]]; then
 workspace_build+=(--target "$cargo_target")
 fi
-workspace_build+=(-p televybackup -p televybackupd -p televybackup-snapshot-access)
+workspace_build+=(-p televybackup -p televybackupd)
+if [[ -z "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
+  workspace_build+=(-p televybackup-snapshot-access)
+fi
 "${workspace_build[@]}"
 cp "$binary_dir/televybackup" "$macos_dir/televybackup-cli"
 
@@ -130,6 +133,13 @@ cp "$binary_dir/televybackupd" "$macos_dir/televybackupd"
 
 snapshot_access_binary="$binary_dir/televybackup-snapshot-access"
 snapshot_mount_helper_binary="$binary_dir/televybackup-snapshot-mount-helper"
+if [[ -n "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
+  snapshot_build=(cargo build --locked --release -p televybackup-snapshot-access --bin televybackup-snapshot-mount-helper)
+  if [[ -n "$cargo_target" ]]; then
+    snapshot_build+=(--target "$cargo_target")
+  fi
+  "${snapshot_build[@]}"
+fi
 cp "$snapshot_mount_helper_binary" "$macos_dir/televybackup-snapshot-mount-helper"
 chmod 755 "$macos_dir/televybackup-snapshot-mount-helper"
 

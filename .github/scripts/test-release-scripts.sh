@@ -144,7 +144,7 @@ assert "consumed receipt exists without a matching product tag" in release_workf
 assert "macos-release-acceptance" in release_workflow
 assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow
 assert "verify-macos-rc-acceptance.py" in release_workflow
-assert "actions/download-artifact@v4" in release_workflow
+assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in release_workflow
 assert 'rc1_json="$(gh release view "$rc1_tag"' in release_workflow
 assert 'rc2_json="$(gh release view "$rc2_tag"' in release_workflow
 assert "fda_regrant_requested" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")

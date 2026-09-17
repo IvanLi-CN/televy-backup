@@ -83,7 +83,7 @@ jobs:
           echo "sha=${main_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout main history
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ steps.trusted-main.outputs.sha }}
           fetch-depth: 0
@@ -452,7 +452,7 @@ jobs:
       - name: Upload immutable helper source
         if: steps.release.outputs.identity_status == 'resolved' && steps.release.outputs.helper_source_mode == 'reuse'
         id: upload-helper-source
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: snapshot-helper-source
           path: ${{ runner.temp }}/snapshot-helper-source
@@ -500,7 +500,7 @@ jobs:
 
       - name: Upload locked release intent
         if: steps.release.outputs.identity_status == 'resolved'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-intent
           path: release-intent.json
@@ -513,11 +513,11 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.merge_sha }}
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
@@ -536,7 +536,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
       - name: Download immutable Snapshot Access helper source
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: snapshot-helper-source
           path: ${{ runner.temp }}/snapshot-helper
@@ -586,7 +586,7 @@ jobs:
       - name: Verify reused Snapshot Access identity
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
         run: bash "$TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY" --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/arm64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-package-arm64
           path: dist/arm64
@@ -598,11 +598,11 @@ jobs:
     runs-on: macos-15-intel
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.merge_sha }}
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
@@ -621,7 +621,7 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
       - name: Download immutable Snapshot Access helper source
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: snapshot-helper-source
           path: ${{ runner.temp }}/snapshot-helper
@@ -671,7 +671,7 @@ jobs:
       - name: Verify reused Snapshot Access identity
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
         run: bash "$TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY" --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/x86_64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-package-x86_64
           path: dist/x86_64
@@ -683,21 +683,21 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.merge_sha }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-package-arm64
           path: dist/arm64
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-package-x86_64
           path: dist/x86_64
       - name: Download immutable Snapshot Access helper source
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: snapshot-helper-source
           path: ${{ runner.temp }}/snapshot-helper
@@ -777,7 +777,7 @@ jobs:
               --candidate "dist/final/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" \
               --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-assets
           path: dist/final
@@ -790,11 +790,11 @@ jobs:
     environment:
       name: macos-release-acceptance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.source_sha }}
           fetch-depth: 1
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-assets
           path: release-assets
@@ -877,16 +877,16 @@ jobs:
       BOUNDARY_TOKEN: ${{ needs.resolve.outputs.boundary_token }}
       BOUND_IDENTITY: ${{ needs.resolve.outputs.bound_identity }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.policy_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-assets
           path: release-assets
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-intent
           path: release-intent
