@@ -25,7 +25,8 @@ bash -n \
 python3 -m py_compile \
   "$root_dir/scripts/macos/reject-symlink-components.py" \
   "$root_dir/scripts/macos/normalize-designated-requirement.py" \
-  "$root_dir/scripts/macos/verify-dmg-metadata.py"
+  "$root_dir/scripts/macos/verify-dmg-metadata.py" \
+  "$root_dir/.github/scripts/verify-dmg-evidence.py"
 symlink_parent="$tmp_dir/symlink-parent"
 mkdir -p "$symlink_parent/real"
 ln -s "$symlink_parent/real" "$symlink_parent/redirect"
@@ -371,6 +372,12 @@ for attach_text in "$verify_release_text" "$finder_text"; do
   }
 done
 layout_verify_text="$(<"$root_dir/scripts/macos/verify-dmg-layout.sh")"
+evidence_verify_text="$(<"$root_dir/.github/scripts/verify-dmg-evidence.py")"
+grep -F 'dmg_filesystem_verify' <<<"$evidence_verify_text" >/dev/null &&
+  grep -F 'dmg_detach' <<<"$evidence_verify_text" >/dev/null || {
+  echo "DMG evidence verifier must enforce filesystem verification and exact detach events" >&2
+  exit 1
+}
 grep -F 'attach_completed=false' <<<"$layout_verify_text" >/dev/null || {
   echo "DMG layout verification must track attach completion separately from cleanup" >&2
   exit 1
@@ -554,6 +561,10 @@ done
 package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
 [[ "$(grep -Fc 'verify-dmg-layout.sh' <<<"$package_workflow_text")" -ge 2 ]] || {
   echo "native package CI jobs must expose the shared DMG layout verifier" >&2
+  exit 1
+}
+[[ "$(grep -Fc 'verify-dmg-evidence.py' <<<"$package_workflow_text")" -ge 3 ]] || {
+  echo "package matrix jobs must validate their persisted DMG event streams" >&2
   exit 1
 }
 [[ "$(grep -Fc 'timeout-minutes: 15' <<<"$package_workflow_text")" -eq 2 ]] || {

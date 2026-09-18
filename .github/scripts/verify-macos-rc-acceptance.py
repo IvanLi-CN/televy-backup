@@ -17,6 +17,7 @@ from pathlib import Path
 
 REQUIREMENT_NORMALIZER = Path(__file__).resolve().parents[2] / "scripts/macos/normalize-designated-requirement.py"
 ALLOWED_SYSTEM_ALIASES = {"/tmp", "/var"}
+RC_TAG_RE = re.compile(r"^v(?P<core>\d+\.\d+\.\d+)-rc\.(?P<ordinal>[1-9]\d*)$")
 
 
 def fail(message: str) -> "NoReturn":
@@ -57,6 +58,13 @@ def required_string(value, name: str) -> str:
     if not isinstance(value, str) or not value:
         fail(f"{name} must be a non-empty string")
     return value
+
+
+def rc_tag_version(tag: str, stable_version: str, name: str) -> tuple[str, int]:
+    match = RC_TAG_RE.fullmatch(tag)
+    if match is None or match.group("core") != stable_version:
+        fail(f"{name} must be an RC tag for stable version {stable_version}")
+    return f"{stable_version}-rc.{match.group('ordinal')}", int(match.group("ordinal"))
 
 
 def verify_screenshot(screenshot_dir: Path, record: dict, name: str) -> None:
@@ -497,6 +505,10 @@ if evidence.get("stable_version") != args.stable_version:
     fail("stable_version does not match the release")
 if evidence.get("rc1_tag") != args.rc1_tag or evidence.get("rc2_tag") != args.rc2_tag:
     fail("RC tags do not match the release sequence")
+rc1_version, rc1_ordinal = rc_tag_version(args.rc1_tag, args.stable_version, "rc1_tag")
+rc2_version, rc2_ordinal = rc_tag_version(args.rc2_tag, args.stable_version, "rc2_tag")
+if rc1_ordinal >= rc2_ordinal:
+    fail("rc1_tag must precede rc2_tag by ordinal")
 if manifest.get("release_version") != args.stable_version:
     fail("BUILD-MANIFEST.json has the wrong stable version")
 if args.stable_source_commit and manifest.get("source_commit") != args.stable_source_commit:
@@ -658,11 +670,11 @@ if any(value is not None for value in rc_args) and not all(value is not None for
 if all(value is not None for value in rc_args):
     rc1_identity, rc1_artifact_digests = verify_rc_artifact(
         args.rc1_manifest, args.rc1_checksums, args.rc1_dmg,
-        f"{args.stable_version}-rc.1", args.rc1_source_commit, "RC1",
+        rc1_version, args.rc1_source_commit, "RC1",
     )
     rc2_identity, _ = verify_rc_artifact(
         args.rc2_manifest, args.rc2_checksums, args.rc2_dmg,
-        f"{args.stable_version}-rc.2", args.rc2_source_commit, "RC2",
+        rc2_version, args.rc2_source_commit, "RC2",
     )
     if rc1_identity != rc2_identity:
         fail("Snapshot Access helper identity changed between the RC release artifacts")

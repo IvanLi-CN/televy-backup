@@ -107,9 +107,11 @@ environment fields.
 
 Stable publication MUST wait for the `macos-release-acceptance` GitHub environment approval and a
 JSON `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` environment value identifying the exact manual
-RC1-to-RC2 acceptance result. The gate MUST download both RC Universal DMGs, bind each manifest's
-source commit to its tag, verify each DMG against its manifest and `SHA256SUMS`, and compare both
-RC helper identities with the final stable manifest. The evidence MUST name the stable version and both RC tags, cover
+RC1-to-RC2 acceptance result. The gate MUST select the two highest published RC ordinals for the
+same stable version, treating the lower selected ordinal as RC1 and the higher as RC2. It MUST
+download both RC Universal DMGs, bind each manifest's source commit to its tag, verify each DMG
+against its manifest and `SHA256SUMS`, and compare both RC helper identities with the final stable
+manifest. The evidence MUST name the stable version and both selected RC tags, cover
 legacy registration migration, exactly one FDA grant, strict backup success on RC1 and RC2 without
 a second grant, and an unchanged root mount helper. Its Snapshot Access and root helper identity
 fields MUST match the final `BUILD-MANIFEST.json`; arbitrary or stale non-JSON values MUST fail.

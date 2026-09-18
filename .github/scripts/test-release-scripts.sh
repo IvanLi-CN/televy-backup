@@ -133,6 +133,7 @@ assert 'git cat-file -e "${POLICY_SHA}^{commit}"' in release_workflow
 assert 'git worktree add --detach "${policy_checkout}" "${POLICY_SHA}"' in release_workflow
 assert 'cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"' in release_workflow
 assert 'policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"' in release_workflow
+assert 'policy_verify_dmg_evidence="${policy_checkout}/.github/scripts/verify-dmg-evidence.py"' in release_workflow
 assert 'cd "${policy_checkout}"' in release_workflow
 assert '"${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"' in release_workflow
 assert 'git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh"' not in release_workflow
@@ -147,6 +148,8 @@ assert "consumed receipt exists without a matching product tag" in release_workf
 assert "macos-release-acceptance" in release_workflow
 assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow
 assert "verify-macos-rc-acceptance.py" in release_workflow
+assert "stable release requires two published RCs" in release_workflow
+assert 'candidates[-2:]' in release_workflow
 assert "--screenshot-dir" in release_workflow
 assert "gh release download \"${rc2_tag}\"" in release_workflow
 assert "import re" in release_workflow

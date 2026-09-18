@@ -771,11 +771,15 @@ jobs:
           cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"
           policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"
           policy_verify_app_icon_assets="${policy_checkout}/scripts/macos/verify-app-icon-assets.sh"
+          policy_verify_dmg_evidence="${policy_checkout}/.github/scripts/verify-dmg-evidence.py"
           (
             cd "${policy_checkout}"
             DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl" \
               "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"
           )
+          python3 "${policy_verify_dmg_evidence}" \
+            --evidence "${RUNNER_TEMP}/dmg-release-events.jsonl" \
+            --asset-dir "$GITHUB_WORKSPACE/dist/final"
           bash "${policy_verify_app_icon_assets}" \
             "${policy_checkout}/assets/brand/macos/TelevyBackup.iconset" \
             "$GITHUB_WORKSPACE/dist/final/TelevyBackup.app/Contents/Resources/TelevyBackup.icns" \
@@ -823,10 +827,38 @@ jobs:
         run: |
           set -euo pipefail
           core_version="${{ needs.resolve.outputs.version }}"
-          for rc_number in 1 2; do
-            rc_version="${core_version}-rc.${rc_number}"
-            rc_tag="v${rc_version}"
-            rc_dir="release-rc/rc${rc_number}"
+          rc_release_list="${RUNNER_TEMP}/rc-releases.json"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft,isPrerelease,publishedAt > "$rc_release_list"
+          rc_tags_json="$(python3 - "$core_version" "$rc_release_list" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          core, path = sys.argv[1:]
+          pattern = re.compile(rf"^v{re.escape(core)}-rc\.(?P<ordinal>[1-9][0-9]*)$")
+          releases = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+          candidates = []
+          for release in releases:
+              if release.get("isDraft") is not False or release.get("isPrerelease") is not True:
+                  continue
+              tag = release.get("tagName")
+              match = pattern.fullmatch(tag or "")
+              if match:
+                  candidates.append((int(match.group("ordinal")), tag))
+          candidates.sort()
+          if len(candidates) < 2:
+              raise SystemExit(f"stable release requires two published RCs for {core}; found {len(candidates)}")
+          print(json.dumps([tag for _, tag in candidates[-2:]]))
+          PY
+          )"
+          rc1_tag="$(printf '%s' "$rc_tags_json" | jq -r '.[0]')"
+          rc2_tag="$(printf '%s' "$rc_tags_json" | jq -r '.[1]')"
+          printf 'RC1_TAG=%s\nRC2_TAG=%s\n' "$rc1_tag" "$rc2_tag" >> "$GITHUB_ENV"
+          for index in 0 1; do
+            rc_tag="$(printf '%s' "$rc_tags_json" | jq -r ".[$index]")"
+            rc_version="${rc_tag#v}"
+            rc_dir="release-rc/rc$((index + 1))"
             mkdir -p "${rc_dir}"
             gh release download "${rc_tag}" \
               --repo "$GITHUB_REPOSITORY" \
@@ -837,15 +869,17 @@ jobs:
             git fetch --force origin "refs/tags/${rc_tag}:refs/tags/${rc_tag}"
             python3 .github/scripts/release_chain.py verify-tag-provenance --tag "${rc_tag}"
             source_commit="$(git rev-list -n 1 "${rc_tag}^{commit}")"
-            echo "RC${rc_number}_SOURCE_COMMIT=${source_commit}" >> "$GITHUB_ENV"
+            echo "RC$((index + 1))_VERSION=${rc_version}" >> "$GITHUB_ENV"
+            echo "RC$((index + 1))_SOURCE_COMMIT=${source_commit}" >> "$GITHUB_ENV"
           done
       - name: Verify downloaded RC DMG layouts
         run: |
           set -euo pipefail
-          core_version="${{ needs.resolve.outputs.version }}"
           for rc_number in 1 2; do
+            rc_version_var="RC${rc_number}_VERSION"
+            rc_version="${!rc_version_var}"
             bash scripts/macos/verify-dmg-layout.sh \
-              --dmg "release-rc/rc${rc_number}/TelevyBackup-${core_version}-rc.${rc_number}.dmg"
+              --dmg "release-rc/rc${rc_number}/TelevyBackup-${rc_version}.dmg"
           done
       - name: Verify manual RC1 to RC2 acceptance evidence
         env:
@@ -854,8 +888,8 @@ jobs:
         run: |
           set -euo pipefail
           core_version="${{ needs.resolve.outputs.version }}"
-          rc1_tag="v${core_version}-rc.1"
-          rc2_tag="v${core_version}-rc.2"
+          rc1_tag="${RC1_TAG}"
+          rc2_tag="${RC2_TAG}"
           screenshot_dir="${RUNNER_TEMP}/finder-acceptance-screenshots"
           mkdir -p "${screenshot_dir}"
           screenshot_names=()
@@ -908,11 +942,11 @@ jobs:
             --stable-source-commit "${{ needs.resolve.outputs.merge_sha }}" \
             --rc1-manifest release-rc/rc1/BUILD-MANIFEST.json \
             --rc1-checksums release-rc/rc1/SHA256SUMS \
-            --rc1-dmg "release-rc/rc1/TelevyBackup-${core_version}-rc.1.dmg" \
+            --rc1-dmg "release-rc/rc1/TelevyBackup-${RC1_VERSION}.dmg" \
             --rc1-source-commit "$RC1_SOURCE_COMMIT" \
             --rc2-manifest release-rc/rc2/BUILD-MANIFEST.json \
             --rc2-checksums release-rc/rc2/SHA256SUMS \
-            --rc2-dmg "release-rc/rc2/TelevyBackup-${core_version}-rc.2.dmg" \
+            --rc2-dmg "release-rc/rc2/TelevyBackup-${RC2_VERSION}.dmg" \
             --rc2-source-commit "$RC2_SOURCE_COMMIT" \
             --screenshot-dir "$screenshot_dir"
 

@@ -102,6 +102,8 @@ jobs:
         env:
           DMG_EVIDENCE_FILE: ${{ runner.temp }}/dmg-layout-arm64-events.jsonl
         run: bash scripts/macos/verify-dmg-layout.sh --dmg "$(find dist/arm64 -maxdepth 1 -name 'TelevyBackup-*-arm64.dmg' -print -quit)"
+      - if: needs.classify.outputs.kind == 'source'
+        run: python3 .github/scripts/verify-dmg-evidence.py --evidence "${{ runner.temp }}/dmg-layout-arm64-events.jsonl" --asset-dir dist/arm64
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: needs.classify.outputs.kind == 'source'
         with:
@@ -176,6 +178,8 @@ jobs:
         env:
           DMG_EVIDENCE_FILE: ${{ runner.temp }}/dmg-layout-x86_64-events.jsonl
         run: bash scripts/macos/verify-dmg-layout.sh --dmg "$(find dist/x86_64 -maxdepth 1 -name 'TelevyBackup-*-x86_64.dmg' -print -quit)"
+      - if: needs.classify.outputs.kind == 'source'
+        run: python3 .github/scripts/verify-dmg-evidence.py --evidence "${{ runner.temp }}/dmg-layout-x86_64-events.jsonl" --asset-dir dist/x86_64
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: needs.classify.outputs.kind == 'source'
         with:
@@ -242,6 +246,9 @@ jobs:
           bash scripts/macos/generate-release-manifest.sh --mode development --asset-dir dist/final --source-commit "$(git rev-parse HEAD)" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
           DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl" \
             bash scripts/macos/verify-release-assets.sh --mode development --asset-dir dist/final --expected-source-commit "$(git rev-parse HEAD)" --expected-packaging-commit "$GITHUB_SHA"
+          python3 .github/scripts/verify-dmg-evidence.py \
+            --evidence "${RUNNER_TEMP}/dmg-release-events.jsonl" \
+            --asset-dir dist/final
       - name: Verify daemon-owned WebDAV service
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/verify-webdav-snapshot-browsing.sh

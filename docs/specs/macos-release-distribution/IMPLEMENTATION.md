@@ -38,7 +38,8 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
   versions, plus verified published prerelease `BUILD-MANIFEST.json` anchoring for RC2/stable reuse,
   including the final Universal bundle
 - stable-gate download and verification of both RC Universal DMGs, checksums, tag-bound source
-  commits, and helper identities before manual evidence is accepted
+  commits, and helper identities before manual evidence is accepted; the two highest published
+  RC ordinals for the stable version are selected as the ordered RC1/RC2 pair
 - real macOS RC1-to-RC2 migration check: one manual FDA grant after the old registration migration, then no FDA regrant for the ordinary main-app update
 - stable publication approval through the `macos-release-acceptance` GitHub environment and the structured `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` value, validated against the final manifest
 - shared testbox full-feature Rust validation
