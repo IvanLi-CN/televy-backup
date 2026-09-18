@@ -212,7 +212,7 @@ jobs:
                   "ref": ref,
                   "sourceSha": reserved_source,
                   "version": trailers.get("Release-Version", ""),
-                  "channel": trailers.get("Release-Channel", "").removeprefix("channel:"),
+                  "channel": release_channel.removeprefix("channel:"),
                   "reservationId": trailers.get("Reservation-Id", ""),
                   "Reservation-Owner": trailers.get("Reservation-Owner", ""),
                   "Reservation-Claim-Key": claim,
