@@ -27,6 +27,20 @@ python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
   --local-root "$repo_dir" --source-sha "$source_sha" --version 0.0.1 --channel prod \
   --owner fixture --claim-key "pr:1:source:${source_sha}:type:type:patch:channel:channel:prod" \
   --output "$tmp_dir/reservation.json" >/dev/null
+cp -R "$repo_dir" "$tmp_dir/prefixed-repo"
+python3 - "$tmp_dir/reservation.json" "$tmp_dir/prefixed-reservation.json" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+value["channel"] = "channel:" + value["channel"]
+json.dump(value, open(sys.argv[2], "w", encoding="utf-8"))
+PY
+prefixed_out="$(python3 "$root_dir/.github/scripts/release_preparation.py" \
+  --repo-root "$tmp_dir/prefixed-repo" --source-sha "$source_sha" --base-sha "$source_sha" \
+  --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" --mode allocate \
+  --reservation-json "$tmp_dir/prefixed-reservation.json")"
+[[ "$prefixed_out" == *'"prepared": "created"'* ]]
 out="$(python3 "$root_dir/.github/scripts/release_preparation.py" \
   --repo-root "$repo_dir" --source-sha "$source_sha" --base-sha "$source_sha" \
   --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" --mode allocate \

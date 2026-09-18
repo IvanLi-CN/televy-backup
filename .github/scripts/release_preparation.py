@@ -126,7 +126,7 @@ def prepare(args: argparse.Namespace) -> None:
     if any(not reservation.get(key) for key in required):
         raise PreparationError("reservation JSON is missing immutable identity fields")
     source_is_ready(repo_root, args.source_sha, args.base_sha, release_mode)
-    reservation_channel = str(reservation.get("channel", ""))
+    reservation_channel = str(reservation.get("channel", "")).removeprefix("channel:")
     expected_channel = intent["channel"].removeprefix("channel:")
     reservation_source_sha = str(reservation.get("sourceSha", ""))
     if not reservation_source_sha or not CHAIN.is_ancestor(reservation_source_sha, args.source_sha):
