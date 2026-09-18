@@ -19,7 +19,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -s "$dmg" && -n "$evidence_dir" ]] || usage
 if [[ -n "$rc2_tag" ]]; then
-  [[ "$rc2_tag" == v*-rc.2 ]] || usage
+  [[ "$rc2_tag" =~ ^v[^/]+-rc\.[1-9][0-9]*$ ]] || usage
   [[ -n "${GITHUB_REPOSITORY:-}" && -n "${GH_TOKEN:-}" ]] || {
     echo "RC2 screenshot upload requires GITHUB_REPOSITORY and GH_TOKEN" >&2
     exit 2
