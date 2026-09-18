@@ -598,8 +598,8 @@ jobs:
 
   build-x86_64:
     name: Build x86_64 package
-    needs: resolve
-    if: needs.resolve.outputs.enabled == 'true'
+    needs: [resolve, warm-x86_64]
+    if: needs.resolve.outputs.enabled == 'true' && needs.warm-x86_64.result == 'success'
     runs-on: macos-15-intel
     timeout-minutes: 15
     steps:
@@ -679,6 +679,37 @@ jobs:
         with:
           name: release-package-x86_64
           path: dist/x86_64
+
+  warm-x86_64:
+    name: Warm x86_64 cargo cache
+    needs: resolve
+    if: needs.resolve.outputs.enabled == 'true'
+    runs-on: macos-15-intel
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.resolve.outputs.merge_sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.91.0
+          targets: x86_64-apple-darwin
+      - name: Cache macOS x86_64 build dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/pip
+            ~/Library/Caches/pip
+            target
+            crates/mtproto-helper/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
+      - name: Build x86_64 cargo cache
+        run: bash scripts/macos/warm-cargo-cache.sh --arch x86_64
 
   assemble:
     name: Assemble Universal 2 package

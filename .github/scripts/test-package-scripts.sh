@@ -587,7 +587,7 @@ grep -F 'timeout-minutes: 16' <<<"$package_workflow_text" >/dev/null || {
   echo "native package CI jobs must cache build dependencies" >&2
   exit 1
 }
-[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$package_workflow_text")" -eq 2 ]] || {
+[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$package_workflow_text")" -eq 3 ]] || {
   echo "package dependency cache action must be pinned to a full commit SHA" >&2
   exit 1
 }
@@ -627,7 +627,7 @@ grep -F 'echo "source_sha=$(git rev-parse HEAD)"' <<<"$package_workflow_text" >/
   echo "package classification must record the checked-out source SHA" >&2
   exit 1
 }
-[[ "$(grep -Fc 'ref: ${{ needs.classify.outputs.source_sha }}' <<<"$package_workflow_text")" -eq 3 ]] || {
+[[ "$(grep -Fc 'ref: ${{ needs.classify.outputs.source_sha }}' <<<"$package_workflow_text")" -eq 4 ]] || {
   echo "all package jobs must checkout the classified immutable source SHA" >&2
   exit 1
 }

@@ -128,7 +128,7 @@ release_text="$(<"$root_dir/.github/workflows/release.yml")"
   printf 'release native package jobs must cache build dependencies\n' >&2
   exit 1
 }
-[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$release_text")" -eq 2 ]] || {
+[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$release_text")" -eq 3 ]] || {
   printf 'release dependency cache action must be pinned to a full commit SHA\n' >&2
   exit 1
 }
