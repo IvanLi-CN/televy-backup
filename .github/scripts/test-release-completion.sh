@@ -121,6 +121,42 @@ skip_out="$(python3 "$root_dir/.github/scripts/release_completion.py" \
   --commit "$source_sha" --base "$source_sha" --labels-json "$tmp_dir/skip-labels.json" --checks-json "$tmp_dir/skip-checks.json")"
 [[ "$skip_out" == *'"status": "skip"'* ]]
 
+baseline_dir="$tmp_dir/baseline"
+mkdir -p "$baseline_dir"
+git -C "$baseline_dir" init -q
+git -C "$baseline_dir" config user.name fixture
+git -C "$baseline_dir" config user.email fixture@example.com
+printf '0.9.9\n' > "$baseline_dir/VERSION"
+git -C "$baseline_dir" add VERSION
+git -C "$baseline_dir" commit -qm source
+baseline_base="$(git -C "$baseline_dir" rev-parse HEAD)"
+printf '0.9.8\n' > "$baseline_dir/VERSION"
+git -C "$baseline_dir" add VERSION
+git -C "$baseline_dir" commit -qm 'restore source baseline'
+baseline_restore="$(git -C "$baseline_dir" rev-parse HEAD)"
+python3 - "$root_dir" "$baseline_dir" "$baseline_base" "$baseline_restore" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+root, repo, base, commit = map(pathlib.Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("release_completion", root / ".github/scripts/release_completion.py")
+assert spec and spec.loader
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.CHAIN.ROOT = repo
+module.CHAIN.final_tag_baseline = lambda tags: "0.9.8"
+module.CHAIN.product_tags = lambda: []
+module.verify_baseline_restore(commit.name, base.name)
+try:
+    module.CHAIN.final_tag_baseline = lambda tags: "0.9.7"
+    module.verify_baseline_restore(commit.name, base.name)
+except module.CompletionError as error:
+    assert "highest final product tag" in str(error)
+else:
+    raise AssertionError("baseline restore accepted a VERSION outside the final-tag baseline")
+PY
+
 squash_dir="$tmp_dir/squash"
 mkdir -p "$squash_dir"
 git -C "$squash_dir" init -q

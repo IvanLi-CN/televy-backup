@@ -79,6 +79,20 @@ def verify_migration(commit: str, base: str, version: str) -> None:
         raise CompletionError("migration PR must add only VERSION")
 
 
+def verify_baseline_restore(commit: str, base: str) -> None:
+    """Allow a controlled VERSION reset after an unbound release attempt."""
+    changed = CHAIN.git("diff", "--name-only", f"{base}...{commit}").splitlines()
+    if changed != ["VERSION"]:
+        raise CompletionError("baseline restore PR must modify only VERSION")
+    baseline = CHAIN.final_tag_baseline(CHAIN.product_tags())
+    restored = CHAIN.commit_version(commit)
+    current = CHAIN.commit_version(base)
+    if restored != baseline:
+        raise CompletionError("baseline restore VERSION must match the highest final product tag")
+    if CHAIN.compare_versions(current, baseline) <= 0:
+        raise CompletionError("baseline restore requires base VERSION above the final product tag")
+
+
 def verify_no_existing_covered_identity(covered: str) -> None:
     product_tags = [row["tag"] for row in CHAIN.product_tags() if row.get("target") == covered]
     identity_refs: list[str] = []
@@ -216,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--covered-merge-proof-json", type=Path)
     parser.add_argument("--allow-migration", action="store_true")
     parser.add_argument("--migration-version")
+    parser.add_argument("--allow-baseline-restore", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.repo_root:
@@ -224,6 +239,10 @@ def main(argv: list[str] | None = None) -> int:
         changed = CHAIN.git("diff", "--name-only", f"{args.base}...{args.commit}").splitlines()
         if intent["action"] == "skip":
             if "VERSION" in changed:
+                if args.allow_baseline_restore:
+                    verify_baseline_restore(args.commit, args.base)
+                    print(json.dumps({"status": "baseline-restore"}, sort_keys=True))
+                    return 0
                 if args.allow_migration and args.migration_version:
                     verify_migration(args.commit, args.base, args.migration_version)
                     print(json.dumps({"status": "migration"}, sort_keys=True))
