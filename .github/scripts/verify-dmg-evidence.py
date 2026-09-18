@@ -61,19 +61,23 @@ if set(observed) != set(expected):
     fail(f"DMG event coverage mismatch; missing={missing!r}, extra={extra!r}")
 
 for resolved, events in observed.items():
-    names = tuple(event["event"] for event in events)
-    if names != SEQUENCE:
-        fail(f"{expected[resolved]} event sequence is {names!r}, expected {SEQUENCE!r}")
-    verify, attach, filesystem, detach = events
-    if verify["device"] or verify["mount_point"]:
-        fail(f"{expected[resolved]} verify event must not claim a device or mount")
-    device = attach.get("device")
-    mount = attach.get("mount_point")
-    if not isinstance(device, str) or not device or not isinstance(mount, str) or not mount:
-        fail(f"{expected[resolved]} attach event lacks device or mount")
-    if filesystem.get("device") != device or filesystem.get("mount_point") != mount:
-        fail(f"{expected[resolved]} filesystem verification changed device or mount")
-    if detach.get("device") != device or detach.get("mount_point") != mount:
-        fail(f"{expected[resolved]} detach changed device or mount")
+    if len(events) % len(SEQUENCE) != 0:
+        fail(f"{expected[resolved]} event count is not a complete sequence: {len(events)}")
+    for offset in range(0, len(events), len(SEQUENCE)):
+        sequence = events[offset : offset + len(SEQUENCE)]
+        names = tuple(event["event"] for event in sequence)
+        if names != SEQUENCE:
+            fail(f"{expected[resolved]} event sequence is {names!r}, expected {SEQUENCE!r}")
+        verify, attach, filesystem, detach = sequence
+        if verify["device"] or verify["mount_point"]:
+            fail(f"{expected[resolved]} verify event must not claim a device or mount")
+        device = attach.get("device")
+        mount = attach.get("mount_point")
+        if not isinstance(device, str) or not device or not isinstance(mount, str) or not mount:
+            fail(f"{expected[resolved]} attach event lacks device or mount")
+        if filesystem.get("device") != device or filesystem.get("mount_point") != mount:
+            fail(f"{expected[resolved]} filesystem verification changed device or mount")
+        if detach.get("device") != device or detach.get("mount_point") != mount:
+            fail(f"{expected[resolved]} detach changed device or mount")
 
-print(json.dumps({"dmgs": sorted(expected.values()), "events": len(SEQUENCE) * len(expected)}, sort_keys=True))
+print(json.dumps({"dmgs": sorted(expected.values()), "events": sum(map(len, observed.values()))}, sort_keys=True))
