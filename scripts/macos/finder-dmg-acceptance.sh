@@ -362,6 +362,7 @@ if [[ "$macos_version" == 15.* ]]; then
 else
   screenshot_basename="finder-acceptance-current.png"
 fi
+acceptance_basename="${screenshot_basename%.png}.json"
 finder_screenshot="$evidence_dir/$screenshot_basename"
 prepare_evidence_path "$finder_screenshot"
 screencapture -x -l "$window_id" "$finder_screenshot"
@@ -442,10 +443,12 @@ if tuple(observation["app_position"]) != expected_app:
 if tuple(observation["applications_position"]) != expected_applications:
     raise SystemExit(f"Applications position differs from schema: {observation['applications_position']!r}")
 PY
-acceptance_path="$evidence_dir/acceptance.json"
+acceptance_path="$evidence_dir/$acceptance_basename"
 prepare_evidence_path "$acceptance_path"
 finder_screenshot_sha256="$(shasum -a 256 "$finder_screenshot" | awk '{print $1}')"
-python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$finder_screenshot" "$finder_screenshot_sha256" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" <<'PY' > "$acceptance_path"
+producer_commit="$(git -C "$root_dir" rev-parse HEAD)"
+producer_sha256="$(shasum -a 256 "$root_dir/scripts/macos/finder-dmg-acceptance.sh" | awk '{print $1}')"
+python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$finder_screenshot" "$finder_screenshot_sha256" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" "$producer_commit" "$producer_sha256" "$acceptance_basename" <<'PY' > "$acceptance_path"
 import hashlib
 import json
 import pathlib
@@ -454,6 +457,9 @@ import sys
 hidden = json.load(open(sys.argv[12], encoding="utf-8"))
 observation = json.load(open(sys.argv[13], encoding="utf-8"))
 visual_review = json.loads(sys.argv[14])
+producer_commit = sys.argv[15]
+producer_sha256 = sys.argv[16]
+acceptance_basename = sys.argv[17]
 layout = json.load(open(sys.argv[7], encoding="utf-8"))
 canonical_layout = {
     "schema_version": layout["schema_version"],
@@ -473,7 +479,8 @@ canonical_layout = {
     "hidden_resource_allowlist": sorted(layout["hidden_resource_allowlist"]),
     "symlinks": layout["symlinks"],
 }
-semantic_layout_digest = hashlib.sha256(json.dumps(canonical_layout, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+canonical_json = lambda value: json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+semantic_layout_digest = hashlib.sha256(canonical_json(canonical_layout)).hexdigest()
 dmg_path = pathlib.Path(sys.argv[2])
 verified_dmg_path = pathlib.Path(sys.argv[3])
 manifest_path = pathlib.Path(sys.argv[5])
@@ -485,6 +492,43 @@ manifest = json.loads(manifest_bytes.decode())
 record = next((asset for asset in manifest.get("assets", []) if asset.get("name") == verified_dmg_path.name), None)
 if record is None or record.get("sha256") != sys.argv[4] or record.get("dmg_layout_digest") != semantic_layout_digest:
     raise SystemExit("Finder acceptance DMG does not match its adjacent BUILD-MANIFEST.json")
+capture_receipt = {
+    "schema_version": 1,
+    "producer": "scripts/macos/finder-dmg-acceptance.sh",
+    "producer_sha256": producer_sha256,
+    "producer_commit": producer_commit,
+    "capture_method": "screencapture -x -l",
+    "capture_scope": "finder-window-only",
+    "window_id": observation["window_id"],
+    "device": sys.argv[1],
+    "macos_version": sys.argv[11],
+    "platform": "macos-15" if sys.argv[11].startswith("15.") else "current",
+    "screenshot": pathlib.Path(sys.argv[8]).name,
+    "screenshot_sha256": sys.argv[9],
+    "dmg_name": pathlib.Path(sys.argv[3]).name,
+    "dmg_sha256": sys.argv[4],
+    "manifest_sha256": manifest_sha256,
+    "checksums_sha256": checksums_sha256,
+    "finder_observation_sha256": hashlib.sha256(canonical_json(observation)).hexdigest(),
+    "show_all_files_sha256": hashlib.sha256(canonical_json(hidden)).hexdigest(),
+    "visual_review_sha256": hashlib.sha256(canonical_json({
+        "status": "approved",
+        "method": "scoped-human-review",
+        "checklist": visual_review,
+        "instruction": layout["overlay"]["instruction"],
+        "arrow_direction": observation["drag_direction"],
+        "asset_digest": layout["asset_digests"][layout["composed_background"]],
+    })).hexdigest(),
+}
+capture_receipt["receipt_sha256"] = hashlib.sha256(canonical_json(capture_receipt)).hexdigest()
+visual_record = {
+    "status": "approved",
+    "method": "scoped-human-review",
+    "checklist": visual_review,
+    "instruction": layout["overlay"]["instruction"],
+    "arrow_direction": observation["drag_direction"],
+    "asset_digest": layout["asset_digests"][layout["composed_background"]],
+}
 print(json.dumps({
     "architecture": sys.argv[10],
     "capture_scope": "finder-window-only",
@@ -514,6 +558,8 @@ print(json.dumps({
     "platform": "macos-15" if sys.argv[11].startswith("15.") else "current",
     "screenshot": pathlib.Path(sys.argv[8]).name,
     "screenshot_sha256": sys.argv[9],
+    "capture_receipt_asset": acceptance_basename,
+    "capture_receipt": capture_receipt,
 }, sort_keys=True))
 PY
 if [[ -n "$rc2_tag" ]]; then
@@ -538,6 +584,22 @@ if [[ -n "$rc2_tag" ]]; then
     echo "reusing matching RC2 Finder screenshot asset: $screenshot_name"
   else
     gh release upload "$rc2_tag" "$finder_screenshot" \
+      --repo "$GITHUB_REPOSITORY"
+  fi
+  receipt_count="$(printf '%s' "$rc2_release" | jq --arg name "$acceptance_basename" '[.assets[]? | select(.name == $name)] | length')"
+  if [[ "$receipt_count" != 0 && "$receipt_count" != 1 ]]; then
+    echo "Finder acceptance found duplicate RC2 receipt assets: $acceptance_basename" >&2
+    exit 1
+  elif [[ "$receipt_count" == 1 ]]; then
+    existing_receipt_digest="$(printf '%s' "$rc2_release" | jq -r --arg name "$acceptance_basename" '.assets[] | select(.name == $name) | .digest // empty')"
+    receipt_digest="$(shasum -a 256 "$acceptance_path" | awk '{print $1}')"
+    [[ "$existing_receipt_digest" == "sha256:$receipt_digest" ]] || {
+      echo "Finder acceptance found a conflicting RC2 receipt asset: $acceptance_basename" >&2
+      exit 1
+    }
+    echo "reusing matching RC2 Finder receipt asset: $acceptance_basename"
+  else
+    gh release upload "$rc2_tag" "$acceptance_path" \
       --repo "$GITHUB_REPOSITORY"
   fi
 fi

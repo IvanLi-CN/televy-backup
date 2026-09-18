@@ -151,7 +151,10 @@ assert "verify-macos-rc-acceptance.py" in release_workflow
 assert "stable release requires two published RCs" in release_workflow
 assert 'candidates[-2:]' in release_workflow
 assert "--screenshot-dir" in release_workflow
+assert "--capture-receipt-dir" in release_workflow
 assert "gh release download \"${rc2_tag}\"" in release_workflow
+assert "receipt_names=()" in release_workflow
+assert 'gh release upload "$rc2_tag" "$acceptance_path"' in (root / "scripts/macos/finder-dmg-acceptance.sh").read_text(encoding="utf-8")
 assert "import re" in release_workflow
 assert "mapfile" not in release_workflow
 assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in release_workflow
@@ -405,6 +408,7 @@ evidence = {
                 "window_role": "Finder",
                 "app_name": "TelevyBackup.app",
                 "applications_name": "Applications",
+                "window_id": 42,
                 "drag_direction": "right",
                 "app_position": [210, 270],
                 "applications_position": [550, 270],
@@ -438,6 +442,7 @@ evidence = {
                 "window_role": "Finder",
                 "app_name": "TelevyBackup.app",
                 "applications_name": "Applications",
+                "window_id": 43,
                 "drag_direction": "right",
                 "app_position": [210, 270],
                 "applications_position": [550, 270],
@@ -641,6 +646,43 @@ fi
     for record in evidence["finder_acceptance"]:
         record["manifest_sha256"] = stable_manifest_sha256
         record["checksums_sha256"] = stable_checksums_sha256
+        record["capture_receipt_asset"] = record["screenshot"].replace(".png", ".json")
+        receipt = {
+            "schema_version": 1,
+            "producer": "scripts/macos/finder-dmg-acceptance.sh",
+            "producer_sha256": hashlib.sha256(
+                (root / "scripts/macos/finder-dmg-acceptance.sh").read_bytes()
+            ).hexdigest(),
+            "producer_commit": "stable-source",
+            "capture_method": "screencapture -x -l",
+            "capture_scope": "finder-window-only",
+            "window_id": record["finder_observation"]["window_id"],
+            "device": "/dev/diskfixture",
+            "macos_version": record["macos_version"],
+            "platform": record["platform"],
+            "screenshot": record["screenshot"],
+            "screenshot_sha256": record["screenshot_sha256"],
+            "dmg_name": record["dmg_name"],
+            "dmg_sha256": record["dmg_sha256"],
+            "manifest_sha256": record["manifest_sha256"],
+            "checksums_sha256": record["checksums_sha256"],
+            "finder_observation_sha256": hashlib.sha256(
+                json.dumps(record["finder_observation"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "show_all_files_sha256": hashlib.sha256(
+                json.dumps(record["show_all_files"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "visual_review_sha256": hashlib.sha256(
+                json.dumps(record["visual_review"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+        receipt["receipt_sha256"] = hashlib.sha256(
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        record["capture_receipt"] = receipt
+        (temp / record["capture_receipt_asset"]).write_text(
+            json.dumps(record, sort_keys=True), encoding="utf-8"
+        )
     rc_args = []
     for number, source in ((1, "rc1-source"), (2, "rc2-source")):
         version = f"1.0.0-rc.{number}"
@@ -668,9 +710,16 @@ fi
         "--rc1-tag", "v1.0.0-rc.1", "--rc2-tag", "v1.0.0-rc.2",
         "--stable-source-commit", "stable-source", *rc_args,
         "--screenshot-dir", str(temp),
+        "--capture-receipt-dir", str(temp),
     ]
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    saved_receipt = evidence["finder_acceptance"][0].pop("capture_receipt")
+    common[3] = json.dumps(evidence)
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    evidence["finder_acceptance"][0]["capture_receipt"] = saved_receipt
+    common[3] = json.dumps(evidence)
     evidence["finder_acceptance"][1]["macos_version"] = "Linux"
     common[3] = json.dumps(evidence)
     result = subprocess.run(common, capture_output=True, text=True)
@@ -727,6 +776,15 @@ fi
     stable_manifest_sha256 = hashlib.sha256(stable_path.read_bytes()).hexdigest()
     for record in evidence["finder_acceptance"]:
         record["manifest_sha256"] = stable_manifest_sha256
+        record["capture_receipt"]["manifest_sha256"] = stable_manifest_sha256
+        receipt_content = dict(record["capture_receipt"])
+        receipt_content.pop("receipt_sha256", None)
+        record["capture_receipt"]["receipt_sha256"] = hashlib.sha256(
+            json.dumps(receipt_content, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        (temp / record["capture_receipt_asset"]).write_text(
+            json.dumps(record, sort_keys=True), encoding="utf-8"
+        )
     common[3] = json.dumps(evidence)
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

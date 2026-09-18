@@ -61,6 +61,21 @@ def required_string(value, name: str) -> str:
     return value
 
 
+def canonical_json(value) -> bytes:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def json_digest(value) -> str:
+    return hashlib.sha256(canonical_json(value)).hexdigest()
+
+
+def file_digest(path: Path, name: str) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        fail(f"{name} cannot be read: {error}")
+
+
 def canonical_layout_digest(layout: dict, name: str) -> str:
     if not isinstance(layout, dict):
         fail(f"{name} must be an object")
@@ -69,9 +84,7 @@ def canonical_layout_digest(layout: dict, name: str) -> str:
         fail(f"{name}.semantic_layout_digest must be a lowercase SHA-256 digest")
     content = dict(layout)
     content.pop("semantic_layout_digest", None)
-    actual = hashlib.sha256(
-        json.dumps(content, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    actual = json_digest(content)
     if claimed != actual:
         fail(f"{name}.semantic_layout_digest does not match the canonical layout content")
     return claimed
@@ -231,8 +244,10 @@ def verify_finder_acceptance(
     manifest,
     stable_version: str,
     screenshot_dir: Path,
+    capture_receipt_dir: Path,
     expected_manifest_sha256: str,
     expected_checksums_sha256: str,
+    expected_source_commit: str | None,
 ) -> None:
     records = evidence.get("finder_acceptance")
     if not isinstance(records, list) or len(records) != 2:
@@ -302,6 +317,55 @@ def verify_finder_acceptance(
         if record.get("manifest_verified") is not True or record.get("checksums_verified") is not True:
             fail(f"{name} manifest/checksum verification is incomplete")
         verify_screenshot(screenshot_dir, record, name)
+        receipt = record.get("capture_receipt")
+        if not isinstance(receipt, dict):
+            fail(f"{name}.capture_receipt is missing")
+        receipt_asset = required_string(record.get("capture_receipt_asset"), f"{name}.capture_receipt_asset")
+        if receipt_asset != Path(receipt_asset).name or not re.fullmatch(
+            r"finder-acceptance-(?:macos-15|current)\.json", receipt_asset
+        ):
+            fail(f"{name}.capture_receipt_asset is not a safe acceptance receipt basename")
+        if capture_receipt_dir.is_symlink() or not capture_receipt_dir.is_dir():
+            fail("capture receipt directory must be a real directory")
+        receipt_path = capture_receipt_dir / receipt_asset
+        try:
+            receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            fail(f"{name} capture receipt cannot be read: {error}")
+        if not isinstance(receipt_payload, dict) or receipt_payload.get("capture_receipt") != receipt:
+            fail(f"{name} capture receipt asset does not match the protected evidence")
+        if receipt.get("schema_version") != 1:
+            fail(f"{name}.capture_receipt.schema_version is unsupported")
+        if receipt.get("producer") != "scripts/macos/finder-dmg-acceptance.sh":
+            fail(f"{name}.capture_receipt producer is not the controlled harness")
+        producer_digest = required_string(receipt.get("producer_sha256"), f"{name}.capture_receipt.producer_sha256")
+        if producer_digest != file_digest(
+            Path(__file__).resolve().parents[2] / "scripts/macos/finder-dmg-acceptance.sh",
+            "Finder acceptance harness",
+        ):
+            fail(f"{name}.capture_receipt producer digest is not the reviewed harness")
+        if expected_source_commit and receipt.get("producer_commit") != expected_source_commit:
+            fail(f"{name}.capture_receipt producer commit does not match the stable release source")
+        if receipt.get("capture_method") != "screencapture -x -l" or receipt.get("capture_scope") != "finder-window-only":
+            fail(f"{name}.capture_receipt capture method or scope is invalid")
+        if not isinstance(receipt.get("window_id"), int) or receipt["window_id"] <= 0:
+            fail(f"{name}.capture_receipt window_id is invalid")
+        if not isinstance(receipt.get("device"), str) or not re.fullmatch(r"/dev/[A-Za-z0-9._-]+", receipt["device"]):
+            fail(f"{name}.capture_receipt device is invalid")
+        for field in ("macos_version", "platform", "screenshot", "screenshot_sha256", "dmg_name", "dmg_sha256", "manifest_sha256", "checksums_sha256"):
+            if receipt.get(field) != record.get(field):
+                fail(f"{name}.capture_receipt.{field} does not match the protected evidence")
+        if receipt.get("finder_observation_sha256") != json_digest(record.get("finder_observation")):
+            fail(f"{name}.capture_receipt Finder observation digest does not match")
+        if receipt.get("show_all_files_sha256") != json_digest(record.get("show_all_files")):
+            fail(f"{name}.capture_receipt hidden-resource digest does not match")
+        if receipt.get("visual_review_sha256") != json_digest(record.get("visual_review")):
+            fail(f"{name}.capture_receipt visual-review digest does not match")
+        claimed_receipt_digest = required_string(receipt.get("receipt_sha256"), f"{name}.capture_receipt.receipt_sha256")
+        receipt_content = dict(receipt)
+        receipt_content.pop("receipt_sha256", None)
+        if claimed_receipt_digest != json_digest(receipt_content):
+            fail(f"{name}.capture_receipt receipt digest does not match its content")
         observation = record.get("finder_observation")
         if not isinstance(observation, dict):
             fail(f"{name}.finder_observation is missing")
@@ -530,6 +594,7 @@ parser.add_argument("--rc2-checksums")
 parser.add_argument("--rc2-dmg")
 parser.add_argument("--rc2-source-commit")
 parser.add_argument("--screenshot-dir", required=True)
+parser.add_argument("--capture-receipt-dir", required=True)
 args = parser.parse_args()
 
 try:
@@ -568,8 +633,10 @@ verify_finder_acceptance(
     manifest,
     args.stable_version,
     Path(args.screenshot_dir),
+    Path(args.capture_receipt_dir),
     stable_manifest_sha256,
     stable_checksums_sha256,
+    args.stable_source_commit,
 )
 
 for field in (
