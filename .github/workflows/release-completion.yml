@@ -248,6 +248,7 @@ jobs:
           python3 - "${completion_args[@]}" \
             --allow-migration \
             --migration-version 0.9.2 \
+            --allow-baseline-restore \
             --reservation-json "${RUNNER_TEMP}/reservation.json" \
             --repository "${GITHUB_REPOSITORY}" \
             --token "${GH_TOKEN}" \

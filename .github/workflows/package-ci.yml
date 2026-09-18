@@ -121,7 +121,7 @@ jobs:
     if: needs.classify.result == 'success'
     name: x86_64 native package
     runs-on: macos-15-intel
-    timeout-minutes: 15
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -185,12 +185,14 @@ jobs:
         with:
           name: package-ci-x86_64
           path: dist/x86_64
+          overwrite: true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always() && needs.classify.outputs.kind == 'source'
         with:
           name: package-ci-x86_64-dmg-verification
           path: ${{ runner.temp }}/dmg-layout-x86_64-events.jsonl
           if-no-files-found: error
+          overwrite: true
 
   universal2:
     name: Universal 2 assembly
