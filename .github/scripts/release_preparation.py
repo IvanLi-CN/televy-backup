@@ -126,13 +126,16 @@ def prepare(args: argparse.Namespace) -> None:
     if any(not reservation.get(key) for key in required):
         raise PreparationError("reservation JSON is missing immutable identity fields")
     source_is_ready(repo_root, args.source_sha, args.base_sha, release_mode)
-    reservation_channel = str(reservation.get("channel", ""))
+    reservation_channel = str(reservation.get("channel", "")).removeprefix("channel:")
     expected_channel = intent["channel"].removeprefix("channel:")
-    if reservation.get("sourceSha") != args.source_sha or reservation_channel != expected_channel:
+    reservation_source_sha = str(reservation.get("sourceSha", ""))
+    if not reservation_source_sha or not CHAIN.is_ancestor(reservation_source_sha, args.source_sha):
+        raise PreparationError("reservation source must be an ancestor of the preparation source")
+    if reservation_channel != expected_channel:
         raise PreparationError("reservation source or channel does not match the release intent")
     reservation_expected = {
         "ref": reservation["ref"],
-        "sourceSha": args.source_sha,
+        "sourceSha": reservation_source_sha,
         "version": reservation["version"],
         "channel": expected_channel,
         "reservationId": reservation["reservationId"],
@@ -172,6 +175,7 @@ def prepare(args: argparse.Namespace) -> None:
         reservation_owner=reservation["Reservation-Owner"],
         claim_key=reservation["Reservation-Claim-Key"],
         boundary_token=reservation["Reservation-Boundary-Token"],
+        reservation_source_sha=reservation_source_sha,
         covered_merge_sha=args.covered_merge_sha or "",
         provenance=args.provenance,
     )
