@@ -187,6 +187,26 @@ def verify_stable_dmg(dmg_path: Path, manifest: dict, stable_version: str) -> No
         fail("stable Universal DMG size does not match BUILD-MANIFEST.json")
 
 
+def verify_rc_checksums(checksum_lines: list[str], manifest: dict, name: str) -> None:
+    observed = {}
+    for line in checksum_lines:
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or not re.fullmatch(r"[0-9A-Fa-f]{64}", fields[0]):
+            fail(f"{name} SHA256SUMS contains a malformed entry")
+        asset_name = fields[1].removeprefix("*")
+        if not asset_name or asset_name in observed:
+            fail(f"{name} SHA256SUMS contains a duplicate or empty asset name: {asset_name}")
+        observed[asset_name] = fields[0].lower()
+    expected = {
+        required_string(asset.get("name"), f"{name} manifest asset.name"):
+        required_string(asset.get("sha256"), f"{name} manifest asset.sha256").lower()
+        for asset in manifest.get("assets", [])
+        if isinstance(asset, dict)
+    }
+    if observed != expected:
+        fail(f"{name} SHA256SUMS does not match its manifest assets")
+
+
 def verify_finder_acceptance(
     evidence,
     manifest,
@@ -610,6 +630,12 @@ def verify_rc_artifact(
     assets = rc_manifest.get("assets")
     if not isinstance(assets, list):
         fail(f"{name} manifest assets must be a list")
+    layout = rc_manifest.get("dmg_layout")
+    if not isinstance(layout, dict):
+        fail(f"{name} manifest dmg_layout must be an object")
+    layout_digest = required_string(
+        layout.get("semantic_layout_digest"), f"{name} manifest dmg_layout.semantic_layout_digest"
+    )
     dmg_name = dmg_path.rsplit("/", 1)[-1]
     asset = next(
         (item for item in assets if isinstance(item, dict) and item.get("name") == dmg_name),
@@ -625,6 +651,9 @@ def verify_rc_artifact(
         fail(f"{name} Universal DMG does not match its manifest")
     if asset.get("bytes") != len(dmg_bytes):
         fail(f"{name} Universal DMG size does not match its manifest")
+    if asset.get("dmg_layout_digest") != layout_digest:
+        fail(f"{name} Universal DMG layout digest does not match its manifest")
+    verify_rc_checksums(checksum_lines, rc_manifest, name)
     checksum = next(
         (line.split()[0] for line in checksum_lines if line.rstrip().endswith("  " + dmg_name)),
         None,
@@ -663,6 +692,7 @@ def verify_rc_artifact(
             for field in identity_fields
         ),
         {actual["artifact_sha256"], actual["artifact_sha256_legacy"]},
+        layout_digest,
     )
 
 
@@ -673,16 +703,25 @@ rc_args = (
 if any(value is not None for value in rc_args) and not all(value is not None for value in rc_args):
     fail("RC artifact verification arguments must be supplied as a complete pair")
 if all(value is not None for value in rc_args):
-    rc1_identity, rc1_artifact_digests = verify_rc_artifact(
+    rc1_identity, rc1_artifact_digests, rc1_layout_digest = verify_rc_artifact(
         args.rc1_manifest, args.rc1_checksums, args.rc1_dmg,
         rc1_version, args.rc1_source_commit, "RC1",
     )
-    rc2_identity, _ = verify_rc_artifact(
+    rc2_identity, _, rc2_layout_digest = verify_rc_artifact(
         args.rc2_manifest, args.rc2_checksums, args.rc2_dmg,
         rc2_version, args.rc2_source_commit, "RC2",
     )
     if rc1_identity != rc2_identity:
         fail("Snapshot Access helper identity changed between the RC release artifacts")
+    if rc1_layout_digest != rc2_layout_digest:
+        fail("DMG semantic layout digest changed between the RC release artifacts")
+    final_layout = manifest.get("dmg_layout")
+    final_layout_digest = required_string(
+        final_layout.get("semantic_layout_digest") if isinstance(final_layout, dict) else None,
+        "manifest dmg_layout.semantic_layout_digest",
+    )
+    if final_layout_digest != rc1_layout_digest:
+        fail("stable DMG semantic layout digest does not match the accepted RC artifacts")
     final_manifest_identity = components["snapshot_access"]
     final_requirement = required_string(
         final_manifest_identity.get("designated_requirement"),

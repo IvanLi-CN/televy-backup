@@ -73,8 +73,8 @@ assert contract["recovery"]["dispatch_requires_existing_bound"] is False
 assert contract["recovery"]["dispatch_bound_repair"] == "append-only-after-same-sha-provenance"
 for gate in ("label_gate", "completion"):
     scheduling = contract["required_gate_scheduling"][gate]
-    assert scheduling["queue"] == "max"
     assert scheduling["cancel_in_progress"] is False
+    assert scheduling["pending_policy"] == "latest-per-group"
 
 workflow_text = "\n".join(
     (root / ".github/workflows" / name).read_text(encoding="utf-8")
@@ -364,7 +364,7 @@ def manifest(version, source_commit, dmg_name, dmg_digest):
         "release_version": version,
         "source_commit": source_commit,
         "components": {"snapshot_access": identity.copy()},
-        "assets": [{"name": dmg_name, "sha256": dmg_digest, "bytes": 4}],
+        "assets": [{"name": dmg_name, "sha256": dmg_digest, "bytes": 4, "dmg_layout_digest": layout_contract["semantic_layout_digest"]}],
         "dmg_layout": layout_contract,
     }
 
@@ -663,6 +663,23 @@ fi
     assert result.returncode != 0, result.stdout + result.stderr
     evidence["finder_acceptance"][1]["macos_version"] = "26.6.2"
     common[3] = json.dumps(evidence)
+    rc1_manifest = json.loads((temp / "rc1.json").read_text(encoding="utf-8"))
+    rc1_manifest["assets"][0]["dmg_layout_digest"] = "0" * 64
+    (temp / "rc1.json").write_text(json.dumps(rc1_manifest), encoding="utf-8")
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    rc1_manifest["assets"][0]["dmg_layout_digest"] = layout_contract["semantic_layout_digest"]
+    (temp / "rc1.json").write_text(json.dumps(rc1_manifest), encoding="utf-8")
+    (temp / "rc1.sums").write_text(
+        f"{hashlib.sha256((temp / 'TelevyBackup-1.0.0-rc.1.dmg').read_bytes()).hexdigest()}  TelevyBackup-1.0.0-rc.1.dmg\nextra\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    (temp / "rc1.sums").write_text(
+        f"{hashlib.sha256((temp / 'TelevyBackup-1.0.0-rc.1.dmg').read_bytes()).hexdigest()}  TelevyBackup-1.0.0-rc.1.dmg\n",
+        encoding="utf-8",
+    )
     stable_dmg.write_bytes(b"tampered stable dmg\n")
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode != 0, result.stdout + result.stderr

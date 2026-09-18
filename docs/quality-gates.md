@@ -12,7 +12,7 @@ TelevyBackup treats pull request checks as an explicit merge contract. The canon
 - `Release intent label gate`
 - `Release completion`
 
-The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks. `Release intent label gate` and `Release completion` use per-PR non-preemptive `queue: max` scheduling so an already queued required evaluation is not cancelled by a later event.
+The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks. `Release intent label gate` and `Release completion` use per-PR concurrency with `cancel-in-progress: false`; GitHub retains the latest pending evaluation for each group, and every new head is independently revalidated before completion.
 
 Release Product treats the highest eligible final product tag as the numeric baseline. Eligible
 product tags are protected annotated tags created by `github-actions[bot]` and reachable from
