@@ -61,6 +61,22 @@ def required_string(value, name: str) -> str:
     return value
 
 
+def canonical_layout_digest(layout: dict, name: str) -> str:
+    if not isinstance(layout, dict):
+        fail(f"{name} must be an object")
+    claimed = required_string(layout.get("semantic_layout_digest"), f"{name}.semantic_layout_digest")
+    if not re.fullmatch(r"[0-9a-f]{64}", claimed):
+        fail(f"{name}.semantic_layout_digest must be a lowercase SHA-256 digest")
+    content = dict(layout)
+    content.pop("semantic_layout_digest", None)
+    actual = hashlib.sha256(
+        json.dumps(content, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if claimed != actual:
+        fail(f"{name}.semantic_layout_digest does not match the canonical layout content")
+    return claimed
+
+
 def rc_tag_version(tag: str, stable_version: str, name: str) -> tuple[str, int]:
     match = RC_TAG_RE.fullmatch(tag)
     if match is None or match.group("core") != stable_version:
@@ -93,8 +109,11 @@ def verify_screenshot(screenshot_dir: Path, record: dict, name: str) -> None:
     screenshot_bytes = screenshot_path.read_bytes()
     if screenshot_bytes[:8] != b"\x89PNG\r\n\x1a\n" or screenshot_bytes[12:16] != b"IHDR":
         fail(f"{name}.screenshot asset is not a PNG image")
-    if len(screenshot_bytes) < 24 or not all(struct.unpack(">II", screenshot_bytes[16:24])):
+    if len(screenshot_bytes) < 24 or struct.unpack(">I", screenshot_bytes[8:12])[0] != 13:
         fail(f"{name}.screenshot asset has invalid PNG dimensions")
+    width, height = struct.unpack(">II", screenshot_bytes[16:24])
+    if width < 640 or height < 480:
+        fail(f"{name}.screenshot asset is too small to be a Finder acceptance viewport")
     actual_digest = hashlib.sha256(screenshot_bytes).hexdigest()
     if actual_digest.lower() != expected_digest.lower():
         fail(f"{name}.screenshot_sha256 does not match the downloaded asset")
@@ -633,9 +652,7 @@ def verify_rc_artifact(
     layout = rc_manifest.get("dmg_layout")
     if not isinstance(layout, dict):
         fail(f"{name} manifest dmg_layout must be an object")
-    layout_digest = required_string(
-        layout.get("semantic_layout_digest"), f"{name} manifest dmg_layout.semantic_layout_digest"
-    )
+    layout_digest = canonical_layout_digest(layout, f"{name} manifest dmg_layout")
     dmg_name = dmg_path.rsplit("/", 1)[-1]
     asset = next(
         (item for item in assets if isinstance(item, dict) and item.get("name") == dmg_name),

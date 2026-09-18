@@ -317,9 +317,11 @@ python3 - "$root_dir" <<'PY'
 import hashlib
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 root = Path(sys.argv[1])
@@ -460,13 +462,25 @@ evidence = {
 
 with tempfile.TemporaryDirectory() as directory:
     temp = Path(directory)
+    def png_fixture(width=760, height=520):
+        def chunk(kind, payload):
+            return (
+                struct.pack(">I", len(payload))
+                + kind
+                + payload
+                + struct.pack(">I", zlib.crc32(kind + payload) & 0xffffffff)
+            )
+        raw = b"".join(b"\x00" + b"\xff" * width for _ in range(height))
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b"")
+        )
+
     screenshots = {
-        "finder-acceptance-macos-15.png": bytes.fromhex(
-            "89504e470d0a1a0a0000000d494844520000000100000001"
-        ),
-        "finder-acceptance-current.png": bytes.fromhex(
-            "89504e470d0a1a0a0000000d494844520000000100000001"
-        ),
+        "finder-acceptance-macos-15.png": png_fixture(),
+        "finder-acceptance-current.png": png_fixture(),
     }
     for name, content in screenshots.items():
         (temp / name).write_bytes(content)
@@ -664,6 +678,13 @@ fi
     evidence["finder_acceptance"][1]["macos_version"] = "26.6.2"
     common[3] = json.dumps(evidence)
     rc1_manifest = json.loads((temp / "rc1.json").read_text(encoding="utf-8"))
+    original_width = rc1_manifest["dmg_layout"]["window"]["width"]
+    rc1_manifest["dmg_layout"]["window"]["width"] = original_width + 1
+    (temp / "rc1.json").write_text(json.dumps(rc1_manifest), encoding="utf-8")
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    rc1_manifest["dmg_layout"]["window"]["width"] = original_width
+    (temp / "rc1.json").write_text(json.dumps(rc1_manifest), encoding="utf-8")
     rc1_manifest["assets"][0]["dmg_layout_digest"] = "0" * 64
     (temp / "rc1.json").write_text(json.dumps(rc1_manifest), encoding="utf-8")
     result = subprocess.run(common, capture_output=True, text=True)
