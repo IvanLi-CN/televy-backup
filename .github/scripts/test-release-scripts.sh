@@ -637,7 +637,12 @@ fi
     stable_dmg = temp / "TelevyBackup-1.0.0.dmg"
     stable_dmg.write_bytes(b"dmg\n")
     stable_digest = hashlib.sha256(stable_dmg.read_bytes()).hexdigest()
-    stable_manifest["assets"] = [{"name": stable_dmg.name, "sha256": stable_digest, "bytes": 4}]
+    stable_manifest["assets"] = [{
+        "name": stable_dmg.name,
+        "sha256": stable_digest,
+        "bytes": 4,
+        "dmg_layout_digest": layout_contract["semantic_layout_digest"],
+    }]
     for record in evidence["finder_acceptance"]:
         record["dmg_sha256"] = stable_digest
     stable_path = temp / "stable.json"
@@ -730,6 +735,19 @@ fi
     ]
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    stable_layout_width = stable_manifest["dmg_layout"]["window"]["width"]
+    stable_manifest["dmg_layout"]["window"]["width"] = stable_layout_width + 1
+    stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    stable_manifest["dmg_layout"]["window"]["width"] = stable_layout_width
+    stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    stable_manifest["assets"][0]["dmg_layout_digest"] = "0" * 64
+    stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    stable_manifest["assets"][0]["dmg_layout_digest"] = layout_contract["semantic_layout_digest"]
+    stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
     saved_receipt = evidence["finder_acceptance"][0].pop("capture_receipt")
     common[3] = json.dumps(evidence)
     result = subprocess.run(common, capture_output=True, text=True)

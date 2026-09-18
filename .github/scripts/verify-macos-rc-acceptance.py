@@ -211,6 +211,11 @@ def verify_stable_dmg(dmg_path: Path, manifest: dict, stable_version: str) -> No
     )
     if not isinstance(expected_asset, dict):
         fail("BUILD-MANIFEST.json is missing the stable Universal DMG")
+    stable_layout_digest = canonical_layout_digest(
+        manifest.get("dmg_layout"), "manifest dmg_layout"
+    )
+    if expected_asset.get("dmg_layout_digest") != stable_layout_digest:
+        fail("stable Universal DMG layout digest does not match the canonical manifest layout")
     dmg_bytes = dmg_path.read_bytes()
     if hashlib.sha256(dmg_bytes).hexdigest() != required_string(
         expected_asset.get("sha256"), "manifest stable Universal DMG.sha256"
