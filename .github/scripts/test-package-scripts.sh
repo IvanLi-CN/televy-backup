@@ -558,6 +558,14 @@ for event_name in dmg_verify dmg_attach dmg_filesystem_verify dmg_detach; do
     exit 1
   }
 done
+grep -F 'emit_dmg_event dmg_verify "$local_dmg" "" ""' <<<"$verify_release_text" >/dev/null || {
+  echo "release DMG verify events must not bind a mount before attach" >&2
+  exit 1
+}
+grep -F 'emit_dmg_event dmg_verify "$dmg" "" ""' <<<"$verify_release_text" >/dev/null || {
+  echo "release layout verify events must not bind a mount before attach" >&2
+  exit 1
+}
 package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
 [[ "$(grep -Fc 'verify-dmg-layout.sh' <<<"$package_workflow_text")" -ge 2 ]] || {
   echo "native package CI jobs must expose the shared DMG layout verifier" >&2

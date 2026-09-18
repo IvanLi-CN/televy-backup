@@ -542,7 +542,7 @@ verify_dmg_helper_identity() (
   }
   trap cleanup EXIT
   hdiutil verify "$local_dmg"
-  emit_dmg_event dmg_verify "$local_dmg" "$mount_point" ""
+  emit_dmg_event dmg_verify "$local_dmg" "" ""
   attach_dmg_readonly "$local_dmg" "$mount_point"
   attached_device="$ATTACHED_DEVICE"
   mounted=true
@@ -690,7 +690,7 @@ check_dmg_layout() {
   trap cleanup RETURN
   hdiutil imageinfo -plist "$dmg" > "$image_info_path"
   hdiutil verify "$dmg"
-  emit_dmg_event dmg_verify "$dmg" "$mount_point" ""
+  emit_dmg_event dmg_verify "$dmg" "" ""
   attach_dmg_readonly "$dmg" "$mount_point"
   attached_device="$ATTACHED_DEVICE"
   mounted=true
