@@ -52,6 +52,7 @@ assert_contains "preparation source check readiness output" "$preparation_text" 
 assert_contains "preparation reserve requires ready source checks" "$preparation_text" "steps.pr.outputs.source_checks_ready == 'true'"
 assert_contains "preparation reservation uses Actions token" "$preparation_text" 'GH_TOKEN: ${{ github.token }}'
 assert_contains "reservation recovery fetches immutable parent" "$preparation_text" '"git", "fetch", "--no-tags", "origin", reserved_source'
+assert_contains "reservation recovery normalizes channel" "$preparation_text" 'trailers.get("Release-Channel", "").removeprefix("channel:")'
 assert_not_contains "preparation App token" "$preparation_text" "actions/create-github-app-token@v1"
 assert_not_contains "preparation extra credential variable" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_ID"
 assert_not_contains "preparation extra credential secret" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY"
