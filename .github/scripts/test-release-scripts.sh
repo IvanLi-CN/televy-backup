@@ -657,6 +657,12 @@ fi
     ]
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    evidence["finder_acceptance"][1]["macos_version"] = "Linux"
+    common[3] = json.dumps(evidence)
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    evidence["finder_acceptance"][1]["macos_version"] = "26.6.2"
+    common[3] = json.dumps(evidence)
     stable_dmg.write_bytes(b"tampered stable dmg\n")
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode != 0, result.stdout + result.stderr

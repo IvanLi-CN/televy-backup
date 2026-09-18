@@ -58,6 +58,7 @@ assert_not_contains "preparation extra credential variable" "$preparation_text" 
 assert_not_contains "preparation extra credential secret" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY"
 label_gate_text="$(<"$root_dir/.github/workflows/label-gate.yml")"
 assert_contains "release intent label gate job" "$label_gate_text" "name: Release intent label gate"
+assert_contains "workflow dispatch trusted main token" "$label_gate_text" 'GH_TOKEN: ${{ github.token }}'
 assert_contains "label gate merge-group validation" "$label_gate_text" "merge-group-release-gate.sh labels"
 assert_contains "label gate merge-group fetch credentials" "$label_gate_text" "persist-credentials: true"
 assert_not_contains "label gate merge-group echo bridge" "$label_gate_text" "reuses the Release intent label gate"

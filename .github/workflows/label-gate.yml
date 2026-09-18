@@ -30,6 +30,8 @@ jobs:
       - name: Resolve trusted main SHA
         if: github.event_name == 'workflow_dispatch'
         id: trusted-main
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"

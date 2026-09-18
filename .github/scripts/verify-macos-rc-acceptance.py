@@ -18,6 +18,7 @@ from pathlib import Path
 REQUIREMENT_NORMALIZER = Path(__file__).resolve().parents[2] / "scripts/macos/normalize-designated-requirement.py"
 ALLOWED_SYSTEM_ALIASES = {"/tmp", "/var"}
 RC_TAG_RE = re.compile(r"^v(?P<core>\d+\.\d+\.\d+)-rc\.(?P<ordinal>[1-9]\d*)$")
+MACOS_VERSION_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\.(?P<patch>\d+))?$")
 
 
 def fail(message: str) -> "NoReturn":
@@ -231,13 +232,17 @@ def verify_finder_acceptance(
         if not isinstance(record, dict):
             fail(f"{name} must be an object")
         version = required_string(record.get("macos_version"), f"{name}.macos_version")
+        version_match = MACOS_VERSION_RE.fullmatch(version)
+        if version_match is None:
+            fail(f"{name}.macos_version is not a macOS version")
+        major = int(version_match.group("major"))
         versions.append(version)
         platform = required_string(record.get("platform"), f"{name}.platform")
         if platform not in {"macos-15", "current"}:
             fail(f"{name}.platform is invalid")
         if platform == "macos-15" and not version.startswith("15."):
             fail(f"{name}.platform macos-15 has a non-macOS-15 version")
-        if platform == "current" and version.startswith("15."):
+        if platform == "current" and major < 16:
             fail(f"{name}.platform current must be distinct from macOS 15")
         platforms.append(platform)
         expected_screenshot_name = f"finder-acceptance-{platform}.png"
