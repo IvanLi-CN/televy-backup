@@ -2,25 +2,82 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: finder-dmg-acceptance.sh --dmg FILE --evidence-dir DIR" >&2
+  echo "usage: finder-dmg-acceptance.sh --dmg FILE --evidence-dir DIR [--upload-rc2-tag TAG]" >&2
   exit 2
 }
 
 dmg=""
 evidence_dir=""
+rc2_tag=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dmg) dmg="${2:-}"; shift 2 ;;
     --evidence-dir) evidence_dir="${2:-}"; shift 2 ;;
+    --upload-rc2-tag) rc2_tag="${2:-}"; shift 2 ;;
     *) usage ;;
   esac
 done
 [[ -s "$dmg" && -n "$evidence_dir" ]] || usage
+if [[ -n "$rc2_tag" ]]; then
+  [[ "$rc2_tag" =~ ^v[^/]+-rc\.[1-9][0-9]*$ ]] || usage
+  [[ -n "${GITHUB_REPOSITORY:-}" && -n "${GH_TOKEN:-}" ]] || {
+    echo "RC2 screenshot upload requires GITHUB_REPOSITORY and GH_TOKEN" >&2
+    exit 2
+  }
+fi
 [[ "${TELEVYBACKUP_RUN_FINDER_ACCEPTANCE:-0}" == "1" ]] || {
   echo "set TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1 in the controlled GUI session" >&2
   exit 2
 }
+root_dir="$(git rev-parse --show-toplevel)"
+signing_key="${TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY:-}"
+signing_key="$(python3 - "$signing_key" "$root_dir" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+candidate = pathlib.Path(os.path.expanduser(sys.argv[1]))
+if not candidate.is_absolute():
+    candidate = pathlib.Path.cwd() / candidate
+try:
+    resolved = candidate.resolve(strict=True)
+    root = pathlib.Path(sys.argv[2]).resolve(strict=True)
+except OSError as error:
+    raise SystemExit(f"Finder acceptance signing key cannot be resolved: {error}")
+if root == resolved or root in resolved.parents:
+    raise SystemExit("Finder acceptance signing key must be outside the repository")
+if not stat.S_ISREG(resolved.stat().st_mode):
+    raise SystemExit("Finder acceptance signing key must be a regular file")
+print(resolved)
+PY
+)" || {
+  echo "Finder acceptance signing key must be a readable regular file outside the repository" >&2
+  exit 2
+}
+[[ -s "$signing_key" ]] || {
+  echo "set TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY to the controlled Ed25519 private key" >&2
+  exit 2
+}
+path_safety_checker="$root_dir/scripts/macos/reject-symlink-components.py"
+reject_symlink_components() {
+  python3 "$path_safety_checker" "$1"
+}
+reject_symlink_components "$dmg"
+reject_symlink_components "$evidence_dir"
 mkdir -p "$evidence_dir"
+[[ ! -L "$evidence_dir" ]] || {
+  echo "Finder acceptance evidence directory must not be a symlink" >&2
+  exit 1
+}
+prepare_evidence_path() {
+  local path="$1"
+  [[ ! -L "$path" ]] || {
+    echo "Finder acceptance evidence path must not be a symlink: $path" >&2
+    exit 1
+  }
+  rm -f "$path"
+}
 lock_dir="${TMPDIR:-/tmp}/televybackup-finder-dmg-acceptance.lock"
 lock_held=false
 snapshot_dir=""
@@ -47,7 +104,6 @@ cleanup_preflight() {
   release_lock || true
 }
 trap cleanup_preflight EXIT
-root_dir="$(git rev-parse --show-toplevel)"
 layout_path="$root_dir/assets/brand/macos/dmg/layout.json"
 source_dmg="$dmg"
 source_asset_dir="$(dirname "$source_dmg")"
@@ -68,22 +124,67 @@ checksums_path="$snapshot_dir/SHA256SUMS"
 cp "$source_dmg" "$dmg"
 cp "$source_manifest_path" "$manifest_path"
 cp "$source_checksums_path" "$checksums_path"
-dmg_sha256="$(shasum -a 256 "$dmg" | awk '{print $1}')"
-"$root_dir/scripts/macos/verify-dmg-layout.sh" --dmg "$dmg"
-python3 - "$checksums_path" "$(basename "$dmg")" "$dmg_sha256" <<'PY'
+stable_dmg_name="$(python3 - "$source_manifest_path" <<'PY'
+import json
 import sys
 
-checksums_path, dmg_name, expected_digest = sys.argv[1:]
-records = {}
-for line in open(checksums_path, encoding="utf-8"):
-    fields = line.rstrip("\n").split(maxsplit=1)
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+version = manifest.get("release_version")
+if not isinstance(version, str) or not version or "-rc." in version:
+    raise SystemExit("Finder acceptance requires a stable BUILD-MANIFEST.json")
+print(f"TelevyBackup-{version}.dmg")
+PY
+)"
+[[ "$(basename "$source_dmg")" == "$stable_dmg_name" ]] || {
+  echo "Finder acceptance must inspect the stable Universal DMG: $stable_dmg_name" >&2
+  exit 1
+}
+while IFS= read -r asset_name; do
+  [[ "$asset_name" != */* && "$asset_name" != .* ]] || {
+    echo "Finder acceptance manifest contains an unsafe asset name: $asset_name" >&2
+    exit 1
+  }
+  cp "$source_asset_dir/$asset_name" "$snapshot_dir/$asset_name"
+done < <(python3 - "$source_manifest_path" <<'PY'
+import json
+import sys
+
+for asset in json.load(open(sys.argv[1], encoding="utf-8")).get("assets", []):
+    print(asset["name"])
+PY
+)
+dmg_sha256="$(shasum -a 256 "$dmg" | awk '{print $1}')"
+"$root_dir/scripts/macos/verify-dmg-layout.sh" --dmg "$dmg"
+python3 - "$manifest_path" "$checksums_path" "$snapshot_dir" "$(basename "$dmg")" "$dmg_sha256" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest_path, checksums_path, asset_dir, dmg_name, expected_digest = sys.argv[1:]
+manifest = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+manifest_records = {record.get("name"): record for record in manifest.get("assets", [])}
+checksum_records = {}
+for line in pathlib.Path(checksums_path).read_text(encoding="utf-8").splitlines():
+    fields = line.split(maxsplit=1)
     if len(fields) != 2:
         raise SystemExit("malformed SHA256SUMS entry")
     name = fields[1].removeprefix("*")
-    if name in records:
+    if name in checksum_records:
         raise SystemExit(f"duplicate SHA256SUMS entry: {name}")
-    records[name] = fields[0]
-if records.get(dmg_name) != expected_digest:
+    checksum_records[name] = fields[0].lower()
+if set(manifest_records) != set(checksum_records):
+    raise SystemExit("BUILD-MANIFEST.json and SHA256SUMS asset sets differ")
+for name, record in manifest_records.items():
+    path = pathlib.Path(asset_dir) / name
+    if not path.is_file():
+        raise SystemExit(f"manifest asset is missing from acceptance input: {name}")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if record.get("sha256") != digest or checksum_records[name] != digest:
+        raise SystemExit(f"manifest/checksum digest mismatch: {name}")
+    if record.get("bytes") != path.stat().st_size:
+        raise SystemExit(f"manifest byte count mismatch: {name}")
+if checksum_records.get(dmg_name) != expected_digest:
     raise SystemExit("Finder acceptance DMG does not match adjacent SHA256SUMS")
 PY
 macos_version="$(sw_vers -productVersion)"
@@ -92,6 +193,20 @@ mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-finder-acceptance.XXXXXX"
 mount_point="$(cd "$mount_point" && pwd -P)"
 attached_device=""
 mounted=false
+attach_attempted=false
+attach_completed=false
+resolve_device_for_mount() {
+  hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+entities = list(payload.get("system-entities", []))
+for image in payload.get("images", []):
+    entities.extend(image.get("system-entities", []))
+for entity in entities:
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"])
+        raise SystemExit(0)' "$1" 2>/dev/null || true
+}
 previous_show_all=""
 previous_show_all_type=""
 previous_show_all_present=false
@@ -128,9 +243,19 @@ cleanup() {
       cleanup_failed=true
     fi
   fi
-  if [[ -n "$attached_device" ]]; then
-    if ! hdiutil detach "$attached_device" >/dev/null 2>&1; then
-      echo "failed to detach Finder acceptance device: $attached_device" >&2
+  if [[ "$mounted" == true || -n "$attached_device" ]]; then
+    cleanup_device="$attached_device"
+    [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
+    if [[ -n "$cleanup_device" ]]; then
+      if hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
+        mounted=false
+        attached_device=""
+      else
+        echo "failed to detach Finder acceptance device: $cleanup_device" >&2
+        cleanup_failed=true
+      fi
+    else
+      echo "failed to resolve Finder acceptance device for cleanup: $mount_point" >&2
       cleanup_failed=true
     fi
   fi
@@ -169,20 +294,58 @@ fi
 finder_was_visible_changed=false
 trap cleanup EXIT
 hdiutil verify "$dmg" >/dev/null
-attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"
+attach_status=0
+attach_attempted=true
+if attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"; then
+  attach_status=0
+else
+  attach_status=$?
+fi
+if (( attach_status != 0 )); then
+  read -r attached_device attached_mount < <(
+    python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.argv[2].encode())
+for entity in payload.get("system-entities", []):
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"], entity["mount-point"])
+        raise SystemExit(0)
+print("", "")' "$mount_point" "$attach_plist" 2>/dev/null || true
+  )
+  if [[ -z "$attached_device" ]]; then
+    attached_device="$(resolve_device_for_mount "$mount_point")"
+  fi
+  mounted=true
+  echo "hdiutil attach failed for $dmg (status $attach_status); cleanup will detach $attached_device" >&2
+  exit "$attach_status"
+fi
+mounted=true
+attach_completed=true
 read -r attached_device attached_mount < <(
   python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
 payload = plistlib.loads(sys.argv[2].encode())
-fallback = ""
 for entity in payload.get("system-entities", []):
-    if entity.get("dev-entry") and not fallback:
-        fallback = entity["dev-entry"]
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"], entity["mount-point"])
         raise SystemExit(0)
-print(fallback, "")' "$mount_point" "$attach_plist"
+print("", "")' "$mount_point" "$attach_plist"
   )
+if [[ -z "$attached_device" ]]; then
+  read -r attached_device attached_mount < <(
+    hdiutil info -plist | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+entities = list(payload.get("system-entities", []))
+for image in payload.get("images", []):
+    entities.extend(image.get("system-entities", []))
+for entity in entities:
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"], entity["mount-point"])
+        raise SystemExit(0)
+print("", "")' "$mount_point"
+  )
+fi
 [[ "$attached_mount" == "$mount_point" && -n "$attached_device" ]] || {
   echo "could not resolve exact attached Finder device" >&2
   exit 1
@@ -194,13 +357,12 @@ open "$mount_point"
 osascript -e 'tell application "Finder" to activate'
 sleep 2
 finder_json="$evidence_dir/finder-observation.json"
-rm -f "$finder_json"
-instruction_text="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["overlay"]["instruction"])' "$layout_path")"
+prepare_evidence_path "$finder_json"
 for attempt in 1 2 3 4 5; do
   if [[ "$attempt" -gt 1 ]]; then
     open "$mount_point" >/dev/null 2>&1 || true
   fi
-  if osascript "$root_dir/scripts/macos/finder-dmg-observe.applescript" "$mount_point" "$finder_json" "$instruction_text"; then
+  if osascript "$root_dir/scripts/macos/finder-dmg-observe.applescript" "$mount_point" "$finder_json"; then
     break
   fi
   sleep 1
@@ -224,11 +386,45 @@ PY
   echo "Finder window was not found; refusing an unscoped screenshot" >&2
   exit 1
 }
-screencapture -x -l "$window_id" "$evidence_dir/finder-window.png"
-[[ -s "$evidence_dir/finder-window.png" ]] || {
+if [[ "$macos_version" == 15.* ]]; then
+  screenshot_basename="finder-acceptance-macos-15.png"
+else
+  screenshot_basename="finder-acceptance-current.png"
+fi
+acceptance_basename="${screenshot_basename%.png}.json"
+signature_basename="${acceptance_basename%.json}.sig"
+finder_screenshot="$evidence_dir/$screenshot_basename"
+prepare_evidence_path "$finder_screenshot"
+screencapture -x -l "$window_id" "$finder_screenshot"
+[[ -s "$finder_screenshot" ]] || {
   echo "Finder window screenshot was not created" >&2
   exit 1
 }
+[[ -n "${TELEVYBACKUP_FINDER_VISUAL_REVIEW:-}" ]] || {
+  echo "set TELEVYBACKUP_FINDER_VISUAL_REVIEW to the approved JSON checklist after inspecting the scoped Finder screenshot" >&2
+  exit 2
+}
+visual_review_json="$(TELEVYBACKUP_FINDER_VISUAL_REVIEW="${TELEVYBACKUP_FINDER_VISUAL_REVIEW}" python3 - <<'PY'
+import json
+import os
+
+required = {
+    "instruction_readable",
+    "instruction_contrast",
+    "arrow_visible",
+    "arrow_direction_correct",
+    "labels_visible",
+    "no_occlusion",
+}
+try:
+    review = json.loads(os.environ["TELEVYBACKUP_FINDER_VISUAL_REVIEW"])
+except (KeyError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid Finder visual review JSON: {error}")
+if set(review) != required or any(value is not True for value in review.values()):
+    raise SystemExit("Finder visual review checklist must contain exactly six true checks")
+print(json.dumps(review, sort_keys=True))
+PY
+)"
 
 defaults write com.apple.finder AppleShowAllFiles -bool true
 finder_was_visible_changed=true
@@ -236,6 +432,7 @@ killall Finder >/dev/null 2>&1 || true
 sleep 1
 open "$mount_point"
 hidden_json="$evidence_dir/show-all-files.json"
+prepare_evidence_path "$hidden_json"
 python3 - "$mount_point" "$layout_path" <<'PY' > "$hidden_json"
 import json
 import os
@@ -268,9 +465,7 @@ if observation["app_name"] != "TelevyBackup.app":
 if observation["applications_name"] != "Applications":
     raise SystemExit("Finder observation is missing Applications")
 if observation["drag_direction"] != "right":
-    raise SystemExit("Finder observation does not show the expected drag direction")
-if observation["instruction"] != layout["overlay"]["instruction"]:
-    raise SystemExit("Finder observation instruction differs from the layout schema")
+    raise SystemExit("Finder icon positions do not show the expected drag direction")
 expected_app = tuple(layout["icon_locations"]["TelevyBackup.app"])
 expected_applications = tuple(layout["icon_locations"]["Applications"])
 if tuple(observation["app_position"]) != expected_app:
@@ -278,13 +473,23 @@ if tuple(observation["app_position"]) != expected_app:
 if tuple(observation["applications_position"]) != expected_applications:
     raise SystemExit(f"Applications position differs from schema: {observation['applications_position']!r}")
 PY
-python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$evidence_dir/finder-window.png" "$machine_arch" "$macos_version" "$hidden_json" <<'PY' > "$evidence_dir/acceptance.json"
+acceptance_path="$evidence_dir/$acceptance_basename"
+prepare_evidence_path "$acceptance_path"
+finder_screenshot_sha256="$(shasum -a 256 "$finder_screenshot" | awk '{print $1}')"
+producer_commit="$(git -C "$root_dir" rev-parse HEAD)"
+producer_sha256="$(shasum -a 256 "$root_dir/scripts/macos/finder-dmg-acceptance.sh" | awk '{print $1}')"
+python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$finder_screenshot" "$finder_screenshot_sha256" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" "$producer_commit" "$producer_sha256" "$acceptance_basename" <<'PY' > "$acceptance_path"
 import hashlib
 import json
 import pathlib
 import sys
 
-hidden = json.load(open(sys.argv[11], encoding="utf-8"))
+hidden = json.load(open(sys.argv[12], encoding="utf-8"))
+observation = json.load(open(sys.argv[13], encoding="utf-8"))
+visual_review = json.loads(sys.argv[14])
+producer_commit = sys.argv[15]
+producer_sha256 = sys.argv[16]
+acceptance_basename = sys.argv[17]
 layout = json.load(open(sys.argv[7], encoding="utf-8"))
 canonical_layout = {
     "schema_version": layout["schema_version"],
@@ -304,7 +509,8 @@ canonical_layout = {
     "hidden_resource_allowlist": sorted(layout["hidden_resource_allowlist"]),
     "symlinks": layout["symlinks"],
 }
-semantic_layout_digest = hashlib.sha256(json.dumps(canonical_layout, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+canonical_json = lambda value: json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+semantic_layout_digest = hashlib.sha256(canonical_json(canonical_layout)).hexdigest()
 dmg_path = pathlib.Path(sys.argv[2])
 verified_dmg_path = pathlib.Path(sys.argv[3])
 manifest_path = pathlib.Path(sys.argv[5])
@@ -316,13 +522,52 @@ manifest = json.loads(manifest_bytes.decode())
 record = next((asset for asset in manifest.get("assets", []) if asset.get("name") == verified_dmg_path.name), None)
 if record is None or record.get("sha256") != sys.argv[4] or record.get("dmg_layout_digest") != semantic_layout_digest:
     raise SystemExit("Finder acceptance DMG does not match its adjacent BUILD-MANIFEST.json")
+capture_receipt = {
+    "schema_version": 1,
+    "producer": "scripts/macos/finder-dmg-acceptance.sh",
+    "producer_sha256": producer_sha256,
+    "producer_commit": producer_commit,
+    "capture_method": "screencapture -x -l",
+    "capture_scope": "finder-window-only",
+    "window_id": observation["window_id"],
+    "device": sys.argv[1],
+    "macos_version": sys.argv[11],
+    "platform": "macos-15" if sys.argv[11].startswith("15.") else "current",
+    "screenshot": pathlib.Path(sys.argv[8]).name,
+    "screenshot_sha256": sys.argv[9],
+    "dmg_name": pathlib.Path(sys.argv[3]).name,
+    "dmg_sha256": sys.argv[4],
+    "manifest_sha256": manifest_sha256,
+    "checksums_sha256": checksums_sha256,
+    "finder_observation_sha256": hashlib.sha256(canonical_json(observation)).hexdigest(),
+    "show_all_files_sha256": hashlib.sha256(canonical_json(hidden)).hexdigest(),
+    "visual_review_sha256": hashlib.sha256(canonical_json({
+        "status": "approved",
+        "method": "scoped-human-review",
+        "checklist": visual_review,
+        "instruction": layout["overlay"]["instruction"],
+        "arrow_direction": observation["drag_direction"],
+        "asset_digest": layout["asset_digests"][layout["composed_background"]],
+    })).hexdigest(),
+}
+capture_receipt["receipt_sha256"] = hashlib.sha256(canonical_json(capture_receipt)).hexdigest()
+visual_record = {
+    "status": "approved",
+    "method": "scoped-human-review",
+    "checklist": visual_review,
+    "instruction": layout["overlay"]["instruction"],
+    "arrow_direction": observation["drag_direction"],
+    "asset_digest": layout["asset_digests"][layout["composed_background"]],
+}
 print(json.dumps({
-    "architecture": sys.argv[9],
+    "architecture": sys.argv[10],
     "capture_scope": "finder-window-only",
     "device": sys.argv[1],
     "dmg": sys.argv[2],
+    "dmg_name": pathlib.Path(sys.argv[3]).name,
     "dmg_sha256": sys.argv[4],
     "event": "finder_acceptance",
+    "finder_observation": observation,
     "manifest": str(manifest_path),
     "manifest_sha256": manifest_sha256,
     "manifest_verified": True,
@@ -330,9 +575,86 @@ print(json.dumps({
     "checksums": str(checksums_path),
     "checksums_sha256": checksums_sha256,
     "checksums_verified": True,
+    "visual_review": {
+        "status": "approved",
+        "method": "scoped-human-review",
+        "checklist": visual_review,
+        "instruction": layout["overlay"]["instruction"],
+        "arrow_direction": observation["drag_direction"],
+        "asset_digest": layout["asset_digests"][layout["composed_background"]],
+    },
     "show_all_files": hidden,
-    "macos_version": sys.argv[10],
-    "screenshot": sys.argv[8],
+    "macos_version": sys.argv[11],
+    "platform": "macos-15" if sys.argv[11].startswith("15.") else "current",
+    "screenshot": pathlib.Path(sys.argv[8]).name,
+    "screenshot_sha256": sys.argv[9],
+    "capture_receipt_asset": acceptance_basename,
+    "capture_signature_asset": signature_basename,
+    "capture_receipt": capture_receipt,
 }, sort_keys=True))
 PY
+signature_path="$evidence_dir/$signature_basename"
+prepare_evidence_path "$signature_path"
+openssl pkeyutl -sign -inkey "$signing_key" -rawin -in "$acceptance_path" -out "$signature_path"
+[[ -s "$signature_path" ]] || {
+  echo "Finder acceptance receipt signature was not created" >&2
+  exit 1
+}
+if [[ -n "$rc2_tag" ]]; then
+  rc2_release=""
+  if ! rc2_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${rc2_tag}" 2>&1)"; then
+    printf '%s\n' "$rc2_release" >&2
+    echo "Finder acceptance could not read the RC2 Release assets" >&2
+    exit 1
+  fi
+  screenshot_name="$(basename "$finder_screenshot")"
+  screenshot_digest="$(shasum -a 256 "$finder_screenshot" | awk '{print $1}')"
+  screenshot_count="$(printf '%s' "$rc2_release" | jq --arg name "$screenshot_name" '[.assets[]? | select(.name == $name)] | length')"
+  if [[ "$screenshot_count" != 0 && "$screenshot_count" != 1 ]]; then
+    echo "Finder acceptance found duplicate RC2 screenshot assets: $screenshot_name" >&2
+    exit 1
+  elif [[ "$screenshot_count" == 1 ]]; then
+    existing_screenshot_digest="$(printf '%s' "$rc2_release" | jq -r --arg name "$screenshot_name" '.assets[] | select(.name == $name) | .digest // empty')"
+    [[ "$existing_screenshot_digest" == "sha256:$screenshot_digest" ]] || {
+      echo "Finder acceptance found a conflicting RC2 screenshot asset: $screenshot_name" >&2
+      exit 1
+    }
+    echo "reusing matching RC2 Finder screenshot asset: $screenshot_name"
+  else
+    gh release upload "$rc2_tag" "$finder_screenshot" \
+      --repo "$GITHUB_REPOSITORY"
+  fi
+  receipt_count="$(printf '%s' "$rc2_release" | jq --arg name "$acceptance_basename" '[.assets[]? | select(.name == $name)] | length')"
+  if [[ "$receipt_count" != 0 && "$receipt_count" != 1 ]]; then
+    echo "Finder acceptance found duplicate RC2 receipt assets: $acceptance_basename" >&2
+    exit 1
+  elif [[ "$receipt_count" == 1 ]]; then
+    existing_receipt_digest="$(printf '%s' "$rc2_release" | jq -r --arg name "$acceptance_basename" '.assets[] | select(.name == $name) | .digest // empty')"
+    receipt_digest="$(shasum -a 256 "$acceptance_path" | awk '{print $1}')"
+    [[ "$existing_receipt_digest" == "sha256:$receipt_digest" ]] || {
+      echo "Finder acceptance found a conflicting RC2 receipt asset: $acceptance_basename" >&2
+      exit 1
+    }
+    echo "reusing matching RC2 Finder receipt asset: $acceptance_basename"
+  else
+    gh release upload "$rc2_tag" "$acceptance_path" \
+      --repo "$GITHUB_REPOSITORY"
+  fi
+  signature_count="$(printf '%s' "$rc2_release" | jq --arg name "$signature_basename" '[.assets[]? | select(.name == $name)] | length')"
+  if [[ "$signature_count" != 0 && "$signature_count" != 1 ]]; then
+    echo "Finder acceptance found duplicate RC2 signature assets: $signature_basename" >&2
+    exit 1
+  elif [[ "$signature_count" == 1 ]]; then
+    existing_signature_digest="$(printf '%s' "$rc2_release" | jq -r --arg name "$signature_basename" '.assets[] | select(.name == $name) | .digest // empty')"
+    signature_digest="$(shasum -a 256 "$signature_path" | awk '{print $1}')"
+    [[ "$existing_signature_digest" == "sha256:$signature_digest" ]] || {
+      echo "Finder acceptance found a conflicting RC2 signature asset: $signature_basename" >&2
+      exit 1
+    }
+    echo "reusing matching RC2 Finder signature asset: $signature_basename"
+  else
+    gh release upload "$rc2_tag" "$signature_path" \
+      --repo "$GITHUB_REPOSITORY"
+  fi
+fi
 echo "Finder DMG acceptance evidence: $evidence_dir"

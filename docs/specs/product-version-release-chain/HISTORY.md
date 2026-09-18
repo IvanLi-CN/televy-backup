@@ -12,5 +12,7 @@
 - Release workflows use only the default GitHub Actions token. Product tags remain server-protected;
   release identity refs are excluded from that product-tag ruleset and rely on the append-only
   application contract for provenance and state protection.
+- Preparation retries may reuse an exact immutable reservation when the same PR source advances
+  along its ancestry; the original reservation source remains recorded and independently verified.
 - Pre-provenance lightweight prerelease tags remain historical ordinal occupancy when reachable
   from `main`; they are not identity, recovery, or publication proof.

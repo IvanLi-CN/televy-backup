@@ -44,6 +44,7 @@ assert spec and spec.loader
 chain = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(chain)
 chain.ROOT = repo
+assert chain.verify_product_tag_provenance("v0.9.3")["owner"] == "protected-release-automation"
 
 reservation_spec = importlib.util.spec_from_file_location("release_reservation", root / ".github/scripts/release_reservation.py")
 assert reservation_spec and reservation_spec.loader
@@ -223,6 +224,19 @@ else:
     raise AssertionError("depth-2 clone unexpectedly verified merge ancestry")
 subprocess.run(["git", "-C", str(shallow), "fetch", "-q", "--unshallow"], check=True)
 assert chain.verify_merged(topology_merge)["prepared"] == "true"
+
+# A source commit may follow preparation on the PR branch. Completion must
+# resolve the VERSION-only preparation commit instead of assuming it is merge^2.
+chain.ROOT = topology
+subprocess.run(["git", "-C", str(topology), "switch", "-q", "-c", "post-preparation", topology_preparation], check=True)
+(topology / "POST_PREPARATION_MERGE").write_text("source update\n", encoding="utf-8")
+subprocess.run(["git", "-C", str(topology), "add", "POST_PREPARATION_MERGE"], check=True)
+subprocess.run(["git", "-C", str(topology), "commit", "-qm", "source update after preparation"], check=True)
+post_preparation_head = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
+subprocess.run(["git", "-C", str(topology), "switch", "-q", "-c", "post-preparation-main", base_sha], check=True)
+subprocess.run(["git", "-C", str(topology), "merge", "--no-ff", "-m", "fixture post-preparation merge", post_preparation_head], check=True)
+post_preparation_merge = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
+assert chain.verify_merged(post_preparation_merge)["prepared"] == "true"
 PY
 
 echo "release chain fixture tests passed"

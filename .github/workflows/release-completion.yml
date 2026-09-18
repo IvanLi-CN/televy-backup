@@ -14,7 +14,7 @@ on:
 
 concurrency:
   group: release-completion-${{ github.event.pull_request.number || inputs.pr_number || github.event.merge_group.head_sha || github.ref }}
-  queue: max
+  cancel-in-progress: false
 
 permissions:
   checks: read
@@ -30,7 +30,7 @@ jobs:
     steps:
       - name: Checkout trusted base
         if: github.event_name != 'merge_group'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.event.pull_request.base.sha || 'main' }}
           fetch-depth: 0
@@ -71,7 +71,7 @@ jobs:
 
       - name: Checkout trusted merge-group gate scripts
         if: github.event_name == 'merge_group'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.event.merge_group.base_sha || github.sha }}
           fetch-depth: 0
@@ -84,9 +84,11 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           EXPECTED_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -euo pipefail
           test "${GITHUB_REF}" = "refs/heads/${EXPECTED_HEAD_REF}"
+          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
           test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
 
       - name: Verify VERSION and release completion
@@ -171,17 +173,9 @@ jobs:
           prepared_json=""
           preparation_sha=""
           product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
-          prepared_json=""
-          preparation_sha=""
           if [[ "${product_release}" == true ]]; then
-            if [[ "${GITHUB_EVENT_NAME}" == workflow_dispatch ]]; then
-              # Dispatches run against a prepared VERSION head; the trusted base script can verify it directly.
-              prepared_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${HEAD_SHA}" 2>/dev/null || true)"
-              preparation_sha="${HEAD_SHA}"
-            else
-              prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}" 2>/dev/null || true)"
-              preparation_sha="$(printf '%s' "${prepared_json}" | jq -r .preparationSha)"
-            fi
+            prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}" 2>/dev/null || true)"
+            preparation_sha="$(printf '%s' "${prepared_json}" | jq -r .preparationSha)"
             if [[ -z "${prepared_json}" ]]; then
               echo "product release is missing a valid VERSION preparation commit" >&2
               exit 1
@@ -204,7 +198,10 @@ jobs:
           fi
           if [[ -n "${prepared_json}" ]]; then
             release_mode="$(printf '%s' "${prepared_json}" | jq -r .mode)"
-            reservation_source_sha="$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')"
+            reservation_source_sha="$(git show -s --format=%B "${preparation_sha}" | sed -n 's/^Release-Reservation-Source-SHA: //p' | head -1)"
+            if [[ -z "${reservation_source_sha}" ]]; then
+              reservation_source_sha="$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')"
+            fi
             reservation_source_tree="$(git rev-parse "${reservation_source_sha}^{tree}" 2>/dev/null || true)"
             jq -n \
               --arg ref "$(printf '%s' "${prepared_json}" | jq -r .reservationRef)" \
@@ -246,14 +243,37 @@ jobs:
               )
             fi
           fi
-          python3 .github/scripts/release_completion.py "${completion_args[@]}" \
+          # Keep the gate logic on the trusted base while bridging the
+          # reservation-source field introduced after the base checkout.
+          python3 - "${completion_args[@]}" \
             --allow-migration \
             --migration-version 0.9.2 \
             --reservation-json "${RUNNER_TEMP}/reservation.json" \
             --repository "${GITHUB_REPOSITORY}" \
             --token "${GH_TOKEN}" \
             --api-root "${GITHUB_API_URL}" \
-            --require-github-verification
+            --require-github-verification <<'PY'
+          import sys
+
+          sys.path.insert(0, ".github/scripts")
+          import release_completion
+
+          trusted_verify_reservation = release_completion.verify_reservation
+
+          def verify_reservation_with_source_compat(*args, **kwargs):
+              path, prepared = args[:2]
+              if "reservationSourceSha" not in prepared:
+                  prepared = dict(prepared)
+                  reservation_source = release_completion.CHAIN.trailers(
+                      prepared["preparationSha"]
+                  ).get("Release-Reservation-Source-SHA")
+                  if reservation_source:
+                      prepared["sourceSha"] = reservation_source
+              return trusted_verify_reservation(path, prepared, *args[2:], **kwargs)
+
+          release_completion.verify_reservation = verify_reservation_with_source_compat
+          raise SystemExit(release_completion.main(sys.argv[1:]))
+          PY
 
       - name: Validate merge-group release completion
         if: github.event_name == 'merge_group'

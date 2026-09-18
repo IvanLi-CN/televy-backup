@@ -9,7 +9,10 @@ bash -n \
   "$root_dir/scripts/macos/build-app.sh" \
   "$root_dir/scripts/macos/package-release.sh" \
   "$root_dir/scripts/macos/assemble-universal.sh" \
+  "$root_dir/scripts/macos/build-dmg.sh" \
+  "$root_dir/scripts/macos/extract-snapshot-access-helper.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh" \
+  "$root_dir/scripts/macos/finder-dmg-acceptance.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
   "$root_dir/scripts/macos/verify-dmg-layout.sh" \
   "$root_dir/scripts/macos/verify-component-identity.sh" \
@@ -19,6 +22,28 @@ bash -n \
   "$root_dir/scripts/macos/generate-app-icon-assets.sh" \
   "$root_dir/scripts/macos/generate-app-icon-previews.sh" \
   "$root_dir/scripts/macos/verify-app-icon-assets.sh"
+python3 -m py_compile \
+  "$root_dir/scripts/macos/reject-symlink-components.py" \
+  "$root_dir/scripts/macos/normalize-designated-requirement.py" \
+  "$root_dir/scripts/macos/verify-dmg-metadata.py" \
+  "$root_dir/.github/scripts/verify-dmg-evidence.py"
+symlink_parent="$tmp_dir/symlink-parent"
+mkdir -p "$symlink_parent/real"
+ln -s "$symlink_parent/real" "$symlink_parent/redirect"
+if python3 "$root_dir/scripts/macos/reject-symlink-components.py" "$symlink_parent/redirect/artifact"; then
+  echo "path safety checker accepted a symlinked parent" >&2
+  exit 1
+fi
+normalized_requirement="$(printf '%s\n' \
+  'codesign: warning: blah' \
+  'designated => identifier "com.example.helper" and (cdhash H"2222222222222222222222222222222222222222" or' \
+  '  cdhash H"1111111111111111111111111111111111111111")' \
+  'Executable=/private/path/helper' \
+  | python3 "$root_dir/scripts/macos/normalize-designated-requirement.py")"
+[[ "$normalized_requirement" == 'designated => identifier "com.example.helper" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")' ]] || {
+  echo "designated requirement normalizer must reconstruct wrapped codesign output" >&2
+  exit 1
+}
 
 build_text="$(<"$root_dir/scripts/macos/build-app.sh")"
 verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
@@ -52,6 +77,22 @@ for binary in TelevyBackup televybackup-cli televybackupd televybackup-mtproto-h
     exit 1
   }
 done
+grep -F 'workspace_build+=(-p televybackup -p televybackupd)' <<<"$build_text" >/dev/null || {
+  echo "build-app.sh must build CLI and daemon in one Cargo invocation" >&2
+  exit 1
+}
+grep -F 'if [[ -z "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]' <<<"$build_text" >/dev/null || {
+  echo "build-app.sh must not rebuild the reusable Snapshot Access bundle" >&2
+  exit 1
+}
+grep -F 'snapshot_build=(cargo build --locked --release -p televybackup-snapshot-access --bin televybackup-snapshot-mount-helper)' <<<"$build_text" >/dev/null || {
+  echo "build-app.sh must build the main-app Snapshot mount helper on the reuse path" >&2
+  exit 1
+}
+if grep -F 'workspace_build+=(--bin' <<<"$build_text" >/dev/null; then
+  echo "build-app.sh must not filter the shared workspace build to one binary" >&2
+  exit 1
+fi
 grep -F "chmod 755 \\" <<<"$build_text" >/dev/null || {
   echo "build-app.sh must preserve executable modes for every main binary" >&2
   exit 1
@@ -87,6 +128,57 @@ grep -F 'detach_dmg_exact' <<<"$verify_release_text" >/dev/null || {
   echo "DMG verification must detach the exact plist-resolved device" >&2
   exit 1
 }
+grep -F 'hdiutil imageinfo -plist' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must inspect the actual image format" >&2
+  exit 1
+}
+grep -F 'verify-dmg-metadata.py' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must inspect attached filesystem metadata" >&2
+  exit 1
+}
+grep -F 'verify_nested_helper_path' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verification must reject symlinked or escaping nested helpers" >&2
+  exit 1
+}
+python3 - "$root_dir/scripts/macos/verify-dmg-metadata.py" "$tmp_dir" <<'PY'
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
+
+verifier = Path(sys.argv[1])
+root = Path(sys.argv[2])
+
+def run_case(image_format, filesystem_type, expected):
+    image_info = root / f"image-{image_format}.plist"
+    filesystem_info = root / f"filesystem-{filesystem_type}.plist"
+    with image_info.open("wb") as handle:
+        plistlib.dump({"Format": image_format}, handle)
+    with filesystem_info.open("wb") as handle:
+        plistlib.dump({"FilesystemType": filesystem_type}, handle)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(verifier),
+            "--image-info",
+            str(image_info),
+            "--filesystem-info",
+            str(filesystem_info),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if (result.returncode == 0) != expected:
+        raise SystemExit(
+            f"unexpected DMG metadata result for {image_format}/{filesystem_type}: "
+            f"{result.stdout}{result.stderr}"
+        )
+
+run_case("UDZO", "hfs", True)
+run_case("UDRO", "hfs", False)
+run_case("UDZO", "apfs", False)
+run_case("UDZO", "not-hfs", False)
+PY
 identity_text="$(<"$root_dir/scripts/macos/verify-component-identity.sh")"
 grep -F 'reference_artifact_sha="$(artifact_sha "$reference" canonical)"' <<<"$identity_text" >/dev/null || {
   echo "component identity verification must compare canonical reference and candidate bundle digests" >&2
@@ -222,8 +314,109 @@ grep -F 'verify-dmg-layout.sh' <<<"$assemble_text" >/dev/null || {
   exit 1
 }
 finder_text="$(<"$root_dir/scripts/macos/finder-dmg-acceptance.sh")"
+extract_helper_text="$(<"$root_dir/scripts/macos/extract-snapshot-access-helper.sh")"
+grep -F 'path_safety_checker="$root_dir/scripts/macos/reject-symlink-components.py"' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must use the shared path safety checker" >&2
+  exit 1
+}
+grep -F 'reject_symlink_components "$dmg"' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must reject symlinked DMG paths" >&2
+  exit 1
+}
+grep -F 'reject_symlink_components "$output_dir"' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must reject symlinked output paths" >&2
+  exit 1
+}
+grep -F 'hdiutil attach -plist' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must use machine-readable attach output" >&2
+  exit 1
+}
+grep -F 'device_from_plist' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must resolve the exact attached device" >&2
+  exit 1
+}
+grep -F 'trap cleanup EXIT' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must clean up mounts on every exit path" >&2
+  exit 1
+}
+grep -F 'helper_real' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must enforce nested helper containment" >&2
+  exit 1
+}
+grep -F 'reject_symlink_components "$helper_path"' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must reject symlinked helper components" >&2
+  exit 1
+}
+grep -F 'output_helper="$output_dir/TelevyBackup Snapshot Access.app"' <<<"$extract_helper_text" >/dev/null &&
+  grep -F '[[ ! -e "$output_helper" && ! -L "$output_helper" ]]' <<<"$extract_helper_text" >/dev/null || {
+  echo "Snapshot Access extraction must reject an existing output helper path" >&2
+  exit 1
+}
+grep -F 'gh release upload "$rc2_tag" "$finder_screenshot"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must upload newly captured screenshots to RC2" >&2
+  exit 1
+}
+grep -F 'reusing matching RC2 Finder screenshot asset' <<<"$finder_text" >/dev/null &&
+  grep -F 'conflicting RC2 screenshot asset' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must make RC2 screenshot uploads digest-idempotent" >&2
+  exit 1
+}
+if grep -F -- '--clobber' <<<"$finder_text" >/dev/null; then
+  echo "Finder acceptance must not overwrite an existing RC2 screenshot" >&2
+  exit 1
+fi
+for attach_text in "$verify_release_text" "$finder_text"; do
+  grep -F 'attach_status=0' <<<"$attach_text" >/dev/null || {
+    echo "DMG attach paths must preserve cleanup when hdiutil attach fails" >&2
+    exit 1
+  }
+done
+layout_verify_text="$(<"$root_dir/scripts/macos/verify-dmg-layout.sh")"
+evidence_verify_text="$(<"$root_dir/.github/scripts/verify-dmg-evidence.py")"
+grep -F 'dmg_filesystem_verify' <<<"$evidence_verify_text" >/dev/null &&
+  grep -F 'dmg_detach' <<<"$evidence_verify_text" >/dev/null || {
+  echo "DMG evidence verifier must enforce filesystem verification and exact detach events" >&2
+  exit 1
+}
+grep -F 'attach_completed=false' <<<"$layout_verify_text" >/dev/null || {
+  echo "DMG layout verification must track attach completion separately from cleanup" >&2
+  exit 1
+}
+grep -F 'if [[ "$mounted" == true || -n "$attached_device" ]]' <<<"$layout_verify_text" >/dev/null || {
+  echo "DMG layout cleanup must only resolve devices while a mount may remain" >&2
+  exit 1
+}
+grep -F 'if hdiutil detach "$attached_device"; then' <<<"$layout_verify_text" >/dev/null || {
+  echo "DMG layout verification must update mount state only after detach succeeds" >&2
+  exit 1
+}
+python3 - "$root_dir/scripts/macos/verify-dmg-layout.sh" <<'PY'
+import pathlib
+import sys
+
+if 'mounted=false\nhdiutil detach "$attached_device"' in pathlib.Path(sys.argv[1]).read_text():
+    raise SystemExit("DMG layout verification must not clear mount state before detach")
+PY
+for cleanup_text in "$verify_release_text" "$finder_text"; do
+  grep -F 'if [[ "$mounted" == true' <<<"$cleanup_text" >/dev/null &&
+    grep -F -- '-n "$attached_device"' <<<"$cleanup_text" >/dev/null || {
+    echo "DMG cleanup must only resolve devices while a mount may remain" >&2
+    exit 1
+  }
+done
+python3 - "$root_dir/scripts/macos/verify-release-assets.sh" <<'PY'
+import pathlib
+import sys
+
+if 'mounted=false\n  detach_dmg_exact' in pathlib.Path(sys.argv[1]).read_text():
+    raise SystemExit("release verification must not clear mount state before detach")
+PY
 grep -F 'TELEVYBACKUP_RUN_FINDER_ACCEPTANCE' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must require explicit controlled-session opt-in" >&2
+  exit 1
+}
+grep -F 'Finder acceptance must inspect the stable Universal DMG' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must inspect the stable Universal DMG" >&2
   exit 1
 }
 grep -F 'screencapture -x -l "$window_id"' <<<"$finder_text" >/dev/null || {
@@ -242,8 +435,25 @@ grep -F 'rmdir "$mount_point"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must cleanly reject unsupported preference types" >&2
   exit 1
 }
-grep -F 'rm -f "$finder_json"' <<<"$finder_text" >/dev/null || {
-  echo "Finder acceptance must discard stale observation evidence" >&2
+grep -F 'prepare_evidence_path()' <<<"$finder_text" >/dev/null &&
+grep -F 'prepare_evidence_path "$finder_json"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must safely discard stale observation evidence" >&2
+  exit 1
+}
+grep -F 'os.path.islink(store_path)' <<<"$layout_verify_text" >/dev/null &&
+  grep -F 'os.path.islink(store_path)' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verifiers must reject symlinked .DS_Store resources" >&2
+  exit 1
+}
+grep -F 'prepare_evidence_path "$DMG_EVIDENCE_FILE"' <<<"$layout_verify_text" >/dev/null &&
+grep -F 'prepare_evidence_path "$DMG_EVIDENCE_FILE"' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG verifiers must safely initialize evidence paths" >&2
+  exit 1
+}
+grep -F 'json.load(open(sys.argv[12]' <<<"$finder_text" >/dev/null &&
+  grep -F 'json.load(open(sys.argv[13]' <<<"$finder_text" >/dev/null &&
+  grep -F 'json.loads(sys.argv[14])' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must preserve Python evidence argument mapping" >&2
   exit 1
 }
 grep -F 'source_checksums_path="$source_asset_dir/SHA256SUMS"' <<<"$finder_text" >/dev/null || {
@@ -270,8 +480,12 @@ grep -F '"semantic_layout_digest": semantic_layout_digest' <<<"$finder_text" >/d
   echo "Finder acceptance evidence must record the semantic layout digest" >&2
   exit 1
 }
-grep -F 'instruction_text' <<<"$finder_text" >/dev/null || {
-  echo "Finder acceptance must pass the schema instruction to the observer" >&2
+grep -F 'TELEVYBACKUP_FINDER_VISUAL_REVIEW' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must require explicit scoped visual review" >&2
+  exit 1
+}
+grep -F 'method": "scoped-human-review"' <<<"$finder_text" >/dev/null || {
+  echo "Finder acceptance must record the scoped visual review method" >&2
   exit 1
 }
 grep -F 'get("window_id")' <<<"$finder_text" >/dev/null || {
@@ -294,8 +508,16 @@ grep -F 'expected_background = layout["asset_digests"][layout["composed_backgrou
   echo "DMG verification must compare the mounted background digest with the layout resource" >&2
   exit 1
 }
-grep -F 'fallback = ""' <<<"$verify_release_text" >/dev/null || {
-  echo "DMG attach verification must retain a fallback device for cleanup" >&2
+grep -F 'if entity.get("mount-point") == expected_mount' <<<"$verify_release_text" >/dev/null || {
+  echo "DMG attach verification must resolve the exact mounted device" >&2
+  exit 1
+}
+if grep -F 'fallback = ""' <<<"$verify_release_text" >/dev/null; then
+  echo "DMG attach verification must not retain an unrelated fallback device" >&2
+  exit 1
+fi
+grep -F -- '--expected-source-commit' <<<"$verify_release_text" >/dev/null || {
+  echo "release asset verification must bind the manifest source commit" >&2
   exit 1
 }
 grep -F 'tarfile' <<<"$verify_release_text" >/dev/null || {
@@ -310,13 +532,91 @@ grep -F 'os.path.islink(background_path)' <<<"$verify_release_text" >/dev/null |
   echo "DMG verification must reject symlinked background resources" >&2
   exit 1
 }
+grep -F 'read-ds-store-layout.py' <<<"$verify_release_text" >/dev/null || {
+  echo "release DMG verification must read back Finder geometry from .DS_Store" >&2
+  exit 1
+}
+grep -F 'read-ds-store-layout.py' <<<"$layout_verify_text" >/dev/null || {
+  echo "DMG layout verification must read back Finder geometry from .DS_Store" >&2
+  exit 1
+}
+grep -F 'DMG_EVIDENCE_FILE' <<<"$verify_release_text" >/dev/null || {
+  echo "release DMG verification must support persisted machine-readable evidence" >&2
+  exit 1
+}
+grep -F 'DMG_EVIDENCE_FILE' <<<"$layout_verify_text" >/dev/null || {
+  echo "DMG layout verification must support persisted machine-readable evidence" >&2
+  exit 1
+}
+for event_name in dmg_verify dmg_attach dmg_filesystem_verify dmg_detach; do
+  grep -F "emit_dmg_event $event_name" <<<"$layout_verify_text" >/dev/null || {
+    echo "DMG layout verification must persist $event_name evidence" >&2
+    exit 1
+  }
+  grep -F "emit_dmg_event $event_name" <<<"$verify_release_text" >/dev/null || {
+    echo "release DMG verification must persist $event_name evidence" >&2
+    exit 1
+  }
+done
+grep -F 'emit_dmg_event dmg_verify "$local_dmg" "" ""' <<<"$verify_release_text" >/dev/null || {
+  echo "release DMG verify events must not bind a mount before attach" >&2
+  exit 1
+}
+grep -F 'emit_dmg_event dmg_verify "$dmg" "" ""' <<<"$verify_release_text" >/dev/null || {
+  echo "release layout verify events must not bind a mount before attach" >&2
+  exit 1
+}
 package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
 [[ "$(grep -Fc 'verify-dmg-layout.sh' <<<"$package_workflow_text")" -ge 2 ]] || {
   echo "native package CI jobs must expose the shared DMG layout verifier" >&2
   exit 1
 }
+[[ "$(grep -Fc 'verify-dmg-evidence.py' <<<"$package_workflow_text")" -ge 3 ]] || {
+  echo "package matrix jobs must validate their persisted DMG event streams" >&2
+  exit 1
+}
+[[ "$(grep -Fc 'timeout-minutes: 15' <<<"$package_workflow_text")" -eq 2 ]] || {
+  echo "native package CI jobs must have a 15-minute timeout" >&2
+  exit 1
+}
+[[ "$(grep -Fc 'uses: actions/cache@' <<<"$package_workflow_text")" -ge 2 ]] || {
+  echo "native package CI jobs must cache build dependencies" >&2
+  exit 1
+}
+[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$package_workflow_text")" -eq 2 ]] || {
+  echo "package dependency cache action must be pinned to a full commit SHA" >&2
+  exit 1
+}
+grep -F 'runner.arch' <<<"$package_workflow_text" >/dev/null || {
+  echo "package dependency cache must be architecture-specific" >&2
+  exit 1
+}
+[[ "$(grep -Fc 'if-no-files-found: error' <<<"$package_workflow_text")" -ge 3 ]] || {
+  echo "package matrix must upload persisted DMG verification evidence" >&2
+  exit 1
+}
+[[ "$(grep -Fc '${{ runner.os }}-ARM64-cargo-macos-' <<<"$package_workflow_text")" -eq 0 && "$(grep -Fc '${{ runner.os }}-X64-cargo-macos-' <<<"$package_workflow_text")" -eq 0 ]] || {
+  echo "package dependency cache must not restore host-specific artifacts across architectures" >&2
+  exit 1
+}
+[[ "$(grep -Fc 'timeout-minutes: 10' <<<"$package_workflow_text")" -eq 1 ]] || {
+  echo "Universal package CI must have a 10-minute timeout" >&2
+  exit 1
+}
+[[ "$(grep -Fc 'Build arm64 package (up to 2 attempts)' <<<"$package_workflow_text")" -eq 1 && "$(grep -Fc 'Build x86_64 package (up to 2 attempts)' <<<"$package_workflow_text")" -eq 1 ]] || {
+  echo "native package CI must retry each build at most once" >&2
+  exit 1
+}
 grep -F 'source_sha: ${{ steps.classify.outputs.source_sha }}' <<<"$package_workflow_text" >/dev/null || {
   echo "package classification must expose an immutable source SHA" >&2
+  exit 1
+}
+grep -F -- '--expected-source-commit "$(git rev-parse HEAD)"' <<<"$package_workflow_text" >/dev/null || {
+  echo "package verification must bind the manifest source commit" >&2
+  exit 1
+}
+grep -F -- '--expected-packaging-commit "$GITHUB_SHA"' <<<"$package_workflow_text" >/dev/null || {
+  echo "package verification must bind the manifest packaging commit" >&2
   exit 1
 }
 grep -F 'echo "source_sha=$(git rev-parse HEAD)"' <<<"$package_workflow_text" >/dev/null || {
@@ -350,17 +650,19 @@ git -C "$tmp_dir" config user.email test@example.com
 printf '%s\n' "$version" > "$tmp_dir/VERSION"
 git -C "$tmp_dir" add VERSION scripts
 git -C "$tmp_dir" commit -qm fixture
+fixture_source_commit="$(git -C "$tmp_dir" rev-parse HEAD)"
+fixture_packaging_commit="$(git -C "$root_dir" rev-parse HEAD)"
 
 TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE=one-time-bootstrap-universal-build \
   bash "$root_dir/scripts/macos/generate-release-manifest.sh" \
   --mode release \
   --asset-dir "$tmp_dir" \
   --source-commit "$(git -C "$tmp_dir" rev-parse HEAD)" \
-  --packaging-commit "$(git -C "$root_dir" rev-parse HEAD)" \
+  --packaging-commit "$fixture_packaging_commit" \
   --output "$tmp_dir/BUILD-MANIFEST.json"
 # This contract fixture runs on Linux and deliberately verifies metadata only;
 # macOS package/release jobs run the default bundle checks.
-bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir" --skip-bundle-checks
+bash "$root_dir/scripts/macos/verify-release-assets.sh" --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --expected-packaging-commit "$fixture_packaging_commit" --skip-bundle-checks
 
 python3 - "$tmp_dir/BUILD-MANIFEST.json" "$version" <<'PY'
 import json
@@ -383,6 +685,25 @@ assert len(layout["semantic_layout_digest"]) == 64
 assert all("dmg_layout_digest" in asset for asset in payload["assets"] if asset["name"].endswith(".dmg"))
 PY
 
+cp "$tmp_dir/BUILD-MANIFEST.json" "$tmp_dir/BUILD-MANIFEST.original.json"
+python3 - "$tmp_dir/BUILD-MANIFEST.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["source_commit"] = "0" * 40
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+if bash "$root_dir/scripts/macos/verify-release-assets.sh" \
+  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --expected-packaging-commit "$fixture_packaging_commit" --skip-bundle-checks >/dev/null 2>&1; then
+  echo "release asset verifier accepted a mismatched manifest source commit" >&2
+  exit 1
+fi
+cp "$tmp_dir/BUILD-MANIFEST.original.json" "$tmp_dir/BUILD-MANIFEST.json"
+
 python3 - "$tmp_dir/BUILD-MANIFEST.json" <<'PY'
 import json
 import sys
@@ -394,7 +715,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle)
 PY
 if bash "$root_dir/scripts/macos/verify-release-assets.sh" \
-  --mode release --asset-dir "$tmp_dir" --skip-bundle-checks >/dev/null 2>&1; then
+  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --expected-packaging-commit "$fixture_packaging_commit" --skip-bundle-checks >/dev/null 2>&1; then
   echo "release asset verifier accepted a mismatched DMG layout digest" >&2
   exit 1
 fi
@@ -410,8 +731,16 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle)
 PY
 if PYTHONOPTIMIZE=1 bash "$root_dir/scripts/macos/verify-release-assets.sh" \
-  --mode release --asset-dir "$tmp_dir" --skip-bundle-checks >/dev/null 2>&1; then
+  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --expected-packaging-commit "$fixture_packaging_commit" --skip-bundle-checks >/dev/null 2>&1; then
   echo "release asset verifier accepted a mismatched manifest under optimized Python" >&2
+  exit 1
+fi
+
+printf 'not-a-dmg' > "$tmp_dir/not-a-dmg"
+mkdir -p "$tmp_dir/finder-evidence"
+if TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=0 bash "$root_dir/scripts/macos/finder-dmg-acceptance.sh" \
+  --dmg "$tmp_dir/not-a-dmg" --evidence-dir "$tmp_dir/finder-evidence" >/dev/null 2>&1; then
+  echo "Finder acceptance must refuse an uncontrolled session" >&2
   exit 1
 fi
 

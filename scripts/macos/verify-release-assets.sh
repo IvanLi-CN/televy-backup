@@ -1,19 +1,74 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() { echo "usage: verify-release-assets.sh --mode release|development --asset-dir DIR [--skip-bundle-checks]" >&2; exit 2; }
-mode=""; asset_dir=""; skip_bundle_checks=false
+usage() { echo "usage: verify-release-assets.sh --mode release|development --asset-dir DIR --expected-source-commit SHA --expected-packaging-commit SHA [--skip-bundle-checks]" >&2; exit 2; }
+mode=""; asset_dir=""; expected_source_commit=""; expected_packaging_commit=""; skip_bundle_checks=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) mode="${2:-}"; shift 2 ;;
     --asset-dir) asset_dir="${2:-}"; shift 2 ;;
+    --expected-source-commit) expected_source_commit="${2:-}"; shift 2 ;;
+    --expected-packaging-commit) expected_packaging_commit="${2:-}"; shift 2 ;;
     --skip-bundle-checks) skip_bundle_checks=true; shift ;;
     *) usage ;;
   esac
 done
-[[ -n "$mode" && -d "$asset_dir" ]] || usage
+[[ -n "$mode" && -d "$asset_dir" && -n "$expected_source_commit" && -n "$expected_packaging_commit" ]] || usage
 [[ "$mode" == "release" || "$mode" == "development" ]] || usage
+[[ "$expected_source_commit" =~ ^[0-9a-fA-F]{40}$ ]] || {
+  echo "expected source commit must be a 40-character SHA" >&2
+  exit 2
+}
+[[ "$expected_packaging_commit" =~ ^[0-9a-fA-F]{40}$ ]] || {
+  echo "expected packaging commit must be a 40-character SHA" >&2
+  exit 2
+}
 root_dir="$(git rev-parse --show-toplevel)"
+metadata_verifier="$root_dir/scripts/macos/verify-dmg-metadata.py"
+path_safety_checker="$root_dir/scripts/macos/reject-symlink-components.py"
+reject_symlink_components() {
+  python3 "$path_safety_checker" "$1"
+}
+requirement_normalizer="$root_dir/scripts/macos/normalize-designated-requirement.py"
+read_designated_requirement() {
+  codesign -d -r- "$1" 2>&1 | python3 "$requirement_normalizer"
+}
+verify_nested_helper_path() {
+  local app="$1"
+  local helper="$2"
+  reject_symlink_components "$app"
+  reject_symlink_components "$helper"
+  [[ ! -L "$helper" && -d "$helper" ]] || {
+    echo "embedded Snapshot Access path must be a real directory: $helper" >&2
+    exit 1
+  }
+  local app_real
+  local helper_real
+  app_real="$(cd "$app" && pwd -P)"
+  helper_real="$(cd "$helper" && pwd -P)"
+  [[ "$helper_real" == "$app_real/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" ]] || {
+    echo "embedded Snapshot Access path escapes the main app bundle: $helper" >&2
+    exit 1
+  }
+  local binary="$helper/Contents/MacOS/televybackup-snapshot-access"
+  reject_symlink_components "$binary"
+  [[ ! -L "$binary" && -f "$binary" ]] || {
+    echo "embedded Snapshot Access executable must be a real file: $binary" >&2
+    exit 1
+  }
+}
+prepare_evidence_path() {
+  local path="$1"
+  reject_symlink_components "$path"
+  [[ ! -L "$path" ]] || {
+    echo "DMG evidence path must not be a symlink: $path" >&2
+    exit 1
+  }
+  rm -f "$path"
+}
+if [[ -n "${DMG_EVIDENCE_FILE:-}" ]]; then
+  prepare_evidence_path "$DMG_EVIDENCE_FILE"
+fi
 source_commit="$(git rev-parse HEAD)"
 version="$(python3 "$root_dir/scripts/product-version.py" --mode "$mode" --source-sha "$source_commit")"
 
@@ -56,7 +111,8 @@ print(digest.hexdigest())
 PY
 }
 emit_dmg_event() {
-  python3 - "$@" <<'PY'
+  local event_json
+  event_json="$(python3 - "$@" <<'PY'
 import json
 import sys
 
@@ -68,6 +124,36 @@ print(json.dumps({
     "mount_point": mount_point,
 }, sort_keys=True))
 PY
+)"
+  printf '%s\n' "$event_json"
+  if [[ -n "${DMG_EVIDENCE_FILE:-}" ]]; then
+    printf '%s\n' "$event_json" >> "$DMG_EVIDENCE_FILE"
+  fi
+}
+resolve_device_for_mount() {
+  local device
+  device="$(hdiutil info -plist 2>/dev/null | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+entities = list(payload.get("system-entities", []))
+for image in payload.get("images", []):
+    entities.extend(image.get("system-entities", []))
+for entity in entities:
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"])
+        raise SystemExit(0)' "$1" 2>/dev/null || true
+  )"
+  if [[ -n "$device" ]]; then
+    printf '%s\n' "$device"
+    return 0
+  fi
+  diskutil info -plist "$1" 2>/dev/null | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+mount = payload.get("MountPoint") or payload.get("mount-point")
+device = payload.get("DeviceNode") or payload.get("dev-entry")
+if mount == expected_mount and device:
+    print(device)' "$1" 2>/dev/null || true
 }
 
 attach_dmg_readonly() {
@@ -75,22 +161,61 @@ attach_dmg_readonly() {
   local mount_point="$2"
   ATTACHED_DEVICE=""
   ATTACHED_MOUNT=""
+  local attached_mount_from_plist
   local attach_plist
-  attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"
+  local attach_status=0
+  if attach_plist="$(hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg")"; then
+    attach_status=0
+  else
+    attach_status=$?
+  fi
+  ATTACHED_MOUNT="$mount_point"
+  if (( attach_status != 0 )); then
+    read -r ATTACHED_DEVICE ATTACHED_MOUNT < <(
+      python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.argv[2].encode())
+for entity in payload.get("system-entities", []):
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"], entity["mount-point"])
+        raise SystemExit(0)
+print("", "")' "$mount_point" "$attach_plist" 2>/dev/null || true
+    )
+    if [[ -z "$ATTACHED_DEVICE" ]]; then
+      ATTACHED_DEVICE="$(resolve_device_for_mount "$mount_point")"
+    fi
+    ATTACHED_MOUNT="$mount_point"
+    echo "hdiutil attach failed for $dmg (status $attach_status); cleanup will detach $ATTACHED_DEVICE" >&2
+    return "$attach_status"
+  fi
   read -r ATTACHED_DEVICE ATTACHED_MOUNT < <(
     python3 -c 'import plistlib, sys
 expected_mount = sys.argv[1]
 payload = plistlib.loads(sys.argv[2].encode())
-fallback = ""
 for entity in payload.get("system-entities", []):
-    if entity.get("dev-entry") and not fallback:
-        fallback = entity["dev-entry"]
     if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"], entity["mount-point"])
         raise SystemExit(0)
-print(fallback, "")' "$mount_point" "$attach_plist"
+print("", "")' "$mount_point" "$attach_plist"
   )
-  [[ "$ATTACHED_MOUNT" == "$mount_point" && -n "$ATTACHED_DEVICE" ]] || {
+  if [[ -z "$ATTACHED_DEVICE" ]]; then
+    read -r ATTACHED_DEVICE ATTACHED_MOUNT < <(
+      hdiutil info -plist | python3 -c 'import plistlib, sys
+expected_mount = sys.argv[1]
+payload = plistlib.loads(sys.stdin.buffer.read())
+entities = list(payload.get("system-entities", []))
+for image in payload.get("images", []):
+    entities.extend(image.get("system-entities", []))
+for entity in entities:
+    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        print(entity["dev-entry"], entity["mount-point"])
+        raise SystemExit(0)
+print("", "")' "$mount_point"
+    )
+  fi
+  attached_mount_from_plist="$ATTACHED_MOUNT"
+  ATTACHED_MOUNT="$mount_point"
+  [[ "$attached_mount_from_plist" == "$mount_point" && -n "$ATTACHED_DEVICE" ]] || {
     echo "hdiutil attach plist did not resolve an exact device: $dmg" >&2
     return 1
   }
@@ -115,7 +240,7 @@ grep -F "televybackup-tools-${version}-arm64.tar.gz" "$asset_dir/SHA256SUMS" >/d
   cd "$asset_dir"
   shasum -a 256 -c SHA256SUMS
 )
-python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" "$root_dir/assets/brand/macos/dmg/layout.json" "$skip_bundle_checks" <<'PY'
+python3 - "$asset_dir/BUILD-MANIFEST.json" "$version" "$root_dir/packaging/macos/snapshot-components.lock.json" "$asset_dir" "$root_dir/assets/brand/macos/dmg/layout.json" "$skip_bundle_checks" "$expected_source_commit" "$expected_packaging_commit" <<'PY'
 import hashlib, json, os, sys
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 lock = json.load(open(sys.argv[3], encoding="utf-8"))
@@ -161,6 +286,8 @@ require(expected_dmg_layout["builder"] == {"name": "dmgbuild", "version": "1.6.7
 require(expected_dmg_layout["format"] == "UDZO", "DMG format is not UDZO")
 
 require(manifest["release_version"] == sys.argv[2], "manifest release version mismatch")
+require(manifest.get("source_commit") == sys.argv[7], "manifest source_commit does not match expected source commit")
+require(manifest.get("packaging_commit") == sys.argv[8], "manifest packaging_commit does not match expected packaging commit")
 require(manifest["signing"] == "ad-hoc", "manifest signing mode mismatch")
 require({"arm64", "x86_64", "universal2"}.issubset(set(manifest["architectures"])), "manifest architectures are incomplete")
 require(manifest["assets"], "manifest assets are missing")
@@ -241,7 +368,8 @@ if [[ "$skip_bundle_checks" == true ]]; then
   exit 0
 fi
 app="$asset_dir/TelevyBackup.app"
-[[ -d "$app" ]] || { echo "missing main app bundle: $app" >&2; exit 1; }
+reject_symlink_components "$asset_dir"
+[[ ! -L "$app" && -d "$app" ]] || { echo "missing main app bundle or symlinked app: $app" >&2; exit 1; }
 [[ ! -d "$asset_dir/TelevyBackup Snapshot Access.app" ]] || {
   echo "Snapshot Access must not be a top-level installable app" >&2
   exit 1
@@ -294,7 +422,7 @@ if [[ -d "$app" ]]; then
   [[ "$root_helper_signature" == *"Signature=adhoc"* ]] || { echo "snapshot mount helper must use an ad-hoc signature" >&2; exit 1; }
   root_helper_sha256="$(shasum -a 256 "$root_helper_binary" | awk '{print $1}')"
   root_helper_cdhash="$(printf '%s\n' "$root_helper_signature" | awk -F= '/^CDHash=/{print $2}')"
-  root_helper_requirement="$(codesign -d -r- "$root_helper_binary" 2>&1 | sed -n '/designated =>/p')"
+  root_helper_requirement="$(read_designated_requirement "$root_helper_binary")"
   root_helper_artifact_sha256="$(artifact_sha256 "$root_helper_binary")"
   [[ -n "$root_helper_cdhash" && -n "$root_helper_requirement" ]] || {
     echo "snapshot mount helper signature identity is incomplete" >&2
@@ -315,7 +443,10 @@ requirement_cdhashes = {
 }
 require(requirement_cdhashes, "mount helper designated requirement has no CDHash identities")
 require({component["cdhash"].lower(), sys.argv[4].lower()} <= requirement_cdhashes, "mount helper CDHash mismatch")
-require(component["designated_requirement"] == sys.argv[5], "mount helper designated requirement mismatch")
+require(
+    component["designated_requirement"] == sys.argv[5],
+    f"mount helper designated requirement mismatch: manifest={component['designated_requirement']!r} actual={sys.argv[5]!r}",
+)
 PY
   launch_agent="$app/Contents/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist"
   [[ -s "$launch_agent" ]] || { echo "embedded Snapshot Access LaunchAgent missing" >&2; exit 1; }
@@ -334,7 +465,7 @@ PY
   }
 fi
 access_app="$app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
-[[ -d "$access_app" ]] || { echo "missing embedded Snapshot Access app bundle: $access_app" >&2; exit 1; }
+verify_nested_helper_path "$app" "$access_app"
 if [[ -d "$access_app" ]]; then
   codesign --verify --strict "$access_app"
   bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$access_app/Contents/Info.plist")"
@@ -347,7 +478,7 @@ if [[ -d "$access_app" ]]; then
   actual_sha256="$(shasum -a 256 "$access_app/Contents/MacOS/televybackup-snapshot-access" | awk '{print $1}')"
   actual_artifact_sha256="$(artifact_sha256 "$access_app")"
   actual_cdhash="$(printf '%s\n' "$signature" | awk -F= '/^CDHash=/{print $2}')"
-  actual_requirement="$(codesign -d -r- "$access_app" 2>&1 | sed -n '/designated =>/p')"
+  actual_requirement="$(read_designated_requirement "$access_app")"
   access_metadata="$("$access_app/Contents/MacOS/televybackup-snapshot-access" --component-metadata)"
   python3 - "$asset_dir/BUILD-MANIFEST.json" "$actual_sha256" "$actual_artifact_sha256" "$actual_cdhash" "$actual_requirement" "$access_metadata" <<'PY'
 import json, re, sys
@@ -380,14 +511,24 @@ verify_dmg_helper_identity() (
   mount_point="$(cd "$mount_point" && pwd -P)"
   attached_device=""
   mounted=false
+  attach_completed=false
   cleanup() {
     original_status=$?
     cleanup_failed=false
-    cleanup_device="$attached_device"
-    [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
-    if [[ -n "$cleanup_device" ]]; then
-      if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
-        echo "failed to detach Snapshot Access verification device: $cleanup_device" >&2
+    if [[ "$mounted" == true || -n "$attached_device" || -n "${ATTACHED_DEVICE:-}" || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
+      cleanup_device="$attached_device"
+      [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
+      [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
+      if [[ -n "$cleanup_device" ]]; then
+        if hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
+          mounted=false
+          attached_device=""
+        else
+          echo "failed to detach Snapshot Access verification device: $cleanup_device" >&2
+          cleanup_failed=true
+        fi
+      else
+        echo "failed to resolve Snapshot Access verification device for cleanup: $mount_point" >&2
         cleanup_failed=true
       fi
     fi
@@ -401,11 +542,13 @@ verify_dmg_helper_identity() (
   }
   trap cleanup EXIT
   hdiutil verify "$local_dmg"
+  emit_dmg_event dmg_verify "$local_dmg" "" ""
   attach_dmg_readonly "$local_dmg" "$mount_point"
   attached_device="$ATTACHED_DEVICE"
   mounted=true
+  attach_completed=true
   app="$mount_point/TelevyBackup.app"
-  [[ -d "$app" ]] || { echo "DMG is missing TelevyBackup.app: $local_dmg" >&2; exit 1; }
+  [[ ! -L "$app" && -d "$app" ]] || { echo "DMG is missing a real TelevyBackup.app: $local_dmg" >&2; exit 1; }
   bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")"
   [[ "$bundle_id" == "com.ivan.televybackup" ]] || {
     echo "DMG must use the prod app bundle id: $local_dmg" >&2
@@ -442,7 +585,7 @@ verify_dmg_helper_identity() (
     [[ "$binary_signature" == *"Signature=adhoc"* ]] || { echo "DMG binary is not ad-hoc signed: $binary" >&2; exit 1; }
   done
   helper="$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
-  [[ -d "$helper" ]] || { echo "DMG is missing embedded Snapshot Access: $local_dmg" >&2; exit 1; }
+  verify_nested_helper_path "$mount_point/TelevyBackup.app" "$helper"
   codesign --verify --strict "$helper"
   bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$helper/Contents/Info.plist")"
   [[ "$bundle_id" == "com.ivan.televybackup.snapshot-access" ]] || {
@@ -457,7 +600,7 @@ verify_dmg_helper_identity() (
   actual_sha256="$(shasum -a 256 "$helper/Contents/MacOS/televybackup-snapshot-access" | awk '{print $1}')"
   actual_artifact_sha256="$(artifact_sha256 "$helper")"
   actual_cdhash="$(printf '%s\n' "$signature" | awk -F= '/^CDHash=/{print $2}')"
-  actual_requirement="$(codesign -d -r- "$helper" 2>&1 | sed -n '/designated =>/p')"
+  actual_requirement="$(read_designated_requirement "$helper")"
   helper_arches="$(lipo -info "$helper/Contents/MacOS/televybackup-snapshot-access")"
   # Snapshot Access is the identity-stable component. Native DMGs carry the exact same
   # Universal helper as the Universal DMG, even though their outer app is thin.
@@ -495,27 +638,43 @@ require(component["protocol_version"] == metadata["protocolVersion"], "Snapshot 
 PY
   fi
   diskutil verifyVolume "$attached_device"
-  mounted=false
+  emit_dmg_event dmg_filesystem_verify "$local_dmg" "$mount_point" "$attached_device"
   detach_dmg_exact "$local_dmg" "$mount_point" "$attached_device"
+  mounted=false
   attached_device=""
   ATTACHED_DEVICE=""
+  ATTACHED_MOUNT=""
   echo "DMG Snapshot Access verified: $local_dmg"
 )
 check_dmg_layout() {
   local dmg="$1"
+  local image_info_path
+  local filesystem_info_path
+  image_info_path="$(mktemp "${TMPDIR:-/tmp}/televybackup-dmg-image-info.XXXXXX")"
+  filesystem_info_path="$(mktemp "${TMPDIR:-/tmp}/televybackup-dmg-filesystem-info.XXXXXX")"
   local mount_point
   mount_point="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-verify.XXXXXX")"
   mount_point="$(cd "$mount_point" && pwd -P)"
   local attached_device=""
   local mounted=false
+  local attach_completed=false
   cleanup() {
     original_status=$?
     cleanup_failed=false
-    cleanup_device="$attached_device"
-    [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
-    if [[ -n "$cleanup_device" ]]; then
-      if ! hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
-        echo "failed to detach DMG layout verification device: $cleanup_device" >&2
+    if [[ "$mounted" == true || -n "$attached_device" || -n "${ATTACHED_DEVICE:-}" || "${ATTACHED_MOUNT:-}" == "$mount_point" ]]; then
+      cleanup_device="$attached_device"
+      [[ -n "$cleanup_device" ]] || cleanup_device="${ATTACHED_DEVICE:-}"
+      [[ -n "$cleanup_device" ]] || cleanup_device="$(resolve_device_for_mount "$mount_point")"
+      if [[ -n "$cleanup_device" ]]; then
+        if hdiutil detach "$cleanup_device" >/dev/null 2>&1; then
+          mounted=false
+          attached_device=""
+        else
+          echo "failed to detach DMG layout verification device: $cleanup_device" >&2
+          cleanup_failed=true
+        fi
+      else
+        echo "failed to resolve DMG layout verification device for cleanup: $mount_point" >&2
         cleanup_failed=true
       fi
     fi
@@ -523,15 +682,25 @@ check_dmg_layout() {
       echo "failed to remove DMG layout verification mount point: $mount_point" >&2
       cleanup_failed=true
     fi
+    rm -f "$image_info_path" "$filesystem_info_path"
     if [[ "$cleanup_failed" == true && "$original_status" -eq 0 ]]; then
       exit 1
     fi
   }
   trap cleanup RETURN
+  hdiutil imageinfo -plist "$dmg" > "$image_info_path"
   hdiutil verify "$dmg"
+  emit_dmg_event dmg_verify "$dmg" "" ""
   attach_dmg_readonly "$dmg" "$mount_point"
   attached_device="$ATTACHED_DEVICE"
   mounted=true
+  attach_completed=true
+  diskutil info -plist "$attached_device" > "$filesystem_info_path"
+  python3 "$metadata_verifier" \
+    --image-info "$image_info_path" \
+    --filesystem-info "$filesystem_info_path" \
+    --expected-format UDZO \
+    --expected-filesystem HFS+
   diskutil verifyVolume "$attached_device"
   local top_level_apps=()
   while IFS= read -r app_path; do
@@ -571,7 +740,8 @@ expected_background = layout["asset_digests"][layout["composed_background"]]
 actual_background = hashlib.sha256(open(background_path, "rb").read()).hexdigest()
 if actual_background != expected_background:
     raise SystemExit(f"DMG background digest mismatch: {actual_background} != {expected_background}")
-if not os.path.isfile(os.path.join(mount_point, ".DS_Store")):
+store_path = os.path.join(mount_point, ".DS_Store")
+if os.path.islink(store_path) or not os.path.isfile(store_path):
     raise SystemExit("DMG .DS_Store resource is missing")
 applications = os.path.join(mount_point, "Applications")
 if not os.path.islink(applications) or os.readlink(applications) != "/Applications":
@@ -579,10 +749,15 @@ if not os.path.islink(applications) or os.readlink(applications) != "/Applicatio
 if set(logical_hidden) & set(layout["icon_locations"]):
     raise SystemExit("hidden DMG resources have Finder icon locations")
 PY
-  mounted=false
+  python3 "$root_dir/scripts/macos/read-ds-store-layout.py" \
+    --store "$mount_point/.DS_Store" \
+    --layout "$root_dir/assets/brand/macos/dmg/layout.json" >/dev/null
+  emit_dmg_event dmg_filesystem_verify "$dmg" "$mount_point" "$attached_device"
   detach_dmg_exact "$dmg" "$mount_point" "$attached_device"
+  mounted=false
   attached_device=""
   ATTACHED_DEVICE=""
+  ATTACHED_MOUNT=""
 }
 for dmg in "$asset_dir/TelevyBackup-${version}.dmg" "$asset_dir/TelevyBackup-${version}-arm64.dmg" "$asset_dir/TelevyBackup-${version}-x86_64.dmg"; do
   check_dmg_layout "$dmg"

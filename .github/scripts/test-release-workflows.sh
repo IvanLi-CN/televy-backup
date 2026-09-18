@@ -37,6 +37,12 @@ for workflow in release-preparation.yml release.yml; do
     exit 1
   fi
 done
+for workflow in package-ci.yml release-preparation.yml release-completion.yml release.yml; do
+  if grep -nE 'uses: [^[:space:]]+@(v[0-9]+|main|master)$' "$root_dir/.github/workflows/$workflow" >/dev/null; then
+    printf 'release-gate workflow contains a mutable action reference: %s\n' "$workflow" >&2
+    exit 1
+  fi
+done
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
 assert_contains "release preparation expectedHeadOid" "$preparation_text" "expectedHeadOid"
 assert_contains "prepared-head gate dispatch permission" "$preparation_text" "actions: write"
@@ -52,11 +58,12 @@ assert_not_contains "preparation extra credential variable" "$preparation_text" 
 assert_not_contains "preparation extra credential secret" "$preparation_text" "TELEVYBACKUP_RELEASE_APP_PRIVATE_KEY"
 label_gate_text="$(<"$root_dir/.github/workflows/label-gate.yml")"
 assert_contains "release intent label gate job" "$label_gate_text" "name: Release intent label gate"
+assert_contains "workflow dispatch trusted main token" "$label_gate_text" 'GH_TOKEN: ${{ github.token }}'
 assert_contains "label gate merge-group validation" "$label_gate_text" "merge-group-release-gate.sh labels"
 assert_contains "label gate merge-group fetch credentials" "$label_gate_text" "persist-credentials: true"
 assert_not_contains "label gate merge-group echo bridge" "$label_gate_text" "reuses the Release intent label gate"
-assert_contains "label gate non-preemptive queue" "$label_gate_text" "queue: max"
-assert_not_contains "label gate preemptive cancellation" "$label_gate_text" "cancel-in-progress: true"
+assert_contains "label gate non-preemptive concurrency" "$label_gate_text" "cancel-in-progress: false"
+assert_not_contains "label gate unsupported queue key" "$label_gate_text" "queue: max"
 notify_text="$(<"$root_dir/.github/workflows/notify-release-failure.yml")"
 assert_contains "notifier Release Product trigger" "$notify_text" "- Release Product"
 if [[ "$notify_text" == *"Release exact-tag backfill"* ]]; then
@@ -107,11 +114,37 @@ if [[ -z "$preparation_refresh_line" || -z "$preparation_sha_line" || "$preparat
   exit 1
 fi
 assert_contains "completion missing preparation fail-closed message" "$completion_text" "product release is missing a valid VERSION preparation commit"
-assert_contains "completion non-preemptive queue" "$completion_text" "queue: max"
+assert_contains "completion non-preemptive concurrency" "$completion_text" "cancel-in-progress: false"
+assert_not_contains "completion unsupported queue key" "$completion_text" "queue: max"
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
 assert_not_contains "completion preemptive cancellation" "$completion_text" "cancel-in-progress: true"
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
+[[ "$(grep -Fc 'timeout-minutes: 15' <<<"$release_text")" -eq 2 ]] || {
+  printf 'release native package jobs must have a 15-minute timeout\n' >&2
+  exit 1
+}
+[[ "$(grep -Fc 'uses: actions/cache@' <<<"$release_text")" -ge 2 ]] || {
+  printf 'release native package jobs must cache build dependencies\n' >&2
+  exit 1
+}
+[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$release_text")" -eq 2 ]] || {
+  printf 'release dependency cache action must be pinned to a full commit SHA\n' >&2
+  exit 1
+}
+assert_contains "release dependency cache architecture key" "$release_text" "runner.arch"
+assert_contains "release publication is non-preemptive" "$release_text" "group: release-product-main"
+assert_contains "release publication is serialized" "$release_text" "cancel-in-progress: false"
+[[ "$(grep -Fc '${{ runner.os }}-ARM64-cargo-macos-' <<<"$release_text")" -eq 0 && "$(grep -Fc '${{ runner.os }}-X64-cargo-macos-' <<<"$release_text")" -eq 0 ]] || {
+  printf 'release dependency cache must not restore host-specific artifacts across architectures\n' >&2
+  exit 1
+}
+[[ "$(grep -Fc 'timeout-minutes: 10' <<<"$release_text")" -eq 1 ]] || {
+  printf 'release Universal 2 assembly must have a 10-minute timeout\n' >&2
+  exit 1
+}
+assert_contains "release arm64 package retry limit" "$release_text" "Build arm64 package (up to 2 attempts)"
+assert_contains "release x86_64 package retry limit" "$release_text" "Build x86_64 package (up to 2 attempts)"
 assert_contains "release snapshot head" "$release_text" "head_sha"
 assert_contains "release snapshot labels" "$release_text" "labels_json"
 assert_contains "release snapshot components" "$release_text" "components_json"
@@ -127,6 +160,8 @@ assert_contains "native helper identity policy invocation" "$release_text" 'bash
 assert_contains "release PR merge association" "$release_text" "merge_commit_sha // empty"
 assert_contains "release PR preparation association" "$release_text" 'pull_request_head_sha}" = "${preparation_sha}'
 assert_contains "release sequence gate" "$release_text" "verify-release-sequence"
+assert_contains "helper tag provenance gate" "$release_text" "verify-tag-provenance --tag \"\${candidate}\""
+assert_contains "RC tag provenance gate" "$release_text" "verify-tag-provenance --tag \"\${rc_tag}\""
 assert_contains "release reservation verification" "$release_text" "verify_github_reservation"
 assert_contains "recovery existing bound verification" "$release_text" "verify_github_receipt"
 assert_contains "release bound receipt" "$release_text" "--state bound"
@@ -141,6 +176,7 @@ assert_contains "release intent tag target" "$release_text" "tag_target_sha"
 assert_contains "release bound identity recovery" "$release_text" "bound_identity"
 assert_contains "release recovery skips successor sequence" "$release_text" 'if [[ "${BOUND_IDENTITY}" != present ]]'
 assert_contains "release annotated tag object" "$release_text" "git/tags"
+assert_contains "release helper extraction cleanup" "$release_text" "extract-snapshot-access-helper.sh"
 assert_contains "release channel flags" "$release_text" "/releases/tags/\${tag}"
 assert_contains "release latest tag lookup" "$release_text" "/releases/latest"
 assert_not_contains "unsupported gh release latest field" "$release_text" "isLatest"
@@ -159,6 +195,17 @@ if [[ "$release_text" == *'Product release became published for "${PRODUCT_TAG}"
 fi
 assert_contains "draft release publish" "$release_text" "gh release edit \"\${PRODUCT_TAG}\" --draft=false"
 assert_contains "draft-only asset overwrite" "$release_text" '[[ "${runtime_state}" == draft ]]'
+assert_not_contains "draft publication never overwrites assets" "$release_text" 'gh release upload "${PRODUCT_TAG}" "${release_files[@]}" --clobber'
+assert_contains "draft publication rechecks state before upload" "$release_text" 'unable to recheck draft Release state'
+assert_contains "draft publication rechecks state after upload" "$release_text" 'Release became published during asset upload'
+assert_contains "draft publication reuses matching assets" "$release_text" 'reusing matching draft Release asset'
+assert_contains "draft publication checks existing asset digest" "$release_text" 'existing asset digest mismatch'
+assert_contains "draft publication rechecks state before each asset" "$release_text" 'Release became published before inspecting'
+assert_contains "draft publication documents non-atomic upload guard" "$release_text" 'no conditional draft precondition'
+assert_contains "draft publication verifies final asset set" "$release_text" 'final Release asset set or digest does not match release-assets'
+assert_contains "new release starts as draft" "$release_text" 'flags=(--draft --verify-tag --title "${PRODUCT_TAG}" --generate-notes)'
+assert_contains "new release is published after verification" "$release_text" 'runtime_state=draft'
+assert_not_contains "draft publication uses one bulk upload" "$release_text" 'gh release upload "${PRODUCT_TAG}" "${release_files[@]}"'
 if (( $(printf '%s' "$release_text" | grep -Fc 'verify-release-sequence') < 2 )); then
   printf 'release workflow must verify sequence before and during publication\n' >&2
   exit 1
@@ -167,7 +214,29 @@ if [[ "$release_text" == *"gh release upload \"\${PRODUCT_TAG}\" release-assets/
   printf 'release workflow must not pass app bundle directories to gh release\n' >&2
   exit 1
 fi
-assert_contains "release regular-file collection" "$release_text" "find release-assets -maxdepth 1 -type f"
+assert_contains "release manifest-bound asset collection" "$release_text" "release-assets set does not match BUILD-MANIFEST.json"
+assert_contains "release regular-file collection" "$release_text" "stat.S_ISREG(os.lstat(path).st_mode)"
+assert_contains "release DMG evidence upload" "$release_text" "name: release-dmg-verification"
+assert_contains "release DMG evidence binding" "$release_text" 'DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl"'
+assert_not_contains "release acceptance screenshot reupload" "$release_text" 'gh release upload "${rc2_tag}" "${screenshot_dir}/${screenshot_name}"'
+assert_contains "release product icon verifier" "$release_text" 'policy_verify_app_icon_assets="${policy_checkout}/scripts/macos/verify-app-icon-assets.sh"'
+assert_contains "release RC layout verifier" "$release_text" 'bash scripts/macos/verify-dmg-layout.sh'
+assert_contains "release complete requirement verifier" "$release_text" 'verify-macos-rc-acceptance.py'
+package_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
+assert_contains "package matrix checks permission" "$package_text" "checks: read"
+assert_contains "prepared package source identity" "$package_text" 'verification_sha=${verification_sha}'
+assert_contains "prepared arm64 package evidence" "$package_text" 'commits/${SOURCE_SHA}/check-runs?filter=latest&per_page=100'
+assert_contains "prepared package gate preserves verify" "$package_text" 'verify-prepared --commit HEAD'
+ruby -ryaml - "$root_dir/.github/workflows/release.yml" <<'RUBY'
+workflow = YAML.load_file(ARGV.fetch(0))
+checkout = workflow.fetch("jobs").fetch("macos-acceptance").fetch("steps").find { |step| step["uses"] == "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" }
+abort "macOS acceptance must use the trusted policy checkout" unless checkout&.fetch("with", {}).fetch("ref", nil) == '${{ needs.resolve.outputs.policy_sha }}'
+RUBY
+ruby -ryaml - "$root_dir/.github/workflows/release.yml" <<'RUBY'
+workflow = YAML.load_file(ARGV.fetch(0))
+permissions = workflow.fetch("jobs").fetch("macos-acceptance").fetch("permissions")
+abort "macOS acceptance must be able to upload Finder screenshots" unless permissions == {"contents" => "write"}
+RUBY
 assert_not_contains "source PR release comment step" "$release_text" "Upsert PR release version comment"
 assert_not_contains "source PR release comment marker" "$release_text" "televybackup-release-version-comment"
 assert_not_contains "source PR lookup" "$release_text" "/commits/\${TARGET_INPUT}/pulls"
@@ -189,6 +258,7 @@ assert_contains "merge-group source-check wait budget" "$merge_group_text" 'dead
 assert_contains "merge-group waits for label gate" "$merge_group_text" 'required=("Release intent label gate"'
 assert_contains "merge-group verification fetch" "$merge_group_text" 'gh api "repos/${repository}/commits/${preparation_sha}"'
 assert_contains "merge-group verification argument" "$merge_group_text" "--github-verification-json"
+assert_contains "merge-group reservation source" "$merge_group_text" 'reservationSourceSha // .sourceSha'
 assert_contains "merge-group checks bind to merge head" "$merge_group_text" 'gh api "repos/${repository}/commits/${head_sha}/check-runs?filter=latest&per_page=100"'
 if [[ -z "$poll_line" || -z "$final_pr_line" || -z "$final_checks_line" || -z "$completion_line" || "$poll_line" -ge "$final_pr_line" || "$final_pr_line" -ge "$final_checks_line" || "$final_checks_line" -ge "$completion_line" ]]; then
   printf 'merge-group completion must wait for required checks before validation\n' >&2
@@ -201,6 +271,7 @@ assert_contains "completion GitHub verification fetch" "$completion_text" 'gh ap
 assert_contains "completion GitHub verification SHA gate" "$completion_text" 'jq -e --arg commit "${preparation_sha}"'
 assert_contains "completion GitHub verification status gate" "$completion_text" '.commit.verification.verified == true'
 assert_contains "completion GitHub verification compatibility probe" "$completion_text" 'release_completion.py --help'
+assert_contains "completion trusted module path" "$completion_text" 'sys.path.insert(0, ".github/scripts")'
 assert_contains "completion GitHub verification argument" "$completion_text" "--github-verification-json"
 assert_contains "completion product-only verification selector" "$completion_text" 'product_release='
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
@@ -210,10 +281,11 @@ assert_not_contains "completion checks bind to source SHA" "$completion_text" 'v
 assert_contains "completion immutable identity refs" "$completion_text" "git fetch --force --tags origin"
 assert_contains "completion covered PR association" "$completion_text" 'commits/${covered_merge_sha}/pulls'
 assert_contains "completion covered merge proof argument" "$completion_text" "--covered-merge-proof-json"
-assert_contains "completion prepared-head trusted-base fallback" "$completion_text" 'if [[ "${GITHUB_EVENT_NAME}" == workflow_dispatch ]]; then'
-assert_contains "completion prepared-head direct verification" "$completion_text" 'verify-prepared --commit "${HEAD_SHA}"'
-assert_contains "completion prepared-head identity binding" "$completion_text" 'preparation_sha="${HEAD_SHA}"'
+assert_not_contains "completion prepared-head direct verification" "$completion_text" 'verify-prepared --commit "${HEAD_SHA}"'
+assert_not_contains "completion prepared-head identity binding" "$completion_text" 'preparation_sha="${HEAD_SHA}"'
 assert_contains "completion source-head preparation lookup" "$completion_text" 'find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}"'
+assert_contains "completion reservation source trailer" "$completion_text" 'Release-Reservation-Source-SHA:'
+assert_contains "completion reservation source fallback" "$completion_text" '.reservationSourceSha // .sourceSha'
 assert_contains "completion reservation source tree" "$completion_text" 'sourceTreeSha'
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
 assert_contains "preparation reservation source tree" "$preparation_text" 'sourceTreeSha'
@@ -221,11 +293,15 @@ assert_contains "completion workflow dispatch input" "$completion_text" "pr_numb
 assert_contains "completion dispatch PR resolution" "$completion_text" 'pulls/${pr_number}'
 assert_contains "completion trusted dispatch ref" "$completion_text" 'refs/heads/${EXPECTED_HEAD_REF}'
 assert_contains "completion dispatch trusted checkout" "$completion_text" 'git rev-parse refs/remotes/origin/main'
+assert_contains "completion dispatch head SHA validation" "$completion_text" 'test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"'
 preparation_text="$(<"$root_dir/.github/workflows/release-preparation.yml")"
+assert_contains "preparation trusted main resolver" "$preparation_text" 'main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '\''.object.sha'\'')"'
+assert_contains "preparation immutable policy checkout" "$preparation_text" 'ref: ${{ steps.trusted-main.outputs.sha }}'
 assert_contains "prepared-head gates use prepared ref" "$preparation_text" '--ref "${HEAD_REF}"'
 assert_not_contains "prepared-head gates dispatch to main" "$preparation_text" "--ref main"
 assert_contains "existing preparation verification source" "$preparation_text" 'SOURCE_SHA: ${{ steps.prepare.outputs.source_sha }}'
-assert_contains "label dispatch trusted checkout" "$label_gate_text" "ref: main"
+assert_contains "preparation dispatch head SHA validation" "$preparation_text" 'test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"'
+assert_contains "label dispatch trusted main resolver" "$label_gate_text" 'main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '\''.object.sha'\'')"'
 assert_contains "label dispatch head verification" "$label_gate_text" '"${GITHUB_SHA}"'
 ruby -ryaml - "$root_dir/.github/workflows/release.yml" "$root_dir/.github/workflows/notify-release-failure.yml" <<'RUBY'
 release = YAML.load_file(ARGV.fetch(0))
@@ -234,7 +310,7 @@ resolve_permissions = release.fetch("jobs").fetch("resolve").fetch("permissions"
 abort "release resolver must be able to read PR metadata" unless resolve_permissions == {"contents" => "write", "pull-requests" => "read"}
 expected_permissions = {"contents" => "write"}
 abort "publish job permissions are broader than contents: write" unless release.fetch("jobs").fetch("publish").fetch("permissions") == expected_permissions
-publish_checkout = release.fetch("jobs").fetch("publish").fetch("steps").find { |step| step["uses"] == "actions/checkout@v4" }
+publish_checkout = release.fetch("jobs").fetch("publish").fetch("steps").find { |step| step["uses"] == "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" }
 abort "publish job must use the trusted policy checkout" unless publish_checkout&.fetch("with", {}).fetch("ref", nil) == '${{ needs.resolve.outputs.policy_sha }}'
 abort "publish checkout must not persist repository credentials" unless publish_checkout.fetch("with", {}).fetch("persist-credentials", nil) == false
 

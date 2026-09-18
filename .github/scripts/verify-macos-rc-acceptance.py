@@ -5,22 +5,132 @@ import argparse
 import hashlib
 import json
 import os
+import plistlib
 import re
 import stat as stat_module
+import struct
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 
+REQUIREMENT_NORMALIZER = Path(__file__).resolve().parents[2] / "scripts/macos/normalize-designated-requirement.py"
+FINDER_ACCEPTANCE_PUBLIC_KEY = Path(__file__).resolve().parents[2] / "assets/release/finder-acceptance-signing-public.pem"
+ALLOWED_SYSTEM_ALIASES = {"/tmp", "/var"}
+RC_TAG_RE = re.compile(r"^v(?P<core>\d+\.\d+\.\d+)-rc\.(?P<ordinal>[1-9]\d*)$")
+MACOS_VERSION_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\.(?P<patch>\d+))?$")
+
+
 def fail(message: str) -> "NoReturn":
     raise SystemExit(f"macOS RC acceptance evidence rejected: {message}")
+
+
+def reject_symlink_components(path: Path, name: str) -> None:
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        if current.is_symlink() and str(current) not in ALLOWED_SYSTEM_ALIASES:
+            fail(f"{name} contains a symlinked path component: {current}")
+
+
+def device_from_plist(raw: bytes, expected_mount: str) -> str:
+    try:
+        payload = plistlib.loads(raw)
+    except (plistlib.InvalidFileException, ValueError):
+        return ""
+    entities = list(payload.get("system-entities", []))
+    for image in payload.get("images", []):
+        entities.extend(image.get("system-entities", []))
+    for entity in entities:
+        if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+            return str(entity["dev-entry"])
+    return ""
+
+
+def device_from_hdiutil_info(mount_path: Path) -> str:
+    result = subprocess.run(["hdiutil", "info", "-plist"], capture_output=True, check=False)
+    if result.returncode != 0:
+        return ""
+    return device_from_plist(result.stdout, str(mount_path))
 
 
 def required_string(value, name: str) -> str:
     if not isinstance(value, str) or not value:
         fail(f"{name} must be a non-empty string")
     return value
+
+
+def canonical_json(value) -> bytes:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def json_digest(value) -> str:
+    return hashlib.sha256(canonical_json(value)).hexdigest()
+
+
+def file_digest(path: Path, name: str) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        fail(f"{name} cannot be read: {error}")
+
+
+def canonical_layout_digest(layout: dict, name: str) -> str:
+    if not isinstance(layout, dict):
+        fail(f"{name} must be an object")
+    claimed = required_string(layout.get("semantic_layout_digest"), f"{name}.semantic_layout_digest")
+    if not re.fullmatch(r"[0-9a-f]{64}", claimed):
+        fail(f"{name}.semantic_layout_digest must be a lowercase SHA-256 digest")
+    content = dict(layout)
+    content.pop("semantic_layout_digest", None)
+    actual = json_digest(content)
+    if claimed != actual:
+        fail(f"{name}.semantic_layout_digest does not match the canonical layout content")
+    return claimed
+
+
+def rc_tag_version(tag: str, stable_version: str, name: str) -> tuple[str, int]:
+    match = RC_TAG_RE.fullmatch(tag)
+    if match is None or match.group("core") != stable_version:
+        fail(f"{name} must be an RC tag for stable version {stable_version}")
+    return f"{stable_version}-rc.{match.group('ordinal')}", int(match.group("ordinal"))
+
+
+def verify_screenshot(screenshot_dir: Path, record: dict, name: str) -> None:
+    screenshot_name = required_string(record.get("screenshot"), f"{name}.screenshot")
+    if (
+        screenshot_name != Path(screenshot_name).name
+        or screenshot_name.startswith(".")
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", screenshot_name)
+        or not screenshot_name.startswith("finder-acceptance-")
+        or not screenshot_name.endswith(".png")
+    ):
+        fail(f"{name}.screenshot must be a safe release asset basename")
+    expected_digest = required_string(record.get("screenshot_sha256"), f"{name}.screenshot_sha256")
+    if not re.fullmatch(r"[0-9A-Fa-f]{64}", expected_digest):
+        fail(f"{name}.screenshot_sha256 must be a SHA-256 digest")
+    if screenshot_dir.is_symlink() or not screenshot_dir.is_dir():
+        fail("screenshot directory must be a real directory")
+    screenshot_path = screenshot_dir / screenshot_name
+    try:
+        screenshot_stat = screenshot_path.lstat()
+    except FileNotFoundError:
+        fail(f"{name}.screenshot asset is missing")
+    if not stat_module.S_ISREG(screenshot_stat.st_mode):
+        fail(f"{name}.screenshot asset must be a regular file")
+    screenshot_bytes = screenshot_path.read_bytes()
+    if screenshot_bytes[:8] != b"\x89PNG\r\n\x1a\n" or screenshot_bytes[12:16] != b"IHDR":
+        fail(f"{name}.screenshot asset is not a PNG image")
+    if len(screenshot_bytes) < 24 or struct.unpack(">I", screenshot_bytes[8:12])[0] != 13:
+        fail(f"{name}.screenshot asset has invalid PNG dimensions")
+    width, height = struct.unpack(">II", screenshot_bytes[16:24])
+    if width < 640 or height < 480:
+        fail(f"{name}.screenshot asset is too small to be a Finder acceptance viewport")
+    actual_digest = hashlib.sha256(screenshot_bytes).hexdigest()
+    if actual_digest.lower() != expected_digest.lower():
+        fail(f"{name}.screenshot_sha256 does not match the downloaded asset")
 
 
 def requirement_cdhashes(requirement: str, name: str) -> set[str]:
@@ -64,6 +174,258 @@ def equal_identity(first, second, name: str, fields: tuple[str, ...]) -> None:
         second_value = required_string(second.get(field), f"{name}.rc2.{field}")
         if first_value != second_value:
             fail(f"{name}.{field} changed between RC1 and RC2")
+
+
+def verify_checksums(checksums_path: Path, manifest: dict) -> str:
+    try:
+        checksum_lines = checksums_path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        fail(f"stable SHA256SUMS cannot be read: {error}")
+    observed = {}
+    for line in checksum_lines:
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or not re.fullmatch(r"[0-9A-Fa-f]{64}", fields[0]):
+            fail("stable SHA256SUMS contains a malformed entry")
+        name = fields[1].removeprefix("*")
+        if not name or name in observed:
+            fail(f"stable SHA256SUMS contains a duplicate or empty asset name: {name}")
+        observed[name] = fields[0].lower()
+    expected = {
+        required_string(asset.get("name"), "manifest asset.name"):
+        required_string(asset.get("sha256"), "manifest asset.sha256").lower()
+        for asset in manifest.get("assets", [])
+        if isinstance(asset, dict)
+    }
+    if observed != expected:
+        fail("stable SHA256SUMS does not match BUILD-MANIFEST.json assets")
+    return hashlib.sha256(checksums_path.read_bytes()).hexdigest()
+
+
+def verify_stable_dmg(dmg_path: Path, manifest: dict, stable_version: str) -> None:
+    expected_name = f"TelevyBackup-{stable_version}.dmg"
+    if dmg_path.name != expected_name or not dmg_path.is_file() or dmg_path.is_symlink():
+        fail("stable Universal DMG path is invalid")
+    expected_asset = next(
+        (asset for asset in manifest.get("assets", []) if isinstance(asset, dict) and asset.get("name") == expected_name),
+        None,
+    )
+    if not isinstance(expected_asset, dict):
+        fail("BUILD-MANIFEST.json is missing the stable Universal DMG")
+    stable_layout_digest = canonical_layout_digest(
+        manifest.get("dmg_layout"), "manifest dmg_layout"
+    )
+    if expected_asset.get("dmg_layout_digest") != stable_layout_digest:
+        fail("stable Universal DMG layout digest does not match the canonical manifest layout")
+    dmg_bytes = dmg_path.read_bytes()
+    if hashlib.sha256(dmg_bytes).hexdigest() != required_string(
+        expected_asset.get("sha256"), "manifest stable Universal DMG.sha256"
+    ).lower():
+        fail("stable Universal DMG bytes do not match BUILD-MANIFEST.json")
+    if expected_asset.get("bytes") != len(dmg_bytes):
+        fail("stable Universal DMG size does not match BUILD-MANIFEST.json")
+
+
+def verify_rc_checksums(checksum_lines: list[str], manifest: dict, name: str) -> None:
+    observed = {}
+    for line in checksum_lines:
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or not re.fullmatch(r"[0-9A-Fa-f]{64}", fields[0]):
+            fail(f"{name} SHA256SUMS contains a malformed entry")
+        asset_name = fields[1].removeprefix("*")
+        if not asset_name or asset_name in observed:
+            fail(f"{name} SHA256SUMS contains a duplicate or empty asset name: {asset_name}")
+        observed[asset_name] = fields[0].lower()
+    expected = {
+        required_string(asset.get("name"), f"{name} manifest asset.name"):
+        required_string(asset.get("sha256"), f"{name} manifest asset.sha256").lower()
+        for asset in manifest.get("assets", [])
+        if isinstance(asset, dict)
+    }
+    if observed != expected:
+        fail(f"{name} SHA256SUMS does not match its manifest assets")
+
+
+def verify_finder_acceptance(
+    evidence,
+    manifest,
+    stable_version: str,
+    screenshot_dir: Path,
+    capture_receipt_dir: Path,
+    capture_signature_dir: Path,
+    capture_public_key: Path,
+    expected_manifest_sha256: str,
+    expected_checksums_sha256: str,
+    expected_source_commit: str | None,
+) -> None:
+    records = evidence.get("finder_acceptance")
+    if not isinstance(records, list) or len(records) != 2:
+        fail("finder_acceptance must contain exactly macOS 15 and current-platform records")
+    versions = []
+    platforms = []
+    layout = manifest.get("dmg_layout")
+    if not isinstance(layout, dict):
+        fail("BUILD-MANIFEST.json dmg_layout is missing")
+    expected_layout_digest = required_string(
+        layout.get("semantic_layout_digest"), "manifest dmg_layout.semantic_layout_digest"
+    )
+    expected_dmg_name = f"TelevyBackup-{stable_version}.dmg"
+    expected_asset = next(
+        (asset for asset in manifest.get("assets", []) if asset.get("name") == expected_dmg_name),
+        None,
+    )
+    if not isinstance(expected_asset, dict):
+        fail("BUILD-MANIFEST.json is missing the Universal DMG asset")
+    expected_dmg_digest = required_string(expected_asset.get("sha256"), "manifest Universal DMG.sha256")
+    expected_locations = layout.get("icon_locations")
+    expected_window = layout.get("window")
+    expected_allowlist = sorted(layout.get("hidden_resource_allowlist", []))
+    if not isinstance(expected_locations, dict) or not isinstance(expected_window, dict):
+        fail("manifest dmg_layout geometry is incomplete")
+    required_checks = {
+        "instruction_readable",
+        "instruction_contrast",
+        "arrow_visible",
+        "arrow_direction_correct",
+        "labels_visible",
+        "no_occlusion",
+    }
+    for index, record in enumerate(records):
+        name = f"finder_acceptance[{index}]"
+        if not isinstance(record, dict):
+            fail(f"{name} must be an object")
+        version = required_string(record.get("macos_version"), f"{name}.macos_version")
+        version_match = MACOS_VERSION_RE.fullmatch(version)
+        if version_match is None:
+            fail(f"{name}.macos_version is not a macOS version")
+        major = int(version_match.group("major"))
+        versions.append(version)
+        platform = required_string(record.get("platform"), f"{name}.platform")
+        if platform not in {"macos-15", "current"}:
+            fail(f"{name}.platform is invalid")
+        if platform == "macos-15" and not version.startswith("15."):
+            fail(f"{name}.platform macos-15 has a non-macOS-15 version")
+        if platform == "current" and major < 16:
+            fail(f"{name}.platform current must be distinct from macOS 15")
+        platforms.append(platform)
+        expected_screenshot_name = f"finder-acceptance-{platform}.png"
+        if record.get("screenshot") != expected_screenshot_name:
+            fail(f"{name}.screenshot does not match its platform")
+        if record.get("capture_scope") != "finder-window-only":
+            fail(f"{name}.capture_scope must be finder-window-only")
+        if record.get("dmg_name") != expected_dmg_name:
+            fail(f"{name}.dmg_name does not match the stable Universal DMG")
+        if record.get("dmg_sha256") != expected_dmg_digest:
+            fail(f"{name}.dmg_sha256 does not match BUILD-MANIFEST.json")
+        if record.get("manifest_sha256") != expected_manifest_sha256:
+            fail(f"{name}.manifest_sha256 does not match the stable BUILD-MANIFEST.json")
+        if record.get("checksums_sha256") != expected_checksums_sha256:
+            fail(f"{name}.checksums_sha256 does not match the stable SHA256SUMS")
+        if record.get("semantic_layout_digest") != expected_layout_digest:
+            fail(f"{name}.semantic_layout_digest does not match BUILD-MANIFEST.json")
+        if record.get("manifest_verified") is not True or record.get("checksums_verified") is not True:
+            fail(f"{name} manifest/checksum verification is incomplete")
+        verify_screenshot(screenshot_dir, record, name)
+        receipt = record.get("capture_receipt")
+        if not isinstance(receipt, dict):
+            fail(f"{name}.capture_receipt is missing")
+        receipt_asset = required_string(record.get("capture_receipt_asset"), f"{name}.capture_receipt_asset")
+        if receipt_asset != Path(receipt_asset).name or not re.fullmatch(
+            r"finder-acceptance-(?:macos-15|current)\.json", receipt_asset
+        ):
+            fail(f"{name}.capture_receipt_asset is not a safe acceptance receipt basename")
+        signature_asset = required_string(record.get("capture_signature_asset"), f"{name}.capture_signature_asset")
+        if signature_asset != Path(signature_asset).name or signature_asset != receipt_asset.removesuffix(".json") + ".sig":
+            fail(f"{name}.capture_signature_asset does not match its receipt asset")
+        if capture_receipt_dir.is_symlink() or not capture_receipt_dir.is_dir():
+            fail("capture receipt directory must be a real directory")
+        if capture_signature_dir.is_symlink() or not capture_signature_dir.is_dir():
+            fail("capture signature directory must be a real directory")
+        receipt_path = capture_receipt_dir / receipt_asset
+        signature_path = capture_signature_dir / signature_asset
+        try:
+            receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            fail(f"{name} capture receipt cannot be read: {error}")
+        if not isinstance(receipt_payload, dict) or receipt_payload.get("capture_receipt") != receipt:
+            fail(f"{name} capture receipt asset does not match the protected evidence")
+        if not signature_path.is_file() or signature_path.is_symlink():
+            fail(f"{name} capture signature asset is missing")
+        signature_check = subprocess.run(
+            ["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(capture_public_key),
+             "-rawin", "-in", str(receipt_path), "-sigfile", str(signature_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if signature_check.returncode != 0:
+            fail(f"{name} capture receipt signature is invalid")
+        if receipt.get("schema_version") != 1:
+            fail(f"{name}.capture_receipt.schema_version is unsupported")
+        if receipt.get("producer") != "scripts/macos/finder-dmg-acceptance.sh":
+            fail(f"{name}.capture_receipt producer is not the controlled harness")
+        producer_digest = required_string(receipt.get("producer_sha256"), f"{name}.capture_receipt.producer_sha256")
+        if producer_digest != file_digest(
+            Path(__file__).resolve().parents[2] / "scripts/macos/finder-dmg-acceptance.sh",
+            "Finder acceptance harness",
+        ):
+            fail(f"{name}.capture_receipt producer digest is not the reviewed harness")
+        if expected_source_commit and receipt.get("producer_commit") != expected_source_commit:
+            fail(f"{name}.capture_receipt producer commit does not match the stable release source")
+        if receipt.get("capture_method") != "screencapture -x -l" or receipt.get("capture_scope") != "finder-window-only":
+            fail(f"{name}.capture_receipt capture method or scope is invalid")
+        if not isinstance(receipt.get("window_id"), int) or receipt["window_id"] <= 0:
+            fail(f"{name}.capture_receipt window_id is invalid")
+        if not isinstance(receipt.get("device"), str) or not re.fullmatch(r"/dev/[A-Za-z0-9._-]+", receipt["device"]):
+            fail(f"{name}.capture_receipt device is invalid")
+        for field in ("macos_version", "platform", "screenshot", "screenshot_sha256", "dmg_name", "dmg_sha256", "manifest_sha256", "checksums_sha256"):
+            if receipt.get(field) != record.get(field):
+                fail(f"{name}.capture_receipt.{field} does not match the protected evidence")
+        if receipt.get("finder_observation_sha256") != json_digest(record.get("finder_observation")):
+            fail(f"{name}.capture_receipt Finder observation digest does not match")
+        if receipt.get("show_all_files_sha256") != json_digest(record.get("show_all_files")):
+            fail(f"{name}.capture_receipt hidden-resource digest does not match")
+        if receipt.get("visual_review_sha256") != json_digest(record.get("visual_review")):
+            fail(f"{name}.capture_receipt visual-review digest does not match")
+        claimed_receipt_digest = required_string(receipt.get("receipt_sha256"), f"{name}.capture_receipt.receipt_sha256")
+        receipt_content = dict(receipt)
+        receipt_content.pop("receipt_sha256", None)
+        if claimed_receipt_digest != json_digest(receipt_content):
+            fail(f"{name}.capture_receipt receipt digest does not match its content")
+        observation = record.get("finder_observation")
+        if not isinstance(observation, dict):
+            fail(f"{name}.finder_observation is missing")
+        if observation.get("window_role") != "Finder":
+            fail(f"{name}.finder_observation is not a Finder window")
+        if observation.get("app_name") != "TelevyBackup.app" or observation.get("applications_name") != "Applications":
+            fail(f"{name}.finder_observation is missing the expected labels")
+        if observation.get("drag_direction") != "right":
+            fail(f"{name}.finder_observation has the wrong drag direction")
+        if observation.get("app_position") != expected_locations.get("TelevyBackup.app"):
+            fail(f"{name}.finder_observation app position differs from the schema")
+        if observation.get("applications_position") != expected_locations.get("Applications"):
+            fail(f"{name}.finder_observation Applications position differs from the schema")
+        hidden = record.get("show_all_files")
+        if not isinstance(hidden, dict) or sorted(hidden.get("allowlist", [])) != expected_allowlist:
+            fail(f"{name}.show_all_files allowlist is invalid")
+        resources = layout.get("resources")
+        composed_background = resources.get("composed_background") if isinstance(resources, dict) else None
+        expected_observed = sorted([".DS_Store", ".background" + Path(required_string(composed_background, "manifest dmg_layout.resources.composed_background")).suffix])
+        if sorted(hidden.get("observed", [])) != expected_observed:
+            fail(f"{name}.show_all_files observed resources are invalid")
+        if hidden.get("visible_window_region") != "outside-default-icon-region":
+            fail(f"{name}.show_all_files visible region is invalid")
+        visual = record.get("visual_review")
+        checklist = visual.get("checklist") if isinstance(visual, dict) else None
+        if not isinstance(visual, dict) or visual.get("status") != "approved" or visual.get("method") != "scoped-human-review":
+            fail(f"{name}.visual_review is not an approved scoped review")
+        if set(checklist or {}) != required_checks or any(value is not True for value in checklist.values()):
+            fail(f"{name}.visual_review checklist is incomplete")
+        if visual.get("arrow_direction") != "right":
+            fail(f"{name}.visual_review arrow direction is invalid")
+    if set(platforms) != {"macos-15", "current"} or len(set(versions)) != 2:
+        fail("finder_acceptance must cover one macOS 15 and one current-platform record")
+    if len({record.get("screenshot") for record in records}) != 2:
+        fail("finder_acceptance screenshots must be distinct release assets")
 
 
 def artifact_sha256(path: Path, canonical: bool = True) -> str:
@@ -110,6 +472,19 @@ def command_output(command: list[str], name: str) -> str:
     return result.stdout + result.stderr
 
 
+def designated_requirement(path: Path, name: str) -> str:
+    raw = command_output(["codesign", "-d", "-r-", str(path)], f"{name} designated requirement")
+    result = subprocess.run(
+        [sys.executable, str(REQUIREMENT_NORMALIZER)],
+        input=raw,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        fail(f"{name} designated requirement is incomplete")
+    return result.stdout.strip()
+
+
 def require_universal2(path: Path, name: str) -> None:
     architectures = command_output(["lipo", "-info", str(path)], f"{name} architecture check")
     if "arm64" not in architectures or "x86_64" not in architectures:
@@ -117,38 +492,62 @@ def require_universal2(path: Path, name: str) -> None:
 
 
 def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
+    reject_symlink_components(Path(dmg_path), f"{name} DMG")
     mount_path = Path(tempfile.mkdtemp(prefix="televybackup-rc-"))
-    mounted = False
+    attached_device = ""
+    cleanup_error = ""
     try:
-        command_output(
+        attach = subprocess.run(
             [
                 "hdiutil",
                 "attach",
+                "-plist",
                 "-nobrowse",
                 "-readonly",
                 "-mountpoint",
                 str(mount_path),
                 dmg_path,
             ],
-            f"{name} DMG mount",
+            capture_output=True,
+            check=False,
         )
-        mounted = True
+        attached_device = device_from_plist(attach.stdout, str(mount_path))
+        if not attached_device:
+            attached_device = device_from_hdiutil_info(mount_path)
+        if attach.returncode != 0:
+            detail = (attach.stdout + attach.stderr).decode(errors="replace").strip()
+            fail(f"{name} DMG mount failed: {detail or attach.returncode}")
+        if not attached_device:
+            fail(f"{name} DMG mount did not resolve an exact device")
+        command_output(["diskutil", "verifyVolume", attached_device], f"{name} DMG filesystem verification")
         top_level_apps = sorted(
             path.name
             for path in mount_path.iterdir()
-            if path.is_dir() and path.name.endswith(".app")
+            if path.name.endswith(".app")
         )
         if top_level_apps != ["TelevyBackup.app"]:
             fail(f"{name} DMG must contain exactly one top-level TelevyBackup.app")
-        main_binary = mount_path / "TelevyBackup.app/Contents/MacOS/TelevyBackup"
+        app_path = mount_path / "TelevyBackup.app"
+        reject_symlink_components(app_path, f"{name} main app")
+        if app_path.is_symlink() or not app_path.is_dir():
+            fail(f"{name} DMG main app must be a real directory")
+        main_binary = app_path / "Contents/MacOS/TelevyBackup"
+        reject_symlink_components(main_binary, f"{name} main executable")
         if not main_binary.is_file():
             fail(f"{name} DMG is missing the main TelevyBackup executable")
         require_universal2(main_binary, f"{name} main app")
-        helper = mount_path / "TelevyBackup.app" / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
-        if not helper.is_dir():
+        helper = app_path / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+        reject_symlink_components(helper, f"{name} Snapshot Access bundle")
+        if helper.is_symlink() or not helper.is_dir():
             fail(f"{name} DMG is missing the embedded Snapshot Access app")
+        app_real = app_path.resolve(strict=True)
+        helper_real = helper.resolve(strict=True)
+        expected_helper = app_real / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app"
+        if helper_real != expected_helper:
+            fail(f"{name} embedded Snapshot Access path escapes the main app bundle")
         binary = helper / "Contents/MacOS/televybackup-snapshot-access"
-        if not binary.is_file():
+        reject_symlink_components(binary, f"{name} Snapshot Access executable")
+        if binary.is_symlink() or not binary.is_file():
             fail(f"{name} DMG is missing the Snapshot Access executable")
         require_universal2(binary, f"{name} Snapshot Access")
         signature = command_output(["codesign", "-dvvv", str(helper)], f"{name} Snapshot Access signature")
@@ -158,13 +557,7 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
             (line.split("=", 1)[1].strip() for line in signature.splitlines() if line.startswith("CDHash=")),
             "",
         )
-        requirement = next(
-            (line.strip() for line in command_output(
-                ["codesign", "-d", "-r-", str(helper)],
-                f"{name} Snapshot Access designated requirement",
-            ).splitlines() if line.startswith("designated =>")),
-            "",
-        )
+        requirement = designated_requirement(helper, f"{name} Snapshot Access")
         if not cdhash or not requirement:
             fail(f"{name} Snapshot Access signature identity is incomplete")
         cdhash_set = requirement_cdhashes(requirement, f"{name} Snapshot Access")
@@ -189,19 +582,30 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
             "protocol_version": metadata.get("protocolVersion"),
         }
     finally:
-        if mounted:
-            subprocess.run(
-                ["hdiutil", "detach", str(mount_path)],
+        if not attached_device:
+            attached_device = device_from_hdiutil_info(mount_path)
+        if attached_device:
+            detach = subprocess.run(
+                ["hdiutil", "detach", attached_device],
                 capture_output=True,
                 text=True,
                 check=False,
             )
-        mount_path.rmdir()
+            if detach.returncode != 0:
+                cleanup_error = f"{name} DMG exact-device detach failed: {detach.stderr.strip() or detach.returncode}"
+        try:
+            mount_path.rmdir()
+        except OSError as error:
+            cleanup_error = cleanup_error or f"{name} DMG mount cleanup failed: {error}"
+        if cleanup_error:
+            fail(cleanup_error)
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--evidence", required=True)
 parser.add_argument("--manifest", required=True)
+parser.add_argument("--checksums", required=True)
+parser.add_argument("--stable-dmg", required=True)
 parser.add_argument("--stable-version", required=True)
 parser.add_argument("--rc1-tag", required=True)
 parser.add_argument("--rc2-tag", required=True)
@@ -214,6 +618,10 @@ parser.add_argument("--rc2-manifest")
 parser.add_argument("--rc2-checksums")
 parser.add_argument("--rc2-dmg")
 parser.add_argument("--rc2-source-commit")
+parser.add_argument("--screenshot-dir", required=True)
+parser.add_argument("--capture-receipt-dir", required=True)
+parser.add_argument("--capture-signature-dir", required=True)
+parser.add_argument("--capture-public-key", default=str(FINDER_ACCEPTANCE_PUBLIC_KEY))
 args = parser.parse_args()
 
 try:
@@ -233,10 +641,32 @@ if evidence.get("stable_version") != args.stable_version:
     fail("stable_version does not match the release")
 if evidence.get("rc1_tag") != args.rc1_tag or evidence.get("rc2_tag") != args.rc2_tag:
     fail("RC tags do not match the release sequence")
+rc1_version, rc1_ordinal = rc_tag_version(args.rc1_tag, args.stable_version, "rc1_tag")
+rc2_version, rc2_ordinal = rc_tag_version(args.rc2_tag, args.stable_version, "rc2_tag")
+if rc1_ordinal >= rc2_ordinal:
+    fail("rc1_tag must precede rc2_tag by ordinal")
 if manifest.get("release_version") != args.stable_version:
     fail("BUILD-MANIFEST.json has the wrong stable version")
 if args.stable_source_commit and manifest.get("source_commit") != args.stable_source_commit:
     fail("BUILD-MANIFEST.json source_commit does not match the stable release source")
+try:
+    stable_manifest_sha256 = hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest()
+except OSError as error:
+    fail(f"stable BUILD-MANIFEST.json cannot be read: {error}")
+stable_checksums_sha256 = verify_checksums(Path(args.checksums), manifest)
+verify_stable_dmg(Path(args.stable_dmg), manifest, args.stable_version)
+verify_finder_acceptance(
+    evidence,
+    manifest,
+    args.stable_version,
+    Path(args.screenshot_dir),
+    Path(args.capture_receipt_dir),
+    Path(args.capture_signature_dir),
+    Path(args.capture_public_key),
+    stable_manifest_sha256,
+    stable_checksums_sha256,
+    args.stable_source_commit,
+)
 
 for field in (
     "legacy_registration_migrated",
@@ -315,6 +745,10 @@ def verify_rc_artifact(
     assets = rc_manifest.get("assets")
     if not isinstance(assets, list):
         fail(f"{name} manifest assets must be a list")
+    layout = rc_manifest.get("dmg_layout")
+    if not isinstance(layout, dict):
+        fail(f"{name} manifest dmg_layout must be an object")
+    layout_digest = canonical_layout_digest(layout, f"{name} manifest dmg_layout")
     dmg_name = dmg_path.rsplit("/", 1)[-1]
     asset = next(
         (item for item in assets if isinstance(item, dict) and item.get("name") == dmg_name),
@@ -330,6 +764,9 @@ def verify_rc_artifact(
         fail(f"{name} Universal DMG does not match its manifest")
     if asset.get("bytes") != len(dmg_bytes):
         fail(f"{name} Universal DMG size does not match its manifest")
+    if asset.get("dmg_layout_digest") != layout_digest:
+        fail(f"{name} Universal DMG layout digest does not match its manifest")
+    verify_rc_checksums(checksum_lines, rc_manifest, name)
     checksum = next(
         (line.split()[0] for line in checksum_lines if line.rstrip().endswith("  " + dmg_name)),
         None,
@@ -368,6 +805,7 @@ def verify_rc_artifact(
             for field in identity_fields
         ),
         {actual["artifact_sha256"], actual["artifact_sha256_legacy"]},
+        layout_digest,
     )
 
 
@@ -378,16 +816,25 @@ rc_args = (
 if any(value is not None for value in rc_args) and not all(value is not None for value in rc_args):
     fail("RC artifact verification arguments must be supplied as a complete pair")
 if all(value is not None for value in rc_args):
-    rc1_identity, rc1_artifact_digests = verify_rc_artifact(
+    rc1_identity, rc1_artifact_digests, rc1_layout_digest = verify_rc_artifact(
         args.rc1_manifest, args.rc1_checksums, args.rc1_dmg,
-        f"{args.stable_version}-rc.1", args.rc1_source_commit, "RC1",
+        rc1_version, args.rc1_source_commit, "RC1",
     )
-    rc2_identity, _ = verify_rc_artifact(
+    rc2_identity, _, rc2_layout_digest = verify_rc_artifact(
         args.rc2_manifest, args.rc2_checksums, args.rc2_dmg,
-        f"{args.stable_version}-rc.2", args.rc2_source_commit, "RC2",
+        rc2_version, args.rc2_source_commit, "RC2",
     )
     if rc1_identity != rc2_identity:
         fail("Snapshot Access helper identity changed between the RC release artifacts")
+    if rc1_layout_digest != rc2_layout_digest:
+        fail("DMG semantic layout digest changed between the RC release artifacts")
+    final_layout = manifest.get("dmg_layout")
+    final_layout_digest = required_string(
+        final_layout.get("semantic_layout_digest") if isinstance(final_layout, dict) else None,
+        "manifest dmg_layout.semantic_layout_digest",
+    )
+    if final_layout_digest != rc1_layout_digest:
+        fail("stable DMG semantic layout digest does not match the accepted RC artifacts")
     final_manifest_identity = components["snapshot_access"]
     final_requirement = required_string(
         final_manifest_identity.get("designated_requirement"),

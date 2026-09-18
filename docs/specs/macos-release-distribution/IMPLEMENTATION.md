@@ -38,19 +38,26 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
   versions, plus verified published prerelease `BUILD-MANIFEST.json` anchoring for RC2/stable reuse,
   including the final Universal bundle
 - stable-gate download and verification of both RC Universal DMGs, checksums, tag-bound source
-  commits, and helper identities before manual evidence is accepted
+  commits, and helper identities before manual evidence is accepted; the two highest published
+  RC ordinals for the stable version are selected as the ordered RC1/RC2 pair
 - real macOS RC1-to-RC2 migration check: one manual FDA grant after the old registration migration, then no FDA regrant for the ordinary main-app update
 - stable publication approval through the `macos-release-acceptance` GitHub environment and the structured `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` value, validated against the final manifest
 - shared testbox full-feature Rust validation
 - pinned `dmgbuild==1.6.7` settings, checked-in deterministic overlay/background bitmap digests (with the Swift generator retained for asset maintenance), semantic layout digest, hidden-resource allowlist, and native/Universal DMG parity
 - final UDZO `hdiutil verify`, `diskutil verifyVolume`, plist attach, exact-device detach, and post-compression readback
+- mounted Finder geometry readback from `.DS_Store`, plus persisted JSONL verify/attach/filesystem-verify/detach events for package and release artifacts
 - Homebrew Cask rendering and stable-release manifest/checksum fixtures; `brew audit --cask --strict`; downloaded Release DMG checksum, bundle-id, minimum-macOS, and Universal 2 checks
 - built-in-token same-repository Cask PR and guarded squash merge using the published `SHA256SUMS` and `BUILD-MANIFEST.json`; no PAT, App, or repository secret
 - controlled Finder acceptance on macOS 15 and the current supported macOS with scoped first-open screenshots
+- protected acceptance records name one `macos-15` and one `current` platform; each distinct screenshot
+  is uploaded to the RC2 Release and downloaded, type-checked, and SHA-256 verified by the stable gate
 
-The controlled acceptance entrypoint is `scripts/macos/finder-dmg-acceptance.sh`. It is intentionally
-manual-only, requires `TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1`, and writes Finder-window-scoped
-evidence rather than running in release CI.
+The controlled acceptance entrypoint is `scripts/macos/finder-dmg-acceptance.sh`, and it must be run
+against the final stable Universal DMG (the captured screenshot is then uploaded to RC2). It is intentionally
+manual-only, requires `TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1` and a JSON
+`TELEVYBACKUP_FINDER_VISUAL_REVIEW` checklist with all six visual checks approved after inspecting
+the Finder-only screenshot, and writes evidence with complete manifest/checksum binding rather than
+running in release CI.
 
 ## Visual Evidence
 

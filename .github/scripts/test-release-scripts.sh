@@ -42,6 +42,7 @@ assert "append-only repository identity refs" in contract["source_of_truth"]
 assert contract["preparation"]["write_api"] == "createCommitOnBranch"
 assert contract["preparation"]["expected_head_oid"] is True
 assert contract["preparation"]["no_gpg_secrets"] is True
+assert "descendant_retry" in contract["preparation"]
 assert contract["execution_authority"]["release_policy"] == "trusted-main-checkout"
 assert contract["execution_authority"]["write_capable_product_checkout"] is False
 assert contract["recovery"]["historical_backfill"] is False
@@ -72,8 +73,8 @@ assert contract["recovery"]["dispatch_requires_existing_bound"] is False
 assert contract["recovery"]["dispatch_bound_repair"] == "append-only-after-same-sha-provenance"
 for gate in ("label_gate", "completion"):
     scheduling = contract["required_gate_scheduling"][gate]
-    assert scheduling["queue"] == "max"
     assert scheduling["cancel_in_progress"] is False
+    assert scheduling["pending_policy"] == "latest-per-group"
 
 workflow_text = "\n".join(
     (root / ".github/workflows" / name).read_text(encoding="utf-8")
@@ -93,11 +94,14 @@ assert "createCommitOnBranch" in workflow_text
 assert "expectedHeadOid" in workflow_text
 assert ".commit.verification.verified" in workflow_text
 assert "verify-release-sequence" in workflow_text
+assert '--expected-source-commit "${{ needs.resolve.outputs.merge_sha }}"' in (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 release_workflow = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 assert "options: [recover]" in release_workflow
 assert "helper_source_mode" in release_workflow
 assert "helper_source_tag" in release_workflow
-assert "hdiutil attach" in release_workflow
+assert "extract-snapshot-access-helper.sh" in release_workflow
+assert "verify-tag-provenance --tag \"${candidate}\"" in release_workflow
+assert "verify-tag-provenance --tag \"${rc_tag}\"" in release_workflow
 assert "verify-component-identity.sh" in release_workflow
 assert "stable release requires a previously published RC" in release_workflow
 assert "gh release list" in release_workflow
@@ -129,8 +133,9 @@ assert 'git cat-file -e "${POLICY_SHA}^{commit}"' in release_workflow
 assert 'git worktree add --detach "${policy_checkout}" "${POLICY_SHA}"' in release_workflow
 assert 'cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"' in release_workflow
 assert 'policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"' in release_workflow
+assert 'policy_verify_dmg_evidence="${policy_checkout}/.github/scripts/verify-dmg-evidence.py"' in release_workflow
 assert 'cd "${policy_checkout}"' in release_workflow
-assert '"${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final"' in release_workflow
+assert '"${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"' in release_workflow
 assert 'git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh"' not in release_workflow
 assert 'bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final' not in release_workflow
 build_and_assembly = release_workflow.split("  build-arm64:", 1)[1].split("  macos-acceptance:", 1)[0]
@@ -143,7 +148,19 @@ assert "consumed receipt exists without a matching product tag" in release_workf
 assert "macos-release-acceptance" in release_workflow
 assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow
 assert "verify-macos-rc-acceptance.py" in release_workflow
-assert "actions/download-artifact@v4" in release_workflow
+assert "stable release requires two published RCs" in release_workflow
+assert 'candidates[-2:]' in release_workflow
+assert "--screenshot-dir" in release_workflow
+assert "--capture-receipt-dir" in release_workflow
+assert "--capture-signature-dir" in release_workflow
+assert "signature_names=()" in release_workflow
+assert "gh release download \"${rc2_tag}\"" in release_workflow
+assert "receipt_names=()" in release_workflow
+assert 'gh release upload "$rc2_tag" "$acceptance_path"' in (root / "scripts/macos/finder-dmg-acceptance.sh").read_text(encoding="utf-8")
+assert "TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY" in (root / "scripts/macos/finder-dmg-acceptance.sh").read_text(encoding="utf-8")
+assert "import re" in release_workflow
+assert "mapfile" not in release_workflow
+assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in release_workflow
 assert 'rc1_json="$(gh release view "$rc1_tag"' in release_workflow
 assert 'rc2_json="$(gh release view "$rc2_tag"' in release_workflow
 assert "fda_regrant_requested" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
@@ -151,6 +168,10 @@ assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.
 assert "needs.macos-acceptance.result == 'success'" in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
 assert "Assemble and validate final assets" in release_workflow
+assert "reusing descendant-compatible reservation" in (root / ".github/workflows/release-preparation.yml").read_text(encoding="utf-8")
+assert "reservationSourceSha // .sourceSha" in (root / ".github/workflows/release-completion.yml").read_text(encoding="utf-8")
+assert "reservationSourceSha // .sourceSha" in release_workflow
+assert "reservationSourceSha // .sourceSha" in (root / ".github/scripts/merge-group-release-gate.sh").read_text(encoding="utf-8")
 PY
 
 python3 - "$root_dir" <<'PY'
@@ -278,6 +299,10 @@ with tempfile.TemporaryDirectory() as directory:
                 "release",
                 "--asset-dir",
                 str(asset_dir),
+                "--expected-source-commit",
+                "1" * 40,
+                "--expected-packaging-commit",
+                "2" * 40,
                 "--skip-bundle-checks",
             ],
             cwd=policy_checkout,
@@ -298,13 +323,37 @@ python3 - "$root_dir" <<'PY'
 import hashlib
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 
 root = Path(sys.argv[1])
 verifier = root / ".github/scripts/verify-macos-rc-acceptance.py"
+layout_source = json.loads((root / "assets/brand/macos/dmg/layout.json").read_text(encoding="utf-8"))
+layout_contract = {
+    "schema_version": layout_source["schema_version"],
+    "builder": layout_source["builder"],
+    "format": layout_source["format"],
+    "filesystem": layout_source["filesystem"],
+    "window": layout_source["window"],
+    "icon_size": layout_source["icon_size"],
+    "icon_locations": layout_source["icon_locations"],
+    "overlay": layout_source["overlay"],
+    "resources": {
+        "background": layout_source["background"],
+        "overlay": layout_source["overlay_asset"],
+        "composed_background": layout_source["composed_background"],
+        "digests": layout_source["asset_digests"],
+    },
+    "hidden_resource_allowlist": sorted(layout_source["hidden_resource_allowlist"]),
+    "symlinks": layout_source["symlinks"],
+}
+layout_contract["semantic_layout_digest"] = hashlib.sha256(
+    json.dumps(layout_contract, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
 identity = {
     "sha256": "",
     "artifact_sha256": "",
@@ -323,7 +372,8 @@ def manifest(version, source_commit, dmg_name, dmg_digest):
         "release_version": version,
         "source_commit": source_commit,
         "components": {"snapshot_access": identity.copy()},
-        "assets": [{"name": dmg_name, "sha256": dmg_digest, "bytes": 4}],
+        "assets": [{"name": dmg_name, "sha256": dmg_digest, "bytes": 4, "dmg_layout_digest": layout_contract["semantic_layout_digest"]}],
+        "dmg_layout": layout_contract,
     }
 
 evidence = {
@@ -346,10 +396,106 @@ evidence = {
         "rc1": identity.copy(),
         "rc2": identity.copy(),
     },
+    "finder_acceptance": [
+        {
+            "macos_version": "15.7",
+            "platform": "macos-15",
+            "capture_scope": "finder-window-only",
+            "dmg_name": "TelevyBackup-1.0.0.dmg",
+            "dmg_sha256": "",
+            "semantic_layout_digest": layout_contract["semantic_layout_digest"],
+            "manifest_verified": True,
+            "checksums_verified": True,
+            "screenshot": "finder-acceptance-macos-15.png",
+            "finder_observation": {
+                "window_role": "Finder",
+                "app_name": "TelevyBackup.app",
+                "applications_name": "Applications",
+                "window_id": 42,
+                "drag_direction": "right",
+                "app_position": [210, 270],
+                "applications_position": [550, 270],
+            },
+            "show_all_files": {
+                "allowlist": [".DS_Store", ".background"],
+                "observed": [".DS_Store", ".background.png"],
+                "visible_window_region": "outside-default-icon-region",
+            },
+            "visual_review": {
+                "status": "approved",
+                "method": "scoped-human-review",
+                "checklist": {key: True for key in (
+                    "instruction_readable", "instruction_contrast", "arrow_visible",
+                    "arrow_direction_correct", "labels_visible", "no_occlusion",
+                )},
+                "arrow_direction": "right",
+            },
+        },
+        {
+            "macos_version": "26.6.2",
+            "platform": "current",
+            "capture_scope": "finder-window-only",
+            "dmg_name": "TelevyBackup-1.0.0.dmg",
+            "dmg_sha256": "",
+            "semantic_layout_digest": layout_contract["semantic_layout_digest"],
+            "manifest_verified": True,
+            "checksums_verified": True,
+            "screenshot": "finder-acceptance-current.png",
+            "finder_observation": {
+                "window_role": "Finder",
+                "app_name": "TelevyBackup.app",
+                "applications_name": "Applications",
+                "window_id": 43,
+                "drag_direction": "right",
+                "app_position": [210, 270],
+                "applications_position": [550, 270],
+            },
+            "show_all_files": {
+                "allowlist": [".DS_Store", ".background"],
+                "observed": [".DS_Store", ".background.png"],
+                "visible_window_region": "outside-default-icon-region",
+            },
+            "visual_review": {
+                "status": "approved",
+                "method": "scoped-human-review",
+                "checklist": {key: True for key in (
+                    "instruction_readable", "instruction_contrast", "arrow_visible",
+                    "arrow_direction_correct", "labels_visible", "no_occlusion",
+                )},
+                "arrow_direction": "right",
+            },
+        },
+    ],
 }
 
 with tempfile.TemporaryDirectory() as directory:
     temp = Path(directory)
+    def png_fixture(width=760, height=520):
+        def chunk(kind, payload):
+            return (
+                struct.pack(">I", len(payload))
+                + kind
+                + payload
+                + struct.pack(">I", zlib.crc32(kind + payload) & 0xffffffff)
+            )
+        raw = b"".join(b"\x00" + b"\xff" * width for _ in range(height))
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b"")
+        )
+
+    screenshots = {
+        "finder-acceptance-macos-15.png": png_fixture(),
+        "finder-acceptance-current.png": png_fixture(),
+    }
+    for name, content in screenshots.items():
+        (temp / name).write_bytes(content)
+    for record in evidence["finder_acceptance"]:
+        record["screenshot_sha256"] = hashlib.sha256(
+            (temp / record["screenshot"]).read_bytes()
+        ).hexdigest()
     fake_bin = temp / "bin"
     fake_bin.mkdir()
     hdiutil_path = fake_bin / "hdiutil"
@@ -357,11 +503,13 @@ with tempfile.TemporaryDirectory() as directory:
         """#!/bin/sh
 set -eu
 if [ "$1" = attach ]; then
+  plist=false
   shift
   mount_point=""
   source=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      -plist) plist=true; shift ;;
       -mountpoint) mount_point="$2"; shift 2 ;;
       *) source="$1"; shift ;;
     esac
@@ -369,8 +517,16 @@ if [ "$1" = attach ]; then
   mkdir -p "$mount_point"
   cp -R "${source}.tree/TelevyBackup.app" "$mount_point/"
   chmod 600 "$mount_point/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/Info.plist"
+  printf '%s\n' "$mount_point" > "$(dirname "$0")/mount-point"
+  if [ "$plist" = true ]; then
+    cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>system-entities</key><array><dict><key>dev-entry</key><string>/dev/diskfixture</string><key>mount-point</key><string>$mount_point</string></dict></array></dict></plist>
+EOF
+  fi
 elif [ "$1" = detach ]; then
-  rm -rf "$2/TelevyBackup.app"
+  rm -rf "$(cat "$(dirname "$0")/mount-point")/TelevyBackup.app"
 else
   exit 2
 fi
@@ -378,6 +534,15 @@ fi
         encoding="utf-8",
     )
     hdiutil_path.chmod(0o755)
+    diskutil_path = fake_bin / "diskutil"
+    diskutil_path.write_text(
+        """#!/bin/sh
+set -eu
+[ "$1" = verifyVolume ] && [ "$2" = /dev/diskfixture ]
+""",
+        encoding="utf-8",
+    )
+    diskutil_path.chmod(0o755)
     lipo_path = fake_bin / "lipo"
     lipo_path.write_text(
         """#!/bin/sh
@@ -467,9 +632,76 @@ fi
                 **root_identity,
             },
         },
+        "dmg_layout": layout_contract,
     }
+    stable_dmg = temp / "TelevyBackup-1.0.0.dmg"
+    stable_dmg.write_bytes(b"dmg\n")
+    stable_digest = hashlib.sha256(stable_dmg.read_bytes()).hexdigest()
+    stable_manifest["assets"] = [{
+        "name": stable_dmg.name,
+        "sha256": stable_digest,
+        "bytes": 4,
+        "dmg_layout_digest": layout_contract["semantic_layout_digest"],
+    }]
+    for record in evidence["finder_acceptance"]:
+        record["dmg_sha256"] = stable_digest
     stable_path = temp / "stable.json"
     stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    stable_checksums_path = temp / "stable.sums"
+    stable_checksums_path.write_text(f"{stable_digest}  {stable_dmg.name}\n", encoding="utf-8")
+    stable_manifest_sha256 = hashlib.sha256(stable_path.read_bytes()).hexdigest()
+    stable_checksums_sha256 = hashlib.sha256(stable_checksums_path.read_bytes()).hexdigest()
+    signing_key = temp / "finder-acceptance-test-private.pem"
+    signing_public_key = temp / "finder-acceptance-test-public.pem"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(signing_key)], check=True)
+    subprocess.run(["openssl", "pkey", "-in", str(signing_key), "-pubout", "-out", str(signing_public_key)], check=True)
+    for record in evidence["finder_acceptance"]:
+        record["manifest_sha256"] = stable_manifest_sha256
+        record["checksums_sha256"] = stable_checksums_sha256
+        record["capture_receipt_asset"] = record["screenshot"].replace(".png", ".json")
+        record["capture_signature_asset"] = record["screenshot"].replace(".png", ".sig")
+        receipt = {
+            "schema_version": 1,
+            "producer": "scripts/macos/finder-dmg-acceptance.sh",
+            "producer_sha256": hashlib.sha256(
+                (root / "scripts/macos/finder-dmg-acceptance.sh").read_bytes()
+            ).hexdigest(),
+            "producer_commit": "stable-source",
+            "capture_method": "screencapture -x -l",
+            "capture_scope": "finder-window-only",
+            "window_id": record["finder_observation"]["window_id"],
+            "device": "/dev/diskfixture",
+            "macos_version": record["macos_version"],
+            "platform": record["platform"],
+            "screenshot": record["screenshot"],
+            "screenshot_sha256": record["screenshot_sha256"],
+            "dmg_name": record["dmg_name"],
+            "dmg_sha256": record["dmg_sha256"],
+            "manifest_sha256": record["manifest_sha256"],
+            "checksums_sha256": record["checksums_sha256"],
+            "finder_observation_sha256": hashlib.sha256(
+                json.dumps(record["finder_observation"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "show_all_files_sha256": hashlib.sha256(
+                json.dumps(record["show_all_files"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "visual_review_sha256": hashlib.sha256(
+                json.dumps(record["visual_review"], sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+        receipt["receipt_sha256"] = hashlib.sha256(
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        record["capture_receipt"] = receipt
+        (temp / record["capture_receipt_asset"]).write_text(
+            json.dumps(record, sort_keys=True), encoding="utf-8"
+        )
+        subprocess.run(
+            ["openssl", "pkeyutl", "-sign", "-inkey", str(signing_key), "-rawin",
+             "-in", str(temp / record["capture_receipt_asset"]),
+             "-out", str(temp / record["capture_signature_asset"])],
+            check=True,
+        )
     rc_args = []
     for number, source in ((1, "rc1-source"), (2, "rc2-source")):
         version = f"1.0.0-rc.{number}"
@@ -491,12 +723,76 @@ fi
     os.environ["PATH"] = f"{fake_bin}{os.pathsep}{old_path}"
     common = [
         sys.executable, str(verifier), "--evidence", json.dumps(evidence),
-        "--manifest", str(stable_path), "--stable-version", "1.0.0",
+        "--manifest", str(stable_path), "--checksums", str(stable_checksums_path),
+        "--stable-dmg", str(stable_dmg),
+        "--stable-version", "1.0.0",
         "--rc1-tag", "v1.0.0-rc.1", "--rc2-tag", "v1.0.0-rc.2",
         "--stable-source-commit", "stable-source", *rc_args,
+        "--screenshot-dir", str(temp),
+        "--capture-receipt-dir", str(temp),
+        "--capture-signature-dir", str(temp),
+        "--capture-public-key", str(signing_public_key),
     ]
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+    stable_layout_width = stable_manifest["dmg_layout"]["window"]["width"]
+    stable_manifest["dmg_layout"]["window"]["width"] = stable_layout_width + 1
+    stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    stable_manifest["dmg_layout"]["window"]["width"] = stable_layout_width
+    stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    stable_manifest["assets"][0]["dmg_layout_digest"] = "0" * 64
+    stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    stable_manifest["assets"][0]["dmg_layout_digest"] = layout_contract["semantic_layout_digest"]
+    stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    saved_receipt = evidence["finder_acceptance"][0].pop("capture_receipt")
+    common[3] = json.dumps(evidence)
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    evidence["finder_acceptance"][0]["capture_receipt"] = saved_receipt
+    common[3] = json.dumps(evidence)
+    evidence["finder_acceptance"][1]["macos_version"] = "Linux"
+    common[3] = json.dumps(evidence)
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    evidence["finder_acceptance"][1]["macos_version"] = "26.6.2"
+    common[3] = json.dumps(evidence)
+    rc1_manifest = json.loads((temp / "rc1.json").read_text(encoding="utf-8"))
+    original_width = rc1_manifest["dmg_layout"]["window"]["width"]
+    rc1_manifest["dmg_layout"]["window"]["width"] = original_width + 1
+    (temp / "rc1.json").write_text(json.dumps(rc1_manifest), encoding="utf-8")
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    rc1_manifest["dmg_layout"]["window"]["width"] = original_width
+    (temp / "rc1.json").write_text(json.dumps(rc1_manifest), encoding="utf-8")
+    rc1_manifest["assets"][0]["dmg_layout_digest"] = "0" * 64
+    (temp / "rc1.json").write_text(json.dumps(rc1_manifest), encoding="utf-8")
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    rc1_manifest["assets"][0]["dmg_layout_digest"] = layout_contract["semantic_layout_digest"]
+    (temp / "rc1.json").write_text(json.dumps(rc1_manifest), encoding="utf-8")
+    (temp / "rc1.sums").write_text(
+        f"{hashlib.sha256((temp / 'TelevyBackup-1.0.0-rc.1.dmg').read_bytes()).hexdigest()}  TelevyBackup-1.0.0-rc.1.dmg\nextra\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    (temp / "rc1.sums").write_text(
+        f"{hashlib.sha256((temp / 'TelevyBackup-1.0.0-rc.1.dmg').read_bytes()).hexdigest()}  TelevyBackup-1.0.0-rc.1.dmg\n",
+        encoding="utf-8",
+    )
+    stable_dmg.write_bytes(b"tampered stable dmg\n")
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    stable_dmg.write_bytes(b"dmg\n")
+    evidence["finder_acceptance"][0]["manifest_sha256"] = "0" * 64
+    common[3] = json.dumps(evidence)
+    result = subprocess.run(common, capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout + result.stderr
+    evidence["finder_acceptance"][0]["manifest_sha256"] = stable_manifest_sha256
     evidence["root_mount_helper"]["rc2"]["cdhash"] = "2222222222222222222222222222222222222222"
     common[3] = json.dumps(evidence)
     result = subprocess.run(common, capture_output=True, text=True)
@@ -511,6 +807,24 @@ fi
     stable_manifest["components"]["snapshot_access"]["artifact_sha256"] = legacy_artifact
     evidence["snapshot_access"]["artifact_sha256"] = legacy_artifact
     stable_path.write_text(json.dumps(stable_manifest), encoding="utf-8")
+    stable_manifest_sha256 = hashlib.sha256(stable_path.read_bytes()).hexdigest()
+    for record in evidence["finder_acceptance"]:
+        record["manifest_sha256"] = stable_manifest_sha256
+        record["capture_receipt"]["manifest_sha256"] = stable_manifest_sha256
+        receipt_content = dict(record["capture_receipt"])
+        receipt_content.pop("receipt_sha256", None)
+        record["capture_receipt"]["receipt_sha256"] = hashlib.sha256(
+            json.dumps(receipt_content, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        (temp / record["capture_receipt_asset"]).write_text(
+            json.dumps(record, sort_keys=True), encoding="utf-8"
+        )
+        subprocess.run(
+            ["openssl", "pkeyutl", "-sign", "-inkey", str(signing_key), "-rawin",
+             "-in", str(temp / record["capture_receipt_asset"]),
+             "-out", str(temp / record["capture_signature_asset"])],
+            check=True,
+        )
     common[3] = json.dumps(evidence)
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

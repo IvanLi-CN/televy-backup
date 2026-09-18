@@ -83,7 +83,7 @@ jobs:
           echo "sha=${main_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout main history
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ steps.trusted-main.outputs.sha }}
           fetch-depth: 0
@@ -159,7 +159,7 @@ jobs:
           test "${verified}" = true
           reservation_json="${RUNNER_TEMP}/reservation.json"
           jq -n \
-            --arg ref "${reservation_ref}" --arg sourceSha "${source_sha}" --arg version "${version}" \
+            --arg ref "${reservation_ref}" --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')" --arg version "${version}" \
             --arg channel "${channel}" --arg reservationId "${reservation_id}" --arg owner "${reservation_owner}" \
             --arg claimKey "${claim_key}" --arg boundaryToken "${boundary_token}" \
             '{ref:$ref,sourceSha:$sourceSha,version:$version,channel:$channel,reservationId:$reservationId,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claimKey,"Reservation-Boundary-Token":$boundaryToken}' \
@@ -167,6 +167,7 @@ jobs:
           python3 - "${reservation_json}" <<'PY'
           import json
           import pathlib
+          import re
           import sys
           sys.path.insert(0, '.github/scripts')
           import release_reservation
@@ -366,6 +367,11 @@ jobs:
                   echo "skipping helper candidate with incomplete assets: ${candidate}"
                   continue
                 fi
+                if ! git fetch --force origin "refs/tags/${candidate}:refs/tags/${candidate}" || \
+                  ! python3 .github/scripts/release_chain.py verify-tag-provenance --tag "${candidate}"; then
+                  echo "skipping helper candidate without protected annotated-tag provenance: ${candidate}"
+                  continue
+                fi
                 candidate_asset_dir="${source_download_dir}/${helper_version}"
                 mkdir -p "${candidate_asset_dir}"
                 if ! gh release download "${candidate}" --repo "$GITHUB_REPOSITORY" \
@@ -452,7 +458,7 @@ jobs:
       - name: Upload immutable helper source
         if: steps.release.outputs.identity_status == 'resolved' && steps.release.outputs.helper_source_mode == 'reuse'
         id: upload-helper-source
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: snapshot-helper-source
           path: ${{ runner.temp }}/snapshot-helper-source
@@ -500,7 +506,7 @@ jobs:
 
       - name: Upload locked release intent
         if: steps.release.outputs.identity_status == 'resolved'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-intent
           path: release-intent.json
@@ -511,18 +517,32 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.enabled == 'true'
     runs-on: macos-15
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.merge_sha }}
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
+      - name: Cache macOS arm64 build dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/pip
+            ~/Library/Caches/pip
+            target
+            crates/mtproto-helper/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
       - name: Download immutable Snapshot Access helper source
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: snapshot-helper-source
           path: ${{ runner.temp }}/snapshot-helper
@@ -535,15 +555,14 @@ jobs:
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
-          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount"
           python3 .github/scripts/release_helper.py verify-assets \
             --asset-dir "$RUNNER_TEMP/snapshot-helper" \
             --lock packaging/macos/snapshot-components.lock.json \
             --source-tag "$HELPER_SOURCE_TAG" \
             --expected-source-commit "$HELPER_SOURCE_COMMIT"
-          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
-          ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
-          hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
+          bash scripts/macos/extract-snapshot-access-helper.sh \
+            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
+            --output-dir "$RUNNER_TEMP/snapshot-helper"
           test -n "${POLICY_SHA}"
           git fetch --force origin main
           git cat-file -e "${POLICY_SHA}^{commit}"
@@ -556,11 +575,23 @@ jobs:
             --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
             --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
           echo "TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE=$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" >> "$GITHUB_ENV"
-      - run: bash scripts/macos/package-release.sh --mode release --arch arm64 --output-dir dist/arm64
+      - name: Build arm64 package (up to 2 attempts)
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if bash scripts/macos/package-release.sh --mode release --arch arm64 --output-dir dist/arm64; then
+              exit 0
+            fi
+            if [[ "$attempt" -eq 2 ]]; then
+              echo "arm64 package build failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            echo "arm64 package build failed; retrying (attempt 2/2)" >&2
+          done
       - name: Verify reused Snapshot Access identity
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
         run: bash "$TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY" --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/arm64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-package-arm64
           path: dist/arm64
@@ -570,18 +601,32 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.enabled == 'true'
     runs-on: macos-15-intel
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.merge_sha }}
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
+      - name: Cache macOS x86_64 build dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cache/pip
+            ~/Library/Caches/pip
+            target
+            crates/mtproto-helper/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
       - name: Download immutable Snapshot Access helper source
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: snapshot-helper-source
           path: ${{ runner.temp }}/snapshot-helper
@@ -594,15 +639,14 @@ jobs:
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
-          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount"
           python3 .github/scripts/release_helper.py verify-assets \
             --asset-dir "$RUNNER_TEMP/snapshot-helper" \
             --lock packaging/macos/snapshot-components.lock.json \
             --source-tag "$HELPER_SOURCE_TAG" \
             --expected-source-commit "$HELPER_SOURCE_COMMIT"
-          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
-          ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
-          hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
+          bash scripts/macos/extract-snapshot-access-helper.sh \
+            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
+            --output-dir "$RUNNER_TEMP/snapshot-helper"
           test -n "${POLICY_SHA}"
           git fetch --force origin main
           git cat-file -e "${POLICY_SHA}^{commit}"
@@ -615,11 +659,23 @@ jobs:
             --candidate "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
             --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
           echo "TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE=$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" >> "$GITHUB_ENV"
-      - run: bash scripts/macos/package-release.sh --mode release --arch x86_64 --output-dir dist/x86_64
+      - name: Build x86_64 package (up to 2 attempts)
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            if bash scripts/macos/package-release.sh --mode release --arch x86_64 --output-dir dist/x86_64; then
+              exit 0
+            fi
+            if [[ "$attempt" -eq 2 ]]; then
+              echo "x86_64 package build failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            echo "x86_64 package build failed; retrying (attempt 2/2)" >&2
+          done
       - name: Verify reused Snapshot Access identity
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
         run: bash "$TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY" --reference "$TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE" --candidate "dist/x86_64/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-package-x86_64
           path: dist/x86_64
@@ -629,22 +685,23 @@ jobs:
     needs: [resolve, build-arm64, build-x86_64]
     if: needs.resolve.outputs.enabled == 'true'
     runs-on: macos-15
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.merge_sha }}
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-package-arm64
           path: dist/arm64
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-package-x86_64
           path: dist/x86_64
       - name: Download immutable Snapshot Access helper source
         if: needs.resolve.outputs.helper_source_mode == 'reuse'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: snapshot-helper-source
           path: ${{ runner.temp }}/snapshot-helper
@@ -657,15 +714,14 @@ jobs:
         run: |
           set -euo pipefail
           helper_version="${HELPER_SOURCE_TAG#v}"
-          mkdir -p "$RUNNER_TEMP/snapshot-helper-mount"
           python3 .github/scripts/release_helper.py verify-assets \
             --asset-dir "$RUNNER_TEMP/snapshot-helper" \
             --lock packaging/macos/snapshot-components.lock.json \
             --source-tag "$HELPER_SOURCE_TAG" \
             --expected-source-commit "$HELPER_SOURCE_COMMIT"
-          hdiutil attach -nobrowse -readonly -mountpoint "$RUNNER_TEMP/snapshot-helper-mount" "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg"
-          ditto "$RUNNER_TEMP/snapshot-helper-mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app"
-          hdiutil detach "$RUNNER_TEMP/snapshot-helper-mount"
+          bash scripts/macos/extract-snapshot-access-helper.sh \
+            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
+            --output-dir "$RUNNER_TEMP/snapshot-helper"
           test -n "${POLICY_SHA}"
           git fetch --force origin main
           git cat-file -e "${POLICY_SHA}^{commit}"
@@ -698,7 +754,7 @@ jobs:
           cp dist/x86_64/TelevyBackup-*-x86_64.dmg dist/final/
           cp dist/arm64/televybackup-tools-*-arm64.tar.gz dist/final/
           cp dist/x86_64/televybackup-tools-*-x86_64.tar.gz dist/final/
-          bash scripts/macos/generate-release-manifest.sh --mode release --asset-dir dist/final --source-commit "${{ needs.resolve.outputs.merge_sha }}" --packaging-commit "$GITHUB_SHA" --output dist/final/BUILD-MANIFEST.json
+          bash scripts/macos/generate-release-manifest.sh --mode release --asset-dir dist/final --source-commit "${{ needs.resolve.outputs.merge_sha }}" --packaging-commit "${POLICY_SHA}" --output dist/final/BUILD-MANIFEST.json
           # Keep product inputs on the recovered merge checkout, but evaluate the
           # release asset policy from the exact trusted main commit resolved above.
           test -n "${POLICY_SHA}"
@@ -714,34 +770,54 @@ jobs:
           # materialized from the exact trusted policy commit.
           cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"
           policy_verify_release_assets="${policy_checkout}/scripts/macos/verify-release-assets.sh"
+          policy_verify_app_icon_assets="${policy_checkout}/scripts/macos/verify-app-icon-assets.sh"
+          policy_verify_dmg_evidence="${policy_checkout}/.github/scripts/verify-dmg-evidence.py"
           (
             cd "${policy_checkout}"
-            "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final"
+            DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl" \
+              "${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"
           )
+          python3 "${policy_verify_dmg_evidence}" \
+            --evidence "${RUNNER_TEMP}/dmg-release-events.jsonl" \
+            --asset-dir "$GITHUB_WORKSPACE/dist/final"
+          bash "${policy_verify_app_icon_assets}" \
+            "${policy_checkout}/assets/brand/macos/TelevyBackup.iconset" \
+            "$GITHUB_WORKSPACE/dist/final/TelevyBackup.app/Contents/Resources/TelevyBackup.icns" \
+            "$GITHUB_WORKSPACE/dist/final/TelevyBackup.app" \
+            "${policy_checkout}/assets/brand/macos/Assets.xcassets" \
+            "${policy_checkout}/assets/brand/macos/previews"
           if [[ "${HELPER_SOURCE_MODE}" == reuse ]]; then
             bash "${policy_checkout}/scripts/macos/verify-component-identity.sh" \
               --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
               --candidate "dist/final/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" \
               --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-assets
           path: dist/final
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: release-dmg-verification
+          path: ${{ runner.temp }}/dmg-release-events.jsonl
+          if-no-files-found: error
 
   macos-acceptance:
     name: Require macOS RC acceptance for stable
     needs: [resolve, assemble]
     if: needs.resolve.outputs.enabled == 'true' && needs.resolve.outputs.channel == 'prod'
     runs-on: macos-15
+    permissions:
+      contents: write
     environment:
       name: macos-release-acceptance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ needs.resolve.outputs.source_sha }}
-          fetch-depth: 1
-      - uses: actions/download-artifact@v4
+          ref: ${{ needs.resolve.outputs.policy_sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-assets
           path: release-assets
@@ -751,10 +827,38 @@ jobs:
         run: |
           set -euo pipefail
           core_version="${{ needs.resolve.outputs.version }}"
-          for rc_number in 1 2; do
-            rc_version="${core_version}-rc.${rc_number}"
-            rc_tag="v${rc_version}"
-            rc_dir="release-rc/rc${rc_number}"
+          rc_release_list="${RUNNER_TEMP}/rc-releases.json"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft,isPrerelease,publishedAt > "$rc_release_list"
+          rc_tags_json="$(python3 - "$core_version" "$rc_release_list" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          core, path = sys.argv[1:]
+          pattern = re.compile(rf"^v{re.escape(core)}-rc\.(?P<ordinal>[1-9][0-9]*)$")
+          releases = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+          candidates = []
+          for release in releases:
+              if release.get("isDraft") is not False or release.get("isPrerelease") is not True:
+                  continue
+              tag = release.get("tagName")
+              match = pattern.fullmatch(tag or "")
+              if match:
+                  candidates.append((int(match.group("ordinal")), tag))
+          candidates.sort()
+          if len(candidates) < 2:
+              raise SystemExit(f"stable release requires two published RCs for {core}; found {len(candidates)}")
+          print(json.dumps([tag for _, tag in candidates[-2:]]))
+          PY
+          )"
+          rc1_tag="$(printf '%s' "$rc_tags_json" | jq -r '.[0]')"
+          rc2_tag="$(printf '%s' "$rc_tags_json" | jq -r '.[1]')"
+          printf 'RC1_TAG=%s\nRC2_TAG=%s\n' "$rc1_tag" "$rc2_tag" >> "$GITHUB_ENV"
+          for index in 0 1; do
+            rc_tag="$(printf '%s' "$rc_tags_json" | jq -r ".[$index]")"
+            rc_version="${rc_tag#v}"
+            rc_dir="release-rc/rc$((index + 1))"
             mkdir -p "${rc_dir}"
             gh release download "${rc_tag}" \
               --repo "$GITHUB_REPOSITORY" \
@@ -763,8 +867,19 @@ jobs:
               --pattern "SHA256SUMS" \
               --dir "${rc_dir}"
             git fetch --force origin "refs/tags/${rc_tag}:refs/tags/${rc_tag}"
+            python3 .github/scripts/release_chain.py verify-tag-provenance --tag "${rc_tag}"
             source_commit="$(git rev-list -n 1 "${rc_tag}^{commit}")"
-            echo "RC${rc_number}_SOURCE_COMMIT=${source_commit}" >> "$GITHUB_ENV"
+            echo "RC$((index + 1))_VERSION=${rc_version}" >> "$GITHUB_ENV"
+            echo "RC$((index + 1))_SOURCE_COMMIT=${source_commit}" >> "$GITHUB_ENV"
+          done
+      - name: Verify downloaded RC DMG layouts
+        run: |
+          set -euo pipefail
+          for rc_number in 1 2; do
+            rc_version_var="RC${rc_number}_VERSION"
+            rc_version="${!rc_version_var}"
+            bash scripts/macos/verify-dmg-layout.sh \
+              --dmg "release-rc/rc${rc_number}/TelevyBackup-${rc_version}.dmg"
           done
       - name: Verify manual RC1 to RC2 acceptance evidence
         env:
@@ -773,8 +888,88 @@ jobs:
         run: |
           set -euo pipefail
           core_version="${{ needs.resolve.outputs.version }}"
-          rc1_tag="v${core_version}-rc.1"
-          rc2_tag="v${core_version}-rc.2"
+          rc1_tag="${RC1_TAG}"
+          rc2_tag="${RC2_TAG}"
+          screenshot_dir="${RUNNER_TEMP}/finder-acceptance-screenshots"
+          mkdir -p "${screenshot_dir}"
+          screenshot_names=()
+          receipt_names=()
+          signature_names=()
+          while IFS= read -r screenshot_name; do
+            [[ -n "${screenshot_name}" ]] && screenshot_names+=("${screenshot_name}")
+          done < <(python3 - "${ACCEPTANCE_EVIDENCE}" <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          records = json.loads(sys.argv[1]).get("finder_acceptance")
+          if not isinstance(records, list) or len(records) != 2:
+              raise SystemExit("finder_acceptance must contain exactly two records")
+          names = []
+          for record in records:
+              name = record.get("screenshot") if isinstance(record, dict) else None
+              if (not isinstance(name, str) or not name or name != pathlib.Path(name).name
+                      or name.startswith(".") or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name)):
+                  raise SystemExit("finder acceptance screenshot names must be safe basenames")
+              names.append(name)
+          if len(set(names)) != len(names):
+              raise SystemExit("finder acceptance screenshot names must be distinct")
+          print("\n".join(names))
+          PY
+          )
+          while IFS= read -r receipt_name; do
+            [[ -n "${receipt_name}" ]] && receipt_names+=("${receipt_name}")
+          done < <(python3 - "${ACCEPTANCE_EVIDENCE}" <<'PY'
+          import json, pathlib, re, sys
+          records = json.loads(sys.argv[1]).get("finder_acceptance")
+          names = []
+          for record in records or []:
+              name = record.get("capture_receipt_asset") if isinstance(record, dict) else None
+              if (not isinstance(name, str) or name != pathlib.Path(name).name
+                      or not re.fullmatch(r"finder-acceptance-(?:macos-15|current)\.json", name)):
+                  raise SystemExit("finder acceptance receipt names must be safe basenames")
+              names.append(name)
+          if len(names) != 2 or len(set(names)) != 2:
+              raise SystemExit("finder acceptance receipt names must be distinct")
+          print("\n".join(names))
+          PY
+          )
+          while IFS= read -r signature_name; do
+            [[ -n "${signature_name}" ]] && signature_names+=("${signature_name}")
+          done < <(python3 - "${ACCEPTANCE_EVIDENCE}" <<'PY'
+          import json, pathlib, re, sys
+          records = json.loads(sys.argv[1]).get("finder_acceptance")
+          names = []
+          for record in records or []:
+              name = record.get("capture_signature_asset") if isinstance(record, dict) else None
+              if (not isinstance(name, str) or name != pathlib.Path(name).name
+                      or not re.fullmatch(r"finder-acceptance-(?:macos-15|current)\.sig", name)):
+                  raise SystemExit("finder acceptance signature names must be safe basenames")
+              names.append(name)
+          if len(names) != 2 or len(set(names)) != 2:
+              raise SystemExit("finder acceptance signature names must be distinct")
+          print("\n".join(names))
+          PY
+          )
+          for screenshot_name in "${screenshot_names[@]}"; do
+            gh release download "${rc2_tag}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "${screenshot_name}" \
+              --dir "${screenshot_dir}"
+          done
+          for receipt_name in "${receipt_names[@]}"; do
+            gh release download "${rc2_tag}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "${receipt_name}" \
+              --dir "${screenshot_dir}"
+          done
+          for signature_name in "${signature_names[@]}"; do
+            gh release download "${rc2_tag}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "${signature_name}" \
+              --dir "${screenshot_dir}"
+          done
           rc1_json="$(gh release view "$rc1_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
           rc2_json="$(gh release view "$rc2_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
           python3 - "$rc1_json" "$rc2_json" <<'PY'
@@ -787,18 +982,23 @@ jobs:
           python3 .github/scripts/verify-macos-rc-acceptance.py \
             --evidence "$ACCEPTANCE_EVIDENCE" \
             --manifest release-assets/BUILD-MANIFEST.json \
+            --checksums release-assets/SHA256SUMS \
+            --stable-dmg "release-assets/TelevyBackup-${core_version}.dmg" \
             --stable-version "$core_version" \
             --rc1-tag "$rc1_tag" \
             --rc2-tag "$rc2_tag" \
             --stable-source-commit "${{ needs.resolve.outputs.merge_sha }}" \
             --rc1-manifest release-rc/rc1/BUILD-MANIFEST.json \
             --rc1-checksums release-rc/rc1/SHA256SUMS \
-            --rc1-dmg "release-rc/rc1/TelevyBackup-${core_version}-rc.1.dmg" \
+            --rc1-dmg "release-rc/rc1/TelevyBackup-${RC1_VERSION}.dmg" \
             --rc1-source-commit "$RC1_SOURCE_COMMIT" \
             --rc2-manifest release-rc/rc2/BUILD-MANIFEST.json \
             --rc2-checksums release-rc/rc2/SHA256SUMS \
-            --rc2-dmg "release-rc/rc2/TelevyBackup-${core_version}-rc.2.dmg" \
-            --rc2-source-commit "$RC2_SOURCE_COMMIT"
+            --rc2-dmg "release-rc/rc2/TelevyBackup-${RC2_VERSION}.dmg" \
+            --rc2-source-commit "$RC2_SOURCE_COMMIT" \
+            --screenshot-dir "$screenshot_dir" \
+            --capture-receipt-dir "$screenshot_dir" \
+            --capture-signature-dir "$screenshot_dir"
 
   publish:
     name: Publish GitHub Release
@@ -824,16 +1024,16 @@ jobs:
       BOUNDARY_TOKEN: ${{ needs.resolve.outputs.boundary_token }}
       BOUND_IDENTITY: ${{ needs.resolve.outputs.bound_identity }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.resolve.outputs.policy_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-assets
           path: release-assets
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-intent
           path: release-intent
@@ -907,24 +1107,125 @@ jobs:
             echo "Product release became published for ${PRODUCT_TAG}; no asset overwrite"
           else
             release_files=()
-            while IFS= read -r -d '' asset; do release_files+=("$asset"); done < <(find release-assets -maxdepth 1 -type f -print0 | sort -z)
+            release_asset_list="${RUNNER_TEMP}/release-asset-list.txt"
+            python3 - "release-assets" > "${release_asset_list}" <<'PY'
+          import json
+          import os
+          import re
+          import stat
+          import sys
+
+          asset_dir = sys.argv[1]
+          manifest_path = os.path.join(asset_dir, "BUILD-MANIFEST.json")
+          with open(manifest_path, encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          expected = {"BUILD-MANIFEST.json", "SHA256SUMS"}
+          for asset in manifest.get("assets", []):
+              name = asset.get("name") if isinstance(asset, dict) else None
+              if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+                  raise SystemExit("BUILD-MANIFEST.json contains an unsafe release asset name")
+              if name in expected:
+                  raise SystemExit(f"BUILD-MANIFEST.json contains a reserved release asset name: {name}")
+              expected.add(name)
+          actual = set(os.listdir(asset_dir))
+          if actual != expected:
+              extra = sorted(actual - expected)
+              missing = sorted(expected - actual)
+              raise SystemExit(
+                  f"release-assets set does not match BUILD-MANIFEST.json: extra={extra!r} missing={missing!r}"
+              )
+          for name in sorted(expected):
+              path = os.path.join(asset_dir, name)
+              if not stat.S_ISREG(os.lstat(path).st_mode):
+                  raise SystemExit(f"release asset must be a regular file: {name}")
+              print(name)
+          PY
+            while IFS= read -r asset_name; do release_files+=("release-assets/${asset_name}"); done < "${release_asset_list}"
             ((${#release_files[@]} > 0))
+            if [[ "${runtime_state}" == missing ]]; then
+              flags=(--draft --verify-tag --title "${PRODUCT_TAG}" --generate-notes)
+              if [[ "${PRODUCT_CHANNEL}" != prod ]]; then
+                flags+=(--prerelease --latest=false)
+              else
+                flags+=(--latest=true)
+              fi
+              gh release create "${PRODUCT_TAG}" "${flags[@]}"
+              runtime_state=draft
+            fi
             if [[ "${runtime_state}" == draft ]]; then
-              gh release upload "${PRODUCT_TAG}" "${release_files[@]}" --clobber
+              latest_release=""
+              if ! latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+                printf '%s\n' "${latest_release}" >&2
+                echo "release_state_conflict: unable to recheck draft Release state" >&2
+                exit 1
+              fi
+              if [[ "$(printf '%s' "${latest_release}" | jq -r '.draft | tostring')" != true ]]; then
+                echo "release_state_conflict: Release became published before asset upload" >&2
+                exit 1
+              fi
+              upload_missing_release_assets() {
+                local asset asset_name expected_digest existing_count existing_digest current_release
+                for asset in "${release_files[@]}"; do
+                  asset_name="$(basename "${asset}")"
+                  expected_digest="$(shasum -a 256 "${asset}" | awk '{print $1}')"
+                  current_release=""
+                  if ! current_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+                    printf '%s\n' "${current_release}" >&2
+                    echo "release_state_conflict: unable to read draft Release before ${asset_name}" >&2
+                    return 1
+                  fi
+                  if [[ "$(printf '%s' "${current_release}" | jq -r '.draft | tostring')" != true ]]; then
+                    echo "release_state_conflict: Release became published before inspecting ${asset_name}" >&2
+                    return 1
+                  fi
+                  existing_count="$(printf '%s' "${current_release}" | jq --arg name "${asset_name}" '[.assets[]? | select(.name == $name)] | length')"
+                  if [[ "${existing_count}" != 0 && "${existing_count}" != 1 ]]; then
+                    echo "release_state_conflict: duplicate Release assets named ${asset_name}" >&2
+                    return 1
+                  fi
+                  if [[ "${existing_count}" == 1 ]]; then
+                    existing_digest="$(printf '%s' "${current_release}" | jq -r --arg name "${asset_name}" '.assets[] | select(.name == $name) | .digest // empty')"
+                    if [[ "${existing_digest}" != "sha256:${expected_digest}" ]]; then
+                      echo "release_state_conflict: existing asset digest mismatch for ${asset_name}" >&2
+                      return 1
+                    fi
+                    echo "reusing matching draft Release asset ${asset_name}"
+                  else
+                    # GitHub's asset upload API has no conditional draft precondition;
+                    # the immediate state check, no-clobber upload, and final recheck
+                    # fail closed for races that cannot be made atomic remotely.
+                    gh release upload "${PRODUCT_TAG}" "${asset}"
+                  fi
+                done
+              }
+              upload_missing_release_assets
+              final_release=""
+              if ! final_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+                printf '%s\n' "${final_release}" >&2
+                echo "release_state_conflict: unable to verify draft Release after asset upload" >&2
+                exit 1
+              fi
+              if [[ "$(printf '%s' "${final_release}" | jq -r '.draft | tostring')" != true ]]; then
+                echo "release_state_conflict: Release became published during asset upload" >&2
+                exit 1
+              fi
+              expected_assets='[]'
+              for asset in "${release_files[@]}"; do
+                asset_name="$(basename "${asset}")"
+                expected_digest="$(shasum -a 256 "${asset}" | awk '{print $1}')"
+                expected_assets="$(printf '%s' "${expected_assets}" | jq -c --arg name "${asset_name}" --arg digest "sha256:${expected_digest}" '. + [{name: $name, digest: $digest}]')"
+              done
+              expected_assets="$(printf '%s' "${expected_assets}" | jq -c 'sort_by(.name)')"
+              actual_assets="$(printf '%s' "${final_release}" | jq -c '[.assets[]? | {name, digest}] | sort_by(.name)')"
+              if [[ "${actual_assets}" != "${expected_assets}" ]]; then
+                echo "release_state_conflict: final Release asset set or digest does not match release-assets" >&2
+                exit 1
+              fi
               if [[ "${PRODUCT_CHANNEL}" == prod ]]; then
                 gh release edit "${PRODUCT_TAG}" --draft=false --latest=true
               else
                 gh release edit "${PRODUCT_TAG}" --draft=false --prerelease --latest=false
               fi
-            else
-              test "${runtime_state}" = missing
-              flags=(--verify-tag --title "${PRODUCT_TAG}" --generate-notes)
-              if [[ "${PRODUCT_CHANNEL}" == prod ]]; then
-                flags+=(--latest=true)
-              else
-                flags+=(--prerelease --latest=false)
-              fi
-              gh release create "${PRODUCT_TAG}" "${release_files[@]}" "${flags[@]}"
             fi
           fi
       - name: Append consumed receipt

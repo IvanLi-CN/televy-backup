@@ -107,12 +107,27 @@ environment fields.
 
 Stable publication MUST wait for the `macos-release-acceptance` GitHub environment approval and a
 JSON `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` environment value identifying the exact manual
-RC1-to-RC2 acceptance result. The gate MUST download both RC Universal DMGs, bind each manifest's
-source commit to its tag, verify each DMG against its manifest and `SHA256SUMS`, and compare both
-RC helper identities with the final stable manifest. The evidence MUST name the stable version and both RC tags, cover
+RC1-to-RC2 acceptance result. The gate MUST select the two highest published RC ordinals for the
+same stable version, treating the lower selected ordinal as RC1 and the higher as RC2. It MUST
+download both RC Universal DMGs, bind each manifest's source commit to its tag, verify each DMG
+against its manifest and `SHA256SUMS`, and compare both RC helper identities with the final stable
+manifest. The evidence MUST name the stable version and both selected RC tags, cover
 legacy registration migration, exactly one FDA grant, strict backup success on RC1 and RC2 without
 a second grant, and an unchanged root mount helper. Its Snapshot Access and root helper identity
 fields MUST match the final `BUILD-MANIFEST.json`; arbitrary or stale non-JSON values MUST fail.
+Each `finder_acceptance` record MUST identify exactly one `platform` from `macos-15` and `current`,
+use the matching basenames `finder-acceptance-<platform>.png`,
+`finder-acceptance-<platform>.json`, and `finder-acceptance-<platform>.sig`, and include a capture
+receipt. The receipt MUST bind the
+controlled harness path and digest, its source commit, `screencapture -x -l`, Finder window ID,
+attached device, screenshot/DMG/manifest/checksum digests, and digests of the Finder observation,
+hidden-resource observation, and visual review. Both files MUST be uploaded as assets on the RC2
+GitHub Release together with the detached Ed25519 signature. The controlled host MUST keep the
+private signing key outside the repository and provide it through
+`TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY`. The stable gate downloads those exact assets into a
+real temporary directory, verifies the receipt asset matches the protected evidence, verifies its
+detached signature against the checked-in public key, recomputes all receipt digests, and then
+verifies regular-file type, PNG signature, dimensions, and screenshot digest before accepting the evidence.
 RC publication remains available so the real-device test can be performed before the stable gate.
 
 The protected evidence object MUST contain `schema_version: 1`, `product`, `stable_version`,
