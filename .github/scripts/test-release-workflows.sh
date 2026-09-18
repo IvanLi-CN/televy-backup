@@ -62,8 +62,8 @@ assert_contains "workflow dispatch trusted main token" "$label_gate_text" 'GH_TO
 assert_contains "label gate merge-group validation" "$label_gate_text" "merge-group-release-gate.sh labels"
 assert_contains "label gate merge-group fetch credentials" "$label_gate_text" "persist-credentials: true"
 assert_not_contains "label gate merge-group echo bridge" "$label_gate_text" "reuses the Release intent label gate"
-assert_contains "label gate non-preemptive queue" "$label_gate_text" "queue: max"
-assert_not_contains "label gate preemptive cancellation" "$label_gate_text" "cancel-in-progress: true"
+assert_contains "label gate non-preemptive concurrency" "$label_gate_text" "cancel-in-progress: false"
+assert_not_contains "label gate unsupported queue key" "$label_gate_text" "queue: max"
 notify_text="$(<"$root_dir/.github/workflows/notify-release-failure.yml")"
 assert_contains "notifier Release Product trigger" "$notify_text" "- Release Product"
 if [[ "$notify_text" == *"Release exact-tag backfill"* ]]; then
@@ -114,7 +114,8 @@ if [[ -z "$preparation_refresh_line" || -z "$preparation_sha_line" || "$preparat
   exit 1
 fi
 assert_contains "completion missing preparation fail-closed message" "$completion_text" "product release is missing a valid VERSION preparation commit"
-assert_contains "completion non-preemptive queue" "$completion_text" "queue: max"
+assert_contains "completion non-preemptive concurrency" "$completion_text" "cancel-in-progress: false"
+assert_not_contains "completion unsupported queue key" "$completion_text" "queue: max"
 assert_contains "completion job timeout covers native CI" "$completion_text" "timeout-minutes: 35"
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
 assert_not_contains "completion preemptive cancellation" "$completion_text" "cancel-in-progress: true"

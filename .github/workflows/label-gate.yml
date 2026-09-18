@@ -14,7 +14,7 @@ on:
 
 concurrency:
   group: label-gate-${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || inputs.pr_number || github.ref }}
-  queue: max
+  cancel-in-progress: false
 
 permissions:
   contents: read
