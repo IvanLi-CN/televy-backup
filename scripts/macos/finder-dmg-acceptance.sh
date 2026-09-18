@@ -29,12 +29,36 @@ fi
   echo "set TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1 in the controlled GUI session" >&2
   exit 2
 }
+root_dir="$(git rev-parse --show-toplevel)"
 signing_key="${TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY:-}"
-[[ -s "$signing_key" && ! -L "$signing_key" ]] || {
+signing_key="$(python3 - "$signing_key" "$root_dir" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+candidate = pathlib.Path(os.path.expanduser(sys.argv[1]))
+if not candidate.is_absolute():
+    candidate = pathlib.Path.cwd() / candidate
+try:
+    resolved = candidate.resolve(strict=True)
+    root = pathlib.Path(sys.argv[2]).resolve(strict=True)
+except OSError as error:
+    raise SystemExit(f"Finder acceptance signing key cannot be resolved: {error}")
+if root == resolved or root in resolved.parents:
+    raise SystemExit("Finder acceptance signing key must be outside the repository")
+if not stat.S_ISREG(resolved.stat().st_mode):
+    raise SystemExit("Finder acceptance signing key must be a regular file")
+print(resolved)
+PY
+)" || {
+  echo "Finder acceptance signing key must be a readable regular file outside the repository" >&2
+  exit 2
+}
+[[ -s "$signing_key" ]] || {
   echo "set TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY to the controlled Ed25519 private key" >&2
   exit 2
 }
-root_dir="$(git rev-parse --show-toplevel)"
 path_safety_checker="$root_dir/scripts/macos/reject-symlink-components.py"
 reject_symlink_components() {
   python3 "$path_safety_checker" "$1"
