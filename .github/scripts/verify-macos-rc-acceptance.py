@@ -16,6 +16,7 @@ from pathlib import Path
 
 
 REQUIREMENT_NORMALIZER = Path(__file__).resolve().parents[2] / "scripts/macos/normalize-designated-requirement.py"
+FINDER_ACCEPTANCE_PUBLIC_KEY = Path(__file__).resolve().parents[2] / "assets/release/finder-acceptance-signing-public.pem"
 ALLOWED_SYSTEM_ALIASES = {"/tmp", "/var"}
 RC_TAG_RE = re.compile(r"^v(?P<core>\d+\.\d+\.\d+)-rc\.(?P<ordinal>[1-9]\d*)$")
 MACOS_VERSION_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\.(?P<patch>\d+))?$")
@@ -245,6 +246,8 @@ def verify_finder_acceptance(
     stable_version: str,
     screenshot_dir: Path,
     capture_receipt_dir: Path,
+    capture_signature_dir: Path,
+    capture_public_key: Path,
     expected_manifest_sha256: str,
     expected_checksums_sha256: str,
     expected_source_commit: str | None,
@@ -325,15 +328,32 @@ def verify_finder_acceptance(
             r"finder-acceptance-(?:macos-15|current)\.json", receipt_asset
         ):
             fail(f"{name}.capture_receipt_asset is not a safe acceptance receipt basename")
+        signature_asset = required_string(record.get("capture_signature_asset"), f"{name}.capture_signature_asset")
+        if signature_asset != Path(signature_asset).name or signature_asset != receipt_asset.removesuffix(".json") + ".sig":
+            fail(f"{name}.capture_signature_asset does not match its receipt asset")
         if capture_receipt_dir.is_symlink() or not capture_receipt_dir.is_dir():
             fail("capture receipt directory must be a real directory")
+        if capture_signature_dir.is_symlink() or not capture_signature_dir.is_dir():
+            fail("capture signature directory must be a real directory")
         receipt_path = capture_receipt_dir / receipt_asset
+        signature_path = capture_signature_dir / signature_asset
         try:
             receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             fail(f"{name} capture receipt cannot be read: {error}")
         if not isinstance(receipt_payload, dict) or receipt_payload.get("capture_receipt") != receipt:
             fail(f"{name} capture receipt asset does not match the protected evidence")
+        if not signature_path.is_file() or signature_path.is_symlink():
+            fail(f"{name} capture signature asset is missing")
+        signature_check = subprocess.run(
+            ["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(capture_public_key),
+             "-rawin", "-in", str(receipt_path), "-sigfile", str(signature_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if signature_check.returncode != 0:
+            fail(f"{name} capture receipt signature is invalid")
         if receipt.get("schema_version") != 1:
             fail(f"{name}.capture_receipt.schema_version is unsupported")
         if receipt.get("producer") != "scripts/macos/finder-dmg-acceptance.sh":
@@ -595,6 +615,8 @@ parser.add_argument("--rc2-dmg")
 parser.add_argument("--rc2-source-commit")
 parser.add_argument("--screenshot-dir", required=True)
 parser.add_argument("--capture-receipt-dir", required=True)
+parser.add_argument("--capture-signature-dir", required=True)
+parser.add_argument("--capture-public-key", default=str(FINDER_ACCEPTANCE_PUBLIC_KEY))
 args = parser.parse_args()
 
 try:
@@ -634,6 +656,8 @@ verify_finder_acceptance(
     args.stable_version,
     Path(args.screenshot_dir),
     Path(args.capture_receipt_dir),
+    Path(args.capture_signature_dir),
+    Path(args.capture_public_key),
     stable_manifest_sha256,
     stable_checksums_sha256,
     args.stable_source_commit,

@@ -29,6 +29,11 @@ fi
   echo "set TELEVYBACKUP_RUN_FINDER_ACCEPTANCE=1 in the controlled GUI session" >&2
   exit 2
 }
+signing_key="${TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY:-}"
+[[ -s "$signing_key" && ! -L "$signing_key" ]] || {
+  echo "set TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY to the controlled Ed25519 private key" >&2
+  exit 2
+}
 root_dir="$(git rev-parse --show-toplevel)"
 path_safety_checker="$root_dir/scripts/macos/reject-symlink-components.py"
 reject_symlink_components() {
@@ -363,6 +368,7 @@ else
   screenshot_basename="finder-acceptance-current.png"
 fi
 acceptance_basename="${screenshot_basename%.png}.json"
+signature_basename="${acceptance_basename%.json}.sig"
 finder_screenshot="$evidence_dir/$screenshot_basename"
 prepare_evidence_path "$finder_screenshot"
 screencapture -x -l "$window_id" "$finder_screenshot"
@@ -559,9 +565,17 @@ print(json.dumps({
     "screenshot": pathlib.Path(sys.argv[8]).name,
     "screenshot_sha256": sys.argv[9],
     "capture_receipt_asset": acceptance_basename,
+    "capture_signature_asset": signature_basename,
     "capture_receipt": capture_receipt,
 }, sort_keys=True))
 PY
+signature_path="$evidence_dir/$signature_basename"
+prepare_evidence_path "$signature_path"
+openssl pkeyutl -sign -inkey "$signing_key" -rawin -in "$acceptance_path" -out "$signature_path"
+[[ -s "$signature_path" ]] || {
+  echo "Finder acceptance receipt signature was not created" >&2
+  exit 1
+}
 if [[ -n "$rc2_tag" ]]; then
   rc2_release=""
   if ! rc2_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${rc2_tag}" 2>&1)"; then
@@ -600,6 +614,22 @@ if [[ -n "$rc2_tag" ]]; then
     echo "reusing matching RC2 Finder receipt asset: $acceptance_basename"
   else
     gh release upload "$rc2_tag" "$acceptance_path" \
+      --repo "$GITHUB_REPOSITORY"
+  fi
+  signature_count="$(printf '%s' "$rc2_release" | jq --arg name "$signature_basename" '[.assets[]? | select(.name == $name)] | length')"
+  if [[ "$signature_count" != 0 && "$signature_count" != 1 ]]; then
+    echo "Finder acceptance found duplicate RC2 signature assets: $signature_basename" >&2
+    exit 1
+  elif [[ "$signature_count" == 1 ]]; then
+    existing_signature_digest="$(printf '%s' "$rc2_release" | jq -r --arg name "$signature_basename" '.assets[] | select(.name == $name) | .digest // empty')"
+    signature_digest="$(shasum -a 256 "$signature_path" | awk '{print $1}')"
+    [[ "$existing_signature_digest" == "sha256:$signature_digest" ]] || {
+      echo "Finder acceptance found a conflicting RC2 signature asset: $signature_basename" >&2
+      exit 1
+    }
+    echo "reusing matching RC2 Finder signature asset: $signature_basename"
+  else
+    gh release upload "$rc2_tag" "$signature_path" \
       --repo "$GITHUB_REPOSITORY"
   fi
 fi

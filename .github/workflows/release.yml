@@ -894,6 +894,7 @@ jobs:
           mkdir -p "${screenshot_dir}"
           screenshot_names=()
           receipt_names=()
+          signature_names=()
           while IFS= read -r screenshot_name; do
             [[ -n "${screenshot_name}" ]] && screenshot_names+=("${screenshot_name}")
           done < <(python3 - "${ACCEPTANCE_EVIDENCE}" <<'PY'
@@ -934,6 +935,23 @@ jobs:
           print("\n".join(names))
           PY
           )
+          while IFS= read -r signature_name; do
+            [[ -n "${signature_name}" ]] && signature_names+=("${signature_name}")
+          done < <(python3 - "${ACCEPTANCE_EVIDENCE}" <<'PY'
+          import json, pathlib, re, sys
+          records = json.loads(sys.argv[1]).get("finder_acceptance")
+          names = []
+          for record in records or []:
+              name = record.get("capture_signature_asset") if isinstance(record, dict) else None
+              if (not isinstance(name, str) or name != pathlib.Path(name).name
+                      or not re.fullmatch(r"finder-acceptance-(?:macos-15|current)\.sig", name)):
+                  raise SystemExit("finder acceptance signature names must be safe basenames")
+              names.append(name)
+          if len(names) != 2 or len(set(names)) != 2:
+              raise SystemExit("finder acceptance signature names must be distinct")
+          print("\n".join(names))
+          PY
+          )
           for screenshot_name in "${screenshot_names[@]}"; do
             gh release download "${rc2_tag}" \
               --repo "$GITHUB_REPOSITORY" \
@@ -944,6 +962,12 @@ jobs:
             gh release download "${rc2_tag}" \
               --repo "$GITHUB_REPOSITORY" \
               --pattern "${receipt_name}" \
+              --dir "${screenshot_dir}"
+          done
+          for signature_name in "${signature_names[@]}"; do
+            gh release download "${rc2_tag}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --pattern "${signature_name}" \
               --dir "${screenshot_dir}"
           done
           rc1_json="$(gh release view "$rc1_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"
@@ -973,7 +997,8 @@ jobs:
             --rc2-dmg "release-rc/rc2/TelevyBackup-${RC2_VERSION}.dmg" \
             --rc2-source-commit "$RC2_SOURCE_COMMIT" \
             --screenshot-dir "$screenshot_dir" \
-            --capture-receipt-dir "$screenshot_dir"
+            --capture-receipt-dir "$screenshot_dir" \
+            --capture-signature-dir "$screenshot_dir"
 
   publish:
     name: Publish GitHub Release

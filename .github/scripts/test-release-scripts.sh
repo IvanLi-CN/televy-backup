@@ -152,9 +152,12 @@ assert "stable release requires two published RCs" in release_workflow
 assert 'candidates[-2:]' in release_workflow
 assert "--screenshot-dir" in release_workflow
 assert "--capture-receipt-dir" in release_workflow
+assert "--capture-signature-dir" in release_workflow
+assert "signature_names=()" in release_workflow
 assert "gh release download \"${rc2_tag}\"" in release_workflow
 assert "receipt_names=()" in release_workflow
 assert 'gh release upload "$rc2_tag" "$acceptance_path"' in (root / "scripts/macos/finder-dmg-acceptance.sh").read_text(encoding="utf-8")
+assert "TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY" in (root / "scripts/macos/finder-dmg-acceptance.sh").read_text(encoding="utf-8")
 assert "import re" in release_workflow
 assert "mapfile" not in release_workflow
 assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in release_workflow
@@ -643,10 +646,15 @@ fi
     stable_checksums_path.write_text(f"{stable_digest}  {stable_dmg.name}\n", encoding="utf-8")
     stable_manifest_sha256 = hashlib.sha256(stable_path.read_bytes()).hexdigest()
     stable_checksums_sha256 = hashlib.sha256(stable_checksums_path.read_bytes()).hexdigest()
+    signing_key = temp / "finder-acceptance-test-private.pem"
+    signing_public_key = temp / "finder-acceptance-test-public.pem"
+    subprocess.run(["openssl", "genpkey", "-algorithm", "ED25519", "-out", str(signing_key)], check=True)
+    subprocess.run(["openssl", "pkey", "-in", str(signing_key), "-pubout", "-out", str(signing_public_key)], check=True)
     for record in evidence["finder_acceptance"]:
         record["manifest_sha256"] = stable_manifest_sha256
         record["checksums_sha256"] = stable_checksums_sha256
         record["capture_receipt_asset"] = record["screenshot"].replace(".png", ".json")
+        record["capture_signature_asset"] = record["screenshot"].replace(".png", ".sig")
         receipt = {
             "schema_version": 1,
             "producer": "scripts/macos/finder-dmg-acceptance.sh",
@@ -683,6 +691,12 @@ fi
         (temp / record["capture_receipt_asset"]).write_text(
             json.dumps(record, sort_keys=True), encoding="utf-8"
         )
+        subprocess.run(
+            ["openssl", "pkeyutl", "-sign", "-inkey", str(signing_key), "-rawin",
+             "-in", str(temp / record["capture_receipt_asset"]),
+             "-out", str(temp / record["capture_signature_asset"])],
+            check=True,
+        )
     rc_args = []
     for number, source in ((1, "rc1-source"), (2, "rc2-source")):
         version = f"1.0.0-rc.{number}"
@@ -711,6 +725,8 @@ fi
         "--stable-source-commit", "stable-source", *rc_args,
         "--screenshot-dir", str(temp),
         "--capture-receipt-dir", str(temp),
+        "--capture-signature-dir", str(temp),
+        "--capture-public-key", str(signing_public_key),
     ]
     result = subprocess.run(common, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -784,6 +800,12 @@ fi
         ).hexdigest()
         (temp / record["capture_receipt_asset"]).write_text(
             json.dumps(record, sort_keys=True), encoding="utf-8"
+        )
+        subprocess.run(
+            ["openssl", "pkeyutl", "-sign", "-inkey", str(signing_key), "-rawin",
+             "-in", str(temp / record["capture_receipt_asset"]),
+             "-out", str(temp / record["capture_signature_asset"])],
+            check=True,
         )
     common[3] = json.dumps(evidence)
     result = subprocess.run(common, capture_output=True, text=True)
