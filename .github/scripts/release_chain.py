@@ -517,8 +517,10 @@ def stage(args: argparse.Namespace) -> None:
     if git("diff", "--name-only") != "VERSION":
         raise ReleaseChainError("preparation staging may modify only VERSION")
     subprocess.run(["git", "add", "VERSION"], cwd=ROOT, check=True)
+    reservation_source_sha = getattr(args, "reservation_source_sha", source_sha)
     metadata = [
         f"Release-Source-SHA: {source_sha}",
+        f"Release-Reservation-Source-SHA: {reservation_source_sha}",
         f"Product-Version: {version}",
         f"Release-Intent-Type: {args.intent_type}",
         f"Release-Intent-Channel: {args.intent_channel}",

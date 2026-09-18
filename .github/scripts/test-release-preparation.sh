@@ -73,11 +73,10 @@ printf 'source update after reservation\n' > "$retry_dir/RETRY"
 git -C "$retry_dir" add RETRY
 git -C "$retry_dir" commit -qm "source update after reservation"
 retry_source_sha="$(git -C "$retry_dir" rev-parse HEAD)"
-retry_reservation="$tmp_dir/retry-reservation.json"
 retry_out="$(python3 "$root_dir/.github/scripts/release_preparation.py" \
   --repo-root "$retry_dir" --source-sha "$retry_source_sha" --base-sha "$retry_base_sha" \
   --labels-json "$tmp_dir/labels.json" --checks-json "$tmp_dir/checks.json" --mode allocate \
-  --reservation-json "$retry_reservation")"
+  --reservation-json "$tmp_dir/retry-reservation.json")"
 [[ "$retry_out" == *'"prepared": "created"'* ]]
 retry_prepared_sha="$(git -C "$retry_dir" rev-parse HEAD)"
 retry_source_recorded="$(git -C "$retry_dir" show -s --format='%(trailers:key=Release-Reservation-Source-SHA,valueonly)' "$retry_prepared_sha")"
