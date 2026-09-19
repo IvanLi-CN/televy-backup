@@ -1105,7 +1105,21 @@ jobs:
           set -euo pipefail
           runtime_state="${RELEASE_STATE}"
           release_output=""
+          release_id=""
+          find_draft_release() {
+            local releases candidate_count
+            releases="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+            candidate_count="$(printf '%s' "${releases}" | jq --arg tag "${PRODUCT_TAG}" '[.[]? | select(.draft == true and .tag_name == $tag)] | length')"
+            if [[ "${candidate_count}" -gt 1 ]]; then
+              echo "release_state_conflict: multiple draft Releases exist for ${PRODUCT_TAG}" >&2
+              return 1
+            fi
+            if [[ "${candidate_count}" == 1 ]]; then
+              printf '%s' "${releases}" | jq -c --arg tag "${PRODUCT_TAG}" '[.[]? | select(.draft == true and .tag_name == $tag)][0]'
+            fi
+          }
           if release_output="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+            release_id="$(printf '%s' "${release_output}" | jq -r '.id | tostring')"
             is_draft="$(printf '%s' "${release_output}" | jq -r '.draft | tostring')"
             is_prerelease="$(printf '%s' "${release_output}" | jq -r '.prerelease | tostring')"
             is_latest=false
@@ -1144,6 +1158,19 @@ jobs:
               printf '%s\n' "${release_output}" >&2
               echo "release_state_conflict: unable to resolve GitHub Release state" >&2
               exit 1
+            fi
+            draft_release="$(find_draft_release)"
+            if [[ -n "${draft_release}" ]]; then
+              release_output="${draft_release}"
+              release_id="$(printf '%s' "${release_output}" | jq -r '.id | tostring')"
+              draft_prerelease="$(printf '%s' "${release_output}" | jq -r '.prerelease | tostring')"
+              expected_draft_prerelease=false
+              [[ "${PRODUCT_CHANNEL}" != prod ]] && expected_draft_prerelease=true
+              if [[ "${draft_prerelease}" != "${expected_draft_prerelease}" ]]; then
+                echo "release_state_conflict: draft Release channel flags do not match ${PRODUCT_CHANNEL}" >&2
+                exit 1
+              fi
+              runtime_state=draft
             fi
           fi
           if [[ "${runtime_state}" == published ]]; then
@@ -1192,12 +1219,25 @@ jobs:
               else
                 flags+=(--latest=true)
               fi
-              gh release create "${PRODUCT_TAG}" "${flags[@]}"
+              gh release create "${PRODUCT_TAG}" "${flags[@]}" >/dev/null
               runtime_state=draft
+              for attempt in 1 2 3; do
+                draft_release="$(find_draft_release)"
+                if [[ -n "${draft_release}" ]]; then
+                  release_output="${draft_release}"
+                  release_id="$(printf '%s' "${release_output}" | jq -r '.id | tostring')"
+                  break
+                fi
+                sleep 2
+              done
+              [[ -n "${release_id}" ]] || {
+                echo "release_state_conflict: created draft Release could not be resolved" >&2
+                exit 1
+              }
             fi
             if [[ "${runtime_state}" == draft ]]; then
               latest_release=""
-              if ! latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+              if ! latest_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" 2>&1)"; then
                 printf '%s\n' "${latest_release}" >&2
                 echo "release_state_conflict: unable to recheck draft Release state" >&2
                 exit 1
@@ -1212,7 +1252,7 @@ jobs:
                   asset_name="$(basename "${asset}")"
                   expected_digest="$(shasum -a 256 "${asset}" | awk '{print $1}')"
                   current_release=""
-                  if ! current_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+                  if ! current_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" 2>&1)"; then
                     printf '%s\n' "${current_release}" >&2
                     echo "release_state_conflict: unable to read draft Release before ${asset_name}" >&2
                     return 1
@@ -1237,13 +1277,16 @@ jobs:
                     # GitHub's asset upload API has no conditional draft precondition;
                     # the immediate state check, no-clobber upload, and final recheck
                     # fail closed for races that cannot be made atomic remotely.
-                    gh release upload "${PRODUCT_TAG}" "${asset}"
+                    gh api --method POST \
+                      -H "Content-Type: application/octet-stream" \
+                      "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${asset_name}" \
+                      --input "${asset}" >/dev/null
                   fi
                 done
               }
               upload_missing_release_assets
               final_release=""
-              if ! final_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PRODUCT_TAG}" 2>&1)"; then
+              if ! final_release="$(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" 2>&1)"; then
                 printf '%s\n' "${final_release}" >&2
                 echo "release_state_conflict: unable to verify draft Release after asset upload" >&2
                 exit 1
