@@ -58,6 +58,18 @@ if ! printf '%s\n' "$refresh_settings_source" | search_stdin_quiet 'ControlIPCCl
   exit 1
 fi
 
+# Product-managed daemon recovery must stay on the CLI service contract. A direct kickstart
+# bypasses enable/bootstrap and regresses after complete exit unloads the LaunchAgent.
+daemon_start_source="$(sed -n '/func ensureDaemonRunning()/,/private func scheduleDaemonIpcRetry/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if printf '%s\n' "$daemon_start_source" | search_stdin 'kickstartLaunchAgent\(label: "com\.ivan\.televybackup\.daemon"'; then
+  echo "ensureDaemonRunning must not directly kickstart the product-managed service" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$daemon_start_source" | search_stdin_quiet 'startProductManagedDaemonViaCLI'; then
+  echo "ensureDaemonRunning must use the CLI for product-managed service recovery" >&2
+  exit 1
+fi
+
 bin_rebind="$out_dir/import-bundle-rebind-logic-tests"
 "$swiftc" \
   -sdk "$sdk_path" \

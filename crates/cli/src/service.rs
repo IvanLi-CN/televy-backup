@@ -53,18 +53,24 @@ fn current_version() -> String {
 }
 
 fn sibling_binary(name: &str) -> Result<PathBuf, CliError> {
-    let exe = std::env::current_exe().map_err(|e| {
-        CliError::new(
-            "service.executable_unavailable",
-            format!("current executable: {e}"),
-        )
-    })?;
-    let parent = exe.parent().ok_or_else(|| {
-        CliError::new(
-            "service.executable_unavailable",
-            "current executable has no parent",
-        )
-    })?;
+    let parent = if let Some(path) = std::env::var_os("TELEVYBACKUP_SERVICE_BIN_DIR") {
+        PathBuf::from(path)
+    } else {
+        let exe = std::env::current_exe().map_err(|e| {
+            CliError::new(
+                "service.executable_unavailable",
+                format!("current executable: {e}"),
+            )
+        })?;
+        exe.parent()
+            .ok_or_else(|| {
+                CliError::new(
+                    "service.executable_unavailable",
+                    "current executable has no parent",
+                )
+            })?
+            .to_path_buf()
+    };
     let path = parent.join(name);
     if !path.is_file() {
         return Err(CliError::new(
@@ -170,6 +176,20 @@ fn gui_domain() -> String {
     format!("gui/{uid}")
 }
 
+fn current_manifest(config_dir: &Path, data_dir: &Path) -> Result<ServiceManifest, CliError> {
+    let daemon = sibling_binary("televybackupd")?;
+    let helper = sibling_binary("televybackup-mtproto-helper")?;
+    Ok(ServiceManifest {
+        schema_version: 1,
+        label: SERVICE_LABEL.to_string(),
+        version: current_version(),
+        config_dir: config_dir.to_string_lossy().into_owned(),
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        daemon_sha256: sha256_file(&daemon)?,
+        helper_sha256: sha256_file(&helper)?,
+    })
+}
+
 pub fn managed_service_matches(config_dir: &Path, data_dir: &Path) -> bool {
     read_manifest(config_dir)
         .ok()
@@ -181,12 +201,45 @@ pub fn managed_service_matches(config_dir: &Path, data_dir: &Path) -> bool {
         })
 }
 
-pub fn kickstart_service() -> Result<(), CliError> {
-    launchctl(&[
-        "kickstart",
-        "-k",
-        &format!("{}/{}", gui_domain(), SERVICE_LABEL),
-    ])
+/// Restore an already-installed product service after a complete application exit.
+///
+/// This intentionally does not install a service when no product-owned manifest exists. The
+/// explicit `daemon install-service` command remains the opt-in boundary for creating one.
+pub fn start_managed_service(config_dir: &Path, data_dir: &Path) -> Result<(), CliError> {
+    let manifest = read_manifest(config_dir)?.ok_or_else(|| {
+        CliError::new(
+            "service.not_installed",
+            "product-managed daemon service is not installed",
+        )
+    })?;
+    if manifest.label != SERVICE_LABEL
+        || manifest.config_dir != config_dir.to_string_lossy()
+        || manifest.data_dir != data_dir.to_string_lossy()
+    {
+        return Err(CliError::new(
+            "service.environment_conflict",
+            format!(
+                "managed service is bound to config={} data={}",
+                manifest.config_dir, manifest.data_dir
+            ),
+        ));
+    }
+
+    let expected = current_manifest(config_dir, data_dir)?;
+    if manifest != expected || !plist_path().is_file() {
+        // Reuse the transactional installer so stale daemon/helper binaries and their plist are
+        // upgraded atomically without touching config, data, indexes, logs, or keychain state.
+        install_inner(config_dir, data_dir, false)?;
+    }
+
+    let domain = gui_domain();
+    let service = format!("{domain}/{SERVICE_LABEL}");
+    launchctl(&["enable", &service])?;
+    if launchctl(&["print", &service]).is_err() {
+        let plist = plist_path();
+        launchctl(&["bootstrap", &domain, &plist.to_string_lossy()])?;
+    }
+    launchctl(&["kickstart", "-k", &service])
 }
 
 pub fn stop_service() -> Result<(), CliError> {
@@ -253,16 +306,8 @@ fn install_inner(
     })?;
     let daemon = sibling_binary("televybackupd")?;
     let helper = sibling_binary("televybackup-mtproto-helper")?;
-    let version = current_version();
-    let new_manifest = ServiceManifest {
-        schema_version: 1,
-        label: SERVICE_LABEL.to_string(),
-        version: version.clone(),
-        config_dir: config_dir.to_string_lossy().into_owned(),
-        data_dir: data_dir.to_string_lossy().into_owned(),
-        daemon_sha256: sha256_file(&daemon)?,
-        helper_sha256: sha256_file(&helper)?,
-    };
+    let new_manifest = current_manifest(config_dir, data_dir)?;
+    let version = new_manifest.version.clone();
 
     if let Some(old) = read_manifest(config_dir)? {
         let same_environment =
@@ -459,7 +504,9 @@ pub fn service_status(config_dir: &Path, data_dir: &Path, json: bool) -> Result<
     let launchd_loaded =
         launchctl(&["print", &format!("{}/{}", gui_domain(), SERVICE_LABEL)]).is_ok();
     let environment_match = manifest.as_ref().map(|m| {
-        m.config_dir == config_dir.to_string_lossy() && m.data_dir == data_dir.to_string_lossy()
+        m.label == SERVICE_LABEL
+            && m.config_dir == config_dir.to_string_lossy()
+            && m.data_dir == data_dir.to_string_lossy()
     });
     let payload = serde_json::json!({
         "installed": manifest.is_some(),
@@ -509,4 +556,131 @@ mod tests {
         assert!(plist.contains("/tmp/c&lt;d"));
         assert!(plist.contains("KeepAlive"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_managed_service_reenables_and_bootstraps_unloaded_service() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("config");
+        let data_dir = temp.path().join("data");
+        let service_root = temp.path().join("service");
+        let bin_dir = temp.path().join("bin");
+        let plist = temp.path().join("LaunchAgents/service.plist");
+        let log = temp.path().join("launchctl.log");
+        let loaded = temp.path().join("loaded");
+        let launchctl = temp.path().join("launchctl");
+        fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        fs::create_dir_all(&service_root).unwrap();
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(bin_dir.join("televybackupd"), b"daemon").unwrap();
+        fs::write(bin_dir.join("televybackup-mtproto-helper"), b"helper").unwrap();
+        fs::write(&plist, "managed").unwrap();
+        fs::write(
+            service_root.join("installation.json"),
+            serde_json::to_vec(&ServiceManifest {
+                schema_version: 1,
+                label: SERVICE_LABEL.into(),
+                version: current_version(),
+                config_dir: config_dir.to_string_lossy().into_owned(),
+                data_dir: data_dir.to_string_lossy().into_owned(),
+                daemon_sha256: format!("{:x}", Sha256::digest(b"daemon")),
+                helper_sha256: format!("{:x}", Sha256::digest(b"helper")),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &launchctl,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  print) test -f '{}' ;;\n  bootstrap) touch '{}' ;;\n  enable|kickstart) exit 0 ;;\n  *) exit 0 ;;\nesac\n",
+                log.display(),
+                loaded.display(),
+                loaded.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&launchctl, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TELEVYBACKUP_SERVICE_ROOT", &service_root);
+            std::env::set_var("TELEVYBACKUP_SERVICE_BIN_DIR", &bin_dir);
+            std::env::set_var("TELEVYBACKUP_LAUNCHAGENT_PLIST", &plist);
+            std::env::set_var("TELEVYBACKUP_LAUNCHCTL", &launchctl);
+        }
+        start_managed_service(&config_dir, &data_dir).unwrap();
+        assert!(loaded.is_file());
+        let calls = fs::read_to_string(&log).unwrap();
+        let calls = calls.lines().collect::<Vec<_>>();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].split_whitespace().next(), Some("enable"));
+        assert_eq!(calls[1].split_whitespace().next(), Some("print"));
+        assert_eq!(calls[2].split_whitespace().next(), Some("bootstrap"));
+        assert_eq!(calls[3].split_whitespace().next(), Some("kickstart"));
+
+        fs::remove_file(&loaded).unwrap();
+        fs::write(&log, "").unwrap();
+        fs::write(
+            service_root.join("installation.json"),
+            serde_json::to_vec(&ServiceManifest {
+                schema_version: 1,
+                label: SERVICE_LABEL.into(),
+                version: "old".into(),
+                config_dir: config_dir.to_string_lossy().into_owned(),
+                data_dir: data_dir.to_string_lossy().into_owned(),
+                daemon_sha256: "old-daemon".into(),
+                helper_sha256: "old-helper".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        start_managed_service(&config_dir, &data_dir).unwrap();
+        assert_eq!(
+            read_manifest(&config_dir).unwrap(),
+            Some(current_manifest(&config_dir, &data_dir).unwrap())
+        );
+        let calls = fs::read_to_string(log).unwrap();
+        let calls = calls.lines().collect::<Vec<_>>();
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[0].split_whitespace().next(), Some("bootout"));
+        assert_eq!(calls[1].split_whitespace().next(), Some("bootstrap"));
+        assert_eq!(calls[2].split_whitespace().next(), Some("enable"));
+        assert_eq!(calls[3].split_whitespace().next(), Some("print"));
+        assert_eq!(calls[4].split_whitespace().next(), Some("kickstart"));
+
+        unsafe {
+            std::env::remove_var("TELEVYBACKUP_SERVICE_ROOT");
+            std::env::remove_var("TELEVYBACKUP_SERVICE_BIN_DIR");
+            std::env::remove_var("TELEVYBACKUP_LAUNCHAGENT_PLIST");
+            std::env::remove_var("TELEVYBACKUP_LAUNCHCTL");
+        }
+    }
+
+    #[test]
+    fn start_managed_service_without_manifest_does_not_install_service() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("config");
+        let data_dir = temp.path().join("data");
+        let service_root = temp.path().join("service");
+        let plist = temp.path().join("LaunchAgents/service.plist");
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("TELEVYBACKUP_SERVICE_ROOT", &service_root);
+            std::env::set_var("TELEVYBACKUP_LAUNCHAGENT_PLIST", &plist);
+        }
+
+        let error = start_managed_service(&config_dir, &data_dir).unwrap_err();
+
+        unsafe {
+            std::env::remove_var("TELEVYBACKUP_SERVICE_ROOT");
+            std::env::remove_var("TELEVYBACKUP_LAUNCHAGENT_PLIST");
+        }
+        assert_eq!(error.code, "service.not_installed");
+        assert!(!service_root.exists());
+        assert!(!plist.exists());
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

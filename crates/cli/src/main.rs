@@ -1591,7 +1591,7 @@ async fn daemon_start(config_dir: &Path, data_dir: &Path, json: bool) -> Result<
     }
 
     if service::managed_service_matches(config_dir, data_dir) {
-        service::kickstart_service().map_err(|e| {
+        service::start_managed_service(config_dir, data_dir).map_err(|e| {
             CliError::retryable(
                 "daemon.start_failed",
                 format!("managed service: {}", e.message),

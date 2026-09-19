@@ -233,7 +233,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 10
     needs: [classify, arm64, x86_64]
-    if: needs.classify.result == 'success'
+    if: always() && needs.classify.result == 'success'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
