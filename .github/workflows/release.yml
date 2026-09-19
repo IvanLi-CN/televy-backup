@@ -560,15 +560,18 @@ jobs:
             --lock packaging/macos/snapshot-components.lock.json \
             --source-tag "$HELPER_SOURCE_TAG" \
             --expected-source-commit "$HELPER_SOURCE_COMMIT"
-          bash scripts/macos/extract-snapshot-access-helper.sh \
-            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
-            --output-dir "$RUNNER_TEMP/snapshot-helper"
           test -n "${POLICY_SHA}"
           git fetch --force origin main
           git cat-file -e "${POLICY_SHA}^{commit}"
+          policy_extract_snapshot_access_helper="$RUNNER_TEMP/extract-snapshot-access-helper.sh"
+          git show "${POLICY_SHA}:scripts/macos/extract-snapshot-access-helper.sh" > "${policy_extract_snapshot_access_helper}"
+          chmod 755 "${policy_extract_snapshot_access_helper}"
           policy_verify_component_identity="$RUNNER_TEMP/verify-component-identity.sh"
           git show "${POLICY_SHA}:scripts/macos/verify-component-identity.sh" > "${policy_verify_component_identity}"
           chmod 755 "${policy_verify_component_identity}"
+          bash "${policy_extract_snapshot_access_helper}" \
+            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
+            --output-dir "$RUNNER_TEMP/snapshot-helper"
           echo "TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY=${policy_verify_component_identity}" >> "$GITHUB_ENV"
           bash "${policy_verify_component_identity}" \
             --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
@@ -644,15 +647,18 @@ jobs:
             --lock packaging/macos/snapshot-components.lock.json \
             --source-tag "$HELPER_SOURCE_TAG" \
             --expected-source-commit "$HELPER_SOURCE_COMMIT"
-          bash scripts/macos/extract-snapshot-access-helper.sh \
-            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
-            --output-dir "$RUNNER_TEMP/snapshot-helper"
           test -n "${POLICY_SHA}"
           git fetch --force origin main
           git cat-file -e "${POLICY_SHA}^{commit}"
+          policy_extract_snapshot_access_helper="$RUNNER_TEMP/extract-snapshot-access-helper.sh"
+          git show "${POLICY_SHA}:scripts/macos/extract-snapshot-access-helper.sh" > "${policy_extract_snapshot_access_helper}"
+          chmod 755 "${policy_extract_snapshot_access_helper}"
           policy_verify_component_identity="$RUNNER_TEMP/verify-component-identity.sh"
           git show "${POLICY_SHA}:scripts/macos/verify-component-identity.sh" > "${policy_verify_component_identity}"
           chmod 755 "${policy_verify_component_identity}"
+          bash "${policy_extract_snapshot_access_helper}" \
+            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
+            --output-dir "$RUNNER_TEMP/snapshot-helper"
           echo "TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY=${policy_verify_component_identity}" >> "$GITHUB_ENV"
           bash "${policy_verify_component_identity}" \
             --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
@@ -750,15 +756,18 @@ jobs:
             --lock packaging/macos/snapshot-components.lock.json \
             --source-tag "$HELPER_SOURCE_TAG" \
             --expected-source-commit "$HELPER_SOURCE_COMMIT"
-          bash scripts/macos/extract-snapshot-access-helper.sh \
-            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
-            --output-dir "$RUNNER_TEMP/snapshot-helper"
           test -n "${POLICY_SHA}"
           git fetch --force origin main
           git cat-file -e "${POLICY_SHA}^{commit}"
+          policy_extract_snapshot_access_helper="$RUNNER_TEMP/extract-snapshot-access-helper.sh"
+          git show "${POLICY_SHA}:scripts/macos/extract-snapshot-access-helper.sh" > "${policy_extract_snapshot_access_helper}"
+          chmod 755 "${policy_extract_snapshot_access_helper}"
           policy_verify_component_identity="$RUNNER_TEMP/verify-component-identity.sh"
           git show "${POLICY_SHA}:scripts/macos/verify-component-identity.sh" > "${policy_verify_component_identity}"
           chmod 755 "${policy_verify_component_identity}"
+          bash "${policy_extract_snapshot_access_helper}" \
+            --dmg "$RUNNER_TEMP/snapshot-helper/TelevyBackup-${helper_version}.dmg" \
+            --output-dir "$RUNNER_TEMP/snapshot-helper"
           echo "TELEVYBACKUP_POLICY_VERIFY_COMPONENT_IDENTITY=${policy_verify_component_identity}" >> "$GITHUB_ENV"
           bash "${policy_verify_component_identity}" \
             --reference "$RUNNER_TEMP/snapshot-helper/TelevyBackup Snapshot Access.app" \
