@@ -26,18 +26,21 @@ reject_symlink_components "$output_dir"
 mkdir -p "$output_dir"
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-snapshot-helper.XXXXXX")"
+work_dir="$(cd "$work_dir" && pwd -P)"
 mount_point="$work_dir/mount"
 mkdir -p "$mount_point"
 attached_device=""
-attach_attempted=false
+attach_completed=false
 
 device_from_plist() {
   local plist_path="$1"
   python3 - "$plist_path" "$mount_point" <<'PY'
+import os
 import plistlib
 import sys
 
 plist_path, expected_mount = sys.argv[1:]
+expected_mount = os.path.realpath(os.path.normpath(expected_mount))
 try:
     with open(plist_path, "rb") as handle:
         payload = plistlib.load(handle)
@@ -47,7 +50,8 @@ entities = list(payload.get("system-entities", []))
 for image in payload.get("images", []):
     entities.extend(image.get("system-entities", []))
 for entity in entities:
-    if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+    mount_point = entity.get("mount-point")
+    if mount_point and os.path.realpath(os.path.normpath(mount_point)) == expected_mount and entity.get("dev-entry"):
         print(entity["dev-entry"])
         raise SystemExit(0)
 PY
@@ -55,8 +59,35 @@ PY
 
 resolve_device_for_mount() {
   local info_path="$work_dir/hdiutil-info.plist"
+  local device=""
   if hdiutil info -plist > "$info_path" 2>/dev/null; then
-    device_from_plist "$info_path" 2>/dev/null || true
+    device="$(device_from_plist "$info_path" 2>/dev/null || true)"
+    if [[ -n "$device" ]]; then
+      printf '%s\n' "$device"
+      return 0
+    fi
+  fi
+  if command -v diskutil >/dev/null 2>&1; then
+    local diskutil_info="$work_dir/diskutil-info.plist"
+    if diskutil info -plist "$mount_point" > "$diskutil_info" 2>/dev/null; then
+      python3 - "$diskutil_info" "$mount_point" <<'PY'
+import os
+import plistlib
+import sys
+
+info_path, expected_mount = sys.argv[1:]
+expected_mount = os.path.realpath(os.path.normpath(expected_mount))
+try:
+    with open(info_path, "rb") as handle:
+        payload = plistlib.load(handle)
+except (OSError, plistlib.InvalidFileException, ValueError):
+    raise SystemExit(0)
+mount_point = payload.get("MountPoint") or payload.get("mount-point")
+device = payload.get("DeviceNode") or payload.get("dev-entry")
+if mount_point and os.path.realpath(os.path.normpath(mount_point)) == expected_mount and device:
+    print(device)
+PY
+    fi
   fi
 }
 
@@ -69,7 +100,7 @@ cleanup() {
       echo "failed to detach Snapshot Access helper device: $cleanup_device" >&2
       [[ "$original_status" -ne 0 ]] || original_status=1
     fi
-  elif [[ "$attach_attempted" == true ]]; then
+  elif [[ "$attach_completed" == true || -n "$attached_device" ]]; then
     echo "failed to resolve Snapshot Access helper device for cleanup: $mount_point" >&2
     [[ "$original_status" -ne 0 ]] || original_status=1
   fi
@@ -77,6 +108,7 @@ cleanup() {
     echo "failed to remove Snapshot Access helper mount point: $mount_point" >&2
     [[ "$original_status" -ne 0 ]] || original_status=1
   fi
+  rm -f "$attach_plist" "$work_dir/hdiutil-info.plist" "$work_dir/diskutil-info.plist"
   if ! rmdir "$work_dir" >/dev/null 2>&1; then
     echo "failed to remove Snapshot Access helper work directory: $work_dir" >&2
     [[ "$original_status" -ne 0 ]] || original_status=1
@@ -85,13 +117,12 @@ cleanup() {
     exit "$original_status"
   fi
 }
+attach_plist="$work_dir/attach.plist"
 trap cleanup EXIT
 
-attach_plist="$work_dir/attach.plist"
-attach_attempted=true
 attach_status=0
 if hdiutil attach -plist -nobrowse -readonly -mountpoint "$mount_point" "$dmg" > "$attach_plist"; then
-  :
+  attach_completed=true
 else
   attach_status=$?
 fi
