@@ -49,8 +49,9 @@ if [[ "${1:-}" == api ]]; then
   shift
   method=GET
   if [[ "${1:-}" == --method ]]; then method="$2"; shift 2; fi
+  while [[ "${1:-}" == -H || "${1:-}" == --header ]]; do shift 2; done
   endpoint="$1"; shift
-  tag=""; object=""; ref=""
+  tag=""; object=""; ref=""; input=""
   while (($#)); do
     case "$1" in
       -f)
@@ -60,10 +61,27 @@ if [[ "${1:-}" == api ]]; then
           ref=*) ref="${2#ref=}" ;;
         esac
         shift 2 ;;
+      -H|--header) shift 2 ;;
+      --input) input="$2"; shift 2 ;;
       --jq) shift 2 ;;
       *) shift ;;
     esac
   done
+  if [[ "$method" == GET && ( "$endpoint" == */releases || "$endpoint" == */releases\?* ) ]]; then
+    release_files=()
+    for release_path in "$state_dir"/*; do
+      [[ -f "$release_path" ]] || continue
+      release_name="${release_path##*/}"
+      [[ "$release_name" == latest || "$release_name" == uploads || "$release_name" == *.created || "$release_name" == *.tmp ]] && continue
+      release_files+=("$release_path")
+    done
+    if ((${#release_files[@]} == 0)); then
+      printf '[]\n'
+    else
+      jq -s '.' "${release_files[@]}"
+    fi
+    exit 0
+  fi
   if [[ "$method" == GET && "$endpoint" == */releases/latest ]]; then
     latest_tag=""
     if [[ -f "$state_dir/latest" ]]; then
@@ -82,8 +100,24 @@ if [[ "${1:-}" == api ]]; then
       echo "HTTP 404: Not Found" >&2
       exit 1
     fi
+    if [[ "$(jq -r '.draft | tostring' "$state_dir/$tag")" == true ]]; then
+      echo "HTTP 404: Not Found" >&2
+      exit 1
+    fi
     cat "$state_dir/$tag"
     exit 0
+  fi
+  if [[ "$method" == GET && "$endpoint" == */releases/* ]]; then
+    release_id="${endpoint##*/releases/}"
+    for release_path in "$state_dir"/*; do
+      [[ -f "$release_path" ]] || continue
+      if jq -e --arg id "$release_id" '.id | tostring == $id' "$release_path" >/dev/null 2>&1; then
+        cat "$release_path"
+        exit 0
+      fi
+    done
+    echo "HTTP 404: Not Found" >&2
+    exit 1
   fi
   if [[ "$method" == POST && "$endpoint" == */git/tags ]]; then
     git -C "$repo_dir" -c user.name='github-actions[bot]' \
@@ -98,15 +132,41 @@ if [[ "${1:-}" == api ]]; then
     printf '{}\n'
     exit 0
   fi
+  if [[ "$method" == POST && "$endpoint" == https://uploads.github.com/*/releases/*/assets* ]]; then
+    release_id="${endpoint#*/releases/}"
+    release_id="${release_id%%/assets*}"
+    asset_name="${endpoint##*name=}"
+    release_path=""
+    for candidate_path in "$state_dir"/*; do
+      [[ -f "$candidate_path" ]] || continue
+      if jq -e --arg id "$release_id" '.id | tostring == $id' "$candidate_path" >/dev/null 2>&1; then
+        release_path="$candidate_path"
+        break
+      fi
+    done
+    [[ -n "$release_path" && -n "$input" ]] || { echo "fixture upload target not found" >&2; exit 1; }
+    printf '%s\n' "$endpoint" >> "$state_dir/uploads"
+    if [[ "${GH_FIXTURE_PUBLISH_ON_UPLOAD:-0}" == 1 ]]; then
+      jq '.draft = false' "$release_path" > "$release_path.tmp"
+    else
+      uploaded_digest="sha256:$(shasum -a 256 "$input" | awk '{print $1}')"
+      jq --arg name "$asset_name" --arg digest "$uploaded_digest" \
+        '.assets = ((.assets // []) + [{name: $name, digest: $digest}])' "$release_path" > "$release_path.tmp"
+    fi
+    mv "$release_path.tmp" "$release_path"
+    printf '{}\n'
+    exit 0
+  fi
   echo "unsupported fixture gh api call: $method $endpoint" >&2
   exit 1
 fi
 if [[ "$1" == release && "$2" == create ]]; then
   tag="$3"
   printf '%s\n' "$*" > "$state_dir/$tag.created"
+  release_id="$(printf '%s' "$tag" | cksum | awk '{print $1}')"
   draft_state=false
   [[ "$*" == *'--draft'* ]] && draft_state=true
-  printf '{"tag_name":"%s","draft":%s,"prerelease":%s}\n' "$tag" "$draft_state" \
+  printf '{"id":%s,"tag_name":"%s","draft":%s,"prerelease":%s,"assets":[]}\n' "$release_id" "$tag" "$draft_state" \
     "$([[ "$*" == *'--prerelease'* ]] && echo true || echo false)" > "$state_dir/$tag"
   if [[ "$*" == *'--latest=true'* ]]; then
     printf '%s\n' "$tag" > "$state_dir/latest"
@@ -129,8 +189,11 @@ if [[ "$1" == release && "$2" == upload ]]; then
 fi
 if [[ "$1" == release && "$2" == edit ]]; then
   tag="$3"
-  printf '{"tag_name":"%s","draft":false,"prerelease":%s}\n' "$tag" \
-    "$([[ "$*" == *'--prerelease'* ]] && echo true || echo false)" > "$state_dir/$tag"
+  release_json="$(<"$state_dir/$tag")"
+  printf '%s' "$release_json" | jq --arg tag "$tag" \
+    --argjson prerelease "$([[ "$*" == *'--prerelease'* ]] && echo true || echo false)" \
+    '.tag_name = $tag | .draft = false | .prerelease = $prerelease' > "$state_dir/$tag.tmp"
+  mv "$state_dir/$tag.tmp" "$state_dir/$tag"
   if [[ "$*" == *'--latest=true'* ]]; then
     printf '%s\n' "$tag" > "$state_dir/latest"
   fi
@@ -192,7 +255,7 @@ jq -cn \
   --arg asset_digest "$draft_asset_digest" \
   --arg manifest_digest "$draft_manifest_digest" \
   --arg checksums_digest "$draft_checksums_digest" \
-  '{tag_name:$tag,draft:true,prerelease:false,assets:[
+  '{id:125,tag_name:$tag,draft:true,prerelease:false,assets:[
     {name:"asset.txt",digest:("sha256:" + $asset_digest)},
     {name:"BUILD-MANIFEST.json",digest:("sha256:" + $manifest_digest)},
     {name:"SHA256SUMS",digest:("sha256:" + $checksums_digest)}
@@ -210,7 +273,7 @@ rm -f "$tmp_dir/state/uploads"
 )
 
 extra_tag="v1.2.56"
-printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[]}\n' \
+printf '{"id":1256,"tag_name":"%s","draft":true,"prerelease":false,"assets":[]}\n' \
   "$extra_tag" > "$tmp_dir/state/$extra_tag"
 printf 'unlisted asset\n' > "$repo_dir/release-assets/unlisted.txt"
 if (
@@ -228,7 +291,7 @@ fi
 rm -f "$repo_dir/release-assets/unlisted.txt"
 
 upload_tag="v1.2.55"
-printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[]}\n' \
+printf '{"id":1255,"tag_name":"%s","draft":true,"prerelease":false,"assets":[]}\n' \
   "$upload_tag" > "$tmp_dir/state/$upload_tag"
 rm -f "$tmp_dir/state/uploads"
 (
@@ -243,7 +306,7 @@ rm -f "$tmp_dir/state/uploads"
 )
 
 conflict_tag="v1.2.6"
-printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[{"name":"asset.txt","digest":"sha256:%064d"}]}\n' \
+printf '{"id":126,"tag_name":"%s","draft":true,"prerelease":false,"assets":[{"name":"asset.txt","digest":"sha256:%064d"}]}\n' \
   "$conflict_tag" 0 > "$tmp_dir/state/$conflict_tag"
 if (
   cd "$repo_dir"
@@ -259,7 +322,7 @@ if (
 fi
 
 race_tag="v1.2.7"
-printf '{"tag_name":"%s","draft":true,"prerelease":false,"assets":[]}\n' \
+printf '{"id":127,"tag_name":"%s","draft":true,"prerelease":false,"assets":[]}\n' \
   "$race_tag" > "$tmp_dir/state/$race_tag"
 printf 'second asset\n' > "$repo_dir/release-assets/second.txt"
 jq '.assets += [{"name":"second.txt"}]' "$repo_dir/release-assets/BUILD-MANIFEST.json" > "$repo_dir/release-assets/BUILD-MANIFEST.json.tmp"
