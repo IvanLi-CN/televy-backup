@@ -832,6 +832,9 @@ jobs:
               --candidate "dist/final/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" \
               --manifest "$RUNNER_TEMP/snapshot-helper/BUILD-MANIFEST.json"
           fi
+          # The app bundle is an internal verification input; release uploads are
+          # limited to the regular files listed by BUILD-MANIFEST.json.
+          rm -rf "$GITHUB_WORKSPACE/dist/final/TelevyBackup.app"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-assets

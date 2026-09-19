@@ -218,6 +218,7 @@ if [[ "$release_text" == *"gh release upload \"\${PRODUCT_TAG}\" release-assets/
 fi
 assert_contains "release manifest-bound asset collection" "$release_text" "release-assets set does not match BUILD-MANIFEST.json"
 assert_contains "release regular-file collection" "$release_text" "stat.S_ISREG(os.lstat(path).st_mode)"
+assert_contains "release app bundle excluded from upload" "$release_text" 'rm -rf "$GITHUB_WORKSPACE/dist/final/TelevyBackup.app"'
 assert_contains "release DMG evidence upload" "$release_text" "name: release-dmg-verification"
 assert_contains "release DMG evidence binding" "$release_text" 'DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl"'
 assert_not_contains "release acceptance screenshot reupload" "$release_text" 'gh release upload "${rc2_tag}" "${screenshot_dir}/${screenshot_name}"'
