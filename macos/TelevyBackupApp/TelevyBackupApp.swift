@@ -1385,6 +1385,20 @@ final class AppModel {
         }
         DispatchQueue.global(qos: .userInitiated).async {
             let domain = "gui/\(getuid())"
+            if self.embeddedSnapshotAccessAgentNeedsRefresh() {
+                let unload = self.runCommandCapture(
+                    exe: "/bin/launchctl",
+                    args: ["bootout", self.embeddedSnapshotAccessLaunchdService],
+                    timeoutSeconds: 5
+                )
+                if unload.status != 0 && !self.launchctlFailureIndicatesMissingService(unload) {
+                    DispatchQueue.main.async {
+                        completion(false, self.launchctlFailure(unload))
+                    }
+                    return
+                }
+                self.appendLog("INFO: refreshed stale Snapshot Access LaunchAgent")
+            }
             let bootstrap = self.runCommandCapture(
                 exe: "/bin/launchctl",
                 args: ["bootstrap", domain, plistPath],
@@ -1425,11 +1439,36 @@ final class AppModel {
         if result.status == 0 {
             return nil
         }
-        let message = launchctlFailure(result).lowercased()
-        if message.contains("could not find service") || message.contains("service not found") || message.contains("no such process") {
+        if launchctlFailureIndicatesMissingService(result) {
             return nil
         }
         return launchctlFailure(result)
+    }
+
+    private func launchctlFailureIndicatesMissingService(
+        _ result: (stdout: String, stderr: String, status: Int32, reason: Process.TerminationReason)
+    ) -> Bool {
+        let message = launchctlFailure(result).lowercased()
+        return message.contains("could not find service")
+            || message.contains("service not found")
+            || message.contains("no such process")
+            || message.contains("unknown service")
+    }
+
+    private func embeddedSnapshotAccessAgentNeedsRefresh() -> Bool {
+        let result = runCommandCapture(
+            exe: "/bin/launchctl",
+            args: ["print", embeddedSnapshotAccessLaunchdService],
+            timeoutSeconds: 5
+        )
+        guard result.status == 0 else { return false }
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.ivan.televybackup"
+        let bundleVersion = (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) ?? ""
+        return SnapshotAccessLaunchdState.needsRefresh(
+            output: result.stdout + result.stderr,
+            expectedBundleIdentifier: bundleIdentifier,
+            expectedBundleVersion: bundleVersion
+        )
     }
 
     private func embeddedSnapshotAccessExecutablePath() -> String? {
@@ -1839,7 +1878,9 @@ final class AppModel {
         DispatchQueue.global(qos: .userInitiated).async {
             // An old daemon can still hold the legacy helper open even when its
             // lease probe was empty. Stop it before changing the helper owner.
-            if !self.snapshotAccessRegistrationIsCommitted(cli: cli, config: config, data: data) {
+            if !self.snapshotAccessRegistrationIsCommitted(cli: cli, config: config, data: data)
+                || self.embeddedSnapshotAccessAgentNeedsRefresh()
+            {
                 let stop = self.runCommandCapture(
                     exe: cli,
                     args: ["--json", "--config-dir", config, "--data-dir", data, "daemon", "stop"],
@@ -4018,6 +4059,8 @@ final class AppModel {
 
     func reportSnapshotAccessRegistrationFailure(_ message: String) {
         appendLog("WARN: Snapshot Access registration unavailable: \(message)")
+        appendStatusActivity("Snapshot Access registration failed: \(message)")
+        showToast("Snapshot Access unavailable", isError: true)
     }
 
     private func appendLog(_ line: String) {
