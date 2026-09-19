@@ -2572,9 +2572,17 @@ final class AppModel {
                 }
             }
 
-            // Prefer the product-managed LaunchAgent, then retain Homebrew as a legacy fallback.
-            if kickstartLaunchAgent(label: "com.ivan.televybackup.daemon") {
-                appendStatusActivity("Daemon kickstarted via launchd (com.ivan.televybackup.daemon)")
+            // The CLI owns product-managed service recovery so disabled/unloaded services are
+            // re-enabled and bootstrapped before kickstart. Only fall through when no compatible
+            // product service is installed; an installed service failure must stay visible.
+            if let managedServiceStart = startProductManagedDaemonViaCLI() {
+                if managedServiceStart {
+                    appendStatusActivity("Daemon started via product-managed service")
+                } else {
+                    appendStatusActivity("Product-managed daemon failed to start (see ui.log)")
+                    scheduleDaemonIpcRetry()
+                    return false
+                }
                 if waitForDaemonIpcReady(timeoutSeconds: 2.0) {
                     return true
                 }
@@ -2768,6 +2776,44 @@ final class AppModel {
         }
         let start = runCommandCapture(exe: "/bin/launchctl", args: ["start", service], timeoutSeconds: 3)
         return start.status == 0
+    }
+
+    /// Returns nil when the product-managed service is absent or bound to another environment.
+    /// A non-nil false result means a compatible service was found but its explicit start failed.
+    private func startProductManagedDaemonViaCLI() -> Bool? {
+        guard let cli = cliPath() else {
+            appendLog("ERROR: bundled CLI unavailable; cannot recover product-managed daemon")
+            return nil
+        }
+        let config = configTomlPath().deletingLastPathComponent().path
+        let data = guiControlDataDirURL().path
+        let statusResult = runCommandCapture(
+            exe: cli,
+            args: ["--json", "--config-dir", config, "--data-dir", data, "daemon", "service-status"],
+            timeoutSeconds: 5
+        )
+        guard statusResult.status == 0,
+              let statusData = statusResult.stdout.data(using: .utf8),
+              let status = try? JSONDecoder().decode(ManagedServiceStatus.self, from: statusData),
+              status.installed,
+              status.environmentMatch == true
+        else {
+            return nil
+        }
+
+        let startResult = runCommandCapture(
+            exe: cli,
+            args: ["--json", "--config-dir", config, "--data-dir", data, "daemon", "start"],
+            timeoutSeconds: 8
+        )
+        guard startResult.status == 0 else {
+            let output = (startResult.stderr.isEmpty ? startResult.stdout : startResult.stderr)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            appendLog("ERROR: product-managed daemon start failed: \(output)")
+            showToast("Managed daemon failed to start (see ui.log)", isError: true)
+            return false
+        }
+        return true
     }
 
     private func scheduleStatusStreamReconnect() {

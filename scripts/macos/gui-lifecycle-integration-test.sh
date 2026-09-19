@@ -105,7 +105,31 @@ if [[ "$mode" == "--complete-exit" ]]; then
     echo "ERROR: complete exit left the isolated daemon running" >&2
     exit 1
   fi
-  echo "OK: complete exit stops the isolated daemon"
+  env \
+    TELEVYBACKUP_ALLOW_MULTI_INSTANCE=1 \
+    TELEVYBACKUP_SHOW_POPOVER_ON_LAUNCH=0 \
+    TELEVYBACKUP_DISABLE_KEYCHAIN=1 \
+    TELEVYBACKUP_TEST_COMPLETE_EXIT=0 \
+    "$app_bin" \
+    --disable-keychain \
+    --data-dir "$data_dir" \
+    --config-dir "$config_dir" \
+    >/dev/null 2>&1 &
+  gui_pid=$!
+  for _ in {1..100}; do
+    if "$cli_bin" --json --data-dir "$data_dir" daemon status >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.1
+  done
+  "$cli_bin" --json --data-dir "$data_dir" daemon status >/dev/null || {
+    echo "ERROR: daemon did not recover after relaunch" >&2
+    exit 1
+  }
+  kill "$gui_pid" 2>/dev/null || true
+  wait "$gui_pid" 2>/dev/null || true
+  gui_pid=""
+  echo "OK: complete exit stops and relaunch recovers the isolated daemon"
   exit 0
 fi
 
