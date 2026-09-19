@@ -348,10 +348,93 @@ grep -F 'reject_symlink_components "$helper_path"' <<<"$extract_helper_text" >/d
   exit 1
 }
 grep -F 'output_helper="$output_dir/TelevyBackup Snapshot Access.app"' <<<"$extract_helper_text" >/dev/null &&
-  grep -F '[[ ! -e "$output_helper" && ! -L "$output_helper" ]]' <<<"$extract_helper_text" >/dev/null || {
+grep -F '[[ ! -e "$output_helper" && ! -L "$output_helper" ]]' <<<"$extract_helper_text" >/dev/null || {
   echo "Snapshot Access extraction must reject an existing output helper path" >&2
   exit 1
 }
+
+extract_fixture="$tmp_dir/snapshot-helper-extract"
+mkdir -p "$extract_fixture/bin" "$extract_fixture/output"
+printf 'fixture dmg\n' > "$extract_fixture/source.dmg"
+cat > "$extract_fixture/bin/hdiutil" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+state_file="$(dirname "$0")/mount-point"
+plist_for_mount() {
+  python3 - "$1" <<'PY'
+import plistlib
+import sys
+plistlib.dump(
+    {
+        "system-entities": [
+            {"dev-entry": "/dev/diskfixture", "mount-point": sys.argv[1]}
+        ]
+    },
+    sys.stdout.buffer,
+)
+PY
+}
+normalize_mount() {
+  python3 - "$1" <<'PY'
+import os
+import sys
+print(os.path.normpath(sys.argv[1]))
+PY
+}
+case "${1:-}" in
+  attach)
+    mount_point=""
+    plist=false
+    shift
+    while [[ "$#" -gt 0 ]]; do
+      case "$1" in
+        -plist) plist=true; shift ;;
+        -mountpoint) mount_point="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    normalized_mount="$(normalize_mount "$mount_point")"
+    mkdir -p "$normalized_mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/MacOS"
+    printf 'helper\n' > "$normalized_mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access"
+    printf '%s\n' "$normalized_mount" > "$state_file"
+    if [[ "$plist" == true ]]; then
+      plist_for_mount "$normalized_mount"
+    fi
+    ;;
+  info)
+    plist_for_mount "$(<"$state_file")"
+    ;;
+  detach)
+    mount_point="$(<"$state_file")"
+    rm -rf "$mount_point/TelevyBackup.app"
+    rm -f "$state_file"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+SH
+chmod 755 "$extract_fixture/bin/hdiutil"
+cat > "$extract_fixture/bin/ditto" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+cp -R "$1" "$2"
+SH
+chmod 755 "$extract_fixture/bin/ditto"
+if ! PATH="$extract_fixture/bin:$PATH" TMPDIR="$extract_fixture/" bash "$root_dir/scripts/macos/extract-snapshot-access-helper.sh" \
+  --dmg "$extract_fixture/source.dmg" --output-dir "$extract_fixture/output"; then
+  echo "Snapshot Access extraction must canonicalize a TMPDIR with a trailing slash" >&2
+  exit 1
+fi
+[[ -f "$extract_fixture/output/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access" ]] || {
+  echo "Snapshot Access extraction fixture did not produce the helper bundle" >&2
+  exit 1
+}
+if find "$extract_fixture" -maxdepth 1 -name 'televybackup-snapshot-helper.*' -print -quit | grep -q .; then
+  echo "Snapshot Access extraction fixture leaked its temporary mount directory" >&2
+  exit 1
+fi
+
 grep -F 'gh release upload "$rc2_tag" "$finder_screenshot"' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must upload newly captured screenshots to RC2" >&2
   exit 1
