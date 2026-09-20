@@ -196,6 +196,30 @@ fn manifest_matches_embedded_access_app(manifest: Option<&Value>, access_app: &P
         .is_some_and(|path| Path::new(path) == access_app)
 }
 
+fn registration_manager_matches(
+    manifest: Option<&Value>,
+    access_app: &Path,
+    requested_manager: Option<&str>,
+) -> bool {
+    let Some(managed_by) = manifest
+        .and_then(|value| value.get("managedBy"))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    is_embedded_registration_manager(Some(managed_by))
+        && requested_manager.is_none_or(|expected| managed_by == expected)
+        && manifest
+            .and_then(|value| value.get("relativeAppPath"))
+            .and_then(Value::as_str)
+            == Some(ACCESS_BUNDLE_RELATIVE_PATH)
+        && manifest_matches_embedded_access_app(manifest, access_app)
+        && manifest
+            .and_then(|value| value.get("migrationState"))
+            .and_then(Value::as_str)
+            == Some("ready")
+}
+
 fn embedded_access_app_path() -> Result<PathBuf, CliError> {
     let app = main_app_path()?;
     let access_app = app.join(ACCESS_BUNDLE_RELATIVE_PATH);
@@ -351,6 +375,47 @@ fn manifest_data_dir(manifest: Option<&Value>, fallback: &Path) -> PathBuf {
 fn active_leases(manifest: Option<&Value>, data_dir: &Path) -> Result<u64, CliError> {
     status_from_socket(&default_socket(&manifest_data_dir(manifest, data_dir)))
         .map(|status| u64::from(status.active_leases))
+}
+
+fn launchctl_service_loaded() -> bool {
+    let domain = format!("gui/{}", unsafe { libc::geteuid() });
+    launchctl(&["print", &user_service_target(&domain)]).is_ok()
+}
+
+fn can_recover_unreachable_signed_registration(
+    existing: Option<&Value>,
+    requested_manager: Option<&str>,
+    service_loaded: bool,
+    error: &CliError,
+) -> bool {
+    requested_manager == Some(EMBEDDED_REGISTRATION_MANAGER)
+        && existing
+            .and_then(|value| value.get("managedBy"))
+            .and_then(Value::as_str)
+            == Some("smappservice")
+        && !service_loaded
+        && error.code == "snapshot_access.unavailable"
+}
+
+fn active_leases_for_migration(
+    existing: Option<&Value>,
+    data_dir: &Path,
+    requested_manager: Option<&str>,
+) -> Result<u64, CliError> {
+    match active_leases(existing, data_dir) {
+        Ok(leases) => Ok(leases),
+        Err(error)
+            if can_recover_unreachable_signed_registration(
+                existing,
+                requested_manager,
+                !launchctl_service_loaded(),
+                &error,
+            ) =>
+        {
+            Ok(0)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn active_legacy_leases(existing: Option<&Value>, data_dir: &Path) -> Result<u64, CliError> {
@@ -552,22 +617,9 @@ pub fn prepare_migration(
     let manifest_file = manifest_path(config_dir);
     let existing = manifest_json(config_dir);
     let legacy_plist = legacy_plist_path();
-    let existing_is_current = existing
-        .as_ref()
-        .and_then(|value| value.get("managedBy"))
-        .and_then(Value::as_str)
-        .is_some_and(|value| is_embedded_registration_manager(Some(value)))
-        && existing
-            .as_ref()
-            .and_then(|value| value.get("relativeAppPath"))
-            .and_then(Value::as_str)
-            == Some(ACCESS_BUNDLE_RELATIVE_PATH)
-        && manifest_matches_embedded_access_app(existing.as_ref(), &access_app)
-        && existing
-            .as_ref()
-            .and_then(|value| value.get("migrationState"))
-            .and_then(Value::as_str)
-            == Some("ready");
+    let requested_manager = std::env::var("TELEVYBACKUP_SNAPSHOT_ACCESS_MANAGER").ok();
+    let existing_is_current =
+        registration_manager_matches(existing.as_ref(), &access_app, requested_manager.as_deref());
     let pending_migration = is_pending_migration(existing.as_ref());
 
     if existing_is_current && !legacy_plist.exists() {
@@ -660,15 +712,17 @@ pub fn prepare_migration(
 
     let legacy_registration = legacy_plist.exists() || (existing.is_some() && !existing_is_current);
     if legacy_registration {
-        let leases = active_leases(existing.as_ref(), data_dir).map_err(|error| {
-            CliError::retryable(
-                "snapshot_access.busy",
-                format!(
-                    "cannot prove that Snapshot Access has no active lease: {}",
-                    error.message
-                ),
-            )
-        })?;
+        let leases =
+            active_leases_for_migration(existing.as_ref(), data_dir, requested_manager.as_deref())
+                .map_err(|error| {
+                    CliError::retryable(
+                        "snapshot_access.busy",
+                        format!(
+                            "cannot prove that Snapshot Access has no active lease: {}",
+                            error.message
+                        ),
+                    )
+                })?;
         if leases > 0 {
             return Err(CliError::retryable(
                 "snapshot_access.busy",
@@ -1076,6 +1130,51 @@ mod tests {
         assert!(manifest_matches_embedded_access_app(
             Some(&manifest),
             current
+        ));
+    }
+
+    #[test]
+    fn signed_helper_registration_is_not_current_for_ad_hoc_launchctl_backend() {
+        let current = Path::new(
+            "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+        );
+        let manifest = json!({
+            "managedBy": "smappservice",
+            "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
+            "appPath": current,
+            "migrationState": "ready",
+        });
+
+        assert!(registration_manager_matches(Some(&manifest), current, None));
+        assert!(!registration_manager_matches(
+            Some(&manifest),
+            current,
+            Some("launchctl-embedded")
+        ));
+    }
+
+    #[test]
+    fn unreachable_signed_registration_is_recoverable_only_when_its_job_is_absent() {
+        let manifest = json!({"managedBy": "smappservice"});
+        let unavailable = CliError::retryable("snapshot_access.unavailable", "Connection refused");
+
+        assert!(can_recover_unreachable_signed_registration(
+            Some(&manifest),
+            Some("launchctl-embedded"),
+            false,
+            &unavailable
+        ));
+        assert!(!can_recover_unreachable_signed_registration(
+            Some(&manifest),
+            Some("launchctl-embedded"),
+            true,
+            &unavailable
+        ));
+        assert!(!can_recover_unreachable_signed_registration(
+            Some(&manifest),
+            Some("smappservice"),
+            false,
+            &unavailable
         ));
     }
 

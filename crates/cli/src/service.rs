@@ -390,10 +390,11 @@ fn install_inner(
     let plist_text = plist_contents(&new_manifest, &active_version_dir.join("televybackupd"));
     atomic_write(&plist, plist_text.as_bytes())?;
     let domain = gui_domain();
+    let service = format!("{domain}/{SERVICE_LABEL}");
     let _ = launchctl(&["bootout", &domain, SERVICE_LABEL]);
-    if let Err(error) = launchctl(&["bootstrap", &domain, &plist.to_string_lossy()]) {
-        if let Some(old_bytes) = old_plist {
-            let _ = atomic_write(&plist, &old_bytes);
+    let rollback = |error: CliError| -> Result<ServiceManifest, CliError> {
+        if let Some(old_bytes) = old_plist.as_ref() {
+            let _ = atomic_write(&plist, old_bytes);
             let _ = launchctl(&["bootstrap", &domain, &plist.to_string_lossy()]);
         } else {
             let _ = fs::remove_file(&plist);
@@ -402,7 +403,15 @@ fn install_inner(
         if rollback_dir.exists() {
             let _ = fs::rename(&rollback_dir, &active_version_dir);
         }
-        return Err(error.with_details(serde_json::json!({"rolledBack": true})));
+        Err(error.with_details(serde_json::json!({"rolledBack": true})))
+    };
+    // A previous `daemon stop` deliberately disables the LaunchAgent. Re-enable it before
+    // bootstrap so launchd does not reject the replacement with the opaque error 5/119.
+    if let Err(error) = launchctl(&["enable", &service]) {
+        return rollback(error);
+    }
+    if let Err(error) = launchctl(&["bootstrap", &domain, &plist.to_string_lossy()]) {
+        return rollback(error);
     }
     atomic_write(
         &manifest_path(config_dir),
@@ -594,9 +603,13 @@ mod tests {
         fs::write(
             &launchctl,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  print) test -f '{}' ;;\n  bootstrap) touch '{}' ;;\n  enable|kickstart) exit 0 ;;\n  *) exit 0 ;;\nesac\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1\" in\n  print) test -f '{}' ;;\n  bootout) rm -f '{}' '{}' ;;\n  enable) touch '{}' ;;\n  bootstrap) test -f '{}' && touch '{}' ;;\n  kickstart) exit 0 ;;\n  *) exit 0 ;;\nesac\n",
                 log.display(),
                 loaded.display(),
+                loaded.display(),
+                temp.path().join("enabled").display(),
+                temp.path().join("enabled").display(),
+                temp.path().join("enabled").display(),
                 loaded.display(),
             ),
         )
@@ -643,12 +656,13 @@ mod tests {
         );
         let calls = fs::read_to_string(log).unwrap();
         let calls = calls.lines().collect::<Vec<_>>();
-        assert_eq!(calls.len(), 5);
+        assert_eq!(calls.len(), 6);
         assert_eq!(calls[0].split_whitespace().next(), Some("bootout"));
-        assert_eq!(calls[1].split_whitespace().next(), Some("bootstrap"));
-        assert_eq!(calls[2].split_whitespace().next(), Some("enable"));
-        assert_eq!(calls[3].split_whitespace().next(), Some("print"));
-        assert_eq!(calls[4].split_whitespace().next(), Some("kickstart"));
+        assert_eq!(calls[1].split_whitespace().next(), Some("enable"));
+        assert_eq!(calls[2].split_whitespace().next(), Some("bootstrap"));
+        assert_eq!(calls[3].split_whitespace().next(), Some("enable"));
+        assert_eq!(calls[4].split_whitespace().next(), Some("print"));
+        assert_eq!(calls[5].split_whitespace().next(), Some("kickstart"));
 
         unsafe {
             std::env::remove_var("TELEVYBACKUP_SERVICE_ROOT");

@@ -69,6 +69,16 @@ if ! printf '%s\n' "$daemon_start_source" | search_stdin_quiet 'startProductMana
   echo "ensureDaemonRunning must use the CLI for product-managed service recovery" >&2
   exit 1
 fi
+if printf '%s\n' "$daemon_start_source" | search_stdin 'requiresSnapshotAccessRegistrationBarrier'; then
+  echo "Snapshot Access registration failure must not block daemon startup" >&2
+  exit 1
+fi
+
+status_stream_source="$(sed -n '/func ensureStatusStreamRunning()/,/private func stopStatusPollIfNeeded/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if printf '%s\n' "$status_stream_source" | search_stdin 'requiresSnapshotAccessRegistrationBarrier'; then
+  echo "Snapshot Access registration failure must not block status streaming" >&2
+  exit 1
+fi
 
 bin_rebind="$out_dir/import-bundle-rebind-logic-tests"
 "$swiftc" \
