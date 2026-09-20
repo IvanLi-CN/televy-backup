@@ -1667,6 +1667,13 @@ final class AppModel {
         } else {
             env.removeValue(forKey: "TELEVYBACKUP_DISABLE_KEYCHAIN")
         }
+        if usesProductionSnapshotAccessConfiguration && isProductionAppVariant {
+            env["TELEVYBACKUP_SNAPSHOT_ACCESS_MANAGER"] = shouldUseEmbeddedSnapshotAccessAgent
+                ? "smappservice"
+                : "launchctl-embedded"
+        } else {
+            env.removeValue(forKey: "TELEVYBACKUP_SNAPSHOT_ACCESS_MANAGER")
+        }
         return env
     }
 
@@ -2082,6 +2089,11 @@ final class AppModel {
                 }
             }
 
+            if state.prepared {
+                DispatchQueue.main.sync {
+                    self.unregisterStaleSnapshotAccessAgentRegistration()
+                }
+            }
             self.registerEmbeddedSnapshotAccessAgent { success, error in
                 guard success else {
                     guard let migrationId = state.migrationId,
@@ -2142,6 +2154,16 @@ final class AppModel {
                     }
                 }
             }
+        }
+    }
+
+    private func unregisterStaleSnapshotAccessAgentRegistration() {
+        let agent = SMAppService.agent(plistName: "com.ivan.televybackup.snapshot-access.plist")
+        do {
+            try agent.unregister()
+            appendLog("INFO: unregistered stale Snapshot Access SMAppService registration")
+        } catch {
+            appendLog("WARN: stale Snapshot Access SMAppService unregister failed: \(error.localizedDescription)")
         }
     }
 
@@ -2453,17 +2475,6 @@ final class AppModel {
     }
 
     func ensureStatusStreamRunning() {
-        if requiresSnapshotAccessRegistrationBarrier && !snapshotAccessRegistrationReady {
-            ensureSnapshotAccessRegistration { [weak self] success, error in
-                guard let self else { return }
-                guard success else {
-                    if let error { self.reportSnapshotAccessRegistrationFailure(error) }
-                    return
-                }
-                self.ensureStatusStreamRunning()
-            }
-            return
-        }
         DispatchQueue.main.async {
             self.statusStreamReconnectWork?.cancel()
             self.statusStreamReconnectWork = nil
@@ -2577,18 +2588,6 @@ final class AppModel {
 
     @discardableResult
     func ensureDaemonRunning() -> Bool {
-        if requiresSnapshotAccessRegistrationBarrier && !snapshotAccessRegistrationReady {
-            ensureSnapshotAccessRegistration { [weak self] success, error in
-                guard let self else { return }
-                guard success else {
-                    if let error { self.reportSnapshotAccessRegistrationFailure(error) }
-                    return
-                }
-                self.lastDaemonStartAttemptAt = nil
-                _ = self.ensureDaemonRunning()
-            }
-            return false
-        }
         let now = Date()
         if let last = lastDaemonStartAttemptAt, now.timeIntervalSince(last) < 3 {
             return waitForDaemonIpcReady(timeoutSeconds: 2.0)
@@ -6484,10 +6483,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let error {
                         ModelStore.shared.reportSnapshotAccessRegistrationFailure(error)
                     }
-                    return
                 }
-                // The migration must quiesce the legacy helper before a new daemon can acquire
-                // a lease; starting both concurrently would make the lease check racy.
+                // Snapshot Access is independent from daemon readiness. Start the daemon even
+                // when helper registration needs user approval or a later retry.
                 ModelStore.shared.ensureDaemonRunning()
                 ModelStore.shared.recoverSnapshotBrowseSessionsIfNeeded()
                 ModelStore.shared.ensureStatusStreamRunning()
