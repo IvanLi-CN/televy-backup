@@ -290,6 +290,14 @@ final class AppModel {
     private let browseMountLock = NSLock()
     private let guiOwnedProcessLock = NSLock()
     private var guiOwnedProcesses: [ObjectIdentifier: Process] = [:]
+#if TELEVYBACKUP_TESTING
+    var testingUsesProductionSnapshotAccessConfiguration: Bool?
+    var testingIsProductionAppVariant: Bool?
+
+    func testingTelevybackupToolEnv() -> [String: String] {
+        televybackupToolEnv()
+    }
+#endif
     var menuQuickActionFailureHandler: ((String) -> Void)? = nil
     var persistentWindowPresentationHandler: ((NSWindow, String) -> Void)? = nil
 
@@ -1321,13 +1329,23 @@ final class AppModel {
     }
 
     private var usesProductionSnapshotAccessConfiguration: Bool {
+#if TELEVYBACKUP_TESTING
+        if let testingUsesProductionSnapshotAccessConfiguration {
+            return testingUsesProductionSnapshotAccessConfiguration
+        }
+#endif
         guard !isDevAppVariant(), !effectiveDisableKeychain() else { return false }
         return effectiveConfigDirURL().standardizedFileURL == defaultConfigDir().standardizedFileURL
             && effectiveDataDirURL().standardizedFileURL == defaultDataDir().standardizedFileURL
     }
 
     private var isProductionAppVariant: Bool {
-        Bundle.main.bundleIdentifier == "com.ivan.televybackup"
+#if TELEVYBACKUP_TESTING
+        if let testingIsProductionAppVariant {
+            return testingIsProductionAppVariant
+        }
+#endif
+        return Bundle.main.bundleIdentifier == "com.ivan.televybackup"
     }
 
     private var shouldUseEmbeddedSnapshotAccessAgent: Bool {
@@ -1343,7 +1361,8 @@ final class AppModel {
         let result = runCommandCapture(
             exe: "/usr/bin/codesign",
             args: ["-dv", "--verbose=4", Bundle.main.bundleURL.path],
-            timeoutSeconds: 3
+            timeoutSeconds: 3,
+            applyProductEnvironment: false
         )
         let output = result.stdout + result.stderr
         return output.contains("Signature=adhoc") || !output.contains("Authority=")
@@ -4225,12 +4244,18 @@ final class AppModel {
         args: [String],
         stdin: String? = nil,
         timeoutSeconds: Double? = nil,
-        env: [String: String] = [:]
+        env: [String: String] = [:],
+        applyProductEnvironment: Bool = true
     ) -> (stdout: String, stderr: String, status: Int32, reason: Process.TerminationReason) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: exe)
         task.arguments = args
-        task.environment = televybackupToolEnv().merging(env) { _, rhs in rhs }
+        let baseEnvironment = CommandEnvironmentSelection.resolve(
+            applyProductEnvironment: applyProductEnvironment,
+            processEnvironment: ProcessInfo.processInfo.environment,
+            productEnvironment: { televybackupToolEnv() }
+        )
+        task.environment = baseEnvironment.merging(env) { _, rhs in rhs }
 
         let out = Pipe()
         let err = Pipe()

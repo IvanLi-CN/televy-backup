@@ -80,6 +80,14 @@ if printf '%s\n' "$status_stream_source" | search_stdin 'requiresSnapshotAccessR
   exit 1
 fi
 
+# Ad-hoc signature detection must not use the command runner's product environment builder,
+# because that builder asks for the signature classification and would recurse during launch.
+signature_probe_source="$(sed -n '/private var isAdHocSignedMainApp/,/private func embeddedSnapshotAccessAppPath/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if ! printf '%s\n' "$signature_probe_source" | search_stdin_quiet 'applyProductEnvironment: false'; then
+  echo "Ad-hoc signature detection must run without rebuilding the product command environment" >&2
+  exit 1
+fi
+
 bin_rebind="$out_dir/import-bundle-rebind-logic-tests"
 "$swiftc" \
   -sdk "$sdk_path" \
@@ -109,6 +117,15 @@ bin_status_store="$out_dir/status-store-tests"
   "$root_dir/macos/TelevyBackupApp/StatusStore.swift" \
   "$root_dir/macos/TelevyBackupAppTests/StatusStoreTests.swift"
 "$bin_status_store"
+
+bin_command_environment="$out_dir/command-environment-selection-tests"
+"$swiftc" \
+  -sdk "$sdk_path" \
+  -O \
+  -o "$bin_command_environment" \
+  "$root_dir/macos/TelevyBackupApp/CommandEnvironmentSelection.swift" \
+  "$root_dir/macos/TelevyBackupAppTests/CommandEnvironmentSelectionTests.swift"
+"$bin_command_environment"
 
 bin_target_presentation="$out_dir/target-presentation-tests"
 "$swiftc" \
@@ -234,5 +251,6 @@ bin_diagnostics="$out_dir/diagnostics-settings-tests"
   -framework AppKit \
   -o "$bin_diagnostics" \
   "$root_dir/macos/TelevyBackupApp"/*.swift \
-  "$root_dir/macos/TelevyBackupAppTests/DiagnosticsSettingsTests.swift"
+  "$root_dir/macos/TelevyBackupAppTests/DiagnosticsSettingsTests.swift" \
+  "$root_dir/macos/TelevyBackupAppTests/ProductionCommandEnvironmentTests.swift"
 "$bin_diagnostics"

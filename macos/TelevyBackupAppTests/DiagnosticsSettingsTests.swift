@@ -91,5 +91,6 @@ private func runDiagnosticsSettingsTests() {
 enum DiagnosticsSettingsTestsMain {
     static func main() {
         runDiagnosticsSettingsTests()
+        runProductionCommandEnvironmentTests()
     }
 }
