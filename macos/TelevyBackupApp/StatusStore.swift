@@ -27,6 +27,7 @@ final class StatusStore: ObservableObject {
         receivedAt: nil,
         connectionPhase: .disconnected
     )
+    @Published private(set) var presentationRevision: UInt64 = 0
 
     private(set) var latestSnapshot: StatusSnapshot?
     private(set) var latestReceivedAt: Date?
@@ -88,6 +89,8 @@ final class StatusStore: ObservableObject {
             let shouldPublish = semanticChange || state.snapshot == nil || state.connectionPhase != .fresh
             if shouldPublish {
                 publish(snapshot, receivedAt: receivedAt, fingerprint: fingerprint, phase: .fresh)
+            } else {
+                refreshPresentation()
             }
             return shouldPublish
         }
@@ -96,6 +99,8 @@ final class StatusStore: ObservableObject {
             let shouldPublish = state.connectionPhase != .fresh
             if shouldPublish {
                 publish(snapshot, receivedAt: receivedAt, fingerprint: fingerprint, phase: .fresh)
+            } else {
+                refreshPresentation()
             }
             return shouldPublish
         }
@@ -153,6 +158,11 @@ final class StatusStore: ObservableObject {
         lastPublishedAt = now()
         state = ViewState(snapshot: snapshot, receivedAt: receivedAt, connectionPhase: phase)
         onPublish?(snapshot)
+    }
+
+    // Equivalent heartbeats still carry a new generatedAt value for freshness UI.
+    private func refreshPresentation() {
+        presentationRevision &+= 1
     }
 
     private static func semanticFingerprint(_ snapshot: StatusSnapshot) -> Data {

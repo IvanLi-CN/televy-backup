@@ -12,7 +12,7 @@ struct StatusStoreTests {
 
     @MainActor
     static func main() async {
-        await idleHeartbeatDoesNotPublish()
+        await idleHeartbeatRefreshesPresentationWithoutSemanticPublish()
         await connectionTransitionsPublishOnce()
         await runningUpdatesAreCoalescedAndFinalIsPreserved()
         await ingressSeesShortLivedActivityBeforeFinalPublish()
@@ -22,13 +22,18 @@ struct StatusStoreTests {
     }
 
     @MainActor
-    private static func idleHeartbeatDoesNotPublish() async {
+    private static func idleHeartbeatRefreshesPresentationWithoutSemanticPublish() async {
         let store = StatusStore(publishInterval: 0.05)
-        var publishes = 0
-        let token = store.objectWillChange.sink { publishes += 1 }
+        var viewRefreshes = 0
+        var semanticPublishes = 0
+        let token = store.objectWillChange.sink { viewRefreshes += 1 }
+        store.onPublish = { _ in semanticPublishes += 1 }
         store.ingest(snapshot(generatedAt: 1_000, state: "idle"), receivedAt: Date(timeIntervalSince1970: 1))
         store.ingest(snapshot(generatedAt: 2_000, state: "idle"), receivedAt: Date(timeIntervalSince1970: 2))
-        expect(publishes == 1, "equivalent idle heartbeat published \(publishes) times")
+        expect(viewRefreshes == 2, "equivalent idle heartbeat did not refresh the presentation")
+        expect(semanticPublishes == 1, "equivalent idle heartbeat repeated semantic publish \(semanticPublishes) times")
+        expect(store.presentationRevision == 1, "equivalent idle heartbeat did not advance presentation revision")
+        expect(store.snapshot?.generatedAt == 2_000, "presentation did not expose the latest idle heartbeat timestamp")
         expect(store.latestReceivedAt == Date(timeIntervalSince1970: 2), "latest idle heartbeat was not recorded")
         _ = token
     }
