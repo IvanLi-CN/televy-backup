@@ -9,7 +9,7 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 | Component | Location | Contract |
 | --- | --- | --- |
 | Build metadata | `crates/*/build.rs`, binary entrypoints | REQ-MRD-003 |
-| macOS package assembly | `scripts/macos/package-release.sh`, `assemble-universal.sh`, shared dmgbuild builder, `verify-dmg-layout.sh`, `verify-component-identity.sh`, `verify-release-assets.sh` | REQ-MRD-001, 002, 004, 010, 011 |
+| macOS package assembly | `scripts/macos/package-release.sh`, `assemble-universal.sh`, shared dmgbuild builder, `verify-dmg-layout.sh`, `verify-component-identity.sh`, `verify-release-assets.sh`, `snapshot-access-launchagent-integration-test.sh` | REQ-MRD-001, 002, 004, 010, 011 |
 | Product brand bundle | `assets/brand/`, `scripts/macos/generate-app-icon-assets.sh`, `scripts/macos/generate-app-icon-previews.sh`, `scripts/macos/build-app.sh` | REQ-MRD-009 |
 | Managed service | `crates/cli/src/service.rs` | REQ-MRD-005, 006 |
 | Snapshot Access and mount services | `crates/snapshot-helper/`, `crates/cli/src/snapshot_service.rs`, `crates/cli/src/snapshot_mount_service.rs` | REQ-MRD-010 |
@@ -30,6 +30,8 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
   canonicalization of the `codesign` `# ` marker, non-quoted whitespace, commutative CDHash
   alternatives, and native-runner projection of the validated CDHash alternative segment),
   legacy artifact-digest compatibility, and RC artifact reuse inspection
+- isolated unique-label `launchctl bootstrap` registration using the built bundle's LaunchAgent
+  contract without starting the Snapshot Access helper
 - helper source resolution independent of the product RC ordinal; published Release manifest
   discovery and explicit no-source bootstrap mode are covered by resolver fixtures
 - historical product checkouts use the trusted main policy SHA for Snapshot Access identity

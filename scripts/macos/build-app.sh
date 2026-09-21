@@ -25,7 +25,7 @@ esac
 
 executable_name="TelevyBackup"
 src_dir="$root_dir/macos/TelevyBackupApp"
-out_root="$root_dir/target/macos-app"
+out_root="${TELEVYBACKUP_APP_OUT_ROOT:-$root_dir/target/macos-app}"
 source_commit="${TELEVYBACKUP_SOURCE_COMMIT:-$(git rev-parse HEAD)}"
 build_mode="${TELEVYBACKUP_BUILD_MODE:-development}"
 case "$build_mode" in
@@ -273,7 +273,7 @@ cat > "$access_agent_plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.ivan.televybackup.snapshot-access</string>
-  <key>BundleProgram</key><string>Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access</string>
+  <key>Program</key><string>/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access</string>
   <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 </dict></plist>
 PLIST

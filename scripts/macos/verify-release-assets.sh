@@ -450,13 +450,17 @@ require(
 PY
   launch_agent="$app/Contents/Library/LaunchAgents/com.ivan.televybackup.snapshot-access.plist"
   [[ -s "$launch_agent" ]] || { echo "embedded Snapshot Access LaunchAgent missing" >&2; exit 1; }
-  bundle_program="$(/usr/bin/plutil -extract BundleProgram raw -o - "$launch_agent")"
-  [[ "$bundle_program" == "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access" ]] || {
-    echo "Snapshot Access LaunchAgent does not use the fixed BundleProgram" >&2
+  program="$(/usr/bin/plutil -extract Program raw -o - "$launch_agent")"
+  [[ "$program" == "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access" ]] || {
+    echo "Snapshot Access LaunchAgent does not use the canonical installed app Program path" >&2
+    exit 1
+  }
+  ! /usr/bin/plutil -extract BundleProgram raw -o - "$launch_agent" >/dev/null 2>&1 || {
+    echo "Snapshot Access LaunchAgent must not use BundleProgram with direct launchctl bootstrap" >&2
     exit 1
   }
   ! /usr/bin/plutil -extract ProgramArguments xml1 -o - "$launch_agent" >/dev/null 2>&1 || {
-    echo "Snapshot Access LaunchAgent must not contain an absolute ProgramArguments path" >&2
+    echo "Snapshot Access LaunchAgent must not contain ProgramArguments" >&2
     exit 1
   }
   ! /usr/bin/grep -R -a -F "target/macos-app" "$app/Contents" >/dev/null || {

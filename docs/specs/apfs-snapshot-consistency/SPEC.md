@@ -83,10 +83,12 @@ lease.
 
 ### REQ-APFS-006: User installation and observability
 
-The main app MUST register the embedded agent with the platform launch service and its plist MUST
-use a bundle-relative `BundleProgram`. Official ad-hoc releases MUST use `launchctl bootstrap` on
-the plist embedded in the product bundle; `SMAppService.agent` MAY be used only by separately
-signed builds. The CLI MUST expose only read-only `snapshot-access status` plus
+The main app MUST register the embedded agent with the platform launch service. The direct-launchctl
+plist in an official ad-hoc release MUST use the fixed canonical `Program` path inside
+`/Applications/TelevyBackup.app`; it MUST NOT accept a workspace or user-supplied helper path.
+Official ad-hoc releases MUST use `launchctl bootstrap` on that plist from the installed product
+bundle. `BundleProgram` MAY be used only by a separately signed `SMAppService.agent` build. The CLI
+MUST expose only read-only `snapshot-access status` plus
 internal migration operations; it MUST reject arbitrary external app paths and MUST NOT create a
 new user LaunchAgent plist. Settings MUST show the exact embedded Access app and mount helper paths,
 component versions, migration state, service reachability, active leases, pending cleanup, and a
@@ -116,9 +118,10 @@ valid and default to live mode until a volume is verified and enabled.
 ### VER-APFS-001: Contract and package
 
 Covers: REQ-APFS-001, REQ-APFS-002.
-Rust/Swift tests, the spec contract checker, and package asset verification prove that target IDs,
-volume UUID preferences, additive status fields, the separate app bundle, the minimal mount-helper
-artifact, and user/system service paths are present without a privileged backup reader.
+Rust/Swift tests, the spec contract checker, package asset verification, and an isolated
+unique-label `launchctl bootstrap` fixture prove that target IDs, volume UUID preferences,
+additive status fields, the separate app bundle, the minimal mount-helper artifact, and
+user/system service paths are present without a privileged backup reader.
 
 ### VER-APFS-002: Access lifecycle and boundary
 
@@ -156,7 +159,7 @@ and version. The result is a manual release artifact; tests MUST NOT modify TCC 
 - [0008-apfs-snapshot-access-app](../../adr/0008-apfs-snapshot-access-app.md)
 - [0009-apfs-snapshot-mount-helper](../../adr/0009-apfs-snapshot-mount-helper.md)
 - [0010-identity-stable-single-product-release](../../adr/0010-identity-stable-single-product-release.md)
-- [0011-ad-hoc-embedded-agent-registration](../../adr/0011-ad-hoc-embedded-agent-registration.md)
+- [0016-direct-launchctl-snapshot-access-registration](../../adr/0016-direct-launchctl-snapshot-access-registration.md)
 
 ## Visual Evidence
 
