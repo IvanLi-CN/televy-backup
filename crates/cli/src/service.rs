@@ -239,7 +239,9 @@ pub fn start_managed_service(config_dir: &Path, data_dir: &Path) -> Result<(), C
         let plist = plist_path();
         launchctl(&["bootstrap", &domain, &plist.to_string_lossy()])?;
     }
-    launchctl(&["kickstart", "-k", &service])
+    // A service that has just been bootstrapped may still be acquiring its data-dir lock.
+    // Start it if needed, but do not force-kill a daemon that is still initializing.
+    launchctl(&["kickstart", &service])
 }
 
 pub fn stop_service() -> Result<(), CliError> {
@@ -632,6 +634,11 @@ mod tests {
         assert_eq!(calls[1].split_whitespace().next(), Some("print"));
         assert_eq!(calls[2].split_whitespace().next(), Some("bootstrap"));
         assert_eq!(calls[3].split_whitespace().next(), Some("kickstart"));
+        assert!(
+            !calls[3].split_whitespace().any(|argument| argument == "-k"),
+            "managed-service recovery must not force-kill an initializing daemon: {}",
+            calls[3]
+        );
 
         fs::remove_file(&loaded).unwrap();
         fs::write(&log, "").unwrap();
@@ -663,6 +670,11 @@ mod tests {
         assert_eq!(calls[3].split_whitespace().next(), Some("enable"));
         assert_eq!(calls[4].split_whitespace().next(), Some("print"));
         assert_eq!(calls[5].split_whitespace().next(), Some("kickstart"));
+        assert!(
+            !calls[5].split_whitespace().any(|argument| argument == "-k"),
+            "managed-service recovery must not force-kill an initializing daemon: {}",
+            calls[5]
+        );
 
         unsafe {
             std::env::remove_var("TELEVYBACKUP_SERVICE_ROOT");

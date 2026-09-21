@@ -2570,6 +2570,10 @@ final class AppModel {
                 out.fileHandleForReading.readabilityHandler = nil
                 err.fileHandleForReading.readabilityHandler = nil
                 self.statusStreamTask = nil
+                // A managed daemon can become IPC-ready after the initial status-stream process
+                // has already exited. Keep consuming its status.json while the stream reconnects
+                // so the popover cannot remain on "Waiting for status..." indefinitely.
+                self.ensureStatusPollRunning()
                 self.onStatusStreamEnded?()
                 self.scheduleStatusStreamReconnect()
             }
