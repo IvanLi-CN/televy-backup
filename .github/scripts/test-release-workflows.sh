@@ -120,8 +120,12 @@ assert_contains "completion job timeout covers native CI" "$completion_text" "ti
 assert_contains "completion source-check wait budget" "$completion_text" 'deadline=$((SECONDS + 1800))'
 assert_not_contains "completion preemptive cancellation" "$completion_text" "cancel-in-progress: true"
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
-[[ "$(grep -Fc 'timeout-minutes: 15' <<<"$release_text")" -eq 2 ]] || {
-  printf 'release native package jobs must have a 15-minute timeout\n' >&2
+[[ "$(grep -Fc 'timeout-minutes: 15' <<<"$release_text")" -eq 1 ]] || {
+  printf 'release arm64 package job must have a 15-minute timeout\n' >&2
+  exit 1
+}
+grep -F 'timeout-minutes: 30' <<<"$release_text" >/dev/null || {
+  printf 'release x86_64 package job must have a 30-minute timeout\n' >&2
   exit 1
 }
 [[ "$(grep -Fc 'uses: actions/cache@' <<<"$release_text")" -ge 2 ]] || {
