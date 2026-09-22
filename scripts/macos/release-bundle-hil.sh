@@ -63,6 +63,19 @@ stream_file="$test_root/status-stream.jsonl"
 gui_pid=""
 stream_pid=""
 
+stop_isolated_helper() {
+  local pid
+  for pid in $(/usr/bin/pgrep -f -x "$helper" || true); do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+  for _ in {1..20}; do
+    if ! /usr/bin/pgrep -f -x "$helper" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.05
+  done
+}
+
 cleanup() {
   [[ -n "$stream_pid" ]] && kill "$stream_pid" >/dev/null 2>&1 || true
   if [[ -n "$gui_pid" ]]; then
@@ -70,6 +83,7 @@ cleanup() {
     kill "$gui_pid" >/dev/null 2>&1 || true
     wait "$gui_pid" >/dev/null 2>&1 || true
   fi
+  stop_isolated_helper
   /bin/launchctl bootout "$fixture_service" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
