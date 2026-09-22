@@ -127,6 +127,10 @@ if [[ "${1:-}" == api ]]; then
     exit 0
   fi
   if [[ "$method" == POST && "$endpoint" == */git/refs ]]; then
+    if [[ "${GH_FIXTURE_REF_POST_FORBIDDEN:-0}" == 1 ]]; then
+      echo "Resource not accessible by integration (HTTP 403)" >&2
+      exit 1
+    fi
     tag="${ref#refs/tags/}"
     git -C "$repo_dir" push -q origin "refs/tags/$tag:refs/tags/$tag"
     printf '{}\n'
@@ -232,6 +236,25 @@ run_publish_fixture() {
 
 run_publish_fixture "1.2.3" prod --latest=true
 run_publish_fixture "1.2.4-rc.1" rc --prerelease
+
+# A historical product commit can make GitHub's REST ref endpoint reject the
+# default Actions token even though the same token may push an annotated tag.
+# The recovery path must use that transport fallback and retain bot provenance.
+push_fallback_tag="v1.2.4-rc.2"
+(
+  cd "$repo_dir"
+  export PATH="$bin_dir:$PATH"
+  export GH_FIXTURE_REPO="$repo_dir" GH_FIXTURE_STATE="$tmp_dir/state"
+  export GITHUB_REPOSITORY=fixture/repo GITHUB_API_URL=https://fixture.invalid GH_TOKEN=fixture
+  export GH_FIXTURE_REF_POST_FORBIDDEN=1
+  export PRODUCT_TAG="$push_fallback_tag" PRODUCT_VERSION=1.2.4-rc.2 PRODUCT_CHANNEL=rc
+  export RELEASE_SHA="$release_sha" RELEASE_STATE=missing BOUND_IDENTITY=present
+  bash "$tmp_dir/tag.sh"
+  git ls-remote --exit-code --refs origin "refs/tags/$push_fallback_tag" >/dev/null
+  [[ "$(git rev-parse "refs/tags/$push_fallback_tag^{commit}")" == "$release_sha" ]]
+  git cat-file -p "refs/tags/$push_fallback_tag" | grep -F \
+    'tagger github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>' >/dev/null
+)
 
 published_tag="v1.2.3"
 rm -f "$tmp_dir/state/$published_tag.created"
