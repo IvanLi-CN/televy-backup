@@ -21,7 +21,8 @@ REF_RE = re.compile(r"^refs/tags/[A-Za-z0-9._/-]+$")
 VERSION_RE = re.compile(r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?$")
 CHANNELS = {"prod", "beta", "rc", "dev"}
 IDENTITY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+IDENTITY_METADATA_CONTENT = "televy-backup release identity\n"
+IDENTITY_METADATA_TREE_SHA = "b1612a1f4eed800eeef62ae225399baf8d0ff6fb"
 
 
 class ReservationError(RuntimeError):
@@ -313,10 +314,33 @@ class GitHubRefClient:
         return normalize_sha(payload["sha"], "reservation commit")
 
     def create_tree(self) -> str:
-        status, payload = self.request_json("POST", f"/repos/{self.repository}/git/trees", {"tree": []})
+        blob_status, blob_payload = self.request_json(
+            "POST",
+            f"/repos/{self.repository}/git/blobs",
+            {"content": IDENTITY_METADATA_CONTENT, "encoding": "utf-8"},
+        )
+        if blob_status not in {200, 201} or not isinstance(blob_payload.get("sha"), str):
+            raise ReservationError("GitHub did not return an identity metadata blob")
+        status, payload = self.request_json(
+            "POST",
+            f"/repos/{self.repository}/git/trees",
+            {
+                "tree": [
+                    {
+                        "path": ".televybackup-release-identity",
+                        "mode": "100644",
+                        "type": "blob",
+                        "sha": normalize_sha(blob_payload["sha"], "identity metadata blob"),
+                    }
+                ]
+            },
+        )
         if status not in {200, 201} or not isinstance(payload.get("sha"), str):
             raise ReservationError("GitHub did not return an identity metadata tree")
-        return normalize_sha(payload["sha"], "identity metadata tree")
+        tree = normalize_sha(payload["sha"], "identity metadata tree")
+        if tree != IDENTITY_METADATA_TREE_SHA:
+            raise ReservationError("GitHub returned an unexpected identity metadata tree")
+        return tree
 
     def create_annotated_tag(self, ref: str, sha: str) -> str:
         tag = ref.removeprefix("refs/tags/")
@@ -417,7 +441,7 @@ def verify_github_decision(
     info = client.commit_info(target)
     reservation_info = client.commit_info(str(reservation["target"]))
     parents = [parent.get("sha") for parent in info.get("parents", [])]
-    allowed_trees = {reservation_info.get("tree", {}).get("sha"), EMPTY_TREE_SHA}
+    allowed_trees = {reservation_info.get("tree", {}).get("sha"), IDENTITY_METADATA_TREE_SHA}
     if parents != [reservation_info.get("sha")] or info.get("tree", {}).get("sha") not in allowed_trees:
         raise ReservationError("remote decision provenance does not match the reservation")
     actual = trailers_from_message(str(info.get("message", "")))
@@ -922,7 +946,7 @@ def create_github_receipt(
         info = client.commit_info(existing)
         merge_info = client.commit_info(merge)
         parents = [parent.get("sha") for parent in info.get("parents", [])]
-        allowed_trees = {merge_info.get("tree", {}).get("sha"), EMPTY_TREE_SHA}
+        allowed_trees = {merge_info.get("tree", {}).get("sha"), IDENTITY_METADATA_TREE_SHA}
         if parents != [merge] or info.get("tree", {}).get("sha") not in allowed_trees:
             raise ReservationError("existing remote receipt provenance does not match its merge SHA")
         actual = trailers_from_message(str(info.get("message", "")))
@@ -1034,7 +1058,7 @@ def verify_github_receipt(
     info = client.commit_info(target)
     merge_info = client.commit_info(merge)
     parents = [parent.get("sha") for parent in info.get("parents", [])]
-    allowed_trees = {merge_info.get("tree", {}).get("sha"), EMPTY_TREE_SHA}
+    allowed_trees = {merge_info.get("tree", {}).get("sha"), IDENTITY_METADATA_TREE_SHA}
     if parents != [merge] or info.get("tree", {}).get("sha") not in allowed_trees:
         raise ReservationError("remote receipt provenance does not match its merge SHA")
     actual = trailers_from_message(str(info.get("message", "")))

@@ -47,7 +47,7 @@ class FakeGitHubRefClient:
         return sha
 
     def create_tree(self):
-        return module.EMPTY_TREE_SHA
+        return module.IDENTITY_METADATA_TREE_SHA
 
     def create_ref(self, ref, sha):
         if ref in self.refs:
