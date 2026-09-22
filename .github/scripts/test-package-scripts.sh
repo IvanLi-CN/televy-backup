@@ -13,6 +13,7 @@ bash -n \
   "$root_dir/scripts/macos/extract-snapshot-access-helper.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh" \
   "$root_dir/scripts/macos/snapshot-access-launchagent-integration-test.sh" \
+  "$root_dir/scripts/macos/release-bundle-hil.sh" \
   "$root_dir/scripts/macos/finder-dmg-acceptance.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
   "$root_dir/scripts/macos/verify-dmg-layout.sh" \
