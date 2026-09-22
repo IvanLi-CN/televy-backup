@@ -1076,12 +1076,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_registration_uses_relative_bundle_program() {
+    fn direct_launchctl_registration_uses_canonical_program_path() {
         let plist = format!(
-            "<key>Label</key><string>{ACCESS_LABEL}</string><key>BundleProgram</key><string>{ACCESS_BUNDLE_RELATIVE_PATH}/Contents/MacOS/televybackup-snapshot-access</string>"
+            "<key>Label</key><string>{ACCESS_LABEL}</string><key>Program</key><string>{INSTALLED_PRODUCTION_APP_PATH}/{ACCESS_BUNDLE_RELATIVE_PATH}/Contents/MacOS/televybackup-snapshot-access</string>"
         );
-        assert!(plist.contains("BundleProgram"));
+        assert!(plist.contains("<key>Program</key>"));
+        assert!(plist.contains(INSTALLED_PRODUCTION_APP_PATH));
         assert!(plist.contains(ACCESS_BUNDLE_RELATIVE_PATH));
+        assert!(!plist.contains("BundleProgram"));
         assert!(!plist.contains("ProgramArguments"));
         assert!(!plist.contains("target/macos-app"));
     }

@@ -226,8 +226,9 @@ operation because backup history and remote metadata are sensitive.
 ## Operational Procedure
 
 1. Build the main app and mount-helper from one source revision; embed Snapshot Access inside the
-   main app and register its bundle-relative LaunchAgent with `launchctl` for the official ad-hoc
-   release path. A separately signed build may use `SMAppService`.
+   main app and register its fixed canonical `/Applications/TelevyBackup.app` `Program` path with
+   `launchctl` for the official ad-hoc release path. A separately signed build may use
+   `SMAppService` and `BundleProgram`.
 2. Let the main app migrate the old external registration transactionally. Install the root helper
    through the explicit administrator transaction; do not run the daemon as root.
 3. Grant FDA only through System Settings to the exact displayed identity or identities required by

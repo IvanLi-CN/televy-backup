@@ -1356,7 +1356,7 @@ final class AppModel {
 
     // Release builds are ad-hoc signed. Under the no-Developer-ID release
     // constraint, the official path cannot depend on SMAppService, so it uses
-    // launchctl with the same bundle-relative LaunchAgent plist.
+    // launchctl with the canonical installed-app LaunchAgent plist.
     private var isAdHocSignedMainApp: Bool {
         let result = runCommandCapture(
             exe: "/usr/bin/codesign",

@@ -12,6 +12,8 @@ bash -n \
   "$root_dir/scripts/macos/build-dmg.sh" \
   "$root_dir/scripts/macos/extract-snapshot-access-helper.sh" \
   "$root_dir/scripts/macos/generate-release-manifest.sh" \
+  "$root_dir/scripts/macos/snapshot-access-launchagent-integration-test.sh" \
+  "$root_dir/scripts/macos/release-bundle-hil.sh" \
   "$root_dir/scripts/macos/finder-dmg-acceptance.sh" \
   "$root_dir/scripts/macos/verify-release-assets.sh" \
   "$root_dir/scripts/macos/verify-dmg-layout.sh" \
@@ -65,6 +67,10 @@ verify_brand_text="$(<"$root_dir/scripts/macos/verify-brand-assets.sh")"
 }
 grep -F 'mkdir -p "$out_root"' <<<"$build_text" >/dev/null || {
   echo "build-app.sh must initialize the output root before validating a reusable bundle" >&2
+  exit 1
+}
+grep -F 'TELEVYBACKUP_APP_OUT_ROOT' <<<"$build_text" >/dev/null || {
+  echo "build-app.sh must support an isolated app output root" >&2
   exit 1
 }
 [[ "$build_text" == *'bundle_id.daemon'* && "$build_text" == *'televybackupd'* ]] || {

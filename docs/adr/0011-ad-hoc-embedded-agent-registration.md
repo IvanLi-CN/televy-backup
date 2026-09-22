@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. This ADR supersedes the `SMAppService.agent` requirement in ADR 0010 and the APFS
-snapshot consistency Spec for the official ad-hoc release path. ADR 0010 remains the authority for
+Superseded by ADR 0016 for the official ad-hoc registration backend. This ADR remains the
+historical record of the original `BundleProgram` decision; ADR 0010 remains the authority for
 single-product packaging and component identity reuse.
 
 ## Decision
