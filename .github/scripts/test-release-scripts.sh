@@ -74,6 +74,8 @@ assert contract["recovery"]["dispatch_bound_repair"] == "append-only-after-same-
 reservation_text = (root / ".github/scripts/release_reservation.py").read_text(encoding="utf-8")
 assert "GIT_CONFIG_KEY_0" in reservation_text
 assert 'self._git("push", "origin", f"{sha}:{ref}")' in reservation_text
+assert "/git/tags" in reservation_text
+assert 'payload.get("object", {}).get("type") != "tag"' in reservation_text
 assert "existing remote ref does not match the requested identity" in reservation_text
 for gate in ("label_gate", "completion"):
     scheduling = contract["required_gate_scheduling"][gate]
