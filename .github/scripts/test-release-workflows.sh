@@ -160,8 +160,18 @@ assert_contains "native helper identity policy invocation" "$release_text" 'bash
 assert_contains "native helper extraction policy SHA" "$release_text" 'git show "${POLICY_SHA}:scripts/macos/extract-snapshot-access-helper.sh"'
 assert_contains "native helper extraction policy invocation" "$release_text" 'bash "${policy_extract_snapshot_access_helper}"'
 assert_contains "release PR merge association" "$release_text" "merge_commit_sha // empty"
+assert_contains "release PR association filters merge" "$release_text" 'row.get("merge_commit_sha") == merge'
 assert_contains "release PR preparation ancestry" "$release_text" 'git merge-base --is-ancestor "${preparation_sha}" "${pull_request_head_sha}"'
+assert_not_contains "release PR association exact preparation head filter" "$release_text" 'row.get("head", {}).get("sha") == preparation'
 assert_not_contains "release PR preparation exact head binding" "$release_text" 'pull_request_head_sha}" = "${preparation_sha}'
+python3 - <<'PY'
+rows = [
+    {"number": 149, "merge_commit_sha": "merge", "head": {"sha": "post-preparation-head"}},
+    {"number": 148, "merge_commit_sha": "other-merge", "head": {"sha": "other-head"}},
+]
+matches = [row.get("number") for row in rows if row.get("merge_commit_sha") == "merge" and row.get("number") is not None]
+assert matches == [149], matches
+PY
 assert_contains "release sequence gate" "$release_text" "verify-release-sequence"
 assert_contains "helper tag provenance gate" "$release_text" "verify-tag-provenance --tag \"\${candidate}\""
 assert_contains "RC tag provenance gate" "$release_text" "verify-tag-provenance --tag \"\${rc_tag}\""

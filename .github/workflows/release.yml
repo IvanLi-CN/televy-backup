@@ -147,7 +147,7 @@ jobs:
           boundary_token="$(printf '%s' "${prepared_json}" | jq -r .boundaryToken)"
           release_type="$(printf '%s' "${prepared_json}" | jq -r .type)"
           covered_merge_sha="$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)"
-          pull_request="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${merge_sha}/pulls?per_page=100" | python3 -c 'import json,sys; merge,preparation=sys.argv[1:]; rows=json.load(sys.stdin); matches=[row.get("number") for row in rows if row.get("merge_commit_sha") == merge and row.get("head", {}).get("sha") == preparation and row.get("number") is not None]; print(matches[0] if len(matches) == 1 else "")' "${merge_sha}" "${preparation_sha}")"
+          pull_request="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${merge_sha}/pulls?per_page=100" | python3 -c 'import json,sys; merge=sys.argv[1]; rows=json.load(sys.stdin); matches=[row.get("number") for row in rows if row.get("merge_commit_sha") == merge and row.get("number") is not None]; print(matches[0] if len(matches) == 1 else "")' "${merge_sha}")"
           test -n "${pull_request}"
           pull_request_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pull_request}")"
           test "$(printf '%s' "${pull_request_json}" | jq -r '.merge_commit_sha // empty')" = "${merge_sha}"
