@@ -21,6 +21,7 @@ REF_RE = re.compile(r"^refs/tags/[A-Za-z0-9._/-]+$")
 VERSION_RE = re.compile(r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?$")
 CHANNELS = {"prod", "beta", "rc", "dev"}
 IDENTITY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 
 class ReservationError(RuntimeError):
@@ -311,6 +312,12 @@ class GitHubRefClient:
             raise ReservationError("GitHub did not return a reservation commit")
         return normalize_sha(payload["sha"], "reservation commit")
 
+    def create_tree(self) -> str:
+        status, payload = self.request_json("POST", f"/repos/{self.repository}/git/trees", {"tree": []})
+        if status not in {200, 201} or not isinstance(payload.get("sha"), str):
+            raise ReservationError("GitHub did not return an identity metadata tree")
+        return normalize_sha(payload["sha"], "identity metadata tree")
+
     def create_annotated_tag(self, ref: str, sha: str) -> str:
         tag = ref.removeprefix("refs/tags/")
         status, payload = self.request_json(
@@ -410,7 +417,8 @@ def verify_github_decision(
     info = client.commit_info(target)
     reservation_info = client.commit_info(str(reservation["target"]))
     parents = [parent.get("sha") for parent in info.get("parents", [])]
-    if parents != [reservation_info.get("sha")] or info.get("tree", {}).get("sha") != reservation_info.get("tree", {}).get("sha"):
+    allowed_trees = {reservation_info.get("tree", {}).get("sha"), EMPTY_TREE_SHA}
+    if parents != [reservation_info.get("sha")] or info.get("tree", {}).get("sha") not in allowed_trees:
         raise ReservationError("remote decision provenance does not match the reservation")
     actual = trailers_from_message(str(info.get("message", "")))
     if any(actual.get(key) != value for key, value in fields.items()):
@@ -429,9 +437,7 @@ def create_github_decision(
     if existing:
         return {"ref": ref, **verify_github_decision(client=client, fields=fields, reservation=reservation)}
     reservation_info = client.commit_info(str(reservation["target"]))
-    tree = reservation_info.get("tree", {}).get("sha")
-    if not isinstance(tree, str):
-        raise ReservationError("reservation tree provenance is unavailable")
+    tree = client.create_tree()
     commit = client.create_commit(tree=tree, parent=str(reservation["target"]), message=decision_message(fields))
     try:
         target = client.create_ref(ref, commit)
@@ -916,16 +922,15 @@ def create_github_receipt(
         info = client.commit_info(existing)
         merge_info = client.commit_info(merge)
         parents = [parent.get("sha") for parent in info.get("parents", [])]
-        if parents != [merge] or info.get("tree", {}).get("sha") != merge_info.get("tree", {}).get("sha"):
+        allowed_trees = {merge_info.get("tree", {}).get("sha"), EMPTY_TREE_SHA}
+        if parents != [merge] or info.get("tree", {}).get("sha") not in allowed_trees:
             raise ReservationError("existing remote receipt provenance does not match its merge SHA")
         actual = trailers_from_message(str(info.get("message", "")))
         if any(actual.get(key) != value for key, value in fields.items()):
             raise ReservationError("existing remote receipt does not match the requested identity")
         return {"ref": ref, "target": existing, **fields}
     merge_info = client.commit_info(merge)
-    tree = merge_info.get("tree", {}).get("sha")
-    if not isinstance(tree, str):
-        raise ReservationError("merge tree provenance is unavailable")
+    tree = client.create_tree()
     commit = client.create_commit(tree=tree, parent=merge, message=receipt_message(fields))
     try:
         target = client.create_ref(ref, commit)
@@ -1029,7 +1034,8 @@ def verify_github_receipt(
     info = client.commit_info(target)
     merge_info = client.commit_info(merge)
     parents = [parent.get("sha") for parent in info.get("parents", [])]
-    if parents != [merge] or info.get("tree", {}).get("sha") != merge_info.get("tree", {}).get("sha"):
+    allowed_trees = {merge_info.get("tree", {}).get("sha"), EMPTY_TREE_SHA}
+    if parents != [merge] or info.get("tree", {}).get("sha") not in allowed_trees:
         raise ReservationError("remote receipt provenance does not match its merge SHA")
     actual = trailers_from_message(str(info.get("message", "")))
     if any(actual.get(key) != value for key, value in fields.items()):
