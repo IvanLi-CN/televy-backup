@@ -61,8 +61,13 @@ Release-Reservation-Owner: fixture
 Release-Claim-Key: ${claim_key}
 Release-Boundary-Token: $(printf '%s' "$first" | jq -r '."Reservation-Boundary-Token"')
 Release-Provenance: fixture-verified"
+git -C "$repo_dir" switch -q -c post-preparation
+printf 'post-preparation\n' > "$repo_dir/fixture.txt"
+git -C "$repo_dir" add fixture.txt
+git -C "$repo_dir" commit -qm "fixture post-preparation change"
+post_preparation_sha="$(git -C "$repo_dir" rev-parse HEAD)"
 git -C "$repo_dir" switch -q -c mainline "$source_sha"
-git -C "$repo_dir" merge --no-ff -qm "fixture product merge" prepared
+git -C "$repo_dir" merge --no-ff -qm "fixture product merge" "$post_preparation_sha"
 merge_sha="$(git -C "$repo_dir" rev-parse HEAD)"
 
 bound="$(python3 "$root_dir/.github/scripts/release_reservation.py" receipt \

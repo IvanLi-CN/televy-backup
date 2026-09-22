@@ -660,13 +660,19 @@ def verify_local_merge_identity(
         "Release-Claim-Key": reservation["Reservation-Claim-Key"],
         "Release-Boundary-Token": reservation["Reservation-Boundary-Token"],
     }
-    for preparation_sha in merge["parents"]:
-        preparation = local_commit_info(preparation_sha, cwd)
-        if preparation["parents"] != [source_sha] or preparation["tree"] != merge["tree"]:
+    for head_sha in merge["parents"]:
+        head = local_commit_info(head_sha, cwd)
+        if head["tree"] != merge["tree"]:
             continue
-        values = trailers_from_message(preparation["message"])
-        if all(values.get(key) == value for key, value in expected.items()):
-            return
+        current = head
+        for _ in range(256):
+            if current["parents"] == [source_sha]:
+                values = trailers_from_message(current["message"])
+                if all(values.get(key) == value for key, value in expected.items()):
+                    return
+            if not current["parents"]:
+                break
+            current = local_commit_info(current["parents"][0], cwd)
     raise ReservationError("merge SHA does not contain the matching prepared release identity")
 
 
@@ -689,14 +695,20 @@ def verify_github_merge_identity(
         "Release-Boundary-Token": reservation["Reservation-Boundary-Token"],
     }
     merge_tree = merge.get("tree", {}).get("sha")
-    for preparation_sha in parents:
-        preparation = client.commit_info(preparation_sha)
-        preparation_parents = [parent.get("sha") for parent in preparation.get("parents", [])]
-        if preparation_parents != [source_sha] or preparation.get("tree", {}).get("sha") != merge_tree:
+    for head_sha in parents:
+        head = client.commit_info(head_sha)
+        if head.get("tree", {}).get("sha") != merge_tree:
             continue
-        values = trailers_from_message(str(preparation.get("message", "")))
-        if all(values.get(key) == value for key, value in expected.items()):
-            return
+        current = head
+        for _ in range(256):
+            current_parents = [parent.get("sha") for parent in current.get("parents", [])]
+            if current_parents == [source_sha]:
+                values = trailers_from_message(str(current.get("message", "")))
+                if all(values.get(key) == value for key, value in expected.items()):
+                    return
+            if not current_parents or not isinstance(current_parents[0], str):
+                break
+            current = client.commit_info(current_parents[0])
     raise ReservationError("merge SHA does not contain the matching prepared release identity")
 
 
