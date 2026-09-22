@@ -71,6 +71,10 @@ assert contract["identity_refs"]["ruleset_excluded_identity_patterns"] == [
 assert contract["identity_refs"]["no_additional_ci_credentials"] is True
 assert contract["recovery"]["dispatch_requires_existing_bound"] is False
 assert contract["recovery"]["dispatch_bound_repair"] == "append-only-after-same-sha-provenance"
+reservation_text = (root / ".github/scripts/release_reservation.py").read_text(encoding="utf-8")
+assert "GIT_CONFIG_KEY_0" in reservation_text
+assert 'self._git("push", "origin", f"{sha}:{ref}")' in reservation_text
+assert "existing remote ref does not match the requested identity" in reservation_text
 for gate in ("label_gate", "completion"):
     scheduling = contract["required_gate_scheduling"][gate]
     assert scheduling["cancel_in_progress"] is False

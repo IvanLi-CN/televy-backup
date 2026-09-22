@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -301,13 +302,63 @@ class GitHubRefClient:
             raise ReservationError("GitHub did not return a reservation commit")
         return normalize_sha(payload["sha"], "reservation commit")
 
-    def create_ref(self, ref: str, sha: str) -> str:
-        status, payload = self.request_json(
-            "POST", f"/repos/{self.repository}/git/refs", {"ref": ref, "sha": normalize_sha(sha)}
+    def _git_env(self) -> dict[str, str]:
+        encoded = base64.b64encode(f"x-access-token:{self.token}".encode("utf-8")).decode("ascii")
+        env = os.environ.copy()
+        env.update(
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+                "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {encoded}",
+                "GIT_TERMINAL_PROMPT": "0",
+            }
         )
+        return env
+
+    def _git(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=ROOT,
+            env=self._git_env(),
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise ReservationError(result.stderr.strip() or f"git {' '.join(args)} failed")
+        return result.stdout.strip()
+
+    def _push_ref(self, ref: str, sha: str) -> str:
+        existing = self.ref_target(ref)
+        if existing:
+            if existing != sha:
+                raise ReservationError(f"existing remote ref does not match the requested identity: {ref}")
+            return existing
+        self._git("fetch", "--no-tags", "origin", sha)
+        try:
+            self._git("push", "origin", f"{sha}:{ref}")
+        except ReservationError:
+            existing = self.ref_target(ref)
+            if existing == sha:
+                return existing
+            raise
+        target = self.ref_target(ref)
+        if target != sha:
+            raise ReservationError(f"git push did not create the requested remote ref: {ref}")
+        return target
+
+    def create_ref(self, ref: str, sha: str) -> str:
+        normalized = normalize_sha(sha)
+        try:
+            status, payload = self.request_json(
+                "POST", f"/repos/{self.repository}/git/refs", {"ref": ref, "sha": normalized}
+            )
+        except ReservationError as error:
+            if " returned 403:" not in str(error):
+                raise
+            return self._push_ref(ref, normalized)
         if status not in {200, 201}:
             raise ReservationError(f"GitHub did not create append-only ref {ref}")
-        value = payload.get("object", {}).get("sha", sha)
+        value = payload.get("object", {}).get("sha", normalized)
         return normalize_sha(value, "created ref target")
 
 
