@@ -377,15 +377,41 @@ fn active_leases(manifest: Option<&Value>, data_dir: &Path) -> Result<u64, CliEr
         .map(|status| u64::from(status.active_leases))
 }
 
-fn launchctl_service_loaded() -> bool {
+fn launchctl_service_state() -> Option<String> {
     let domain = format!("gui/{}", unsafe { libc::geteuid() });
-    launchctl(&["print", &user_service_target(&domain)]).is_ok()
+    let output = Command::new("/bin/launchctl")
+        .args(["print", &user_service_target(&domain)])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn launchctl_service_is_unhealthy(output: &str) -> bool {
+    if output
+        .lines()
+        .any(|line| line.contains("job state = spawn failed"))
+    {
+        return true;
+    }
+    output.lines().any(|line| {
+        let Some(value) = line.trim().strip_prefix("last exit code = ") else {
+            return false;
+        };
+        value
+            .split_once(':')
+            .and_then(|(code, _)| code.trim().parse::<i32>().ok())
+            .is_some_and(|code| code != 0)
+    })
 }
 
 fn can_recover_unreachable_signed_registration(
     existing: Option<&Value>,
     requested_manager: Option<&str>,
     service_loaded: bool,
+    service_unhealthy: bool,
     error: &CliError,
 ) -> bool {
     requested_manager == Some(EMBEDDED_REGISTRATION_MANAGER)
@@ -393,7 +419,7 @@ fn can_recover_unreachable_signed_registration(
             .and_then(|value| value.get("managedBy"))
             .and_then(Value::as_str)
             == Some("smappservice")
-        && !service_loaded
+        && (!service_loaded || service_unhealthy)
         && error.code == "snapshot_access.unavailable"
 }
 
@@ -404,17 +430,22 @@ fn active_leases_for_migration(
 ) -> Result<u64, CliError> {
     match active_leases(existing, data_dir) {
         Ok(leases) => Ok(leases),
-        Err(error)
+        Err(error) => {
+            let service_state = launchctl_service_state();
             if can_recover_unreachable_signed_registration(
                 existing,
                 requested_manager,
-                !launchctl_service_loaded(),
+                service_state.is_some(),
+                service_state
+                    .as_deref()
+                    .is_some_and(launchctl_service_is_unhealthy),
                 &error,
-            ) =>
-        {
-            Ok(0)
+            ) {
+                Ok(0)
+            } else {
+                Err(error)
+            }
         }
-        Err(error) => Err(error),
     }
 }
 
@@ -1156,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_signed_registration_is_recoverable_only_when_its_job_is_absent() {
+    fn unreachable_signed_registration_is_recoverable_without_a_healthy_job() {
         let manifest = json!({"managedBy": "smappservice"});
         let unavailable = CliError::retryable("snapshot_access.unavailable", "Connection refused");
 
@@ -1164,19 +1195,40 @@ mod tests {
             Some(&manifest),
             Some("launchctl-embedded"),
             false,
+            false,
+            &unavailable
+        ));
+        assert!(can_recover_unreachable_signed_registration(
+            Some(&manifest),
+            Some("launchctl-embedded"),
+            true,
+            true,
             &unavailable
         ));
         assert!(!can_recover_unreachable_signed_registration(
             Some(&manifest),
             Some("launchctl-embedded"),
             true,
+            false,
             &unavailable
         ));
         assert!(!can_recover_unreachable_signed_registration(
             Some(&manifest),
             Some("smappservice"),
             false,
+            false,
             &unavailable
+        ));
+    }
+
+    #[test]
+    fn launchctl_spawn_failure_is_an_unhealthy_registration() {
+        assert!(launchctl_service_is_unhealthy("job state = spawn failed\n"));
+        assert!(launchctl_service_is_unhealthy(
+            "last exit code = 78: EX_CONFIG\n"
+        ));
+        assert!(!launchctl_service_is_unhealthy(
+            "job state = running\nlast exit code = 0: SUCCESS\n"
         ));
     }
 
