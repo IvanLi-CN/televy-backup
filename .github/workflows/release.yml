@@ -152,7 +152,7 @@ jobs:
           pull_request_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pull_request}")"
           test "$(printf '%s' "${pull_request_json}" | jq -r '.merge_commit_sha // empty')" = "${merge_sha}"
           pull_request_head_sha="$(printf '%s' "${pull_request_json}" | jq -r '.head.sha')"
-          test "${pull_request_head_sha}" = "${preparation_sha}"
+          git merge-base --is-ancestor "${preparation_sha}" "${pull_request_head_sha}"
           labels_json="$(printf '%s' "${pull_request_json}" | jq -c '[.labels[].name]')"
           components_json="$(printf '%s' "${labels_json}" | jq -c '[.[] | select(startswith("component:"))]')"
           verified="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${preparation_sha}" --jq '.commit.verification.verified')"

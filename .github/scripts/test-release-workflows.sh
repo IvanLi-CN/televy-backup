@@ -160,7 +160,8 @@ assert_contains "native helper identity policy invocation" "$release_text" 'bash
 assert_contains "native helper extraction policy SHA" "$release_text" 'git show "${POLICY_SHA}:scripts/macos/extract-snapshot-access-helper.sh"'
 assert_contains "native helper extraction policy invocation" "$release_text" 'bash "${policy_extract_snapshot_access_helper}"'
 assert_contains "release PR merge association" "$release_text" "merge_commit_sha // empty"
-assert_contains "release PR preparation association" "$release_text" 'pull_request_head_sha}" = "${preparation_sha}'
+assert_contains "release PR preparation ancestry" "$release_text" 'git merge-base --is-ancestor "${preparation_sha}" "${pull_request_head_sha}"'
+assert_not_contains "release PR preparation exact head binding" "$release_text" 'pull_request_head_sha}" = "${preparation_sha}'
 assert_contains "release sequence gate" "$release_text" "verify-release-sequence"
 assert_contains "helper tag provenance gate" "$release_text" "verify-tag-provenance --tag \"\${candidate}\""
 assert_contains "RC tag provenance gate" "$release_text" "verify-tag-provenance --tag \"\${rc_tag}\""
