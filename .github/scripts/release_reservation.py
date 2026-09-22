@@ -284,7 +284,16 @@ class GitHubRefClient:
         if status == 404:
             return None
         value = payload.get("object", {}).get("sha")
-        return normalize_sha(value, "remote ref target") if isinstance(value, str) else None
+        if not isinstance(value, str):
+            return None
+        target = normalize_sha(value, "remote ref target")
+        if payload.get("object", {}).get("type") != "tag":
+            return target
+        tag_status, tag_payload = self.request_json("GET", f"/repos/{self.repository}/git/tags/{target}")
+        if tag_status != 200:
+            raise ReservationError("annotated identity ref target is unavailable")
+        commit = tag_payload.get("object", {}).get("sha")
+        return normalize_sha(commit, "annotated identity ref commit") if isinstance(commit, str) else None
 
     def commit_info(self, sha: str) -> dict[str, Any]:
         status, payload = self.request_json("GET", f"/repos/{self.repository}/git/commits/{normalize_sha(sha)}")
@@ -301,6 +310,17 @@ class GitHubRefClient:
         if status not in {200, 201} or not isinstance(payload.get("sha"), str):
             raise ReservationError("GitHub did not return a reservation commit")
         return normalize_sha(payload["sha"], "reservation commit")
+
+    def create_annotated_tag(self, ref: str, sha: str) -> str:
+        tag = ref.removeprefix("refs/tags/")
+        status, payload = self.request_json(
+            "POST",
+            f"/repos/{self.repository}/git/tags",
+            {"tag": tag, "message": f"release identity ref: {tag}", "object": normalize_sha(sha), "type": "commit"},
+        )
+        if status not in {200, 201} or not isinstance(payload.get("sha"), str):
+            raise ReservationError(f"GitHub did not create an annotated identity tag: {ref}")
+        return normalize_sha(payload["sha"], "annotated identity tag")
 
     def _git_env(self) -> dict[str, str]:
         encoded = base64.b64encode(f"x-access-token:{self.token}".encode("utf-8")).decode("ascii")
@@ -355,11 +375,29 @@ class GitHubRefClient:
         except ReservationError as error:
             if " returned 403:" not in str(error):
                 raise
-            return self._push_ref(ref, normalized)
+            tag_object = self.create_annotated_tag(ref, normalized)
+            try:
+                self.request_json(
+                    "POST", f"/repos/{self.repository}/git/refs", {"ref": ref, "sha": tag_object}
+                )
+            except ReservationError:
+                existing = self.ref_target(ref)
+                if existing == normalized:
+                    return existing
+                raise
+            target = self.ref_target(ref)
+            if target != normalized:
+                raise ReservationError(f"annotated identity ref does not resolve to the requested commit: {ref}")
+            return target
         if status not in {200, 201}:
             raise ReservationError(f"GitHub did not create append-only ref {ref}")
-        value = payload.get("object", {}).get("sha", normalized)
-        return normalize_sha(value, "created ref target")
+        target = self.ref_target(ref)
+        if target is None:
+            value = payload.get("object", {}).get("sha", normalized)
+            return normalize_sha(value, "created ref target")
+        if target != normalized:
+            raise ReservationError(f"created remote ref does not match the requested identity: {ref}")
+        return target
 
 
 def verify_github_decision(
