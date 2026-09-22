@@ -46,6 +46,9 @@ class FakeGitHubRefClient:
         self.commits[sha] = {"sha": sha, "tree": {"sha": tree}, "parents": [{"sha": parent}], "message": message}
         return sha
 
+    def create_tree(self):
+        return module.EMPTY_TREE_SHA
+
     def create_ref(self, ref, sha):
         if ref in self.refs:
             raise module.ReservationError("already exists")
