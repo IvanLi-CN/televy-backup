@@ -88,6 +88,20 @@ if ! printf '%s\n' "$signature_probe_source" | search_stdin_quiet 'applyProductE
   exit 1
 fi
 
+# launchctl bootstrap may return before the helper creates its socket. The migration commit must
+# remain behind the helper readiness check or the app rolls back with snapshot_access.unavailable.
+launchctl_snapshot_access_source="$(sed -n '/private func performLaunchctlSnapshotAccessRegistration/,/private func unregisterStaleSnapshotAccessAgentRegistration/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if ! printf '%s\n' "$launchctl_snapshot_access_source" | search_stdin_quiet 'waitForEmbeddedSnapshotAccess'; then
+  echo "launchctl Snapshot Access registration must wait for the helper before committing migration" >&2
+  exit 1
+fi
+wait_line="$(printf '%s\n' "$launchctl_snapshot_access_source" | search_stdin 'waitForEmbeddedSnapshotAccess' | head -1 | cut -d: -f1)"
+commit_line="$(printf '%s\n' "$launchctl_snapshot_access_source" | search_stdin 'snapshot-access.*commit-migration' | head -1 | cut -d: -f1)"
+if [[ -z "$wait_line" || -z "$commit_line" || "$wait_line" -ge "$commit_line" ]]; then
+  echo "launchctl Snapshot Access migration commit must follow helper readiness" >&2
+  exit 1
+fi
+
 bin_rebind="$out_dir/import-bundle-rebind-logic-tests"
 "$swiftc" \
   -sdk "$sdk_path" \
