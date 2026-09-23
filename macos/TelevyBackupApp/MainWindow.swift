@@ -166,6 +166,14 @@ struct MainWindowRootView: View {
             }
         }
         .frame(minWidth: 860, minHeight: 520)
+        .overlay(alignment: .bottomTrailing) {
+            if let toast = taskStore.toastText {
+                ToastPill(text: toast, isError: taskStore.toastIsError)
+                    .padding(16)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
     }
 
     private func toggleSidebar() {
@@ -428,6 +436,15 @@ enum MainWindowUIDemo {
     }
 }
 
+private struct SnapshotBrowseIssue: Identifiable {
+    let id = UUID()
+    let failure: ControlRequestFailure
+
+    var canBrowseCached: Bool {
+        failure.code == "snapshot.browse.catalog_refresh_unavailable"
+    }
+}
+
 private struct TargetListRow: View {
     @Environment(\.appRuntime) private var model
     @EnvironmentObject var statusStore: StatusStore
@@ -440,6 +457,8 @@ private struct TargetListRow: View {
     let onRestore: () -> Void
     let onVerify: () -> Void
     let onSelect: () -> Void
+    @State private var browseInFlight = false
+    @State private var browseIssue: SnapshotBrowseIssue?
 
     private var runs: [RunLogSummary] {
         runHistoryStore.runs
@@ -497,6 +516,23 @@ private struct TargetListRow: View {
             return TargetPresentation.lastRunCompact(run: latestHistoricalRun, now: now)
         }
         return nil
+    }
+
+    private func browse(allowCachedCatalog: Bool = false) {
+        guard !browseInFlight else { return }
+        browseInFlight = true
+        model.browseTargetInFinder(
+            targetId: target.targetId,
+            allowCachedCatalog: allowCachedCatalog
+        ) { result in
+            browseInFlight = false
+            switch result {
+            case .success:
+                model.showToast("Backup volume opened in Finder", isError: false)
+            case let .failure(error):
+                browseIssue = SnapshotBrowseIssue(failure: error)
+            }
+        }
     }
 
     var body: some View {
@@ -652,16 +688,30 @@ private struct TargetListRow: View {
                 .disabled(!model.canEnqueueBackup())
             Divider()
             Button("Browse backups in Finder") {
-                model.browseTargetInFinder(targetId: target.targetId) { result in
-                    if case let .failure(error) = result {
-                        model.showToast(controlFailureMessage(error), isError: true)
-                    }
-                }
+                browse()
             }
+            .disabled(browseInFlight)
             Button("Restore…") { onRestore() }
                 .disabled(isBusy)
             Button("Verify") { onVerify() }
                 .disabled(isBusy)
+        }
+        .alert(item: $browseIssue) { issue in
+            if issue.canBrowseCached {
+                return Alert(
+                    title: Text("Couldn’t refresh backup catalog"),
+                    message: Text(controlFailureMessage(issue.failure)),
+                    primaryButton: .default(Text("Browse Cached")) {
+                        browse(allowCachedCatalog: true)
+                    },
+                    secondaryButton: .cancel(Text("Cancel"))
+                )
+            }
+            return Alert(
+                title: Text("Couldn’t browse backups"),
+                message: Text(controlFailureMessage(issue.failure)),
+                dismissButton: .default(Text("OK"))
+            )
         }
         .help(target.sourcePath)
         .padding(.vertical, 4)
@@ -683,15 +733,6 @@ private struct TargetDetailView: View {
         let systemImage: String
     }
 
-    private struct BrowseIssue: Identifiable {
-        let id = UUID()
-        let failure: ControlRequestFailure
-
-        var canBrowseCached: Bool {
-            failure.code == "snapshot.browse.catalog_refresh_unavailable"
-        }
-    }
-
     private enum Tab: String, CaseIterable, Identifiable {
         case history = "History"
         case diagnostics = "Diagnostics"
@@ -711,11 +752,11 @@ private struct TargetDetailView: View {
     @State private var browseInFlight = false
     @State private var browseMounted = false
     @State private var browseUnmountInFlight = false
-    @State private var browseIssue: BrowseIssue? = {
+    @State private var browseIssue: SnapshotBrowseIssue? = {
         guard MainWindowUIDemo.scene == "main-window-target-browse-cached-catalog" else {
             return nil
         }
-        return BrowseIssue(failure: ControlRequestFailure(
+        return SnapshotBrowseIssue(failure: ControlRequestFailure(
             code: "snapshot.browse.catalog_refresh_unavailable",
             message: "The remote backup catalog could not be refreshed. You can browse the last cached catalog.",
             retryable: true
@@ -866,7 +907,7 @@ private struct TargetDetailView: View {
                 browseMounted = true
                 model.showToast("Backup volume opened in Finder", isError: false)
             case let .failure(error):
-                browseIssue = BrowseIssue(failure: error)
+                browseIssue = SnapshotBrowseIssue(failure: error)
             }
         }
     }

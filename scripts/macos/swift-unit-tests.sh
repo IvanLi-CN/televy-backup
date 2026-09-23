@@ -120,6 +120,17 @@ if ! printf '%s\n' "$browse_mount_lifecycle_source" | search_stdin_quiet 'mounte
   exit 1
 fi
 
+main_window_source="$(sed -n '/struct MainWindowRootView/,/private func toggleSidebar/p' "$root_dir/macos/TelevyBackupApp/MainWindow.swift")"
+if ! printf '%s\n' "$main_window_source" | search_stdin_quiet 'ToastPill'; then
+  echo "MainWindowRootView must render browse success and failure toasts" >&2
+  exit 1
+fi
+target_row_browse_source="$(sed -n '/private struct TargetListRow/,/private struct TargetDetailView/p' "$root_dir/macos/TelevyBackupApp/MainWindow.swift")"
+if ! printf '%s\n' "$target_row_browse_source" | search_stdin_quiet 'SnapshotBrowseIssue'; then
+  echo "Target list browse actions must expose actionable failure state" >&2
+  exit 1
+fi
+
 bin_rebind="$out_dir/import-bundle-rebind-logic-tests"
 "$swiftc" \
   -sdk "$sdk_path" \
