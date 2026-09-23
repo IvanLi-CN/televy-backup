@@ -102,6 +102,24 @@ if [[ -z "$wait_line" || -z "$commit_line" || "$wait_line" -ge "$commit_line" ]]
   exit 1
 fi
 
+# FileManager.mountedVolumeURLs can lag for a user-owned WebDAV mount. The Finder browse path
+# must verify the kernel mount table instead of treating that lag as a mount failure and cleaning
+# up the session immediately.
+browse_mount_source="$(sed -n '/private func mountedBrowseVolumePaths()/,/private func unmountBrowseVolume/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if ! printf '%s\n' "$browse_mount_source" | search_stdin_quiet 'getmntinfo'; then
+  echo "WebDAV browse mount verification must inspect the system mount table" >&2
+  exit 1
+fi
+browse_mount_lifecycle_source="$(sed -n '/private func waitForMountedBrowseVolume/,/private func unmountBrowseVolume/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if printf '%s\n' "$browse_mount_lifecycle_source" | search_stdin 'mountedVolumeURLs'; then
+  echo "WebDAV browse mount lifecycle must not use the lagging FileManager mount list" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$browse_mount_lifecycle_source" | search_stdin_quiet 'mountedBrowseVolumePaths'; then
+  echo "WebDAV browse mount wait must use the kernel mount table helper" >&2
+  exit 1
+fi
+
 bin_rebind="$out_dir/import-bundle-rebind-logic-tests"
 "$swiftc" \
   -sdk "$sdk_path" \
