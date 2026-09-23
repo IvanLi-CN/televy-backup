@@ -175,6 +175,22 @@ impl BrowseDavFs {
                 source: Some(BrowseFileSource::Bytes(bytes)),
             });
         }
+        // macOS mount_webdav probes the root with PROPFIND for `._.` before it exposes the
+        // volume. Treat an unoccupied root Finder sidecar as a session-local empty file so that
+        // the read-only volume can complete that probe without creating persistent metadata.
+        if !relative.contains('/')
+            && metadata_overlay_path(relative)
+            && metadata_overlay_is_allowed(relative, session).await?
+        {
+            return Ok(BrowseNode {
+                meta: BrowseMeta {
+                    size: 0,
+                    mtime_ms: 0,
+                    dir: false,
+                },
+                source: Some(BrowseFileSource::Bytes(Vec::new())),
+            });
+        }
         let Some((snapshot, snapshot_path)) = snapshot_path(relative, session).await? else {
             return Err(FsError::NotFound);
         };
@@ -1905,6 +1921,29 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn webdav_service_accepts_root_finder_sidecar_probe() {
+        let temp = tempfile::tempdir().unwrap();
+        let session =
+            Arc::new(test_session(&temp.path().join("endpoint.sqlite"), temp.path()).await);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve(listener, session.clone()));
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(
+                b"PROPFIND /capability/._. HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let headers = read_http_headers(&mut stream).await;
+        let headers_text = String::from_utf8_lossy(&headers);
+        assert!(headers_text.starts_with("HTTP/1.1 207"), "{headers_text}");
+
+        session.shutdown.cancel();
+        server.await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires macOS mount_webdav and Full Disk Access"]
     async fn webdav_mount_webdav_enumerates_copies_and_recovers() {
@@ -2493,6 +2532,18 @@ mod tests {
         assert!(metadata_overlay_path(".DS_Store"));
         assert!(metadata_overlay_path("snapshot/._file"));
         assert!(!metadata_overlay_path("snapshot/real-file"));
+    }
+
+    #[tokio::test]
+    async fn root_finder_sidecar_probe_is_a_virtual_empty_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = test_session(&temp.path().join("endpoint.sqlite"), temp.path()).await;
+
+        let node = BrowseDavFs::node(&session, "._.").await.unwrap();
+
+        assert!(!node.meta.dir);
+        assert_eq!(node.meta.size, 0);
+        assert!(matches!(node.source, Some(BrowseFileSource::Bytes(bytes)) if bytes.is_empty()));
     }
 
     #[test]
