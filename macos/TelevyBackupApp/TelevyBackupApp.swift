@@ -2054,7 +2054,8 @@ final class AppModel {
         }
         let config = effectiveConfigDirURL().path
         let data = effectiveDataDirURL().path
-        guard embeddedSnapshotAccessComponentVersion() != nil else {
+        let expectedPath = embeddedSnapshotAccessAppPath()
+        guard let expectedVersion = embeddedSnapshotAccessComponentVersion() else {
             completion(false, "Snapshot Access embedded component version is unavailable")
             return
         }
@@ -2132,32 +2133,23 @@ final class AppModel {
                     )
                     return
                 }
-                guard state.prepared else {
-                    completion(true, nil)
-                    return
-                }
-                guard let migrationId = state.migrationId,
-                      let migrationOwner = state.migrationOwner else {
-                    completion(false, "Snapshot Access migration returned no transaction id")
-                    return
-                }
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let commit = self.runCommandCapture(
-                        exe: cli,
-                        args: [
-                            "--json", "--config-dir", config, "--data-dir", data,
-                            "snapshot-access", "commit-migration",
-                            "--migration-id", migrationId,
-                            "--migration-owner", migrationOwner,
-                        ],
-                        timeoutSeconds: 20
-                    )
-                    let output = (commit.stderr.isEmpty ? commit.stdout : commit.stderr)
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .prefix(400).description
-                    DispatchQueue.main.async {
-                        guard commit.status != 0 else {
-                            completion(true, nil)
+                // launchctl bootstrap can return before the helper has created its socket.
+                // Wait for a verified helper before committing migration, otherwise commit
+                // observes ENOENT and rolls the newly registered service back immediately.
+                self.waitForEmbeddedSnapshotAccess(
+                    cli: cli,
+                    config: config,
+                    data: data,
+                    expectedPath: expectedPath,
+                    expectedVersion: expectedVersion,
+                    attempt: 0
+                ) { ready, readinessError in
+                    guard ready else {
+                        let message = readinessError ?? "Embedded Snapshot Access helper did not become ready"
+                        guard state.prepared,
+                              let migrationId = state.migrationId,
+                              let migrationOwner = state.migrationOwner else {
+                            completion(false, message)
                             return
                         }
                         self.rollbackLaunchctlSnapshotAccessMigration(
@@ -2167,9 +2159,50 @@ final class AppModel {
                             socketPath: socketPath,
                             migrationId: migrationId,
                             migrationOwner: migrationOwner,
-                            message: output.isEmpty ? "Snapshot Access migration could not be committed" : output,
+                            message: message,
                             completion: completion
                         )
+                        return
+                    }
+                    guard state.prepared else {
+                        completion(true, nil)
+                        return
+                    }
+                    guard let migrationId = state.migrationId,
+                          let migrationOwner = state.migrationOwner else {
+                        completion(false, "Snapshot Access migration returned no transaction id")
+                        return
+                    }
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let commit = self.runCommandCapture(
+                            exe: cli,
+                            args: [
+                                "--json", "--config-dir", config, "--data-dir", data,
+                                "snapshot-access", "commit-migration",
+                                "--migration-id", migrationId,
+                                "--migration-owner", migrationOwner,
+                            ],
+                            timeoutSeconds: 20
+                        )
+                        let output = (commit.stderr.isEmpty ? commit.stdout : commit.stderr)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                            .prefix(400).description
+                        DispatchQueue.main.async {
+                            guard commit.status != 0 else {
+                                completion(true, nil)
+                                return
+                            }
+                            self.rollbackLaunchctlSnapshotAccessMigration(
+                                cli: cli,
+                                config: config,
+                                data: data,
+                                socketPath: socketPath,
+                                migrationId: migrationId,
+                                migrationOwner: migrationOwner,
+                                message: output.isEmpty ? "Snapshot Access migration could not be committed" : output,
+                                completion: completion
+                            )
+                        }
                     }
                 }
             }
