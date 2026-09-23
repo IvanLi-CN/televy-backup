@@ -400,7 +400,13 @@ final class AppModel {
                     self.browseMountsByTargetId[targetId] = BrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot)
                     self.browseMountLock.unlock()
                     self.appendLog("INFO: WebDAV browse volume mounted target=\(targetId) session=\(mount.sessionId)")
+#if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
+                    if ProcessInfo.processInfo.environment["TELEVYBACKUP_BROWSE_HIL_NO_OPEN"] != "1" {
+                        NSWorkspace.shared.open(mountRoot)
+                    }
+#else
                     NSWorkspace.shared.open(mountRoot)
+#endif
                     DispatchQueue.main.async { completion(.success(())) }
                 } catch {
                     self.appendLog("WARN: browse mount setup failed target=\(targetId) error=\(error.localizedDescription)")
@@ -6467,6 +6473,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
+#if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
+    private func writeBrowseMountHILResult(_ value: String, path: String) {
+        try? Data((value + "\n").utf8).write(
+            to: URL(fileURLWithPath: path),
+            options: .atomic
+        )
+    }
+
+    private func scheduleBrowseMountHILIfRequested() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let targetId = environment["TELEVYBACKUP_BROWSE_HIL_TARGET_ID"],
+              !targetId.isEmpty,
+              let resultPath = environment["TELEVYBACKUP_BROWSE_HIL_RESULT"],
+              !resultPath.isEmpty
+        else {
+            return
+        }
+
+        func attempt(_ number: Int) {
+            guard number < 120 else {
+                writeBrowseMountHILResult("error:daemon_not_ready", path: resultPath)
+                return
+            }
+            guard ModelStore.shared.ensureDaemonRunning() else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    attempt(number + 1)
+                }
+                return
+            }
+            ModelStore.shared.browseTargetInFinder(
+                targetId: targetId,
+                allowCachedCatalog: true
+            ) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.writeBrowseMountHILResult("ok:mounted", path: resultPath)
+                    if environment["TELEVYBACKUP_BROWSE_HIL_AUTO_UNMOUNT"] == "1" {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            ModelStore.shared.unmountTargetInFinder(targetId: targetId) { unmount in
+                                switch unmount {
+                                case .success:
+                                    self.writeBrowseMountHILResult("ok:unmounted", path: resultPath)
+                                case let .failure(error):
+                                    self.writeBrowseMountHILResult(
+                                        "error:unmount_\(error.code)",
+                                        path: resultPath
+                                    )
+                                }
+                            }
+                        }
+                    }
+                case let .failure(error):
+                    self.writeBrowseMountHILResult("error:\(error.code)", path: resultPath)
+                }
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            attempt(0)
+        }
+    }
+#endif
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         exitIfSecondaryInstance()
         appearanceOverride.apply(to: NSApp)
@@ -6585,6 +6655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         #if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
         scheduleCompleteExitForLifecycleTestIfRequested()
+        scheduleBrowseMountHILIfRequested()
         #endif
 
         let env = ProcessInfo.processInfo.environment
