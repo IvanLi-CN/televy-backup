@@ -314,9 +314,11 @@ final class AppModel {
         allowCachedCatalog: Bool = false,
         completion: @escaping (Result<Void, ControlRequestFailure>) -> Void
     ) {
+        appendLog("INFO: browse mount requested target=\(targetId)")
         recoverSnapshotBrowseSessions { recovery in
             guard case .success = recovery else {
                 if case let .failure(error) = recovery {
+                    self.appendLog("WARN: browse mount recovery failed code=\(error.code)")
                     completion(.failure(error))
                 }
                 return
@@ -347,6 +349,7 @@ final class AppModel {
             )
             switch result {
             case let .failure(error):
+                self.appendLog("WARN: browse mount request failed target=\(targetId) code=\(error.code)")
                 DispatchQueue.main.async { completion(.failure(error)) }
             case let .success(mount):
                 let mountRoot = self.guiControlDataDirURL()
@@ -367,19 +370,21 @@ final class AppModel {
                             decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(),
                             as: UTF8.self
                         ).trimmingCharacters(in: .whitespacesAndNewlines)
+                        self.appendLog("WARN: mount_webdav failed target=\(targetId) exit=\(task.terminationStatus)")
                         self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
                         DispatchQueue.main.async {
                             completion(.failure(ControlRequestFailure(
                                 code: "snapshot.browse.mount_failed",
                                 message: output.isEmpty
-                                    ? "The backup volume could not be mounted in Finder."
-                                    : "The backup volume could not be mounted in Finder: \(output)",
+                                    ? "The backup volume could not be mounted in Finder. See ui.log for the mount command result."
+                                    : "The backup volume could not be mounted in Finder. See ui.log for the mount command result.",
                                 retryable: true
                             )))
                         }
                         return
                     }
                     guard self.waitForMountedBrowseVolume(mountRoot, timeoutSeconds: 10) else {
+                        self.appendLog("WARN: WebDAV mount did not appear in the kernel mount table target=\(targetId)")
                         self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
                         DispatchQueue.main.async {
                             completion(.failure(ControlRequestFailure(
@@ -394,9 +399,17 @@ final class AppModel {
                     self.browseMountLock.lock()
                     self.browseMountsByTargetId[targetId] = BrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot)
                     self.browseMountLock.unlock()
+                    self.appendLog("INFO: WebDAV browse volume mounted target=\(targetId) session=\(mount.sessionId)")
+#if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
+                    if ProcessInfo.processInfo.environment["TELEVYBACKUP_BROWSE_HIL_NO_OPEN"] != "1" {
+                        NSWorkspace.shared.open(mountRoot)
+                    }
+#else
                     NSWorkspace.shared.open(mountRoot)
+#endif
                     DispatchQueue.main.async { completion(.success(())) }
                 } catch {
+                    self.appendLog("WARN: browse mount setup failed target=\(targetId) error=\(error.localizedDescription)")
                     self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
                     DispatchQueue.main.async {
                         completion(.failure(ControlRequestFailure(code: "snapshot.browse.mount_failed", message: "The backup volume could not be mounted in Finder.", retryable: true)))
@@ -410,11 +423,7 @@ final class AppModel {
         let expectedPath = mountRoot.standardizedFileURL.path
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         repeat {
-            let mountedVolumes = FileManager.default.mountedVolumeURLs(
-                includingResourceValuesForKeys: nil,
-                options: FileManager.VolumeEnumerationOptions()
-            ) ?? []
-            if mountedVolumes.contains(where: { $0.standardizedFileURL.path == expectedPath }) {
+            if mountedBrowseVolumePaths()?.contains(expectedPath) == true {
                 return true
             }
             if Date() >= deadline { break }
@@ -571,13 +580,23 @@ final class AppModel {
     }
 
     private func mountedBrowseVolumePaths() -> Set<String>? {
-        guard let mountedVolumes = FileManager.default.mountedVolumeURLs(
-            includingResourceValuesForKeys: nil,
-            options: []
-        ) else {
+        var mountBuffer: UnsafeMutablePointer<statfs>?
+        let mountCount = getmntinfo(&mountBuffer, MNT_NOWAIT)
+        guard mountCount >= 0, mountCount == 0 || mountBuffer != nil else {
             return nil
         }
-        return Set(mountedVolumes.map { $0.standardizedFileURL.path })
+        guard let mountBuffer else { return [] }
+
+        return Set((0..<Int(mountCount)).map { index in
+            var mountPath = mountBuffer[index].f_mntonname
+            let capacity = MemoryLayout.size(ofValue: mountPath)
+            let path = withUnsafePointer(to: &mountPath) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: capacity) {
+                    String(cString: $0)
+                }
+            }
+            return URL(fileURLWithPath: path).standardizedFileURL.path
+        })
     }
 
     private func unmountBrowseVolume(at path: String) -> Bool {
@@ -6454,6 +6473,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
+#if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
+    private func writeBrowseMountHILResult(_ value: String, path: String) {
+        try? Data((value + "\n").utf8).write(
+            to: URL(fileURLWithPath: path),
+            options: .atomic
+        )
+    }
+
+    private func scheduleBrowseMountHILIfRequested() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let targetId = environment["TELEVYBACKUP_BROWSE_HIL_TARGET_ID"],
+              !targetId.isEmpty,
+              let resultPath = environment["TELEVYBACKUP_BROWSE_HIL_RESULT"],
+              !resultPath.isEmpty
+        else {
+            return
+        }
+
+        func attempt(_ number: Int) {
+            guard number < 120 else {
+                writeBrowseMountHILResult("error:daemon_not_ready", path: resultPath)
+                return
+            }
+            guard ModelStore.shared.ensureDaemonRunning() else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    attempt(number + 1)
+                }
+                return
+            }
+            ModelStore.shared.browseTargetInFinder(
+                targetId: targetId,
+                allowCachedCatalog: true
+            ) { [weak self] result in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.writeBrowseMountHILResult("ok:mounted", path: resultPath)
+                    if environment["TELEVYBACKUP_BROWSE_HIL_AUTO_UNMOUNT"] == "1" {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            ModelStore.shared.unmountTargetInFinder(targetId: targetId) { unmount in
+                                switch unmount {
+                                case .success:
+                                    self.writeBrowseMountHILResult("ok:unmounted", path: resultPath)
+                                case let .failure(error):
+                                    self.writeBrowseMountHILResult(
+                                        "error:unmount_\(error.code)",
+                                        path: resultPath
+                                    )
+                                }
+                            }
+                        }
+                    }
+                case let .failure(error):
+                    self.writeBrowseMountHILResult("error:\(error.code)", path: resultPath)
+                }
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            attempt(0)
+        }
+    }
+#endif
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         exitIfSecondaryInstance()
         appearanceOverride.apply(to: NSApp)
@@ -6572,6 +6655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         #if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
         scheduleCompleteExitForLifecycleTestIfRequested()
+        scheduleBrowseMountHILIfRequested()
         #endif
 
         let env = ProcessInfo.processInfo.environment
