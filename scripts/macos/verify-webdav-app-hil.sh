@@ -31,6 +31,11 @@ cli="$app/Contents/MacOS/televybackup-cli"
 config_dir="$test_root/config"
 data_dir="$test_root/data"
 result_path="$test_root/browse-result"
+repeat_count="${TELEVYBACKUP_BROWSE_HIL_REPEAT:-1}"
+if ! [[ "$repeat_count" =~ ^[1-4]$ ]]; then
+  echo "ERROR: TELEVYBACKUP_BROWSE_HIL_REPEAT must be 1..4" >&2
+  exit 2
+fi
 mkdir -p "$config_dir" "$data_dir/index" "$test_root/source"
 
 cp "$root_dir/scripts/macos/fixtures/perf-idle/config.toml" "$config_dir/config.toml"
@@ -59,20 +64,34 @@ TELEVYBACKUP_ALLOW_MULTI_INSTANCE=1 \
   TELEVYBACKUP_DISABLE_KEYCHAIN=1 \
   TELEVYBACKUP_BROWSE_HIL_TARGET_ID=browse-hil \
   TELEVYBACKUP_BROWSE_HIL_RESULT="$result_path" \
+  TELEVYBACKUP_BROWSE_HIL_ALLOW_CACHED="${TELEVYBACKUP_BROWSE_HIL_ALLOW_CACHED:-1}" \
+  TELEVYBACKUP_BROWSE_HIL_REPEAT="$repeat_count" \
   TELEVYBACKUP_BROWSE_HIL_NO_OPEN=1 \
   "$app_bin" --disable-keychain --config-dir "$config_dir" --data-dir "$data_dir" \
   >"$test_root/app.log" 2>&1 &
 app_pid=$!
 
 for _ in {1..300}; do
-  [[ -s "$result_path" ]] && break
+  if [[ -s "$result_path" ]] && [[ "$(wc -l < "$result_path")" -ge "$repeat_count" ]]; then
+    break
+  fi
   sleep 0.1
 done
 
-grep -Fx 'ok:mounted' "$result_path" >/dev/null || {
+if [[ "$repeat_count" -eq 2 ]]; then
+  grep -Fx 'ok:mounted' "$result_path" >/dev/null && \
+    grep -Fx 'error:snapshot.browse.already_mounted' "$result_path" >/dev/null || {
+    echo "ERROR: repeated browse did not report the existing mount" >&2
+    cat "$result_path" 2>/dev/null || true
+    tail -80 "$test_root/app.log" >&2 || true
+    exit 1
+  }
+elif ! grep -Fx 'ok:mounted' "$result_path" >/dev/null; then
   echo "ERROR: source-built App browse mount did not succeed" >&2
   cat "$result_path" 2>/dev/null || true
   tail -80 "$test_root/app.log" >&2 || true
   exit 1
-}
-echo "OK: source-built App browse mount HIL"
+fi
+echo "OK: source-built App browse mount HIL (attempts=$repeat_count)"
+printf 'HIL results:\n'
+cat "$result_path"

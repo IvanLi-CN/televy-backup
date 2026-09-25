@@ -145,6 +145,38 @@ private func testRunLogParserRetainsRunID() {
     expectNavigation(summary?.targetId == "photos", "NDJSON target identity was not retained")
 }
 
+private func testSnapshotBrowseFailuresAreActionable() {
+    let alreadyMounted = ControlRequestFailure(
+        code: "snapshot.browse.already_mounted",
+        message: "This target is already mounted.",
+        retryable: false
+    )
+    expectNavigation(
+        controlFailureMessage(alreadyMounted).contains("already mounted"),
+        "repeated browse must explain that the existing Finder volume is already mounted"
+    )
+
+    let mountFailed = ControlRequestFailure(
+        code: "snapshot.browse.mount_failed",
+        message: "mount failed",
+        retryable: true
+    )
+    expectNavigation(
+        controlFailureMessage(mountFailed).contains("application log"),
+        "mount failures must direct the operator to the application log"
+    )
+
+    let catalogRefreshUnavailable = ControlRequestFailure(
+        code: "snapshot.browse.catalog_refresh_unavailable",
+        message: "catalog refresh failed",
+        retryable: true
+    )
+    expectNavigation(
+        controlFailureMessage(catalogRefreshUnavailable).contains("cached"),
+        "remote catalog failures must offer cached browsing context"
+    )
+}
+
 @main
 enum MainWindowNavigationTestsMain {
     static func main() {
@@ -153,6 +185,7 @@ enum MainWindowNavigationTestsMain {
         testNavigationStoreReplaysRepeatedClicks()
         testOptionalStatusIdentityDecodesWithLegacyFallback()
         testRunLogParserRetainsRunID()
+        testSnapshotBrowseFailuresAreActionable()
         print("OK: MainWindowNavigationTests")
     }
 }

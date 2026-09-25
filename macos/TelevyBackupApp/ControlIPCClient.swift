@@ -20,6 +20,20 @@ func controlFailureMessage(_ failure: ControlRequestFailure) -> String {
         return "The encrypted secrets vault is unavailable."
     case "settings.revision_conflict":
         return "Settings changed elsewhere. Reload before saving again."
+    case "snapshot.browse.catalog_refresh_unavailable":
+        return "The remote backup catalog could not be refreshed. You can browse the last cached catalog."
+    case "snapshot.browse.catalog_unavailable":
+        return "The cached backup catalog is unavailable or incomplete."
+    case "snapshot.browse.catalog_empty":
+        return "No retained backup snapshots are available for this target."
+    case "snapshot.browse.already_mounted":
+        return "This target's backup volume is already mounted in Finder."
+    case "snapshot.browse.mount_failed":
+        return "The backup volume could not be mounted in Finder. Check the application log for the mount result."
+    case "snapshot.browse.mount_not_visible":
+        return "The backup volume was not visible after mounting. Check the application log for the mount result."
+    case "snapshot.browse.recovery_failed":
+        return "An earlier backup volume could not be cleaned up. Eject it in Finder and retry."
     default:
         return failure.message
     }

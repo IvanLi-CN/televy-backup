@@ -881,6 +881,14 @@ final class AppModel {
         ensureStatusStreamRunning()
     }
 
+    func refreshRuntimeAfterSnapshotAccessRegistration() {
+        lastDaemonStartAttemptAt = nil
+        invalidateSnapshotBrowseRecovery()
+        ensureDaemonRunning()
+        recoverSnapshotBrowseSessionsIfNeeded()
+        ensureStatusStreamRunning()
+    }
+
     func stopRuntimeResources(fullyStopDaemon: Bool) -> String? {
         statusStreamReconnectWork?.cancel()
         statusStreamReconnectWork = nil
@@ -6475,8 +6483,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 #if TELEVYBACKUP_GUI_LIFECYCLE_TESTING
     private func writeBrowseMountHILResult(_ value: String, path: String) {
-        try? Data((value + "\n").utf8).write(
-            to: URL(fileURLWithPath: path),
+        let resultURL = URL(fileURLWithPath: path)
+        var contents = (try? String(contentsOf: resultURL, encoding: .utf8)) ?? ""
+        contents.append(value)
+        contents.append("\n")
+        try? Data(contents.utf8).write(
+            to: resultURL,
             options: .atomic
         )
     }
@@ -6490,27 +6502,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else {
             return
         }
+        let repeatCount = min(
+            max(Int(environment["TELEVYBACKUP_BROWSE_HIL_REPEAT"] ?? "1") ?? 1, 1),
+            4
+        )
+        let allowCachedCatalog = environment["TELEVYBACKUP_BROWSE_HIL_ALLOW_CACHED"] != "0"
 
-        func attempt(_ number: Int) {
+        func attempt(_ number: Int, repeatIndex: Int = 1) {
             guard number < 120 else {
                 writeBrowseMountHILResult("error:daemon_not_ready", path: resultPath)
                 return
             }
             guard ModelStore.shared.ensureDaemonRunning() else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    attempt(number + 1)
+                    attempt(number + 1, repeatIndex: repeatIndex)
                 }
                 return
             }
             ModelStore.shared.browseTargetInFinder(
                 targetId: targetId,
-                allowCachedCatalog: true
+                allowCachedCatalog: allowCachedCatalog
             ) { [weak self] result in
                 guard let self else { return }
+                let outcome: String
                 switch result {
                 case .success:
-                    self.writeBrowseMountHILResult("ok:mounted", path: resultPath)
-                    if environment["TELEVYBACKUP_BROWSE_HIL_AUTO_UNMOUNT"] == "1" {
+                    outcome = "ok:mounted"
+                    if repeatIndex == repeatCount,
+                       environment["TELEVYBACKUP_BROWSE_HIL_AUTO_UNMOUNT"] == "1"
+                    {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                             ModelStore.shared.unmountTargetInFinder(targetId: targetId) { unmount in
                                 switch unmount {
@@ -6526,7 +6546,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         }
                     }
                 case let .failure(error):
-                    self.writeBrowseMountHILResult("error:\(error.code)", path: resultPath)
+                    outcome = "error:\(error.code)"
+                }
+                self.writeBrowseMountHILResult(outcome, path: resultPath)
+                if repeatIndex < repeatCount {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        attempt(0, repeatIndex: repeatIndex + 1)
+                    }
                 }
             }
         }
@@ -6623,17 +6649,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1" {
                 return
             }
+
+            // Snapshot Access registration may involve launchd/SMAppService and can take several
+            // seconds or fail when the operator has not granted privacy access. Start the daemon
+            // and its status stream first so the GUI remains connected while that independent
+            // migration is settling. Registration may stop a stale daemon during migration, so
+            // repeat the recovery sequence after the callback as well.
+            ModelStore.shared.ensureDaemonRunning()
+            ModelStore.shared.recoverSnapshotBrowseSessionsIfNeeded()
+            ModelStore.shared.ensureStatusStreamRunning()
             ModelStore.shared.ensureSnapshotAccessRegistration { success, error in
                 if !success {
                     if let error {
                         ModelStore.shared.reportSnapshotAccessRegistrationFailure(error)
                     }
                 }
-                // Snapshot Access is independent from daemon readiness. Start the daemon even
-                // when helper registration needs user approval or a later retry.
-                ModelStore.shared.ensureDaemonRunning()
-                ModelStore.shared.recoverSnapshotBrowseSessionsIfNeeded()
-                ModelStore.shared.ensureStatusStreamRunning()
+                ModelStore.shared.refreshRuntimeAfterSnapshotAccessRegistration()
             }
         }
 
