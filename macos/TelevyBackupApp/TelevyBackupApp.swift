@@ -383,13 +383,25 @@ final class AppModel {
                         }
                         return
                     }
-                    guard self.waitForMountedBrowseVolume(mountRoot, timeoutSeconds: 10) else {
+                    guard self.waitForMountedBrowseVolume(mountRoot, timeoutSeconds: 30) else {
                         self.appendLog("WARN: WebDAV mount did not appear in the kernel mount table target=\(targetId)")
                         self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
                         DispatchQueue.main.async {
                             completion(.failure(ControlRequestFailure(
                                 code: "snapshot.browse.mount_failed",
                                 message: "The backup volume did not become available in Finder.",
+                                retryable: true
+                            )))
+                        }
+                        return
+                    }
+                    guard self.waitForReadableBrowseVolume(mountRoot, timeoutSeconds: 30) else {
+                        self.appendLog("WARN: WebDAV browse volume mounted but content was not readable target=\(targetId)")
+                        self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
+                        DispatchQueue.main.async {
+                            completion(.failure(ControlRequestFailure(
+                                code: "snapshot.browse.mount_unreadable",
+                                message: "The backup volume mounted but its contents could not be read.",
                                 retryable: true
                             )))
                         }
@@ -420,10 +432,25 @@ final class AppModel {
     }
 
     private func waitForMountedBrowseVolume(_ mountRoot: URL, timeoutSeconds: Double) -> Bool {
-        let expectedPath = mountRoot.standardizedFileURL.path
+        let expectedPath = canonicalBrowsePath(mountRoot)
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         repeat {
             if mountedBrowseVolumePaths()?.contains(expectedPath) == true {
+                return true
+            }
+            if Date() >= deadline { break }
+            Thread.sleep(forTimeInterval: 0.1)
+        } while true
+        return false
+    }
+
+    private func waitForReadableBrowseVolume(_ mountRoot: URL, timeoutSeconds: Double) -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        repeat {
+            if (try? FileManager.default.contentsOfDirectory(
+                at: mountRoot,
+                includingPropertiesForKeys: [.isDirectoryKey]
+            )) != nil {
                 return true
             }
             if Date() >= deadline { break }
@@ -491,7 +518,7 @@ final class AppModel {
             let token = center.addObserver(forName: NSWorkspace.didUnmountNotification, object: nil, queue: .main) { [weak self] notification in
                 guard let self,
                       let volumeURL = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL,
-                      volumeURL.standardizedFileURL.path == mountRoot.standardizedFileURL.path
+                      canonicalBrowsePath(volumeURL) == canonicalBrowsePath(mountRoot)
                 else { return }
                 self.cleanupBrowseMount(sessionId: sessionId, mountRoot: mountRoot, socketPath: socketPath)
             }
@@ -500,7 +527,7 @@ final class AppModel {
             timer.schedule(deadline: .now() + 5, repeating: 5)
             timer.setEventHandler { [weak self] in
                 guard let self else { return }
-                let mountedPath = mountRoot.standardizedFileURL.path
+                let mountedPath = canonicalBrowsePath(mountRoot)
                 if let mountedVolumes = self.mountedBrowseVolumePaths() {
                     let mounted = mountedVolumes.contains(mountedPath)
                     if !mounted {
@@ -573,10 +600,18 @@ final class AppModel {
     private func removeBrowseMountDirectory(sessionId: String, mountRoot: URL) {
         let mountsRoot = guiControlDataDirURL()
             .appendingPathComponent("mounts", isDirectory: true)
-            .standardizedFileURL
-        let candidate = mountRoot.standardizedFileURL
-        guard candidate.path.hasPrefix(mountsRoot.path + "/"), candidate.lastPathComponent == sessionId else { return }
+        let candidate = mountRoot.resolvingSymlinksInPath().standardizedFileURL
+        let canonicalMountsRoot = mountsRoot.resolvingSymlinksInPath().standardizedFileURL
+        guard candidate.path.hasPrefix(canonicalMountsRoot.path + "/"), candidate.lastPathComponent == sessionId else { return }
         try? FileManager.default.removeItem(at: candidate)
+    }
+
+    private func canonicalBrowsePath(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    private func canonicalBrowsePath(_ path: String) -> String {
+        canonicalBrowsePath(URL(fileURLWithPath: path))
     }
 
     private func mountedBrowseVolumePaths() -> Set<String>? {
@@ -595,17 +630,18 @@ final class AppModel {
                     String(cString: $0)
                 }
             }
-            return URL(fileURLWithPath: path).standardizedFileURL.path
+            return canonicalBrowsePath(path)
         })
     }
 
     private func unmountBrowseVolume(at path: String) -> Bool {
+        let canonicalPath = canonicalBrowsePath(path)
         guard let mountedPaths = mountedBrowseVolumePaths() else { return false }
-        guard mountedPaths.contains(path) else { return true }
+        guard mountedPaths.contains(canonicalPath) else { return true }
 
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/sbin/umount")
-        task.arguments = [path]
+        task.arguments = [canonicalPath]
         do {
             try task.run()
         } catch {
@@ -618,7 +654,7 @@ final class AppModel {
             return false
         }
         guard let remainingPaths = mountedBrowseVolumePaths() else { return false }
-        return !remainingPaths.contains(path)
+        return !remainingPaths.contains(canonicalPath)
     }
 
     private func unmountBrowseSessionBeforeTermination(sessionId: String, socketPath: String) -> Bool {
@@ -757,6 +793,7 @@ final class AppModel {
     private func cleanupOrphanedBrowseMounts() -> Bool {
         let mountsRoot = guiControlDataDirURL()
             .appendingPathComponent("mounts", isDirectory: true)
+            .resolvingSymlinksInPath()
             .standardizedFileURL
         guard FileManager.default.fileExists(atPath: mountsRoot.path) else { return true }
         guard let entries = try? FileManager.default.contentsOfDirectory(
@@ -770,7 +807,7 @@ final class AppModel {
             let sessionId = entry.lastPathComponent
             guard sessionId.hasPrefix("browse_"), sessionId.count > "browse_".count else { continue }
             guard (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
-            let candidate = entry.standardizedFileURL
+            let candidate = entry.resolvingSymlinksInPath().standardizedFileURL
             guard candidate.path.hasPrefix(mountsRoot.path + "/") else { continue }
             if mountedPaths.contains(candidate.path) {
                 guard unmountBrowseVolume(at: candidate.path) else {

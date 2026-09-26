@@ -17,11 +17,12 @@ use dav_server::fs::{
     DavDirEntry, DavFile, DavFileSystem, DavMetaData, FsError, FsFuture, FsResult, FsStream,
     OpenOptions, ReadDirMeta,
 };
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use getrandom::getrandom;
-use hyper::Response;
+use http_body_util::BodyExt;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
+use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -920,7 +921,7 @@ async fn serve(listener: TcpListener, session: Arc<BrowseSession>) {
                 let connection_shutdown = connection_session.shutdown.clone();
                 tokio::spawn(async move {
                     let io = TokioIo::new(stream);
-                    let service = service_fn(move |request| {
+                    let service = service_fn(move |request: Request<hyper::body::Incoming>| {
                         let handler = handler.clone();
                         let capability_prefix = connection_capability_prefix.clone();
                         let capability_root = connection_capability_root.clone();
@@ -952,6 +953,39 @@ async fn serve(listener: TcpListener, session: Arc<BrowseSession>) {
                                         .expect("static 405 response");
                                     return Ok::<_, Infallible>(response);
                                 }
+                            }
+                            if matches!(request.method().as_str(), "OPTIONS" | "PROPFIND") {
+                                let (parts, body) = request.into_parts();
+                                if body.collect().await.is_err() {
+                                    return Ok::<_, Infallible>(response_from_raw(response(
+                                        400,
+                                        "text/plain",
+                                        b"invalid request body",
+                                    )));
+                                }
+                                let method = parts.method.as_str().to_string();
+                                let request_path = parts.uri.path();
+                                let raw_path = if request_path == capability_root {
+                                    capability_prefix.as_str()
+                                } else {
+                                    request_path
+                                };
+                                let headers = parts
+                                    .headers
+                                    .iter()
+                                    .filter_map(|(name, value)| {
+                                        Some((
+                                            name.as_str().to_ascii_lowercase(),
+                                            value.to_str().ok()?.to_string(),
+                                        ))
+                                    })
+                                    .collect::<HashMap<_, _>>();
+                                let raw = respond(&method, raw_path, &headers, &[], &session).await;
+                                return Ok::<_, Infallible>(if session.shutdown.is_cancelled() {
+                                    revoked_response()
+                                } else {
+                                    response_from_raw(raw)
+                                });
                             }
                             if matches!(request.method().as_str(), "GET" | "HEAD") {
                                 let relative = if request_path == capability_root {
@@ -985,7 +1019,7 @@ async fn serve(listener: TcpListener, session: Arc<BrowseSession>) {
                                     response_from_raw(raw)
                                 });
                             }
-                            let response = handler.handle(request).await;
+                            let response = buffer_dav_response(handler.handle(request).await).await;
                             if session.shutdown.is_cancelled() {
                                 Ok::<_, Infallible>(revoked_response())
                             } else {
@@ -1035,12 +1069,41 @@ fn response_from_raw(raw: Vec<u8>) -> Response<dav_server::body::Body> {
             .trim_end_matches('\r')
             .to_string();
         if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("connection") {
+                continue;
+            }
             builder = builder.header(name, value.trim());
         }
     }
     builder
         .body(dav_server::body::Body::from(Bytes::from(body.to_vec())))
         .expect("generated WebDAV response is valid")
+}
+
+async fn buffer_dav_response(
+    response: Response<dav_server::body::Body>,
+) -> Response<dav_server::body::Body> {
+    let (mut parts, mut body) = response.into_parts();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        match chunk {
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(_) => {
+                return Response::builder()
+                    .status(500)
+                    .body(dav_server::body::Body::from("WebDAV response unavailable"))
+                    .expect("static WebDAV error response is valid");
+            }
+        }
+    }
+    parts.headers.remove("transfer-encoding");
+    if !parts.headers.contains_key("content-length") {
+        let length = bytes.len().to_string();
+        if let Ok(value) = length.parse() {
+            parts.headers.insert("content-length", value);
+        }
+    }
+    Response::from_parts(parts, dav_server::body::Body::from(Bytes::from(bytes)))
 }
 
 #[allow(dead_code)]
@@ -1122,8 +1185,12 @@ async fn respond(
     match method {
         "OPTIONS" => response_with_headers(
             200,
-            "",
-            vec![("Allow", "OPTIONS, PROPFIND, GET, HEAD"), ("DAV", "1")],
+            "application/octet-stream",
+            vec![
+                ("Allow", "OPTIONS, PROPFIND, GET, HEAD"),
+                ("DAV", "1,2,3,sabredav-partialupdate"),
+                ("Content-Length", "0"),
+            ],
             &[],
         ),
         "PROPFIND" => match propfind(
@@ -1192,6 +1259,10 @@ async fn propfind(
                     .map(|path| (path.clone(), "file".to_string(), 0, 0)),
             );
         }
+    } else if metadata_overlay_path(relative)
+        && metadata_overlay_is_allowed(relative, session).await?
+    {
+        resources.push((relative.to_string(), "file".to_string(), 0, 0));
     } else if let Some((snapshot, snapshot_path)) = snapshot_path(relative, session).await? {
         if let Some(entry) = session
             .reader
@@ -1297,6 +1368,20 @@ async fn get_file(
             "application/json",
             vec![("Content-Length", &bytes.len().to_string())],
             if head { &[] } else { bytes },
+        );
+    }
+    // macOS mount_webdav reads the root Finder sidecar after its PROPFIND probe. Keep the
+    // direct GET path consistent with BrowseDavFs::node so that the mount can complete.
+    if metadata_overlay_path(relative)
+        && metadata_overlay_is_allowed(relative, session)
+            .await
+            .unwrap_or(false)
+    {
+        return response_with_headers(
+            200,
+            "application/octet-stream",
+            vec![("Content-Length", "0")],
+            &[],
         );
     }
     let Some((snapshot, snapshot_path)) = (match snapshot_path(relative, session).await {
@@ -1810,6 +1895,9 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
     use hyper::Request;
+    use televy_backup_core::{
+        BackupConfig, ChunkingConfig, InMemoryStorage, RemoteDedupeMode, run_backup,
+    };
 
     #[test]
     fn fresh_storage_failure_offers_cached_catalog_fallback() {
@@ -1828,20 +1916,28 @@ mod tests {
     }
 
     async fn test_session(endpoint_db_path: &Path, cache_root: &Path) -> BrowseSession {
+        let reader = Arc::new(SnapshotContentReader::new(
+            endpoint_db_path,
+            cache_root.join("filemaps"),
+            Arc::new(televy_backup_core::InMemoryStorage::new()),
+            [0; 32],
+            Arc::new(SnapshotBrowseCache::new(cache_root, 1024 * 1024)),
+        ));
+        test_session_with_reader("/source", reader)
+    }
+
+    fn test_session_with_reader(
+        source_path: impl Into<String>,
+        reader: Arc<SnapshotContentReader>,
+    ) -> BrowseSession {
         BrowseSession {
             id: "test-session".to_string(),
             target_id: "target".to_string(),
-            source_path: "/source".to_string(),
+            source_path: source_path.into(),
             volume_name: "Test".to_string(),
             capability: "capability".to_string(),
             catalog_source: "cached".to_string(),
-            reader: Arc::new(SnapshotContentReader::new(
-                endpoint_db_path,
-                cache_root.join("filemaps"),
-                Arc::new(televy_backup_core::InMemoryStorage::new()),
-                [0; 32],
-                Arc::new(SnapshotBrowseCache::new(cache_root, 1024 * 1024)),
-            )),
+            reader,
             snapshots: Arc::new(Mutex::new(Vec::new())),
             retired_snapshot_names: Arc::new(Mutex::new(HashSet::new())),
             metadata_overlay: Arc::new(Mutex::new(HashMap::new())),
@@ -1949,12 +2045,13 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(serve(listener, session.clone()));
         let mut stream = TcpStream::connect(address).await.unwrap();
-        stream
-            .write_all(
-                b"PROPFIND /capability/._. HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .await
-            .unwrap();
+        let body = b"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>";
+        let headers = format!(
+            "PROPFIND /capability/._. HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: {}\r\nContent-Type: text/xml\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
         let headers = read_http_headers(&mut stream).await;
         let headers_text = String::from_utf8_lossy(&headers);
         assert!(headers_text.starts_with("HTTP/1.1 207"), "{headers_text}");
@@ -1968,35 +2065,61 @@ mod tests {
     async fn webdav_mount_webdav_enumerates_copies_and_recovers() {
         assert!(cfg!(target_os = "macos"));
         let temp = tempfile::tempdir().unwrap();
+        let expected = b"daemon-backed WebDAV fixture\n".to_vec();
+        let source_path = temp.path().join("source");
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::write(source_path.join("hello.txt"), &expected).unwrap();
         let endpoint_db_path = temp.path().join("endpoint.sqlite");
-        let endpoint_pool = televy_backup_core::index_db::open_index_db(&endpoint_db_path)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES (?, ?, ?, ?, NULL)",
+        let filemap_dir = temp.path().join("filemaps");
+        let dedupe_db_path = temp.path().join("dedupe.sqlite");
+        let storage = Arc::new(InMemoryStorage::new());
+        run_backup(
+            storage.as_ref(),
+            BackupConfig {
+                endpoint_db_path: endpoint_db_path.clone(),
+                filemap_dir: filemap_dir.clone(),
+                dedupe_db_path: dedupe_db_path.clone(),
+                dedupe_pending_db_path: temp.path().join("dedupe.pending.sqlite"),
+                source_path: source_path.clone(),
+                label: "Test".to_string(),
+                chunking: ChunkingConfig {
+                    min_bytes: 64,
+                    avg_bytes: 256,
+                    max_bytes: 1024,
+                },
+                rate_limit: Default::default(),
+                master_key: [0; 32],
+                snapshot_id: None,
+                keep_last_snapshots: 10,
+                remote_dedupe: RemoteDedupeMode::Disabled,
+            },
         )
-        .bind("snapshot-1234")
-        .bind("2026-09-11T08:00:00Z")
-        .bind("/source")
-        .bind("Test")
-        .execute(&endpoint_pool)
         .await
         .unwrap();
-        drop(endpoint_pool);
-
-        let session = Arc::new(test_session(&endpoint_db_path, temp.path()).await);
-        let expected = b"daemon-backed WebDAV fixture\n".to_vec();
-        session
-            .metadata_overlay
-            .lock()
-            .await
-            .insert("hello.txt".to_string(), expected.clone());
+        let reader = Arc::new(
+            SnapshotContentReader::new(
+                &endpoint_db_path,
+                &filemap_dir,
+                storage,
+                [0; 32],
+                Arc::new(SnapshotBrowseCache::new(
+                    temp.path().join("cache"),
+                    1024 * 1024,
+                )),
+            )
+            .with_dedupe_db(dedupe_db_path),
+        );
+        let session = Arc::new(test_session_with_reader(
+            source_path.to_string_lossy().to_string(),
+            reader,
+        ));
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(serve(listener, session.clone()));
         let mount_dir = temp.path().join("webdav-mount");
         std::fs::create_dir(&mount_dir).unwrap();
+        let mount_dir = std::fs::canonicalize(&mount_dir).unwrap();
         let _mount_guard = TestMountGuard(mount_dir.clone());
         let url = format!(
             "http://127.0.0.1:{}/{}/",
@@ -2019,10 +2142,19 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert!(names.iter().any(|name| name == "hello.txt"), "{names:?}");
-        let copied = temp.path().join("copied.txt");
-        std::fs::copy(mount_dir.join("hello.txt"), &copied).unwrap();
-        assert_eq!(std::fs::read(copied).unwrap(), expected);
+        let snapshot_name = session
+            .reader
+            .list_snapshots(&session.source_path)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .display_name;
+        assert!(names.iter().any(|name| name == &snapshot_name), "{names:?}");
+        let mounted_bytes =
+            std::fs::read(mount_dir.join(&snapshot_name).join("hello.txt")).unwrap();
+        assert_eq!(mounted_bytes, expected);
 
         let service = SnapshotBrowseService::new(
             temp.path().join("config"),
@@ -2056,14 +2188,15 @@ mod tests {
     }
 
     fn wait_for_test_mount(path: &Path) -> bool {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let expected_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         while std::time::Instant::now() < deadline {
             let mounted = std::process::Command::new("/sbin/mount")
                 .output()
                 .map(|output| {
                     String::from_utf8_lossy(&output.stdout)
                         .lines()
-                        .any(|line| line.contains(&format!(" on {} ", path.display())))
+                        .any(|line| line.contains(&format!(" on {} ", expected_path.display())))
                 })
                 .unwrap_or(false);
             if mounted {
@@ -2563,6 +2696,10 @@ mod tests {
         assert!(!node.meta.dir);
         assert_eq!(node.meta.size, 0);
         assert!(matches!(node.source, Some(BrowseFileSource::Bytes(bytes)) if bytes.is_empty()));
+
+        let response = respond("GET", "/capability/._.", &HashMap::new(), &[], &session).await;
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with(b"\r\n\r\n"));
     }
 
     #[test]
