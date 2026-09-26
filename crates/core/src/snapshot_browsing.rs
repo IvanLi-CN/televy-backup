@@ -618,7 +618,11 @@ async fn validate_snapshot_filemap(
             endpoint.get::<String, _>("label"),
             endpoint.get::<Option<String>, _>("base_snapshot_id"),
         );
-        if filemap_metadata != endpoint_metadata {
+        if !snapshot_created_at_matches(&filemap_metadata.0, &endpoint_metadata.0)
+            || filemap_metadata.1 != endpoint_metadata.1
+            || filemap_metadata.2 != endpoint_metadata.2
+            || filemap_metadata.3 != endpoint_metadata.3
+        {
             return Err(Error::Integrity {
                 message: format!(
                     "snapshot filemap metadata does not match endpoint catalog: {snapshot_id}"
@@ -627,6 +631,21 @@ async fn validate_snapshot_filemap(
         }
     }
     Ok(())
+}
+
+fn snapshot_created_at_matches(filemap: &str, endpoint: &str) -> bool {
+    if filemap == endpoint {
+        return true;
+    }
+    // Legacy backups inserted these rows with separate SQLite `now` calls, endpoint first.
+    let (Ok(filemap), Ok(endpoint)) = (
+        DateTime::parse_from_rfc3339(filemap),
+        DateTime::parse_from_rfc3339(endpoint),
+    ) else {
+        return false;
+    };
+    let skew = filemap.signed_duration_since(endpoint);
+    skew >= chrono::Duration::zero() && skew <= chrono::Duration::seconds(1)
 }
 
 fn verify_chunk(chunk_hash: &str, plain: Vec<u8>) -> Result<Vec<u8>> {
@@ -883,6 +902,29 @@ mod tests {
     fn malformed_snapshot_timestamps_fail_closed() {
         assert!(local_display_time("2026/09/11T14:05:37").is_err());
         assert!(local_display_time("not-a-timestamp").is_err());
+    }
+
+    #[test]
+    fn legacy_filemap_timestamp_skew_is_forward_and_bounded() {
+        let endpoint = "2026-09-11T08:00:00.000Z";
+        assert!(snapshot_created_at_matches(endpoint, endpoint));
+        assert!(snapshot_created_at_matches(
+            "2026-09-11T08:00:00.015Z",
+            endpoint
+        ));
+        assert!(snapshot_created_at_matches(
+            "2026-09-11T08:00:01.000Z",
+            endpoint
+        ));
+        assert!(!snapshot_created_at_matches(
+            "2026-09-11T07:59:59.999Z",
+            endpoint
+        ));
+        assert!(!snapshot_created_at_matches(
+            "2026-09-11T08:00:01.001Z",
+            endpoint
+        ));
+        assert!(!snapshot_created_at_matches("invalid", endpoint));
     }
 
     #[test]

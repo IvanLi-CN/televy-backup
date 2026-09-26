@@ -53,10 +53,12 @@ EOF
 
 sqlite3 "$data_dir/index/index.fixture.sqlite" < "$root_dir/crates/core/migrations/0001_init.sql"
 sqlite3 "$data_dir/index/index.fixture.sqlite" \
-  "INSERT INTO snapshots(snapshot_id,created_at,source_path,label,base_snapshot_id) VALUES('snapshot-hil-1','2026-09-23T04:00:00Z','$test_root/source','Browse HIL',NULL);"
+  "INSERT INTO snapshots(snapshot_id,created_at,source_path,label,base_snapshot_id) VALUES('snapshot-hil-1','2026-09-23T04:00:00.000Z','$test_root/source','Browse HIL',NULL);"
 mkdir -p "$data_dir/index/filemaps/fixture"
 cp "$data_dir/index/index.fixture.sqlite" \
   "$data_dir/index/filemaps/fixture/snapshot-hil-1.sqlite"
+sqlite3 "$data_dir/index/filemaps/fixture/snapshot-hil-1.sqlite" \
+  "UPDATE snapshots SET created_at='2026-09-23T04:00:00.015Z' WHERE snapshot_id='snapshot-hil-1';"
 
 TELEVYBACKUP_ALLOW_MULTI_INSTANCE=1 \
   TELEVYBACKUP_UI_DEMO=1 \

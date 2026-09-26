@@ -2462,6 +2462,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_timestamp_skew_does_not_block_browse_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint_db = temp.path().join("index.endpoint.sqlite");
+        let endpoint_pool = televy_backup_core::index_db::open_index_db(&endpoint_db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('snapshot-1234', '2026-09-11T08:00:00.000Z', '/source', 'Test', NULL)",
+        )
+        .execute(&endpoint_pool)
+        .await
+        .unwrap();
+        drop(endpoint_pool);
+
+        let filemap_dir = temp.path().join("filemaps");
+        std::fs::create_dir_all(&filemap_dir).unwrap();
+        let filemap_pool = televy_backup_core::index_db::open_snapshot_filemap_db(
+            &filemap_dir.join("snapshot-1234.sqlite"),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshots (snapshot_id, created_at, source_path, label, base_snapshot_id) VALUES ('snapshot-1234', '2026-09-11T08:00:00.015Z', '/source', 'Test', NULL)",
+        )
+        .execute(&filemap_pool)
+        .await
+        .unwrap();
+        drop(filemap_pool);
+
+        let reader = SnapshotContentReader::new_cached(
+            endpoint_db,
+            filemap_dir,
+            "test.mem",
+            Arc::new(SnapshotBrowseCache::new(temp.path().join("cache"), 1024)),
+        );
+        let snapshots = reader.list_snapshots("/source").await.unwrap();
+
+        assert!(
+            collect_unavailable_entries(&reader, &snapshots)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn unavailable_entry_errors_are_reported_during_mount_setup() {
         let temp = tempfile::tempdir().unwrap();
         let reader = SnapshotContentReader::new_cached(
