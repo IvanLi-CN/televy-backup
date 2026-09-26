@@ -669,7 +669,7 @@ impl SnapshotBrowseService {
             Some(
                 connect_storage(&self.config_root, &self.data_root, &settings, &target)
                     .await
-                    .map_err(sanitize_mount_error)?,
+                    .map_err(sanitize_catalog_refresh_error)?,
             )
         };
         if !params.allow_cached_catalog {
@@ -1758,7 +1758,10 @@ async fn connect_storage(
         session,
         cache_dir,
         min_delay_ms: Some(endpoint.rate_limit.min_delay_ms as u64),
-        max_concurrent_uploads: Some(endpoint.rate_limit.max_concurrent_uploads as usize),
+        // Finder browse is a read-through session, not an upload workload. Keep helper startup
+        // bounded to one MTProto process so a high backup upload concurrency cannot multiply the
+        // synchronous catalog-refresh latency for a user-facing mount request.
+        max_concurrent_uploads: Some(1),
         helper_path: None,
     })
     .await
@@ -1793,12 +1796,12 @@ fn io_control_error(error: std::io::Error) -> ControlError {
     }
 }
 
-fn sanitize_mount_error(error: ControlError) -> ControlError {
+fn sanitize_catalog_refresh_error(error: ControlError) -> ControlError {
     ControlError {
-        code: error.code,
-        message: "Backup storage is unavailable for snapshot browsing.".to_string(),
-        retryable: error.retryable,
-        details: serde_json::json!({}),
+        code: "snapshot.browse.catalog_refresh_unavailable".to_string(),
+        message: "The remote backup catalog could not be refreshed. You can browse the last cached catalog.".to_string(),
+        retryable: true,
+        details: serde_json::json!({ "sourceCode": error.code }),
     }
 }
 
@@ -1807,6 +1810,22 @@ mod tests {
     use super::*;
     use futures_util::StreamExt;
     use hyper::Request;
+
+    #[test]
+    fn fresh_storage_failure_offers_cached_catalog_fallback() {
+        let mapped = sanitize_catalog_refresh_error(ControlError {
+            code: "telegram.unavailable".to_string(),
+            message: "secret transport detail".to_string(),
+            retryable: true,
+            details: serde_json::json!({ "raw": "must not leak" }),
+        });
+
+        assert_eq!(mapped.code, "snapshot.browse.catalog_refresh_unavailable");
+        assert!(mapped.retryable);
+        assert_eq!(mapped.details["sourceCode"], "telegram.unavailable");
+        assert!(mapped.message.contains("cached catalog"));
+        assert!(!mapped.message.contains("secret transport detail"));
+    }
 
     async fn test_session(endpoint_db_path: &Path, cache_root: &Path) -> BrowseSession {
         BrowseSession {
