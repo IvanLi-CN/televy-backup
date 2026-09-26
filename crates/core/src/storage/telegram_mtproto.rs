@@ -17,6 +17,10 @@ use super::{Storage, StorageProgress};
 use crate::{Error, Result};
 
 const TG_MTPROTO_OBJECT_ID_PREFIX_V1: &str = "tgmtproto:v1:";
+// Control-plane requests must not hold a user-facing operation for the full document timeout.
+// Browse needs to resolve the pinned catalog before it can create a local WebDAV session, so a
+// stalled Telegram connection must fail quickly and let the caller choose a cached catalog.
+const MTPROTO_HELPER_CONTROL_TIMEOUT_SECS: u64 = 15;
 const MTPROTO_HELPER_READ_TIMEOUT_SECS: u64 = 600;
 // Upload progress events should arrive quickly (the helper emits a 0-byte heartbeat
 // before the first network request). If nothing arrives for this long, treat it as
@@ -348,8 +352,11 @@ impl MtProtoHelperManager {
     fn should_respawn_helper_after(err: &Error) -> bool {
         match err {
             Error::Telegram { message } => {
-                message.contains("mtproto helper")
-                    || message.to_ascii_lowercase().contains("timed out")
+                // A timed-out request has already killed and reaped the helper. Defer the
+                // replacement until the next checkout so the current control request can return
+                // its typed failure instead of spending another control timeout respawning.
+                (!message.to_ascii_lowercase().contains("timed out")
+                    && message.contains("mtproto helper"))
                     || message.contains("save_file_part failed")
                     || message.contains("save_big_file_part failed")
             }
@@ -679,6 +686,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum FakeHelperMode {
         Graceful,
+        HangOnInit,
         HangAfterShutdownAck,
         DelayedUploads,
         CrashOnUpload,
@@ -732,6 +740,7 @@ mod tests {
 
         let mode = match mode {
             FakeHelperMode::Graceful => "graceful",
+            FakeHelperMode::HangOnInit => "hang_on_init",
             FakeHelperMode::HangAfterShutdownAck => "hang_after_ack",
             FakeHelperMode::DelayedUploads => "delayed_uploads",
             FakeHelperMode::CrashOnUpload => "crash_on_upload",
@@ -750,6 +759,11 @@ while IFS= read -r line; do
   printf '%s\n' "$line" >> "$REQUESTS"
   case "$line" in
     *'"cmd":"init"'*)
+      if [ "$MODE" = "hang_on_init" ]; then
+        while :; do
+          :
+        done
+      fi
       printf '%s\n' '{{"ok":true,"session":"{FAKE_HELPER_SESSION_B64}"}}'
       ;;
     *'"cmd":"shutdown"'*)
@@ -872,6 +886,35 @@ printf 'eof\n' >> "$EVENTS"
             std::thread::sleep(Duration::from_millis(50));
         }
         fs::read_to_string(path).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mtproto_helper_init_timeout_kills_stalled_helper() {
+        let fake = write_fake_helper(FakeHelperMode::HangOnInit);
+        let cache_dir = fake
+            .script_path
+            .parent()
+            .unwrap()
+            .join("cache-init-timeout");
+        let mut helper = MtProtoHelper::spawn(&fake.script_path).unwrap();
+        let pid = helper.child.id();
+        let started = Instant::now();
+
+        let error = helper
+            .init_with_timeout(
+                fake_init_request(&cache_dir, Some(PRIMARY_SESSION_B64.to_string())),
+                1,
+            )
+            .expect_err("stalled init should time out");
+
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(
+            error
+                .to_string()
+                .contains("timed out waiting for response after 1s")
+        );
+        assert!(wait_for_process_exit(pid, Duration::from_secs(5)));
     }
 
     #[cfg(unix)]
@@ -1332,8 +1375,12 @@ impl MtProtoHelper {
     }
 
     fn init(&mut self, req: InitRequest) -> Result<()> {
+        self.init_with_timeout(req, MTPROTO_HELPER_CONTROL_TIMEOUT_SECS)
+    }
+
+    fn init_with_timeout(&mut self, req: InitRequest, timeout_secs: u64) -> Result<()> {
         self.send_json(&Request::Init(req))?;
-        let env = self.read_json_line()?;
+        let env = self.read_json_line_with_timeout(timeout_secs)?;
         self.apply_session(&env)?;
         if !env.ok {
             return Err(Error::InvalidConfig {
@@ -1499,7 +1546,7 @@ impl MtProtoHelper {
     fn get_pinned(&mut self) -> Result<Option<String>> {
         self.send_json(&Request::GetPinned)?;
 
-        let env = self.read_json_line()?;
+        let env = self.read_json_line_with_timeout(MTPROTO_HELPER_CONTROL_TIMEOUT_SECS)?;
         self.apply_session(&env)?;
         if !env.ok {
             return Err(Error::Telegram {
