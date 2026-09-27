@@ -395,18 +395,6 @@ final class AppModel {
                         }
                         return
                     }
-                    guard self.waitForReadableBrowseVolume(mountRoot, timeoutSeconds: 30) else {
-                        self.appendLog("WARN: WebDAV browse volume mounted but content was not readable target=\(targetId)")
-                        self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
-                        DispatchQueue.main.async {
-                            completion(.failure(ControlRequestFailure(
-                                code: "snapshot.browse.mount_unreadable",
-                                message: "The backup volume mounted but its contents could not be read.",
-                                retryable: true
-                            )))
-                        }
-                        return
-                    }
                     self.observeBrowseUnmount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
                     self.browseMountLock.lock()
                     self.browseMountsByTargetId[targetId] = BrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot)
@@ -436,21 +424,6 @@ final class AppModel {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         repeat {
             if mountedBrowseVolumePaths()?.contains(expectedPath) == true {
-                return true
-            }
-            if Date() >= deadline { break }
-            Thread.sleep(forTimeInterval: 0.1)
-        } while true
-        return false
-    }
-
-    private func waitForReadableBrowseVolume(_ mountRoot: URL, timeoutSeconds: Double) -> Bool {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        repeat {
-            if (try? FileManager.default.contentsOfDirectory(
-                at: mountRoot,
-                includingPropertiesForKeys: [.isDirectoryKey]
-            )) != nil {
                 return true
             }
             if Date() >= deadline { break }

@@ -119,6 +119,13 @@ if ! printf '%s\n' "$browse_mount_lifecycle_source" | search_stdin_quiet 'mounte
   echo "WebDAV browse mount wait must use the kernel mount table helper" >&2
   exit 1
 fi
+# A WebDAV mount can be valid while a direct FileManager directory probe blocks under macOS
+# TCC/Finder filesystem mediation. Mount readiness is established by the kernel table; the App
+# must open Finder instead of adding an unbounded local-directory read to this lifecycle path.
+if printf '%s\n' "$browse_mount_lifecycle_source" | search_stdin 'contentsOfDirectory'; then
+  echo "WebDAV browse mount lifecycle must not block on a local FileManager directory probe" >&2
+  exit 1
+fi
 
 main_window_source="$(sed -n '/struct MainWindowRootView/,/private func toggleSidebar/p' "$root_dir/macos/TelevyBackupApp/MainWindow.swift")"
 if ! printf '%s\n' "$main_window_source" | search_stdin_quiet 'ToastPill'; then
