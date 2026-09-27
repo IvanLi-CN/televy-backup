@@ -56,6 +56,7 @@ struct MainWindowRootView: View {
     @State private var lastNavigationRevision = 0
     @State private var pendingNavigation: MainWindowDestination?
     @State private var didRefreshPendingRunHistory = false
+    @State private var browseMountRevision = 0
 
     private enum Selection {
         static let unknownTarget = "__unknown_target__"
@@ -108,6 +109,12 @@ struct MainWindowRootView: View {
         .onReceive(runHistoryStore.$refreshInFlight) { _ in resolvePendingNavigation() }
         .onReceive(statusStore.$state) { _ in resolvePendingNavigation() }
         .onReceive(taskStore.$activeTask) { _ in resolvePendingNavigation() }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidMount)) { _ in
+            browseMountRevision &+= 1
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidUnmount)) { _ in
+            browseMountRevision &+= 1
+        }
         .onChange(of: selection) { _, newSelection in
             guard let selectedRun else { return }
             guard !SnapshotRunDetailSelection.shouldKeepDetail(
@@ -344,6 +351,7 @@ struct MainWindowRootView: View {
                         target: target,
                         isSelected: selection == target.targetId,
                         isBusy: taskStore.isRunning,
+                        initialBrowseMounted: model.isBrowseMounted(targetId: target.targetId),
                         onBackup: {
                             model.backupRun(targetId: target.targetId)
                         },
@@ -357,6 +365,7 @@ struct MainWindowRootView: View {
                             selection = target.targetId
                         }
                     )
+                    .id("target-row-\(target.targetId)-\(browseMountRevision)")
                     .tag(target.targetId)
                 }
 
@@ -458,7 +467,29 @@ private struct TargetListRow: View {
     let onVerify: () -> Void
     let onSelect: () -> Void
     @State private var browseInFlight = false
+    @State private var browseMounted = false
+    @State private var browseUnmountInFlight = false
     @State private var browseIssue: SnapshotBrowseIssue?
+
+    init(
+        target: StatusTarget,
+        isSelected: Bool,
+        isBusy: Bool,
+        initialBrowseMounted: Bool,
+        onBackup: @escaping () -> Void,
+        onRestore: @escaping () -> Void,
+        onVerify: @escaping () -> Void,
+        onSelect: @escaping () -> Void
+    ) {
+        self.target = target
+        self.isSelected = isSelected
+        self.isBusy = isBusy
+        self.onBackup = onBackup
+        self.onRestore = onRestore
+        self.onVerify = onVerify
+        self.onSelect = onSelect
+        _browseMounted = State(initialValue: initialBrowseMounted)
+    }
 
     private var runs: [RunLogSummary] {
         runHistoryStore.runs
@@ -521,6 +552,10 @@ private struct TargetListRow: View {
     private func browse(allowCachedCatalog: Bool = false) {
         guard !browseInFlight else { return }
         browseInFlight = true
+        model.showToast(
+            allowCachedCatalog ? "Preparing cached backup catalog…" : "Refreshing backup catalog…",
+            isError: false
+        )
         model.browseTargetInFinder(
             targetId: target.targetId,
             allowCachedCatalog: allowCachedCatalog
@@ -528,9 +563,24 @@ private struct TargetListRow: View {
             browseInFlight = false
             switch result {
             case .success:
+                browseMounted = true
                 model.showToast("Backup volume opened in Finder", isError: false)
             case let .failure(error):
                 browseIssue = SnapshotBrowseIssue(failure: error)
+            }
+        }
+    }
+
+    private func unmountBrowse() {
+        guard !browseUnmountInFlight else { return }
+        browseUnmountInFlight = true
+        model.unmountTargetInFinder(targetId: target.targetId) { result in
+            browseUnmountInFlight = false
+            switch result {
+            case .success:
+                browseMounted = false
+            case let .failure(error):
+                model.showToast(controlFailureMessage(error), isError: true)
             }
         }
     }
@@ -585,6 +635,12 @@ private struct TargetListRow: View {
         }()
 
         let rowSecondaryLeft: String = {
+            if let browseActivity = SnapshotBrowsePresentation.activityText(
+                isBrowsing: browseInFlight,
+                isEjecting: browseUnmountInFlight
+            ) {
+                return browseActivity
+            }
             switch status {
             case .starting:
                 return "Requesting backup…"
@@ -683,18 +739,45 @@ private struct TargetListRow: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
-        .contextMenu {
-            Button("Backup now") { onBackup() }
-                .disabled(!model.canEnqueueBackup())
-            Divider()
-            Button("Browse backups in Finder") {
-                browse()
-            }
-            .disabled(browseInFlight)
-            Button("Restore…") { onRestore() }
-                .disabled(isBusy)
-            Button("Verify") { onVerify() }
-                .disabled(isBusy)
+        .onAppear {
+            browseMounted = model.isBrowseMounted(targetId: target.targetId)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidMount)) { _ in
+            browseMounted = model.isBrowseMounted(targetId: target.targetId)
+            browseInFlight = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidStart)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
+            browseInFlight = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidFinish)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
+            browseInFlight = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidUnmount)) { _ in
+            browseMounted = model.isBrowseMounted(targetId: target.targetId)
+        }
+        .overlay {
+            TargetContextMenuBridge(
+                isMounted: browseMounted,
+                canBackup: model.canEnqueueBackup(),
+                browseEnabled: !browseInFlight && !browseMounted,
+                ejectEnabled: !browseUnmountInFlight,
+                restoreEnabled: !isBusy,
+                verifyEnabled: !isBusy,
+                onBackup: onBackup,
+                onBrowse: { browse() },
+                onRevealTargetFolder: {
+                    model.revealTargetFolderInFinder(path: target.sourcePath)
+                },
+                onEject: { unmountBrowse() },
+                onRestore: onRestore,
+                onVerify: onVerify
+            )
         }
         .alert(item: $browseIssue) { issue in
             if issue.canBrowseCached {
@@ -715,6 +798,135 @@ private struct TargetListRow: View {
         }
         .help(target.sourcePath)
         .padding(.vertical, 4)
+    }
+}
+
+private struct TargetContextMenuBridge: NSViewRepresentable {
+    let isMounted: Bool
+    let canBackup: Bool
+    let browseEnabled: Bool
+    let ejectEnabled: Bool
+    let restoreEnabled: Bool
+    let verifyEnabled: Bool
+    let onBackup: () -> Void
+    let onBrowse: () -> Void
+    let onRevealTargetFolder: () -> Void
+    let onEject: () -> Void
+    let onRestore: () -> Void
+    let onVerify: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> ContextMenuView {
+        let view = ContextMenuView()
+        view.menuProvider = { [weak coordinator = context.coordinator] in
+            coordinator?.makeMenu()
+        }
+        updateCoordinator(context.coordinator)
+        return view
+    }
+
+    func updateNSView(_ nsView: ContextMenuView, context: Context) {
+        nsView.menuProvider = { [weak coordinator = context.coordinator] in
+            coordinator?.makeMenu()
+        }
+        updateCoordinator(context.coordinator)
+    }
+
+    private func updateCoordinator(_ coordinator: Coordinator) {
+        coordinator.isMounted = isMounted
+        coordinator.canBackup = canBackup
+        coordinator.browseEnabled = browseEnabled
+        coordinator.ejectEnabled = ejectEnabled
+        coordinator.restoreEnabled = restoreEnabled
+        coordinator.verifyEnabled = verifyEnabled
+        coordinator.onBackup = onBackup
+        coordinator.onBrowse = onBrowse
+        coordinator.onRevealTargetFolder = onRevealTargetFolder
+        coordinator.onEject = onEject
+        coordinator.onRestore = onRestore
+        coordinator.onVerify = onVerify
+    }
+
+    final class Coordinator: NSObject {
+        var isMounted = false
+        var canBackup = false
+        var browseEnabled = false
+        var ejectEnabled = false
+        var restoreEnabled = false
+        var verifyEnabled = false
+        var onBackup: () -> Void = {}
+        var onBrowse: () -> Void = {}
+        var onRevealTargetFolder: () -> Void = {}
+        var onEject: () -> Void = {}
+        var onRestore: () -> Void = {}
+        var onVerify: () -> Void = {}
+
+        func makeMenu() -> NSMenu {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            menu.addItem(makeItem("Backup now", action: #selector(backupNow), enabled: canBackup, systemImage: nil))
+            menu.addItem(.separator())
+            menu.addItem(makeItem(
+                "Browse backups in Finder",
+                action: #selector(browseBackups),
+                enabled: browseEnabled,
+                systemImage: nil
+            ))
+            menu.addItem(makeItem(
+                "Open target folder in Finder",
+                action: #selector(revealTargetFolder),
+                enabled: true,
+                systemImage: nil
+            ))
+            if isMounted {
+                menu.addItem(makeItem(
+                    "Eject backup volume",
+                    action: #selector(ejectBackupVolume),
+                    enabled: ejectEnabled,
+                    systemImage: nil
+                ))
+            }
+            menu.addItem(.separator())
+            menu.addItem(makeItem("Restore…", action: #selector(restore), enabled: restoreEnabled, systemImage: nil))
+            menu.addItem(makeItem("Verify", action: #selector(verify), enabled: verifyEnabled, systemImage: nil))
+            return menu
+        }
+
+        private func makeItem(_ title: String, action: Selector, enabled: Bool, systemImage _: String?) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.isEnabled = enabled
+            return item
+        }
+
+        @objc private func backupNow() { onBackup() }
+        @objc private func browseBackups() { onBrowse() }
+        @objc private func revealTargetFolder() { onRevealTargetFolder() }
+        @objc private func ejectBackupVolume() { onEject() }
+        @objc private func restore() { onRestore() }
+        @objc private func verify() { onVerify() }
+    }
+
+    final class ContextMenuView: NSView {
+        var menuProvider: (() -> NSMenu?)?
+
+        override func menu(for _: NSEvent) -> NSMenu? {
+            menuProvider?()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let event = NSApp.currentEvent else { return nil }
+            if event.type == .rightMouseDown || event.type == .otherMouseDown {
+                return super.hitTest(point)
+            }
+            if event.type == .leftMouseDown, event.modifierFlags.contains(.control) {
+                return super.hitTest(point)
+            }
+            return nil
+        }
     }
 }
 
@@ -813,6 +1025,22 @@ private struct TargetDetailView: View {
         .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidUnmount)) { _ in
             browseMounted = false
         }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidMount)) { _ in
+            browseMounted = model.isBrowseMounted(targetId: target.targetId)
+            browseInFlight = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidStart)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
+            browseInFlight = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidFinish)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
+            browseInFlight = false
+        }
         .alert(item: $browseIssue) { issue in
             if issue.canBrowseCached {
                 Alert(
@@ -849,11 +1077,24 @@ private struct TargetDetailView: View {
                     Button {
                         unmountBrowse()
                     } label: {
-                        if browseUnmountInFlight {
-                            ProgressView()
-                                .controlSize(.small)
+                        if let browseActivity = SnapshotBrowsePresentation.activityText(
+                            isBrowsing: false,
+                            isEjecting: browseUnmountInFlight
+                        ) {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text(browseActivity)
+                            }
                         } else {
-                            Label("Eject backup volume", systemImage: "eject")
+                            Label(
+                                SnapshotBrowsePresentation.actionText(
+                                    isBrowsing: false,
+                                    isMounted: true,
+                                    isEjecting: false
+                                ),
+                                systemImage: "eject"
+                            )
                         }
                     }
                     .buttonStyle(.bordered)
@@ -863,11 +1104,24 @@ private struct TargetDetailView: View {
                     Button {
                         browse()
                     } label: {
-                        if browseInFlight {
-                            ProgressView()
-                                .controlSize(.small)
+                        if let browseActivity = SnapshotBrowsePresentation.activityText(
+                            isBrowsing: browseInFlight,
+                            isEjecting: false
+                        ) {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text(browseActivity)
+                            }
                         } else {
-                            Label("Browse backups in Finder", systemImage: "externaldrive")
+                            Label(
+                                SnapshotBrowsePresentation.actionText(
+                                    isBrowsing: false,
+                                    isMounted: false,
+                                    isEjecting: false
+                                ),
+                                systemImage: "externaldrive"
+                            )
                         }
                     }
                     .buttonStyle(.bordered)
@@ -900,6 +1154,10 @@ private struct TargetDetailView: View {
     private func browse(allowCachedCatalog: Bool = false) {
         guard !browseInFlight else { return }
         browseInFlight = true
+        model.showToast(
+            allowCachedCatalog ? "Preparing cached backup catalog…" : "Refreshing backup catalog…",
+            isError: false
+        )
         model.browseTargetInFinder(targetId: target.targetId, allowCachedCatalog: allowCachedCatalog) { result in
             browseInFlight = false
             switch result {

@@ -246,8 +246,9 @@ pub fn start_managed_service(config_dir: &Path, data_dir: &Path) -> Result<(), C
 
 pub fn stop_service() -> Result<(), CliError> {
     let domain = gui_domain();
-    let _ = launchctl(&["disable", &format!("{}/{}", domain, SERVICE_LABEL)]);
-    launchctl(&["bootout", &domain, SERVICE_LABEL])
+    let service = format!("{domain}/{SERVICE_LABEL}");
+    let _ = launchctl(&["disable", &service]);
+    launchctl(&["bootout", &service])
 }
 
 fn plist_contents(manifest: &ServiceManifest, daemon_path: &Path) -> String {
@@ -393,7 +394,7 @@ fn install_inner(
     atomic_write(&plist, plist_text.as_bytes())?;
     let domain = gui_domain();
     let service = format!("{domain}/{SERVICE_LABEL}");
-    let _ = launchctl(&["bootout", &domain, SERVICE_LABEL]);
+    let _ = launchctl(&["bootout", &service]);
     let rollback = |error: CliError| -> Result<ServiceManifest, CliError> {
         if let Some(old_bytes) = old_plist.as_ref() {
             let _ = atomic_write(&plist, old_bytes);
@@ -491,7 +492,8 @@ pub fn uninstall_service(config_dir: &Path, json: bool) -> Result<(), CliError> 
     }
     let domain = gui_domain();
     if plist.is_file() {
-        let _ = launchctl(&["bootout", &domain, SERVICE_LABEL]);
+        let service = format!("{domain}/{SERVICE_LABEL}");
+        let _ = launchctl(&["bootout", &service]);
         fs::remove_file(&plist)
             .map_err(|e| CliError::new("service.uninstall_failed", e.to_string()))?;
     }
@@ -664,6 +666,14 @@ mod tests {
         let calls = fs::read_to_string(log).unwrap();
         let calls = calls.lines().collect::<Vec<_>>();
         assert_eq!(calls.len(), 6);
+        assert_eq!(
+            calls[0],
+            format!(
+                "bootout gui/{}/{}",
+                unsafe { libc::geteuid() },
+                SERVICE_LABEL
+            )
+        );
         assert_eq!(calls[0].split_whitespace().next(), Some("bootout"));
         assert_eq!(calls[1].split_whitespace().next(), Some("enable"));
         assert_eq!(calls[2].split_whitespace().next(), Some("bootstrap"));
