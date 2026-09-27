@@ -132,6 +132,22 @@ if printf '%s\n' "$browse_mount_lifecycle_source" | search_stdin 'contentsOfDire
   echo "WebDAV browse mount lifecycle must not block on a local FileManager directory probe" >&2
   exit 1
 fi
+if printf '%s\n' "$browse_mount_lifecycle_source" | search_stdin 'resolvingSymlinksInPath'; then
+  echo "WebDAV browse mount lifecycle must not resolve symlinks on a disappearing mount" >&2
+  exit 1
+fi
+
+# Finder may briefly keep a GUI-owned WebDAV mount busy during an explicit eject. The App must
+# retain the normal unmount path but provide Disk Arbitration's force fallback for that action.
+unmount_source="$(sed -n '/private func unmountBrowseVolume/,/private func waitForBrowseVolumeUnmount/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if ! printf '%s\n' "$unmount_source" | search_stdin_quiet 'diskutil'; then
+  echo "WebDAV browse eject must retain a diskutil fallback for Finder-busy mounts" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$unmount_source" | search_stdin_quiet 'unmount.*force'; then
+  echo "WebDAV browse eject must use diskutil unmount force for Finder-busy mounts" >&2
+  exit 1
+fi
 
 main_window_source="$(sed -n '/struct MainWindowRootView/,/private func toggleSidebar/p' "$root_dir/macos/TelevyBackupApp/MainWindow.swift")"
 if ! printf '%s\n' "$main_window_source" | search_stdin_quiet 'ToastPill'; then
@@ -141,6 +157,22 @@ fi
 target_row_browse_source="$(sed -n '/private struct TargetListRow/,/private struct TargetDetailView/p' "$root_dir/macos/TelevyBackupApp/MainWindow.swift")"
 if ! printf '%s\n' "$target_row_browse_source" | search_stdin_quiet 'SnapshotBrowseIssue'; then
   echo "Target list browse actions must expose actionable failure state" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$target_row_browse_source" | search_stdin_quiet 'Browse backups in Finder'; then
+  echo "Target list context menu must expose backup browsing in Finder" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$target_row_browse_source" | search_stdin_quiet 'Open target folder in Finder'; then
+  echo "Target list context menu must expose the target folder in Finder" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$target_row_browse_source" | search_stdin_quiet 'Eject backup volume'; then
+  echo "Target list context menu must expose conditional backup volume ejection" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$target_row_browse_source" | search_stdin_quiet 'if isMounted'; then
+  echo "Target list context menu must hide backup volume ejection until a mount is active" >&2
   exit 1
 fi
 

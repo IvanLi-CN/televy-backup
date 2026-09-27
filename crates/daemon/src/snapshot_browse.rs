@@ -41,6 +41,10 @@ use televy_backup_core::{TelegramMtProtoStorage, TelegramMtProtoStorageConfig};
 
 #[allow(dead_code)]
 const MAX_HTTP_REQUEST: usize = 1024 * 1024;
+// Remote catalog refresh can download and validate an updated endpoint index. Keep the
+// user-facing request bounded, but allow a cold MTProto/storage path more than one short retry.
+const FRESH_BROWSE_TIMEOUT: Duration = Duration::from_secs(60);
+const CACHED_STORAGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SnapshotBrowseMountParams {
@@ -68,7 +72,7 @@ struct BrowseSession {
     snapshots: Arc<Mutex<Vec<BrowseSnapshot>>>,
     retired_snapshot_names: Arc<Mutex<HashSet<String>>>,
     metadata_overlay: Arc<Mutex<HashMap<String, Vec<u8>>>>,
-    diagnostics_json: Arc<Vec<u8>>,
+    diagnostics_json: Arc<RwLock<Vec<u8>>>,
     shutdown: CancellationToken,
 }
 
@@ -152,15 +156,14 @@ impl BrowseDavFs {
             });
         }
         if relative == format!("{DIAGNOSTICS_DIRECTORY}/{UNAVAILABLE_ENTRIES_FILE}") {
+            let diagnostics_json = session.diagnostics_json.read().await.clone();
             return Ok(BrowseNode {
                 meta: BrowseMeta {
-                    size: session.diagnostics_json.len() as u64,
+                    size: diagnostics_json.len() as u64,
                     mtime_ms: 0,
                     dir: false,
                 },
-                source: Some(BrowseFileSource::Bytes(
-                    session.diagnostics_json.as_ref().clone(),
-                )),
+                source: Some(BrowseFileSource::Bytes(diagnostics_json)),
             });
         }
         if let Some(bytes) = session.metadata_overlay.lock().await.get(relative).cloned() {
@@ -260,10 +263,11 @@ impl BrowseDavFs {
                 },
             });
         } else if relative == DIAGNOSTICS_DIRECTORY {
+            let diagnostics_len = session.diagnostics_json.read().await.len() as u64;
             entries.push(BrowseDirEntryImpl {
                 name: UNAVAILABLE_ENTRIES_FILE.as_bytes().to_vec(),
                 meta: BrowseMeta {
-                    size: session.diagnostics_json.len() as u64,
+                    size: diagnostics_len,
                     mtime_ms: 0,
                     dir: false,
                 },
@@ -579,7 +583,19 @@ impl SnapshotBrowseService {
         match request.method.as_str() {
             "snapshot.browse.mount" => {
                 let params: SnapshotBrowseMountParams = decode_params(&request.params)?;
-                self.mount(params).await
+                if params.allow_cached_catalog {
+                    self.mount(params).await
+                } else {
+                    match tokio::time::timeout(FRESH_BROWSE_TIMEOUT, self.mount(params)).await {
+                        Ok(result) => result,
+                        Err(_) => Err(ControlError {
+                            code: "snapshot.browse.catalog_refresh_unavailable".to_string(),
+                            message: "The remote backup catalog could not be refreshed in time. You can browse the last cached catalog.".to_string(),
+                            retryable: true,
+                            details: serde_json::json!({ "sourceCode": "control.timeout" }),
+                        }),
+                    }
+                }
             }
             "snapshot.browse.status" => {
                 let params: SnapshotBrowseSessionParams = decode_params(&request.params)?;
@@ -650,17 +666,51 @@ impl SnapshotBrowseService {
             .join("index")
             .join("dedupe")
             .join(format!("dedupe.{}.sqlite", target.endpoint_id));
+        let endpoint = settings
+            .telegram_endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == target.endpoint_id)
+            .ok_or_else(|| {
+                ControlError::invalid_request(
+                    "target endpoint was not found",
+                    serde_json::json!({}),
+                )
+            })?;
+        if !params.allow_cached_catalog && crate::is_likely_private_chat_id(&endpoint.chat_id) {
+            return Err(ControlError {
+                code: "snapshot.browse.catalog_refresh_unavailable".to_string(),
+                message: "The remote backup catalog cannot be refreshed for a private Telegram chat. You can browse the last cached catalog.".to_string(),
+                retryable: true,
+                details: serde_json::json!({}),
+            });
+        }
         // A cached catalog must remain usable when remote storage is unavailable, but it should
         // still attach storage when credentials are available so file reads can fetch objects.
         // A fresh catalog initializes storage before refreshing the endpoint index.
         let remote_storage = if params.allow_cached_catalog {
-            match connect_storage(&self.config_root, &self.data_root, &settings, &target).await {
-                Ok(storage) => Some(storage),
-                Err(error) => {
+            // A cached catalog must remain mountable when Telegram is unavailable, but retain
+            // remote reads when storage can initialize quickly. The short bound keeps Finder
+            // mount setup independent from helper/network startup latency.
+            match tokio::time::timeout(
+                CACHED_STORAGE_CONNECT_TIMEOUT,
+                connect_storage(&self.config_root, &self.data_root, &settings, &target),
+            )
+            .await
+            {
+                Ok(Ok(storage)) => Some(storage),
+                Ok(Err(error)) => {
                     tracing::debug!(
                         event = "snapshot.browse.cached_storage_unavailable",
                         target_id = %target.id,
                         error = ?error,
+                        "cached snapshot browsing will remain metadata-only"
+                    );
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        event = "snapshot.browse.cached_storage_timeout",
+                        target_id = %target.id,
                         "cached snapshot browsing will remain metadata-only"
                     );
                     None
@@ -674,24 +724,6 @@ impl SnapshotBrowseService {
             )
         };
         if !params.allow_cached_catalog {
-            let endpoint = settings
-                .telegram_endpoints
-                .iter()
-                .find(|endpoint| endpoint.id == target.endpoint_id)
-                .ok_or_else(|| {
-                    ControlError::invalid_request(
-                        "target endpoint was not found",
-                        serde_json::json!({}),
-                    )
-                })?;
-            if crate::is_likely_private_chat_id(&endpoint.chat_id) {
-                return Err(ControlError {
-                    code: "snapshot.browse.catalog_refresh_unavailable".to_string(),
-                    message: "The remote backup catalog cannot be refreshed for a private Telegram chat. You can browse the last cached catalog.".to_string(),
-                    retryable: true,
-                    details: serde_json::json!({}),
-                });
-            }
             let (storage, master_key) = remote_storage
                 .as_ref()
                 .expect("fresh snapshot browsing requires remote storage");
@@ -771,38 +803,27 @@ impl SnapshotBrowseService {
         } else {
             catalog_source = "cached";
         }
-        if params.allow_cached_catalog {
-            for snapshot in &snapshots {
-                if reader
-                    .list_children(&snapshot.snapshot_id, "")
-                    .await
-                    .is_err()
-                {
-                    return Err(ControlError {
-                        code: "snapshot.browse.catalog_unavailable".to_string(),
-                        message:
-                            "The cached catalog does not contain all retained snapshot filemaps."
-                                .to_string(),
-                        retryable: true,
-                        details: serde_json::json!({}),
-                    });
-                }
-            }
-        }
-        let unavailable_entries = collect_unavailable_entries(&reader, &snapshots).await?;
-        let diagnostics_json = Arc::new(
+        // Cached browsing must not scan every retained snapshot before mounting. A real target
+        // may contain a large history, and a missing filemap can be reported when that snapshot
+        // is opened instead of preventing the WebDAV volume from being created.
+        // Diagnostics are advisory and can require a full scan of every retained filemap.
+        // Do not make WebDAV mount setup wait on that scan; the session starts immediately and
+        // the diagnostic resource is filled in the background.
+        let diagnostics_json = Arc::new(RwLock::new(
             serde_json::to_vec(&serde_json::json!({
-                "entries": unavailable_entries,
-                "note": "Some historical metadata cannot be reconstructed from the snapshot."
+                "entries": [],
+                "pending": true,
+                "note": "Unavailable-entry diagnostics are still being collected."
             }))
             .map(|mut bytes| {
                 bytes.push(b'\n');
                 bytes
             })
             .unwrap_or_else(|_| {
-                b"{\"entries\":[],\"note\":\"Diagnostics unavailable.\"}\n".to_vec()
+                b"{\"entries\":[],\"pending\":true,\"note\":\"Diagnostics unavailable.\"}\n"
+                    .to_vec()
             }),
-        );
+        ));
         let session_id = format!("browse_{}", Uuid::new_v4().simple());
         let capability = capability_token();
         let volume_name = target
@@ -843,6 +864,34 @@ impl SnapshotBrowseService {
             .lock()
             .await
             .insert(target.id, session_id.clone());
+        let diagnostics_session = session.clone();
+        let diagnostics_reader = session.reader.clone();
+        let diagnostics_snapshots = session.snapshots.clone();
+        tokio::spawn(async move {
+            let snapshots = diagnostics_snapshots.lock().await.clone();
+            let result = tokio::select! {
+                _ = diagnostics_session.shutdown.cancelled() => return,
+                result = collect_unavailable_entries(&diagnostics_reader, &snapshots) => result,
+            };
+            let payload = match result {
+                Ok(entries) => serde_json::json!({
+                    "entries": entries,
+                    "pending": false,
+                    "note": "Some historical metadata cannot be reconstructed from the snapshot."
+                }),
+                Err(error) => serde_json::json!({
+                    "entries": [],
+                    "pending": false,
+                    "note": "Unavailable-entry diagnostics could not be collected.",
+                    "sourceCode": error.code,
+                }),
+            };
+            let mut bytes = serde_json::to_vec(&payload).unwrap_or_else(|_| {
+                b"{\"entries\":[],\"pending\":false,\"note\":\"Diagnostics unavailable.\"}".to_vec()
+            });
+            bytes.push(b'\n');
+            *diagnostics_session.diagnostics_json.write().await = bytes;
+        });
         Ok(serde_json::json!({
             "sessionId": session_id,
             "volumeName": session.volume_name,
@@ -1308,7 +1357,7 @@ async fn propfind(
                 "dir".to_string()
             },
             if relative.ends_with(".json") {
-                session.diagnostics_json.len() as u64
+                session.diagnostics_json.read().await.len() as u64
             } else {
                 0
             },
@@ -1362,12 +1411,12 @@ async fn get_file(
         );
     }
     if relative == format!("{DIAGNOSTICS_DIRECTORY}/{UNAVAILABLE_ENTRIES_FILE}") {
-        let bytes = session.diagnostics_json.as_slice();
+        let diagnostics_json = session.diagnostics_json.read().await.clone();
         return response_with_headers(
             200,
             "application/json",
-            vec![("Content-Length", &bytes.len().to_string())],
-            if head { &[] } else { bytes },
+            vec![("Content-Length", &diagnostics_json.len().to_string())],
+            if head { &[] } else { &diagnostics_json },
         );
     }
     // macOS mount_webdav reads the root Finder sidecar after its PROPFIND probe. Keep the
@@ -1915,6 +1964,14 @@ mod tests {
         assert!(!mapped.message.contains("secret transport detail"));
     }
 
+    #[test]
+    fn fresh_catalog_refresh_timeout_allows_a_slow_remote_sync() {
+        assert!(
+            FRESH_BROWSE_TIMEOUT >= Duration::from_secs(60),
+            "fresh catalog refresh must not fail during the previous 20-second window"
+        );
+    }
+
     async fn test_session(endpoint_db_path: &Path, cache_root: &Path) -> BrowseSession {
         let reader = Arc::new(SnapshotContentReader::new(
             endpoint_db_path,
@@ -1941,7 +1998,7 @@ mod tests {
             snapshots: Arc::new(Mutex::new(Vec::new())),
             retired_snapshot_names: Arc::new(Mutex::new(HashSet::new())),
             metadata_overlay: Arc::new(Mutex::new(HashMap::new())),
-            diagnostics_json: Arc::new(b"{}\n".to_vec()),
+            diagnostics_json: Arc::new(RwLock::new(b"{}\n".to_vec())),
             shutdown: CancellationToken::new(),
         }
     }
@@ -2508,7 +2565,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_entry_errors_are_reported_during_mount_setup() {
+    async fn unavailable_entry_collection_reports_errors() {
         let temp = tempfile::tempdir().unwrap();
         let reader = SnapshotContentReader::new_cached(
             temp.path().join("endpoint.sqlite"),
