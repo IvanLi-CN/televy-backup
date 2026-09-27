@@ -69,6 +69,12 @@ if ! printf '%s\n' "$daemon_start_source" | search_stdin_quiet 'startProductMana
   echo "ensureDaemonRunning must use the CLI for product-managed service recovery" >&2
   exit 1
 fi
+managed_start_line="$(printf '%s\n' "$daemon_start_source" | search_stdin 'startProductManagedDaemonViaCLI' | head -1 | cut -d: -f1)"
+ready_probe_line="$(printf '%s\n' "$daemon_start_source" | search_stdin 'waitForDaemonIpcReady\(timeoutSeconds: 0\.05\)' | head -1 | cut -d: -f1)"
+if [[ -z "$managed_start_line" || -z "$ready_probe_line" || "$managed_start_line" -ge "$ready_probe_line" ]]; then
+  echo "ensureDaemonRunning must reconcile a product-managed service before accepting ready IPC" >&2
+  exit 1
+fi
 if printf '%s\n' "$daemon_start_source" | search_stdin 'requiresSnapshotAccessRegistrationBarrier'; then
   echo "Snapshot Access registration failure must not block daemon startup" >&2
   exit 1

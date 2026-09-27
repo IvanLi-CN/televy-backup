@@ -1578,18 +1578,10 @@ fn daemon_ipc_ready(data_dir: &Path) -> bool {
 }
 
 async fn daemon_start(config_dir: &Path, data_dir: &Path, json: bool) -> Result<(), CliError> {
-    if daemon_ipc_ready(data_dir) {
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({ "running": true, "started": false })
-            );
-        } else {
-            println!("daemon already running");
-        }
-        return Ok(());
-    }
-
+    // A reachable IPC socket is not sufficient for a product-managed service: the running
+    // process may still be an older daemon/helper pair from a previous App release. Reconcile an
+    // installed service before accepting the existing process as ready so App updates take effect
+    // without requiring a separate install-service command.
     if service::managed_service_matches(config_dir, data_dir) {
         service::start_managed_service(config_dir, data_dir).map_err(|e| {
             CliError::retryable(
@@ -1616,6 +1608,18 @@ async fn daemon_start(config_dir: &Path, data_dir: &Path, json: bool) -> Result<
             "daemon.start_timeout",
             "managed daemon IPC did not become ready within 5s",
         ));
+    }
+
+    if daemon_ipc_ready(data_dir) {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "running": true, "started": false })
+            );
+        } else {
+            println!("daemon already running");
+        }
+        return Ok(());
     }
 
     let daemon = daemon_binary_path();

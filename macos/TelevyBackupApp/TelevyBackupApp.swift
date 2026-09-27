@@ -2689,22 +2689,10 @@ final class AppModel {
 
         let preferBundled = preferBundledDaemonForCurrentEnvironment()
 
-        // If IPC is already ready in our configured data dir, we are done (regardless of other
-        // televybackupd processes that might exist on the system).
-        if waitForDaemonIpcReady(timeoutSeconds: 0.05) {
-            return true
-        }
-
         // If we are running in a dev/automation environment (custom dirs and/or keychain disabled),
         // a system launchd service won't inherit our env vars and will likely bind a different
         // data dir, so skip it and spawn our bundled daemon instead.
         if !preferBundled {
-            if isDaemonRunning() {
-                if waitForDaemonIpcReady(timeoutSeconds: 1.5) {
-                    return true
-                }
-            }
-
             // The CLI owns product-managed service recovery so disabled/unloaded services are
             // re-enabled and bootstrapped before kickstart. Only fall through when no compatible
             // product service is installed; an installed service failure must stay visible.
@@ -2722,6 +2710,18 @@ final class AppModel {
                 appendStatusActivity("Daemon starting (IPC not ready yet)")
                 scheduleDaemonIpcRetry()
                 return false
+            }
+
+            // If there is no compatible product-managed service, preserve an already-ready IPC
+            // instance (for example Homebrew) before trying other launchd/fallback paths.
+            if waitForDaemonIpcReady(timeoutSeconds: 0.05) {
+                return true
+            }
+
+            if isDaemonRunning() {
+                if waitForDaemonIpcReady(timeoutSeconds: 1.5) {
+                    return true
+                }
             }
 
             if kickstartLaunchAgent(label: "homebrew.mxcl.televybackupd") {
@@ -2925,12 +2925,21 @@ final class AppModel {
             args: ["--json", "--config-dir", config, "--data-dir", data, "daemon", "service-status"],
             timeoutSeconds: 5
         )
-        guard statusResult.status == 0,
-              let statusData = statusResult.stdout.data(using: .utf8),
-              let status = try? JSONDecoder().decode(ManagedServiceStatus.self, from: statusData),
-              status.installed,
-              status.environmentMatch == true
+        guard statusResult.status == 0 else {
+            let output = (statusResult.stderr.isEmpty ? statusResult.stdout : statusResult.stderr)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            appendLog("ERROR: product-managed daemon service status failed: \(output.isEmpty ? "exit=\(statusResult.status)" : output)")
+            showToast("Managed daemon status unavailable (see ui.log)", isError: true)
+            return false
+        }
+        guard let statusData = statusResult.stdout.data(using: .utf8),
+              let status = try? JSONDecoder().decode(ManagedServiceStatus.self, from: statusData)
         else {
+            appendLog("ERROR: product-managed daemon service status returned invalid JSON")
+            showToast("Managed daemon status invalid (see ui.log)", isError: true)
+            return false
+        }
+        guard status.installed, status.environmentMatch == true else {
             return nil
         }
 
