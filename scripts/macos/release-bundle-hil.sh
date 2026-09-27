@@ -18,6 +18,10 @@ done
 
 [[ -d "$app" ]] || usage
 [[ -z "$lifecycle_app" || -d "$lifecycle_app" ]] || usage
+app="$(cd "$app" && pwd -P)"
+if [[ -n "$lifecycle_app" ]]; then
+  lifecycle_app="$(cd "$lifecycle_app" && pwd -P)"
+fi
 
 root_dir="$(git rev-parse --show-toplevel)"
 app_bin="$app/Contents/MacOS/TelevyBackup"
