@@ -242,6 +242,21 @@ private func testStatusColorsFollowStateSemantics() {
     expect(TargetUserStatus.offline.colorRole == .warning, "Offline should use the warning color role")
 }
 
+private func testSnapshotBrowsePresentationShowsWorkInFlight() {
+    expect(
+        SnapshotBrowsePresentation.activityText(isBrowsing: true, isEjecting: false) == "Browsing…",
+        "a browse request must expose an explicit in-flight activity"
+    )
+    expect(
+        SnapshotBrowsePresentation.actionText(isBrowsing: true, isMounted: false, isEjecting: false) == "Browsing…",
+        "the browse control must name the active operation"
+    )
+    expect(
+        SnapshotBrowsePresentation.actionText(isBrowsing: false, isMounted: false, isEjecting: false) == "Browse backups in Finder",
+        "an idle browse control must retain its browse action"
+    )
+}
+
 private func testBatchAcknowledgementUsesLatestSnapshot() {
     let request = BackupRequestPresentation(
         targetIds: ["target-a"],
@@ -266,6 +281,7 @@ enum TargetPresentationTestsMain {
         testBatchAcknowledgementUsesLatestSnapshot()
         testBackupButtonUsesOnlyStartOrStopSemantics()
         testStatusColorsFollowStateSemantics()
+        testSnapshotBrowsePresentationShowsWorkInFlight()
         print("OK: TargetPresentationTests")
     }
 }

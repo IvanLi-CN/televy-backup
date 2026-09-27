@@ -15,6 +15,19 @@ cleanup() {
   if [[ -x "$cli" ]]; then
     "$cli" --json --config-dir "$test_root/config" --data-dir "$test_root/data" daemon stop >/dev/null 2>&1 || true
   fi
+  local mount_path
+  local mount_prefix="$test_root/data/mounts/"
+  if [[ -d "$test_root/data/mounts" ]]; then
+    mount_prefix="$(cd "$test_root/data/mounts" && pwd -P)/"
+  fi
+  while IFS= read -r mount_path; do
+    [[ -n "$mount_path" ]] || continue
+    /sbin/umount "$mount_path" >/dev/null 2>&1 || \
+      /usr/sbin/diskutil unmount force "$mount_path" >/dev/null 2>&1 || true
+  done < <(
+    /sbin/mount | awk -v prefix="$mount_prefix" \
+      'index($3, prefix) == 1 { print $3 }'
+  )
 }
 trap cleanup EXIT
 

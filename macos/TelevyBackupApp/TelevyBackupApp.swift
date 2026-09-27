@@ -6,6 +6,9 @@ import ServiceManagement
 import SwiftUI
 
 extension Notification.Name {
+    static let snapshotBrowseDidStart = Notification.Name("TelevyBackup.snapshotBrowseDidStart")
+    static let snapshotBrowseDidFinish = Notification.Name("TelevyBackup.snapshotBrowseDidFinish")
+    static let snapshotBrowseDidMount = Notification.Name("TelevyBackup.snapshotBrowseDidMount")
     static let snapshotBrowseDidUnmount = Notification.Name("TelevyBackup.snapshotBrowseDidUnmount")
 }
 
@@ -315,18 +318,37 @@ final class AppModel {
         completion: @escaping (Result<Void, ControlRequestFailure>) -> Void
     ) {
         appendLog("INFO: browse mount requested target=\(targetId)")
+        NotificationCenter.default.post(
+            name: .snapshotBrowseDidStart,
+            object: nil,
+            userInfo: ["targetId": targetId]
+        )
+        let finish: (Result<Void, ControlRequestFailure>) -> Void = { result in
+            DispatchQueue.main.async {
+                var userInfo: [String: Any] = ["targetId": targetId]
+                if case let .failure(error) = result {
+                    userInfo["errorCode"] = error.code
+                }
+                NotificationCenter.default.post(
+                    name: .snapshotBrowseDidFinish,
+                    object: nil,
+                    userInfo: userInfo
+                )
+                completion(result)
+            }
+        }
         recoverSnapshotBrowseSessions { recovery in
             guard case .success = recovery else {
                 if case let .failure(error) = recovery {
                     self.appendLog("WARN: browse mount recovery failed code=\(error.code)")
-                    completion(.failure(error))
+                    finish(.failure(error))
                 }
                 return
             }
             self.mountTargetInFinder(
                 targetId: targetId,
                 allowCachedCatalog: allowCachedCatalog,
-                completion: completion
+                completion: finish
             )
         }
     }
@@ -345,7 +367,7 @@ final class AppModel {
                     "targetId": targetId,
                     "allowCachedCatalog": allowCachedCatalog,
                 ],
-                timeoutSeconds: 30
+                timeoutSeconds: 75
             )
             switch result {
             case let .failure(error):
@@ -407,7 +429,10 @@ final class AppModel {
 #else
                     NSWorkspace.shared.open(mountRoot)
 #endif
-                    DispatchQueue.main.async { completion(.success(())) }
+                    DispatchQueue.main.async {
+                        NotificationCenter.default.post(name: .snapshotBrowseDidMount, object: nil)
+                        completion(.success(()))
+                    }
                 } catch {
                     self.appendLog("WARN: browse mount setup failed target=\(targetId) error=\(error.localizedDescription)")
                     self.cleanupBrowseMount(sessionId: mount.sessionId, mountRoot: mountRoot, socketPath: socketPath)
@@ -463,7 +488,7 @@ final class AppModel {
                 }
                 return
             }
-            guard self.unmountBrowseVolume(at: mount.mountRoot.path) else {
+            guard self.waitForBrowseVolumeUnmount(at: mount.mountRoot.path) else {
                 self.scheduleBrowseMountCleanupRetry(
                     sessionId: mount.sessionId,
                     mountRoot: mount.mountRoot,
@@ -573,14 +598,17 @@ final class AppModel {
     private func removeBrowseMountDirectory(sessionId: String, mountRoot: URL) {
         let mountsRoot = guiControlDataDirURL()
             .appendingPathComponent("mounts", isDirectory: true)
-        let candidate = mountRoot.resolvingSymlinksInPath().standardizedFileURL
-        let canonicalMountsRoot = mountsRoot.resolvingSymlinksInPath().standardizedFileURL
+        let candidate = mountRoot.standardizedFileURL
+        let canonicalMountsRoot = mountsRoot.standardizedFileURL
         guard candidate.path.hasPrefix(canonicalMountsRoot.path + "/"), candidate.lastPathComponent == sessionId else { return }
         try? FileManager.default.removeItem(at: candidate)
     }
 
     private func canonicalBrowsePath(_ url: URL) -> String {
-        url.resolvingSymlinksInPath().standardizedFileURL.path
+        // WebDAV mount roots can block while resolving symlinks after the volume disappears.
+        // The GUI owns this path and compares it with getmntinfo output, so lexical normalization
+        // is sufficient and keeps lifecycle polling off the filesystem I/O path.
+        url.standardizedFileURL.path
     }
 
     private func canonicalBrowsePath(_ path: String) -> String {
@@ -612,22 +640,57 @@ final class AppModel {
         guard let mountedPaths = mountedBrowseVolumePaths() else { return false }
         guard mountedPaths.contains(canonicalPath) else { return true }
 
+        if runBrowseUnmountCommand(
+            executablePath: "/sbin/umount",
+            arguments: [canonicalPath],
+            expectedPath: canonicalPath
+        ) {
+            return true
+        }
+
+        // Finder can keep a WebDAV mount busy while it transitions into or out of the
+        // browsing view. An explicit eject must complete that user-requested operation,
+        // so fall back to Disk Arbitration's force unmount for this GUI-owned mount.
+        appendLog("INFO: retrying busy browse volume unmount with diskutil force")
+        return runBrowseUnmountCommand(
+            executablePath: "/usr/sbin/diskutil",
+            arguments: ["unmount", "force", canonicalPath],
+            expectedPath: canonicalPath
+        )
+    }
+
+    private func runBrowseUnmountCommand(
+        executablePath: String,
+        arguments: [String],
+        expectedPath: String
+    ) -> Bool {
         let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/sbin/umount")
-        task.arguments = [canonicalPath]
+        task.executableURL = URL(fileURLWithPath: executablePath)
+        task.arguments = arguments
         do {
             try task.run()
         } catch {
-            appendLog("WARN: failed to start browse volume unmount: \(error)")
+            appendLog("WARN: failed to start browse volume unmount command \(executablePath): \(error)")
             return false
         }
         task.waitUntilExit()
         guard task.terminationStatus == 0 else {
-            appendLog("WARN: browse volume unmount failed: exit=\(task.terminationStatus)")
+            appendLog("WARN: browse volume unmount failed command=\(executablePath) exit=\(task.terminationStatus)")
             return false
         }
         guard let remainingPaths = mountedBrowseVolumePaths() else { return false }
-        return !remainingPaths.contains(canonicalPath)
+        return !remainingPaths.contains(expectedPath)
+    }
+
+    private func waitForBrowseVolumeUnmount(at path: String) -> Bool {
+        let deadline = Date().addingTimeInterval(15)
+        repeat {
+            if unmountBrowseVolume(at: path) {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.5)
+        } while Date() < deadline
+        return false
     }
 
     private func unmountBrowseSessionBeforeTermination(sessionId: String, socketPath: String) -> Bool {
@@ -3040,6 +3103,18 @@ final class AppModel {
 
     func revealStatusSourceInFinder() {
         NSWorkspace.shared.activateFileViewerSelecting([statusJsonURL()])
+    }
+
+    func revealTargetFolderInFinder(path: String) {
+        NSWorkspace.shared.activateFileViewerSelecting([
+            URL(fileURLWithPath: path, isDirectory: true),
+        ])
+    }
+
+    func isBrowseMounted(targetId: String) -> Bool {
+        browseMountLock.lock()
+        defer { browseMountLock.unlock() }
+        return browseMountsByTargetId[targetId] != nil
     }
 
     private func startStatusStaleTimer() {
