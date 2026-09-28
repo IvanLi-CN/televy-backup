@@ -45,14 +45,21 @@ config_dir="$test_root/config"
 data_dir="$test_root/data"
 result_path="$test_root/browse-result"
 repeat_count="${TELEVYBACKUP_BROWSE_HIL_REPEAT:-1}"
+chat_id="${TELEVYBACKUP_BROWSE_HIL_CHAT_ID:-fixture-disabled}"
 if ! [[ "$repeat_count" =~ ^[1-4]$ ]]; then
   echo "ERROR: TELEVYBACKUP_BROWSE_HIL_REPEAT must be 1..4" >&2
+  exit 2
+fi
+if [[ ! "$chat_id" =~ ^[A-Za-z0-9_@+.-]+$ ]]; then
+  echo "ERROR: TELEVYBACKUP_BROWSE_HIL_CHAT_ID contains unsupported characters" >&2
   exit 2
 fi
 mkdir -p "$config_dir" "$data_dir/index" "$test_root/source"
 
 cp "$root_dir/scripts/macos/fixtures/perf-idle/config.toml" "$config_dir/config.toml"
 sed -i '' "s#__FIXTURE_A__#$test_root/source#g; s#__FIXTURE_B__#$test_root/source#g" \
+  "$config_dir/config.toml"
+sed -i '' "s#chat_id = \"fixture-disabled\"#chat_id = \"$chat_id\"#" \
   "$config_dir/config.toml"
 cat >> "$config_dir/config.toml" <<EOF
 

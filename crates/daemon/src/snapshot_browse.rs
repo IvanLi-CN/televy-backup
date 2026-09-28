@@ -643,7 +643,20 @@ impl SnapshotBrowseService {
         }
 
         let (endpoint_db_path, filemap_dir) = find_target_index(&self.data_root, &target).await?;
-        if params.allow_cached_catalog && !endpoint_db_path.is_file() {
+        let endpoint = settings
+            .telegram_endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == target.endpoint_id)
+            .ok_or_else(|| {
+                ControlError::invalid_request(
+                    "target endpoint was not found",
+                    serde_json::json!({}),
+                )
+            })?;
+        let is_private_chat = crate::is_likely_private_chat_id(&endpoint.chat_id);
+        let use_cached_catalog =
+            browse_uses_cached_catalog(params.allow_cached_catalog, is_private_chat);
+        if use_cached_catalog && !endpoint_db_path.is_file() {
             return Err(ControlError {
                 code: "snapshot.browse.catalog_unavailable".to_string(),
                 message: "The target catalog is not available locally for cached browsing."
@@ -666,28 +679,11 @@ impl SnapshotBrowseService {
             .join("index")
             .join("dedupe")
             .join(format!("dedupe.{}.sqlite", target.endpoint_id));
-        let endpoint = settings
-            .telegram_endpoints
-            .iter()
-            .find(|endpoint| endpoint.id == target.endpoint_id)
-            .ok_or_else(|| {
-                ControlError::invalid_request(
-                    "target endpoint was not found",
-                    serde_json::json!({}),
-                )
-            })?;
-        if !params.allow_cached_catalog && crate::is_likely_private_chat_id(&endpoint.chat_id) {
-            return Err(ControlError {
-                code: "snapshot.browse.catalog_refresh_unavailable".to_string(),
-                message: "The remote backup catalog cannot be refreshed for a private Telegram chat. You can browse the last cached catalog.".to_string(),
-                retryable: true,
-                details: serde_json::json!({}),
-            });
-        }
         // A cached catalog must remain usable when remote storage is unavailable, but it should
         // still attach storage when credentials are available so file reads can fetch objects.
-        // A fresh catalog initializes storage before refreshing the endpoint index.
-        let remote_storage = if params.allow_cached_catalog {
+        // A fresh catalog initializes storage before refreshing the endpoint index. Private chats
+        // cannot publish the pinned bootstrap catalog, so browse uses the local catalog instead.
+        let remote_storage = if use_cached_catalog {
             // A cached catalog must remain mountable when Telegram is unavailable, but retain
             // remote reads when storage can initialize quickly. The short bound keeps Finder
             // mount setup independent from helper/network startup latency.
@@ -723,7 +719,7 @@ impl SnapshotBrowseService {
                     .map_err(sanitize_catalog_refresh_error)?,
             )
         };
-        if !params.allow_cached_catalog {
+        if !use_cached_catalog {
             let (storage, master_key) = remote_storage
                 .as_ref()
                 .expect("fresh snapshot browsing requires remote storage");
@@ -735,7 +731,7 @@ impl SnapshotBrowseService {
                 &endpoint_db_path,
                 &filemap_dir,
                 &dedupe_db_path,
-                crate::is_likely_private_chat_id(&endpoint.chat_id),
+                is_private_chat,
                 None,
                 &CancellationToken::new(),
             )
@@ -781,7 +777,7 @@ impl SnapshotBrowseService {
             });
         }
         let mut catalog_source = "fresh";
-        if !params.allow_cached_catalog {
+        if !use_cached_catalog {
             for snapshot in &snapshots {
                 if crate::snapshot_inspection_ipc::prepare_snapshot_filemap_for_browse(
                     &self.config_root,
@@ -1939,6 +1935,10 @@ fn sanitize_catalog_refresh_error(error: ControlError) -> ControlError {
     }
 }
 
+fn browse_uses_cached_catalog(requested_cached: bool, is_private_chat: bool) -> bool {
+    requested_cached || is_private_chat
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1970,6 +1970,14 @@ mod tests {
             FRESH_BROWSE_TIMEOUT >= Duration::from_secs(60),
             "fresh catalog refresh must not fail during the previous 20-second window"
         );
+    }
+
+    #[test]
+    fn private_chat_browse_uses_local_catalog_when_fresh_refresh_is_unavailable() {
+        assert!(browse_uses_cached_catalog(false, true));
+        assert!(browse_uses_cached_catalog(true, true));
+        assert!(browse_uses_cached_catalog(true, false));
+        assert!(!browse_uses_cached_catalog(false, false));
     }
 
     async fn test_session(endpoint_db_path: &Path, cache_root: &Path) -> BrowseSession {
