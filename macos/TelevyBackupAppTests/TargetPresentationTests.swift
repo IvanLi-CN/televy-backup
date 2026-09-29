@@ -257,6 +257,67 @@ private func testSnapshotBrowsePresentationShowsWorkInFlight() {
     )
 }
 
+private func testSnapshotBrowseMenuKeepsTargetScope() {
+    let entries = SnapshotBrowsePresentation.menuEntries(
+        targets: [
+            SnapshotBrowseMenuTargetInput(id: "sync", label: "Sync"),
+            SnapshotBrowseMenuTargetInput(id: "projects", label: "Projects"),
+            SnapshotBrowseMenuTargetInput(id: "codex", label: "Codex"),
+        ],
+        mountedTargetIDs: ["projects"],
+        browsingTargetIDs: [],
+        ejectingTargetIDs: []
+    )
+
+    expect(entries.map(\.id) == ["sync", "projects", "codex"], "menu targets should retain configured target order")
+    expect(entries[0].browseEnabled, "an unmounted target should expose Browse")
+    expect(!entries[0].showsEject, "an unmounted target must not expose Eject")
+    expect(entries[1].isMounted, "the mounted target must be marked mounted")
+    expect(!entries[1].browseEnabled, "a mounted target must not expose a second Browse request")
+    expect(entries[1].showsEject && entries[1].ejectEnabled, "a mounted target should expose Eject")
+    expect(!entries[2].showsEject, "another unmounted target must remain independent")
+
+    let browsing = SnapshotBrowsePresentation.menuEntries(
+        targets: [SnapshotBrowseMenuTargetInput(id: "sync", label: nil)],
+        mountedTargetIDs: [],
+        browsingTargetIDs: ["sync"],
+        ejectingTargetIDs: []
+    )
+    expect(!browsing[0].browseEnabled, "a target with a browse request in flight must be disabled")
+    expect(!browsing[0].showsEject, "Eject must not appear before a mount exists")
+
+    let ejecting = SnapshotBrowsePresentation.menuEntries(
+        targets: [SnapshotBrowseMenuTargetInput(id: "sync", label: "Sync")],
+        mountedTargetIDs: ["sync"],
+        browsingTargetIDs: [],
+        ejectingTargetIDs: ["sync"]
+    )
+    expect(ejecting[0].showsEject && !ejecting[0].ejectEnabled, "an eject in flight should remain visible but disabled")
+}
+
+private func testStaleSnapshotMarksEveryTargetOffline() {
+    var first = target()
+    first.targetId = "target-a"
+    var second = target(state: "running")
+    second.targetId = "target-b"
+    let stale = snapshot([first, second])
+    let nowMs = stale.generatedAt + StatusFreshness.staleMs + 1
+
+    for value in stale.targets {
+        expect(
+            TargetPresentation.userStatus(
+                target: value,
+                activeTask: nil,
+                backupRequest: nil,
+                hasInProgressRunLog: false,
+                snap: stale,
+                nowMs: nowMs
+            ) == .offline,
+            "targets from one stale daemon snapshot must share the Offline state"
+        )
+    }
+}
+
 private func testBatchAcknowledgementUsesLatestSnapshot() {
     let request = BackupRequestPresentation(
         targetIds: ["target-a"],
@@ -282,6 +343,8 @@ enum TargetPresentationTestsMain {
         testBackupButtonUsesOnlyStartOrStopSemantics()
         testStatusColorsFollowStateSemantics()
         testSnapshotBrowsePresentationShowsWorkInFlight()
+        testSnapshotBrowseMenuKeepsTargetScope()
+        testStaleSnapshotMarksEveryTargetOffline()
         print("OK: TargetPresentationTests")
     }
 }

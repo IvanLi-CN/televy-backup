@@ -176,6 +176,30 @@ if ! printf '%s\n' "$target_row_browse_source" | search_stdin_quiet 'if isMounte
   exit 1
 fi
 
+target_detail_source="$(sed -n '/private var detail: some View/,/private var sidebar: some View/p' "$root_dir/macos/TelevyBackupApp/MainWindow.swift")"
+if ! printf '%s\n' "$target_detail_source" | search_stdin_quiet 'target-detail-'; then
+  echo "Target detail browse state must be isolated by target identity" >&2
+  exit 1
+fi
+
+menu_bar_browse_source="$(sed -n '/private func showQuickActionMenu()/,/private func configurePopoverWindowIfNeeded/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if ! printf '%s\n' "$menu_bar_browse_source" | search_stdin_quiet 'Browse Backups in Finder'; then
+  echo "Menu bar quick actions must expose target-scoped backup browsing" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$menu_bar_browse_source" | search_stdin_quiet 'Eject Backup Volume'; then
+  echo "Menu bar quick actions must expose target-scoped backup volume ejection" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$menu_bar_browse_source" | search_stdin_quiet 'filter.*showsEject'; then
+  echo "Menu bar quick actions must hide ejection until a target volume is mounted" >&2
+  exit 1
+fi
+if ! printf '%s\n' "$menu_bar_browse_source" | search_stdin_quiet 'representedObject'; then
+  echo "Menu bar browse/eject actions must retain their target identity" >&2
+  exit 1
+fi
+
 bin_rebind="$out_dir/import-bundle-rebind-logic-tests"
 "$swiftc" \
   -sdk "$sdk_path" \
