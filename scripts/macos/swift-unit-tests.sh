@@ -80,6 +80,14 @@ if printf '%s\n' "$daemon_start_source" | search_stdin 'requiresSnapshotAccessRe
   exit 1
 fi
 
+# CLI daemon stop owns product-managed LaunchAgent teardown. The GUI's follow-up bootout must be
+# idempotent when the CLI already unloaded that service, otherwise complete exit re-enables it.
+shutdown_source="$(sed -n '/func stopRuntimeResources(fullyStopDaemon:/,/private struct RateSample/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
+if ! printf '%s\n' "$shutdown_source" | search_stdin_quiet 'unload\.status != 0 && !launchctlFailureIndicatesMissingService\(unload\)'; then
+  echo "complete exit must treat an already-unloaded LaunchAgent as success" >&2
+  exit 1
+fi
+
 status_stream_source="$(sed -n '/func ensureStatusStreamRunning()/,/private func stopStatusPollIfNeeded/p' "$root_dir/macos/TelevyBackupApp/TelevyBackupApp.swift")"
 if printf '%s\n' "$status_stream_source" | search_stdin 'requiresSnapshotAccessRegistrationBarrier'; then
   echo "Snapshot Access registration failure must not block status streaming" >&2

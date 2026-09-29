@@ -1093,7 +1093,10 @@ final class AppModel {
 
         if let service {
             let unload = runCommandCapture(exe: "/bin/launchctl", args: ["bootout", service], timeoutSeconds: 5)
-            if unload.status != 0 {
+            // daemon stop already unloads product-managed services. Treat a second bootout that
+            // reports the service as absent as an idempotent success, while preserving failures
+            // for real launchctl errors and Homebrew unloads that still need GUI ownership.
+            if unload.status != 0 && !launchctlFailureIndicatesMissingService(unload) {
                 appendLog("ERROR: LaunchAgent not unloaded: exit=\(unload.status)")
                 restoreLaunchAgentIfNeeded()
                 return unload.stderr.isEmpty
