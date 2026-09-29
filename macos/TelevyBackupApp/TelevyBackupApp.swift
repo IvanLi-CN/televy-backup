@@ -9,6 +9,8 @@ extension Notification.Name {
     static let snapshotBrowseDidStart = Notification.Name("TelevyBackup.snapshotBrowseDidStart")
     static let snapshotBrowseDidFinish = Notification.Name("TelevyBackup.snapshotBrowseDidFinish")
     static let snapshotBrowseDidMount = Notification.Name("TelevyBackup.snapshotBrowseDidMount")
+    static let snapshotBrowseDidEjectStart = Notification.Name("TelevyBackup.snapshotBrowseDidEjectStart")
+    static let snapshotBrowseDidEjectFinish = Notification.Name("TelevyBackup.snapshotBrowseDidEjectFinish")
     static let snapshotBrowseDidUnmount = Notification.Name("TelevyBackup.snapshotBrowseDidUnmount")
 }
 
@@ -290,6 +292,8 @@ final class AppModel {
         let mountRoot: URL
     }
     private var browseMountsByTargetId: [String: BrowseMount] = [:]
+    private var browseTargetsInFlight: Set<String> = []
+    private var browseEjectTargetsInFlight: Set<String> = []
     private let browseMountLock = NSLock()
     private let guiOwnedProcessLock = NSLock()
     private var guiOwnedProcesses: [ObjectIdentifier: Process] = [:]
@@ -318,6 +322,7 @@ final class AppModel {
         completion: @escaping (Result<Void, ControlRequestFailure>) -> Void
     ) {
         appendLog("INFO: browse mount requested target=\(targetId)")
+        setBrowseTargetInFlight(targetId, active: true)
         NotificationCenter.default.post(
             name: .snapshotBrowseDidStart,
             object: nil,
@@ -325,6 +330,7 @@ final class AppModel {
         )
         let finish: (Result<Void, ControlRequestFailure>) -> Void = { result in
             DispatchQueue.main.async {
+                self.setBrowseTargetInFlight(targetId, active: false)
                 var userInfo: [String: Any] = ["targetId": targetId]
                 if case let .failure(error) = result {
                     userInfo["errorCode"] = error.code
@@ -430,7 +436,11 @@ final class AppModel {
                     NSWorkspace.shared.open(mountRoot)
 #endif
                     DispatchQueue.main.async {
-                        NotificationCenter.default.post(name: .snapshotBrowseDidMount, object: nil)
+                        NotificationCenter.default.post(
+                            name: .snapshotBrowseDidMount,
+                            object: nil,
+                            userInfo: ["targetId": targetId, "sessionId": mount.sessionId]
+                        )
                         completion(.success(()))
                     }
                 } catch {
@@ -468,6 +478,12 @@ final class AppModel {
             completion(.success(()))
             return
         }
+        setBrowseEjectInFlight(targetId, active: true)
+        NotificationCenter.default.post(
+            name: .snapshotBrowseDidEjectStart,
+            object: nil,
+            userInfo: ["targetId": targetId, "sessionId": mount.sessionId]
+        )
         let socketPath = controlSocketPath()
         DispatchQueue.global(qos: .utility).async {
             let result: Result<ControlAckResponse, ControlRequestFailure> = ControlIPCClient.request(
@@ -476,6 +492,8 @@ final class AppModel {
                 params: ["sessionId": mount.sessionId]
             )
             guard case .success = result else {
+                self.setBrowseEjectInFlight(targetId, active: false)
+                self.postBrowseEjectFinish(targetId: targetId)
                 self.scheduleBrowseMountCleanupRetry(
                     sessionId: mount.sessionId,
                     mountRoot: mount.mountRoot,
@@ -489,6 +507,8 @@ final class AppModel {
                 return
             }
             guard self.waitForBrowseVolumeUnmount(at: mount.mountRoot.path) else {
+                self.setBrowseEjectInFlight(targetId, active: false)
+                self.postBrowseEjectFinish(targetId: targetId)
                 self.scheduleBrowseMountCleanupRetry(
                     sessionId: mount.sessionId,
                     mountRoot: mount.mountRoot,
@@ -570,18 +590,22 @@ final class AppModel {
 
     private func finishBrowseMountCleanup(sessionId: String, mountRoot: URL) {
         DispatchQueue.main.async {
-            self.clearBrowseMountTracking(sessionId: sessionId)
-            NotificationCenter.default.post(
-                name: .snapshotBrowseDidUnmount,
-                object: nil,
-                userInfo: ["sessionId": sessionId]
-            )
+            let targetId = self.clearBrowseMountTracking(sessionId: sessionId)
+            var userInfo: [String: Any] = ["sessionId": sessionId]
+            if let targetId {
+                self.setBrowseEjectInFlight(targetId, active: false)
+                self.postBrowseEjectFinish(targetId: targetId)
+                userInfo["targetId"] = targetId
+            }
+            NotificationCenter.default.post(name: .snapshotBrowseDidUnmount, object: nil, userInfo: userInfo)
             self.removeBrowseMountDirectory(sessionId: sessionId, mountRoot: mountRoot)
         }
     }
 
-    private func clearBrowseMountTracking(sessionId: String) {
+    @discardableResult
+    private func clearBrowseMountTracking(sessionId: String) -> String? {
         browseMountLock.lock()
+        let targetId = browseMountsByTargetId.first(where: { $0.value.sessionId == sessionId })?.key
         browseMountsByTargetId = browseMountsByTargetId.filter { $0.value.sessionId != sessionId }
         browseMountLock.unlock()
         if let token = browseUnmountObservers.removeValue(forKey: sessionId) {
@@ -592,6 +616,17 @@ final class AppModel {
         }
         if let timer = browseOrphanCleanupTimers.removeValue(forKey: sessionId) {
             timer.cancel()
+        }
+        return targetId
+    }
+
+    private func postBrowseEjectFinish(targetId: String) {
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .snapshotBrowseDidEjectFinish,
+                object: nil,
+                userInfo: ["targetId": targetId]
+            )
         }
     }
 
@@ -3115,6 +3150,62 @@ final class AppModel {
         browseMountLock.lock()
         defer { browseMountLock.unlock() }
         return browseMountsByTargetId[targetId] != nil
+    }
+
+    func isBrowseInFlight(targetId: String) -> Bool {
+        browseMountLock.lock()
+        defer { browseMountLock.unlock() }
+        return browseTargetsInFlight.contains(targetId)
+    }
+
+    func isBrowseEjecting(targetId: String) -> Bool {
+        browseMountLock.lock()
+        defer { browseMountLock.unlock() }
+        return browseEjectTargetsInFlight.contains(targetId)
+    }
+
+    func snapshotBrowseMenuEntries() -> [SnapshotBrowseMenuEntry] {
+        browseMountLock.lock()
+        let mountedTargetIDs = Set(browseMountsByTargetId.keys)
+        let browsingTargetIDs = browseTargetsInFlight
+        let ejectingTargetIDs = browseEjectTargetsInFlight
+        browseMountLock.unlock()
+
+        var targets = statusStore.snapshot?.targets.map {
+            SnapshotBrowseMenuTargetInput(id: $0.targetId, label: $0.label)
+        } ?? []
+        let knownTargetIDs = Set(targets.map(\.id))
+        let extraIDs = (mountedTargetIDs.union(browsingTargetIDs).union(ejectingTargetIDs))
+            .subtracting(knownTargetIDs)
+            .sorted()
+        targets.append(contentsOf: extraIDs.map { SnapshotBrowseMenuTargetInput(id: $0, label: nil) })
+
+        return SnapshotBrowsePresentation.menuEntries(
+            targets: targets,
+            mountedTargetIDs: mountedTargetIDs,
+            browsingTargetIDs: browsingTargetIDs,
+            ejectingTargetIDs: ejectingTargetIDs
+        )
+    }
+
+    private func setBrowseTargetInFlight(_ targetId: String, active: Bool) {
+        browseMountLock.lock()
+        if active {
+            browseTargetsInFlight.insert(targetId)
+        } else {
+            browseTargetsInFlight.remove(targetId)
+        }
+        browseMountLock.unlock()
+    }
+
+    private func setBrowseEjectInFlight(_ targetId: String, active: Bool) {
+        browseMountLock.lock()
+        if active {
+            browseEjectTargetsInFlight.insert(targetId)
+        } else {
+            browseEjectTargetsInFlight.remove(targetId)
+        }
+        browseMountLock.unlock()
     }
 
     private func startStatusStaleTimer() {
@@ -7092,6 +7183,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(makeMenuItem("Backup", action: #selector(quickBackup(_:)), enabled: state == .backupAvailable))
         menu.addItem(makeMenuItem("Stop Backup", action: #selector(quickStopBackup(_:)), enabled: state == .stopAvailable))
         menu.addItem(.separator())
+
+        let browseEntries = model.snapshotBrowseMenuEntries()
+        menu.addItem(makeTargetActionMenuItem(
+            "Browse Backups in Finder",
+            entries: browseEntries,
+            action: #selector(quickBrowseBackups(_:)),
+            enabled: { $0.browseEnabled }
+        ))
+        let ejectEntries = browseEntries.filter(\.showsEject)
+        if !ejectEntries.isEmpty {
+            menu.addItem(makeTargetActionMenuItem(
+                "Eject Backup Volume",
+                entries: ejectEntries,
+                action: #selector(quickEjectBackupVolume(_:)),
+                enabled: { $0.ejectEnabled }
+            ))
+        }
+        menu.addItem(.separator())
         menu.addItem(makeMenuItem("Main Window", action: #selector(quickOpenMainWindow(_:)), enabled: !terminationInProgress))
         menu.addItem(makeMenuItem("Settings", action: #selector(quickOpenSettings(_:)), enabled: !terminationInProgress))
         menu.addItem(.separator())
@@ -7107,12 +7216,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return item
     }
 
+    private func makeTargetActionMenuItem(
+        _ title: String,
+        entries: [SnapshotBrowseMenuEntry],
+        action: Selector,
+        enabled: (SnapshotBrowseMenuEntry) -> Bool
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        for entry in entries {
+            let targetItem = makeMenuItem(entry.title, action: action, enabled: enabled(entry))
+            targetItem.representedObject = entry.id
+            submenu.addItem(targetItem)
+        }
+        item.submenu = submenu
+        item.isEnabled = !entries.isEmpty
+        return item
+    }
+
+    private func targetID(from sender: Any?) -> String? {
+        (sender as? NSMenuItem)?.representedObject as? String
+    }
+
     @objc private func quickBackup(_ sender: Any?) {
         ModelStore.shared.triggerMenuBackupNowAllEnabled()
     }
 
     @objc private func quickStopBackup(_ sender: Any?) {
         ModelStore.shared.triggerMenuStopBackup()
+    }
+
+    @objc private func quickBrowseBackups(_ sender: Any?) {
+        guard let targetId = targetID(from: sender) else { return }
+        browseTargetFromMenu(targetId: targetId)
+    }
+
+    @objc private func quickEjectBackupVolume(_ sender: Any?) {
+        guard let targetId = targetID(from: sender) else { return }
+        let model = ModelStore.shared
+        model.unmountTargetInFinder(targetId: targetId) { result in
+            switch result {
+            case .success:
+                model.showToast("Backup volume ejected", isError: false)
+            case let .failure(error):
+                model.reportMenuQuickActionError(controlFailureMessage(error))
+            }
+        }
+    }
+
+    private func browseTargetFromMenu(targetId: String, allowCachedCatalog: Bool = false) {
+        let model = ModelStore.shared
+        model.showToast(
+            allowCachedCatalog ? "Preparing cached backup catalog…" : "Refreshing backup catalog…",
+            isError: false
+        )
+        model.browseTargetInFinder(
+            targetId: targetId,
+            allowCachedCatalog: allowCachedCatalog
+        ) { [weak self] result in
+            switch result {
+            case .success:
+                model.showToast("Backup volume opened in Finder", isError: false)
+            case let .failure(error):
+                if !allowCachedCatalog, error.code == "snapshot.browse.catalog_refresh_unavailable" {
+                    self?.promptBrowseCachedCatalog(targetId: targetId, failure: error)
+                } else {
+                    model.reportMenuQuickActionError(controlFailureMessage(error))
+                }
+            }
+        }
+    }
+
+    private func promptBrowseCachedCatalog(targetId: String, failure: ControlRequestFailure) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t refresh backup catalog"
+        alert.informativeText = controlFailureMessage(failure)
+        alert.addButton(withTitle: "Browse Cached")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        browseTargetFromMenu(targetId: targetId, allowCachedCatalog: true)
     }
 
     @objc private func quickOpenMainWindow(_ sender: Any?) {

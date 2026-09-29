@@ -396,6 +396,7 @@ struct MainWindowRootView: View {
            let target = targets.first(where: { $0.targetId == selection })
         {
             TargetDetailView(target: target, onOpenRun: openRunDetail)
+                .id("target-detail-\(target.targetId)")
         } else {
             VStack(spacing: 12) {
                 Image(systemName: "sidebar.left")
@@ -741,8 +742,13 @@ private struct TargetListRow: View {
         .onTapGesture { onSelect() }
         .onAppear {
             browseMounted = model.isBrowseMounted(targetId: target.targetId)
+            browseInFlight = model.isBrowseInFlight(targetId: target.targetId)
+            browseUnmountInFlight = model.isBrowseEjecting(targetId: target.targetId)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidMount)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidMount)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
             browseMounted = model.isBrowseMounted(targetId: target.targetId)
             browseInFlight = false
         }
@@ -757,6 +763,18 @@ private struct TargetListRow: View {
                   targetId == target.targetId
             else { return }
             browseInFlight = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidEjectStart)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
+            browseUnmountInFlight = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidEjectFinish)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
+            browseUnmountInFlight = false
         }
         .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidUnmount)) { _ in
             browseMounted = model.isBrowseMounted(targetId: target.targetId)
@@ -1022,10 +1040,33 @@ private struct TargetDetailView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidUnmount)) { _ in
-            browseMounted = false
+        .onAppear {
+            browseMounted = model.isBrowseMounted(targetId: target.targetId)
+            browseInFlight = model.isBrowseInFlight(targetId: target.targetId)
+            browseUnmountInFlight = model.isBrowseEjecting(targetId: target.targetId)
         }
-        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidMount)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidUnmount)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
+            browseMounted = model.isBrowseMounted(targetId: target.targetId)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidEjectStart)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
+            browseUnmountInFlight = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidEjectFinish)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
+            browseUnmountInFlight = false
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .snapshotBrowseDidMount)) { notification in
+            guard let targetId = notification.userInfo?["targetId"] as? String,
+                  targetId == target.targetId
+            else { return }
             browseMounted = model.isBrowseMounted(targetId: target.targetId)
             browseInFlight = false
         }
