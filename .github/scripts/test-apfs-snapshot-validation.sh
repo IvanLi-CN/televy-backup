@@ -71,8 +71,8 @@ assert_contains "manual regression Snapshot Access tests" "$pr_workflow_text" "c
 assert_contains "manual regression core test" "$pr_workflow_text" "strict_snapshot_read_errors_keep_the_snapshot_access_code"
 assert_contains "manual regression daemon test" "$pr_workflow_text" "brokered_source_reports_snapshot_access_failures_without_invalidating_config"
 assert_contains "manual regression contract test" "$pr_workflow_text" "test-apfs-snapshot-validation.sh"
-assert_not_contains "manual regression mutable checkout action" "$pr_workflow_text" "actions/checkout@v4"
-assert_not_contains "manual regression mutable toolchain action" "$pr_workflow_text" "dtolnay/rust-toolchain@v1"
+assert_contains "manual regression pinned checkout action" "$pr_workflow_text" "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+assert_contains "manual regression pinned toolchain action" "$pr_workflow_text" "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
 
 assert_contains "orchestrator fail-closed shell" "$ci_text" "set -euo pipefail"
 assert_contains "orchestrator APFS check" "$ci_text" "diskutil info"
