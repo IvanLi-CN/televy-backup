@@ -3,14 +3,14 @@ set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
 workflow="$root_dir/.github/workflows/apfs-snapshot-acceptance.yml"
-manual_workflow="$root_dir/.github/workflows/apfs-snapshot-manual-regression.yml"
+pr_workflow="$root_dir/.github/workflows/ci-pr.yml"
 actionlint_config="$root_dir/.github/actionlint.yaml"
 ci_script="$root_dir/scripts/macos/verify-apfs-snapshot-ci.sh"
 long_read_script="$root_dir/scripts/macos/verify-apfs-snapshot-long-read.sh"
 integration_script="$root_dir/scripts/macos/verify-apfs-snapshot-integration.sh"
 
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$workflow"
-ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$manual_workflow"
+ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$pr_workflow"
 grep -F 'televybackup-apfs' "$actionlint_config" >/dev/null
 
 assert_contains() {
@@ -34,7 +34,7 @@ assert_not_contains() {
 }
 
 workflow_text="$(<"$workflow")"
-manual_workflow_text="$(<"$manual_workflow")"
+pr_workflow_text="$(<"$pr_workflow")"
 ci_text="$(<"$ci_script")"
 long_read_text="$(<"$long_read_script")"
 integration_text="$(<"$integration_script")"
@@ -65,17 +65,14 @@ assert_not_contains "mutable checkout action" "$workflow_text" "actions/checkout
 assert_not_contains "mutable toolchain action" "$workflow_text" "dtolnay/rust-toolchain@v1"
 assert_not_contains "mutable artifact action" "$workflow_text" "actions/upload-artifact@v4"
 
-assert_contains "manual regression workflow name" "$manual_workflow_text" "name: Manual APFS snapshot regression"
-assert_contains "manual regression dispatch" "$manual_workflow_text" "workflow_dispatch:"
-assert_not_contains "manual regression push trigger" "$manual_workflow_text" $'\n  push:'
-assert_not_contains "manual regression pull request trigger" "$manual_workflow_text" $'\n  pull_request:'
-assert_not_contains "manual regression label trigger" "$manual_workflow_text" "types: [labeled]"
-assert_contains "manual regression Snapshot Access tests" "$manual_workflow_text" "cargo test --locked -p televybackup-snapshot-access"
-assert_contains "manual regression core test" "$manual_workflow_text" "strict_snapshot_read_errors_keep_the_snapshot_access_code"
-assert_contains "manual regression daemon test" "$manual_workflow_text" "brokered_source_reports_snapshot_access_failures_without_invalidating_config"
-assert_contains "manual regression contract test" "$manual_workflow_text" "test-apfs-snapshot-validation.sh"
-assert_not_contains "manual regression mutable checkout action" "$manual_workflow_text" "actions/checkout@v4"
-assert_not_contains "manual regression mutable toolchain action" "$manual_workflow_text" "dtolnay/rust-toolchain@v1"
+assert_contains "manual regression job" "$pr_workflow_text" "manual-snapshot-regression"
+assert_contains "manual regression dispatch gate" "$pr_workflow_text" "github.event_name == 'workflow_dispatch'"
+assert_contains "manual regression Snapshot Access tests" "$pr_workflow_text" "cargo test --locked -p televybackup-snapshot-access"
+assert_contains "manual regression core test" "$pr_workflow_text" "strict_snapshot_read_errors_keep_the_snapshot_access_code"
+assert_contains "manual regression daemon test" "$pr_workflow_text" "brokered_source_reports_snapshot_access_failures_without_invalidating_config"
+assert_contains "manual regression contract test" "$pr_workflow_text" "test-apfs-snapshot-validation.sh"
+assert_not_contains "manual regression mutable checkout action" "$pr_workflow_text" "actions/checkout@v4"
+assert_not_contains "manual regression mutable toolchain action" "$pr_workflow_text" "dtolnay/rust-toolchain@v1"
 
 assert_contains "orchestrator fail-closed shell" "$ci_text" "set -euo pipefail"
 assert_contains "orchestrator APFS check" "$ci_text" "diskutil info"
