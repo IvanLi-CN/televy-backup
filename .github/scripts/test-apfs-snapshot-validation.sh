@@ -3,10 +3,12 @@ set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
 workflow="$root_dir/.github/workflows/apfs-snapshot-acceptance.yml"
+actionlint_config="$root_dir/.github/actionlint.yaml"
 ci_script="$root_dir/scripts/macos/verify-apfs-snapshot-ci.sh"
 long_read_script="$root_dir/scripts/macos/verify-apfs-snapshot-long-read.sh"
 
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$workflow"
+grep -F 'televybackup-apfs' "$actionlint_config" >/dev/null
 
 assert_contains() {
   local label="$1"

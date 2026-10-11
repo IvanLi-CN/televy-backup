@@ -1,0 +1,5 @@
+self-hosted-runner:
+  labels:
+    - televybackup-apfs
+
+config-variables: null
