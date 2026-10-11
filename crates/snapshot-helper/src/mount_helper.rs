@@ -24,7 +24,7 @@ use crate::{
     MountResponseResult, MountSnapshotRef, MountStatusResult, validate_mount_request,
 };
 
-pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.1.0";
+pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.2.0";
 pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -271,6 +271,7 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
             device_identifier TEXT NOT NULL,
             snapshot_name TEXT NOT NULL,
             mount_root TEXT NOT NULL,
+            mount_device INTEGER NOT NULL DEFAULT 0,
             snapshot_manifest TEXT NOT NULL,
             state TEXT NOT NULL,
             created_at TEXT NOT NULL
@@ -278,29 +279,44 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
     )
     .execute(pool)
     .await?;
+    let _ = sqlx::query("ALTER TABLE mounts ADD COLUMN mount_device INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
     Ok(())
 }
 
 async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
     let rows = sqlx::query(
-        "SELECT lease_id, mount_root, snapshot_manifest FROM mounts WHERE state != 'released'",
+        "SELECT lease_id, mount_root, mount_device, snapshot_manifest FROM mounts WHERE state != 'released'",
     )
     .fetch_all(pool)
     .await?;
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
         let mount_root: String = row.try_get("mount_root")?;
+        let mount_device: i64 = row.try_get("mount_device").unwrap_or_default();
         let manifest_json: String = row.try_get("snapshot_manifest")?;
         let manifest =
             serde_json::from_str::<Vec<MountSnapshotRef>>(&manifest_json).unwrap_or_default();
+        let expected_device = u64::try_from(mount_device)
+            .ok()
+            .filter(|device| *device != 0);
         let cleanup_state = if mount_root.is_empty() {
             if delete_manifest(&manifest) {
                 "released"
             } else {
                 "cleanup_pending"
             }
+        } else if expected_device.is_none() {
+            // A legacy row has no trusted mount identity. Do not unmount whatever now occupies
+            // the recorded path; UUID cleanup is the only safe recovery operation.
+            if delete_manifest(&manifest) {
+                "released"
+            } else {
+                "cleanup_pending"
+            }
         } else {
-            cleanup_mount(Path::new(&mount_root), &manifest)
+            cleanup_mount(Path::new(&mount_root), &manifest, expected_device)
         };
         update_state(pool, &lease_id, cleanup_state).await?;
     }
@@ -459,6 +475,7 @@ async fn mount_request(
     }
     validate_mount_root(mount_root, uid)?;
     validate_source_mount(source_mount_point, volume_uuid, device_identifier)?;
+    validate_snapshot_binding(device_identifier, snapshot_uuid, snapshot_name)?;
     let existing: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM mounts WHERE lease_id = ? AND state != 'released'",
     )
@@ -508,6 +525,41 @@ async fn mount_request(
         update_state(journal, lease_id, cleanup_state).await?;
         return Err(error);
     }
+    match mounted_snapshot_path(mount_root) {
+        Ok(true) => {}
+        Ok(false) => {
+            let cleanup_state = cleanup_mount(mount_root, manifest, None);
+            update_state(journal, lease_id, cleanup_state).await?;
+            return Err(MountHelperError::Protocol(
+                "mount_apfs did not expose the requested snapshot mount".into(),
+            ));
+        }
+        Err(error) => {
+            let cleanup_state = cleanup_mount(mount_root, manifest, None);
+            update_state(journal, lease_id, cleanup_state).await?;
+            return Err(error);
+        }
+    }
+    let mount_device = match fs::metadata(mount_root) {
+        Ok(metadata) => metadata.dev(),
+        Err(error) => {
+            let cleanup_state = cleanup_mount(mount_root, manifest, None);
+            update_state(journal, lease_id, cleanup_state).await?;
+            return Err(MountHelperError::Io(error));
+        }
+    };
+    if mount_device == 0 {
+        let cleanup_state = cleanup_mount(mount_root, manifest, None);
+        update_state(journal, lease_id, cleanup_state).await?;
+        return Err(MountHelperError::Protocol(
+            "mounted snapshot has no usable device identity".into(),
+        ));
+    }
+    sqlx::query("UPDATE mounts SET mount_device = ? WHERE lease_id = ?")
+        .bind(i64::try_from(mount_device).unwrap_or(i64::MAX))
+        .bind(lease_id)
+        .execute(journal)
+        .await?;
     sqlx::query("UPDATE mounts SET state = 'active' WHERE lease_id = ?")
         .bind(lease_id)
         .execute(journal)
@@ -531,7 +583,7 @@ async fn release_request(
     }
     validate_lease_id(lease_id)?;
     let row = sqlx::query(
-        "SELECT uid, mount_root, snapshot_manifest FROM mounts WHERE lease_id = ? AND state != 'released'",
+        "SELECT uid, mount_root, mount_device, snapshot_manifest FROM mounts WHERE lease_id = ? AND state != 'released'",
     )
     .bind(lease_id)
     .fetch_optional(journal)
@@ -544,10 +596,22 @@ async fn release_request(
         ));
     }
     let mount_root: String = row.try_get("mount_root")?;
+    let mount_device: i64 = row.try_get("mount_device").unwrap_or_default();
     let manifest_json: String = row.try_get("snapshot_manifest")?;
     let manifest =
         serde_json::from_str::<Vec<MountSnapshotRef>>(&manifest_json).unwrap_or_default();
-    let cleanup_state = cleanup_mount(Path::new(&mount_root), &manifest);
+    let expected_device = u64::try_from(mount_device)
+        .ok()
+        .filter(|device| *device != 0);
+    let cleanup_state = if expected_device.is_none() {
+        if delete_manifest(&manifest) {
+            "released"
+        } else {
+            "cleanup_pending"
+        }
+    } else {
+        cleanup_mount(Path::new(&mount_root), &manifest, expected_device)
+    };
     update_state(journal, lease_id, cleanup_state).await?;
     Ok(MountReleaseResult {
         lease_id: lease_id.to_string(),
@@ -609,13 +673,27 @@ async fn cleanup_request(
     })
 }
 
-fn cleanup_mount(mount_root: &Path, manifest: &[MountSnapshotRef]) -> &'static str {
+fn cleanup_mount(
+    mount_root: &Path,
+    manifest: &[MountSnapshotRef],
+    expected_device: Option<u64>,
+) -> &'static str {
     let unmount_ok = match mounted_snapshot_path(mount_root) {
-        Ok(true) => run_command(
-            "/sbin/umount",
-            ["-f", mount_root.to_string_lossy().as_ref()],
-        )
-        .is_ok(),
+        Ok(true)
+            if expected_device.is_none_or(|expected| {
+                fs::metadata(mount_root)
+                    .map(|metadata| metadata.dev() == expected)
+                    .unwrap_or(false)
+            }) =>
+        {
+            run_command(
+                "/sbin/umount",
+                ["-f", mount_root.to_string_lossy().as_ref()],
+            )
+            .is_ok()
+        }
+        // Never unmount a different device that was substituted at the recorded path.
+        Ok(true) => false,
         // A prepared journal row can survive a crash before mount_apfs completes. In that case
         // there is no mount to remove, so UUID-scoped snapshot cleanup can proceed.
         Ok(false) => true,
@@ -748,6 +826,46 @@ fn validate_source_mount(
         ));
     }
     Ok(())
+}
+
+fn validate_snapshot_binding(
+    device_identifier: &str,
+    snapshot_uuid: &str,
+    snapshot_name: &str,
+) -> Result<(), MountHelperError> {
+    let output = run_command_output(
+        "/usr/sbin/diskutil",
+        ["apfs", "listSnapshots", "-plist", device_identifier],
+    )?;
+    let value = Value::from_reader_xml(output.as_slice())
+        .map_err(|error| MountHelperError::Protocol(format!("invalid snapshot plist: {error}")))?;
+    if snapshot_binding_matches(&value, snapshot_uuid, snapshot_name) {
+        Ok(())
+    } else {
+        Err(MountHelperError::Protocol(
+            "snapshot name does not match the requested snapshot UUID".into(),
+        ))
+    }
+}
+
+fn snapshot_binding_matches(value: &Value, snapshot_uuid: &str, snapshot_name: &str) -> bool {
+    value
+        .as_dictionary()
+        .and_then(|root| root.get("Snapshots"))
+        .and_then(Value::as_array)
+        .is_some_and(|snapshots| {
+            snapshots.iter().any(|snapshot| {
+                let Some(snapshot) = snapshot.as_dictionary() else {
+                    return false;
+                };
+                snapshot
+                    .get("SnapshotUUID")
+                    .and_then(Value::as_string)
+                    .is_some_and(|uuid| uuid.eq_ignore_ascii_case(snapshot_uuid))
+                    && snapshot.get("SnapshotName").and_then(Value::as_string)
+                        == Some(snapshot_name)
+            })
+        })
 }
 
 fn validate_lease_id(value: &str) -> Result<(), MountHelperError> {
@@ -922,6 +1040,18 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_binding_requires_the_requested_uuid_and_name_pair() {
+        let value = Value::from_reader_xml(
+            br#"<?xml version="1.0"?><plist version="1.0"><dict><key>Snapshots</key><array><dict><key>SnapshotUUID</key><string>ABC</string><key>SnapshotName</key><string>snapshot-a</string></dict><dict><key>SnapshotUUID</key><string>DEF</string><key>SnapshotName</key><string>snapshot-b</string></dict></array></dict></plist>"#.as_slice(),
+        )
+        .unwrap();
+
+        assert!(snapshot_binding_matches(&value, "abc", "snapshot-a"));
+        assert!(!snapshot_binding_matches(&value, "abc", "snapshot-b"));
+        assert!(!snapshot_binding_matches(&value, "missing", "snapshot-a"));
+    }
+
+    #[test]
     fn mount_protocol_round_trips_manifest_and_selected_uuid() {
         let request = MountRequest {
             version: MOUNT_HELPER_PROTOCOL_VERSION,
@@ -968,6 +1098,27 @@ mod tests {
         let mount_root = temp.path().join("mount");
         fs::create_dir(&mount_root).unwrap();
         assert!(!mounted_snapshot_path(&mount_root).unwrap());
+    }
+
+    #[tokio::test]
+    async fn mount_journal_migration_adds_recorded_device_identity() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE mounts (lease_id TEXT PRIMARY KEY, uid INTEGER NOT NULL, volume_uuid TEXT NOT NULL, device_identifier TEXT NOT NULL, snapshot_name TEXT NOT NULL, mount_root TEXT NOT NULL, snapshot_manifest TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL)",
+        )
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        init_journal(&journal).await.unwrap();
+
+        let column: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('mounts') WHERE name = 'mount_device'",
+        )
+        .fetch_optional(&journal)
+        .await
+        .unwrap();
+        assert_eq!(column.as_deref(), Some("mount_device"));
     }
 
     #[test]
@@ -1019,6 +1170,15 @@ mod tests {
     fn mount_status_accepts_the_unchanged_v098_helper() {
         let result = MountStatusResult {
             helper_version: LEGACY_ROOT_MOUNT_HELPER_VERSION.into(),
+            active_mounts: 0,
+        };
+        assert!(validate_status_result(&result).is_ok());
+    }
+
+    #[test]
+    fn mount_status_accepts_the_current_identity_bound_helper() {
+        let result = MountStatusResult {
+            helper_version: ROOT_MOUNT_HELPER_VERSION.into(),
             active_mounts: 0,
         };
         assert!(validate_status_result(&result).is_ok());

@@ -196,6 +196,16 @@ fn file_chunker<R: Read + 'static>(
     }
 }
 
+fn strict_snapshot_read_error(relative_path: &str, error: impl std::fmt::Display) -> Error {
+    Error::SnapshotAccess {
+        message: format!(
+            "strict snapshot read failed path_components={} path_bytes={}: {error}",
+            Path::new(relative_path).components().count(),
+            relative_path.len()
+        ),
+    }
+}
+
 struct RonomonStreamCDC<R: Read> {
     source: R,
     buffer: Vec<u8>,
@@ -2872,12 +2882,7 @@ async fn run_backup_with_source_internal<S: Storage>(
                             Ok(f) => f,
                             Err(e) => {
                                 if source.is_brokered() {
-                                    return Err(Error::InvalidConfig {
-                                        message: format!(
-                                            "strict snapshot read failed for {}: {}",
-                                            rel_path, e
-                                        ),
-                                    });
+                                    return Err(strict_snapshot_read_error(&rel_path, e));
                                 }
                                 let sqlite_started = Instant::now();
                                 let retry_waits = delete_transient_scan_file_in_tx(
@@ -2916,8 +2921,14 @@ async fn run_backup_with_source_internal<S: Storage>(
                                 return Err(Error::Cancelled);
                             }
 
-                            let chunk = chunk.map_err(|_| Error::InvalidConfig {
-                                message: "chunking failed".to_string(),
+                            let chunk = chunk.map_err(|error| {
+                                if source.is_brokered() {
+                                    strict_snapshot_read_error(&rel_path, error)
+                                } else {
+                                    Error::InvalidConfig {
+                                        message: format!("chunking failed: {error}"),
+                                    }
+                                }
                             })?;
                             result.chunks_total += 1;
                             scan_chunks_total.store(result.chunks_total, Ordering::Relaxed);
@@ -7022,8 +7033,21 @@ mod tests {
         ignore_error_is_non_root_not_found, initialize_base_chunk_copy_map,
         insert_filemap_chunks_batch, materialize_base_chunk_copy_map,
         revalidate_file_for_base_copy, seed_base_snapshot_chunks, stage_base_chunk_copy_batch,
+        strict_snapshot_read_error,
     };
     use crate::Error;
+
+    #[test]
+    fn strict_snapshot_read_errors_keep_the_snapshot_access_code() {
+        let error = strict_snapshot_read_error(
+            "sessions/example.jsonl",
+            std::io::Error::from_raw_os_error(libc::EIO),
+        );
+
+        assert_eq!(error.code(), "snapshot.access_failed");
+        assert!(error.to_string().contains("path_components=2"));
+        assert!(error.to_string().contains("Input/output error"));
+    }
 
     #[test]
     fn scan_trace_coarsens_during_collection() {

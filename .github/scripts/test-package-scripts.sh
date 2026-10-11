@@ -766,7 +766,7 @@ assert payload["release_version"] == sys.argv[2]
 assert payload["signing"] == "ad-hoc"
 assert len(payload["assets"]) == 5
 assert payload["components"]["snapshot_access"]["source"] == "one-time-bootstrap-universal-build"
-assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.1.0", "0.9.8"]
+assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.2.0", "0.9.8"]
 layout = payload["dmg_layout"]
 assert layout["builder"] == {"name": "dmgbuild", "version": "1.6.7"}
 assert layout["format"] == "UDZO"

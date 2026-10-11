@@ -1,9 +1,13 @@
 # Implementation
 
 - `crates/snapshot-helper`: user-session Snapshot Access protocol and journal-backed lifecycle,
-  including compatibility recognition for the unchanged v0.9.8 root mount helper.
+  including recorded mount-device identities, migratable lease journals, unique firmlink resolution,
+  and descriptor-relative no-follow reads. Missing or changed mount identities fail the current
+  strict run before source bytes are served.
 - `crates/snapshot-helper/src/mount_helper.rs` and `src/bin/televybackup-snapshot-mount-helper.rs`:
-  mount-only root IPC, UUID journal, and crash recovery.
+  mount-only root IPC, UUID journal, crash recovery, and component version `0.2.0` validation that
+  binds the requested snapshot name to its manifest UUID before `mount_apfs` and verifies the
+  mounted device afterward. The installed `0.9.8` helper remains migration-readable only.
 - `crates/daemon/src/snapshot_client.rs`: restricted IPC client and `BrokeredSnapshotSource`.
 - `crates/core/src/backup.rs`: `BackupSource` seam shared by local and brokered reads.
 - `crates/cli/src/snapshot_service.rs`: fixed-bundle status plus transactional legacy registration
