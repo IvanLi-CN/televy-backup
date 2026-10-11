@@ -65,6 +65,8 @@ assert_contains "orchestrator sanitized timepoint" "$ci_text" "verify-apfs-snaps
 assert_contains "orchestrator sanitized long read" "$ci_text" "verify-apfs-snapshot-long-read.sh"
 assert_contains "orchestrator artifact schema" "$ci_text" "televybackup.apfs_snapshot_ci.v1"
 assert_contains "orchestrator no published snapshot assertion" "$ci_text" "publishedSnapshot: false"
+# The single-quoted needle intentionally checks the literal shell source.
+# shellcheck disable=SC2016
 assert_contains "orchestrator narrow root cleanup" "$ci_text" 'sudo -n rm -rf -- "$mount_runtime_root"'
 assert_not_contains "orchestrator broad root cleanup" "$ci_text" "rm -rf /"
 

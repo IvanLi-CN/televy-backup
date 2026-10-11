@@ -134,6 +134,8 @@ config_path.write_text(
 )
 PY
 
+  # The user shell opens this private log before sudo; the root helper only inherits the fd.
+  # shellcheck disable=SC2024
 sudo -n env \
   TELEVYBACKUP_SNAPSHOT_MOUNT_SOCKET="$mount_socket" \
   TELEVYBACKUP_SNAPSHOT_MOUNT_JOURNAL="$mount_journal" \
