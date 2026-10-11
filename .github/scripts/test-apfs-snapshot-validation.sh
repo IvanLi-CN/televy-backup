@@ -35,6 +35,9 @@ ci_text="$(<"$ci_script")"
 long_read_text="$(<"$long_read_script")"
 
 assert_contains "workflow name" "$workflow_text" "name: macOS APFS snapshot acceptance"
+assert_contains "same-repository label trigger" "$workflow_text" "types: [labeled]"
+assert_contains "acceptance label gate" "$workflow_text" "apfs-acceptance"
+assert_contains "same-repository safety gate" "$workflow_text" "head.repo.full_name == github.repository"
 assert_contains "manual dispatch trigger" "$workflow_text" "workflow_dispatch:"
 assert_not_contains "unsafe pull request target trigger" "$workflow_text" "pull_request_target"
 assert_contains "read-only workflow permission" "$workflow_text" $'permissions:\n  contents: read'

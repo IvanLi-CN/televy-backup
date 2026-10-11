@@ -1,6 +1,9 @@
 name: macOS APFS snapshot acceptance
 
 on:
+  pull_request:
+    branches: [main]
+    types: [labeled]
   workflow_dispatch:
     inputs:
       source_ref:
@@ -22,6 +25,10 @@ env:
 jobs:
   contract:
     name: APFS validation contract
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'apfs-acceptance'))
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -49,6 +56,10 @@ jobs:
 
   runner-preflight:
     name: Dedicated APFS runner preflight
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'apfs-acceptance'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -62,6 +73,10 @@ jobs:
 
   apfs:
     name: macOS APFS snapshot acceptance
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'apfs-acceptance'))
     needs: [contract, runner-preflight]
     runs-on: [self-hosted, macOS, televybackup-apfs]
     timeout-minutes: 45
