@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root_dir="$(git rev-parse --show-toplevel)"
+workflow="$root_dir/.github/workflows/apfs-snapshot-acceptance.yml"
+ci_script="$root_dir/scripts/macos/verify-apfs-snapshot-ci.sh"
+long_read_script="$root_dir/scripts/macos/verify-apfs-snapshot-long-read.sh"
+
+ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$workflow"
+
+assert_contains() {
+  local label="$1"
+  local haystack="$2"
+  local needle="$3"
+  [[ "$haystack" == *"$needle"* ]] || {
+    printf 'missing %s: %s\n' "$label" "$needle" >&2
+    exit 1
+  }
+}
+
+assert_not_contains() {
+  local label="$1"
+  local haystack="$2"
+  local needle="$3"
+  [[ "$haystack" != *"$needle"* ]] || {
+    printf 'unexpected %s: %s\n' "$label" "$needle" >&2
+    exit 1
+  }
+}
+
+workflow_text="$(<"$workflow")"
+ci_text="$(<"$ci_script")"
+long_read_text="$(<"$long_read_script")"
+
+assert_contains "workflow name" "$workflow_text" "name: macOS APFS snapshot acceptance"
+assert_contains "manual dispatch trigger" "$workflow_text" "workflow_dispatch:"
+assert_not_contains "unsafe pull request target trigger" "$workflow_text" "pull_request_target"
+assert_contains "read-only workflow permission" "$workflow_text" $'permissions:\n  contents: read'
+assert_contains "runner inventory permission" "$workflow_text" "actions: read"
+assert_contains "non-preemptive acceptance concurrency" "$workflow_text" "cancel-in-progress: false"
+assert_contains "dedicated runner label" "$workflow_text" "runs-on: [self-hosted, macOS, televybackup-apfs]"
+assert_contains "runner registration preflight" "$workflow_text" "actions/runners?per_page=100"
+assert_contains "runner preflight dependency" "$workflow_text" "needs: [contract, runner-preflight]"
+assert_contains "stable app root variable" "$workflow_text" "vars.TELEVYBACKUP_APFS_APP_ROOT"
+assert_contains "stable signing identity variable" "$workflow_text" "vars.TELEVYBACKUP_APFS_CODESIGN_IDENTITY"
+assert_contains "passwordless sudo preflight" "$workflow_text" "sudo -n true"
+assert_contains "FDA preflight message" "$workflow_text" "FDA pre-granted"
+assert_contains "candidate orchestrator invocation" "$workflow_text" "verify-apfs-snapshot-ci.sh"
+assert_contains "sanitized summary artifact" "$workflow_text" "summary.json"
+assert_contains "sanitized timepoint artifact" "$workflow_text" "a5.json"
+assert_contains "sanitized long-read artifact" "$workflow_text" "a6.json"
+assert_not_contains "raw access log upload" "$workflow_text" "access.log"
+assert_not_contains "raw mount log upload" "$workflow_text" "mount-helper.log"
+assert_not_contains "mutable checkout action" "$workflow_text" "actions/checkout@v4"
+assert_not_contains "mutable toolchain action" "$workflow_text" "dtolnay/rust-toolchain@v1"
+assert_not_contains "mutable artifact action" "$workflow_text" "actions/upload-artifact@v4"
+
+assert_contains "orchestrator fail-closed shell" "$ci_text" "set -euo pipefail"
+assert_contains "orchestrator APFS check" "$ci_text" "diskutil info"
+assert_contains "orchestrator root helper socket" "$ci_text" "TELEVYBACKUP_SNAPSHOT_MOUNT_SOCKET"
+assert_contains "orchestrator FDA check" "$ci_text" ".fdaReady == true"
+assert_contains "orchestrator sanitized timepoint" "$ci_text" "verify-apfs-snapshot-integration.sh"
+assert_contains "orchestrator sanitized long read" "$ci_text" "verify-apfs-snapshot-long-read.sh"
+assert_contains "orchestrator artifact schema" "$ci_text" "televybackup.apfs_snapshot_ci.v1"
+assert_contains "orchestrator no published snapshot assertion" "$ci_text" "publishedSnapshot: false"
+assert_contains "orchestrator narrow root cleanup" "$ci_text" 'sudo -n rm -rf -- "$mount_runtime_root"'
+assert_not_contains "orchestrator broad root cleanup" "$ci_text" "rm -rf /"
+
+assert_contains "long read fail-closed shell" "$long_read_text" "set -euo pipefail"
+assert_contains "long read exact unmount" "$long_read_text" "sudo -n /sbin/umount -f"
+assert_contains "long read diagnostic assertion" "$long_read_text" 'snapshot read failed'
+assert_contains "long read errno assertion" "$long_read_text" 'errno='
+assert_contains "long read sanitized schema" "$long_read_text" "televybackup.apfs_snapshot_long_read.v1"
+assert_not_contains "long read live fallback" "$long_read_text" "live-source"
+
+echo "APFS snapshot validation workflow contract passed"

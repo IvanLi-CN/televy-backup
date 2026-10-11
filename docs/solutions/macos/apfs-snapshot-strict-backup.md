@@ -196,6 +196,10 @@ result alone can be fabricated. To review it meaningfully, pair it with the exac
 the verifier source, reproducible build checks, and the unit tests below. Do not publish raw logs to
 make a boolean report appear stronger.
 
+## GitHub Actions Boundary
+
+The repository runs the deterministic protocol, path-safety, error-propagation, and workflow-contract checks on hosted runners. Real APFS timepoint and long-read acceptance is implemented by `.github/workflows/apfs-snapshot-acceptance.yml`; it builds the candidate at a stable runner path, starts an isolated root mount helper and user-session Snapshot Access process, creates a disposable APFS fixture, and uploads only the three sanitized JSON evidence cards. The job is manual and uses the `self-hosted`, `macOS`, `televybackup-apfs` labels because GitHub-hosted macOS runners cannot carry the required FDA grant or prove the root mount-helper identity. The runner must expose `TELEVYBACKUP_APFS_APP_ROOT` and `TELEVYBACKUP_APFS_CODESIGN_IDENTITY` repository variables and must be provisioned with passwordless `sudo` and FDA for both exact identities. A missing runner or failed preflight is a failed acceptance, never an unverified green result.
+
 ## Residual Risks
 
 The sanitized report contains no personal filesystem data or host topology, but no useful system can

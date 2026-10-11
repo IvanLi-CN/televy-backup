@@ -132,6 +132,10 @@ jobs:
           bash ./.github/scripts/test-release-completion.sh
           bash ./.github/scripts/test-release-workflows.sh
 
+      - name: APFS snapshot validation workflow contract
+        if: needs.classify.outputs.kind == 'source'
+        run: bash ./.github/scripts/test-apfs-snapshot-validation.sh
+
       - name: Homebrew Cask contract tests
         if: needs.classify.outputs.kind == 'source'
         run: bash ./.github/scripts/test-homebrew-cask.sh

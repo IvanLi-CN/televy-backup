@@ -14,6 +14,10 @@ TelevyBackup treats pull request checks as an explicit merge contract. The canon
 
 The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks. `Release intent label gate` and `Release completion` use per-PR concurrency with `cancel-in-progress: false`; GitHub retains the latest pending evaluation for each group, and every new head is independently revalidated before completion.
 
+## APFS acceptance lane
+
+The hosted `quality` job checks the APFS validation workflow contract and the hosted macOS jobs run the deterministic Snapshot Access, daemon, and core regression tests. Real APFS snapshot mounting, Full Disk Access, and controlled mount-health loss run only in `.github/workflows/apfs-snapshot-acceptance.yml` on a dedicated `self-hosted`, `macOS`, `televybackup-apfs` runner. That runner must provide a stable app output path, a stable signing identity, passwordless `sudo`, and FDA grants for the exact candidate app and mount-helper identities. The workflow uploads only sanitized `summary.json`, `a5.json`, and `a6.json` evidence. This lane remains manual and informational until such a runner is registered and its FDA/signing baseline is verified; it is deliberately not a required PR check that could queue forever.
+
 Release Product treats the highest eligible final product tag as the numeric baseline. Eligible
 product tags are protected annotated tags created by `github-actions[bot]` and reachable from
 `main`; foreign, lightweight, incomplete, or unreachable tags fail closed. Prerelease ordinals are
