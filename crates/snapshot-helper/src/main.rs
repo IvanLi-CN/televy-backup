@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, OsStr};
 use std::fs;
 use std::io::Read;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
