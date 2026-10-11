@@ -35,6 +35,26 @@ if [[ "$target_id" == "$target_spec" || -z "$source_path" || ! -d "$source_path"
   echo "invalid target specification" >&2
   exit 2
 fi
+if [[ "$sanitized" == true ]]; then
+  : "${TELEVYBACKUP_SANITIZED_FIXTURE_ROOT:?TELEVYBACKUP_SANITIZED_FIXTURE_ROOT is required in sanitized mode}"
+  [[ "$target_id" == "apfs-ci" ]] || {
+    echo "sanitized mode accepts only the synthetic apfs-ci target" >&2
+    exit 2
+  }
+  fixture_root="$(cd "$TELEVYBACKUP_SANITIZED_FIXTURE_ROOT" && pwd -P)"
+  source_path="$(cd "$source_path" && pwd -P)"
+  case "$source_path" in
+    "$fixture_root"/*) ;;
+    *)
+      echo "sanitized mode requires a source below the isolated fixture root" >&2
+      exit 2
+      ;;
+  esac
+  [[ -z "$(find "$source_path" -mindepth 1 -maxdepth 1 -print -quit)" ]] || {
+    echo "sanitized mode requires an empty synthetic source root" >&2
+    exit 2
+  }
+fi
 
 socket_path="${TELEVYBACKUP_SNAPSHOT_SOCKET:?TELEVYBACKUP_SNAPSHOT_SOCKET is required}"
 journal_path="${TELEVYBACKUP_SNAPSHOT_JOURNAL:?TELEVYBACKUP_SNAPSHOT_JOURNAL is required}"

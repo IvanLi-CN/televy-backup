@@ -6,6 +6,7 @@ workflow="$root_dir/.github/workflows/apfs-snapshot-acceptance.yml"
 actionlint_config="$root_dir/.github/actionlint.yaml"
 ci_script="$root_dir/scripts/macos/verify-apfs-snapshot-ci.sh"
 long_read_script="$root_dir/scripts/macos/verify-apfs-snapshot-long-read.sh"
+integration_script="$root_dir/scripts/macos/verify-apfs-snapshot-integration.sh"
 
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$workflow"
 grep -F 'televybackup-apfs' "$actionlint_config" >/dev/null
@@ -33,6 +34,7 @@ assert_not_contains() {
 workflow_text="$(<"$workflow")"
 ci_text="$(<"$ci_script")"
 long_read_text="$(<"$long_read_script")"
+integration_text="$(<"$integration_script")"
 
 assert_contains "workflow name" "$workflow_text" "name: macOS APFS snapshot acceptance"
 assert_contains "same-repository label trigger" "$workflow_text" "types: [labeled]"
@@ -66,6 +68,11 @@ assert_contains "orchestrator root helper socket" "$ci_text" "TELEVYBACKUP_SNAPS
 assert_contains "orchestrator FDA check" "$ci_text" ".fdaReady == true"
 assert_contains "orchestrator sanitized timepoint" "$ci_text" "verify-apfs-snapshot-integration.sh"
 assert_contains "orchestrator sanitized long read" "$ci_text" "verify-apfs-snapshot-long-read.sh"
+assert_contains "synthetic fixture guard" "$ci_text" "TELEVYBACKUP_SANITIZED_FIXTURE_ROOT"
+assert_contains "canonical timepoint card" "$ci_text" "snapshotReadPreMutation: true"
+assert_contains "canonical long-read card" "$ci_text" "healthyReadCompleted: true"
+assert_not_contains "raw timepoint card copy" "$ci_text" 'cp "$a5_output" "$evidence_dir/a5.json"'
+assert_not_contains "raw long-read card copy" "$ci_text" 'cp "$a6_output" "$evidence_dir/a6.json"'
 assert_contains "orchestrator artifact schema" "$ci_text" "televybackup.apfs_snapshot_ci.v1"
 assert_contains "orchestrator no published snapshot assertion" "$ci_text" "publishedSnapshot: false"
 # The single-quoted needle intentionally checks the literal shell source.
@@ -78,6 +85,11 @@ assert_contains "long read exact unmount" "$long_read_text" "sudo -n /sbin/umoun
 assert_contains "long read diagnostic assertion" "$long_read_text" 'snapshot read failed'
 assert_contains "long read errno assertion" "$long_read_text" 'errno='
 assert_contains "long read sanitized schema" "$long_read_text" "televybackup.apfs_snapshot_long_read.v1"
+assert_contains "long read synthetic fixture guard" "$long_read_text" "TELEVYBACKUP_SANITIZED_FIXTURE_ROOT"
 assert_not_contains "long read live fallback" "$long_read_text" "live-source"
+
+assert_contains "timepoint synthetic fixture guard" "$integration_text" "TELEVYBACKUP_SANITIZED_FIXTURE_ROOT"
+assert_contains "timepoint synthetic target guard" "$integration_text" '[[ "$target_id" == "apfs-ci" ]]'
+assert_not_contains "timepoint transcript persistence in sanitized mode" "$integration_text" 'printf '\''%s\\n'\'' "$last_response" >>"$evidence_path"'
 
 echo "APFS snapshot validation workflow contract passed"

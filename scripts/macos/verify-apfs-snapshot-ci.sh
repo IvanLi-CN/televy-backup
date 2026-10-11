@@ -100,6 +100,13 @@ cleanup() {
   if [[ -d "$mount_runtime_root" ]]; then
     sudo -n rm -rf -- "$mount_runtime_root" >/dev/null 2>&1 || true
   fi
+  rm -f -- \
+    "$evidence_dir/mount-helper.log" \
+    "$evidence_dir/access.log" \
+    "$evidence_dir/a5.stdout" \
+    "$evidence_dir/a5.stderr" \
+    "$evidence_dir/a6.stdout" \
+    "$evidence_dir/a6.stderr"
   rm -rf -- "$fixture_root" "$access_runtime_root"
   if [[ "$exit_status" -ne 0 && ! -s "$evidence_dir/summary.json" ]]; then
     write_failure_card \
@@ -196,14 +203,29 @@ printf '%s' "${access_status:-}" | jq -e \
 repo_root="$(git rev-parse --show-toplevel)"
 a5_output="$evidence_dir/a5.stdout"
 set +e
-bash "$repo_root/scripts/macos/verify-apfs-snapshot-integration.sh" \
+TELEVYBACKUP_SANITIZED_FIXTURE_ROOT="$fixture_root" \
+  bash "$repo_root/scripts/macos/verify-apfs-snapshot-integration.sh" \
   --sanitized "apfs-ci:$source_root" >"$a5_output" 2>"$evidence_dir/a5.stderr"
 a5_status=$?
 set -e
 if [[ "$a5_status" -eq 0 ]] && jq -e \
-  '.schema == "televybackup.apfs_snapshot_evidence.v1" and .result == "passed"' \
+  '.schema == "televybackup.apfs_snapshot_evidence.v1" and .result == "passed" and
+   .privacy == "sanitized" and .cases == 1 and
+   (.assertions | .snapshotReadPreMutation == true and .liveMutationObserved == true and
+    .leasesReleased == true and .cleanupComplete == true)' \
   "$a5_output" >/dev/null; then
-  cp "$a5_output" "$evidence_dir/a5.json"
+  jq -cn '{
+    schema: "televybackup.apfs_snapshot_evidence.v1",
+    result: "passed",
+    privacy: "sanitized",
+    cases: 1,
+    assertions: {
+      snapshotReadPreMutation: true,
+      liveMutationObserved: true,
+      leasesReleased: true,
+      cleanupComplete: true
+    }
+  }' >"$evidence_dir/a5.json"
 else
   write_failure_card \
     "$evidence_dir/a5.json" \
@@ -217,14 +239,32 @@ if [[ "$a5_status" -eq 0 ]]; then
   set +e
   TELEVYBACKUP_SNAPSHOT_SOCKET="$access_socket" \
     TELEVYBACKUP_SNAPSHOT_JOURNAL="$access_journal" \
+    TELEVYBACKUP_SANITIZED_FIXTURE_ROOT="$fixture_root" \
     bash "$repo_root/scripts/macos/verify-apfs-snapshot-long-read.sh" \
     --sanitized "apfs-ci:$source_root" >"$a6_output" 2>"$evidence_dir/a6.stderr"
   a6_status=$?
   set -e
   if [[ "$a6_status" -eq 0 ]] && jq -e \
-    '.schema == "televybackup.apfs_snapshot_long_read.v1" and .result == "passed"' \
+    '.schema == "televybackup.apfs_snapshot_long_read.v1" and .result == "passed" and
+     .privacy == "sanitized" and
+     (.assertions | .healthyReadCompleted == true and .liveMutationRan == true and
+      .mountHealthLossFailedClosed == true and .stageAndErrnoContext == true and
+      .leasesReleased == true and .cleanupComplete == true and .publishedSnapshot == false)' \
     "$a6_output" >/dev/null; then
-    cp "$a6_output" "$evidence_dir/a6.json"
+    jq -cn '{
+      schema: "televybackup.apfs_snapshot_long_read.v1",
+      result: "passed",
+      privacy: "sanitized",
+      assertions: {
+        healthyReadCompleted: true,
+        liveMutationRan: true,
+        mountHealthLossFailedClosed: true,
+        stageAndErrnoContext: true,
+        leasesReleased: true,
+        cleanupComplete: true,
+        publishedSnapshot: false
+      }
+    }' >"$evidence_dir/a6.json"
   else
     write_failure_card \
       "$evidence_dir/a6.json" \
