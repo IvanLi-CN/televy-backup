@@ -290,6 +290,11 @@ jobs:
             *"Failed to create local snapshot"*) tmutil_reason=failed_to_create_local_snapshot ;;
             *"No such file"*) tmutil_reason=destination_unavailable ;;
           esac
+          jq -cn \
+            --arg reason "$tmutil_reason" \
+            --argjson status "$tmutil_status" \
+            '{schema:"televybackup.apfs_snapshot_tmutil_diagnostic.v1",privacy:"sanitized",status:$status,reason:$reason}' \
+            >"$RUNNER_TEMP/apfs-snapshot-evidence/tmutil.json"
           {
             printf '%s\n' '### Hosted APFS local snapshot diagnostic'
             printf '%s\n' "- status=$tmutil_status"
@@ -305,6 +310,7 @@ jobs:
             ${{ runner.temp }}/apfs-snapshot-evidence/summary.json
             ${{ runner.temp }}/apfs-snapshot-evidence/a5.json
             ${{ runner.temp }}/apfs-snapshot-evidence/a6.json
+            ${{ runner.temp }}/apfs-snapshot-evidence/tmutil.json
           if-no-files-found: warn
           retention-days: 14
 
