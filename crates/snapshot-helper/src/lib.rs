@@ -8,7 +8,7 @@ pub const ACCESS_BUNDLE_ID: &str = "com.ivan.televybackup.snapshot-access";
 pub const ACCESS_BUNDLE_RELATIVE_PATH: &str =
     "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app";
 pub const ACCESS_AGENT_PLIST_NAME: &str = "com.ivan.televybackup.snapshot-access.plist";
-pub const MOUNT_HELPER_PROTOCOL_VERSION: u32 = 2;
+pub const MOUNT_HELPER_PROTOCOL_VERSION: u32 = 3;
 pub const MOUNT_HELPER_LABEL: &str = "com.ivan.televybackup.snapshot-mount-helper";
 pub const MOUNT_HELPER_INSTALL_PATH: &str =
     "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper";
@@ -133,6 +133,10 @@ pub enum MountMethod {
         volume_uuid: String,
         device_identifier: String,
     },
+    Renew {
+        uid: u32,
+        lease_id: String,
+    },
     Mount {
         uid: u32,
         lease_id: String,
@@ -173,6 +177,7 @@ pub struct MountResponse {
 pub enum MountResponseResult {
     Status(MountStatusResult),
     Reserved(MountReleaseResult),
+    Renewed(MountReleaseResult),
     Mounted(MountLeaseResult),
     Released(MountReleaseResult),
     CleanupRecorded(MountReleaseResult),

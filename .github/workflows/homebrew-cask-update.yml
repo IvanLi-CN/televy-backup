@@ -239,7 +239,7 @@ jobs:
         run: |
           set -euo pipefail
           gh workflow run ci-pr.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
-          gh workflow run package-ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "source_ref=${HEAD_SHA}"
+          gh workflow run package-ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
           gh workflow run label-gate.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
           gh workflow run release-completion.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
           gh workflow run homebrew-cask.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"

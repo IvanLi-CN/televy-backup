@@ -26,7 +26,7 @@ use crate::{
     validate_mount_request,
 };
 
-pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.3.0";
+pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.4.0";
 pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
 const MOUNT_ROOT_BASE: &str = "/private/var/tmp/televybackup-snapshot-mounts";
@@ -120,6 +120,19 @@ pub fn reserve(
         Some(MountResponseResult::Reserved(result)) => Ok(result),
         _ => Err(MountHelperError::Protocol(
             "reserve response missing result".into(),
+        )),
+    }
+}
+
+pub fn renew(uid: u32, lease_id: &str) -> Result<MountReleaseResult, MountHelperError> {
+    let response = request(MountMethod::Renew {
+        uid,
+        lease_id: lease_id.to_string(),
+    })?;
+    match response.result {
+        Some(MountResponseResult::Renewed(result)) => Ok(result),
+        _ => Err(MountHelperError::Protocol(
+            "renew response missing result".into(),
         )),
     }
 }
@@ -252,7 +265,9 @@ fn validate_response(response: &MountResponse, request_id: &str) -> Result<(), M
 
 fn request_timeout(method: &MountMethod) -> Duration {
     match method {
-        MountMethod::Status | MountMethod::StatusVolume { .. } => STATUS_REQUEST_TIMEOUT,
+        MountMethod::Status | MountMethod::StatusVolume { .. } | MountMethod::Renew { .. } => {
+            STATUS_REQUEST_TIMEOUT
+        }
         MountMethod::Reserve { .. }
         | MountMethod::Mount { .. }
         | MountMethod::Release { .. }
@@ -329,7 +344,8 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
             snapshot_manifest TEXT NOT NULL,
             reservation_manifest TEXT NOT NULL DEFAULT '[]',
             state TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            last_renewed_at TEXT NOT NULL DEFAULT ''
         )",
     )
     .execute(pool)
@@ -339,6 +355,16 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
         .await;
     let _ = sqlx::query(
         "ALTER TABLE mounts ADD COLUMN reservation_manifest TEXT NOT NULL DEFAULT '[]'",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE mounts ADD COLUMN last_renewed_at TEXT NOT NULL DEFAULT ''",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "UPDATE mounts SET last_renewed_at = created_at WHERE last_renewed_at = ''",
     )
     .execute(pool)
     .await;
@@ -381,7 +407,7 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
                             .eq_ignore_ascii_case(&device_identifier)
                     }) =>
             {
-                if delete_manifest(&manifest) {
+                if delete_manifest(&volume_uuid, &manifest) {
                     "released"
                 } else {
                     "cleanup_pending"
@@ -403,7 +429,7 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
                     // before the mounted device identity was persisted. The managed root is
                     // root-owned and cannot be replaced by the requesting user, so cleanup can
                     // inspect and unmount it.
-                    cleanup_mount(&expected_root, &manifest, expected_device)
+                    cleanup_mount(&expected_root, &manifest, expected_device, &volume_uuid)
                 }
                 // Rows from the pre-root-owned layout or malformed journals cannot be safely
                 // mapped to a stable target. Keep the volume blocked instead of resolving a
@@ -572,6 +598,11 @@ async fn handle_request(
         )
         .await
         .map(MountResponseResult::Reserved),
+        MountMethod::Renew { uid, lease_id } => {
+            renew_request(peer_uid, uid, &lease_id, journal)
+                .await
+                .map(MountResponseResult::Renewed)
+        }
         MountMethod::Mount {
             uid,
             lease_id,
@@ -695,7 +726,7 @@ async fn status_for_volume_result(
     .fetch_all(pool)
     .await?;
     let recovery_rows = sqlx::query(
-        "SELECT lease_id, state FROM mounts WHERE lower(volume_uuid) = lower(?) AND created_at <= datetime('now', ?) AND ((state IN ('reserved', 'cleanup_pending') AND snapshot_manifest = '[]' AND mount_root = '') OR (uid = ? AND state IN ('prepared', 'cleanup_pending') AND mount_root = ''))",
+        "SELECT lease_id, state FROM mounts WHERE lower(volume_uuid) = lower(?) AND last_renewed_at <= datetime('now', ?) AND ((state IN ('reserved', 'cleanup_pending') AND snapshot_manifest = '[]' AND mount_root = '') OR (uid = ? AND state IN ('prepared', 'cleanup_pending') AND mount_root = ''))",
     )
     .bind(volume_uuid)
     .bind(RECOVERY_AGE_SECONDS)
@@ -750,7 +781,7 @@ async fn reserve_request(
     let reservation_manifest = snapshot_inventory_manifest(device_identifier)?;
     let reservation_manifest_json = serde_json::to_string(&reservation_manifest)?;
     sqlx::query(
-        "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, state, created_at) VALUES (?, ?, ?, ?, '', '', '[]', ?, 'reserved', datetime('now'))",
+        "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, '', '', '[]', ?, 'reserved', datetime('now'), datetime('now'))",
     )
     .bind(lease_id)
     .bind(i64::from(uid))
@@ -759,6 +790,36 @@ async fn reserve_request(
     .bind(&reservation_manifest_json)
     .execute(journal)
     .await?;
+    Ok(MountReleaseResult {
+        lease_id: lease_id.to_string(),
+        cleanup_state: "reserved".to_string(),
+    })
+}
+
+async fn renew_request(
+    peer_uid: u32,
+    uid: u32,
+    lease_id: &str,
+    journal: &SqlitePool,
+) -> Result<MountReleaseResult, MountHelperError> {
+    if peer_uid != uid || uid == 0 {
+        return Err(MountHelperError::Protocol(
+            "renew request UID does not match peer".into(),
+        ));
+    }
+    validate_lease_id(lease_id)?;
+    let updated = sqlx::query(
+        "UPDATE mounts SET last_renewed_at = datetime('now') WHERE lease_id = ? AND uid = ? AND state = 'reserved' AND mount_root = '' AND snapshot_manifest = '[]'",
+    )
+    .bind(lease_id)
+    .bind(i64::from(uid))
+    .execute(journal)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(MountHelperError::Protocol(
+            "snapshot reservation is no longer renewable".into(),
+        ));
+    }
     Ok(MountReleaseResult {
         lease_id: lease_id.to_string(),
         cleanup_state: "reserved".to_string(),
@@ -964,7 +1025,7 @@ async fn mount_request(
         // another attempt's resources.
         let cleanup_state = match fs::symlink_metadata(&mount_root) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if delete_manifest(manifest) {
+                if delete_manifest(volume_uuid, manifest) {
                     "released"
                 } else {
                     "cleanup_pending"
@@ -983,7 +1044,7 @@ async fn mount_request(
         match validate_source_mount(source_mount_point, volume_uuid, device_identifier) {
             Ok(device) => device,
             Err(error) => {
-                let cleanup_state = cleanup_mount(&mount_root, manifest, None);
+                let cleanup_state = cleanup_mount(&mount_root, manifest, None, volume_uuid);
                 update_state(journal, lease_id, cleanup_state).await?;
                 return Err(error);
             }
@@ -999,21 +1060,21 @@ async fn mount_request(
         ],
     );
     if let Err(error) = mount_result {
-        let cleanup_state = cleanup_mount(&mount_root, manifest, None);
+        let cleanup_state = cleanup_mount(&mount_root, manifest, None, volume_uuid);
         update_state(journal, lease_id, cleanup_state).await?;
         return Err(error);
     }
     match mounted_snapshot_path(&mount_root) {
         Ok(true) => {}
         Ok(false) => {
-            let cleanup_state = cleanup_mount(&mount_root, manifest, None);
+            let cleanup_state = cleanup_mount(&mount_root, manifest, None, volume_uuid);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(MountHelperError::Protocol(
                 "mount_apfs did not expose the requested snapshot mount".into(),
             ));
         }
         Err(error) => {
-            let cleanup_state = cleanup_mount(&mount_root, manifest, None);
+            let cleanup_state = cleanup_mount(&mount_root, manifest, None, volume_uuid);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(error);
         }
@@ -1021,13 +1082,13 @@ async fn mount_request(
     let mount_device = match fs::metadata(&mount_root) {
         Ok(metadata) => metadata.dev(),
         Err(error) => {
-            let cleanup_state = cleanup_mount(&mount_root, manifest, None);
+            let cleanup_state = cleanup_mount(&mount_root, manifest, None, volume_uuid);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(MountHelperError::Io(error));
         }
     };
     if mount_device == 0 {
-        let cleanup_state = cleanup_mount(&mount_root, manifest, None);
+        let cleanup_state = cleanup_mount(&mount_root, manifest, None, volume_uuid);
         update_state(journal, lease_id, cleanup_state).await?;
         return Err(MountHelperError::Protocol(
             "mounted snapshot has no usable device identity".into(),
@@ -1045,7 +1106,12 @@ async fn mount_request(
         Ok(_) | Err(_) => {
             // Never return a live mount after its identity failed to persist. The mount root is
             // root-owned and cannot be replaced by the requesting user during cleanup.
-            let cleanup_state = cleanup_mount(&mount_root, manifest, Some(mount_device));
+            let cleanup_state = cleanup_mount(
+                &mount_root,
+                manifest,
+                Some(mount_device),
+                volume_uuid,
+            );
             let _ = update_state(journal, lease_id, cleanup_state).await;
             return Err(MountHelperError::Protocol(
                 "mounted snapshot identity could not be persisted".into(),
@@ -1071,7 +1137,7 @@ async fn release_request(
     }
     validate_lease_id(lease_id)?;
     let row = sqlx::query(
-        "SELECT uid, volume_uuid, device_identifier, mount_root, mount_device, snapshot_manifest, reservation_manifest, state, created_at FROM mounts WHERE lease_id = ?",
+        "SELECT uid, volume_uuid, device_identifier, mount_root, mount_device, snapshot_manifest, reservation_manifest, state, last_renewed_at FROM mounts WHERE lease_id = ?",
     )
     .bind(lease_id)
     .fetch_optional(journal)
@@ -1085,15 +1151,15 @@ async fn release_request(
     let manifest_json: String = row.try_get("snapshot_manifest")?;
     let reservation_manifest_json: String = row.try_get("reservation_manifest")?;
     let state: String = row.try_get("state")?;
-    let created_at: String = row.try_get("created_at")?;
+    let last_renewed_at: String = row.try_get("last_renewed_at")?;
     let stale_reserved = matches!(state.as_str(), "reserved" | "cleanup_pending")
         && mount_root.is_empty()
         && manifest_json == "[]"
         && sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM mounts WHERE lease_id = ? AND created_at = ? AND created_at <= datetime('now', ?)",
+            "SELECT COUNT(*) FROM mounts WHERE lease_id = ? AND last_renewed_at = ? AND last_renewed_at <= datetime('now', ?)",
         )
         .bind(lease_id)
-        .bind(&created_at)
+        .bind(&last_renewed_at)
         .bind(RECOVERY_AGE_SECONDS)
         .fetch_one(journal)
         .await?
@@ -1149,7 +1215,7 @@ async fn release_request(
         });
     }
     if mount_root.is_empty() {
-        let cleanup_state = if delete_manifest(&manifest) {
+        let cleanup_state = if delete_manifest(&volume_uuid, &manifest) {
             "released"
         } else {
             "cleanup_pending"
@@ -1169,7 +1235,7 @@ async fn release_request(
     {
         "cleanup_pending"
     } else {
-        cleanup_mount(&expected_root, &manifest, expected_device)
+        cleanup_mount(&expected_root, &manifest, expected_device, &volume_uuid)
     };
     update_state(journal, lease_id, cleanup_state).await?;
     Ok(MountReleaseResult {
@@ -1274,7 +1340,7 @@ async fn cleanup_request(
             "cleanup device identity no longer matches the journaled volume".into(),
         ));
     }
-    let cleanup_state = if delete_manifest(&stored_manifest) {
+    let cleanup_state = if delete_manifest(&volume_uuid, &stored_manifest) {
         "released"
     } else {
         "cleanup_pending"
@@ -1290,6 +1356,7 @@ fn cleanup_mount(
     mount_root: &Path,
     manifest: &[MountSnapshotRef],
     expected_device: Option<u64>,
+    volume_uuid: &str,
 ) -> &'static str {
     let unmount_ok = match mounted_snapshot_path(mount_root) {
         Ok(true)
@@ -1313,7 +1380,7 @@ fn cleanup_mount(
         Ok(false) => true,
         Err(_) => false,
     };
-    let delete_ok = delete_manifest(manifest);
+    let delete_ok = delete_manifest(volume_uuid, manifest);
     let root_ok = if unmount_ok {
         fs::remove_dir(mount_root).is_ok() || !mount_root.exists()
     } else {
@@ -1343,8 +1410,22 @@ fn mounted_snapshot_path(path: &Path) -> Result<bool, MountHelperError> {
     Ok(metadata.dev() != parent_metadata.dev())
 }
 
-fn delete_manifest(manifest: &[MountSnapshotRef]) -> bool {
+fn delete_manifest(volume_uuid: &str, manifest: &[MountSnapshotRef]) -> bool {
+    let Some(device_identifier) = manifest.first().map(|snapshot| snapshot.device_identifier.as_str())
+    else {
+        return false;
+    };
+    if manifest.iter().any(|snapshot| {
+        !snapshot
+            .device_identifier
+            .eq_ignore_ascii_case(device_identifier)
+    }) {
+        return false;
+    }
     manifest.iter().all(|snapshot| {
+        if validate_device_volume_binding(device_identifier, volume_uuid).is_err() {
+            return false;
+        }
         run_command(
             "/usr/sbin/diskutil",
             [
@@ -1545,16 +1626,23 @@ fn snapshot_inventory_manifest(
         .and_then(|root| root.get("Snapshots"))
         .and_then(Value::as_array)
     else {
-        return Ok(Vec::new());
+        return Err(MountHelperError::Protocol(
+            "snapshot inventory plist is missing an array of snapshots".into(),
+        ));
     };
     let mut manifest = Vec::new();
     for snapshot in snapshots {
-        let Some(snapshot) = snapshot.as_dictionary() else {
-            continue;
-        };
-        let Some(uuid) = snapshot.get("SnapshotUUID").and_then(Value::as_string) else {
-            continue;
-        };
+        let snapshot = snapshot.as_dictionary().ok_or_else(|| {
+            MountHelperError::Protocol("snapshot inventory contains a malformed entry".into())
+        })?;
+        let uuid = snapshot
+            .get("SnapshotUUID")
+            .and_then(Value::as_string)
+            .ok_or_else(|| {
+                MountHelperError::Protocol(
+                    "snapshot inventory entry is missing SnapshotUUID".into(),
+                )
+            })?;
         validate_uuid(uuid)?;
         manifest.push(MountSnapshotRef {
             device_identifier: device_identifier.to_string(),
@@ -1812,6 +1900,13 @@ mod tests {
             STATUS_REQUEST_TIMEOUT
         );
         assert_eq!(
+            request_timeout(&MountMethod::Renew {
+                uid: 501,
+                lease_id: "lease".into(),
+            }),
+            STATUS_REQUEST_TIMEOUT
+        );
+        assert_eq!(
             request_timeout(&MountMethod::Release {
                 uid: 501,
                 lease_id: "lease".into(),
@@ -1855,6 +1950,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reservation_column.as_deref(), Some("reservation_manifest"));
+
+        let renewal_column: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('mounts') WHERE name = 'last_renewed_at'",
+        )
+        .fetch_optional(&journal)
+        .await
+        .unwrap();
+        assert_eq!(renewal_column.as_deref(), Some("last_renewed_at"));
     }
 
     #[tokio::test]

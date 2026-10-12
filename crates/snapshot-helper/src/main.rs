@@ -1079,6 +1079,12 @@ async fn acquire_lease(
     let mount_status = mount_helper::status().map_err(|error| {
         HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
     })?;
+    if mount_status.helper_version != mount_helper::ROOT_MOUNT_HELPER_VERSION {
+        return Err(HelperError::Message(format!(
+            "incompatible snapshot mount helper version: {}",
+            mount_status.helper_version
+        )));
+    }
     if let Some(nested_mount) = nested_mount_under(source_path, &info.mount_point)? {
         return Err(HelperError::Message(format!(
             "source contains nested mounted volume: {}",
@@ -1104,17 +1110,10 @@ async fn acquire_lease(
         }
     }
     retry_pending_cleanup(uid, &info.uuid, &state.journal).await?;
-    let mut volume_status =
-        if mount_status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION {
-            mount_helper::status_for_volume(uid, &info.uuid).map_err(|error| {
-                HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
-            })?
-        } else {
-            mount_status.clone()
-        };
-    if mount_status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
-        && !volume_status.recovery_leases.is_empty()
-    {
+    let mut volume_status = mount_helper::status_for_volume(uid, &info.uuid).map_err(|error| {
+        HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
+    })?;
+    if !volume_status.recovery_leases.is_empty() {
         for recovery in &volume_status.recovery_leases {
             let result = mount_helper::release(uid, &recovery.lease_id).map_err(|error| {
                 HelperError::Message(format!(
@@ -1158,19 +1157,13 @@ async fn acquire_lease(
     mount_helper::reserve(uid, &lease_id, &info.uuid, &info.device_identifier).map_err(
         |error| HelperError::Message(format!("snapshot mount helper reservation failed: {error}")),
     )?;
-    let before = match source_snapshot_inventory(&info.device_identifier) {
-        Ok(inventory) => inventory,
-        Err(error) => {
-            let _ = mount_helper::release(uid, &lease_id);
-            return Err(error);
-        }
-    };
-    if let Err(error) = run_command("/usr/bin/tmutil", ["localsnapshot"]) {
-        let _ = mount_helper::release(uid, &lease_id);
-        return Err(error);
-    }
-    let after = match source_snapshot_inventory(&info.device_identifier) {
-        Ok(inventory) => inventory,
+    let (before, after) = match with_snapshot_lease_renewal(uid, &lease_id, || {
+        let before = source_snapshot_inventory(&info.device_identifier)?;
+        run_command("/usr/bin/tmutil", ["localsnapshot"])?;
+        let after = source_snapshot_inventory(&info.device_identifier)?;
+        Ok((before, after))
+    }) {
+        Ok(inventories) => inventories,
         Err(error) => {
             let _ = mount_helper::release(uid, &lease_id);
             return Err(error);
@@ -1634,6 +1627,47 @@ fn run_command<const N: usize, S: AsRef<OsStr>>(
         status: output.status.to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
     })
+}
+
+fn with_snapshot_lease_renewal<T, F>(
+    uid: u32,
+    lease_id: &str,
+    action: F,
+) -> Result<T, HelperError>
+where
+    F: FnOnce() -> Result<T, HelperError>,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let renewal_failed = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let worker_failed = Arc::clone(&renewal_failed);
+    let worker_lease_id = lease_id.to_string();
+    let worker = std::thread::spawn(move || {
+        let mut seconds_since_renewal = 0_u32;
+        while !worker_stop.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if worker_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            seconds_since_renewal += 1;
+            if seconds_since_renewal < 30 {
+                continue;
+            }
+            seconds_since_renewal = 0;
+            if mount_helper::renew(uid, &worker_lease_id).is_err() {
+                worker_failed.store(true, Ordering::Relaxed);
+            }
+        }
+    });
+    let snapshot_result = action();
+    stop.store(true, Ordering::Relaxed);
+    let _ = worker.join();
+    if renewal_failed.load(Ordering::Relaxed) {
+        return Err(HelperError::Message(
+            "snapshot reservation heartbeat failed".into(),
+        ));
+    }
+    snapshot_result
 }
 
 fn run_command_output<const N: usize, S: AsRef<OsStr>>(
