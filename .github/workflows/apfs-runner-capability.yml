@@ -1,0 +1,77 @@
+name: macOS APFS runner capability probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-14
+          - label: macos-14-large
+          - label: macos-15
+          - label: macos-15-intel
+          - label: macos-15-large
+          - label: macos-15-xlarge
+          - label: macos-26
+          - label: macos-26-large
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 10
+    steps:
+      - name: Probe local snapshot support
+        id: probe
+        run: |
+          set +e
+          snapshot_output="$(sudo -n tmutil snapshot 2>&1)"
+          snapshot_status=$?
+          localsnapshot_output="$(sudo -n tmutil localsnapshot 2>&1)"
+          localsnapshot_status=$?
+
+          classify_reason() {
+            case "$1" in
+              *"Failed to create local snapshot"*) printf '%s' failed_to_create_local_snapshot ;;
+              *"Operation not permitted"*) printf '%s' operation_not_permitted ;;
+              *"No space"*) printf '%s' no_space ;;
+              *"not supported"*|*"Unsupported"*) printf '%s' unsupported ;;
+              *) printf '%s' command_failed ;;
+            esac
+          }
+
+          snapshot_reason="$(classify_reason "$snapshot_output")"
+          localsnapshot_reason="$(classify_reason "$localsnapshot_output")"
+          supported=false
+          if [[ "$snapshot_status" -eq 0 && "$localsnapshot_status" -eq 0 ]]; then
+            supported=true
+          fi
+
+          jq -cn \
+            --arg runner "${{ matrix.label }}" \
+            --argjson snapshot_status "$snapshot_status" \
+            --arg snapshot_reason "$snapshot_reason" \
+            --argjson localsnapshot_status "$localsnapshot_status" \
+            --arg localsnapshot_reason "$localsnapshot_reason" \
+            --argjson supported "$supported" \
+            '{schema:"televybackup.apfs_snapshot_runner_capability.v1",privacy:"sanitized",runner:$runner,snapshot:{status:$snapshot_status,reason:$snapshot_reason},localsnapshot:{status:$localsnapshot_status,reason:$localsnapshot_reason},supported:$supported}' \
+            >"$RUNNER_TEMP/apfs-runner-capability.json"
+
+          {
+            printf '%s\n' '### APFS runner capability'
+            printf '%s\n' "- runner=${{ matrix.label }}"
+            printf '%s\n' "- tmutil snapshot status=$snapshot_status reason=$snapshot_reason"
+            printf '%s\n' "- tmutil localsnapshot status=$localsnapshot_status reason=$localsnapshot_reason"
+            printf '%s\n' "- supported=$supported"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized capability card
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: apfs-runner-capability-${{ matrix.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/apfs-runner-capability.json
+          if-no-files-found: error
+          retention-days: 14
