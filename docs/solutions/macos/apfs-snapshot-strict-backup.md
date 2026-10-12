@@ -53,7 +53,7 @@ Snapshot Access.app (logged-in user)
   - IPC: metadata pages and bounded read streams
 
 Snapshot Mount Helper (root LaunchDaemon)
-  - Mount, Release, Status, journal-bound Cleanup only
+  - Mount, Release, Status, volume-scoped StatusVolume, journal-bound Cleanup only
   - mount_apfs, umount, and exact recorded UUID deletion
   - no source file opens, Keychain, encryption, indexes, or network access
 ```

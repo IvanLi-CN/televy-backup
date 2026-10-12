@@ -123,6 +123,10 @@ pub struct MountRequest {
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum MountMethod {
     Status,
+    StatusVolume {
+        uid: u32,
+        volume_uuid: String,
+    },
     Mount {
         uid: u32,
         lease_id: String,

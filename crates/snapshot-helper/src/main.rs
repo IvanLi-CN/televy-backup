@@ -1076,7 +1076,7 @@ async fn acquire_lease(
             "APFS container has less than {MIN_FREE_BYTES} free bytes"
         )));
     }
-    mount_helper::status().map_err(|error| {
+    let mount_status = mount_helper::status().map_err(|error| {
         HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
     })?;
     if let Some(nested_mount) = nested_mount_under(source_path, &info.mount_point)? {
@@ -1104,15 +1104,21 @@ async fn acquire_lease(
         }
     }
     retry_pending_cleanup(uid, &info.uuid, &state.journal).await?;
-    let mount_status = mount_helper::status().map_err(|error| {
-        HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
-    })?;
-    let volume_blocked = mount_status
+    let volume_status = if mount_status.helper_version
+        == mount_helper::ROOT_MOUNT_HELPER_VERSION
+    {
+        mount_helper::status_for_volume(uid, &info.uuid).map_err(|error| {
+            HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
+        })?
+    } else {
+        mount_status.clone()
+    };
+    let volume_blocked = volume_status
         .blocked_volume_uuids
         .iter()
         .any(|volume| volume.eq_ignore_ascii_case(&info.uuid));
-    let unscoped_helper_state = mount_status.blocked_volume_uuids.is_empty()
-        && mount_status.active_mounts > 0;
+    let unscoped_helper_state = volume_status.blocked_volume_uuids.is_empty()
+        && volume_status.active_mounts > 0;
     if volume_blocked || unscoped_helper_state {
         return Err(HelperError::Message(
             "snapshot mount helper has pending cleanup for the source volume".into(),

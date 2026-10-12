@@ -90,6 +90,25 @@ pub fn status() -> Result<MountStatusResult, MountHelperError> {
     }
 }
 
+pub fn status_for_volume(
+    uid: u32,
+    volume_uuid: &str,
+) -> Result<MountStatusResult, MountHelperError> {
+    let response = request(MountMethod::StatusVolume {
+        uid,
+        volume_uuid: volume_uuid.to_string(),
+    })?;
+    match response.result {
+        Some(MountResponseResult::Status(result)) => {
+            validate_status_result(&result)?;
+            Ok(result)
+        }
+        _ => Err(MountHelperError::Protocol(
+            "volume status response missing result".into(),
+        )),
+    }
+}
+
 fn validate_status_result(result: &MountStatusResult) -> Result<(), MountHelperError> {
     if result.helper_version != ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != LEGACY_ROOT_MOUNT_HELPER_VERSION
@@ -210,7 +229,7 @@ fn validate_response(response: &MountResponse, request_id: &str) -> Result<(), M
 
 fn request_timeout(method: &MountMethod) -> Duration {
     match method {
-        MountMethod::Status => STATUS_REQUEST_TIMEOUT,
+        MountMethod::Status | MountMethod::StatusVolume { .. } => STATUS_REQUEST_TIMEOUT,
         MountMethod::Mount { .. } | MountMethod::Release { .. } | MountMethod::Cleanup { .. } => {
             MUTATING_REQUEST_TIMEOUT
         }
@@ -478,6 +497,11 @@ async fn handle_request(
         MountMethod::Status => status_result(journal, peer_uid)
             .await
             .map(MountResponseResult::Status),
+        MountMethod::StatusVolume { uid, volume_uuid } => {
+            status_for_volume_result(peer_uid, uid, &volume_uuid, journal)
+                .await
+                .map(MountResponseResult::Status)
+        }
         MountMethod::Mount {
             uid,
             lease_id,
@@ -565,6 +589,37 @@ async fn status_result(
         .fetch_all(pool)
         .await?
     };
+    Ok(MountStatusResult {
+        helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
+        active_mounts,
+        blocked_volume_uuids,
+    })
+}
+
+async fn status_for_volume_result(
+    peer_uid: u32,
+    uid: u32,
+    volume_uuid: &str,
+    pool: &SqlitePool,
+) -> Result<MountStatusResult, MountHelperError> {
+    if peer_uid != uid || uid == 0 {
+        return Err(MountHelperError::Protocol(
+            "volume status request UID does not match peer".into(),
+        ));
+    }
+    validate_uuid(volume_uuid)?;
+    let active_mounts = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('prepared', 'active', 'cleanup_pending')",
+    )
+    .bind(volume_uuid)
+    .fetch_one(pool)
+    .await? as u32;
+    let blocked_volume_uuids = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT volume_uuid FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
+    )
+    .bind(volume_uuid)
+    .fetch_all(pool)
+    .await?;
     Ok(MountStatusResult {
         helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
         active_mounts,
@@ -858,18 +913,17 @@ async fn cleanup_request(
             "cleanup journal entry belongs to another user".into(),
         ));
     }
+    let state: String = row.try_get("state")?;
+    if state != "prepared" {
+        return Err(MountHelperError::Protocol(
+            "cleanup requires a prepared journal entry".into(),
+        ));
+    }
     let mount_root: String = row.try_get("mount_root")?;
     if !mount_root.is_empty() {
         return Err(MountHelperError::Protocol(
             "mounted leases must be released through the lease operation".into(),
         ));
-    }
-    let state: String = row.try_get("state")?;
-    if state == "released" {
-        return Ok(MountReleaseResult {
-            lease_id: cleanup_id.to_string(),
-            cleanup_state: "released".to_string(),
-        });
     }
     let stored_manifest_json: String = row.try_get("snapshot_manifest")?;
     let stored_manifest = parse_journal_manifest(&stored_manifest_json)?;
@@ -1393,6 +1447,39 @@ mod tests {
         .unwrap();
 
         let status = status_result(&journal, 501).await.unwrap();
+        assert_eq!(status.active_mounts, 1);
+        assert_eq!(
+            status.blocked_volume_uuids,
+            vec!["C8A38394-49AE-42F9-85FB-14DD9EA549FA"]
+        );
+    }
+
+    #[tokio::test]
+    async fn volume_status_detects_other_uid_without_listing_other_volumes() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'cleanup_pending', datetime('now'))",
+        )
+        .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind(502_i64)
+        .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind("disk5s1")
+        .bind("snapshot")
+        .bind("")
+        .bind("[]")
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        let status = status_for_volume_result(
+            501,
+            501,
+            "c8a38394-49ae-42f9-85fb-14dd9ea549fa",
+            &journal,
+        )
+        .await
+        .unwrap();
         assert_eq!(status.active_mounts, 1);
         assert_eq!(
             status.blocked_volume_uuids,

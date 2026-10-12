@@ -61,9 +61,10 @@ free-space threshold, nested mounts, and relative paths MUST be checked before a
   failed cleanup MUST block the volume's next strict backup.
 
 The mount helper MUST run as a root LaunchDaemon with FDA manually granted to its exact installed
-identity, expose a separate peer-UID-checked Unix socket, and accept only `Status`, `Mount`,
-`Release`, and journal-bound `Cleanup`. `Cleanup` MUST reject any manifest that is not already
-recorded in the matching prepared journal row. It MUST NOT read source files, configuration, Keychain
+identity, expose a separate peer-UID-checked Unix socket, and accept only `Status`, volume-scoped
+`StatusVolume`, `Mount`, `Release`, and journal-bound `Cleanup`. `StatusVolume` MUST answer only
+whether the requested volume UUID has a prepared, active, or cleanup-pending row. `Cleanup` MUST
+reject any manifest that is not already recorded in the matching prepared journal row. It MUST NOT read source files, configuration, Keychain
 material, backup indexes, or network data. Its root-owned journal records lease, mount root,
 volume/device identity, and the exact snapshot UUID manifest.
 
