@@ -1736,12 +1736,8 @@ fn authorize_source_path_child(uid: u32, source_path: &Path) -> i32 {
         return 126;
     }
     let (group, user) = unsafe { ((*passwd).pw_gid, (*passwd).pw_name) };
-    let base_group = match libc::c_int::try_from(group) {
-        Ok(group) => group,
-        Err(_) => return 126,
-    };
     if unsafe { libc::setgid(group) } != 0
-        || unsafe { libc::initgroups(user, base_group) } != 0
+        || !initialize_supplementary_groups(user, group)
         || unsafe { libc::setuid(uid as libc::uid_t) } != 0
     {
         return 126;
@@ -1757,6 +1753,20 @@ fn authorize_source_path_child(uid: u32, source_path: &Path) -> i32 {
     }
     unsafe { libc::close(fd) };
     0
+}
+
+fn initialize_supplementary_groups(user: *const libc::c_char, group: libc::gid_t) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(base_group) = libc::c_int::try_from(group) else {
+            return false;
+        };
+        unsafe { libc::initgroups(user, base_group) == 0 }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        unsafe { libc::initgroups(user, group) == 0 }
+    }
 }
 
 fn validate_device_volume_binding(
