@@ -358,16 +358,13 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
     )
     .execute(pool)
     .await;
-    let _ = sqlx::query(
-        "ALTER TABLE mounts ADD COLUMN last_renewed_at TEXT NOT NULL DEFAULT ''",
-    )
+    let _ = sqlx::query("ALTER TABLE mounts ADD COLUMN last_renewed_at TEXT NOT NULL DEFAULT ''")
     .execute(pool)
     .await;
-    let _ = sqlx::query(
-        "UPDATE mounts SET last_renewed_at = created_at WHERE last_renewed_at = ''",
-    )
-    .execute(pool)
-    .await;
+    let _ =
+        sqlx::query("UPDATE mounts SET last_renewed_at = created_at WHERE last_renewed_at = ''")
+            .execute(pool)
+            .await;
     Ok(())
 }
 
@@ -598,11 +595,9 @@ async fn handle_request(
         )
         .await
         .map(MountResponseResult::Reserved),
-        MountMethod::Renew { uid, lease_id } => {
-            renew_request(peer_uid, uid, &lease_id, journal)
-                .await
-                .map(MountResponseResult::Renewed)
-        }
+        MountMethod::Renew { uid, lease_id } => renew_request(peer_uid, uid, &lease_id, journal)
+            .await
+            .map(MountResponseResult::Renewed),
         MountMethod::Mount {
             uid,
             lease_id,
@@ -1106,12 +1101,8 @@ async fn mount_request(
         Ok(_) | Err(_) => {
             // Never return a live mount after its identity failed to persist. The mount root is
             // root-owned and cannot be replaced by the requesting user during cleanup.
-            let cleanup_state = cleanup_mount(
-                &mount_root,
-                manifest,
-                Some(mount_device),
-                volume_uuid,
-            );
+            let cleanup_state =
+                cleanup_mount(&mount_root, manifest, Some(mount_device), volume_uuid);
             let _ = update_state(journal, lease_id, cleanup_state).await;
             return Err(MountHelperError::Protocol(
                 "mounted snapshot identity could not be persisted".into(),
@@ -1411,7 +1402,9 @@ fn mounted_snapshot_path(path: &Path) -> Result<bool, MountHelperError> {
 }
 
 fn delete_manifest(volume_uuid: &str, manifest: &[MountSnapshotRef]) -> bool {
-    let Some(device_identifier) = manifest.first().map(|snapshot| snapshot.device_identifier.as_str())
+    let Some(device_identifier) = manifest
+        .first()
+        .map(|snapshot| snapshot.device_identifier.as_str())
     else {
         return false;
     };

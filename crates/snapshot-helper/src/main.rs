@@ -1629,11 +1629,7 @@ fn run_command<const N: usize, S: AsRef<OsStr>>(
     })
 }
 
-fn with_snapshot_lease_renewal<T, F>(
-    uid: u32,
-    lease_id: &str,
-    action: F,
-) -> Result<T, HelperError>
+fn with_snapshot_lease_renewal<T, F>(uid: u32, lease_id: &str, action: F) -> Result<T, HelperError>
 where
     F: FnOnce() -> Result<T, HelperError>,
 {
