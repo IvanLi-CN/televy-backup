@@ -188,6 +188,18 @@ for target_spec in "$@"; do
   lease_response="$last_response"
   if ! printf '%s' "$lease_response" | jq -e '.ok and .result.kind == "lease"' >/dev/null; then
     lease_error_code="$(printf '%s' "$lease_response" | jq -r '.code // "unknown"' 2>/dev/null || printf 'unknown')"
+    lease_error_message="$(printf '%s' "$lease_response" | jq -r '.message // ""' 2>/dev/null || true)"
+    case "$lease_error_message" in
+      *tmutil*|*localsnapshot*)
+        fail_validation "lease_command_tmutil_failed"
+        ;;
+      *snapshot\ inventory*)
+        fail_validation "lease_snapshot_inventory_failed"
+        ;;
+      */sbin/mount*|*nested\ mounted\ volume*)
+        fail_validation "lease_mount_inventory_failed"
+        ;;
+    esac
     case "$lease_error_code" in
       command_failed|invalid_request|io|journal|lease_conflict|protocol|unsupported)
         fail_validation "lease_response_${lease_error_code}"
