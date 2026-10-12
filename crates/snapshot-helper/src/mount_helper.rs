@@ -406,10 +406,7 @@ fn validate_managed_mount_root(path: &Path) -> bool {
                 && metadata.mode() & 0o022 == 0
                 && !metadata.file_type().is_symlink()
         })
-        .map_or_else(
-            |error| error.kind() == std::io::ErrorKind::NotFound,
-            |valid| valid,
-        );
+        .unwrap_or_else(|error| error.kind() == std::io::ErrorKind::NotFound);
     path.starts_with(&base) && base_ok && uid_root_ok && mount_root_ok
 }
 
