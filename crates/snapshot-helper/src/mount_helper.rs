@@ -1,5 +1,7 @@
+use std::ffi::CString;
 use std::fs;
 use std::io::{BufRead, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -26,7 +28,7 @@ use crate::{
     validate_mount_request,
 };
 
-pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.4.0";
+pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.0";
 pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
 const MOUNT_ROOT_BASE: &str = "/private/var/tmp/televybackup-snapshot-mounts";
@@ -109,12 +111,14 @@ pub fn reserve(
     lease_id: &str,
     volume_uuid: &str,
     device_identifier: &str,
+    source_path: &Path,
 ) -> Result<MountReleaseResult, MountHelperError> {
     let response = request(MountMethod::Reserve {
         uid,
         lease_id: lease_id.to_string(),
         volume_uuid: volume_uuid.to_string(),
         device_identifier: device_identifier.to_string(),
+        source_path: source_path.to_string_lossy().into_owned(),
     })?;
     match response.result {
         Some(MountResponseResult::Reserved(result)) => Ok(result),
@@ -337,6 +341,7 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
             uid INTEGER NOT NULL,
             volume_uuid TEXT NOT NULL,
             device_identifier TEXT NOT NULL,
+            source_path TEXT NOT NULL DEFAULT '',
             snapshot_name TEXT NOT NULL,
             mount_root TEXT NOT NULL,
             mount_device INTEGER NOT NULL DEFAULT 0,
@@ -357,6 +362,9 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
     )
     .execute(pool)
     .await;
+    let _ = sqlx::query("ALTER TABLE mounts ADD COLUMN source_path TEXT NOT NULL DEFAULT ''")
+        .execute(pool)
+        .await;
     let _ = sqlx::query("ALTER TABLE mounts ADD COLUMN last_renewed_at TEXT NOT NULL DEFAULT ''")
         .execute(pool)
         .await;
@@ -591,12 +599,14 @@ async fn handle_request(
             lease_id,
             volume_uuid,
             device_identifier,
+            source_path,
         } => reserve_request(
             peer_uid,
             uid,
             &lease_id,
             &volume_uuid,
             &device_identifier,
+            Path::new(&source_path),
             journal,
         )
         .await
@@ -757,6 +767,7 @@ async fn reserve_request(
     lease_id: &str,
     volume_uuid: &str,
     device_identifier: &str,
+    source_path: &Path,
     journal: &SqlitePool,
 ) -> Result<MountReleaseResult, MountHelperError> {
     if peer_uid != uid || uid == 0 {
@@ -768,6 +779,8 @@ async fn reserve_request(
     validate_uuid(volume_uuid)?;
     validate_device(device_identifier)?;
     validate_device_volume_binding(device_identifier, volume_uuid)?;
+    validate_source_path(source_path, volume_uuid, device_identifier)?;
+    authorize_source_path(uid, source_path)?;
     let blocked: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
     )
@@ -782,12 +795,13 @@ async fn reserve_request(
     let reservation_manifest = snapshot_inventory_manifest(device_identifier)?;
     let reservation_manifest_json = serde_json::to_string(&reservation_manifest)?;
     sqlx::query(
-        "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, '', '', '[]', ?, 'reserved', datetime('now'), datetime('now'))",
+        "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, source_path, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, ?, '', '', '[]', ?, 'reserved', datetime('now'), datetime('now'))",
     )
     .bind(lease_id)
     .bind(i64::from(uid))
     .bind(volume_uuid)
     .bind(device_identifier)
+    .bind(source_path.to_string_lossy().as_ref())
     .bind(&reservation_manifest_json)
     .execute(journal)
     .await?;
@@ -910,7 +924,7 @@ async fn record_cleanup_request(
         ));
     }
     let manifest: Vec<_> = current_manifest
-        .into_iter()
+        .iter()
         .filter(|snapshot| {
             !reservation_manifest.iter().any(|reserved| {
                 reserved
@@ -919,6 +933,7 @@ async fn record_cleanup_request(
                     && reserved.uuid.eq_ignore_ascii_case(&snapshot.uuid)
             })
         })
+        .cloned()
         .collect();
     if manifest.is_empty() {
         return Err(MountHelperError::Protocol(
@@ -1019,7 +1034,7 @@ async fn mount_request(
     }
     let mount_root = expected_mount_root(i64::from(uid), lease_id)?;
     let existing = sqlx::query(
-        "SELECT uid, volume_uuid, device_identifier, mount_root, snapshot_manifest, state FROM mounts WHERE lease_id = ?",
+        "SELECT uid, volume_uuid, device_identifier, source_path, mount_root, snapshot_manifest, state FROM mounts WHERE lease_id = ?",
     )
     .bind(lease_id)
     .fetch_optional(journal)
@@ -1030,6 +1045,7 @@ async fn mount_request(
     let stored_uid: i64 = row.try_get("uid")?;
     let stored_volume_uuid: String = row.try_get("volume_uuid")?;
     let stored_device_identifier: String = row.try_get("device_identifier")?;
+    let stored_source_path: String = row.try_get("source_path").unwrap_or_default();
     let stored_mount_root: String = row.try_get("mount_root")?;
     let stored_manifest_json: String = row.try_get("snapshot_manifest")?;
     let stored_manifest = parse_journal_manifest(&stored_manifest_json)?;
@@ -1045,6 +1061,13 @@ async fn mount_request(
             "mount request does not match the recorded snapshot reservation".into(),
         ));
     }
+    let stored_source_path = Path::new(&stored_source_path);
+    validate_source_path(
+        stored_source_path,
+        &stored_volume_uuid,
+        &stored_device_identifier,
+    )?;
+    authorize_source_path(uid, stored_source_path)?;
     let journal_update = sqlx::query(
         "UPDATE mounts SET snapshot_name = ?, mount_root = ? WHERE lease_id = ? AND state = 'prepared' AND mount_root = ''",
     )
@@ -1598,18 +1621,31 @@ fn validate_source_mount(
     expected_volume_uuid: &str,
     expected_device: &str,
 ) -> Result<PathBuf, MountHelperError> {
-    if !source_mount_point.is_absolute() || !source_mount_point.is_dir() {
+    if !source_mount_point.is_dir() {
         return Err(MountHelperError::Protocol(
             "source mount point is not a directory".into(),
         ));
     }
+    validate_source_path(source_mount_point, expected_volume_uuid, expected_device)?;
+    // Pass the validated device node to mount_apfs instead of the request pathname. The
+    // pathname is only used for the diskutil identity query; a user cannot replace the
+    // root-owned /dev node between validation and the privileged mount operation.
+    Ok(PathBuf::from("/dev").join(expected_device))
+}
+
+fn validate_source_path(
+    source_path: &Path,
+    expected_volume_uuid: &str,
+    expected_device: &str,
+) -> Result<(), MountHelperError> {
+    if !source_path.is_absolute() || !source_path.exists() {
+        return Err(MountHelperError::Protocol(
+            "source path is not an absolute existing path".into(),
+        ));
+    }
     let output = run_command_output(
         "/usr/sbin/diskutil",
-        [
-            "info",
-            "-plist",
-            source_mount_point.to_string_lossy().as_ref(),
-        ],
+        ["info", "-plist", source_path.to_string_lossy().as_ref()],
     )?;
     let value = Value::from_reader_xml(output.as_slice())
         .map_err(|error| MountHelperError::Protocol(format!("invalid volume plist: {error}")))?;
@@ -1637,10 +1673,63 @@ fn validate_source_mount(
             "source mount identity does not match the lease".into(),
         ));
     }
-    // Pass the validated device node to mount_apfs instead of the request pathname. The
-    // pathname is only used for the diskutil identity query; a user cannot replace the
-    // root-owned /dev node between validation and the privileged mount operation.
-    Ok(PathBuf::from("/dev").join(expected_device))
+    Ok(())
+}
+
+fn authorize_source_path(uid: u32, source_path: &Path) -> Result<(), MountHelperError> {
+    if uid == 0 || unsafe { libc::geteuid() } != 0 {
+        return Err(MountHelperError::Protocol(
+            "source path authorization requires a non-root peer".into(),
+        ));
+    }
+    let path = CString::new(source_path.as_os_str().as_bytes()).map_err(|_| {
+        MountHelperError::Protocol("source path contains an invalid NUL byte".into())
+    })?;
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return Err(MountHelperError::Io(std::io::Error::last_os_error()));
+    }
+    if child == 0 {
+        let passwd = unsafe { libc::getpwuid(uid as libc::uid_t) };
+        if passwd.is_null()
+            || unsafe { libc::initgroups((*passwd).pw_name, (*passwd).pw_gid) } != 0
+            || unsafe { libc::setgid((*passwd).pw_gid) } != 0
+        {
+            unsafe { libc::_exit(126) };
+        }
+        let set_uid = unsafe { libc::setuid(uid as libc::uid_t) };
+        if set_uid != 0 {
+            unsafe { libc::_exit(126) };
+        }
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd >= 0 {
+            unsafe { libc::close(fd) };
+            unsafe { libc::_exit(0) };
+        }
+        unsafe { libc::_exit(1) };
+    }
+    let mut status = 0_i32;
+    loop {
+        let result = unsafe { libc::waitpid(child, &mut status, 0) };
+        if result == child {
+            break;
+        }
+        if result < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return Err(MountHelperError::Io(std::io::Error::last_os_error()));
+        }
+    }
+    if status & 0x7f == 0 && (status >> 8) & 0xff == 0 {
+        Ok(())
+    } else {
+        Err(MountHelperError::Protocol(
+            "peer cannot access the requested source path".into(),
+        ))
+    }
 }
 
 fn validate_device_volume_binding(
@@ -2047,6 +2136,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(renewal_column.as_deref(), Some("last_renewed_at"));
+
+        let source_path_column: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('mounts') WHERE name = 'source_path'",
+        )
+        .fetch_optional(&journal)
+        .await
+        .unwrap();
+        assert_eq!(source_path_column.as_deref(), Some("source_path"));
     }
 
     #[tokio::test]

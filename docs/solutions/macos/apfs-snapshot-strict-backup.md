@@ -104,8 +104,8 @@ sequenceDiagram
 
 | Operation | Component | Authority | Normal backup prompt |
 | --- | --- | --- | --- |
-| Snapshot creation and snapshot file reads | Snapshot Access.app | FDA for the exact installed app identity | No |
-| Snapshot mount, unmount, UUID cleanup | Root mount helper | root LaunchDaemon plus FDA for the exact helper identity in the currently validated baseline | No |
+| Snapshot file reads | Snapshot Access.app | FDA for the exact installed app identity | No |
+| Snapshot creation, mount, unmount, UUID cleanup | Root mount helper | root LaunchDaemon plus FDA for the exact helper identity in the currently validated baseline | No |
 | Keychain, encryption, indexes, upload | Backup daemon | ordinary user | No |
 | Install/update/remove mount helper | installer / CLI | administrator authorization | Yes, only for that transaction |
 
@@ -114,7 +114,7 @@ the owner to grant FDA again. Strict mode must display a blocking state in that 
 quietly read the live source.
 
 The locked deployment baseline grants FDA to both Snapshot Access and the root mount helper. The
-helper's protocol and code path remain mount-only, but the validation that established feasibility
+helper's protocol and code path own snapshot creation and mount cleanup, but the validation that established feasibility
 gave both exact identities FDA. It is therefore incorrect to market an Access-only FDA requirement
 until the same release has passed the timepoint test after the helper's FDA authorization is removed.
 That future least-privilege experiment is optional optimization work, not a prerequisite for this

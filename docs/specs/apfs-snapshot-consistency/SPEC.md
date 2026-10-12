@@ -63,7 +63,8 @@ free-space threshold, nested mounts, and relative paths MUST be checked before a
 The mount helper MUST run as a root LaunchDaemon with FDA manually granted to its exact installed
 identity, expose a separate peer-UID-checked Unix socket, and accept only `Status`, volume-scoped
 `StatusVolume`, `Reserve`, `Renew`, `RecordCleanup`, `Mount`, `Release`, and journal-bound `Cleanup`. `Reserve` MUST
-claim the requested volume before snapshot creation and record the pre-existing snapshot UUIDs;
+claim the requested volume before snapshot creation, bind the lease to the requested source path, and
+prove that the peer UID can open that path before recording the pre-existing snapshot UUIDs;
 `RecordCleanup` MUST invoke `tmutil localsnapshot` inside the root helper's serialized mutation section,
 require exactly one new snapshot, and re-check the complete inventory before and after journaling it;
 the Access process MUST renew an in-flight reservation while snapshot creation is running, and stale

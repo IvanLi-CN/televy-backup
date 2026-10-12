@@ -1154,9 +1154,16 @@ async fn acquire_lease(
     }
 
     let lease_id = Uuid::new_v4().to_string();
-    mount_helper::reserve(uid, &lease_id, &info.uuid, &info.device_identifier).map_err(
-        |error| HelperError::Message(format!("snapshot mount helper reservation failed: {error}")),
-    )?;
+    mount_helper::reserve(
+        uid,
+        &lease_id,
+        &info.uuid,
+        &info.device_identifier,
+        source_path,
+    )
+    .map_err(|error| {
+        HelperError::Message(format!("snapshot mount helper reservation failed: {error}"))
+    })?;
     let (before, after) = match with_snapshot_lease_renewal(uid, &lease_id, || {
         let before = source_snapshot_inventory(&info.device_identifier)?;
         if let Err(first_error) = mount_helper::record_cleanup(uid, &lease_id)
