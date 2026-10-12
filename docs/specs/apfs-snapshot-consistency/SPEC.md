@@ -64,11 +64,8 @@ The mount helper MUST run as a root LaunchDaemon with FDA manually granted to it
 identity, expose a separate peer-UID-checked Unix socket, and accept only `Status`, volume-scoped
 `StatusVolume`, `Reserve`, `RecordCleanup`, `Mount`, `Release`, and journal-bound `Cleanup`. `Reserve` MUST
 claim the requested volume before `tmutil localsnapshot` and record the pre-existing snapshot UUIDs;
-`RecordCleanup` MUST bind a non-empty newly discovered manifest to that reservation. If recording fails,
-the reservation MUST remain blocking until a later retry or age-gated recovery compares the current
-inventory with the saved baseline. `Release` MUST revalidate the journaled device/volume binding and
-persist any discovered post-reservation manifest before deletion. `StatusVolume` MUST answer only
-whether the requested volume UUID has a reserved, prepared, active, or cleanup-pending row. `Cleanup` MUST
+`RecordCleanup` MUST revalidate the device and derive the complete current post-reservation snapshot set itself before journaling it; callers MUST NOT submit a deletion manifest. If recording fails, the reservation MUST remain blocking until a later retry succeeds. An age-gated recovery MAY release a reservation only when the current inventory exactly matches its recorded baseline; any unrecorded post-reservation snapshot MUST remain blocked and MUST NOT be deleted. `Release` MUST revalidate the journaled device/volume binding and delete only the manifest already recorded in the journal. `StatusVolume` MUST answer only
+whether the requested volume UUID has a reserved, prepared, active, or cleanup-pending row and may expose age-gated empty-manifest reservations for controlled recovery. `Cleanup` MUST
 reject any manifest that is not already recorded in the matching prepared journal row. It MUST NOT read source files, configuration, Keychain
 material, backup indexes, or network data. Its root-owned journal records lease, mount root,
 volume/device identity, and the exact snapshot UUID manifest.

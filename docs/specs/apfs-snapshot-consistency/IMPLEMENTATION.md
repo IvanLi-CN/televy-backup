@@ -5,7 +5,7 @@
   and descriptor-relative no-follow reads. Missing or changed mount identities fail the current
   strict run before source bytes are served.
 - `crates/snapshot-helper/src/mount_helper.rs` and `src/bin/televybackup-snapshot-mount-helper.rs`:
-  mount-only root IPC, volume reservation before snapshot creation, UUID journal, crash recovery, and component version `0.2.0` validation that
+  mount-only root IPC, volume reservation before snapshot creation, UUID journal, crash recovery, and component version `0.3.0` validation that
   binds the requested snapshot name to its manifest UUID before `mount_apfs`, passes the validated
   `/dev/<device>` identity instead of a mutable request pathname, and verifies the mounted device
   afterward. The installed `0.9.8` helper remains migration-readable only.

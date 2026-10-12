@@ -1104,13 +1104,14 @@ async fn acquire_lease(
         }
     }
     retry_pending_cleanup(uid, &info.uuid, &state.journal).await?;
-    let mut volume_status = if mount_status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION {
-        mount_helper::status_for_volume(uid, &info.uuid).map_err(|error| {
-            HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
-        })?
-    } else {
-        mount_status.clone()
-    };
+    let mut volume_status =
+        if mount_status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION {
+            mount_helper::status_for_volume(uid, &info.uuid).map_err(|error| {
+                HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
+            })?
+        } else {
+            mount_status.clone()
+        };
     if mount_status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
         && !volume_status.recovery_leases.is_empty()
     {
@@ -1134,8 +1135,8 @@ async fn acquire_lease(
         .blocked_volume_uuids
         .iter()
         .any(|volume| volume.eq_ignore_ascii_case(&info.uuid));
-    let unscoped_helper_state = volume_status.blocked_volume_uuids.is_empty()
-        && volume_status.active_mounts > 0;
+    let unscoped_helper_state =
+        volume_status.blocked_volume_uuids.is_empty() && volume_status.active_mounts > 0;
     if volume_blocked || unscoped_helper_state {
         return Err(HelperError::Message(
             "snapshot mount helper has pending cleanup for the source volume".into(),
@@ -1154,9 +1155,9 @@ async fn acquire_lease(
     }
 
     let lease_id = Uuid::new_v4().to_string();
-    mount_helper::reserve(uid, &lease_id, &info.uuid, &info.device_identifier).map_err(|error| {
-        HelperError::Message(format!("snapshot mount helper reservation failed: {error}"))
-    })?;
+    mount_helper::reserve(uid, &lease_id, &info.uuid, &info.device_identifier).map_err(
+        |error| HelperError::Message(format!("snapshot mount helper reservation failed: {error}")),
+    )?;
     let before = match source_snapshot_inventory(&info.device_identifier) {
         Ok(inventory) => inventory,
         Err(error) => {
@@ -1201,8 +1202,8 @@ async fn acquire_lease(
             "snapshot creation did not produce a source-volume snapshot".into(),
         ));
     }
-    if let Err(first_error) = mount_helper::record_cleanup(uid, &lease_id, &mount_manifest) {
-        if let Err(second_error) = mount_helper::record_cleanup(uid, &lease_id, &mount_manifest) {
+    if let Err(first_error) = mount_helper::record_cleanup(uid, &lease_id) {
+        if let Err(second_error) = mount_helper::record_cleanup(uid, &lease_id) {
             let _ = mount_helper::release(uid, &lease_id);
             return Err(HelperError::Message(format!(
                 "snapshot mount helper could not record cleanup manifest: {first_error}; retry: {second_error}"
@@ -1212,9 +1213,9 @@ async fn acquire_lease(
     let snapshot = match source_snapshot(&new_snapshots, &info.device_identifier) {
         Ok(snapshot) => snapshot,
         // Ambiguous ownership is fail-closed. The root helper only deletes manifests already
-        // recorded in its journal, so cleanup is restricted to this reservation's exact list.
+        // recorded in its journal, so cleanup is restricted to the helper-derived reservation set.
         Err(error) => {
-            let _ = mount_helper::cleanup(uid, &lease_id, &mount_manifest);
+            let _ = mount_helper::cleanup(uid, &lease_id);
             return Err(error);
         }
     };
