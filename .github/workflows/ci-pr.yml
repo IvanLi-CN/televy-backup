@@ -224,7 +224,7 @@ jobs:
       needs.classify.outputs.kind == 'source' &&
       contains(github.event.pull_request.labels.*.name, 'apfs-acceptance')
     name: Labeled APFS snapshot acceptance
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 45
     steps:
       - name: Checkout dispatched pull request head
