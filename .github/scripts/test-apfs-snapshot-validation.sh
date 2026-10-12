@@ -87,6 +87,7 @@ assert_contains "orchestrator APFS check" "$ci_text" "diskutil info"
 assert_contains "orchestrator filesystem device resolution" "$ci_text" 'fixture_device="$(df -P "$source_root"'
 assert_not_contains "orchestrator directory diskutil lookup" "$ci_text" 'diskutil info "$source_root"'
 assert_contains "orchestrator root helper socket" "$ci_text" "TELEVYBACKUP_SNAPSHOT_MOUNT_SOCKET"
+assert_contains "orchestrator status helper socket propagation" "$ci_text" 'TELEVYBACKUP_SNAPSHOT_MOUNT_JOURNAL="$mount_journal"'
 assert_contains "orchestrator FDA check" "$ci_text" ".fdaReady == true"
 assert_contains "orchestrator sanitized timepoint" "$ci_text" "verify-apfs-snapshot-integration.sh"
 assert_contains "orchestrator sanitized long read" "$ci_text" "verify-apfs-snapshot-long-read.sh"

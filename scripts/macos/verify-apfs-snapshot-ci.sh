@@ -186,7 +186,9 @@ for _ in $(seq 1 120); do
     continue
   }
   access_status="$(
-    "$cli_binary" --json --config-dir "$config_root" --data-dir "$data_root" \
+    TELEVYBACKUP_SNAPSHOT_MOUNT_SOCKET="$mount_socket" \
+      TELEVYBACKUP_SNAPSHOT_MOUNT_JOURNAL="$mount_journal" \
+      "$cli_binary" --json --config-dir "$config_root" --data-dir "$data_root" \
       snapshot-access status 2>/dev/null || true
   )"
   if printf '%s' "$access_status" | jq -e \
