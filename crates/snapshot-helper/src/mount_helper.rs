@@ -1817,18 +1817,7 @@ async fn retain_present_manifest_after_delete_failure(
     manifest: &[MountSnapshotRef],
 ) {
     let remaining_manifest = match snapshot_inventory_manifest(device_identifier) {
-        Ok(current_manifest) => manifest
-            .iter()
-            .filter(|recorded| {
-                current_manifest.iter().any(|current| {
-                    current
-                        .device_identifier
-                        .eq_ignore_ascii_case(&recorded.device_identifier)
-                        && current.uuid.eq_ignore_ascii_case(&recorded.uuid)
-                })
-            })
-            .cloned()
-            .collect::<Vec<_>>(),
+        Ok(current_manifest) => manifest_entries_present_in_inventory(manifest, &current_manifest),
         Err(_) => manifest.to_vec(),
     };
     let remaining_manifest_json =
@@ -1841,6 +1830,24 @@ async fn retain_present_manifest_after_delete_failure(
     .bind(manifest_json)
     .execute(journal)
     .await;
+}
+
+fn manifest_entries_present_in_inventory(
+    recorded_manifest: &[MountSnapshotRef],
+    current_manifest: &[MountSnapshotRef],
+) -> Vec<MountSnapshotRef> {
+    recorded_manifest
+        .iter()
+        .filter(|recorded| {
+            current_manifest.iter().any(|current| {
+                current
+                    .device_identifier
+                    .eq_ignore_ascii_case(&recorded.device_identifier)
+                    && current.uuid.eq_ignore_ascii_case(&recorded.uuid)
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 fn delete_manifest(volume_uuid: &str, manifest: &[MountSnapshotRef]) -> bool {
@@ -2643,6 +2650,28 @@ mod tests {
         });
 
         assert!(!manifests_equal(&changed, &baseline));
+    }
+
+    #[test]
+    fn partial_manifest_cleanup_keeps_only_present_records() {
+        let recorded = vec![
+            MountSnapshotRef {
+                device_identifier: "disk5s1".into(),
+                uuid: "A8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+            },
+            MountSnapshotRef {
+                device_identifier: "disk5s1".into(),
+                uuid: "B8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+            },
+        ];
+        let current = vec![MountSnapshotRef {
+            device_identifier: "DISK5S1".into(),
+            uuid: "a8a38394-49ae-42f9-85fb-14dd9ea549FA".into(),
+        }];
+
+        let present = manifest_entries_present_in_inventory(&recorded, &current);
+        assert_eq!(present.len(), 1);
+        assert_eq!(present[0].uuid, recorded[0].uuid);
     }
 
     #[test]
