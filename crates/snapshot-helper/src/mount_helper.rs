@@ -180,10 +180,7 @@ pub fn release(uid: u32, lease_id: &str) -> Result<MountReleaseResult, MountHelp
     }
 }
 
-pub fn record_cleanup(
-    uid: u32,
-    lease_id: &str,
-) -> Result<MountReleaseResult, MountHelperError> {
+pub fn record_cleanup(uid: u32, lease_id: &str) -> Result<MountReleaseResult, MountHelperError> {
     let response = request(MountMethod::RecordCleanup {
         uid,
         lease_id: lease_id.to_string(),
@@ -196,10 +193,7 @@ pub fn record_cleanup(
     }
 }
 
-pub fn cleanup(
-    uid: u32,
-    cleanup_id: &str,
-) -> Result<MountReleaseResult, MountHelperError> {
+pub fn cleanup(uid: u32, cleanup_id: &str) -> Result<MountReleaseResult, MountHelperError> {
     let response = request(MountMethod::Cleanup {
         uid,
         cleanup_id: cleanup_id.to_string(),
@@ -380,8 +374,7 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
             None => "cleanup_pending",
             Some(manifest)
                 if mount_root.is_empty()
-                    && validate_device_volume_binding(&device_identifier, &volume_uuid)
-                        .is_ok()
+                    && validate_device_volume_binding(&device_identifier, &volume_uuid).is_ok()
                     && manifest.iter().all(|snapshot| {
                         snapshot
                             .device_identifier
