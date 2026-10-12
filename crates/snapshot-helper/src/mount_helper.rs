@@ -1825,7 +1825,7 @@ async fn retain_unconfirmed_manifest_after_delete_failure(
             confirmed_deleted,
             &current_manifest,
         ),
-        Err(_) => manifest.to_vec(),
+        Err(_) => manifest_entries_remaining_after_partial_delete(manifest, confirmed_deleted, &[]),
     };
     let remaining_manifest_json =
         serde_json::to_string(&remaining_manifest).unwrap_or_else(|_| manifest_json.to_string());
