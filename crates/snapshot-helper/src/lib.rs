@@ -187,6 +187,14 @@ pub struct MountStatusResult {
     pub active_mounts: u32,
     #[serde(default)]
     pub blocked_volume_uuids: Vec<String>,
+    #[serde(default)]
+    pub recovery_leases: Vec<MountRecoveryLease>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MountRecoveryLease {
+    pub lease_id: String,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

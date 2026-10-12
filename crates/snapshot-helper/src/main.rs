@@ -1104,13 +1104,32 @@ async fn acquire_lease(
         }
     }
     retry_pending_cleanup(uid, &info.uuid, &state.journal).await?;
-    let volume_status = if mount_status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION {
+    let mut volume_status = if mount_status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION {
         mount_helper::status_for_volume(uid, &info.uuid).map_err(|error| {
             HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
         })?
     } else {
         mount_status.clone()
     };
+    if mount_status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
+        && !volume_status.recovery_leases.is_empty()
+    {
+        for recovery in &volume_status.recovery_leases {
+            let result = mount_helper::release(uid, &recovery.lease_id).map_err(|error| {
+                HelperError::Message(format!(
+                    "snapshot mount helper orphan cleanup failed: {error}"
+                ))
+            })?;
+            if result.cleanup_state != "released" {
+                return Err(HelperError::Message(
+                    "snapshot mount helper orphan cleanup remains pending".into(),
+                ));
+            }
+        }
+        volume_status = mount_helper::status_for_volume(uid, &info.uuid).map_err(|error| {
+            HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
+        })?;
+    }
     let volume_blocked = volume_status
         .blocked_volume_uuids
         .iter()

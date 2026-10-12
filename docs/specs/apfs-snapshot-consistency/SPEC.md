@@ -64,7 +64,10 @@ The mount helper MUST run as a root LaunchDaemon with FDA manually granted to it
 identity, expose a separate peer-UID-checked Unix socket, and accept only `Status`, volume-scoped
 `StatusVolume`, `Reserve`, `RecordCleanup`, `Mount`, `Release`, and journal-bound `Cleanup`. `Reserve` MUST
 claim the requested volume before `tmutil localsnapshot` and record the pre-existing snapshot UUIDs;
-`RecordCleanup` MUST bind a non-empty newly discovered manifest to that reservation. `StatusVolume` MUST answer only
+`RecordCleanup` MUST bind a non-empty newly discovered manifest to that reservation. If recording fails,
+the reservation MUST remain blocking until a later retry or age-gated recovery compares the current
+inventory with the saved baseline. `Release` MUST revalidate the journaled device/volume binding and
+persist any discovered post-reservation manifest before deletion. `StatusVolume` MUST answer only
 whether the requested volume UUID has a reserved, prepared, active, or cleanup-pending row. `Cleanup` MUST
 reject any manifest that is not already recorded in the matching prepared journal row. It MUST NOT read source files, configuration, Keychain
 material, backup indexes, or network data. Its root-owned journal records lease, mount root,
