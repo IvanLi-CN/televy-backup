@@ -1162,8 +1162,8 @@ async fn mount_request(
                     lease_id,
                     volume_uuid,
                     device_identifier,
-                    reservation_manifest_json,
-                    stored_manifest_json,
+                    &reservation_manifest_json,
+                    &stored_manifest_json,
                     manifest,
                 )
                 .await
