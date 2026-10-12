@@ -611,7 +611,7 @@ async fn mount_request(
     validate_source_mount(source_mount_point, volume_uuid, device_identifier)?;
     validate_snapshot_binding(device_identifier, snapshot_uuid, snapshot_name)?;
     let blocked: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM mounts WHERE volume_uuid = ? AND state IN ('prepared', 'active', 'cleanup_pending')",
+        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('prepared', 'active', 'cleanup_pending')",
     )
     .bind(volume_uuid)
     .fetch_one(journal)
