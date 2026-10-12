@@ -35,6 +35,7 @@ const MOUNT_ROOT_BASE: &str = "/private/var/tmp/televybackup-snapshot-mounts";
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MUTATING_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const RECOVERY_AGE_SECONDS: &str = "-300 seconds";
+const AUTHORIZE_SOURCE_PATH_ARG: &str = "--authorize-source-path";
 
 #[derive(Debug, Error)]
 pub enum MountHelperError {
@@ -1351,7 +1352,7 @@ async fn reconcile_reserved_snapshot(
         return "cleanup_pending";
     }
     let updated = sqlx::query(
-        "UPDATE mounts SET state = 'released' WHERE lease_id = ? AND state IN ('reserved', 'cleanup_pending') AND mount_root = '' AND snapshot_manifest = '[]' AND reservation_manifest = ?",
+        "UPDATE mounts SET state = 'cleanup_pending' WHERE lease_id = ? AND state IN ('reserved', 'cleanup_pending') AND mount_root = '' AND snapshot_manifest = '[]' AND reservation_manifest = ?",
     )
     .bind(lease_id)
     .bind(reservation_manifest_json)
@@ -1361,7 +1362,12 @@ async fn reconcile_reserved_snapshot(
         return "cleanup_pending";
     }
     match snapshot_inventory_manifest(device_identifier) {
-        Ok(final_manifest) if manifests_equal(&final_manifest, &reservation_manifest) => "released",
+        Ok(final_manifest) if manifests_equal(&final_manifest, &reservation_manifest) => {
+            // A snapshot can be created by another process immediately after the final inventory
+            // read. Keep the stale lease as a tombstone instead of releasing it and losing the
+            // only journal row that can continue to block unsafe cleanup.
+            "cleanup_pending"
+        }
         _ => {
             let _ = update_state(journal, lease_id, "cleanup_pending").await;
             "cleanup_pending"
@@ -1682,54 +1688,75 @@ fn authorize_source_path(uid: u32, source_path: &Path) -> Result<(), MountHelper
             "source path authorization requires a non-root peer".into(),
         ));
     }
-    let path = CString::new(source_path.as_os_str().as_bytes()).map_err(|_| {
-        MountHelperError::Protocol("source path contains an invalid NUL byte".into())
-    })?;
-    let child = unsafe { libc::fork() };
-    if child < 0 {
-        return Err(MountHelperError::Io(std::io::Error::last_os_error()));
-    }
-    if child == 0 {
-        let passwd = unsafe { libc::getpwuid(uid as libc::uid_t) };
-        if passwd.is_null()
-            || unsafe { libc::initgroups((*passwd).pw_name, (*passwd).pw_gid) } != 0
-            || unsafe { libc::setgid((*passwd).pw_gid) } != 0
-        {
-            unsafe { libc::_exit(126) };
-        }
-        let set_uid = unsafe { libc::setuid(uid as libc::uid_t) };
-        if set_uid != 0 {
-            unsafe { libc::_exit(126) };
-        }
-        let fd = unsafe {
-            libc::open(
-                path.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            )
-        };
-        if fd >= 0 {
-            unsafe { libc::close(fd) };
-            unsafe { libc::_exit(0) };
-        }
-        unsafe { libc::_exit(1) };
-    }
-    let mut status = 0_i32;
-    loop {
-        let result = unsafe { libc::waitpid(child, &mut status, 0) };
-        if result == child {
-            break;
-        }
-        if result < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-            return Err(MountHelperError::Io(std::io::Error::last_os_error()));
-        }
-    }
-    if status & 0x7f == 0 && (status >> 8) & 0xff == 0 {
+    let executable = std::env::current_exe()?;
+    let status = Command::new(executable)
+        .arg(AUTHORIZE_SOURCE_PATH_ARG)
+        .arg(uid.to_string())
+        .arg(source_path)
+        .status()?;
+    if status.success() {
         Ok(())
     } else {
         Err(MountHelperError::Protocol(
             "peer cannot access the requested source path".into(),
         ))
     }
+}
+
+/// Run source-path authorization before the Tokio runtime starts.
+///
+/// This is an exec'd process rather than a `fork()` child of the multithreaded server, so
+/// privilege transitions cannot inherit locks held by threads that do not exist in the child.
+pub fn maybe_authorize_source_path(args: &[String]) -> Option<i32> {
+    if args.get(1).map(String::as_str) != Some(AUTHORIZE_SOURCE_PATH_ARG) {
+        return None;
+    }
+    if args.len() != 4 {
+        return Some(126);
+    }
+    let Some(uid) = args.get(2).and_then(|value| value.parse::<u32>().ok()) else {
+        return Some(126);
+    };
+    let Some(path) = args.get(3).map(Path::new).filter(|path| path.is_absolute()) else {
+        return Some(126);
+    };
+    Some(authorize_source_path_child(uid, path))
+}
+
+fn authorize_source_path_child(uid: u32, source_path: &Path) -> i32 {
+    if uid == 0 || unsafe { libc::geteuid() } != 0 {
+        return 126;
+    }
+    let path = match CString::new(source_path.as_os_str().as_bytes()) {
+        Ok(path) => path,
+        Err(_) => return 126,
+    };
+    let passwd = unsafe { libc::getpwuid(uid as libc::uid_t) };
+    if passwd.is_null() {
+        return 126;
+    }
+    let (group, user) = unsafe { ((*passwd).pw_gid, (*passwd).pw_name) };
+    let base_group = match libc::c_int::try_from(group) {
+        Ok(group) => group,
+        Err(_) => return 126,
+    };
+    if unsafe { libc::setgid(group) } != 0
+        || unsafe { libc::initgroups(user, base_group) } != 0
+        || unsafe { libc::setuid(uid as libc::uid_t) } != 0
+    {
+        return 126;
+    }
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return 1;
+    }
+    unsafe { libc::close(fd) };
+    0
 }
 
 fn validate_device_volume_binding(

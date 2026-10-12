@@ -9,7 +9,9 @@
   root IPC, peer-UID source-path authorization, serialized helper-owned snapshot creation through `RecordCleanup`, UUID journal, crash recovery, and component version `0.5.0` validation that
   binds the requested snapshot name to its manifest UUID before `mount_apfs`, passes the validated
   `/dev/<device>` identity instead of a mutable request pathname, and verifies the mounted device
-  afterward. The installed `0.9.8` helper remains migration-readable only.
+  afterward. Source-path authorization runs in an exec'd one-shot helper before the server runtime
+  starts, and stale empty-manifest leases remain `cleanup_pending` until an owning flow records a
+  manifest. The installed `0.9.8` helper remains migration-readable only.
 - `crates/daemon/src/snapshot_client.rs`: restricted IPC client and `BrokeredSnapshotSource`.
 - `crates/core/src/backup.rs`: `BackupSource` seam shared by local and brokered reads.
 - `crates/cli/src/snapshot_service.rs`: fixed-bundle status plus transactional legacy registration

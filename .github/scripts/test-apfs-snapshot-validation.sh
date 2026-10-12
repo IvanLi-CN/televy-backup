@@ -98,8 +98,12 @@ assert_contains "single snapshot ownership result" "$mount_helper_text" 'manifes
 assert_contains "pre-journal inventory fence" "$mount_helper_text" 'snapshot inventory changed while recording cleanup'
 assert_contains "post-journal inventory fence" "$mount_helper_text" 'snapshot inventory changed after cleanup was recorded'
 assert_contains "release inventory fence" "$mount_helper_text" 'inventory_matches_expected('
+assert_contains "stale empty lease remains blocked" "$mount_helper_text" "UPDATE mounts SET state = 'cleanup_pending'"
 assert_contains "lease source-path binding" "$mount_helper_text" 'authorize_source_path(uid, source_path)'
 assert_contains "mount source-path reauthorization" "$mount_helper_text" 'authorize_source_path(uid, stored_source_path)'
+assert_contains "source-path authorization uses exec boundary" "$mount_helper_text" 'Command::new(executable)'
+assert_contains "source-path authorization has pre-runtime entrypoint" "$mount_helper_text" 'maybe_authorize_source_path'
+assert_not_contains "source-path authorization does not fork Tokio helper" "$mount_helper_text" 'libc::fork()'
 assert_not_contains "access-side snapshot creation" "$access_text" 'run_command("/usr/bin/tmutil", ["localsnapshot"])'
 
 echo "APFS snapshot validation workflow contract passed"
