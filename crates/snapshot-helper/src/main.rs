@@ -1104,9 +1104,7 @@ async fn acquire_lease(
         }
     }
     retry_pending_cleanup(uid, &info.uuid, &state.journal).await?;
-    let volume_status = if mount_status.helper_version
-        == mount_helper::ROOT_MOUNT_HELPER_VERSION
-    {
+    let volume_status = if mount_status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION {
         mount_helper::status_for_volume(uid, &info.uuid).map_err(|error| {
             HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
         })?
@@ -1184,10 +1182,13 @@ async fn acquire_lease(
             "snapshot creation did not produce a source-volume snapshot".into(),
         ));
     }
-    if let Err(error) = mount_helper::record_cleanup(uid, &lease_id, &mount_manifest) {
-        return Err(HelperError::Message(format!(
-            "snapshot mount helper could not record cleanup manifest: {error}"
-        )));
+    if let Err(first_error) = mount_helper::record_cleanup(uid, &lease_id, &mount_manifest) {
+        if let Err(second_error) = mount_helper::record_cleanup(uid, &lease_id, &mount_manifest) {
+            let _ = mount_helper::release(uid, &lease_id);
+            return Err(HelperError::Message(format!(
+                "snapshot mount helper could not record cleanup manifest: {first_error}; retry: {second_error}"
+            )));
+        }
     }
     let snapshot = match source_snapshot(&new_snapshots, &info.device_identifier) {
         Ok(snapshot) => snapshot,

@@ -636,7 +636,7 @@ async fn status_result(
 ) -> Result<MountStatusResult, MountHelperError> {
     let active_mounts = (if peer_uid == 0 {
         sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+            "SELECT COUNT(*) FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
         )
         .fetch_one(pool)
         .await?
@@ -716,6 +716,7 @@ async fn reserve_request(
     validate_lease_id(lease_id)?;
     validate_uuid(volume_uuid)?;
     validate_device(device_identifier)?;
+    validate_device_volume_binding(device_identifier, volume_uuid)?;
     let blocked: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
     )
@@ -1325,6 +1326,44 @@ fn validate_source_mount(
     Ok(PathBuf::from("/dev").join(expected_device))
 }
 
+fn validate_device_volume_binding(
+    device_identifier: &str,
+    expected_volume_uuid: &str,
+) -> Result<(), MountHelperError> {
+    let device_path = format!("/dev/{device_identifier}");
+    let output = run_command_output(
+        "/usr/sbin/diskutil",
+        ["info", "-plist", device_path.as_str()],
+    )?;
+    let value = Value::from_reader_xml(output.as_slice())
+        .map_err(|error| MountHelperError::Protocol(format!("invalid device plist: {error}")))?;
+    let dict = value
+        .as_dictionary()
+        .ok_or_else(|| MountHelperError::Protocol("device plist is not a dictionary".into()))?;
+    let filesystem = dict
+        .get("FilesystemName")
+        .and_then(Value::as_string)
+        .unwrap_or_default();
+    let actual_device = dict
+        .get("DeviceIdentifier")
+        .and_then(Value::as_string)
+        .unwrap_or_default();
+    let actual_volume_uuid = dict
+        .get("APFSVolumeUUID")
+        .and_then(Value::as_string)
+        .or_else(|| dict.get("VolumeUUID").and_then(Value::as_string))
+        .unwrap_or_default();
+    if !filesystem.eq_ignore_ascii_case("APFS")
+        || !actual_device.eq_ignore_ascii_case(device_identifier)
+        || !actual_volume_uuid.eq_ignore_ascii_case(expected_volume_uuid)
+    {
+        return Err(MountHelperError::Protocol(
+            "device does not match the requested APFS volume".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_snapshot_binding(
     device_identifier: &str,
     snapshot_uuid: &str,
@@ -1810,14 +1849,10 @@ mod tests {
         .await
         .unwrap();
 
-        let status = status_for_volume_result(
-            501,
-            501,
-            "c8a38394-49ae-42f9-85fb-14dd9ea549fa",
-            &journal,
-        )
-        .await
-        .unwrap();
+        let status =
+            status_for_volume_result(501, 501, "c8a38394-49ae-42f9-85fb-14dd9ea549fa", &journal)
+                .await
+                .unwrap();
         assert_eq!(status.active_mounts, 1);
         assert_eq!(
             status.blocked_volume_uuids,
