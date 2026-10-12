@@ -23,12 +23,12 @@
       "label": "com.ivan.televybackup.snapshot-mount-helper",
       "install_path": "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
       "binary": "Contents/MacOS/televybackup-snapshot-mount-helper",
-      "component_version": "0.2.0",
+      "component_version": "0.3.0",
       "compatible_component_versions": [
-        "0.2.0",
+        "0.3.0",
         "0.9.8"
       ],
-      "protocol_version": 1,
+      "protocol_version": 2,
       "source": "release-bundled-compatibility-reference",
       "identity_source": "bundled-release-artifact",
       "installed_observation": "manual-rc-acceptance-required",
