@@ -623,8 +623,7 @@ async fn mount_request(
     // Re-check the source identity immediately before the privileged mount command. The first
     // validation protects the request contract; this second check closes the journal/update
     // window in which a system mount could have changed.
-    if let Err(error) = validate_source_mount(source_mount_point, volume_uuid, device_identifier)
-    {
+    if let Err(error) = validate_source_mount(source_mount_point, volume_uuid, device_identifier) {
         let cleanup_state = cleanup_mount(&mount_root, manifest, None);
         update_state(journal, lease_id, cleanup_state).await?;
         return Err(error);
