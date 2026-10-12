@@ -278,6 +278,24 @@ jobs:
             --app "$RUNNER_TEMP/televybackup-apfs-app/TelevyBackup.app" \
             --evidence-dir "$RUNNER_TEMP/apfs-snapshot-evidence"
 
+      - name: Diagnose hosted APFS local snapshot failure
+        if: ${{ failure() }}
+        run: |
+          set +e
+          tmutil_stderr="$(sudo -n tmutil localsnapshot 2>&1)"
+          tmutil_status=$?
+          tmutil_reason=command_failed
+          case "$tmutil_stderr" in
+            *"Operation not permitted"*) tmutil_reason=operation_not_permitted ;;
+            *"Failed to create local snapshot"*) tmutil_reason=failed_to_create_local_snapshot ;;
+            *"No such file"*) tmutil_reason=destination_unavailable ;;
+          esac
+          {
+            printf '%s\n' '### Hosted APFS local snapshot diagnostic'
+            printf '%s\n' "- status=$tmutil_status"
+            printf '%s\n' "- reason=$tmutil_reason"
+          } >>"$GITHUB_STEP_SUMMARY"
+
       - name: Upload sanitized APFS evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
