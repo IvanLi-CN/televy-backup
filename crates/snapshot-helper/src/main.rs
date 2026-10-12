@@ -1136,20 +1136,32 @@ async fn acquire_lease(
         ));
     }
 
-    let before = source_snapshot_inventory(&info.device_identifier)?;
-    run_command("/usr/bin/tmutil", ["localsnapshot"])?;
-    let after = source_snapshot_inventory(&info.device_identifier)?;
+    let lease_id = Uuid::new_v4().to_string();
+    mount_helper::reserve(uid, &lease_id, &info.uuid, &info.device_identifier).map_err(|error| {
+        HelperError::Message(format!("snapshot mount helper reservation failed: {error}"))
+    })?;
+    let before = match source_snapshot_inventory(&info.device_identifier) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            let _ = mount_helper::release(uid, &lease_id);
+            return Err(error);
+        }
+    };
+    if let Err(error) = run_command("/usr/bin/tmutil", ["localsnapshot"]) {
+        let _ = mount_helper::release(uid, &lease_id);
+        return Err(error);
+    }
+    let after = match source_snapshot_inventory(&info.device_identifier) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            let _ = mount_helper::release(uid, &lease_id);
+            return Err(error);
+        }
+    };
     let new_snapshots: Vec<_> = after
         .into_iter()
         .filter_map(|(key, snapshot)| (!before.contains_key(&key)).then_some((key.0, snapshot)))
         .collect();
-    let snapshot = match source_snapshot(&new_snapshots, &info.device_identifier) {
-        Ok(snapshot) => snapshot,
-        // Ambiguous ownership is fail-closed. The root helper only deletes manifests already
-        // recorded in its journal, so a caller-supplied ambiguous list is never treated as a
-        // privileged cleanup authorization.
-        Err(error) => return Err(error),
-    };
     let snapshot_manifest: Vec<SnapshotRef> = new_snapshots
         .iter()
         .map(|(device, snapshot)| SnapshotRef {
@@ -1159,7 +1171,6 @@ async fn acquire_lease(
             created_at: snapshot.created_at.clone(),
         })
         .collect();
-    let lease_id = Uuid::new_v4().to_string();
     let mount_manifest: Vec<MountSnapshotRef> = snapshot_manifest
         .iter()
         .map(|snapshot| MountSnapshotRef {
@@ -1167,6 +1178,26 @@ async fn acquire_lease(
             uuid: snapshot.uuid.clone(),
         })
         .collect();
+    if mount_manifest.is_empty() {
+        let _ = mount_helper::release(uid, &lease_id);
+        return Err(HelperError::Message(
+            "snapshot creation did not produce a source-volume snapshot".into(),
+        ));
+    }
+    if let Err(error) = mount_helper::record_cleanup(uid, &lease_id, &mount_manifest) {
+        return Err(HelperError::Message(format!(
+            "snapshot mount helper could not record cleanup manifest: {error}"
+        )));
+    }
+    let snapshot = match source_snapshot(&new_snapshots, &info.device_identifier) {
+        Ok(snapshot) => snapshot,
+        // Ambiguous ownership is fail-closed. The root helper only deletes manifests already
+        // recorded in its journal, so cleanup is restricted to this reservation's exact list.
+        Err(error) => {
+            let _ = mount_helper::cleanup(uid, &lease_id, &mount_manifest);
+            return Err(error);
+        }
+    };
     let mount_root = match mount_helper::mount(
         uid,
         &lease_id,

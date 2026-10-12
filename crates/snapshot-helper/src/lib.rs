@@ -127,6 +127,12 @@ pub enum MountMethod {
         uid: u32,
         volume_uuid: String,
     },
+    Reserve {
+        uid: u32,
+        lease_id: String,
+        volume_uuid: String,
+        device_identifier: String,
+    },
     Mount {
         uid: u32,
         lease_id: String,
@@ -141,6 +147,11 @@ pub enum MountMethod {
     Release {
         uid: u32,
         lease_id: String,
+    },
+    RecordCleanup {
+        uid: u32,
+        lease_id: String,
+        snapshot_manifest: Vec<MountSnapshotRef>,
     },
     Cleanup {
         uid: u32,
@@ -163,8 +174,10 @@ pub struct MountResponse {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MountResponseResult {
     Status(MountStatusResult),
+    Reserved(MountReleaseResult),
     Mounted(MountLeaseResult),
     Released(MountReleaseResult),
+    CleanupRecorded(MountReleaseResult),
     Cleaned(MountReleaseResult),
 }
 

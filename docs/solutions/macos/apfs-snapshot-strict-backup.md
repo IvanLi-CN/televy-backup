@@ -53,7 +53,7 @@ Snapshot Access.app (logged-in user)
   - IPC: metadata pages and bounded read streams
 
 Snapshot Mount Helper (root LaunchDaemon)
-  - Mount, Release, Status, volume-scoped StatusVolume, journal-bound Cleanup only
+  - Reserve, RecordCleanup, Mount, Release, Status, volume-scoped StatusVolume, journal-bound Cleanup only; Reserve owns the source volume before snapshot creation and RecordCleanup binds the exact new manifest
   - mount_apfs, umount, and exact recorded UUID deletion
   - no source file opens, Keychain, encryption, indexes, or network access
 ```

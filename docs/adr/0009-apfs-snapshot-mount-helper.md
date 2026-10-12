@@ -5,7 +5,7 @@
 Keep Snapshot Access as a private embedded user-session FDA and file-reading helper inside
 `TelevyBackup.app`, and add a
 separate root `com.ivan.televybackup.snapshot-mount-helper` LaunchDaemon. Its only IPC methods are
-`Status`, volume-scoped `StatusVolume`, `Mount`, `Release`, and journal-bound `Cleanup`; `Mount` validates the caller UID and APFS
+`Status`, volume-scoped `StatusVolume`, `Reserve`, `RecordCleanup`, `Mount`, `Release`, and journal-bound `Cleanup`; `Reserve` claims the source volume before snapshot creation and records the pre-existing snapshot UUIDs, while `RecordCleanup` binds the newly discovered manifest to that reservation. `Mount` validates the caller UID and APFS
 volume/device identity, creates a root-owned per-user lease directory that the caller cannot
 replace, validates the UUID manifest before invoking `mount_apfs`, and passes the validated device
 identity rather than the caller's source pathname; `Release` unmounts and deletes only the manifest
