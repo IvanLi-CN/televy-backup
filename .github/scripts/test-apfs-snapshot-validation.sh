@@ -74,7 +74,8 @@ assert_contains "manual regression contract test" "$pr_workflow_text" "test-apfs
 assert_contains "manual regression pinned checkout action" "$pr_workflow_text" "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 assert_contains "manual regression pinned toolchain action" "$pr_workflow_text" "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
 assert_contains "manual real APFS job" "$pr_workflow_text" "manual-apfs-real-acceptance"
-assert_contains "manual real APFS dispatch gate" "$pr_workflow_text" "name: Manual APFS snapshot acceptance"
+assert_contains "manual real APFS dispatch gate" "$pr_workflow_text" "github.event_name == 'workflow_dispatch'"
+assert_contains "manual real APFS label gate" "$pr_workflow_text" "apfs-acceptance"
 assert_contains "manual real APFS hosted runner" "$pr_workflow_text" "runs-on: macos-15"
 assert_contains "manual real APFS candidate build" "$pr_workflow_text" "scripts/macos/build-app.sh"
 assert_contains "manual real APFS orchestrator" "$pr_workflow_text" "scripts/macos/verify-apfs-snapshot-ci.sh"
@@ -111,14 +112,6 @@ assert_contains "timepoint synthetic fixture guard" "$integration_text" "TELEVYB
 assert_contains "timepoint synthetic target guard" "$integration_text" '[[ "$target_id" == "apfs-ci" ]]'
 assert_not_contains "timepoint transcript persistence in sanitized mode" "$integration_text" 'printf '\''%s\\n'\'' "$last_response" >>"$evidence_path"'
 
-assert_contains "hosted APFS acceptance job" "$workflow_text" "hosted-apfs"
-assert_contains "hosted APFS label gate" "$workflow_text" "name: Hosted macOS APFS snapshot acceptance"
-assert_contains "hosted APFS candidate build" "$workflow_text" "scripts/macos/build-app.sh"
-assert_contains "hosted APFS orchestrator" "$workflow_text" "scripts/macos/verify-apfs-snapshot-ci.sh"
-assert_contains "hosted APFS sanitized artifact" "$workflow_text" "apfs-snapshot-hosted-evidence"
-assert_contains "hosted APFS pinned checkout action" "$workflow_text" "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
-assert_contains "hosted APFS pinned toolchain action" "$workflow_text" "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
-assert_contains "hosted APFS pinned artifact action" "$workflow_text" "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 assert_contains "dedicated APFS manual gate" "$workflow_text" "github.event_name == 'workflow_dispatch'"
 
 echo "APFS snapshot validation workflow contract passed"

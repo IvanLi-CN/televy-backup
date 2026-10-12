@@ -219,10 +219,13 @@ jobs:
   manual-apfs-real-acceptance:
     needs: classify
     if: >-
-      github.event_name == 'workflow_dispatch' &&
       needs.classify.result == 'success' &&
-      needs.classify.outputs.kind == 'source'
-    name: Manual APFS snapshot acceptance
+      needs.classify.outputs.kind == 'source' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'apfs-acceptance')))
+    name: Labeled APFS snapshot acceptance
     runs-on: macos-15
     timeout-minutes: 45
     steps:
