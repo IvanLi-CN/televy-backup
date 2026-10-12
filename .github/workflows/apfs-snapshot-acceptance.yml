@@ -169,7 +169,6 @@ jobs:
           hdiutil attach -quiet -nobrowse -mountpoint "$tm_mount" "$tm_image"
           sudo -n tmutil setdestination "$tm_mount" >/dev/null
           sudo -n tmutil enable >/dev/null
-          sudo -n tmutil enablelocal >/dev/null
           sudo -n tmutil destinationinfo >/dev/null
           printf 'APFS_CAPABILITY_TM_MOUNT=%s\n' "$tm_mount" >>"$GITHUB_ENV"
 

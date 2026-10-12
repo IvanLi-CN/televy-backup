@@ -258,7 +258,6 @@ jobs:
           hdiutil attach -quiet -nobrowse -mountpoint "$tm_mount" "$tm_image"
           sudo -n tmutil setdestination "$tm_mount" >/dev/null
           sudo -n tmutil enable >/dev/null
-          sudo -n tmutil enablelocal >/dev/null
           sudo -n tmutil destinationinfo >/dev/null
           printf 'TELEVYBACKUP_CI_TM_IMAGE=%s\n' "$tm_image" >> "$GITHUB_ENV"
           printf 'TELEVYBACKUP_CI_TM_MOUNT=%s\n' "$tm_mount" >> "$GITHUB_ENV"
