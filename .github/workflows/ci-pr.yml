@@ -250,7 +250,7 @@ jobs:
         env:
           TELEVYBACKUP_APP_VARIANT: prod
           TELEVYBACKUP_BUILD_MODE: development
-          TELEVYBACKUP_CODESIGN_IDENTITY: -
+          TELEVYBACKUP_CODESIGN_IDENTITY: '-'
           TELEVYBACKUP_APP_OUT_ROOT: ${{ runner.temp }}/televybackup-apfs-app
         run: bash scripts/macos/build-app.sh
 
