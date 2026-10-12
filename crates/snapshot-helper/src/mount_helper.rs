@@ -601,10 +601,7 @@ async fn mount_request(
             })
             .collect::<Vec<_>>(),
     )?;
-    let mount_root = match create_mount_root(uid, lease_id) {
-        Ok(path) => path,
-        Err(error) => return Err(error),
-    };
+    let mount_root = expected_mount_root(i64::from(uid), lease_id)?;
     if let Err(error) = sqlx::query(
         "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', datetime('now'))",
     )
@@ -618,9 +615,26 @@ async fn mount_request(
     .execute(journal)
     .await
     {
-        let _ = fs::remove_dir(&mount_root);
         let _ = delete_manifest(manifest);
         return Err(error.into());
+    }
+
+    if let Err(error) = create_mount_root(uid, lease_id) {
+        // The prepared row is the recovery record for the snapshot. If the target already exists,
+        // ownership is ambiguous, so leave the row pending instead of unmounting or deleting
+        // another attempt's resources.
+        let cleanup_state = match fs::symlink_metadata(&mount_root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if delete_manifest(manifest) {
+                    "released"
+                } else {
+                    "cleanup_pending"
+                }
+            }
+            _ => "cleanup_pending",
+        };
+        update_state(journal, lease_id, cleanup_state).await?;
+        return Err(error);
     }
 
     // Re-check the source identity immediately before the privileged mount command. The first
