@@ -5,6 +5,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use plist::Value;
@@ -16,6 +17,7 @@ use sqlx::{
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream as TokioUnixStream};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::{
@@ -227,8 +229,8 @@ pub async fn run_server() -> Result<(), MountHelperError> {
         .ok_or_else(|| MountHelperError::Protocol("journal has no parent".into()))?;
     ensure_root_directory(journal_parent)?;
     ensure_mount_root_base(&configured_mount_root_base())?;
-    // Mount requests are serialized by the journal. A single connection keeps
-    // launchd startup deterministic and avoids parallel SQLite initialization.
+    // Keep one SQLite connection and serialize requests so lease existence checks, mount-root
+    // creation, and journal transitions cannot race across IPC connections.
     let journal = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
@@ -257,11 +259,13 @@ pub async fn run_server() -> Result<(), MountHelperError> {
     }
     let listener = UnixListener::bind(&socket_path)?;
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))?;
+    let mutation_lock = Arc::new(AsyncMutex::new(()));
     loop {
         let (stream, _) = listener.accept().await?;
         let journal = journal.clone();
+        let mutation_lock = Arc::clone(&mutation_lock);
         tokio::spawn(async move {
-            if let Err(error) = serve_connection(stream, journal).await {
+            if let Err(error) = serve_connection(stream, journal, mutation_lock).await {
                 eprintln!("snapshot mount helper connection failed: {error}");
             }
         });
@@ -303,19 +307,20 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
         let mount_root: String = row.try_get("mount_root")?;
         let mount_device: i64 = row.try_get("mount_device").unwrap_or_default();
         let manifest_json: String = row.try_get("snapshot_manifest")?;
-        let manifest =
-            serde_json::from_str::<Vec<MountSnapshotRef>>(&manifest_json).unwrap_or_default();
+        let manifest = parse_journal_manifest(&manifest_json).ok();
         let expected_device = u64::try_from(mount_device)
             .ok()
             .filter(|device| *device != 0);
-        let cleanup_state = if mount_root.is_empty() {
-            if delete_manifest(&manifest) {
-                "released"
-            } else {
-                "cleanup_pending"
+        let cleanup_state = match manifest {
+            None => "cleanup_pending",
+            Some(manifest) if mount_root.is_empty() => {
+                if delete_manifest(&manifest) {
+                    "released"
+                } else {
+                    "cleanup_pending"
+                }
             }
-        } else {
-            match expected_mount_root(uid, &lease_id) {
+            Some(manifest) => match expected_mount_root(uid, &lease_id) {
                 Ok(expected_root)
                     if Path::new(&mount_root) == expected_root
                         && validate_managed_mount_root(&expected_root) =>
@@ -330,7 +335,7 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
                 // mapped to a stable target. Keep the volume blocked instead of resolving a
                 // user-controlled path.
                 _ => "cleanup_pending",
-            }
+            },
         };
         update_state(pool, &lease_id, cleanup_state).await?;
     }
@@ -427,6 +432,7 @@ fn ensure_root_owned_directory(path: &Path, expected_mode: u32) -> Result<(), Mo
 async fn serve_connection(
     stream: TokioUnixStream,
     journal: SqlitePool,
+    mutation_lock: Arc<AsyncMutex<()>>,
 ) -> Result<(), MountHelperError> {
     let peer_uid = peer_uid(stream.as_raw_fd())?;
     let (read_half, mut write_half) = stream.into_split();
@@ -435,7 +441,10 @@ async fn serve_connection(
     while reader.read_line(&mut line).await? > 0 {
         let request: Result<MountRequest, _> = serde_json::from_str(line.trim());
         let response = match request {
-            Ok(request) => handle_request(request, peer_uid, &journal).await,
+            Ok(request) => {
+                let _mutation_guard = mutation_lock.lock().await;
+                handle_request(request, peer_uid, &journal).await
+            }
             Err(error) => MountResponse::error("unknown", "invalid_request", error.to_string()),
         };
         if !response.ok {
@@ -594,10 +603,7 @@ async fn mount_request(
     )?;
     let mount_root = match create_mount_root(uid, lease_id) {
         Ok(path) => path,
-        Err(error) => {
-            let _ = delete_manifest(manifest);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     if let Err(error) = sqlx::query(
         "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', datetime('now'))",
@@ -620,17 +626,22 @@ async fn mount_request(
     // Re-check the source identity immediately before the privileged mount command. The first
     // validation protects the request contract; this second check closes the journal/update
     // window in which a system mount could have changed.
-    if let Err(error) = validate_source_mount(source_mount_point, volume_uuid, device_identifier) {
-        let cleanup_state = cleanup_mount(&mount_root, manifest, None);
-        update_state(journal, lease_id, cleanup_state).await?;
-        return Err(error);
-    }
+    let source_device =
+        match validate_source_mount(source_mount_point, volume_uuid, device_identifier) {
+            Ok(device) => device,
+            Err(error) => {
+                let cleanup_state = cleanup_mount(&mount_root, manifest, None);
+                update_state(journal, lease_id, cleanup_state).await?;
+                return Err(error);
+            }
+        };
+    let source_device = source_device.to_string_lossy().into_owned();
     let mount_result = run_command(
         "/sbin/mount_apfs",
         [
             "-s",
             snapshot_name,
-            source_mount_point.to_string_lossy().as_ref(),
+            source_device.as_str(),
             mount_root.to_string_lossy().as_ref(),
         ],
     );
@@ -707,7 +718,7 @@ async fn release_request(
     }
     validate_lease_id(lease_id)?;
     let row = sqlx::query(
-        "SELECT uid, mount_root, mount_device, snapshot_manifest FROM mounts WHERE lease_id = ? AND state != 'released'",
+        "SELECT uid, mount_root, mount_device, snapshot_manifest, state FROM mounts WHERE lease_id = ?",
     )
     .bind(lease_id)
     .fetch_optional(journal)
@@ -722,8 +733,23 @@ async fn release_request(
     let mount_root: String = row.try_get("mount_root")?;
     let mount_device: i64 = row.try_get("mount_device").unwrap_or_default();
     let manifest_json: String = row.try_get("snapshot_manifest")?;
-    let manifest =
-        serde_json::from_str::<Vec<MountSnapshotRef>>(&manifest_json).unwrap_or_default();
+    let state: String = row.try_get("state")?;
+    if state == "released" {
+        return Ok(MountReleaseResult {
+            lease_id: lease_id.to_string(),
+            cleanup_state: "released".to_string(),
+        });
+    }
+    let manifest = match parse_journal_manifest(&manifest_json) {
+        Ok(manifest) => manifest,
+        Err(_) => {
+            update_state(journal, lease_id, "cleanup_pending").await?;
+            return Ok(MountReleaseResult {
+                lease_id: lease_id.to_string(),
+                cleanup_state: "cleanup_pending".to_string(),
+            });
+        }
+    };
     let expected_device = u64::try_from(mount_device)
         .ok()
         .filter(|device| *device != 0);
@@ -869,6 +895,22 @@ fn delete_manifest(manifest: &[MountSnapshotRef]) -> bool {
     })
 }
 
+fn parse_journal_manifest(value: &str) -> Result<Vec<MountSnapshotRef>, MountHelperError> {
+    let manifest = serde_json::from_str::<Vec<MountSnapshotRef>>(value).map_err(|_| {
+        MountHelperError::Protocol("snapshot mount journal contains an invalid manifest".into())
+    })?;
+    if manifest.is_empty() {
+        return Err(MountHelperError::Protocol(
+            "snapshot mount journal contains an empty manifest".into(),
+        ));
+    }
+    for snapshot in &manifest {
+        validate_device(&snapshot.device_identifier)?;
+        validate_uuid(&snapshot.uuid)?;
+    }
+    Ok(manifest)
+}
+
 async fn update_state(
     journal: &SqlitePool,
     lease_id: &str,
@@ -886,7 +928,7 @@ fn validate_source_mount(
     source_mount_point: &Path,
     expected_volume_uuid: &str,
     expected_device: &str,
-) -> Result<(), MountHelperError> {
+) -> Result<PathBuf, MountHelperError> {
     if !source_mount_point.is_absolute() || !source_mount_point.is_dir() {
         return Err(MountHelperError::Protocol(
             "source mount point is not a directory".into(),
@@ -926,7 +968,10 @@ fn validate_source_mount(
             "source mount identity does not match the lease".into(),
         ));
     }
-    Ok(())
+    // Pass the validated device node to mount_apfs instead of the request pathname. The
+    // pathname is only used for the diskutil identity query; a user cannot replace the
+    // root-owned /dev node between validation and the privileged mount operation.
+    Ok(PathBuf::from("/dev").join(expected_device))
 }
 
 fn validate_snapshot_binding(
@@ -1138,6 +1183,16 @@ mod tests {
         assert!(validate_device("/dev/disk5s1").is_err());
         assert!(validate_uuid("A8A38394-49AE-42F9-85FB-14DD9EA549FA").is_ok());
         assert!(validate_uuid("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn journal_manifest_rejects_corrupt_or_empty_cleanup_identity() {
+        assert!(parse_journal_manifest("not-json").is_err());
+        assert!(parse_journal_manifest("[]").is_err());
+        assert!(parse_journal_manifest(
+            r#"[{"device_identifier":"disk5s1","uuid":"B8A38394-49AE-42F9-85FB-14DD9EA549FA"}]"#
+        )
+        .is_ok());
     }
 
     #[test]

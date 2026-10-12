@@ -6,8 +6,9 @@
   strict run before source bytes are served.
 - `crates/snapshot-helper/src/mount_helper.rs` and `src/bin/televybackup-snapshot-mount-helper.rs`:
   mount-only root IPC, UUID journal, crash recovery, and component version `0.2.0` validation that
-  binds the requested snapshot name to its manifest UUID before `mount_apfs` and verifies the
-  mounted device afterward. The installed `0.9.8` helper remains migration-readable only.
+  binds the requested snapshot name to its manifest UUID before `mount_apfs`, passes the validated
+  `/dev/<device>` identity instead of a mutable request pathname, and verifies the mounted device
+  afterward. The installed `0.9.8` helper remains migration-readable only.
 - `crates/daemon/src/snapshot_client.rs`: restricted IPC client and `BrokeredSnapshotSource`.
 - `crates/core/src/backup.rs`: `BackupSource` seam shared by local and brokered reads.
 - `crates/cli/src/snapshot_service.rs`: fixed-bundle status plus transactional legacy registration
