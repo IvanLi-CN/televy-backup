@@ -246,7 +246,7 @@ jobs:
           command -v sqlite3
           command -v tmutil
           sudo -n true
-          sudo -n tmutil enablelocal
+          sudo -n tmutil snapshot >/dev/null
 
       - name: Build ad-hoc candidate
         env:

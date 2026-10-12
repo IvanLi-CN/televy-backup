@@ -77,7 +77,7 @@ assert_contains "manual real APFS job" "$pr_workflow_text" "manual-apfs-real-acc
 assert_contains "manual real APFS dispatch gate" "$pr_workflow_text" "github.event_name == 'workflow_dispatch'"
 assert_contains "manual real APFS label gate" "$pr_workflow_text" "apfs-acceptance"
 assert_contains "manual real APFS hosted runner" "$pr_workflow_text" "runs-on: macos-15"
-assert_contains "manual real APFS local snapshots" "$pr_workflow_text" "sudo -n tmutil enablelocal"
+assert_contains "manual real APFS local snapshots" "$pr_workflow_text" "sudo -n tmutil snapshot"
 assert_contains "manual real APFS candidate build" "$pr_workflow_text" "scripts/macos/build-app.sh"
 assert_contains "manual real APFS orchestrator" "$pr_workflow_text" "scripts/macos/verify-apfs-snapshot-ci.sh"
 assert_contains "manual real APFS sanitized artifact" "$pr_workflow_text" "apfs-snapshot-hosted-evidence"
