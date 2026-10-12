@@ -99,8 +99,11 @@ assert_contains "pre-journal inventory fence" "$mount_helper_text" 'snapshot inv
 assert_contains "post-journal inventory fence" "$mount_helper_text" 'snapshot inventory changed after cleanup was recorded'
 assert_contains "release inventory fence" "$mount_helper_text" 'inventory_matches_expected('
 assert_contains "released tombstone audit" "$mount_helper_text" 'audit_released_tombstones(journal, volume_uuid, device_identifier)'
+assert_contains "released tombstone has a valid baseline" "$mount_helper_text" 'reservation_manifest_valid = 1'
 assert_contains "stale inventory change reblocks" "$mount_helper_text" "released snapshot tombstone inventory changed"
 assert_contains "creation baseline is exact" "$mount_helper_text" 'if !manifests_equal(&current_manifest, &reservation_manifest)'
+assert_contains "deletion clears recorded manifest" "$mount_helper_text" "snapshot_manifest = '[]', reservation_manifest = ?"
+assert_contains "stale release remains blocked" "$mount_helper_text" 'if !stale_reserved'
 assert_contains "lease source-path binding" "$mount_helper_text" 'authorize_source_path(uid, source_path)'
 assert_contains "mount source-path reauthorization" "$mount_helper_text" 'authorize_source_path(uid, stored_source_path)'
 assert_contains "source-path authorization uses exec boundary" "$mount_helper_text" 'Command::new(executable)'

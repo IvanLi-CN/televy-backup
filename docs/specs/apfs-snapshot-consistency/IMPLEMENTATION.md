@@ -11,7 +11,9 @@
   `/dev/<device>` identity instead of a mutable request pathname, and verifies the mounted device
   afterward. Source-path authorization runs in an exec'd one-shot helper before the server runtime
   starts, and released leases remain as auditable tombstones; a later reserve audits their
-  baseline and re-blocks the volume if inventory changed. The installed `0.9.8` helper remains
+  validated baseline and re-blocks the volume if inventory changed. Deletion clears the recorded
+  manifest before storing the post-deletion inventory, while migrated rows without a validated
+  baseline remain blocked. The installed `0.9.8` helper remains
   migration-readable only.
 - `crates/daemon/src/snapshot_client.rs`: restricted IPC client and `BrokeredSnapshotSource`.
 - `crates/core/src/backup.rs`: `BackupSource` seam shared by local and brokered reads.
