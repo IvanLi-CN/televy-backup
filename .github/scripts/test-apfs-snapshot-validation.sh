@@ -73,6 +73,13 @@ assert_contains "manual regression daemon test" "$pr_workflow_text" "brokered_so
 assert_contains "manual regression contract test" "$pr_workflow_text" "test-apfs-snapshot-validation.sh"
 assert_contains "manual regression pinned checkout action" "$pr_workflow_text" "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 assert_contains "manual regression pinned toolchain action" "$pr_workflow_text" "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
+assert_contains "manual real APFS job" "$pr_workflow_text" "manual-apfs-real-acceptance"
+assert_contains "manual real APFS dispatch gate" "$pr_workflow_text" "name: Manual APFS snapshot acceptance"
+assert_contains "manual real APFS hosted runner" "$pr_workflow_text" "runs-on: macos-15"
+assert_contains "manual real APFS candidate build" "$pr_workflow_text" "scripts/macos/build-app.sh"
+assert_contains "manual real APFS orchestrator" "$pr_workflow_text" "scripts/macos/verify-apfs-snapshot-ci.sh"
+assert_contains "manual real APFS sanitized artifact" "$pr_workflow_text" "apfs-snapshot-hosted-evidence"
+assert_contains "manual real APFS pinned artifact action" "$pr_workflow_text" "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 
 assert_contains "orchestrator fail-closed shell" "$ci_text" "set -euo pipefail"
 assert_contains "orchestrator APFS check" "$ci_text" "diskutil info"
