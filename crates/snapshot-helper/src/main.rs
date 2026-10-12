@@ -1722,6 +1722,78 @@ mod tests {
         assert!(error.to_string().contains("mount identity changed"));
     }
 
+    #[tokio::test]
+    async fn snapshot_timepoint_reads_pre_mutation_after_live_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot_source = temp.path().join("source");
+        let live_source = temp.path().join("live");
+        fs::create_dir(&snapshot_source).unwrap();
+        fs::create_dir(&live_source).unwrap();
+        let snapshot_file = snapshot_source.join("probe.txt");
+        let live_file = live_source.join("probe.txt");
+        fs::write(&snapshot_file, b"PRE").unwrap();
+        fs::write(&live_file, b"PRE").unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let state = scan_test_state(&temp, uid).await;
+
+        let opened = open_read_stream(uid, "lease-1", "probe.txt", &state).unwrap();
+        fs::write(&live_file, b"POST").unwrap();
+        let read = read_stream(uid, &opened.stream_id, 1024, &state).unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(read.bytes_base64)
+            .unwrap();
+
+        assert_eq!(bytes, b"PRE");
+        assert_eq!(fs::read(&live_file).unwrap(), b"POST");
+        close_read_stream(uid, &opened.stream_id, &state).unwrap();
+    }
+
+    #[tokio::test]
+    async fn long_read_fails_closed_after_mount_identity_loss() {
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot_source = temp.path().join("source");
+        let live_source = temp.path().join("live");
+        fs::create_dir(&snapshot_source).unwrap();
+        fs::create_dir(&live_source).unwrap();
+        let snapshot_file = snapshot_source.join("large.bin");
+        let live_control = live_source.join("control.txt");
+        let snapshot_bytes = vec![b'S'; 2 * 1024 * 1024];
+        fs::write(&snapshot_file, &snapshot_bytes).unwrap();
+        fs::write(&live_control, b"initial").unwrap();
+        let uid = unsafe { libc::geteuid() };
+        let state = scan_test_state(&temp, uid).await;
+
+        let healthy = open_read_stream(uid, "lease-1", "large.bin", &state).unwrap();
+        let mut read_bytes = Vec::new();
+        loop {
+            let read = read_stream(uid, &healthy.stream_id, 256 * 1024, &state).unwrap();
+            read_bytes.extend(
+                base64::engine::general_purpose::STANDARD
+                    .decode(read.bytes_base64)
+                    .unwrap(),
+            );
+            fs::write(&live_control, b"changed").unwrap();
+            if read.eof {
+                break;
+            }
+        }
+        assert_eq!(read_bytes, snapshot_bytes);
+        close_read_stream(uid, &healthy.stream_id, &state).unwrap();
+
+        let fault = open_read_stream(uid, "lease-1", "large.bin", &state).unwrap();
+        state
+            .leases
+            .lock()
+            .unwrap()
+            .get_mut("lease-1")
+            .unwrap()
+            .mount_device = 0;
+        let error = read_stream(uid, &fault.stream_id, 256 * 1024, &state).unwrap_err();
+        assert!(error.to_string().contains("snapshot read failed"));
+        assert!(error.to_string().contains("errno="));
+        close_read_stream(uid, &fault.stream_id, &state).unwrap();
+    }
+
     #[test]
     fn firmlink_resolution_rejects_ambiguous_snapshot_candidates() {
         let temp = tempfile::tempdir().unwrap();
