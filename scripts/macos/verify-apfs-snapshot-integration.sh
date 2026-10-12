@@ -186,8 +186,17 @@ for target_spec in "$@"; do
     fail_validation "lease_request_failed"
   fi
   lease_response="$last_response"
-  printf '%s' "$lease_response" | jq -e '.ok and .result.kind == "lease"' >/dev/null ||
-    fail_validation "lease_response_invalid"
+  if ! printf '%s' "$lease_response" | jq -e '.ok and .result.kind == "lease"' >/dev/null; then
+    lease_error_code="$(printf '%s' "$lease_response" | jq -r '.code // "unknown"' 2>/dev/null || printf 'unknown')"
+    case "$lease_error_code" in
+      command_failed|invalid_request|io|journal|lease_conflict|protocol|unsupported)
+        fail_validation "lease_response_${lease_error_code}"
+        ;;
+      *)
+        fail_validation "lease_response_invalid"
+        ;;
+    esac
+  fi
   lease_id="$(printf '%s' "$lease_response" | jq -er '.result.lease_id')" ||
     fail_validation "lease_identity_missing"
   leases+=("$lease_id")
