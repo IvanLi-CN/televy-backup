@@ -1874,13 +1874,11 @@ mod tests {
 
         recover_journal(&journal).await.unwrap();
 
-        let state: String = sqlx::query_scalar(
-            "SELECT state FROM mounts WHERE lease_id = ?",
-        )
-        .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
-        .fetch_one(&journal)
-        .await
-        .unwrap();
+        let state: String = sqlx::query_scalar("SELECT state FROM mounts WHERE lease_id = ?")
+            .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
+            .fetch_one(&journal)
+            .await
+            .unwrap();
         assert_eq!(state, "reserved");
     }
 
@@ -1899,14 +1897,10 @@ mod tests {
         .await
         .unwrap();
 
-        let status = status_for_volume_result(
-            501,
-            501,
-            "C8A38394-49AE-42F9-85FB-14DD9EA549FA",
-            &journal,
-        )
-        .await
-        .unwrap();
+        let status =
+            status_for_volume_result(501, 501, "C8A38394-49AE-42F9-85FB-14DD9EA549FA", &journal)
+                .await
+                .unwrap();
         assert_eq!(status.recovery_leases.len(), 1);
         assert_eq!(
             status.recovery_leases[0].lease_id,
@@ -1929,14 +1923,10 @@ mod tests {
         .await
         .unwrap();
 
-        let status = status_for_volume_result(
-            501,
-            501,
-            "C8A38394-49AE-42F9-85FB-14DD9EA549FA",
-            &journal,
-        )
-        .await
-        .unwrap();
+        let status =
+            status_for_volume_result(501, 501, "C8A38394-49AE-42F9-85FB-14DD9EA549FA", &journal)
+                .await
+                .unwrap();
         assert_eq!(status.recovery_leases.len(), 1);
     }
 
@@ -1983,14 +1973,9 @@ mod tests {
     async fn cleanup_requires_an_existing_journal_manifest() {
         let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
         init_journal(&journal).await.unwrap();
-        let error = cleanup_request(
-            501,
-            501,
-            "A8A38394-49AE-42F9-85FB-14DD9EA549FA",
-            &journal,
-        )
-        .await
-        .unwrap_err();
+        let error = cleanup_request(501, 501, "A8A38394-49AE-42F9-85FB-14DD9EA549FA", &journal)
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("existing journal entry"));
 
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mounts")
