@@ -1202,13 +1202,13 @@ async fn acquire_lease(
             "snapshot creation did not produce a source-volume snapshot".into(),
         ));
     }
-    if let Err(first_error) = mount_helper::record_cleanup(uid, &lease_id) {
-        if let Err(second_error) = mount_helper::record_cleanup(uid, &lease_id) {
-            let _ = mount_helper::release(uid, &lease_id);
-            return Err(HelperError::Message(format!(
-                "snapshot mount helper could not record cleanup manifest: {first_error}; retry: {second_error}"
-            )));
-        }
+    if let Err(first_error) = mount_helper::record_cleanup(uid, &lease_id)
+        && let Err(second_error) = mount_helper::record_cleanup(uid, &lease_id)
+    {
+        let _ = mount_helper::release(uid, &lease_id);
+        return Err(HelperError::Message(format!(
+            "snapshot mount helper could not record cleanup manifest: {first_error}; retry: {second_error}"
+        )));
     }
     let snapshot = match source_snapshot(&new_snapshots, &info.device_identifier) {
         Ok(snapshot) => snapshot,
