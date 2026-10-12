@@ -254,9 +254,10 @@ jobs:
           tm_image="$RUNNER_TEMP/televybackup-apfs-tm.sparsebundle"
           tm_mount="$RUNNER_TEMP/televybackup-apfs-tm-volume"
           mkdir -p "$tm_mount"
-          hdiutil create -quiet -size 2g -fs APFS -type SPARSEBUNDLE -volname TelevyBackupAPFSTM "$tm_image"
+          hdiutil create -quiet -size 20g -fs APFS -type SPARSEBUNDLE -volname TelevyBackupAPFSTM "$tm_image"
           hdiutil attach -quiet -nobrowse -mountpoint "$tm_mount" "$tm_image"
-          sudo -n tmutil setdestination -a "$tm_mount" >/dev/null
+          sudo -n tmutil setdestination "$tm_mount" >/dev/null
+          sudo -n tmutil enable >/dev/null
           sudo -n tmutil destinationinfo >/dev/null
           printf 'TELEVYBACKUP_CI_TM_IMAGE=%s\n' "$tm_image" >> "$GITHUB_ENV"
           printf 'TELEVYBACKUP_CI_TM_MOUNT=%s\n' "$tm_mount" >> "$GITHUB_ENV"
