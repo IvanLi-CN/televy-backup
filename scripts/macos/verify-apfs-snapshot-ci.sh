@@ -124,7 +124,12 @@ if [[ -n "$(find "$source_root" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   echo "APFS fixture source root must be empty before validation" >&2
   exit 1
 fi
-diskutil info "$source_root" | grep -Eiq 'File System Personality:[[:space:]]*APFS|Type:[[:space:]]*APFS' || {
+fixture_device="$(df -P "$source_root" 2>/dev/null | awk 'NR == 2 { print $1 }')"
+[[ "$fixture_device" == /dev/* ]] || {
+  echo "APFS fixture filesystem device could not be resolved" >&2
+  exit 1
+}
+diskutil info "$fixture_device" 2>/dev/null | grep -Eiq 'File System Personality:[[:space:]]*APFS|Type:[[:space:]]*APFS' || {
   echo "APFS fixture source root is not on an APFS volume" >&2
   exit 1
 }
