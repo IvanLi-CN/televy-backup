@@ -64,9 +64,8 @@ fixture_root="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/televybackup-apfs-fix
 source_root="$fixture_root/source"
 config_root="$fixture_root/config"
 data_root="$fixture_root/data"
-access_runtime_root="/tmp/televybackup-apfs-access-$run_id"
 mount_runtime_root="/tmp/televybackup-apfs-mount-$run_id"
-access_socket="$access_runtime_root/access.sock"
+access_socket="$data_root/snapshot-access/access.sock"
 access_journal="$data_root/snapshot-access/journal.sqlite"
 mount_socket="$mount_runtime_root/helper.sock"
 mount_journal="$mount_runtime_root/journal.sqlite"
@@ -107,7 +106,7 @@ cleanup() {
     "$evidence_dir/a5.stderr" \
     "$evidence_dir/a6.stdout" \
     "$evidence_dir/a6.stderr"
-  rm -rf -- "$fixture_root" "$access_runtime_root"
+  rm -rf -- "$fixture_root"
   if [[ "$exit_status" -ne 0 && ! -s "$evidence_dir/summary.json" ]]; then
     write_failure_card \
       "$evidence_dir/summary.json" \
@@ -118,8 +117,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$source_root" "$config_root" "$data_root" "$access_runtime_root"
-chmod 700 "$fixture_root" "$source_root" "$config_root" "$data_root" "$access_runtime_root"
+mkdir -p "$source_root" "$config_root" "$data_root"
+chmod 700 "$fixture_root" "$source_root" "$config_root" "$data_root"
 if [[ -n "$(find "$source_root" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
   echo "APFS fixture source root must be empty before validation" >&2
   exit 1
