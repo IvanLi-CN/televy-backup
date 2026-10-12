@@ -153,16 +153,26 @@ jobs:
       matrix:
         include:
           - label: macos-14
-          - label: macos-14-large
           - label: macos-15
           - label: macos-15-intel
-          - label: macos-15-large
-          - label: macos-15-xlarge
           - label: macos-26
-          - label: macos-26-large
     runs-on: ${{ matrix.label }}
     timeout-minutes: 10
     steps:
+      - name: Prepare Time Machine destination
+        run: |
+          set -euo pipefail
+          tm_image="$RUNNER_TEMP/apfs-capability-tm.sparsebundle"
+          tm_mount="$RUNNER_TEMP/apfs-capability-tm-volume"
+          mkdir -p "$tm_mount"
+          hdiutil create -quiet -size 20g -fs APFS -type SPARSEBUNDLE -volname TelevyBackupAPFSTM "$tm_image"
+          hdiutil attach -quiet -nobrowse -mountpoint "$tm_mount" "$tm_image"
+          sudo -n tmutil setdestination "$tm_mount" >/dev/null
+          sudo -n tmutil enable >/dev/null
+          sudo -n tmutil enablelocal >/dev/null
+          sudo -n tmutil destinationinfo >/dev/null
+          printf 'APFS_CAPABILITY_TM_MOUNT=%s\n' "$tm_mount" >>"$GITHUB_ENV"
+
       - name: Probe local snapshot support
         run: |
           set +e
@@ -213,4 +223,12 @@ jobs:
           path: ${{ runner.temp }}/apfs-runner-capability.json
           if-no-files-found: error
           retention-days: 14
+
+      - name: Clean up Time Machine destination
+        if: always()
+        run: |
+          set +e
+          tm_mount="${APFS_CAPABILITY_TM_MOUNT:-$RUNNER_TEMP/apfs-capability-tm-volume}"
+          sudo -n tmutil removedestination "$tm_mount" >/dev/null 2>&1 || true
+          hdiutil detach "$tm_mount" -force >/dev/null 2>&1 || true
 

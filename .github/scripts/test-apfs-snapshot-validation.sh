@@ -125,9 +125,11 @@ assert_not_contains "timepoint transcript persistence in sanitized mode" "$integ
 assert_contains "dedicated APFS manual gate" "$workflow_text" "github.event_name == 'workflow_dispatch'"
 
 assert_contains "capability probe mode" "$workflow_text" "default: acceptance"
-assert_contains "capability probe matrix" "$workflow_text" "macos-15-xlarge"
+assert_contains "capability probe matrix" "$workflow_text" "macos-15-intel"
 assert_contains "capability probe snapshot command" "$workflow_text" "tmutil snapshot"
 assert_contains "capability probe local snapshot command" "$workflow_text" "tmutil localsnapshot"
+assert_contains "capability probe destination" "$workflow_text" "tmutil setdestination"
+assert_contains "capability probe local snapshot enablement" "$workflow_text" "tmutil enablelocal"
 assert_contains "capability probe sanitized schema" "$workflow_text" "televybackup.apfs_snapshot_runner_capability.v1"
 assert_contains "capability probe artifact" "$workflow_text" "apfs-runner-capability-"
 assert_not_contains "capability probe raw output upload" "$workflow_text" 'tmutil.log'
