@@ -209,6 +209,8 @@ printf '%s' "${access_status:-}" | jq -e \
 repo_root="$(git rev-parse --show-toplevel)"
 a5_output="$evidence_dir/a5.stdout"
 set +e
+TELEVYBACKUP_SNAPSHOT_SOCKET="$access_socket" \
+  TELEVYBACKUP_SNAPSHOT_JOURNAL="$access_journal" \
 TELEVYBACKUP_SANITIZED_FIXTURE_ROOT="$fixture_root" \
   bash "$repo_root/scripts/macos/verify-apfs-snapshot-integration.sh" \
   --sanitized "apfs-ci:$source_root" >"$a5_output" 2>"$evidence_dir/a5.stderr"

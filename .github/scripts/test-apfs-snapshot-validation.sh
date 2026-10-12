@@ -91,6 +91,8 @@ assert_contains "orchestrator status helper socket propagation" "$ci_text" 'TELE
 assert_contains "orchestrator access socket alignment" "$ci_text" 'access_socket="$data_root/snapshot-access/access.sock"'
 assert_contains "orchestrator FDA check" "$ci_text" ".fdaReady == true"
 assert_contains "orchestrator sanitized timepoint" "$ci_text" "verify-apfs-snapshot-integration.sh"
+assert_contains "orchestrator timepoint access socket" "$ci_text" 'TELEVYBACKUP_SNAPSHOT_SOCKET="$access_socket"'
+assert_contains "orchestrator timepoint access journal" "$ci_text" 'TELEVYBACKUP_SNAPSHOT_JOURNAL="$access_journal"'
 assert_contains "orchestrator sanitized long read" "$ci_text" "verify-apfs-snapshot-long-read.sh"
 assert_contains "synthetic fixture guard" "$ci_text" "TELEVYBACKUP_SANITIZED_FIXTURE_ROOT"
 assert_contains "canonical timepoint card" "$ci_text" "snapshotReadPreMutation: true"
