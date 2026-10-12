@@ -475,7 +475,7 @@ async fn handle_request(
         return MountResponse::error(request_id, "invalid_request", error);
     }
     let result = match request.method {
-        MountMethod::Status => status_result(journal)
+        MountMethod::Status => status_result(journal, peer_uid)
             .await
             .map(MountResponseResult::Status),
         MountMethod::Mount {
@@ -533,15 +533,42 @@ fn error_code(error: &MountHelperError) -> &'static str {
     }
 }
 
-async fn status_result(pool: &SqlitePool) -> Result<MountStatusResult, MountHelperError> {
-    let active_mounts = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM mounts WHERE state IN ('prepared', 'active', 'cleanup_pending')",
-    )
-    .fetch_one(pool)
-    .await? as u32;
+async fn status_result(
+    pool: &SqlitePool,
+    peer_uid: u32,
+) -> Result<MountStatusResult, MountHelperError> {
+    let active_mounts = (if peer_uid == 0 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM mounts WHERE state IN ('prepared', 'active', 'cleanup_pending')",
+        )
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM mounts WHERE uid = ? AND state IN ('prepared', 'active', 'cleanup_pending')",
+        )
+        .bind(i64::from(peer_uid))
+        .fetch_one(pool)
+        .await?
+    }) as u32;
+    let blocked_volume_uuids = if peer_uid == 0 {
+        sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT volume_uuid FROM mounts WHERE state IN ('prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
+        )
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT volume_uuid FROM mounts WHERE uid = ? AND state IN ('prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
+        )
+        .bind(i64::from(peer_uid))
+        .fetch_all(pool)
+        .await?
+    };
     Ok(MountStatusResult {
         helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
         active_mounts,
+        blocked_volume_uuids,
     })
 }
 
@@ -583,6 +610,17 @@ async fn mount_request(
     }
     validate_source_mount(source_mount_point, volume_uuid, device_identifier)?;
     validate_snapshot_binding(device_identifier, snapshot_uuid, snapshot_name)?;
+    let blocked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM mounts WHERE volume_uuid = ? AND state IN ('prepared', 'active', 'cleanup_pending')",
+    )
+    .bind(volume_uuid)
+    .fetch_one(journal)
+    .await?;
+    if blocked > 0 {
+        return Err(MountHelperError::Protocol(
+            "source volume has an active mount or pending snapshot cleanup".into(),
+        ));
+    }
     let existing: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM mounts WHERE lease_id = ? AND state != 'released'",
     )
@@ -1336,6 +1374,32 @@ mod tests {
         assert_eq!(rows, 0);
     }
 
+    #[tokio::test]
+    async fn status_reports_pending_cleanup_by_volume() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'cleanup_pending', datetime('now'))",
+        )
+        .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind(501_i64)
+        .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind("disk5s1")
+        .bind("snapshot")
+        .bind("")
+        .bind("[]")
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        let status = status_result(&journal, 501).await.unwrap();
+        assert_eq!(status.active_mounts, 1);
+        assert_eq!(
+            status.blocked_volume_uuids,
+            vec!["C8A38394-49AE-42F9-85FB-14DD9EA549FA"]
+        );
+    }
+
     #[test]
     fn socket_directory_allows_traversal_but_not_unprivileged_writes() {
         assert_ne!(SOCKET_DIRECTORY_MODE & 0o001, 0);
@@ -1365,6 +1429,7 @@ mod tests {
         let result = MountStatusResult {
             helper_version: "0.0.0".into(),
             active_mounts: 0,
+            blocked_volume_uuids: vec![],
         };
         assert!(validate_status_result(&result).is_err());
     }
@@ -1374,6 +1439,7 @@ mod tests {
         let result = MountStatusResult {
             helper_version: LEGACY_ROOT_MOUNT_HELPER_VERSION.into(),
             active_mounts: 0,
+            blocked_volume_uuids: vec![],
         };
         assert!(validate_status_result(&result).is_ok());
     }
@@ -1383,6 +1449,7 @@ mod tests {
         let result = MountStatusResult {
             helper_version: ROOT_MOUNT_HELPER_VERSION.into(),
             active_mounts: 0,
+            blocked_volume_uuids: vec![],
         };
         assert!(validate_status_result(&result).is_ok());
     }

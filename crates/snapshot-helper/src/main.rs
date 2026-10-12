@@ -1076,11 +1076,9 @@ async fn acquire_lease(
             "APFS container has less than {MIN_FREE_BYTES} free bytes"
         )));
     }
-    if let Err(error) = mount_helper::status() {
-        return Err(HelperError::Message(format!(
-            "snapshot mount helper unavailable: {error}"
-        )));
-    }
+    mount_helper::status().map_err(|error| {
+        HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
+    })?;
     if let Some(nested_mount) = nested_mount_under(source_path, &info.mount_point)? {
         return Err(HelperError::Message(format!(
             "source contains nested mounted volume: {}",
@@ -1106,6 +1104,20 @@ async fn acquire_lease(
         }
     }
     retry_pending_cleanup(uid, &info.uuid, &state.journal).await?;
+    let mount_status = mount_helper::status().map_err(|error| {
+        HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
+    })?;
+    let volume_blocked = mount_status
+        .blocked_volume_uuids
+        .iter()
+        .any(|volume| volume.eq_ignore_ascii_case(&info.uuid));
+    let unscoped_helper_state = mount_status.blocked_volume_uuids.is_empty()
+        && mount_status.active_mounts > 0;
+    if volume_blocked || unscoped_helper_state {
+        return Err(HelperError::Message(
+            "snapshot mount helper has pending cleanup for the source volume".into(),
+        ));
+    }
     let blocked: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM leases WHERE lower(volume_uuid) = lower(?) AND state IN ('active', 'cleanup_pending')",
     )

@@ -168,6 +168,8 @@ pub enum MountResponseResult {
 pub struct MountStatusResult {
     pub helper_version: String,
     pub active_mounts: u32,
+    #[serde(default)]
+    pub blocked_volume_uuids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
