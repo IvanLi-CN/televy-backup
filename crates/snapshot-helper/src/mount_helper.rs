@@ -1740,13 +1740,18 @@ async fn delete_manifest_and_record_tombstone(
     if !inventory_matches_expected(device_identifier, reservation_manifest_json, manifest) {
         return "cleanup_pending";
     }
-    if !delete_manifest(volume_uuid, manifest) {
-        retain_present_manifest_after_delete_failure(
+    let confirmed_deleted = match delete_manifest(volume_uuid, manifest) {
+        Ok(()) => None,
+        Err(confirmed_deleted) => Some(confirmed_deleted),
+    };
+    if let Some(confirmed_deleted) = confirmed_deleted {
+        retain_unconfirmed_manifest_after_delete_failure(
             journal,
             lease_id,
             device_identifier,
             manifest_json,
             manifest,
+            &confirmed_deleted,
         )
         .await;
         return "cleanup_pending";
@@ -1809,15 +1814,20 @@ async fn delete_manifest_and_record_tombstone(
     }
 }
 
-async fn retain_present_manifest_after_delete_failure(
+async fn retain_unconfirmed_manifest_after_delete_failure(
     journal: &SqlitePool,
     lease_id: &str,
     device_identifier: &str,
     manifest_json: &str,
     manifest: &[MountSnapshotRef],
+    confirmed_deleted: &[MountSnapshotRef],
 ) {
     let remaining_manifest = match snapshot_inventory_manifest(device_identifier) {
-        Ok(current_manifest) => manifest_entries_present_in_inventory(manifest, &current_manifest),
+        Ok(current_manifest) => manifest_entries_remaining_after_partial_delete(
+            manifest,
+            confirmed_deleted,
+            &current_manifest,
+        ),
         Err(_) => manifest.to_vec(),
     };
     let remaining_manifest_json =
@@ -1832,14 +1842,20 @@ async fn retain_present_manifest_after_delete_failure(
     .await;
 }
 
-fn manifest_entries_present_in_inventory(
+fn manifest_entries_remaining_after_partial_delete(
     recorded_manifest: &[MountSnapshotRef],
+    confirmed_deleted: &[MountSnapshotRef],
     current_manifest: &[MountSnapshotRef],
 ) -> Vec<MountSnapshotRef> {
     recorded_manifest
         .iter()
         .filter(|recorded| {
-            current_manifest.iter().any(|current| {
+            !confirmed_deleted.iter().any(|deleted| {
+                deleted
+                    .device_identifier
+                    .eq_ignore_ascii_case(&recorded.device_identifier)
+                    && deleted.uuid.eq_ignore_ascii_case(&recorded.uuid)
+            }) || current_manifest.iter().any(|current| {
                 current
                     .device_identifier
                     .eq_ignore_ascii_case(&recorded.device_identifier)
@@ -1850,24 +1866,28 @@ fn manifest_entries_present_in_inventory(
         .collect()
 }
 
-fn delete_manifest(volume_uuid: &str, manifest: &[MountSnapshotRef]) -> bool {
+fn delete_manifest(
+    volume_uuid: &str,
+    manifest: &[MountSnapshotRef],
+) -> Result<(), Vec<MountSnapshotRef>> {
     let Some(device_identifier) = manifest
         .first()
         .map(|snapshot| snapshot.device_identifier.as_str())
     else {
-        return false;
+        return Err(Vec::new());
     };
     if manifest.iter().any(|snapshot| {
         !snapshot
             .device_identifier
             .eq_ignore_ascii_case(device_identifier)
     }) {
-        return false;
+        return Err(Vec::new());
     }
-    let mut deleted = true;
+    let mut confirmed_deleted = Vec::new();
+    let mut failed = false;
     for snapshot in manifest {
         if validate_device_volume_binding(device_identifier, volume_uuid).is_err() {
-            return false;
+            return Err(confirmed_deleted);
         }
         if run_command(
             "/usr/sbin/diskutil",
@@ -1881,10 +1901,16 @@ fn delete_manifest(volume_uuid: &str, manifest: &[MountSnapshotRef]) -> bool {
         )
         .is_err()
         {
-            deleted = false;
+            failed = true;
+        } else {
+            confirmed_deleted.push(snapshot.clone());
         }
     }
-    deleted
+    if failed {
+        Err(confirmed_deleted)
+    } else {
+        Ok(())
+    }
 }
 
 fn parse_journal_manifest(value: &str) -> Result<Vec<MountSnapshotRef>, MountHelperError> {
@@ -2653,7 +2679,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_manifest_cleanup_keeps_only_present_records() {
+    fn partial_manifest_cleanup_keeps_unconfirmed_records() {
         let recorded = vec![
             MountSnapshotRef {
                 device_identifier: "disk5s1".into(),
@@ -2664,14 +2690,27 @@ mod tests {
                 uuid: "B8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
             },
         ];
+        let confirmed_deleted = vec![recorded[0].clone()];
+        let current = Vec::new();
+
+        let remaining = manifest_entries_remaining_after_partial_delete(
+            &recorded,
+            &confirmed_deleted,
+            &current,
+        );
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].uuid.as_str(), recorded[1].uuid.as_str());
+
         let current = vec![MountSnapshotRef {
             device_identifier: "DISK5S1".into(),
             uuid: "a8a38394-49ae-42f9-85fb-14dd9ea549FA".into(),
         }];
-
-        let present = manifest_entries_present_in_inventory(&recorded, &current);
-        assert_eq!(present.len(), 1);
-        assert_eq!(present[0].uuid, recorded[0].uuid);
+        let remaining = manifest_entries_remaining_after_partial_delete(
+            &recorded,
+            &confirmed_deleted,
+            &current,
+        );
+        assert_eq!(remaining.len(), 2);
     }
 
     #[test]
