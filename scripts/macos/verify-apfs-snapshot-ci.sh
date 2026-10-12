@@ -233,11 +233,16 @@ if [[ "$a5_status" -eq 0 ]] && jq -e \
     }
   }' >"$evidence_dir/a5.json"
 else
+  a5_reason="timepoint_validation_failed"
+  if detected_reason="$(jq -r 'select(.schema == "televybackup.apfs_snapshot_evidence.v1" and .privacy == "sanitized") | .reason // empty' "$evidence_dir/a5.stderr" 2>/dev/null | tail -n 1)" &&
+    [[ "$detected_reason" =~ ^[a-z0-9_]+$ ]]; then
+    a5_reason="$detected_reason"
+  fi
   write_failure_card \
     "$evidence_dir/a5.json" \
     "televybackup.apfs_snapshot_evidence.v1" \
     "failed" \
-    "timepoint_validation_failed"
+    "$a5_reason"
 fi
 
 if [[ "$a5_status" -eq 0 ]]; then
@@ -272,11 +277,16 @@ if [[ "$a5_status" -eq 0 ]]; then
       }
     }' >"$evidence_dir/a6.json"
   else
+    a6_reason="long_read_or_mount_health_validation_failed"
+    if detected_reason="$(jq -r 'select(.schema == "televybackup.apfs_snapshot_long_read.v1" and .privacy == "sanitized") | .reason // empty' "$evidence_dir/a6.stderr" 2>/dev/null | tail -n 1)" &&
+      [[ "$detected_reason" =~ ^[a-z0-9_]+$ ]]; then
+      a6_reason="$detected_reason"
+    fi
     write_failure_card \
       "$evidence_dir/a6.json" \
       "televybackup.apfs_snapshot_long_read.v1" \
       "failed" \
-      "long_read_or_mount_health_validation_failed"
+      "$a6_reason"
   fi
 else
   a6_status=3

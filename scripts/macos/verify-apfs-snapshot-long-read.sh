@@ -65,6 +65,18 @@ large_file_size=$((32 * 1024 * 1024))
 leases=()
 streams=()
 mutator_pid=""
+failure_reason=""
+
+fail_validation() {
+  local reason="$1"
+  failure_reason="$reason"
+  if [[ "$sanitized" == true ]]; then
+    printf '%s\n' "{\"schema\":\"televybackup.apfs_snapshot_long_read.v1\",\"result\":\"failed\",\"privacy\":\"sanitized\",\"reason\":\"$reason\"}" >&2
+  else
+    echo "APFS long-read validation failed: $reason" >&2
+  fi
+  exit 1
+}
 
 request() {
   local payload="$1"
@@ -111,8 +123,8 @@ cleanup() {
     release_lease "$lease_id"
   done
   rm -f -- "$large_file" "$control_file"
-  if [[ "$exit_status" -ne 0 && "$sanitized" == true ]]; then
-    printf '%s\n' '{"schema":"televybackup.apfs_snapshot_long_read.v1","result":"failed","privacy":"sanitized"}' >&2
+  if [[ "$exit_status" -ne 0 && "$sanitized" == true && -z "$failure_reason" ]]; then
+    printf '%s\n' '{"schema":"televybackup.apfs_snapshot_long_read.v1","result":"failed","privacy":"sanitized","reason":"unexpected_validation_exit"}' >&2
   fi
 }
 trap cleanup EXIT
@@ -120,19 +132,25 @@ trap cleanup EXIT
 dd if=/dev/zero of="$large_file" bs=1048576 count=32 status=none
 printf 'live-control-initial\n' > "$control_file"
 
-probe_response="$(request "$(jq -cn --arg request_id "$(uuidgen)" --arg target_id "$target_id" \
-  '{version:2,request_id:$request_id,method:"probe_volume",target_id:$target_id}')")"
-printf '%s' "$probe_response" | jq -e '.ok and .result.kind == "probe" and .result.snapshot_supported' >/dev/null
-volume_uuid="$(printf '%s' "$probe_response" | jq -er '.result.volume_uuid')"
+if ! probe_response="$(request "$(jq -cn --arg request_id "$(uuidgen)" --arg target_id "$target_id" \
+  '{version:2,request_id:$request_id,method:"probe_volume",target_id:$target_id}')")"; then
+  fail_validation "probe_request_failed"
+fi
+printf '%s' "$probe_response" | jq -e '.ok and .result.kind == "probe" and .result.snapshot_supported' >/dev/null ||
+  fail_validation "probe_response_invalid"
+volume_uuid="$(printf '%s' "$probe_response" | jq -er '.result.volume_uuid')" ||
+  fail_validation "probe_volume_identity_missing"
 
 acquire() {
   local run_label="$1"
   local response lease_id
-  response="$(request "$(jq -cn --arg request_id "$(uuidgen)" --arg target_id "$target_id" \
+  if ! response="$(request "$(jq -cn --arg request_id "$(uuidgen)" --arg target_id "$target_id" \
     --arg volume_uuid "$volume_uuid" --arg run_id "apfs-long-read-$integration_id-$run_label" \
-    '{version:2,request_id:$request_id,method:"acquire_lease",target_id:$target_id,expected_volume_uuid:$volume_uuid,run_id:$run_id}')")"
-  printf '%s' "$response" | jq -e '.ok and .result.kind == "lease"' >/dev/null
-  lease_id="$(printf '%s' "$response" | jq -er '.result.lease_id')"
+    '{version:2,request_id:$request_id,method:"acquire_lease",target_id:$target_id,expected_volume_uuid:$volume_uuid,run_id:$run_id}')")"; then
+    return 1
+  fi
+  printf '%s' "$response" | jq -e '.ok and .result.kind == "lease"' >/dev/null || return 1
+  lease_id="$(printf '%s' "$response" | jq -er '.result.lease_id')" || return 1
   leases+=("$lease_id")
   printf '%s' "$lease_id"
 }
@@ -145,11 +163,13 @@ mount_root_for() {
 open_stream() {
   local lease_id="$1"
   local response
-  response="$(request "$(jq -cn --arg request_id "$(uuidgen)" --arg lease_id "$lease_id" \
+  if ! response="$(request "$(jq -cn --arg request_id "$(uuidgen)" --arg lease_id "$lease_id" \
     --arg relative_path "$(basename "$large_file")" \
-    '{version:2,request_id:$request_id,method:"open_read_stream",lease_id:$lease_id,relative_path:$relative_path}')")"
-  printf '%s' "$response" | jq -e '.ok and .result.kind == "read_stream"' >/dev/null
-  printf '%s' "$response" | jq -er '.result.stream_id'
+    '{version:2,request_id:$request_id,method:"open_read_stream",lease_id:$lease_id,relative_path:$relative_path}')")"; then
+    return 1
+  fi
+  printf '%s' "$response" | jq -e '.ok and .result.kind == "read_stream"' >/dev/null || return 1
+  printf '%s' "$response" | jq -er '.result.stream_id' || return 1
 }
 
 read_stream_fully() {
@@ -158,18 +178,20 @@ read_stream_fully() {
   local eof=false
   while [[ "$eof" != true ]]; do
     local response chunk_size
-    response="$(request "$(jq -cn --arg request_id "$(uuidgen)" --arg stream_id "$stream_id" \
-      '{version:2,request_id:$request_id,method:"read_stream",stream_id:$stream_id,max_bytes:1048576}')")"
-    printf '%s' "$response" | jq -e '.ok and .result.kind == "read_stream"' >/dev/null
-    chunk_size="$(printf '%s' "$response" | jq -er '.result.bytes_base64' | base64 -D | wc -c | tr -d ' ')"
+    if ! response="$(request "$(jq -cn --arg request_id "$(uuidgen)" --arg stream_id "$stream_id" \
+      '{version:2,request_id:$request_id,method:"read_stream",stream_id:$stream_id,max_bytes:1048576}')")"; then
+      return 1
+    fi
+    printf '%s' "$response" | jq -e '.ok and .result.kind == "read_stream"' >/dev/null || return 1
+    chunk_size="$(printf '%s' "$response" | jq -er '.result.bytes_base64' | base64 -D | wc -c | tr -d ' ')" || return 1
     total=$((total + chunk_size))
-    eof="$(printf '%s' "$response" | jq -er '.result.eof')"
+    eof="$(printf '%s' "$response" | jq -er '.result.eof')" || return 1
   done
   printf '%s' "$total"
 }
 
-healthy_lease="$(acquire healthy)"
-healthy_stream="$(open_stream "$healthy_lease")"
+healthy_lease="$(acquire healthy)" || fail_validation "healthy_lease_failed"
+healthy_stream="$(open_stream "$healthy_lease")" || fail_validation "healthy_open_stream_failed"
 streams+=("$healthy_stream")
 (
   for tick in $(seq 1 80); do
@@ -178,7 +200,7 @@ streams+=("$healthy_stream")
   done
 ) &
 mutator_pid=$!
-healthy_bytes="$(read_stream_fully "$healthy_stream")"
+healthy_bytes="$(read_stream_fully "$healthy_stream")" || fail_validation "healthy_read_failed"
 wait "$mutator_pid"
 mutator_pid=""
 [[ "$healthy_bytes" -eq "$large_file_size" ]] || {
@@ -190,22 +212,23 @@ streams=()
 release_lease "$healthy_lease"
 leases=()
 
-fault_lease="$(acquire fault)"
-fault_stream="$(open_stream "$fault_lease")"
+fault_lease="$(acquire fault)" || fail_validation "fault_lease_failed"
+fault_stream="$(open_stream "$fault_lease")" || fail_validation "fault_open_stream_failed"
 streams+=("$fault_stream")
 fault_mount_root="$(mount_root_for "$fault_lease")"
 [[ -n "$fault_mount_root" && -d "$fault_mount_root" ]] || {
-  echo "fault lease mount root is unavailable" >&2
-  exit 1
+  fail_validation "fault_mount_root_unavailable"
 }
 sudo -n /sbin/umount -f "$fault_mount_root"
 fault_response="$(request "$(jq -cn --arg request_id "$(uuidgen)" --arg stream_id "$fault_stream" \
-  '{version:2,request_id:$request_id,method:"read_stream",stream_id:$stream_id,max_bytes:1048576}')")"
-printf '%s' "$fault_response" | jq -e '.ok == false and (.code == "io" or .code == "invalid_request")' >/dev/null
-fault_message="$(printf '%s' "$fault_response" | jq -er '.message')"
+  '{version:2,request_id:$request_id,method:"read_stream",stream_id:$stream_id,max_bytes:1048576}')")" ||
+  fail_validation "fault_read_request_failed"
+printf '%s' "$fault_response" | jq -e '.ok == false and (.code == "io" or .code == "invalid_request")' >/dev/null ||
+  fail_validation "fault_read_did_not_fail_closed"
+fault_message="$(printf '%s' "$fault_response" | jq -er '.message')" ||
+  fail_validation "fault_error_message_missing"
 [[ "$fault_message" == *"snapshot read failed"* && "$fault_message" == *"errno="* ]] || {
-  echo "fault response did not contain sanitized stage and errno context" >&2
-  exit 1
+  fail_validation "fault_error_context_missing"
 }
 close_stream "$fault_stream"
 streams=()
@@ -213,8 +236,10 @@ release_lease "$fault_lease"
 leases=()
 
 status_response="$(request "$(jq -cn --arg request_id "$(uuidgen)" \
-  '{version:2,request_id:$request_id,method:"status"}')")"
-printf '%s' "$status_response" | jq -e '.ok and .result.active_leases == 0 and .result.pending_cleanup == 0' >/dev/null
+  '{version:2,request_id:$request_id,method:"status"}')")" ||
+  fail_validation "status_request_failed"
+printf '%s' "$status_response" | jq -e '.ok and .result.active_leases == 0 and .result.pending_cleanup == 0' >/dev/null ||
+  fail_validation "status_not_clean"
 
 if [[ "$sanitized" == true ]]; then
   printf '%s\n' '{"schema":"televybackup.apfs_snapshot_long_read.v1","result":"passed","privacy":"sanitized","assertions":{"healthyReadCompleted":true,"liveMutationRan":true,"mountHealthLossFailedClosed":true,"stageAndErrnoContext":true,"leasesReleased":true,"cleanupComplete":true,"publishedSnapshot":false}}'
