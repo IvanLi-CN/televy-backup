@@ -10,8 +10,9 @@
   binds the requested snapshot name to its manifest UUID before `mount_apfs`, passes the validated
   `/dev/<device>` identity instead of a mutable request pathname, and verifies the mounted device
   afterward. Source-path authorization runs in an exec'd one-shot helper before the server runtime
-  starts, and stale empty-manifest leases remain `cleanup_pending` until an owning flow records a
-  manifest. The installed `0.9.8` helper remains migration-readable only.
+  starts, and released leases remain as auditable tombstones; a later reserve audits their
+  baseline and re-blocks the volume if inventory changed. The installed `0.9.8` helper remains
+  migration-readable only.
 - `crates/daemon/src/snapshot_client.rs`: restricted IPC client and `BrokeredSnapshotSource`.
 - `crates/core/src/backup.rs`: `BackupSource` seam shared by local and brokered reads.
 - `crates/cli/src/snapshot_service.rs`: fixed-bundle status plus transactional legacy registration

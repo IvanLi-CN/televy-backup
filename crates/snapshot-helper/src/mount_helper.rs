@@ -419,7 +419,12 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
                             .eq_ignore_ascii_case(&device_identifier)
                     }) =>
             {
-                if delete_manifest(&volume_uuid, &manifest) {
+                if delete_manifest_and_confirm_baseline(
+                    &volume_uuid,
+                    &device_identifier,
+                    &reservation_manifest_json,
+                    &manifest,
+                ) {
                     "released"
                 } else {
                     "cleanup_pending"
@@ -762,6 +767,43 @@ async fn status_for_volume_result(
     })
 }
 
+async fn audit_released_tombstones(
+    journal: &SqlitePool,
+    volume_uuid: &str,
+    device_identifier: &str,
+) -> Result<(), MountHelperError> {
+    let rows = sqlx::query(
+        "SELECT lease_id, device_identifier, reservation_manifest FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'released'",
+    )
+    .bind(volume_uuid)
+    .fetch_all(journal)
+    .await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let current_manifest = snapshot_inventory_manifest(device_identifier)?;
+    for row in rows {
+        let lease_id: String = row.try_get("lease_id")?;
+        let stored_device: String = row.try_get("device_identifier")?;
+        let reservation_manifest_json: String = row.try_get("reservation_manifest")?;
+        let baseline = parse_reservation_manifest(&reservation_manifest_json);
+        let matches = stored_device.eq_ignore_ascii_case(device_identifier)
+            && baseline
+                .as_ref()
+                .is_ok_and(|baseline| manifests_equal(&current_manifest, baseline));
+        if !matches {
+            sqlx::query("UPDATE mounts SET state = 'cleanup_pending' WHERE lease_id = ? AND state = 'released'")
+                .bind(lease_id)
+                .execute(journal)
+                .await?;
+            return Err(MountHelperError::Protocol(
+                "released snapshot tombstone inventory changed".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn reserve_request(
     peer_uid: u32,
     uid: u32,
@@ -782,6 +824,7 @@ async fn reserve_request(
     validate_device_volume_binding(device_identifier, volume_uuid)?;
     validate_source_path(source_path, volume_uuid, device_identifier)?;
     authorize_source_path(uid, source_path)?;
+    audit_released_tombstones(journal, volume_uuid, device_identifier).await?;
     let blocked: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
     )
@@ -910,20 +953,14 @@ async fn record_cleanup_request(
     let reservation_manifest = parse_reservation_manifest(&reservation_manifest_json)?;
     // Snapshot creation is performed inside the root helper's serialized mutation section. This
     // prevents a caller from turning another process's snapshot into its deletion manifest.
-    run_command("/usr/bin/tmutil", ["localsnapshot"])?;
-    let current_manifest = snapshot_inventory_manifest(&device_identifier)?;
-    if reservation_manifest.iter().any(|reserved| {
-        !current_manifest.iter().any(|current| {
-            current
-                .device_identifier
-                .eq_ignore_ascii_case(&reserved.device_identifier)
-                && current.uuid.eq_ignore_ascii_case(&reserved.uuid)
-        })
-    }) {
+    let before_manifest = snapshot_inventory_manifest(&device_identifier)?;
+    if !manifests_equal(&before_manifest, &reservation_manifest) {
         return Err(MountHelperError::Protocol(
             "cleanup reservation baseline changed before recording".into(),
         ));
     }
+    run_command("/usr/bin/tmutil", ["localsnapshot"])?;
+    let current_manifest = snapshot_inventory_manifest(&device_identifier)?;
     let manifest: Vec<_> = current_manifest
         .iter()
         .filter(|snapshot| {
@@ -1035,7 +1072,7 @@ async fn mount_request(
     }
     let mount_root = expected_mount_root(i64::from(uid), lease_id)?;
     let existing = sqlx::query(
-        "SELECT uid, volume_uuid, device_identifier, source_path, mount_root, snapshot_manifest, state FROM mounts WHERE lease_id = ?",
+        "SELECT uid, volume_uuid, device_identifier, source_path, mount_root, snapshot_manifest, reservation_manifest, state FROM mounts WHERE lease_id = ?",
     )
     .bind(lease_id)
     .fetch_optional(journal)
@@ -1049,6 +1086,7 @@ async fn mount_request(
     let stored_source_path: String = row.try_get("source_path").unwrap_or_default();
     let stored_mount_root: String = row.try_get("mount_root")?;
     let stored_manifest_json: String = row.try_get("snapshot_manifest")?;
+    let reservation_manifest_json: String = row.try_get("reservation_manifest")?;
     let stored_manifest = parse_journal_manifest(&stored_manifest_json)?;
     let state: String = row.try_get("state")?;
     if stored_uid != i64::from(uid)
@@ -1089,7 +1127,12 @@ async fn mount_request(
         // another attempt's resources.
         let cleanup_state = match fs::symlink_metadata(&mount_root) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if delete_manifest(volume_uuid, manifest) {
+                if delete_manifest_and_confirm_baseline(
+                    volume_uuid,
+                    device_identifier,
+                    reservation_manifest_json,
+                    manifest,
+                ) {
                     "released"
                 } else {
                     "cleanup_pending"
@@ -1282,7 +1325,12 @@ async fn release_request(
         });
     }
     if mount_root.is_empty() {
-        let cleanup_state = if delete_manifest(&volume_uuid, &manifest) {
+        let cleanup_state = if delete_manifest_and_confirm_baseline(
+            &volume_uuid,
+            &device_identifier,
+            &reservation_manifest_json,
+            &manifest,
+        ) {
             "released"
         } else {
             "cleanup_pending"
@@ -1352,7 +1400,9 @@ async fn reconcile_reserved_snapshot(
         return "cleanup_pending";
     }
     let updated = sqlx::query(
-        "UPDATE mounts SET state = 'cleanup_pending' WHERE lease_id = ? AND state IN ('reserved', 'cleanup_pending') AND mount_root = '' AND snapshot_manifest = '[]' AND reservation_manifest = ?",
+        // Keep the row as a released tombstone. Future reservations audit this baseline before
+        // any source bytes can be served, covering snapshots created after this transition.
+        "UPDATE mounts SET state = 'released' WHERE lease_id = ? AND state IN ('reserved', 'cleanup_pending') AND mount_root = '' AND snapshot_manifest = '[]' AND reservation_manifest = ?",
     )
     .bind(lease_id)
     .bind(reservation_manifest_json)
@@ -1362,12 +1412,9 @@ async fn reconcile_reserved_snapshot(
         return "cleanup_pending";
     }
     match snapshot_inventory_manifest(device_identifier) {
-        Ok(final_manifest) if manifests_equal(&final_manifest, &reservation_manifest) => {
-            // A snapshot can be created by another process immediately after the final inventory
-            // read. Keep the stale lease as a tombstone instead of releasing it and losing the
-            // only journal row that can continue to block unsafe cleanup.
-            "cleanup_pending"
-        }
+        // The released row is retained as a tombstone. A later Reserve audits it before serving
+        // bytes, so a snapshot created after this check cannot become untracked.
+        Ok(final_manifest) if manifests_equal(&final_manifest, &reservation_manifest) => "released",
         _ => {
             let _ = update_state(journal, lease_id, "cleanup_pending").await;
             "cleanup_pending"
@@ -1440,7 +1487,12 @@ async fn cleanup_request(
             cleanup_state: "cleanup_pending".to_string(),
         });
     }
-    let cleanup_state = if delete_manifest(&volume_uuid, &stored_manifest) {
+    let cleanup_state = if delete_manifest_and_confirm_baseline(
+        &volume_uuid,
+        &device_identifier,
+        &reservation_manifest_json,
+        &stored_manifest,
+    ) {
         "released"
     } else {
         "cleanup_pending"
@@ -1508,6 +1560,16 @@ fn mounted_snapshot_path(path: &Path) -> Result<bool, MountHelperError> {
         Err(error) => return Err(MountHelperError::Io(error)),
     };
     Ok(metadata.dev() != parent_metadata.dev())
+}
+
+fn delete_manifest_and_confirm_baseline(
+    volume_uuid: &str,
+    device_identifier: &str,
+    reservation_manifest_json: &str,
+    manifest: &[MountSnapshotRef],
+) -> bool {
+    delete_manifest(volume_uuid, manifest)
+        && inventory_matches_expected(device_identifier, reservation_manifest_json, &[])
 }
 
 fn delete_manifest(volume_uuid: &str, manifest: &[MountSnapshotRef]) -> bool {
