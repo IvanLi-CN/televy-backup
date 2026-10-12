@@ -4,7 +4,6 @@ set -euo pipefail
 root_dir="$(git rev-parse --show-toplevel)"
 workflow="$root_dir/.github/workflows/apfs-snapshot-acceptance.yml"
 pr_workflow="$root_dir/.github/workflows/ci-pr.yml"
-capability_workflow="$root_dir/.github/workflows/apfs-runner-capability.yml"
 actionlint_config="$root_dir/.github/actionlint.yaml"
 ci_script="$root_dir/scripts/macos/verify-apfs-snapshot-ci.sh"
 long_read_script="$root_dir/scripts/macos/verify-apfs-snapshot-long-read.sh"
@@ -12,7 +11,6 @@ integration_script="$root_dir/scripts/macos/verify-apfs-snapshot-integration.sh"
 
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$workflow"
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$pr_workflow"
-ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$capability_workflow"
 grep -F 'televybackup-apfs' "$actionlint_config" >/dev/null
 
 assert_contains() {
@@ -37,7 +35,6 @@ assert_not_contains() {
 
 workflow_text="$(<"$workflow")"
 pr_workflow_text="$(<"$pr_workflow")"
-capability_workflow_text="$(<"$capability_workflow")"
 ci_text="$(<"$ci_script")"
 long_read_text="$(<"$long_read_script")"
 integration_text="$(<"$integration_script")"
@@ -127,13 +124,12 @@ assert_not_contains "timepoint transcript persistence in sanitized mode" "$integ
 
 assert_contains "dedicated APFS manual gate" "$workflow_text" "github.event_name == 'workflow_dispatch'"
 
-assert_contains "capability probe workflow dispatch" "$capability_workflow_text" "workflow_dispatch:"
-assert_contains "capability probe matrix" "$capability_workflow_text" "macos-15-xlarge"
-assert_contains "capability probe snapshot command" "$capability_workflow_text" "tmutil snapshot"
-assert_contains "capability probe local snapshot command" "$capability_workflow_text" "tmutil localsnapshot"
-assert_contains "capability probe sanitized schema" "$capability_workflow_text" "televybackup.apfs_snapshot_runner_capability.v1"
-assert_contains "capability probe artifact" "$capability_workflow_text" "apfs-runner-capability-"
-assert_not_contains "capability probe raw output" "$capability_workflow_text" 'snapshot_output:'
-assert_not_contains "capability probe raw output upload" "$capability_workflow_text" 'tmutil.log'
+assert_contains "capability probe mode" "$workflow_text" "default: acceptance"
+assert_contains "capability probe matrix" "$workflow_text" "macos-15-xlarge"
+assert_contains "capability probe snapshot command" "$workflow_text" "tmutil snapshot"
+assert_contains "capability probe local snapshot command" "$workflow_text" "tmutil localsnapshot"
+assert_contains "capability probe sanitized schema" "$workflow_text" "televybackup.apfs_snapshot_runner_capability.v1"
+assert_contains "capability probe artifact" "$workflow_text" "apfs-runner-capability-"
+assert_not_contains "capability probe raw output upload" "$workflow_text" 'tmutil.log'
 
 echo "APFS snapshot validation workflow contract passed"

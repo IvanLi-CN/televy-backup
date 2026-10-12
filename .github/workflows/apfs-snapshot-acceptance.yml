@@ -10,6 +10,14 @@ on:
         description: Commit or ref to validate; defaults to the triggering commit
         required: false
         type: string
+      mode:
+        description: Validation mode
+        required: false
+        default: acceptance
+        type: choice
+        options:
+          - acceptance
+          - capability
 
 concurrency:
   group: apfs-snapshot-acceptance-${{ github.ref }}-${{ inputs.source_ref || github.sha }}
@@ -57,7 +65,7 @@ jobs:
   runner-preflight:
     name: Dedicated APFS runner preflight
     if: >-
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch' && inputs.mode != 'capability'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -72,7 +80,7 @@ jobs:
   apfs:
     name: macOS APFS snapshot acceptance
     if: >-
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch' && inputs.mode != 'capability'
     needs: [contract, runner-preflight]
     runs-on: [self-hosted, macOS, televybackup-apfs]
     timeout-minutes: 45
@@ -133,6 +141,76 @@ jobs:
             ${{ runner.temp }}/apfs-snapshot-evidence/summary.json
             ${{ runner.temp }}/apfs-snapshot-evidence/a5.json
             ${{ runner.temp }}/apfs-snapshot-evidence/a6.json
+          if-no-files-found: error
+          retention-days: 14
+
+  runner-capability:
+    name: Probe ${{ matrix.label }}
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.mode == 'capability'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-14
+          - label: macos-14-large
+          - label: macos-15
+          - label: macos-15-intel
+          - label: macos-15-large
+          - label: macos-15-xlarge
+          - label: macos-26
+          - label: macos-26-large
+    runs-on: ${{ matrix.label }}
+    timeout-minutes: 10
+    steps:
+      - name: Probe local snapshot support
+        run: |
+          set +e
+          snapshot_output="$(sudo -n tmutil snapshot 2>&1)"
+          snapshot_status=$?
+          localsnapshot_output="$(sudo -n tmutil localsnapshot 2>&1)"
+          localsnapshot_status=$?
+
+          classify_reason() {
+            case "$1" in
+              *"Failed to create local snapshot"*) printf '%s' failed_to_create_local_snapshot ;;
+              *"Operation not permitted"*) printf '%s' operation_not_permitted ;;
+              *"No space"*) printf '%s' no_space ;;
+              *"not supported"*|*"Unsupported"*) printf '%s' unsupported ;;
+              *) printf '%s' command_failed ;;
+            esac
+          }
+
+          snapshot_reason="$(classify_reason "$snapshot_output")"
+          localsnapshot_reason="$(classify_reason "$localsnapshot_output")"
+          supported=false
+          if [[ "$snapshot_status" -eq 0 && "$localsnapshot_status" -eq 0 ]]; then
+            supported=true
+          fi
+
+          jq -cn \
+            --arg runner "${{ matrix.label }}" \
+            --argjson snapshot_status "$snapshot_status" \
+            --arg snapshot_reason "$snapshot_reason" \
+            --argjson localsnapshot_status "$localsnapshot_status" \
+            --arg localsnapshot_reason "$localsnapshot_reason" \
+            --argjson supported "$supported" \
+            '{schema:"televybackup.apfs_snapshot_runner_capability.v1",privacy:"sanitized",runner:$runner,snapshot:{status:$snapshot_status,reason:$snapshot_reason},localsnapshot:{status:$localsnapshot_status,reason:$localsnapshot_reason},supported:$supported}' \
+            >"$RUNNER_TEMP/apfs-runner-capability.json"
+
+          {
+            printf '%s\n' '### APFS runner capability'
+            printf '%s\n' "- runner=${{ matrix.label }}"
+            printf '%s\n' "- tmutil snapshot status=$snapshot_status reason=$snapshot_reason"
+            printf '%s\n' "- tmutil localsnapshot status=$localsnapshot_status reason=$localsnapshot_reason"
+            printf '%s\n' "- supported=$supported"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sanitized capability card
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: apfs-runner-capability-${{ matrix.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/apfs-runner-capability.json
           if-no-files-found: error
           retention-days: 14
 
