@@ -1740,10 +1740,7 @@ async fn delete_manifest_and_record_tombstone(
     if !inventory_matches_expected(device_identifier, reservation_manifest_json, manifest) {
         return "cleanup_pending";
     }
-    let confirmed_deleted = match delete_manifest(volume_uuid, manifest) {
-        Ok(()) => None,
-        Err(confirmed_deleted) => Some(confirmed_deleted),
-    };
+    let confirmed_deleted = delete_manifest(volume_uuid, manifest).err();
     if let Some(confirmed_deleted) = confirmed_deleted {
         retain_unconfirmed_manifest_after_delete_failure(
             journal,
