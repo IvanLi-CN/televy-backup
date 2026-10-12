@@ -643,31 +643,31 @@ async fn mount_request(
         update_state(journal, lease_id, cleanup_state).await?;
         return Err(error);
     }
-    match mounted_snapshot_path(mount_root) {
+    match mounted_snapshot_path(&mount_root) {
         Ok(true) => {}
         Ok(false) => {
-            let cleanup_state = cleanup_mount(mount_root, manifest, None);
+            let cleanup_state = cleanup_mount(&mount_root, manifest, None);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(MountHelperError::Protocol(
                 "mount_apfs did not expose the requested snapshot mount".into(),
             ));
         }
         Err(error) => {
-            let cleanup_state = cleanup_mount(mount_root, manifest, None);
+            let cleanup_state = cleanup_mount(&mount_root, manifest, None);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(error);
         }
     }
-    let mount_device = match fs::metadata(mount_root) {
+    let mount_device = match fs::metadata(&mount_root) {
         Ok(metadata) => metadata.dev(),
         Err(error) => {
-            let cleanup_state = cleanup_mount(mount_root, manifest, None);
+            let cleanup_state = cleanup_mount(&mount_root, manifest, None);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(MountHelperError::Io(error));
         }
     };
     if mount_device == 0 {
-        let cleanup_state = cleanup_mount(mount_root, manifest, None);
+        let cleanup_state = cleanup_mount(&mount_root, manifest, None);
         update_state(journal, lease_id, cleanup_state).await?;
         return Err(MountHelperError::Protocol(
             "mounted snapshot has no usable device identity".into(),
@@ -685,7 +685,7 @@ async fn mount_request(
         Ok(_) | Err(_) => {
             // Never return a live mount after its identity failed to persist. The mount root is
             // root-owned and cannot be replaced by the requesting user during cleanup.
-            let cleanup_state = cleanup_mount(mount_root, manifest, Some(mount_device));
+            let cleanup_state = cleanup_mount(&mount_root, manifest, Some(mount_device));
             let _ = update_state(journal, lease_id, cleanup_state).await;
             return Err(MountHelperError::Protocol(
                 "mounted snapshot identity could not be persisted".into(),
