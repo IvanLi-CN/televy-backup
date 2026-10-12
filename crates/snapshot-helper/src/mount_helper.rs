@@ -1737,9 +1737,18 @@ async fn delete_manifest_and_record_tombstone(
     manifest_json: &str,
     manifest: &[MountSnapshotRef],
 ) -> &'static str {
-    if !inventory_matches_expected(device_identifier, reservation_manifest_json, manifest)
-        || !delete_manifest(volume_uuid, manifest)
-    {
+    if !inventory_matches_expected(device_identifier, reservation_manifest_json, manifest) {
+        return "cleanup_pending";
+    }
+    if !delete_manifest(volume_uuid, manifest) {
+        retain_present_manifest_after_delete_failure(
+            journal,
+            lease_id,
+            device_identifier,
+            manifest_json,
+            manifest,
+        )
+        .await;
         return "cleanup_pending";
     }
     let current_manifest = match snapshot_inventory_manifest(device_identifier) {
@@ -1800,6 +1809,40 @@ async fn delete_manifest_and_record_tombstone(
     }
 }
 
+async fn retain_present_manifest_after_delete_failure(
+    journal: &SqlitePool,
+    lease_id: &str,
+    device_identifier: &str,
+    manifest_json: &str,
+    manifest: &[MountSnapshotRef],
+) {
+    let remaining_manifest = match snapshot_inventory_manifest(device_identifier) {
+        Ok(current_manifest) => manifest
+            .iter()
+            .filter(|recorded| {
+                current_manifest.iter().any(|current| {
+                    current
+                        .device_identifier
+                        .eq_ignore_ascii_case(&recorded.device_identifier)
+                        && current.uuid.eq_ignore_ascii_case(&recorded.uuid)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>(),
+        Err(_) => manifest.to_vec(),
+    };
+    let remaining_manifest_json =
+        serde_json::to_string(&remaining_manifest).unwrap_or_else(|_| manifest_json.to_string());
+    let _ = sqlx::query(
+        "UPDATE mounts SET snapshot_manifest = ?, state = 'cleanup_pending' WHERE lease_id = ? AND snapshot_manifest = ?",
+    )
+    .bind(remaining_manifest_json)
+    .bind(lease_id)
+    .bind(manifest_json)
+    .execute(journal)
+    .await;
+}
+
 fn delete_manifest(volume_uuid: &str, manifest: &[MountSnapshotRef]) -> bool {
     let Some(device_identifier) = manifest
         .first()
@@ -1814,11 +1857,12 @@ fn delete_manifest(volume_uuid: &str, manifest: &[MountSnapshotRef]) -> bool {
     }) {
         return false;
     }
-    manifest.iter().all(|snapshot| {
+    let mut deleted = true;
+    for snapshot in manifest {
         if validate_device_volume_binding(device_identifier, volume_uuid).is_err() {
             return false;
         }
-        run_command(
+        if run_command(
             "/usr/sbin/diskutil",
             [
                 "apfs",
@@ -1828,8 +1872,12 @@ fn delete_manifest(volume_uuid: &str, manifest: &[MountSnapshotRef]) -> bool {
                 &snapshot.uuid,
             ],
         )
-        .is_ok()
-    })
+        .is_err()
+        {
+            deleted = false;
+        }
+    }
+    deleted
 }
 
 fn parse_journal_manifest(value: &str) -> Result<Vec<MountSnapshotRef>, MountHelperError> {
