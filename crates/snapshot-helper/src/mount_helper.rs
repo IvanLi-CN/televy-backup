@@ -1,8 +1,11 @@
-use std::fs;
+use std::ffi::CString;
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -287,15 +290,17 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
 
 async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
     let rows = sqlx::query(
-        "SELECT lease_id, mount_root, mount_device, snapshot_manifest FROM mounts WHERE state != 'released'",
+        "SELECT lease_id, uid, mount_root, mount_device, snapshot_manifest, state FROM mounts WHERE state != 'released'",
     )
     .fetch_all(pool)
     .await?;
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
+        let uid: i64 = row.try_get("uid").unwrap_or_default();
         let mount_root: String = row.try_get("mount_root")?;
         let mount_device: i64 = row.try_get("mount_device").unwrap_or_default();
         let manifest_json: String = row.try_get("snapshot_manifest")?;
+        let state: String = row.try_get("state").unwrap_or_default();
         let manifest =
             serde_json::from_str::<Vec<MountSnapshotRef>>(&manifest_json).unwrap_or_default();
         let expected_device = u64::try_from(mount_device)
@@ -307,6 +312,15 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
             } else {
                 "cleanup_pending"
             }
+        } else if expected_device.is_none() && state == "prepared" {
+            // A crash can leave a prepared row after mount_apfs succeeded but before the
+            // mounted device identity was persisted. Only inspect a still-private mount
+            // parent, then clean up a mount that is actually present at the recorded target.
+            recover_prepared_mount(
+                Path::new(&mount_root),
+                u32::try_from(uid).ok(),
+                &manifest,
+            )
         } else if expected_device.is_none() {
             // A legacy row has no trusted mount identity. Do not unmount whatever now occupies
             // the recorded path; UUID cleanup is the only safe recovery operation.
@@ -321,6 +335,26 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
         update_state(pool, &lease_id, cleanup_state).await?;
     }
     Ok(())
+}
+
+fn recover_prepared_mount(
+    mount_root: &Path,
+    uid: Option<u32>,
+    manifest: &[MountSnapshotRef],
+) -> &'static str {
+    match mounted_snapshot_path(mount_root) {
+        Ok(true) if uid.is_some_and(|uid| validate_mount_cleanup_path(mount_root, uid)) => {
+            cleanup_mount(mount_root, manifest, None)
+        }
+        Ok(false) => {
+            if delete_manifest(manifest) {
+                "released"
+            } else {
+                "cleanup_pending"
+            }
+        }
+        Ok(true) | Err(_) => "cleanup_pending",
+    }
 }
 
 async fn serve_connection(
@@ -473,9 +507,12 @@ async fn mount_request(
         validate_device(&snapshot.device_identifier)?;
         validate_uuid(&snapshot.uuid)?;
     }
-    validate_mount_root(mount_root, uid)?;
     validate_source_mount(source_mount_point, volume_uuid, device_identifier)?;
     validate_snapshot_binding(device_identifier, snapshot_uuid, snapshot_name)?;
+    // Keep an fd for the validated directory. The mount command runs with this directory as
+    // its cwd and targets ".", so a caller cannot replace the path with a symlink while the
+    // journal queries above are in flight.
+    let mount_root_handle = open_mount_root(mount_root, uid)?;
     let existing: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM mounts WHERE lease_id = ? AND state != 'released'",
     )
@@ -507,14 +544,15 @@ async fn mount_request(
     .execute(journal)
     .await?;
 
-    let mount_result = run_command(
+    let mount_result = run_command_at(
         "/sbin/mount_apfs",
         [
             "-s",
             snapshot_name,
             source_mount_point.to_string_lossy().as_ref(),
-            mount_root.to_string_lossy().as_ref(),
+            ".",
         ],
+        &mount_root_handle,
     );
     if let Err(error) = mount_result {
         let cleanup_state = if delete_manifest(manifest) {
@@ -528,14 +566,14 @@ async fn mount_request(
     match mounted_snapshot_path(mount_root) {
         Ok(true) => {}
         Ok(false) => {
-            let cleanup_state = cleanup_mount(mount_root, manifest, None);
+            let cleanup_state = cleanup_mount_at(&mount_root_handle, manifest);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(MountHelperError::Protocol(
                 "mount_apfs did not expose the requested snapshot mount".into(),
             ));
         }
         Err(error) => {
-            let cleanup_state = cleanup_mount(mount_root, manifest, None);
+            let cleanup_state = cleanup_mount_at(&mount_root_handle, manifest);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(error);
         }
@@ -543,27 +581,37 @@ async fn mount_request(
     let mount_device = match fs::metadata(mount_root) {
         Ok(metadata) => metadata.dev(),
         Err(error) => {
-            let cleanup_state = cleanup_mount(mount_root, manifest, None);
+            let cleanup_state = cleanup_mount_at(&mount_root_handle, manifest);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(MountHelperError::Io(error));
         }
     };
     if mount_device == 0 {
-        let cleanup_state = cleanup_mount(mount_root, manifest, None);
+        let cleanup_state = cleanup_mount_at(&mount_root_handle, manifest);
         update_state(journal, lease_id, cleanup_state).await?;
         return Err(MountHelperError::Protocol(
             "mounted snapshot has no usable device identity".into(),
         ));
     }
-    sqlx::query("UPDATE mounts SET mount_device = ? WHERE lease_id = ?")
+    let journal_update = sqlx::query(
+        "UPDATE mounts SET mount_device = ?, state = 'active' WHERE lease_id = ? AND state = 'prepared'",
+    )
         .bind(i64::try_from(mount_device).unwrap_or(i64::MAX))
         .bind(lease_id)
         .execute(journal)
-        .await?;
-    sqlx::query("UPDATE mounts SET state = 'active' WHERE lease_id = ?")
-        .bind(lease_id)
-        .execute(journal)
-        .await?;
+        .await;
+    match journal_update {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) | Err(_) => {
+            // Never return a live mount after its identity failed to persist. The fd-anchored
+            // cleanup remains safe even if the caller changed the path during the SQL update.
+            let cleanup_state = cleanup_mount_at(&mount_root_handle, manifest);
+            let _ = update_state(journal, lease_id, cleanup_state).await;
+            return Err(MountHelperError::Protocol(
+                "mounted snapshot identity could not be persisted".into(),
+            ));
+        }
+    }
     Ok(MountLeaseResult {
         lease_id: lease_id.to_string(),
         mount_root: mount_root.to_string_lossy().into_owned(),
@@ -707,6 +755,16 @@ fn cleanup_mount(
     }
 }
 
+fn cleanup_mount_at(mount_root: &File, manifest: &[MountSnapshotRef]) -> &'static str {
+    let unmount_ok = run_command_at("/sbin/umount", ["-f", "."], mount_root).is_ok();
+    let delete_ok = delete_manifest(manifest);
+    if unmount_ok && delete_ok {
+        "released"
+    } else {
+        "cleanup_pending"
+    }
+}
+
 fn mounted_snapshot_path(path: &Path) -> Result<bool, MountHelperError> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -779,6 +837,93 @@ fn validate_mount_root(path: &Path, uid: u32) -> Result<(), MountHelperError> {
         current = parent;
     }
     Ok(())
+}
+
+fn open_mount_root(path: &Path, uid: u32) -> Result<File, MountHelperError> {
+    validate_mount_root(path, uid)?;
+    let file = open_directory_no_follow(path)?;
+    let fd_metadata = file.metadata()?;
+    let path_metadata = fs::symlink_metadata(path)?;
+    if fd_metadata.dev() != path_metadata.dev() || fd_metadata.ino() != path_metadata.ino() {
+        return Err(MountHelperError::Protocol(
+            "mount root changed during validation".into(),
+        ));
+    }
+    Ok(file)
+}
+
+fn open_directory_no_follow(path: &Path) -> Result<File, MountHelperError> {
+    let mut current = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open("/")?;
+    for component in path.components() {
+        let std::path::Component::Normal(component) = component else {
+            if matches!(component, std::path::Component::RootDir) {
+                continue;
+            }
+            return Err(MountHelperError::Protocol(
+                "mount root must not contain . or .. components".into(),
+            ));
+        };
+        let component = CString::new(component.as_bytes()).map_err(|_| {
+            MountHelperError::Protocol("mount root contains an invalid path component".into())
+        })?;
+        let fd = unsafe {
+            libc::openat(
+                current.as_raw_fd(),
+                component.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0,
+            )
+        };
+        if fd == -1 {
+            return Err(MountHelperError::Io(std::io::Error::last_os_error()));
+        }
+        current = unsafe { File::from_raw_fd(fd) };
+    }
+    Ok(current)
+}
+
+fn validate_mount_cleanup_path(path: &Path, uid: u32) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let parent_metadata = match fs::symlink_metadata(parent) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+    if !parent_metadata.is_dir()
+        || parent_metadata.uid() != uid
+        || parent_metadata.mode() & 0o022 != 0
+    {
+        return false;
+    }
+    let mut current = parent;
+    while let Some(ancestor) = current.parent() {
+        let metadata = match fs::symlink_metadata(current) {
+            Ok(metadata) => metadata,
+            Err(_) => return false,
+        };
+        if metadata.file_type().is_symlink() || metadata.mode() & 0o022 != 0 {
+            return false;
+        }
+        if ancestor == current {
+            break;
+        }
+        current = ancestor;
+    }
+    true
 }
 
 fn validate_source_mount(
@@ -961,6 +1106,34 @@ fn run_command<const N: usize, S: AsRef<std::ffi::OsStr>>(
     args: [S; N],
 ) -> Result<(), MountHelperError> {
     let output = Command::new(program).args(args).output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(MountHelperError::Command {
+        program: program.to_string(),
+        status: output.status.to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+fn run_command_at<const N: usize, S: AsRef<std::ffi::OsStr>>(
+    program: &str,
+    args: [S; N],
+    directory: &File,
+) -> Result<(), MountHelperError> {
+    let directory_fd = directory.as_raw_fd();
+    let mut command = Command::new(program);
+    command.args(args);
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(directory_fd) == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let output = command.output()?;
     if output.status.success() {
         return Ok(());
     }
