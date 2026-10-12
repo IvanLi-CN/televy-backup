@@ -1159,7 +1159,13 @@ async fn acquire_lease(
     )?;
     let (before, after) = match with_snapshot_lease_renewal(uid, &lease_id, || {
         let before = source_snapshot_inventory(&info.device_identifier)?;
-        run_command("/usr/bin/tmutil", ["localsnapshot"])?;
+        if let Err(first_error) = mount_helper::record_cleanup(uid, &lease_id)
+            && let Err(second_error) = mount_helper::record_cleanup(uid, &lease_id)
+        {
+            return Err(HelperError::Message(format!(
+                "snapshot mount helper could not create and record the snapshot: {first_error}; retry: {second_error}"
+            )));
+        }
         let after = source_snapshot_inventory(&info.device_identifier)?;
         Ok((before, after))
     }) {
@@ -1195,12 +1201,11 @@ async fn acquire_lease(
             "snapshot creation did not produce a source-volume snapshot".into(),
         ));
     }
-    if let Err(first_error) = mount_helper::record_cleanup(uid, &lease_id)
-        && let Err(second_error) = mount_helper::record_cleanup(uid, &lease_id)
-    {
+    if mount_manifest.len() != 1 {
         let _ = mount_helper::release(uid, &lease_id);
         return Err(HelperError::Message(format!(
-            "snapshot mount helper could not record cleanup manifest: {first_error}; retry: {second_error}"
+            "snapshot creation produced an ambiguous source-volume result: {} snapshots",
+            mount_manifest.len()
         )));
     }
     let snapshot = match source_snapshot(&new_snapshots, &info.device_identifier) {
@@ -1612,21 +1617,6 @@ fn nested_mount_under(
         }
     }
     Ok(None)
-}
-
-fn run_command<const N: usize, S: AsRef<OsStr>>(
-    program: &str,
-    args: [S; N],
-) -> Result<(), HelperError> {
-    let output = Command::new(program).args(args).output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(HelperError::Command {
-        program: program.to_string(),
-        status: output.status.to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-    })
 }
 
 fn with_snapshot_lease_renewal<T, F>(uid: u32, lease_id: &str, action: F) -> Result<T, HelperError>

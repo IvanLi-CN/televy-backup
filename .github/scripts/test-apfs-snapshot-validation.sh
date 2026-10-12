@@ -6,6 +6,8 @@ pr_workflow="$root_dir/.github/workflows/ci-pr.yml"
 ci_script="$root_dir/scripts/macos/verify-apfs-snapshot-ci.sh"
 long_read_script="$root_dir/scripts/macos/verify-apfs-snapshot-long-read.sh"
 integration_script="$root_dir/scripts/macos/verify-apfs-snapshot-integration.sh"
+mount_helper_source="$root_dir/crates/snapshot-helper/src/mount_helper.rs"
+access_source="$root_dir/crates/snapshot-helper/src/main.rs"
 
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$pr_workflow"
 
@@ -33,6 +35,8 @@ pr_workflow_text="$(<"$pr_workflow")"
 ci_text="$(<"$ci_script")"
 long_read_text="$(<"$long_read_script")"
 integration_text="$(<"$integration_script")"
+mount_helper_text="$(<"$mount_helper_source")"
+access_text="$(<"$access_source")"
 
 assert_contains "manual regression job" "$pr_workflow_text" "manual-snapshot-regression"
 assert_contains "manual regression dispatch gate" "$pr_workflow_text" "github.event_name == 'workflow_dispatch'"
@@ -88,5 +92,12 @@ assert_not_contains "long read live fallback" "$long_read_text" "live-source"
 assert_contains "timepoint synthetic fixture guard" "$integration_text" "TELEVYBACKUP_SANITIZED_FIXTURE_ROOT"
 assert_contains "timepoint synthetic target guard" "$integration_text" '[[ "$target_id" == "apfs-ci" ]]'
 assert_not_contains "timepoint transcript persistence in sanitized mode" "$integration_text" 'printf '\''%s\\n'\'' "$last_response" >>"$evidence_path"'
+
+assert_contains "root-owned snapshot creation" "$mount_helper_text" 'run_command("/usr/bin/tmutil", ["localsnapshot"])'
+assert_contains "single snapshot ownership result" "$mount_helper_text" 'manifest.len() != 1'
+assert_contains "pre-journal inventory fence" "$mount_helper_text" 'snapshot inventory changed while recording cleanup'
+assert_contains "post-journal inventory fence" "$mount_helper_text" 'snapshot inventory changed after cleanup was recorded'
+assert_contains "release inventory fence" "$mount_helper_text" 'inventory_matches_expected('
+assert_not_contains "access-side snapshot creation" "$access_text" 'run_command("/usr/bin/tmutil", ["localsnapshot"])'
 
 echo "APFS snapshot validation workflow contract passed"

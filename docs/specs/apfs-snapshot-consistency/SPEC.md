@@ -63,10 +63,12 @@ free-space threshold, nested mounts, and relative paths MUST be checked before a
 The mount helper MUST run as a root LaunchDaemon with FDA manually granted to its exact installed
 identity, expose a separate peer-UID-checked Unix socket, and accept only `Status`, volume-scoped
 `StatusVolume`, `Reserve`, `Renew`, `RecordCleanup`, `Mount`, `Release`, and journal-bound `Cleanup`. `Reserve` MUST
-claim the requested volume before `tmutil localsnapshot` and record the pre-existing snapshot UUIDs;
+claim the requested volume before snapshot creation and record the pre-existing snapshot UUIDs;
+`RecordCleanup` MUST invoke `tmutil localsnapshot` inside the root helper's serialized mutation section,
+require exactly one new snapshot, and re-check the complete inventory before and after journaling it;
 the Access process MUST renew an in-flight reservation while snapshot creation is running, and stale
 recovery MUST use the last successful renewal time rather than creation time;
-`RecordCleanup` MUST revalidate the device and derive the complete current post-reservation snapshot set itself before journaling it; callers MUST NOT submit a deletion manifest. If recording fails, the reservation MUST remain blocking until a later retry succeeds. An age-gated recovery MAY release a reservation only when the current inventory exactly matches its recorded baseline; any unrecorded post-reservation snapshot MUST remain blocked and MUST NOT be deleted. `Release` MUST revalidate the journaled device/volume binding and delete only the manifest already recorded in the journal. `StatusVolume` MUST answer only
+callers MUST NOT submit a deletion manifest. If recording fails, the reservation MUST remain blocking until a later retry succeeds. An age-gated recovery MAY release a reservation only when two consecutive inventory checks exactly match its recorded baseline and the final check still matches after the state transition; any unrecorded post-reservation snapshot MUST remain blocked and MUST NOT be deleted. `Release` MUST revalidate the journaled device/volume binding and require the current inventory to equal the recorded baseline plus the journaled manifest before deleting only that manifest. `StatusVolume` MUST answer only
 whether the requested volume UUID has a reserved, prepared, active, or cleanup-pending row and may expose age-gated empty-manifest reservations for controlled recovery. `Cleanup` MUST
 delete only the non-empty manifest already recorded in the matching prepared journal row. It MUST NOT read source files, configuration, Keychain
 material, backup indexes, or network data. Its root-owned journal records lease, mount root,

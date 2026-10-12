@@ -5,7 +5,7 @@
 Keep Snapshot Access as a private embedded user-session FDA and file-reading helper inside
 `TelevyBackup.app`, and add a
 separate root `com.ivan.televybackup.snapshot-mount-helper` LaunchDaemon. Its only IPC methods are
-`Status`, volume-scoped `StatusVolume`, `Reserve`, `Renew`, `RecordCleanup`, `Mount`, `Release`, and journal-bound `Cleanup`; `Reserve` claims the source volume before snapshot creation and records the pre-existing snapshot UUIDs, while the Access process renews an in-flight reservation and `RecordCleanup` revalidates the device and derives the complete post-reservation snapshot set itself before journaling it. Callers cannot submit a deletion manifest. A stale reservation is recoverable only after its last successful renewal exceeds the age threshold and only when the current inventory exactly matches the recorded baseline; any unrecorded snapshot keeps the volume blocked. `Release` revalidates the device/volume binding immediately before deleting only a manifest already recorded in the journal. `Mount` validates the caller UID and APFS
+`Status`, volume-scoped `StatusVolume`, `Reserve`, `Renew`, `RecordCleanup`, `Mount`, `Release`, and journal-bound `Cleanup`; `Reserve` claims the source volume before snapshot creation and records the pre-existing snapshot UUIDs. `RecordCleanup` invokes `tmutil localsnapshot` inside the root helper's serialized mutation section, requires exactly one new snapshot, and rechecks the inventory before and after journaling it; the Access process renews an in-flight reservation. Callers cannot submit a deletion manifest. A stale reservation is recoverable only after its last successful renewal exceeds the age threshold and two inventory checks exactly match the recorded baseline; any unrecorded snapshot keeps the volume blocked. `Release` revalidates the device/volume binding and requires the current inventory to equal the recorded baseline plus the journaled manifest before deletion. `Mount` validates the caller UID and APFS
 volume/device identity, creates a root-owned per-user lease directory that the caller cannot
 replace, validates the UUID manifest before invoking `mount_apfs`, and passes the validated device
 identity rather than the caller's source pathname; `Release` unmounts and deletes only the manifest
@@ -13,13 +13,13 @@ recorded for that lease, while `Cleanup` can delete only a manifest already reco
 journal row. Legacy helper status is accepted only for the one-time migration probe; strict lease
 acquisition rejects it before `Reserve`. The current validated strict-mode baseline also
 grants FDA to this helper's exact installed identity; that additional TCC authority does not expand
-the helper beyond its mount-only protocol.
+the helper into a file-reading or network boundary.
 
 ## Rationale
 
 Testing on macOS showed that `tmutil localsnapshot` and FDA-controlled reads work as a regular user,
 but `mount_apfs` fails with `Operation not permitted`. FDA is a TCC file-access decision and does
-not grant mount(2) privilege. A root mount-only boundary preserves the no-copy requirement without
+not grant mount(2) privilege. A root snapshot-and-mount boundary preserves the no-copy requirement without
 making the backup daemon or file reader privileged.
 
 ## Consequences
