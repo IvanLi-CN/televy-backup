@@ -1755,8 +1755,8 @@ async fn delete_manifest_and_record_tombstone(
             return "cleanup_pending";
         }
     };
-    let current_manifest_json = match serde_json::to_string(&current_manifest) {
-        Ok(json) => json,
+    let reservation_manifest = match parse_reservation_manifest(reservation_manifest_json) {
+        Ok(manifest) => manifest,
         Err(_) => {
             let _ = sqlx::query(
                 "UPDATE mounts SET snapshot_manifest = '[]', state = 'cleanup_pending' WHERE lease_id = ? AND snapshot_manifest = ?",
@@ -1768,10 +1768,21 @@ async fn delete_manifest_and_record_tombstone(
             return "cleanup_pending";
         }
     };
+    // A post-deletion inventory change is unowned; keep the original baseline and block reuse.
+    if !manifests_equal(&current_manifest, &reservation_manifest) {
+        let _ = sqlx::query(
+            "UPDATE mounts SET snapshot_manifest = '[]', state = 'cleanup_pending' WHERE lease_id = ? AND snapshot_manifest = ?",
+        )
+        .bind(lease_id)
+        .bind(manifest_json)
+        .execute(journal)
+        .await;
+        return "cleanup_pending";
+    }
     let updated = sqlx::query(
         "UPDATE mounts SET snapshot_manifest = '[]', reservation_manifest = ?, reservation_manifest_valid = 1, state = 'released' WHERE lease_id = ? AND snapshot_manifest = ? AND reservation_manifest_valid = 1",
     )
-    .bind(current_manifest_json)
+    .bind(reservation_manifest_json)
     .bind(lease_id)
     .bind(manifest_json)
     .execute(journal)
@@ -2569,6 +2580,21 @@ mod tests {
             },
         ];
         assert!(manifests_equal(&left, &right));
+    }
+
+    #[test]
+    fn post_deletion_inventory_rejects_an_unowned_snapshot() {
+        let baseline = vec![MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: "A8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+        }];
+        let mut changed = baseline.clone();
+        changed.push(MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: "B8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+        });
+
+        assert!(!manifests_equal(&changed, &baseline));
     }
 
     #[test]

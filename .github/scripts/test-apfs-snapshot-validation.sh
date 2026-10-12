@@ -102,6 +102,7 @@ assert_contains "released tombstone audit" "$mount_helper_text" 'audit_released_
 assert_contains "released tombstone has a valid baseline" "$mount_helper_text" 'reservation_manifest_valid = 1'
 assert_contains "stale inventory change reblocks" "$mount_helper_text" "released snapshot tombstone inventory changed"
 assert_contains "creation baseline is exact" "$mount_helper_text" 'if !manifests_equal(&current_manifest, &reservation_manifest)'
+assert_contains "deletion requires original baseline" "$mount_helper_text" "A post-deletion inventory change is unowned"
 assert_contains "deletion clears recorded manifest" "$mount_helper_text" "snapshot_manifest = '[]', reservation_manifest = ?"
 assert_contains "stale release remains blocked" "$mount_helper_text" 'if !stale_reserved'
 assert_contains "lease source-path binding" "$mount_helper_text" 'authorize_source_path(uid, source_path)'
