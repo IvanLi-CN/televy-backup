@@ -805,26 +805,42 @@ async fn cleanup_request(
         validate_uuid(&snapshot.uuid)?;
     }
     let manifest_json = serde_json::to_string(manifest)?;
-    let existing: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM mounts WHERE lease_id = ? AND state != 'released'",
+    let row = sqlx::query(
+        "SELECT uid, mount_root, snapshot_manifest, state FROM mounts WHERE lease_id = ?",
     )
     .bind(cleanup_id)
-    .fetch_one(journal)
-    .await?;
-    if existing != 0 {
+    .fetch_optional(journal)
+    .await?
+    .ok_or_else(|| {
+        MountHelperError::Protocol("cleanup requires an existing journal entry".into())
+    })?;
+    let stored_uid: i64 = row.try_get("uid")?;
+    if stored_uid != i64::from(uid) {
         return Err(MountHelperError::Protocol(
-            "cleanup id already has an active journal entry".into(),
+            "cleanup journal entry belongs to another user".into(),
         ));
     }
-    sqlx::query(
-        "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at) VALUES (?, ?, '', '', '', '', ?, 'prepared', datetime('now'))",
-    )
-    .bind(cleanup_id)
-    .bind(i64::from(uid))
-    .bind(&manifest_json)
-    .execute(journal)
-    .await?;
-    let cleanup_state = if delete_manifest(manifest) {
+    let mount_root: String = row.try_get("mount_root")?;
+    if !mount_root.is_empty() {
+        return Err(MountHelperError::Protocol(
+            "mounted leases must be released through the lease operation".into(),
+        ));
+    }
+    let state: String = row.try_get("state")?;
+    if state == "released" {
+        return Ok(MountReleaseResult {
+            lease_id: cleanup_id.to_string(),
+            cleanup_state: "released".to_string(),
+        });
+    }
+    let stored_manifest_json: String = row.try_get("snapshot_manifest")?;
+    let stored_manifest = parse_journal_manifest(&stored_manifest_json)?;
+    if serde_json::to_string(&stored_manifest)? != manifest_json {
+        return Err(MountHelperError::Protocol(
+            "cleanup manifest does not match the journal entry".into(),
+        ));
+    }
+    let cleanup_state = if delete_manifest(&stored_manifest) {
         "released"
     } else {
         "cleanup_pending"
@@ -1291,6 +1307,33 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(column.as_deref(), Some("mount_device"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_requires_an_existing_journal_manifest() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let manifest = vec![MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: "B8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+        }];
+
+        let error = cleanup_request(
+            501,
+            501,
+            "A8A38394-49AE-42F9-85FB-14DD9EA549FA",
+            &manifest,
+            &journal,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("existing journal entry"));
+
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mounts")
+            .fetch_one(&journal)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[test]

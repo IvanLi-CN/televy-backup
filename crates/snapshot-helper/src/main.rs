@@ -17,7 +17,7 @@ use ignore::WalkBuilder;
 use plist::Value;
 use serde::Deserialize;
 use sqlx::{
-    SqlitePool,
+    Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use televybackup_snapshot_access::mount_helper;
@@ -323,6 +323,36 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), HelperError> {
             .bind(state)
             .bind(lease_id)
             .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn retry_pending_cleanup(
+    uid: u32,
+    volume_uuid: &str,
+    journal: &SqlitePool,
+) -> Result<(), HelperError> {
+    let rows = sqlx::query(
+        "SELECT lease_id, uid FROM leases WHERE lower(volume_uuid) = lower(?) AND uid = ? AND state = 'cleanup_pending'",
+    )
+    .bind(volume_uuid)
+    .bind(i64::from(uid))
+    .fetch_all(journal)
+    .await?;
+    for row in rows {
+        let lease_id: String = row.try_get("lease_id")?;
+        let owner_uid: i64 = row.try_get("uid")?;
+        let Ok(owner_uid) = u32::try_from(owner_uid) else {
+            continue;
+        };
+        let Ok(result) = mount_helper::release(owner_uid, &lease_id) else {
+            continue;
+        };
+        sqlx::query("UPDATE leases SET state = ? WHERE lease_id = ?")
+            .bind(&result.cleanup_state)
+            .bind(&lease_id)
+            .execute(journal)
             .await?;
     }
     Ok(())
@@ -1075,6 +1105,7 @@ async fn acquire_lease(
             ));
         }
     }
+    retry_pending_cleanup(uid, &info.uuid, &state.journal).await?;
     let blocked: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM leases WHERE lower(volume_uuid) = lower(?) AND state IN ('active', 'cleanup_pending')",
     )
@@ -1096,19 +1127,10 @@ async fn acquire_lease(
         .collect();
     let snapshot = match source_snapshot(&new_snapshots, &info.device_identifier) {
         Ok(snapshot) => snapshot,
-        Err(error) => {
-            let manifest = new_snapshots
-                .iter()
-                .map(|(device, snapshot)| MountSnapshotRef {
-                    device_identifier: device.clone(),
-                    uuid: snapshot.uuid.clone(),
-                })
-                .collect::<Vec<_>>();
-            if !manifest.is_empty() {
-                let _ = mount_helper::cleanup(uid, &Uuid::new_v4().to_string(), &manifest);
-            }
-            return Err(error);
-        }
+        // Ambiguous ownership is fail-closed. The root helper only deletes manifests already
+        // recorded in its journal, so a caller-supplied ambiguous list is never treated as a
+        // privileged cleanup authorization.
+        Err(error) => return Err(error),
     };
     let snapshot_manifest: Vec<SnapshotRef> = new_snapshots
         .iter()

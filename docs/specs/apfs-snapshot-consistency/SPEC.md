@@ -30,7 +30,7 @@ formats.
 ### Non-goals
 
 - No root backup daemon, root file reader, `fs_snapshot_*` entitlement, or staging copy. A minimal
-  root LaunchDaemon is limited to mount, unmount, and UUID-scoped snapshot cleanup.
+  root LaunchDaemon is limited to mount, unmount, and journal-bound snapshot cleanup.
 - No activity-directory fallback in strict mode and no changes to Time Machine policy.
 - No defense against a malicious process running as the same macOS user.
 
@@ -57,12 +57,13 @@ free-space threshold, nested mounts, and relative paths MUST be checked before a
   invocation, record its UUID/device manifest before serving data, and ask the root mount helper to
   mount it below a helper-managed per-user directory whose parent and lease target cannot be
   replaced by the requesting user. Release and crash recovery MUST unmount and delete only
-  manifest-recorded snapshots; ambiguous ownership or failed cleanup MUST block the volume's next
-  strict backup.
+  manifest-recorded snapshots; ambiguous ownership MUST fail the acquire before serving bytes, and
+  failed cleanup MUST block the volume's next strict backup.
 
 The mount helper MUST run as a root LaunchDaemon with FDA manually granted to its exact installed
 identity, expose a separate peer-UID-checked Unix socket, and accept only `Status`, `Mount`,
-`Release`, and UUID-scoped `Cleanup`. It MUST NOT read source files, configuration, Keychain
+`Release`, and journal-bound `Cleanup`. `Cleanup` MUST reject any manifest that is not already
+recorded in the matching prepared journal row. It MUST NOT read source files, configuration, Keychain
 material, backup indexes, or network data. Its root-owned journal records lease, mount root,
 volume/device identity, and the exact snapshot UUID manifest.
 
@@ -128,7 +129,7 @@ user/system service paths are present without a privileged backup reader.
 
 Covers: REQ-APFS-003.
 Snapshot Access and mount-helper unit tests prove fixed command usage, peer UID enforcement, arbitrary-path
-rejection, private journal/mount ownership, unique snapshot ownership, UUID-only cleanup, and
+rejection, private journal/mount ownership, unique snapshot ownership, journal-bound cleanup, and
 foreign journal recovery isolation.
 
 ### VER-APFS-003: Brokered data integrity

@@ -53,7 +53,7 @@ Snapshot Access.app (logged-in user)
   - IPC: metadata pages and bounded read streams
 
 Snapshot Mount Helper (root LaunchDaemon)
-  - Mount, Release, Status, UUID-scoped Cleanup only
+  - Mount, Release, Status, journal-bound Cleanup only
   - mount_apfs, umount, and exact recorded UUID deletion
   - no source file opens, Keychain, encryption, indexes, or network access
 ```
@@ -207,7 +207,7 @@ The sanitized report contains no personal filesystem data or host topology, but 
 make the implementation's authority risk zero. The root helper is intentionally small because a
 defect in a root process is high impact, and FDA granted to that helper is a deployment-level
 capability even though the accepted IPC has no file-read method. The mitigations are a fixed command
-allowlist, peer-UID checking, source-volume and private-mount validation, UUID-manifest cleanup, and
+allowlist, peer-UID checking, source-volume and private-mount validation, journal-bound manifest cleanup, and
 the separation that keeps encryption, Keychain material, indexes, and networking out of the helper.
 
 This solution also provides filesystem timepoint consistency, not application transaction
@@ -218,7 +218,7 @@ must provide its own documented backup/export mechanism.
 
 | Level | What it establishes | Safe artifact |
 | --- | --- | --- |
-| Protocol/unit tests | Request allowlists, peer UID binding, private mount validation, UUID-only cleanup | Test names and pass/fail counts |
+| Protocol/unit tests | Request allowlists, peer UID binding, private mount validation, journal-bound cleanup | Test names and pass/fail counts |
 | Brokered core tests | The daemon uses streams rather than a mount path; strict errors fail closed | Test names and pass/fail counts |
 | Sanitized APFS integration | `PRE` survives in snapshot while live file is `POST`; cleanup completes | Sanitized JSON assertion report |
 | Package verification | One product bundle contains the independent Access helper and the mount-helper artifact | Artifact names, component hashes, and identity fields, if desired |
