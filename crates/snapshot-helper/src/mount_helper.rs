@@ -1189,10 +1189,12 @@ mod tests {
     fn journal_manifest_rejects_corrupt_or_empty_cleanup_identity() {
         assert!(parse_journal_manifest("not-json").is_err());
         assert!(parse_journal_manifest("[]").is_err());
-        assert!(parse_journal_manifest(
-            r#"[{"device_identifier":"disk5s1","uuid":"B8A38394-49AE-42F9-85FB-14DD9EA549FA"}]"#
-        )
-        .is_ok());
+        assert!(
+            parse_journal_manifest(
+                r#"[{"device_identifier":"disk5s1","uuid":"B8A38394-49AE-42F9-85FB-14DD9EA549FA"}]"#
+            )
+            .is_ok()
+        );
     }
 
     #[test]
