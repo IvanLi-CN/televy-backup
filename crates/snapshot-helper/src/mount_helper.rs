@@ -359,8 +359,8 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
     .execute(pool)
     .await;
     let _ = sqlx::query("ALTER TABLE mounts ADD COLUMN last_renewed_at TEXT NOT NULL DEFAULT ''")
-    .execute(pool)
-    .await;
+        .execute(pool)
+        .await;
     let _ =
         sqlx::query("UPDATE mounts SET last_renewed_at = created_at WHERE last_renewed_at = ''")
             .execute(pool)
