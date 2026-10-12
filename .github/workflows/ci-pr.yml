@@ -242,11 +242,24 @@ jobs:
         run: |
           set -euo pipefail
           command -v diskutil
+          command -v hdiutil
           command -v jq
           command -v sqlite3
           command -v tmutil
           sudo -n true
-          sudo -n tmutil snapshot >/dev/null
+
+      - name: Prepare hosted APFS Time Machine destination
+        run: |
+          set -euo pipefail
+          tm_image="$RUNNER_TEMP/televybackup-apfs-tm.sparsebundle"
+          tm_mount="$RUNNER_TEMP/televybackup-apfs-tm-volume"
+          mkdir -p "$tm_mount"
+          hdiutil create -quiet -size 2g -fs APFS -type SPARSEBUNDLE -volname TelevyBackupAPFSTM "$tm_image"
+          hdiutil attach -quiet -nobrowse -mountpoint "$tm_mount" "$tm_image"
+          sudo -n tmutil setdestination -a "$tm_mount" >/dev/null
+          sudo -n tmutil destinationinfo >/dev/null
+          printf 'TELEVYBACKUP_CI_TM_IMAGE=%s\n' "$tm_image" >> "$GITHUB_ENV"
+          printf 'TELEVYBACKUP_CI_TM_MOUNT=%s\n' "$tm_mount" >> "$GITHUB_ENV"
 
       - name: Build ad-hoc candidate
         env:
@@ -275,6 +288,14 @@ jobs:
             ${{ runner.temp }}/apfs-snapshot-evidence/a6.json
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Clean up hosted APFS Time Machine destination
+        if: always()
+        run: |
+          set +e
+          tm_mount="${TELEVYBACKUP_CI_TM_MOUNT:-$RUNNER_TEMP/televybackup-apfs-tm-volume}"
+          sudo -n tmutil removedestination "$tm_mount" >/dev/null 2>&1 || true
+          hdiutil detach "$tm_mount" -force >/dev/null 2>&1 || true
 
   macos-swift:
     needs: classify
