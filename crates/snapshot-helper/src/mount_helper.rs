@@ -1659,6 +1659,7 @@ async fn cleanup_request(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cleanup_mount(
     mount_root: &Path,
     manifest: &[MountSnapshotRef],
