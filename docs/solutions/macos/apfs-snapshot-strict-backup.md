@@ -96,8 +96,9 @@ sequenceDiagram
    only that manifest; it never deletes a snapshot discovered by name alone.
 5. There is at most one active lease and one coalesced pending run per volume. A cleanup-pending
    volume is blocked until its recorded resources are recovered.
-6. Snapshot mount directories are private to the owning user. The daemon cannot substitute a mount
-   path or bypass the Access IPC.
+6. Snapshot mount directories are created by the root helper below a root-owned per-user parent;
+   the requesting user can read the returned lease path but cannot replace its mount target. The
+   daemon cannot bypass the Access IPC.
 
 ## Permission Model
 
@@ -198,7 +199,7 @@ make a boolean report appear stronger.
 
 ## GitHub Actions Boundary
 
-The repository's hosted required checks run deterministic protocol, path-safety, error-propagation, and workflow-contract checks. The `manual-snapshot-regression` job in `.github/workflows/ci-pr.yml` is dispatch-only and runs the named fixture timepoint, mount-health, broker, and workflow tests without touching user data. Production-like APFS timepoint and long-read acceptance is kept in the separate `.github/workflows/apfs-snapshot-acceptance.yml` manual dispatch path, which uses the `self-hosted`, `macOS`, `televybackup-apfs` labels with a stable signed candidate and FDA grant against protected source paths. That runner must expose `TELEVYBACKUP_APFS_APP_ROOT` and `TELEVYBACKUP_APFS_CODESIGN_IDENTITY` repository variables and must be provisioned with passwordless `sudo` and FDA for both exact identities. Sanitized mode is restricted to the generated `apfs-ci` target below the disposable fixture root. The uploaded cards are constructed from fixed schemas and contain only booleans, fixed result/schema values, and bounded exit codes; paths, usernames, hostnames, environment values, volume or snapshot identifiers, logs, IPC responses, and test bytes are excluded. Raw verifier output is deleted before upload. A failed dedicated preflight is a failed acceptance, never an unverified green result.
+The repository's hosted required checks run deterministic protocol, path-safety, error-propagation, and workflow-contract checks. The `manual-snapshot-regression` job in `.github/workflows/ci-pr.yml` is dispatch-only and runs the named fixture timepoint, mount-health, broker, and workflow tests against an isolated temporary tree without touching user data. The fixture assertions produce only boolean outcomes and bounded error context; they do not read or upload user files.
 
 ## Residual Risks
 

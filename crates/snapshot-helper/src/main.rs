@@ -1122,13 +1122,6 @@ async fn acquire_lease(
         })
         .collect();
     let lease_id = Uuid::new_v4().to_string();
-    let mount_root = state
-        .data_dir
-        .join("snapshot-access/mounts")
-        .join(uid.to_string())
-        .join(&lease_id);
-    fs::create_dir_all(&mount_root)?;
-    fs::set_permissions(&mount_root, fs::Permissions::from_mode(0o700))?;
     let mount_manifest: Vec<MountSnapshotRef> = snapshot_manifest
         .iter()
         .map(|snapshot| MountSnapshotRef {
@@ -1136,7 +1129,7 @@ async fn acquire_lease(
             uuid: snapshot.uuid.clone(),
         })
         .collect();
-    if let Err(error) = mount_helper::mount(
+    let mount_root = match mount_helper::mount(
         uid,
         &lease_id,
         &info.uuid,
@@ -1144,12 +1137,12 @@ async fn acquire_lease(
         &snapshot.uuid,
         &snapshot.name,
         &info.mount_point,
-        &mount_root,
+        Path::new("/"),
         &mount_manifest,
     ) {
-        let _ = fs::remove_dir(&mount_root);
-        return Err(HelperError::Message(error.to_string()));
-    }
+        Ok(result) => PathBuf::from(result.mount_root),
+        Err(error) => return Err(HelperError::Message(error.to_string())),
+    };
     let mount_device = match capture_mount_device(&mount_root) {
         Ok(device) => device,
         Err(error) => {

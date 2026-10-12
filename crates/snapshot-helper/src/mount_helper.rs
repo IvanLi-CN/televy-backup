@@ -1,11 +1,8 @@
-use std::ffi::CString;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io::{BufRead, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -30,6 +27,7 @@ use crate::{
 pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.2.0";
 pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
+const MOUNT_ROOT_BASE: &str = "/private/var/tmp/televybackup-snapshot-mounts";
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MUTATING_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
@@ -71,6 +69,10 @@ pub fn configured_journal_path() -> PathBuf {
     std::env::var_os("TELEVYBACKUP_SNAPSHOT_MOUNT_JOURNAL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MOUNT_HELPER_JOURNAL))
+}
+
+fn configured_mount_root_base() -> PathBuf {
+    PathBuf::from(MOUNT_ROOT_BASE)
 }
 
 pub fn status() -> Result<MountStatusResult, MountHelperError> {
@@ -224,6 +226,7 @@ pub async fn run_server() -> Result<(), MountHelperError> {
         .parent()
         .ok_or_else(|| MountHelperError::Protocol("journal has no parent".into()))?;
     ensure_root_directory(journal_parent)?;
+    ensure_mount_root_base(&configured_mount_root_base())?;
     // Mount requests are serialized by the journal. A single connection keeps
     // launchd startup deterministic and avoids parallel SQLite initialization.
     let journal = SqlitePoolOptions::new()
@@ -290,7 +293,7 @@ async fn init_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
 
 async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
     let rows = sqlx::query(
-        "SELECT lease_id, uid, mount_root, mount_device, snapshot_manifest, state FROM mounts WHERE state != 'released'",
+        "SELECT lease_id, uid, mount_root, mount_device, snapshot_manifest FROM mounts WHERE state != 'released'",
     )
     .fetch_all(pool)
     .await?;
@@ -300,7 +303,6 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
         let mount_root: String = row.try_get("mount_root")?;
         let mount_device: i64 = row.try_get("mount_device").unwrap_or_default();
         let manifest_json: String = row.try_get("snapshot_manifest")?;
-        let state: String = row.try_get("state").unwrap_or_default();
         let manifest =
             serde_json::from_str::<Vec<MountSnapshotRef>>(&manifest_json).unwrap_or_default();
         let expected_device = u64::try_from(mount_device)
@@ -312,49 +314,117 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
             } else {
                 "cleanup_pending"
             }
-        } else if expected_device.is_none() && state == "prepared" {
-            // A crash can leave a prepared row after mount_apfs succeeded but before the
-            // mounted device identity was persisted. Only inspect a still-private mount
-            // parent, then clean up a mount that is actually present at the recorded target.
-            recover_prepared_mount(
-                Path::new(&mount_root),
-                u32::try_from(uid).ok(),
-                &manifest,
-            )
-        } else if expected_device.is_none() {
-            // A legacy row has no trusted mount identity. Do not unmount whatever now occupies
-            // the recorded path; UUID cleanup is the only safe recovery operation.
-            if delete_manifest(&manifest) {
-                "released"
-            } else {
-                "cleanup_pending"
-            }
         } else {
-            cleanup_mount(Path::new(&mount_root), &manifest, expected_device)
+            match expected_mount_root(uid, &lease_id) {
+                Ok(expected_root)
+                    if Path::new(&mount_root) == expected_root
+                        && validate_managed_mount_root(&expected_root) =>
+                {
+                    // A crash can leave a prepared or active row after mount_apfs succeeded but
+                    // before the mounted device identity was persisted. The managed root is
+                    // root-owned and cannot be replaced by the requesting user, so cleanup can
+                    // inspect and unmount it.
+                    cleanup_mount(&expected_root, &manifest, expected_device)
+                }
+                // Rows from the pre-root-owned layout or malformed journals cannot be safely
+                // mapped to a stable target. Keep the volume blocked instead of resolving a
+                // user-controlled path.
+                _ => "cleanup_pending",
+            }
         };
         update_state(pool, &lease_id, cleanup_state).await?;
     }
     Ok(())
 }
 
-fn recover_prepared_mount(
-    mount_root: &Path,
-    uid: Option<u32>,
-    manifest: &[MountSnapshotRef],
-) -> &'static str {
-    match mounted_snapshot_path(mount_root) {
-        Ok(true) if uid.is_some_and(|uid| validate_mount_cleanup_path(mount_root, uid)) => {
-            cleanup_mount(mount_root, manifest, None)
+fn expected_mount_root(uid: i64, lease_id: &str) -> Result<PathBuf, MountHelperError> {
+    let uid = u32::try_from(uid)
+        .map_err(|_| MountHelperError::Protocol("invalid journal mount owner".into()))?;
+    validate_lease_id(lease_id)?;
+    Ok(configured_mount_root_base()
+        .join(uid.to_string())
+        .join(lease_id))
+}
+
+fn create_mount_root(uid: u32, lease_id: &str) -> Result<PathBuf, MountHelperError> {
+    let base = configured_mount_root_base();
+    ensure_mount_root_base(&base)?;
+    let uid_root = base.join(uid.to_string());
+    match fs::symlink_metadata(&uid_root) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&uid_root)?;
+            fs::set_permissions(&uid_root, fs::Permissions::from_mode(0o711))?;
         }
-        Ok(false) => {
-            if delete_manifest(manifest) {
-                "released"
-            } else {
-                "cleanup_pending"
-            }
-        }
-        Ok(true) | Err(_) => "cleanup_pending",
+        Err(error) => return Err(MountHelperError::Io(error)),
     }
+    ensure_root_owned_directory(&uid_root, 0o711)?;
+    let mount_root = uid_root.join(lease_id);
+    fs::create_dir(&mount_root)?;
+    fs::set_permissions(&mount_root, fs::Permissions::from_mode(0o755))?;
+    ensure_root_owned_directory(&mount_root, 0o755)?;
+    Ok(mount_root)
+}
+
+fn ensure_mount_root_base(path: &Path) -> Result<(), MountHelperError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o711))?;
+        }
+        Err(error) => return Err(MountHelperError::Io(error)),
+    }
+    ensure_root_owned_directory(path, 0o711)
+}
+
+fn validate_managed_mount_root(path: &Path) -> bool {
+    let base = configured_mount_root_base();
+    let Some(uid_root) = path.parent() else {
+        return false;
+    };
+    let base_ok = fs::symlink_metadata(&base)
+        .map(|metadata| {
+            metadata.is_dir()
+                && metadata.uid() == 0
+                && metadata.mode() & 0o022 == 0
+                && !metadata.file_type().is_symlink()
+        })
+        .unwrap_or(false);
+    let uid_root_ok = fs::symlink_metadata(uid_root)
+        .map(|metadata| {
+            metadata.is_dir()
+                && metadata.uid() == 0
+                && metadata.mode() & 0o022 == 0
+                && !metadata.file_type().is_symlink()
+        })
+        .unwrap_or(false);
+    let mount_root_ok = fs::symlink_metadata(path)
+        .map(|metadata| {
+            metadata.is_dir()
+                && metadata.uid() == 0
+                && metadata.mode() & 0o022 == 0
+                && !metadata.file_type().is_symlink()
+        })
+        .map_or_else(
+            |error| error.kind() == std::io::ErrorKind::NotFound,
+            |valid| valid,
+        );
+    path.starts_with(&base) && base_ok && uid_root_ok && mount_root_ok
+}
+
+fn ensure_root_owned_directory(path: &Path, expected_mode: u32) -> Result<(), MountHelperError> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+        || metadata.mode() & 0o777 != expected_mode
+    {
+        return Err(MountHelperError::Protocol(
+            "unsafe root-owned snapshot mount directory".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn serve_connection(
@@ -410,7 +480,7 @@ async fn handle_request(
             snapshot_uuid,
             snapshot_name,
             source_mount_point,
-            mount_root,
+            mount_root: _requested_mount_root,
             snapshot_manifest,
         } => mount_request(
             peer_uid,
@@ -421,7 +491,6 @@ async fn handle_request(
             &snapshot_uuid,
             &snapshot_name,
             Path::new(&source_mount_point),
-            Path::new(&mount_root),
             &snapshot_manifest,
             journal,
         )
@@ -480,7 +549,6 @@ async fn mount_request(
     snapshot_uuid: &str,
     snapshot_name: &str,
     source_mount_point: &Path,
-    mount_root: &Path,
     manifest: &[MountSnapshotRef],
     journal: &SqlitePool,
 ) -> Result<MountLeaseResult, MountHelperError> {
@@ -509,10 +577,6 @@ async fn mount_request(
     }
     validate_source_mount(source_mount_point, volume_uuid, device_identifier)?;
     validate_snapshot_binding(device_identifier, snapshot_uuid, snapshot_name)?;
-    // Keep an fd for the validated directory. The mount command runs with this directory as
-    // its cwd and targets ".", so a caller cannot replace the path with a symlink while the
-    // journal queries above are in flight.
-    let mount_root_handle = open_mount_root(mount_root, uid)?;
     let existing: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM mounts WHERE lease_id = ? AND state != 'released'",
     )
@@ -531,7 +595,14 @@ async fn mount_request(
             })
             .collect::<Vec<_>>(),
     )?;
-    sqlx::query(
+    let mount_root = match create_mount_root(uid, lease_id) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = delete_manifest(manifest);
+            return Err(error);
+        }
+    };
+    if let Err(error) = sqlx::query(
         "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', datetime('now'))",
     )
     .bind(lease_id)
@@ -542,38 +613,47 @@ async fn mount_request(
     .bind(mount_root.to_string_lossy().as_ref())
     .bind(&manifest_json)
     .execute(journal)
-    .await?;
+    .await
+    {
+        let _ = fs::remove_dir(&mount_root);
+        let _ = delete_manifest(manifest);
+        return Err(error.into());
+    }
 
-    let mount_result = run_command_at(
+    // Re-check the source identity immediately before the privileged mount command. The first
+    // validation protects the request contract; this second check closes the journal/update
+    // window in which a system mount could have changed.
+    if let Err(error) = validate_source_mount(source_mount_point, volume_uuid, device_identifier)
+    {
+        let cleanup_state = cleanup_mount(&mount_root, manifest, None);
+        update_state(journal, lease_id, cleanup_state).await?;
+        return Err(error);
+    }
+    let mount_result = run_command(
         "/sbin/mount_apfs",
         [
             "-s",
             snapshot_name,
             source_mount_point.to_string_lossy().as_ref(),
-            ".",
+            mount_root.to_string_lossy().as_ref(),
         ],
-        &mount_root_handle,
     );
     if let Err(error) = mount_result {
-        let cleanup_state = if delete_manifest(manifest) {
-            "released"
-        } else {
-            "cleanup_pending"
-        };
+        let cleanup_state = cleanup_mount(&mount_root, manifest, None);
         update_state(journal, lease_id, cleanup_state).await?;
         return Err(error);
     }
     match mounted_snapshot_path(mount_root) {
         Ok(true) => {}
         Ok(false) => {
-            let cleanup_state = cleanup_mount_at(&mount_root_handle, manifest);
+            let cleanup_state = cleanup_mount(mount_root, manifest, None);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(MountHelperError::Protocol(
                 "mount_apfs did not expose the requested snapshot mount".into(),
             ));
         }
         Err(error) => {
-            let cleanup_state = cleanup_mount_at(&mount_root_handle, manifest);
+            let cleanup_state = cleanup_mount(mount_root, manifest, None);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(error);
         }
@@ -581,13 +661,13 @@ async fn mount_request(
     let mount_device = match fs::metadata(mount_root) {
         Ok(metadata) => metadata.dev(),
         Err(error) => {
-            let cleanup_state = cleanup_mount_at(&mount_root_handle, manifest);
+            let cleanup_state = cleanup_mount(mount_root, manifest, None);
             update_state(journal, lease_id, cleanup_state).await?;
             return Err(MountHelperError::Io(error));
         }
     };
     if mount_device == 0 {
-        let cleanup_state = cleanup_mount_at(&mount_root_handle, manifest);
+        let cleanup_state = cleanup_mount(mount_root, manifest, None);
         update_state(journal, lease_id, cleanup_state).await?;
         return Err(MountHelperError::Protocol(
             "mounted snapshot has no usable device identity".into(),
@@ -603,9 +683,9 @@ async fn mount_request(
     match journal_update {
         Ok(result) if result.rows_affected() == 1 => {}
         Ok(_) | Err(_) => {
-            // Never return a live mount after its identity failed to persist. The fd-anchored
-            // cleanup remains safe even if the caller changed the path during the SQL update.
-            let cleanup_state = cleanup_mount_at(&mount_root_handle, manifest);
+            // Never return a live mount after its identity failed to persist. The mount root is
+            // root-owned and cannot be replaced by the requesting user during cleanup.
+            let cleanup_state = cleanup_mount(mount_root, manifest, Some(mount_device));
             let _ = update_state(journal, lease_id, cleanup_state).await;
             return Err(MountHelperError::Protocol(
                 "mounted snapshot identity could not be persisted".into(),
@@ -651,14 +731,13 @@ async fn release_request(
     let expected_device = u64::try_from(mount_device)
         .ok()
         .filter(|device| *device != 0);
-    let cleanup_state = if expected_device.is_none() {
-        if delete_manifest(&manifest) {
-            "released"
-        } else {
-            "cleanup_pending"
-        }
+    let expected_root = expected_mount_root(i64::from(uid), lease_id)?;
+    let cleanup_state = if Path::new(&mount_root) != expected_root
+        || !validate_managed_mount_root(&expected_root)
+    {
+        "cleanup_pending"
     } else {
-        cleanup_mount(Path::new(&mount_root), &manifest, expected_device)
+        cleanup_mount(&expected_root, &manifest, expected_device)
     };
     update_state(journal, lease_id, cleanup_state).await?;
     Ok(MountReleaseResult {
@@ -739,6 +818,7 @@ fn cleanup_mount(
                 ["-f", mount_root.to_string_lossy().as_ref()],
             )
             .is_ok()
+                && matches!(mounted_snapshot_path(mount_root), Ok(false))
         }
         // Never unmount a different device that was substituted at the recorded path.
         Ok(true) => false,
@@ -748,17 +828,12 @@ fn cleanup_mount(
         Err(_) => false,
     };
     let delete_ok = delete_manifest(manifest);
-    if unmount_ok && delete_ok {
-        "released"
+    let root_ok = if unmount_ok {
+        fs::remove_dir(mount_root).is_ok() || !mount_root.exists()
     } else {
-        "cleanup_pending"
-    }
-}
-
-fn cleanup_mount_at(mount_root: &File, manifest: &[MountSnapshotRef]) -> &'static str {
-    let unmount_ok = run_command_at("/sbin/umount", ["-f", "."], mount_root).is_ok();
-    let delete_ok = delete_manifest(manifest);
-    if unmount_ok && delete_ok {
+        false
+    };
+    if unmount_ok && delete_ok && root_ok {
         "released"
     } else {
         "cleanup_pending"
@@ -809,121 +884,6 @@ async fn update_state(
         .execute(journal)
         .await?;
     Ok(())
-}
-
-fn validate_mount_root(path: &Path, uid: u32) -> Result<(), MountHelperError> {
-    if !path.is_absolute() {
-        return Err(MountHelperError::Protocol(
-            "mount root must be absolute".into(),
-        ));
-    }
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
-        return Err(MountHelperError::Protocol(
-            "mount root must be an existing private directory owned by the caller".into(),
-        ));
-    }
-    let mut current = path;
-    while let Some(parent) = current.parent() {
-        let metadata = fs::symlink_metadata(current)?;
-        if metadata.file_type().is_symlink() || metadata.mode() & 0o022 != 0 {
-            return Err(MountHelperError::Protocol(
-                "mount root path contains a symlink or world-writable directory".into(),
-            ));
-        }
-        if parent == current {
-            break;
-        }
-        current = parent;
-    }
-    Ok(())
-}
-
-fn open_mount_root(path: &Path, uid: u32) -> Result<File, MountHelperError> {
-    validate_mount_root(path, uid)?;
-    let file = open_directory_no_follow(path)?;
-    let fd_metadata = file.metadata()?;
-    let path_metadata = fs::symlink_metadata(path)?;
-    if fd_metadata.dev() != path_metadata.dev() || fd_metadata.ino() != path_metadata.ino() {
-        return Err(MountHelperError::Protocol(
-            "mount root changed during validation".into(),
-        ));
-    }
-    Ok(file)
-}
-
-fn open_directory_no_follow(path: &Path) -> Result<File, MountHelperError> {
-    let mut current = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open("/")?;
-    for component in path.components() {
-        let std::path::Component::Normal(component) = component else {
-            if matches!(component, std::path::Component::RootDir) {
-                continue;
-            }
-            return Err(MountHelperError::Protocol(
-                "mount root must not contain . or .. components".into(),
-            ));
-        };
-        let component = CString::new(component.as_bytes()).map_err(|_| {
-            MountHelperError::Protocol("mount root contains an invalid path component".into())
-        })?;
-        let fd = unsafe {
-            libc::openat(
-                current.as_raw_fd(),
-                component.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0,
-            )
-        };
-        if fd == -1 {
-            return Err(MountHelperError::Io(std::io::Error::last_os_error()));
-        }
-        current = unsafe { File::from_raw_fd(fd) };
-    }
-    Ok(current)
-}
-
-fn validate_mount_cleanup_path(path: &Path, uid: u32) -> bool {
-    if !path.is_absolute() {
-        return false;
-    }
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(_) => return false,
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return false;
-    }
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    let parent_metadata = match fs::symlink_metadata(parent) {
-        Ok(metadata) => metadata,
-        Err(_) => return false,
-    };
-    if !parent_metadata.is_dir()
-        || parent_metadata.uid() != uid
-        || parent_metadata.mode() & 0o022 != 0
-    {
-        return false;
-    }
-    let mut current = parent;
-    while let Some(ancestor) = current.parent() {
-        let metadata = match fs::symlink_metadata(current) {
-            Ok(metadata) => metadata,
-            Err(_) => return false,
-        };
-        if metadata.file_type().is_symlink() || metadata.mode() & 0o022 != 0 {
-            return false;
-        }
-        if ancestor == current {
-            break;
-        }
-        current = ancestor;
-    }
-    true
 }
 
 fn validate_source_mount(
@@ -1116,34 +1076,6 @@ fn run_command<const N: usize, S: AsRef<std::ffi::OsStr>>(
     })
 }
 
-fn run_command_at<const N: usize, S: AsRef<std::ffi::OsStr>>(
-    program: &str,
-    args: [S; N],
-    directory: &File,
-) -> Result<(), MountHelperError> {
-    let directory_fd = directory.as_raw_fd();
-    let mut command = Command::new(program);
-    command.args(args);
-    unsafe {
-        command.pre_exec(move || {
-            if libc::fchdir(directory_fd) == -1 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    }
-    let output = command.output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(MountHelperError::Command {
-        program: program.to_string(),
-        status: output.status.to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-    })
-}
-
 fn run_command_output<const N: usize, S: AsRef<std::ffi::OsStr>>(
     program: &str,
     args: [S; N],
@@ -1292,18 +1224,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(column.as_deref(), Some("mount_device"));
-    }
-
-    #[test]
-    fn mount_root_rejects_group_writable_ancestors() {
-        let temp = tempfile::tempdir().unwrap();
-        let unsafe_parent = temp.path().join("group-writable");
-        let mount_root = unsafe_parent.join("mount");
-        fs::create_dir(&unsafe_parent).unwrap();
-        fs::create_dir(&mount_root).unwrap();
-        fs::set_permissions(&unsafe_parent, fs::Permissions::from_mode(0o770)).unwrap();
-        let uid = unsafe { libc::geteuid() };
-        assert!(validate_mount_root(&mount_root, uid).is_err());
     }
 
     #[test]

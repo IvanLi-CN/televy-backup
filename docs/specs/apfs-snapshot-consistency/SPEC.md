@@ -55,7 +55,8 @@ free-space threshold, nested mounts, and relative paths MUST be checked before a
 
 `AcquireLease` MUST snapshot the target volume, uniquely confirm the snapshot created by that
   invocation, record its UUID/device manifest before serving data, and ask the root mount helper to
-  mount it below a private app directory. Release and crash recovery MUST unmount and delete only
+  mount it below a helper-managed per-user directory whose parent and lease target cannot be
+  replaced by the requesting user. Release and crash recovery MUST unmount and delete only
   manifest-recorded snapshots; ambiguous ownership or failed cleanup MUST block the volume's next
   strict backup.
 
