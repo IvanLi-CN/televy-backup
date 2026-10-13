@@ -53,7 +53,7 @@ Snapshot Access.app (logged-in user)
   - IPC: metadata pages and bounded read streams
 
 Snapshot Mount Helper (root LaunchDaemon)
-  - Mount, Release, Status, UUID-scoped Cleanup only
+  - Reserve, RecordCleanup, Mount, Release, Status, volume-scoped StatusVolume, journal-bound Cleanup only; Reserve owns the source volume before snapshot creation, RecordCleanup derives and journals the complete post-reservation set, and age-gated recovery releases only an unchanged baseline while leaving unknown snapshots blocked
   - mount_apfs, umount, and exact recorded UUID deletion
   - no source file opens, Keychain, encryption, indexes, or network access
 ```
@@ -96,15 +96,16 @@ sequenceDiagram
    only that manifest; it never deletes a snapshot discovered by name alone.
 5. There is at most one active lease and one coalesced pending run per volume. A cleanup-pending
    volume is blocked until its recorded resources are recovered.
-6. Snapshot mount directories are private to the owning user. The daemon cannot substitute a mount
-   path or bypass the Access IPC.
+6. Snapshot mount directories are created by the root helper below a root-owned per-user parent;
+   the requesting user can read the returned lease path but cannot replace its mount target. The
+   daemon cannot bypass the Access IPC.
 
 ## Permission Model
 
 | Operation | Component | Authority | Normal backup prompt |
 | --- | --- | --- | --- |
-| Snapshot creation and snapshot file reads | Snapshot Access.app | FDA for the exact installed app identity | No |
-| Snapshot mount, unmount, UUID cleanup | Root mount helper | root LaunchDaemon plus FDA for the exact helper identity in the currently validated baseline | No |
+| Snapshot file reads | Snapshot Access.app | FDA for the exact installed app identity | No |
+| Snapshot creation, mount, unmount, UUID cleanup | Root mount helper | root LaunchDaemon plus FDA for the exact helper identity in the currently validated baseline | No |
 | Keychain, encryption, indexes, upload | Backup daemon | ordinary user | No |
 | Install/update/remove mount helper | installer / CLI | administrator authorization | Yes, only for that transaction |
 
@@ -113,7 +114,7 @@ the owner to grant FDA again. Strict mode must display a blocking state in that 
 quietly read the live source.
 
 The locked deployment baseline grants FDA to both Snapshot Access and the root mount helper. The
-helper's protocol and code path remain mount-only, but the validation that established feasibility
+helper's protocol and code path own snapshot creation and mount cleanup, but the validation that established feasibility
 gave both exact identities FDA. It is therefore incorrect to market an Access-only FDA requirement
 until the same release has passed the timepoint test after the helper's FDA authorization is removed.
 That future least-privilege experiment is optional optimization work, not a prerequisite for this
@@ -196,13 +197,17 @@ result alone can be fabricated. To review it meaningfully, pair it with the exac
 the verifier source, reproducible build checks, and the unit tests below. Do not publish raw logs to
 make a boolean report appear stronger.
 
+## GitHub Actions Boundary
+
+The repository's hosted required checks run deterministic protocol, path-safety, error-propagation, and workflow-contract checks. The `manual-snapshot-regression` job in `.github/workflows/ci-pr.yml` is dispatch-only and runs the named fixture timepoint, mount-health, broker, and workflow tests against an isolated temporary tree without touching user data. The fixture assertions produce only boolean outcomes and bounded error context; they do not read or upload user files.
+
 ## Residual Risks
 
 The sanitized report contains no personal filesystem data or host topology, but no useful system can
 make the implementation's authority risk zero. The root helper is intentionally small because a
 defect in a root process is high impact, and FDA granted to that helper is a deployment-level
 capability even though the accepted IPC has no file-read method. The mitigations are a fixed command
-allowlist, peer-UID checking, source-volume and private-mount validation, UUID-manifest cleanup, and
+allowlist, peer-UID checking, source-volume and private-mount validation, journal-bound manifest cleanup, and
 the separation that keeps encryption, Keychain material, indexes, and networking out of the helper.
 
 This solution also provides filesystem timepoint consistency, not application transaction
@@ -213,7 +218,7 @@ must provide its own documented backup/export mechanism.
 
 | Level | What it establishes | Safe artifact |
 | --- | --- | --- |
-| Protocol/unit tests | Request allowlists, peer UID binding, private mount validation, UUID-only cleanup | Test names and pass/fail counts |
+| Protocol/unit tests | Request allowlists, peer UID binding, private mount validation, journal-bound cleanup | Test names and pass/fail counts |
 | Brokered core tests | The daemon uses streams rather than a mount path; strict errors fail closed | Test names and pass/fail counts |
 | Sanitized APFS integration | `PRE` survives in snapshot while live file is `POST`; cleanup completes | Sanitized JSON assertion report |
 | Package verification | One product bundle contains the independent Access helper and the mount-helper artifact | Artifact names, component hashes, and identity fields, if desired |

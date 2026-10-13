@@ -14,6 +14,12 @@ TelevyBackup treats pull request checks as an explicit merge contract. The canon
 
 The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks. `Release intent label gate` and `Release completion` use per-PR concurrency with `cancel-in-progress: false`; GitHub retains the latest pending evaluation for each group, and every new head is independently revalidated before completion.
 
+## APFS acceptance lane
+
+The hosted `quality` job checks the APFS validation workflow contract. The deterministic Snapshot Access, daemon, core, fixture timepoint, and mount-health regression tests run in the `manual-snapshot-regression` job in `.github/workflows/ci-pr.yml`, which is gated by `workflow_dispatch` and runs only when an owner explicitly starts PR validation; it never touches user data. The job runs the fixture tests against an isolated temporary tree and asserts strict snapshot behavior, mount identity loss handling, and `snapshot.access_failed` propagation.
+
+The `manual-snapshot-regression` job in `.github/workflows/ci-pr.yml` is gated by `workflow_dispatch` and runs the deterministic failure-injection and error-propagation regression tests on hosted macOS only when an owner explicitly starts a PR validation. Ordinary push and pull-request runs skip this job; the regular required checks still validate the source contracts and compile the implementation.
+
 Release Product treats the highest eligible final product tag as the numeric baseline. Eligible
 product tags are protected annotated tags created by `github-actions[bot]` and reachable from
 `main`; foreign, lightweight, incomplete, or unreachable tags fail closed. Prerelease ordinals are

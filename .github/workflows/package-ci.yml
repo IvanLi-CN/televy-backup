@@ -6,9 +6,9 @@ on:
   merge_group:
   workflow_dispatch:
     inputs:
-      source_ref:
-        description: Commit or ref to package; defaults to the triggering commit
-        required: false
+      pr_number:
+        description: Open same-repository PR to package
+        required: true
         type: string
 
 permissions:
@@ -24,9 +24,23 @@ jobs:
       source_sha: ${{ steps.classify.outputs.source_sha }}
       verification_sha: ${{ steps.classify.outputs.verification_sha }}
     steps:
+      - name: Verify workflow dispatch targets current pull request head
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/package-pr.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg head_ref "${GITHUB_REF_NAME}" \
+            --arg head_sha "${GITHUB_SHA}" \
+            '.state == "open" and .base.ref == "main" and .head.repo.full_name == $repository and .head.ref == $head_ref and .head.sha == $head_sha' \
+            "${RUNNER_TEMP}/package-pr.json" >/dev/null
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
       - id: classify
         run: |

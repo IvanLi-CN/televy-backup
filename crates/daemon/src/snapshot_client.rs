@@ -571,6 +571,12 @@ mod tests {
         let error = source.entries(None).unwrap_err();
 
         assert_eq!(error.code(), "snapshot.access_failed");
+
+        let error = match source.open("missing.txt") {
+            Ok(_) => panic!("missing Snapshot Access socket must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "snapshot.access_failed");
     }
 
     #[test]

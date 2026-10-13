@@ -30,7 +30,7 @@ formats.
 ### Non-goals
 
 - No root backup daemon, root file reader, `fs_snapshot_*` entitlement, or staging copy. A minimal
-  root LaunchDaemon is limited to mount, unmount, and UUID-scoped snapshot cleanup.
+  root LaunchDaemon is limited to mount, unmount, and journal-bound snapshot cleanup.
 - No activity-directory fallback in strict mode and no changes to Time Machine policy.
 - No defense against a malicious process running as the same macOS user.
 
@@ -55,13 +55,23 @@ free-space threshold, nested mounts, and relative paths MUST be checked before a
 
 `AcquireLease` MUST snapshot the target volume, uniquely confirm the snapshot created by that
   invocation, record its UUID/device manifest before serving data, and ask the root mount helper to
-  mount it below a private app directory. Release and crash recovery MUST unmount and delete only
-  manifest-recorded snapshots; ambiguous ownership or failed cleanup MUST block the volume's next
-  strict backup.
+  mount it below a helper-managed per-user directory whose parent and lease target cannot be
+  replaced by the requesting user. Release and crash recovery MUST unmount and delete only
+  manifest-recorded snapshots; ambiguous ownership MUST fail the acquire before serving bytes, and
+  failed cleanup MUST block the volume's next strict backup.
 
 The mount helper MUST run as a root LaunchDaemon with FDA manually granted to its exact installed
-identity, expose a separate peer-UID-checked Unix socket, and accept only `Status`, `Mount`,
-`Release`, and UUID-scoped `Cleanup`. It MUST NOT read source files, configuration, Keychain
+identity, expose a separate peer-UID-checked Unix socket, and accept only `Status`, volume-scoped
+`StatusVolume`, `Reserve`, `Renew`, `RecordCleanup`, `Mount`, `Release`, and journal-bound `Cleanup`. `Reserve` MUST
+claim the requested volume before snapshot creation, bind the lease to the requested source path, and
+prove that the peer UID can open that path before recording the pre-existing snapshot UUIDs;
+`RecordCleanup` MUST invoke `tmutil localsnapshot` inside the root helper's serialized mutation section,
+require exactly one new snapshot, and re-check the complete inventory before and after journaling it;
+the Access process MUST renew an in-flight reservation while snapshot creation is running, and stale
+recovery MUST use the last successful renewal time rather than creation time;
+callers MUST NOT submit a deletion manifest. If recording fails, the reservation MUST remain blocking until a later retry succeeds. An age-gated recovery MAY transition an empty-manifest reservation to a retained `released` tombstone only after repeated inventory checks match its baseline; every later `Reserve` MUST audit those tombstones before serving bytes and move any changed tombstone back to `cleanup_pending`. Historical rows without a validated reservation baseline MUST remain non-serviceable and MUST NOT be used for snapshot deletion. Any unrecorded post-reservation snapshot MUST remain blocked and MUST NOT be deleted. `Release` MUST revalidate the journaled device/volume binding and require the current inventory to equal the recorded baseline plus the journaled manifest before deleting only that manifest; after deletion it MUST require the inventory to equal the original reservation baseline before clearing the recorded manifest and retaining the released tombstone. If the post-deletion inventory differs, the lease MUST remain `cleanup_pending` with the original baseline. `StatusVolume` MUST answer only
+whether the requested volume UUID has a reserved, prepared, active, or cleanup-pending row and may expose age-gated empty-manifest reservations for controlled recovery. `Cleanup` MUST
+delete only the non-empty manifest already recorded in the matching prepared journal row. It MUST NOT read source files, configuration, Keychain
 material, backup indexes, or network data. Its root-owned journal records lease, mount root,
 volume/device identity, and the exact snapshot UUID manifest.
 
@@ -104,7 +114,8 @@ the same prepare operation; missing or mismatched transaction credentials MUST f
 The Access app is started by the main app's per-user embedded launch service and can be used
 without the GUI after registration. The official ad-hoc path uses `launchctl bootstrap`; a signed
 build may use `SMAppService.agent`. The v0.9.8 helper remains readable for the one-time lease
-probe, while only the current component may be committed or used for strict reads. RC1 establishes
+probe, while only the current component may be committed or used for strict reads; strict lease
+acquisition MUST reject a legacy helper before `Reserve`. RC1 establishes
 the embedded helper identity; ordinary future product-version RC1 builds reuse the approved
 artifact named by the component lock, and RC2/stable reuse that version's exact Universal artifact,
 so ordinary main-app updates do not request FDA again. A real Access helper code or FDA behavior
@@ -127,7 +138,7 @@ user/system service paths are present without a privileged backup reader.
 
 Covers: REQ-APFS-003.
 Snapshot Access and mount-helper unit tests prove fixed command usage, peer UID enforcement, arbitrary-path
-rejection, private journal/mount ownership, unique snapshot ownership, UUID-only cleanup, and
+rejection, private journal/mount ownership, unique snapshot ownership, journal-bound cleanup, and
 foreign journal recovery isolation.
 
 ### VER-APFS-003: Brokered data integrity

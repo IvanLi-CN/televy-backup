@@ -20,21 +20,25 @@ Creates one small, uniquely named test file inside each source root. For every t
 APFS snapshot lease, changes only that test file in the live source, verifies the brokered snapshot
 stream still returns the original bytes, then releases the lease and deletes the test file.
 
---sanitized emits a shareable JSON assertion report. It removes the temporary raw IPC transcript and
-does not print source paths, target IDs, volume identifiers, snapshot identifiers, mount roots, or
-test bytes.
+--sanitized emits a fixed-schema JSON assertion report. It requires an isolated synthetic fixture,
+does not persist the IPC transcript, and does not print source paths, target IDs, volume identifiers,
+snapshot identifiers, mount roots, or test bytes.
 USAGE
   exit 2
 fi
 
 integration_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-data_dir="${TELEVYBACKUP_DATA_DIR:-$HOME/Library/Application Support/TelevyBackup}"
-socket_path="${TELEVYBACKUP_SNAPSHOT_SOCKET:-$data_dir/snapshot-access/access.sock}"
 if "$sanitized"; then
+  : "${TELEVYBACKUP_SNAPSHOT_SOCKET:?TELEVYBACKUP_SNAPSHOT_SOCKET is required in sanitized mode}"
+  : "${TELEVYBACKUP_SANITIZED_FIXTURE_ROOT:?TELEVYBACKUP_SANITIZED_FIXTURE_ROOT is required in sanitized mode}"
+  socket_path="$TELEVYBACKUP_SNAPSHOT_SOCKET"
+  fixture_root="$(cd "$TELEVYBACKUP_SANITIZED_FIXTURE_ROOT" && pwd -P)"
   evidence_dir="$(mktemp -d "${TMPDIR:-/tmp}/televybackup-snapshot-evidence.XXXXXX")"
   chmod 700 "$evidence_dir"
-  evidence_path="$evidence_dir/transcript.jsonl"
+  evidence_path=""
 else
+  data_dir="${TELEVYBACKUP_DATA_DIR:-$HOME/Library/Application Support/TelevyBackup}"
+  socket_path="${TELEVYBACKUP_SNAPSHOT_SOCKET:-$data_dir/snapshot-access/access.sock}"
   evidence_dir="${TELEVYBACKUP_SNAPSHOT_EVIDENCE_DIR:-$PWD/target/apfs-snapshot-integration}"
   evidence_path="$evidence_dir/$integration_id.jsonl"
 fi
@@ -44,9 +48,25 @@ test_files=()
 leases=()
 last_response=""
 completed_cases=0
+failure_reason=""
+
+fail_validation() {
+  local reason="$1"
+  failure_reason="$reason"
+  if "$sanitized"; then
+    printf '%s\n' "{\"schema\":\"televybackup.apfs_snapshot_evidence.v1\",\"result\":\"failed\",\"completedCases\":$completed_cases,\"privacy\":\"sanitized\",\"reason\":\"$reason\"}" >&2
+  else
+    echo "APFS snapshot integration validation failed: $reason" >&2
+  fi
+  exit 1
+}
 
 request() {
   local payload="$1"
+  local stderr_path="/dev/null"
+  if ! "$sanitized"; then
+    stderr_path="$evidence_dir/socket-error"
+  fi
   if ! last_response="$(perl -MIO::Socket::UNIX -e '
     my ($socket_path, $request) = @ARGV;
     my $socket = IO::Socket::UNIX->new(
@@ -57,7 +77,7 @@ request() {
     shutdown($socket, 1) or die "shutdown: $!\n";
     my $response = <$socket>;
     print $response if defined $response;
-  ' "$socket_path" "$payload" 2>"$evidence_dir/socket-error")"; then
+  ' "$socket_path" "$payload" 2>"$stderr_path")"; then
     if "$sanitized"; then
       echo "Snapshot Access request failed" >&2
     else
@@ -69,9 +89,7 @@ request() {
     echo "empty response from Snapshot Access" >&2
     return 1
   fi
-  if "$sanitized"; then
-    printf '%s\n' "$last_response" >>"$evidence_path"
-  else
+  if ! "$sanitized"; then
     printf '%s\n' "$last_response" | tee -a "$evidence_path"
   fi
 }
@@ -94,10 +112,12 @@ cleanup() {
     rm -f -- "$test_file"
   done
   if "$sanitized"; then
-    rm -f -- "$evidence_path" "$evidence_dir/socket-error"
+    rm -f -- "$evidence_dir/socket-error"
     rmdir "$evidence_dir" 2>/dev/null || true
     if [ "$exit_status" -ne 0 ]; then
-      printf '%s\n' "{\"schema\":\"televybackup.apfs_snapshot_evidence.v1\",\"result\":\"failed\",\"completedCases\":$completed_cases,\"privacy\":\"sanitized\"}" >&2
+      if [ -z "$failure_reason" ]; then
+        printf '%s\n' "{\"schema\":\"televybackup.apfs_snapshot_evidence.v1\",\"result\":\"failed\",\"completedCases\":$completed_cases,\"privacy\":\"sanitized\",\"reason\":\"unexpected_validation_exit\"}" >&2
+      fi
     fi
   fi
 }
@@ -123,6 +143,24 @@ for target_spec in "$@"; do
     fi
     exit 2
   fi
+  if "$sanitized"; then
+    [[ "$target_id" == "apfs-ci" ]] || {
+      echo "sanitized mode accepts only the synthetic apfs-ci target" >&2
+      exit 2
+    }
+    source_path="$(cd "$source_path" && pwd -P)"
+    case "$source_path" in
+      "$fixture_root"/*) ;;
+      *)
+        echo "sanitized mode requires a source below the isolated fixture root" >&2
+        exit 2
+        ;;
+    esac
+    [[ -z "$(find "$source_path" -mindepth 1 -maxdepth 1 -print -quit)" ]] || {
+      echo "sanitized mode requires an empty synthetic source root" >&2
+      exit 2
+    }
+  fi
 
   basename=".televybackup-snapshot-probe-$integration_id"
   test_file="$source_path/$basename"
@@ -132,46 +170,79 @@ for target_spec in "$@"; do
   test_files+=("$test_file")
 
   probe_request_id="$(uuidgen)"
-  request "$(jq -cn --arg request_id "$probe_request_id" --arg target_id "$target_id" \
-    '{version:2,request_id:$request_id,method:"probe_volume",target_id:$target_id}')" >/dev/null
+  if ! request "$(jq -cn --arg request_id "$probe_request_id" --arg target_id "$target_id" \
+    '{version:2,request_id:$request_id,method:"probe_volume",target_id:$target_id}')" >/dev/null; then
+    fail_validation "probe_request_failed"
+  fi
   probe_response="$last_response"
-  printf '%s' "$probe_response" | jq -e '.ok and .result.kind == "probe" and .result.snapshot_supported' >/dev/null
-  volume_uuid="$(printf '%s' "$probe_response" | jq -er '.result.volume_uuid')"
+  printf '%s' "$probe_response" | jq -e '.ok and .result.kind == "probe" and .result.snapshot_supported' >/dev/null ||
+    fail_validation "probe_response_invalid"
+  volume_uuid="$(printf '%s' "$probe_response" | jq -er '.result.volume_uuid')" ||
+    fail_validation "probe_volume_identity_missing"
 
   lease_request_id="$(uuidgen)"
-  request "$(jq -cn --arg request_id "$lease_request_id" --arg target_id "$target_id" --arg volume_uuid "$volume_uuid" --arg run_id "integration-$integration_id-$target_id" \
-    '{version:2,request_id:$request_id,method:"acquire_lease",target_id:$target_id,expected_volume_uuid:$volume_uuid,run_id:$run_id}')" >/dev/null
+  if ! request "$(jq -cn --arg request_id "$lease_request_id" --arg target_id "$target_id" --arg volume_uuid "$volume_uuid" --arg run_id "integration-$integration_id-$target_id" \
+    '{version:2,request_id:$request_id,method:"acquire_lease",target_id:$target_id,expected_volume_uuid:$volume_uuid,run_id:$run_id}')" >/dev/null; then
+    fail_validation "lease_request_failed"
+  fi
   lease_response="$last_response"
-  printf '%s' "$lease_response" | jq -e '.ok and .result.kind == "lease"' >/dev/null
-  lease_id="$(printf '%s' "$lease_response" | jq -er '.result.lease_id')"
+  if ! printf '%s' "$lease_response" | jq -e '.ok and .result.kind == "lease"' >/dev/null; then
+    lease_error_code="$(printf '%s' "$lease_response" | jq -r '.code // "unknown"' 2>/dev/null || printf 'unknown')"
+    lease_error_message="$(printf '%s' "$lease_response" | jq -r '.message // ""' 2>/dev/null || true)"
+    case "$lease_error_message" in
+      *tmutil*|*localsnapshot*)
+        fail_validation "lease_command_tmutil_failed"
+        ;;
+      *snapshot\ inventory*)
+        fail_validation "lease_snapshot_inventory_failed"
+        ;;
+      */sbin/mount*|*nested\ mounted\ volume*)
+        fail_validation "lease_mount_inventory_failed"
+        ;;
+    esac
+    case "$lease_error_code" in
+      command_failed|invalid_request|io|journal|lease_conflict|protocol|unsupported)
+        fail_validation "lease_response_${lease_error_code}"
+        ;;
+      *)
+        fail_validation "lease_response_invalid"
+        ;;
+    esac
+  fi
+  lease_id="$(printf '%s' "$lease_response" | jq -er '.result.lease_id')" ||
+    fail_validation "lease_identity_missing"
   leases+=("$lease_id")
 
   printf '%s' "$changed" >"$test_file"
   read_request_id="$(uuidgen)"
-  request "$(jq -cn --arg request_id "$read_request_id" --arg lease_id "$lease_id" --arg relative_path "$basename" \
-    '{version:2,request_id:$request_id,method:"open_read_stream",lease_id:$lease_id,relative_path:$relative_path}')" >/dev/null
+  if ! request "$(jq -cn --arg request_id "$read_request_id" --arg lease_id "$lease_id" --arg relative_path "$basename" \
+    '{version:2,request_id:$request_id,method:"open_read_stream",lease_id:$lease_id,relative_path:$relative_path}')" >/dev/null; then
+    fail_validation "open_stream_request_failed"
+  fi
   open_response="$last_response"
-  printf '%s' "$open_response" | jq -e '.ok and .result.kind == "read_stream"' >/dev/null
-  stream_id="$(printf '%s' "$open_response" | jq -er '.result.stream_id')"
+  printf '%s' "$open_response" | jq -e '.ok and .result.kind == "read_stream"' >/dev/null ||
+    fail_validation "open_stream_response_invalid"
+  stream_id="$(printf '%s' "$open_response" | jq -er '.result.stream_id')" ||
+    fail_validation "stream_identity_missing"
 
   stream_request_id="$(uuidgen)"
-  request "$(jq -cn --arg request_id "$stream_request_id" --arg stream_id "$stream_id" \
-    '{version:2,request_id:$request_id,method:"read_stream",stream_id:$stream_id,max_bytes:1048576}')" >/dev/null
+  if ! request "$(jq -cn --arg request_id "$stream_request_id" --arg stream_id "$stream_id" \
+    '{version:2,request_id:$request_id,method:"read_stream",stream_id:$stream_id,max_bytes:1048576}')" >/dev/null; then
+    fail_validation "read_stream_request_failed"
+  fi
   read_response="$last_response"
-  printf '%s' "$read_response" | jq -e '.ok and .result.kind == "read_stream"' >/dev/null
-  snapshot_bytes="$(printf '%s' "$read_response" | jq -er '.result.bytes_base64' | base64 -D)"
+  printf '%s' "$read_response" | jq -e '.ok and .result.kind == "read_stream"' >/dev/null ||
+    fail_validation "read_stream_response_invalid"
+  snapshot_bytes="$(printf '%s' "$read_response" | jq -er '.result.bytes_base64' | base64 -D)" ||
+    fail_validation "read_stream_payload_invalid"
   if [ "$snapshot_bytes" != "$original" ] || [ "$(cat "$test_file")" != "$changed" ]; then
-    if "$sanitized"; then
-      echo "snapshot byte verification failed" >&2
-    else
-      echo "snapshot byte verification failed for $target_spec" >&2
-    fi
-    exit 1
+    fail_validation "snapshot_bytes_mismatch"
   fi
 
   close_request_id="$(uuidgen)"
   request "$(jq -cn --arg request_id "$close_request_id" --arg stream_id "$stream_id" \
-    '{version:2,request_id:$request_id,method:"close_read_stream",stream_id:$stream_id}')" >/dev/null
+    '{version:2,request_id:$request_id,method:"close_read_stream",stream_id:$stream_id}')" >/dev/null ||
+    fail_validation "close_stream_request_failed"
   release_lease "$lease_id"
   leases=("${leases[@]:0:${#leases[@]}-1}")
   rm -f -- "$test_file"
@@ -181,9 +252,11 @@ done
 
 status_request_id="$(uuidgen)"
 request "$(jq -cn --arg request_id "$status_request_id" \
-  '{version:2,request_id:$request_id,method:"status"}')" >/dev/null
+  '{version:2,request_id:$request_id,method:"status"}')" >/dev/null ||
+  fail_validation "status_request_failed"
 status_response="$last_response"
-printf '%s' "$status_response" | jq -e '.ok and .result.active_leases == 0 and .result.pending_cleanup == 0' >/dev/null
+printf '%s' "$status_response" | jq -e '.ok and .result.active_leases == 0 and .result.pending_cleanup == 0' >/dev/null ||
+  fail_validation "status_not_clean"
 
 if "$sanitized"; then
   printf '%s\n' "{\"schema\":\"televybackup.apfs_snapshot_evidence.v1\",\"result\":\"passed\",\"cases\":$completed_cases,\"assertions\":{\"snapshotReadPreMutation\":true,\"liveMutationObserved\":true,\"leasesReleased\":true,\"cleanupComplete\":true},\"redacted\":[\"sourcePath\",\"targetId\",\"volumeUuid\",\"snapshotUuid\",\"mountRoot\",\"testBytes\",\"rawIpc\"]}"

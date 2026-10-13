@@ -132,6 +132,10 @@ jobs:
           bash ./.github/scripts/test-release-completion.sh
           bash ./.github/scripts/test-release-workflows.sh
 
+      - name: APFS snapshot validation workflow contract
+        if: needs.classify.outputs.kind == 'source'
+        run: bash ./.github/scripts/test-apfs-snapshot-validation.sh
+
       - name: Homebrew Cask contract tests
         if: needs.classify.outputs.kind == 'source'
         run: bash ./.github/scripts/test-homebrew-cask.sh
@@ -178,6 +182,44 @@ jobs:
         run: |
           cd crates/mtproto-helper
           cargo test
+
+  manual-snapshot-regression:
+    needs: classify
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      needs.classify.result == 'success' &&
+      needs.classify.outputs.kind == 'source'
+    name: Manual Snapshot Access regression
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout dispatched pull request head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Snapshot Access failure-injection tests
+        run: cargo test --locked -p televybackup-snapshot-access
+
+      - name: Preserve strict Snapshot Access error code
+        run: cargo test --locked -p televy_backup_core strict_snapshot_read_errors_keep_the_snapshot_access_code
+
+      - name: Preserve daemon broker error code
+        run: cargo test --locked -p televybackupd brokered_source_reports_snapshot_access_failures_without_invalidating_config
+
+      - name: Snapshot timepoint and mount-health fixture tests
+        run: |
+          cargo test --locked -p televybackup-snapshot-access snapshot_timepoint_reads_pre_mutation_after_live_change
+          cargo test --locked -p televybackup-snapshot-access long_read_fails_closed_after_mount_identity_loss
+
+      - name: Validate APFS acceptance contract
+        run: bash .github/scripts/test-apfs-snapshot-validation.sh
 
   macos-swift:
     needs: classify

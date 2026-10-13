@@ -245,6 +245,10 @@ assert_contains "release RC layout verifier" "$release_text" 'bash scripts/macos
 assert_contains "release complete requirement verifier" "$release_text" 'verify-macos-rc-acceptance.py'
 package_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
 assert_contains "package matrix checks permission" "$package_text" "checks: read"
+assert_contains "package dispatch PR input" "$package_text" "pr_number:"
+assert_contains "package dispatch current head validation" "$package_text" "Verify workflow dispatch targets current pull request head"
+assert_contains "package dispatch PR API validation" "$package_text" 'pulls/${PR_NUMBER}'
+assert_contains "package dispatch exact head validation" "$package_text" '.head.sha == $head_sha'
 assert_contains "prepared package source identity" "$package_text" 'verification_sha=${verification_sha}'
 assert_contains "prepared arm64 package evidence" "$package_text" 'commits/${SOURCE_SHA}/check-runs?filter=latest&per_page=100'
 assert_contains "prepared package gate preserves verify" "$package_text" 'verify-prepared --commit HEAD'
