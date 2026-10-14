@@ -136,6 +136,9 @@ jobs:
             -o "${RUNNER_TEMP}/snapshot-mount-helper-installation-tests"
           "${RUNNER_TEMP}/snapshot-mount-helper-installation-tests"
 
+      - name: Verify fixture shutdown failure preserves created state
+        run: python3 -m unittest discover -s scripts/macos/tests -p 'test_snapshot_helper_upgrade_cleanup.py'
+
       - name: Verify published upgrade recovery through candidate registration code
         env:
           GH_TOKEN: ${{ github.token }}

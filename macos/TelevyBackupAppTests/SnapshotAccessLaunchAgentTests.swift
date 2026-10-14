@@ -2,6 +2,8 @@ import Foundation
 
 private let executable = "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access"
 private let service = "gui/501/com.ivan.televybackup.snapshot-access"
+private let fixtureRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+private var lockURL: URL { fixtureRoot.appendingPathComponent("registration.lock") }
 private func job(_ pid: Int32?, program: String = executable) -> SnapshotAccessLaunchAgent.CommandResult {
     .init(status: 0, output: "program = \(program)\n" + (pid.map { "pid = \($0)\n" } ?? ""))
 }
@@ -22,6 +24,7 @@ private func check(
     do {
         try SnapshotAccessLaunchAgent.register(
             service: service, domain: "gui/501", plistPath: "/fixture/agent.plist", executablePath: executable,
+            lockURL: lockURL,
             run: { args in
                 commands.append(args)
                 if args.first == "print" {
@@ -44,6 +47,22 @@ private func check(
 
 @main enum SnapshotAccessLaunchAgentTestsMain {
     static func main() throws {
+        if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--contend" {
+            do {
+                try SnapshotAccessLaunchAgent.register(
+                    service: service, domain: "gui/501", plistPath: "/fixture/agent.plist", executablePath: executable,
+                    lockURL: URL(fileURLWithPath: CommandLine.arguments[2]),
+                    run: { _ in preconditionFailure("contending process inspected the service") },
+                    isCurrent: { _ in false }, prepareRestart: {}
+                )
+                preconditionFailure("contending process acquired the registration lock")
+            } catch {
+                precondition(error.localizedDescription.contains("already in progress"))
+            }
+            return
+        }
+        try FileManager.default.createDirectory(at: fixtureRoot, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: fixtureRoot) }
         // Ad-hoc jobs have no parent bundle metadata. Actual runtime identity decides.
         check(initial: job(42), expectedKickstart: ["kickstart", "-k", service])
         check(initial: job(42), current: true)
@@ -55,6 +74,17 @@ private func check(
         check(initial: .init(status: 113, output: "missing"), bootstrapSucceeds: false, expectedFailure: true)
         check(initial: job(42, program: "/foreign/access"), expectedFailure: true)
         check(initial: job(42), second: job(43), expectedFailure: true)
+        // A second application process cannot inspect/restart while the first owns
+        // the entire inspect/prepare/recheck/kickstart sequence.
+        check(initial: job(42), prepare: {
+            let contender = Process()
+            contender.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+            contender.arguments = ["--contend", lockURL.path]
+            try contender.run()
+            contender.waitUntilExit()
+            precondition(contender.terminationStatus == 0)
+        }, expectedKickstart: ["kickstart", "-k", service])
+        check(initial: job(43), current: true) // The lock is released after success.
         for status in [
             SnapshotAccessRestartStatus(serviceReachable: true, activeLeases: 1, pendingCleanup: 0),
             SnapshotAccessRestartStatus(serviceReachable: true, activeLeases: 0, pendingCleanup: 1),
@@ -63,6 +93,12 @@ private func check(
         ] {
             check(initial: job(42), prepare: { try status.requireIdle() }, expectedFailure: true)
         }
+        check(initial: job(43), current: true) // The lock is released after failure.
+        try FileManager.default.removeItem(at: lockURL)
+        let target = fixtureRoot.appendingPathComponent("foreign-lock")
+        try Data().write(to: target)
+        try FileManager.default.createSymbolicLink(at: lockURL, withDestinationURL: target)
+        check(initial: job(42), expectedFailure: true)
         try SnapshotAccessRestartStatus(serviceReachable: true, activeLeases: 0, pendingCleanup: 0).requireIdle()
         print("OK: SnapshotAccessLaunchAgentTests")
     }

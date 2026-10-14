@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import Darwin
 
 enum SnapshotAccessRuntimeIdentity {
     static func isCurrent(pid: Int32, appPath: String) -> Bool {
@@ -20,6 +21,10 @@ enum SnapshotAccessRuntimeIdentity {
 }
 
 enum SnapshotAccessLaunchAgent {
+    static var registrationLockURL: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("televybackup-snapshot-access-registration.lock")
+    }
+
     struct CommandResult {
         let status: Int32
         let output: String
@@ -35,10 +40,15 @@ enum SnapshotAccessLaunchAgent {
         domain: String,
         plistPath: String,
         executablePath: String,
+        lockURL: URL = registrationLockURL,
         run: ([String]) -> CommandResult,
         isCurrent: (Int32) -> Bool,
         prepareRestart: () throws -> Void
     ) throws {
+        // Keep one inode across attempts: unlinking a lock file lets a second process
+        // acquire a different inode while the first registration is still running.
+        let lock = try acquireRegistrationLock(lockURL)
+        defer { _ = close(lock) }
         let loaded = run(["print", service])
         if loaded.status == 0 {
             try useLoadedService(
@@ -57,6 +67,24 @@ enum SnapshotAccessLaunchAgent {
             raced, service: service, executablePath: executablePath,
             run: run, isCurrent: isCurrent, prepareRestart: prepareRestart
         )
+    }
+
+    private static func acquireRegistrationLock(_ url: URL) throws -> Int32 {
+        let fd = open(url.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        guard fd >= 0 else {
+            throw Failure(message: "Snapshot Access registration lock is unavailable")
+        }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              info.st_uid == getuid(), info.st_nlink == 1, (info.st_mode & 0o777) == 0o600 else {
+            _ = close(fd)
+            throw Failure(message: "Snapshot Access registration lock is not a private regular file")
+        }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            _ = close(fd)
+            throw Failure(message: "Snapshot Access registration is already in progress; retry when it finishes")
+        }
+        return fd
     }
 
     private static func useLoadedService(
