@@ -23,6 +23,16 @@ def immediate(probe, predicate):
 
 
 class UpgradeCleanupTests(unittest.TestCase):
+    def test_dangling_symlink_is_existing_state(self):
+        with tempfile.TemporaryDirectory() as parent:
+            link = Path(parent) / "existing-helper"
+            link.symlink_to(Path(parent) / "missing-target")
+            self.assertFalse(link.exists())
+            self.assertFalse(fixture.fixture_state_absent((link,)))
+            self.assertTrue(link.is_symlink())
+            link.unlink()
+            self.assertTrue(fixture.fixture_state_absent((link,)))
+
     def test_shutdown_failure_preserves_all_created_targets(self):
         for failed_service in (fixture.ACCESS_SERVICE, fixture.SERVICE):
             with self.subTest(service=failed_service), tempfile.TemporaryDirectory() as parent:

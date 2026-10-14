@@ -70,6 +70,12 @@ def service_absent(result):
     return result.returncode != 0 and "could not find service" in (result.stdout + result.stderr).lower()
 
 
+def fixture_state_absent(paths):
+    # A dangling symlink still belongs to a previous installation. Never adopt it
+    # as absent state or delete it as a target created by this fixture.
+    return not any(os.path.lexists(path) for path in paths)
+
+
 def cleanup_fixture(root, mounts, access_registered, installed):
     # Confirm every owned service is gone before removing anything it can still
     # execute or use. A failed shutdown preserves the fixture for private diagnosis.
@@ -238,7 +244,7 @@ def main():
     assert os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "disposable hosted runner required"
     assert sys.platform == "darwin" and os.geteuid() != 0
     assert os.environ.get("GITHUB_REPOSITORY") == REPOSITORY
-    assert not any(path.exists() for path in (BINARY, PLIST, MOUNT_SOCKET, JOURNAL)), \
+    assert fixture_state_absent((BINARY, PLIST, MOUNT_SOCKET, JOURNAL)), \
         "existing helper state: refusing to replace it"
     assert run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False).returncode != 0
     assert run("/bin/launchctl", "print", ACCESS_SERVICE, check=False).returncode != 0, \
@@ -396,7 +402,7 @@ def main():
     assert reproduction is True
     access_absent = service_absent(run("/bin/launchctl", "print", ACCESS_SERVICE, check=False))
     mount_absent = service_absent(run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False))
-    state_absent = not any(path.exists() for path in (BINARY, PLIST, MOUNT_SOCKET, JOURNAL))
+    state_absent = fixture_state_absent((BINARY, PLIST, MOUNT_SOCKET, JOURNAL))
     assert access_absent and mount_absent and state_absent, "synthetic fixture cleanup incomplete"
     report("cleanup", access_service_absent=access_absent,
            mount_service_absent=mount_absent, fixture_state_absent=state_absent)
