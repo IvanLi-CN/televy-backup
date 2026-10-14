@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
+import re
 import shutil
 import socket
 import subprocess
@@ -27,6 +29,8 @@ JOURNAL = Path("/var/db/televybackup/snapshot-mount-helper")
 ACCESS_RELATIVE = Path("Contents/Library/LoginItems/TelevyBackup Snapshot Access.app")
 EXECUTABLE = Path("Contents/MacOS/televybackup-snapshot-access")
 PROTOCOL_ERROR = "unsupported mount helper response version"
+ACCESS_LABEL = "com.ivan.televybackup.snapshot-access"
+ACCESS_SERVICE = f"gui/{os.geteuid()}/{ACCESS_LABEL}"
 
 
 def run(*args, check=True):
@@ -93,14 +97,33 @@ def replace_file(source, destination):
     os.replace(staged, destination)
 
 
-def stop(process):
-    if process is not None and process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+def access_job_state():
+    result = run("/bin/launchctl", "print", ACCESS_SERVICE)
+    match = re.search(r"^\s*pid = (\d+)\s*$", result.stdout, re.MULTILINE)
+    assert match is not None, "synthetic Access LaunchAgent has no running process"
+    return int(match.group(1)), result.stdout
+
+
+def refresh_probe(job_output, root, bundle_version):
+    output_file = root / "synthetic-launchd-state.txt"
+    output_file.write_text(job_output)
+    harness = root / "RefreshProbe.swift"
+    harness.write_text('''import Foundation
+@main struct RefreshProbe {
+    static func main() throws {
+        let output = try String(contentsOfFile: CommandLine.arguments[1], encoding: .utf8)
+        let result = SnapshotAccessLaunchdState.needsRefresh(
+            output: output,
+            expectedBundleIdentifier: "com.ivan.televybackup",
+            expectedBundleVersion: CommandLine.arguments[2])
+        print(result ? "true" : "false")
+    }
+}
+''')
+    executable = root / "refresh-probe"
+    run("swiftc", "macos/TelevyBackupApp/SnapshotAccessLaunchdState.swift", str(harness),
+        "-o", str(executable))
+    return run(str(executable), str(output_file), bundle_version).stdout.strip() == "true"
 
 
 def main():
@@ -111,8 +134,10 @@ def main():
     assert not any(path.exists() for path in (BINARY, PLIST, MOUNT_SOCKET, JOURNAL)), \
         "existing helper state: refusing to replace it"
     assert run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False).returncode != 0
+    assert run("/bin/launchctl", "print", ACCESS_SERVICE, check=False).returncode != 0, \
+        "existing Access registration: refusing to replace it"
     run("sudo", "-n", "true")
-    process = None
+    access_registered = False
     mounts = []
     installed = False
     reproduction = None
@@ -147,22 +172,30 @@ def main():
             (config / "config.toml").write_text("targets = []\n")
             (data / "snapshot-access").mkdir(mode=0o700)
             access_socket = data / "snapshot-access/access.sock"
-            env = os.environ.copy()
-            env.update({"TELEVYBACKUP_CONFIG_DIR": str(config),
-                        "TELEVYBACKUP_DATA_DIR": str(data),
-                        "TELEVYBACKUP_SNAPSHOT_SOCKET": str(access_socket),
-                        "TELEVYBACKUP_SNAPSHOT_JOURNAL": str(data / "journal.sqlite")})
-            env.pop("TELEVYBACKUP_SNAPSHOT_MOUNT_SOCKET", None)
+            env = {"TELEVYBACKUP_CONFIG_DIR": str(config),
+                   "TELEVYBACKUP_DATA_DIR": str(data),
+                   "TELEVYBACKUP_SNAPSHOT_SOCKET": str(access_socket),
+                   "TELEVYBACKUP_SNAPSHOT_JOURNAL": str(data / "journal.sqlite")}
             cli = app / "Contents/MacOS/televybackup-cli"
             access = app / ACCESS_RELATIVE / EXECUTABLE
             installed = True
             run("sudo", "-n", str(cli), "--json", "--config-dir", str(config),
                 "--data-dir", str(data), "snapshot-mount-helper", "install")
             wait_for(lambda: request(MOUNT_SOCKET, old_protocol), lambda reply: reply.get("ok") is True)
-            with (root / "synthetic-access.log").open("w") as log:
-                process = subprocess.Popen([str(access)], env=env, stdout=log, stderr=log)
+            with (root / "synthetic-access.log").open("w"):
+                agent = plistlib.loads((app / "Contents/Library/LaunchAgents" / (ACCESS_LABEL + ".plist")).read_bytes())
+                assert agent["Label"] == ACCESS_LABEL and agent["KeepAlive"] is True
+                agent["Program"] = str(access)
+                agent["EnvironmentVariables"] = env
+                agent["StandardOutPath"] = str(root / "synthetic-access.log")
+                agent["StandardErrorPath"] = str(root / "synthetic-access.log")
+                agent_path = root / "synthetic-access-agent.plist"
+                agent_path.write_bytes(plistlib.dumps(agent))
+                run("/bin/launchctl", "bootstrap", f"gui/{os.geteuid()}", str(agent_path))
+                access_registered = True
                 before = wait_for(lambda: request(access_socket, old_component["protocol_version"]),
                                   lambda reply: reply.get("result", {}).get("mount_helper_reachable") is True)
+                old_pid, _ = access_job_state()
                 report("old-pair", access_reachable=before["ok"], mount_reachable=True)
                 # Replace on-disk binaries at the same canonical paths while preserving
                 # the running Access process, as can happen during an app upgrade.
@@ -171,7 +204,7 @@ def main():
                 replace_file(new_app / "Contents/MacOS/televybackup-snapshot-mount-helper",
                              app / "Contents/MacOS/televybackup-snapshot-mount-helper")
                 replace_file(new_app / ACCESS_RELATIVE / EXECUTABLE, access)
-                assert process.poll() is None, "old Access exited before the upgrade probe"
+                assert access_job_state()[0] == old_pid, "old Access exited before the upgrade probe"
                 installation = json.loads(run("sudo", "-n", str(cli), "--json", "--config-dir",
                                               str(config), "--data-dir", str(data),
                                               "snapshot-mount-helper", "install").stdout)
@@ -199,24 +232,40 @@ def main():
                     assert access_state["mount_helper_reachable"] is False
                     assert PROTOCOL_ERROR in access_state["mount_helper_error"]
                     stable_probes += 1
+                current_pid, job_output = access_job_state()
+                new_info = plistlib.loads((new_app / "Contents/Info.plist").read_bytes())
+                needs_refresh = refresh_probe(job_output, root, str(new_info["CFBundleVersion"]))
+                bootstrap = run("/bin/launchctl", "bootstrap", f"gui/{os.geteuid()}",
+                                str(agent_path), check=False)
+                bootstrap_message = (bootstrap.stdout + bootstrap.stderr).lower()
+                report("launch-agent-registration", production_needs_refresh=needs_refresh,
+                       parent_bundle_version_present="parent bundle version = " in job_output,
+                       bootstrap_exit_code=bootstrap.returncode,
+                       already_loaded_marker="already loaded" in bootstrap_message,
+                       service_exists_marker="service exists" in bootstrap_message,
+                       input_output_error="input/output error" in bootstrap_message,
+                       old_access_still_running=access_job_state()[0] == old_pid)
+                assert needs_refresh is False, "production refresh gate detected the stale process"
+                assert bootstrap.returncode != 0
+                assert "already loaded" not in bootstrap_message and "service exists" not in bootstrap_message
                 report("after-install", cli_ready=installation["helperReady"],
                        direct_mount_protocol=direct["version"],
                        access_component_version=state["access_app_version"],
                        access_path_matches_current_bundle=state.get("access_app_path") == str(app / ACCESS_RELATIVE),
-                       old_access_process_alive=process.poll() is None,
+                       old_access_process_alive=current_pid == old_pid,
                        current_cli_accepts_old_access=outer_status["serviceReachable"],
                        mount_socket_override_present="TELEVYBACKUP_SNAPSHOT_MOUNT_SOCKET" in env,
                        consecutive_matching_probes=stable_probes,
                        mount_reachable=state["mount_helper_reachable"],
                        exact_protocol_error=reproduction)
-                stop(process)
-                process = subprocess.Popen([str(access)], env=env, stdout=log, stderr=log)
+                run("/bin/launchctl", "kickstart", "-k", ACCESS_SERVICE)
                 restarted = wait_for(lambda: request(access_socket, new_component["protocol_version"]),
                                     lambda reply: reply.get("result", {}).get("mount_helper_reachable") is True)
                 report("restart-only", mount_reachable=restarted["result"]["mount_helper_reachable"],
                        mount_error_absent=restarted["result"].get("mount_helper_error") is None)
         finally:
-            stop(process)
+            if access_registered:
+                run("/bin/launchctl", "bootout", ACCESS_SERVICE, check=False)
             if installed:
                 run("sudo", "-n", "/bin/launchctl", "bootout", SERVICE, check=False)
                 # Every target was proved absent before this disposable fixture created it.
