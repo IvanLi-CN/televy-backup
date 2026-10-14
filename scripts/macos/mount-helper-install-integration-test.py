@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Exercise the real bundled installer and both IPC peers on a disposable CI runner."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import plistlib
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+
+LABEL = "com.ivan.televybackup.snapshot-mount-helper"
+SERVICE = "system/" + LABEL
+BINARY = Path("/Library/PrivilegedHelperTools") / LABEL
+PLIST = Path("/Library/LaunchDaemons") / (LABEL + ".plist")
+MOUNT_SOCKET = Path("/private/var/run/televybackup/snapshot-mount-helper.sock")
+JOURNAL = Path("/var/db/televybackup/snapshot-mount-helper")
+
+
+def run(*args, check=True):
+    return subprocess.run(args, check=check, capture_output=True, text=True, timeout=30)
+
+
+def request(path, version):
+    request_id = str(uuid.uuid4())
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+        stream.settimeout(5)
+        stream.connect(str(path))
+        stream.sendall(json.dumps({"version": version, "request_id": request_id, "method": "status"}).encode() + b"\n")
+        reply = json.loads(stream.makefile("rb").readline())
+    assert reply["request_id"] == request_id, "IPC response identity mismatch"
+    return reply
+
+
+def wait_for(probe, assertion):
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        try:
+            result = probe()
+            if assertion(result):
+                return result
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.2)
+    raise AssertionError("helper did not reach the expected IPC state within 20 seconds")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--app", required=True, type=Path)
+    parser.add_argument("--require-readiness", action="store_true")
+    args = parser.parse_args()
+    # Never run this integration test on an owner's machine.
+    assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
+    assert sys.platform == "darwin" and os.geteuid() != 0, "macOS user session required"
+    app = args.app.resolve()
+    cli = app / "Contents/MacOS/televybackup-cli"
+    access = app / "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access"
+    metadata = json.loads(run(str(access), "--component-metadata").stdout)
+    expected_protocol = metadata["mountHelperProtocolVersion"]
+    assert expected_protocol == 4, "unexpected published component protocol"
+    assert not any(path.exists() for path in (BINARY, PLIST, MOUNT_SOCKET, JOURNAL)), "runner already has a mount helper; refusing to replace it"
+    assert run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False).returncode != 0, "runner already has a loaded helper"
+    run("sudo", "-n", "true")
+    process = None
+    root = None
+    with tempfile.TemporaryDirectory(prefix="televy-helper-install-ci-", dir="/private/tmp") as temp:
+        fixture = Path(temp)
+        os.chmod(fixture, 0o755)
+        root = fixture / "root"
+        run("sudo", "-n", "mkdir", str(root))
+        run("sudo", "-n", "chmod", "755", str(root))
+        config = fixture / "config"
+        data = fixture / "data"
+        config.mkdir(mode=0o700)
+        data.mkdir(mode=0o700)
+        (config / "config.toml").write_text("targets = []\n")
+        access_socket = data / "access.sock"
+        # A pre-upgrade service replies with the historical protocol, not a mock
+        # client. The bundled Access executable must surface the exact UI symptom.
+        old_server = fixture / "old_server.py"
+        old_server.write_text('''import json, os, socket
+path = "/private/var/run/televybackup/snapshot-mount-helper.sock"
+os.makedirs(os.path.dirname(path), mode=0o711, exist_ok=True)
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(path)
+os.chmod(path, 0o666)
+server.listen()
+while True:
+    connection, _ = server.accept()
+    with connection:
+        request = json.loads(connection.makefile("rb").readline())
+        response = {"version":1,"request_id":request["request_id"],"ok":True,
+                    "result":{"kind":"status","helper_version":"0.9.8","active_mounts":0,
+                              "blocked_volume_uuids":[],"recovery_leases":[]}}
+        connection.sendall(json.dumps(response).encode() + b"\\n")
+''')
+        seed_plist = fixture / "old.plist"
+        seed_plist.write_bytes(plistlib.dumps({
+            "Label": LABEL,
+            "ProgramArguments": ["/usr/bin/python3", str(old_server)],
+            "RunAtLoad": True,
+            "KeepAlive": True,
+        }))
+        root_plist = root / "old.plist"
+        run("sudo", "-n", "cp", str(seed_plist), str(root_plist))
+        run("sudo", "-n", "chown", "root:wheel", str(root_plist))
+        run("sudo", "-n", "chmod", "644", str(root_plist))
+        try:
+            run("sudo", "-n", "/bin/launchctl", "bootstrap", "system", str(root_plist))
+            wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == 1)
+            env = os.environ.copy()
+            env.update({
+                "TELEVYBACKUP_CONFIG_DIR": str(config),
+                "TELEVYBACKUP_DATA_DIR": str(data),
+                "TELEVYBACKUP_SNAPSHOT_SOCKET": str(access_socket),
+                "TELEVYBACKUP_SNAPSHOT_JOURNAL": str(data / "journal.sqlite"),
+            })
+            with (fixture / "access.log").open("w") as log:
+                process = subprocess.Popen([str(access)], env=env, stdout=log, stderr=log)
+            before = wait_for(lambda: request(access_socket, metadata["protocolVersion"]), lambda reply: reply.get("ok") is True)
+            assert before["result"]["mount_helper_reachable"] is False
+            assert "unsupported mount helper response version" in before["result"]["mount_helper_error"]
+            print("REPRODUCED: published Access reports unsupported mount helper response version for the legacy service", flush=True)
+            # Same privileged CLI entrypoint as the GUI's password-authorized command.
+            installed = run("sudo", "-n", str(cli), "--json", "--config-dir", str(config), "--data-dir", str(data), "snapshot-mount-helper", "install")
+            installation = json.loads(installed.stdout)
+            assert installation["installed"] is True
+            if args.require_readiness:
+                assert installation["helperReady"] is True
+                assert installation["helperVersion"] == "0.5.0"
+            direct = wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == expected_protocol and reply.get("ok") is True)
+            assert direct["result"]["helper_version"] == "0.5.0"
+            after = wait_for(lambda: request(access_socket, metadata["protocolVersion"]), lambda reply: reply.get("result", {}).get("mount_helper_reachable") is True)
+            assert after["result"]["mount_helper_error"] is None
+            assert process.poll() is None, "Access unexpectedly exited during installation"
+            print("PASS: real bundled install replaces the legacy service and the same Access process becomes reachable", flush=True)
+        finally:
+            if process is not None:
+                process.terminate()
+                process.wait(timeout=10)
+            run("sudo", "-n", "/bin/launchctl", "bootout", SERVICE, check=False)
+            # These targets were proved absent before this test created them.
+            run("sudo", "-n", "rm", "-f", str(BINARY), str(PLIST), str(MOUNT_SOCKET), check=False)
+            run("sudo", "-n", "rm", "-rf", str(JOURNAL), str(root), check=False)
+
+
+if __name__ == "__main__":
+    main()

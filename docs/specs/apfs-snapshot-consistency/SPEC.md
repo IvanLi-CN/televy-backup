@@ -178,3 +178,8 @@ The Settings Snapshots screen is captured from the deterministic `SettingsUIDemo
 
 - [Snapshot Access ready](assets/snapshot-access-ready.png)
 - [Snapshot Access requires FDA](assets/snapshot-access-fda-required.png)
+
+Administrator installation failures remain visible after the status refresh. These production notices are rendered in GitHub Actions from synthetic installation and status callbacks:
+
+- [Mount helper installation failure, light](assets/mount-helper-install-error-light.png)
+- [Mount helper installation failure, dark](assets/mount-helper-install-error-dark.png)

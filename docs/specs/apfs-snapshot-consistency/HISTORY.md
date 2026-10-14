@@ -1,5 +1,9 @@
 # History
 
+## Installation feedback
+
+- PR #176 follows the protocol-compatibility release with a hosted regression for the privileged installer and its UI feedback. A status refresh previously overwrote administrator installation failures; installation and Access communication now form one completion result, and the CLI verifies the new service before acknowledging readiness. The reproduced feedback failure and the passing published-artifact installation are distinct evidence; neither establishes the cause of an owner's inaccessible runtime state.
+
 ## Durable Rationale
 
 - APFS local snapshots are used as a read-only filesystem view because live-file scanning cannot guarantee one backup time point.

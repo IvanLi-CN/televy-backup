@@ -2568,7 +2568,17 @@ final class AppModel {
         }
     }
 
-    func installSnapshotMountHelper(completion: @escaping (Bool, String?) -> Void) {
+    func installSnapshotMountHelper(completion: @escaping (Bool, String?, SnapshotControlStatus?) -> Void) {
+        SnapshotMountHelperInstallation.perform(
+            install: authorizeSnapshotMountHelperInstallation,
+            refresh: fetchSnapshotStatus,
+            isReady: { $0.serviceReachable && $0.mountHelperReachable },
+            readinessError: { $0.mountHelperError ?? $0.accessAppError },
+            completion: completion
+        )
+    }
+
+    private func authorizeSnapshotMountHelperInstallation(completion: @escaping (Bool, String?) -> Void) {
         guard let cli = cliPath() else {
             DispatchQueue.main.async { completion(false, "CLI is unavailable in this app bundle") }
             return
@@ -2584,7 +2594,8 @@ final class AppModel {
             let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .prefix(400).description
-            DispatchQueue.main.async { completion(result.status == 0, result.status == 0 ? nil : output) }
+            let failure = output.isEmpty ? "Mount helper installation command failed (status \(result.status))" : output
+            DispatchQueue.main.async { completion(result.status == 0, result.status == 0 ? nil : failure) }
         }
     }
 
