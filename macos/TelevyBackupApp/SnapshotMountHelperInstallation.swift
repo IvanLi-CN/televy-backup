@@ -3,7 +3,7 @@ import Foundation
 enum SnapshotMountHelperInstallation {
     static func perform<Status>(
         install: (@escaping (Bool, String?) -> Void) -> Void,
-        refresh: (@escaping (Status?, String?) -> Void) -> Void,
+        refresh: @escaping (@escaping (Status?, String?) -> Void) -> Void,
         isReady: @escaping (Status) -> Bool,
         completion: @escaping (Bool, String?, Status?) -> Void
     ) {
