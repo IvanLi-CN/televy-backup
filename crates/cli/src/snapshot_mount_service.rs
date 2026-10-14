@@ -5,9 +5,12 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use serde_json::json;
-use televybackup_snapshot_access::{MOUNT_HELPER_INSTALL_PATH, mount_helper};
+use televybackup_snapshot_access::{
+    MOUNT_HELPER_INSTALL_PATH, MOUNT_HELPER_PROTOCOL_VERSION, MountStatusResult, mount_helper,
+};
 
 use super::CliError;
 
@@ -187,6 +190,39 @@ fn reject_if_busy(operation: &str) -> Result<(), CliError> {
     }
 }
 
+fn wait_for_installed_helper(
+    mut probe: impl FnMut() -> Result<MountStatusResult, mount_helper::MountHelperError>,
+    mut pause: impl FnMut(),
+) -> Result<MountStatusResult, CliError> {
+    let mut last_error = String::new();
+    // A status request already has a five-second read timeout. Four probes keep
+    // the complete startup check bounded even if a loaded service never replies.
+    for attempt in 0..4 {
+        match probe() {
+            Ok(status) if status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION => {
+                return Ok(status);
+            }
+            Ok(status) => {
+                last_error = format!(
+                    "expected component {}, received {}",
+                    mount_helper::ROOT_MOUNT_HELPER_VERSION,
+                    status.helper_version
+                );
+            }
+            Err(error) => last_error = error.to_string(),
+        }
+        if attempt < 3 {
+            pause();
+        }
+    }
+    Err(CliError::retryable(
+        "snapshot_mount_helper.readiness_failed",
+        format!(
+            "mount helper was bootstrapped but is not ready (expected protocol {MOUNT_HELPER_PROTOCOL_VERSION}): {last_error}"
+        ),
+    ))
+}
+
 pub fn install(json_output: bool) -> Result<(), CliError> {
     require_root()?;
     reject_if_busy("install or update the snapshot mount helper")?;
@@ -199,10 +235,13 @@ pub fn install(json_output: bool) -> Result<(), CliError> {
     let service = system_service_target();
     let _ = launchctl(&["bootout", &service]);
     launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
+    let status = wait_for_installed_helper(mount_helper::status, || {
+        std::thread::sleep(Duration::from_millis(250));
+    })?;
     if json_output {
         println!(
             "{}",
-            json!({"installed": true, "label": MOUNT_HELPER_LABEL, "binary": MOUNT_HELPER_INSTALL_PATH, "plist": MOUNT_HELPER_PLIST_PATH})
+            json!({"installed": true, "helperReady": true, "helperVersion": status.helper_version, "label": MOUNT_HELPER_LABEL, "binary": MOUNT_HELPER_INSTALL_PATH, "plist": MOUNT_HELPER_PLIST_PATH})
         );
     } else {
         println!("snapshot mount helper installed");
@@ -282,5 +321,56 @@ mod tests {
             system_service_target(),
             "system/com.ivan.televybackup.snapshot-mount-helper"
         );
+    }
+
+    #[test]
+    fn install_waits_for_the_new_component_before_acknowledging_success() {
+        let mut calls = 0;
+        let mut pauses = 0;
+        let result = wait_for_installed_helper(
+            || {
+                calls += 1;
+                if calls == 1 {
+                    return Err(mount_helper::MountHelperError::Unavailable(
+                        "fixture startup".into(),
+                    ));
+                }
+                Ok(MountStatusResult {
+                    helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+                    ..Default::default()
+                })
+            },
+            || pauses += 1,
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls, 2);
+        assert_eq!(pauses, 1);
+    }
+
+    #[test]
+    fn install_cannot_acknowledge_a_stale_or_unresponsive_service() {
+        for stale in [true, false] {
+            let mut calls = 0;
+            let error = wait_for_installed_helper(
+                || {
+                    calls += 1;
+                    if stale {
+                        Ok(MountStatusResult {
+                            helper_version: mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION.into(),
+                            ..Default::default()
+                        })
+                    } else {
+                        Err(mount_helper::MountHelperError::Protocol(
+                            "unsupported mount helper response version".into(),
+                        ))
+                    }
+                },
+                || {},
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "snapshot_mount_helper.readiness_failed");
+            assert!(error.message.contains("expected protocol 4"));
+            assert_eq!(calls, 4);
+        }
     }
 }

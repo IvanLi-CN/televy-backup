@@ -55,12 +55,38 @@ private func testConfirmedReadinessAndRetry() {
     expectInstallation(successes == 1, "completion must be delivered exactly once")
 }
 
+private func testInstallationFailureWinsOverAnExistingHealthyService() {
+    SnapshotMountHelperInstallation.perform(
+        install: { $0(false, "authorization cancelled") },
+        refresh: { $0(FixtureStatus(reachable: true), "fixture refresh warning") },
+        isReady: { $0.reachable },
+        completion: { success, error, _ in
+            expectInstallation(!success, "an existing healthy service cannot turn a cancelled installation into success")
+            expectInstallation(error == "authorization cancelled", "installer failure must take precedence over refresh output")
+        }
+    )
+}
+
+private func testUnavailableStatusPreservesTheVerificationError() {
+    SnapshotMountHelperInstallation.perform(
+        install: { $0(true, nil) },
+        refresh: { $0(nil as FixtureStatus?, "fixture control IPC unavailable") },
+        isReady: { $0.reachable },
+        completion: { success, error, _ in
+            expectInstallation(!success, "an unavailable verification must fail closed")
+            expectInstallation(error?.contains("fixture control IPC unavailable") == true, "the verification failure must be visible")
+        }
+    )
+}
+
 @main
 enum SnapshotMountHelperInstallationTestsMain {
     static func main() {
         testInstallationFailureSurvivesSuccessfulStatusRefresh()
         testExitZeroIsInsufficientWhenTheProtocolStillFails()
         testConfirmedReadinessAndRetry()
+        testInstallationFailureWinsOverAnExistingHealthyService()
+        testUnavailableStatusPreservesTheVerificationError()
         print("OK: SnapshotMountHelperInstallationTests")
     }
 }

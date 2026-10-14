@@ -53,6 +53,7 @@ def wait_for(probe, assertion):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", required=True, type=Path)
+    parser.add_argument("--require-readiness", action="store_true")
     args = parser.parse_args()
     # Never run this integration test on an owner's machine.
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
@@ -128,7 +129,11 @@ while True:
             print("REPRODUCED: published Access reports unsupported mount helper response version for the legacy service", flush=True)
             # Same privileged CLI entrypoint as the GUI's password-authorized command.
             installed = run("sudo", "-n", str(cli), "--json", "--config-dir", str(config), "--data-dir", str(data), "snapshot-mount-helper", "install")
-            assert json.loads(installed.stdout)["installed"] is True
+            installation = json.loads(installed.stdout)
+            assert installation["installed"] is True
+            if args.require_readiness:
+                assert installation["helperReady"] is True
+                assert installation["helperVersion"] == "0.5.0"
             direct = wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == expected_protocol and reply.get("ok") is True)
             assert direct["result"]["helper_version"] == "0.5.0"
             after = wait_for(lambda: request(access_socket, metadata["protocolVersion"]), lambda reply: reply.get("result", {}).get("mount_helper_reachable") is True)

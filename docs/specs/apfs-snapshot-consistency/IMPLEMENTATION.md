@@ -29,4 +29,6 @@
 - `macos/TelevyBackupApp/TelevyBackupApp.swift`: ad-hoc `launchctl` registration, optional
   `SMAppService` registration for signed builds, and migration commit/rollback orchestration.
 - `crates/cli/src/snapshot_mount_service.rs`: explicit administrator-authorized mount-helper
-  LaunchDaemon installation and status contract.
+  LaunchDaemon installation and status contract. Installation acknowledges success only after a bounded IPC probe confirms the current mount-helper component and protocol; bootstrap alone is insufficient.
+- `macos/TelevyBackupApp/SnapshotMountHelperInstallation.swift`: coordinates administrator installation and the subsequent Access status check, preserves installation errors across refresh, and rejects an exit-zero installation whose communication check still fails.
+- `scripts/macos/mount-helper-install-integration-test.py`: dispatch-only GitHub-hosted macOS regression using real published helper binaries and a synthetic historical service, empty configuration, and isolated journals. It reproduces the protocol error before installation and checks communication after replacement without snapshots or TCC changes.

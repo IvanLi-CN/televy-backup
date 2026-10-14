@@ -2573,6 +2573,7 @@ final class AppModel {
             install: authorizeSnapshotMountHelperInstallation,
             refresh: fetchSnapshotStatus,
             isReady: { $0.serviceReachable && $0.mountHelperReachable },
+            readinessError: { $0.mountHelperError ?? $0.accessAppError },
             completion: completion
         )
     }
@@ -2593,7 +2594,8 @@ final class AppModel {
             let output = (result.stderr.isEmpty ? result.stdout : result.stderr)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .prefix(400).description
-            DispatchQueue.main.async { completion(result.status == 0, result.status == 0 ? nil : output) }
+            let failure = output.isEmpty ? "Mount helper installation command failed (status \(result.status))" : output
+            DispatchQueue.main.async { completion(result.status == 0, result.status == 0 ? nil : failure) }
         }
     }
 

@@ -218,6 +218,7 @@ jobs:
           trap 'hdiutil detach "${fixture}/mount" >/dev/null' EXIT
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/mount/TelevyBackup.app"
+          cp -R "${fixture}/mount/TelevyBackup.app" "${fixture}/TelevyBackup.app"
 
       - name: Mount helper installation feedback regression
         run: |
@@ -228,6 +229,21 @@ jobs:
 
       - name: Snapshot Access failure-injection tests
         run: cargo test --locked -p televybackup-snapshot-access
+
+      - name: Candidate mount helper installer regression
+        run: |
+          set -euo pipefail
+          cargo test --locked -p televybackup snapshot_mount_service::tests
+          cargo build --locked -p televybackup -p televybackup-snapshot-access \
+            --bin televybackup --bin televybackup-snapshot-mount-helper
+          fixture="${RUNNER_TEMP}/mount-helper-install-release"
+          cp target/debug/televybackup "${fixture}/TelevyBackup.app/Contents/MacOS/televybackup-cli"
+          cp target/debug/televybackup-snapshot-mount-helper \
+            "${fixture}/TelevyBackup.app/Contents/MacOS/televybackup-snapshot-mount-helper"
+          codesign --force --sign - "${fixture}/TelevyBackup.app/Contents/MacOS/televybackup-cli"
+          codesign --force --sign - "${fixture}/TelevyBackup.app/Contents/MacOS/televybackup-snapshot-mount-helper"
+          python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/TelevyBackup.app" --require-readiness
 
       - name: Preserve strict Snapshot Access error code
         run: cargo test --locked -p televy_backup_core strict_snapshot_read_errors_keep_the_snapshot_access_code
