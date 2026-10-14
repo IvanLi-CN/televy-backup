@@ -28,6 +28,7 @@ struct RunLogSummary: Identifiable {
     let chunksChecked: Int64?
     let ignoreRuleFiles: Int64?
     let ignoreInvalidRules: Int64?
+    var errorReason: String? = nil
 }
 
 enum SnapshotRunDetailSelection {
@@ -1368,6 +1369,20 @@ private struct TargetDetailView: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    if status == .failed || (status == .idle && latestHistoricalRun?.status == "interrupted") {
+                        let matchingRun = target.lastRun.flatMap { terminal in
+                            runs.first { terminal.runId != nil && $0.runId == terminal.runId }
+                        } ?? (target.lastRun == nil ? latestHistoricalRun : nil)
+                        let code = target.lastRun?.errorCode ?? matchingRun?.errorCode
+                        let reason = target.lastRun?.errorReason ?? matchingRun?.errorReason
+                        BackupFailureNotice(
+                            issue: BackupFailurePresentation(code: code, reason: reason),
+                            code: code,
+                            openSettings: { model.openSettingsWindow() },
+                            openDiagnostics: { tab = .diagnostics }
+                        )
+                    }
+
                     if status == .offline {
                         Text("No recent updates.")
                             .font(.system(size: 12, weight: .semibold))
@@ -1901,7 +1916,7 @@ private struct StatusBadge: View {
     }
 }
 
-private struct RunLogRow: View {
+struct RunLogRow: View {
     let run: RunLogSummary
     var onOpen: ((RunLogSummary) -> Void)? = nil
 
@@ -1912,13 +1927,14 @@ private struct RunLogRow: View {
                     Text(run.kind.uppercased())
                         .font(.system(size: 11, weight: .heavy))
                     let statusText = run.status ?? "—"
-                    Text(statusText)
+                    Text(statusText.capitalized)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle({
                             switch run.status {
                             case "succeeded": return Color.green
                             case "failed": return Color.red
                             case "running": return Color.blue
+                            case "interrupted": return Color.orange
                             default: return Color.secondary
                             }
                         }())
@@ -1948,7 +1964,8 @@ private struct RunLogRow: View {
                 } label: {
                     Image(systemName: "doc.text")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
                 .help("Reveal log file in Finder")
             }
         }
@@ -1965,7 +1982,7 @@ private struct RunLogRow: View {
             parts.append(formatDuration(d))
         }
         if let e = r.errorCode, !e.isEmpty {
-            parts.append("Error \(e)")
+            parts.append(BackupFailurePresentation(code: e, reason: r.errorReason).title)
         }
         if let b = r.bytesUploaded, b > 0 {
             parts.append("Uploaded \(formatBytes(b))")

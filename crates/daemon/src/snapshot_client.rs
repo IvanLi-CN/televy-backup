@@ -39,6 +39,42 @@ pub enum SnapshotClientError {
     Json(#[from] serde_json::Error),
 }
 
+impl SnapshotClientError {
+    /// A bounded, privacy-safe hint for UI recovery. Keep the public failure code unchanged.
+    pub fn failure_reason(&self) -> Option<&'static str> {
+        let message = match self {
+            Self::Unavailable(_) => return Some("service_unavailable"),
+            Self::Timeout { .. } => return Some("request_timed_out"),
+            Self::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Some("permission_denied");
+            }
+            Self::Rejected { message, .. } | Self::Protocol(message) => message.as_str(),
+            _ => return None,
+        };
+        let message = message.to_ascii_lowercase();
+        if message.contains("unsupported mount helper response version")
+            || message.contains("unsupported access app response version")
+            || message.contains("incompatible snapshot access component version")
+            || message.contains("incompatible mount helper")
+        {
+            Some("protocol_mismatch")
+        } else if message.contains("permission denied")
+            || message.contains("operation not permitted")
+            || message.contains("full disk access")
+        {
+            Some("permission_denied")
+        } else if message.contains("mount helper unavailable") {
+            Some("mount_helper_unavailable")
+        } else if message.contains("free space") || message.contains("no space left") {
+            Some("insufficient_space")
+        } else if message.contains("cleanup") {
+            Some("cleanup_pending")
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SnapshotClient {
     socket_path: PathBuf,
@@ -558,6 +594,38 @@ fn decode_response(line: &str, request_id: &str) -> Result<Response, SnapshotCli
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_failure_reasons_are_bounded_and_do_not_expose_diagnostics() {
+        for (message, reason) in [
+            (
+                "snapshot mount helper reservation failed: mount helper protocol error: unsupported mount helper response version",
+                Some("protocol_mismatch"),
+            ),
+            ("permission denied (os error 13)", Some("permission_denied")),
+            (
+                "mount helper unavailable: socket not found",
+                Some("mount_helper_unavailable"),
+            ),
+            ("insufficient free space", Some("insufficient_space")),
+            ("previous lease cleanup is pending", Some("cleanup_pending")),
+            ("unclassified fixture diagnostic", None),
+        ] {
+            let error = SnapshotClientError::Rejected {
+                code: "invalid_request".into(),
+                message: message.into(),
+            };
+            assert_eq!(error.failure_reason(), reason);
+        }
+        assert_eq!(
+            SnapshotClientError::Unavailable("private socket path".into()).failure_reason(),
+            Some("service_unavailable")
+        );
+        assert_eq!(
+            SnapshotClientError::Timeout { operation: "read" }.failure_reason(),
+            Some("request_timed_out")
+        );
+    }
 
     #[test]
     fn brokered_source_reports_snapshot_access_failures_without_invalidating_config() {

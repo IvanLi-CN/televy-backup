@@ -378,6 +378,45 @@ fn backup_task_cancelled(
     }
 }
 
+fn finish_snapshot_setup_failure(
+    status_state: &Arc<Mutex<StatusRuntimeState>>,
+    target_id: &str,
+    run_id: &str,
+    duration_seconds: f64,
+    error_code: &str,
+    error_reason: Option<&str>,
+) {
+    // History consumes run.finish; updating only the live status leaves a running row forever.
+    tracing::error!(
+        event = "run.finish",
+        kind = "backup",
+        run_id,
+        task_id = run_id,
+        target_id,
+        status = "failed",
+        duration_seconds,
+        error_code,
+        error_reason,
+        "run.finish"
+    );
+    if let Ok(mut status) = status_state.lock() {
+        status.mark_run_finish_failure(
+            target_id,
+            Some(run_id),
+            duration_seconds,
+            error_code.into(),
+        );
+        if let Some(summary) = status
+            .targets
+            .get_mut(target_id)
+            .and_then(|target| target.last_run.as_mut())
+            .filter(|summary| summary.run_id.as_deref() == Some(run_id))
+        {
+            summary.error_reason = error_reason.map(str::to_string);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct TargetRuntime {
     target_id: String,
@@ -855,6 +894,7 @@ impl StatusRuntimeState {
             duration_seconds,
             status: Some(state.to_string()),
             error_code: terminal.error_code,
+            error_reason: None,
             files_indexed: None,
             bytes_uploaded,
             bytes_deduped,
@@ -944,6 +984,7 @@ impl StatusRuntimeState {
             duration_seconds: Some(duration_seconds),
             status: Some("succeeded".to_string()),
             error_code: None,
+            error_reason: None,
             files_indexed: Some(files_indexed),
             bytes_uploaded: Some(bytes_uploaded),
             bytes_deduped: Some(bytes_deduped),
@@ -987,6 +1028,7 @@ impl StatusRuntimeState {
             duration_seconds: Some(duration_seconds),
             status: Some("failed".to_string()),
             error_code: Some(error_code),
+            error_reason: None,
             files_indexed: None,
             bytes_uploaded: None,
             bytes_deduped: None,
@@ -1029,6 +1071,7 @@ impl StatusRuntimeState {
             duration_seconds: Some(duration_seconds),
             status: Some("cancelled".to_string()),
             error_code: None,
+            error_reason: None,
             files_indexed: None,
             bytes_uploaded: None,
             bytes_deduped: None,
@@ -1612,6 +1655,72 @@ mod tests {
             },
         );
         st
+    }
+
+    #[test]
+    fn snapshot_setup_failures_finish_both_status_and_run_history() {
+        let root = tempfile::tempdir().unwrap();
+        for (index, code) in [
+            "snapshot.acquire_failed",
+            "snapshot.probe_failed",
+            "snapshot.source_unavailable",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let run_id = format!("snapshot_setup_{index}");
+            let status = Arc::new(Mutex::new(state_one_target()));
+            assert!(
+                status
+                    .lock()
+                    .unwrap()
+                    .try_mark_backup_run_start("t1", "connecting", &run_id)
+            );
+            let log =
+                televy_backup_core::run_log::start_run_log("backup", &run_id, root.path(), "warn")
+                    .unwrap();
+            tracing::warn!(
+                event = "run.start",
+                run_id,
+                target_id = "t1",
+                kind = "backup"
+            );
+            finish_snapshot_setup_failure(
+                &status,
+                "t1",
+                &run_id,
+                23.0,
+                code,
+                Some("protocol_mismatch"),
+            );
+            let log_path = log.path().to_path_buf();
+            drop(log);
+            let records: Vec<serde_json::Value> = std::fs::read_to_string(log_path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let terminal: Vec<_> = records
+                .iter()
+                .filter(|row| row["fields"]["event"] == "run.finish")
+                .collect();
+            assert_eq!(terminal.len(), 1);
+            let fields = &terminal[0]["fields"];
+            assert_eq!(fields["run_id"], run_id);
+            assert_eq!(fields["target_id"], "t1");
+            assert_eq!(fields["status"], "failed");
+            assert_eq!(fields["error_code"], code);
+            assert_eq!(fields["error_reason"], "protocol_mismatch");
+            assert_eq!(fields["duration_seconds"], 23.0);
+            let state = status.lock().unwrap();
+            let target = &state.targets["t1"];
+            assert_eq!(target.state, "failed");
+            assert!(target.active_task.is_none());
+            let summary = target.last_run.as_ref().unwrap();
+            assert_eq!(summary.run_id.as_deref(), Some(run_id.as_str()));
+            assert_eq!(summary.error_code.as_deref(), Some(code));
+            assert_eq!(summary.error_reason.as_deref(), Some("protocol_mismatch"));
+        }
     }
 
     fn progress(bytes_uploaded: u64) -> TaskProgress {
@@ -3130,12 +3239,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         source_path = %target.source_path,
                         "snapshot.waiting_for_source_volume"
                     );
-                    backup_task_failed(
+                    finish_snapshot_setup_failure(
                         &status_state,
                         &target.id,
-                        Some(&task_id),
+                        &task_id,
                         started.elapsed().as_secs_f64(),
                         "snapshot.source_unavailable",
+                        None,
                     );
                     if is_queued_target {
                         complete_backup_queue_target(&backup_queue, &status_state, &target.id);
@@ -3165,17 +3275,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(error) => {
                                 tracing::error!(
                                     event = "snapshot.acquire_failed",
+                                    error_reason = error.failure_reason(),
                                     target_id = %target.id,
                                     source_path = %target.source_path,
                                     error = %error,
                                     "snapshot.acquire_failed"
                                 );
-                                backup_task_failed(
+                                finish_snapshot_setup_failure(
                                     &status_state,
                                     &target.id,
-                                    Some(&task_id),
+                                    &task_id,
                                     started.elapsed().as_secs_f64(),
                                     "snapshot.acquire_failed",
+                                    error.failure_reason(),
                                 );
                                 if is_queued_target {
                                     complete_backup_queue_target(
@@ -3200,17 +3312,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(error) => {
                         tracing::error!(
                             event = "snapshot.probe_failed",
+                            error_reason = error.failure_reason(),
                             target_id = %target.id,
                             source_path = %target.source_path,
                             error = %error,
                             "snapshot.probe_failed"
                         );
-                        backup_task_failed(
+                        finish_snapshot_setup_failure(
                             &status_state,
                             &target.id,
-                            Some(&task_id),
+                            &task_id,
                             started.elapsed().as_secs_f64(),
                             "snapshot.probe_failed",
+                            error.failure_reason(),
                         );
                         if is_queued_target {
                             complete_backup_queue_target(&backup_queue, &status_state, &target.id);

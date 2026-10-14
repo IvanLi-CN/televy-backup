@@ -1,0 +1,62 @@
+import AppKit
+import Foundation
+import SwiftUI
+
+/// Render the production failure notice and history rows from fixed synthetic data.
+@main
+enum BackupFailureHistoryPreview {
+    @MainActor
+    static func main() throws {
+        guard CommandLine.arguments.count == 2 else { exit(2) }
+        let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let failed = run(id: "fixture-failed", status: "failed", code: "snapshot.acquire_failed", reason: "protocol_mismatch")
+        let interrupted = run(id: "fixture-interrupted", status: "interrupted", code: "task.interrupted", reason: nil)
+        for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
+            let content = VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("Photos").font(.system(size: 18, weight: .bold))
+                    Text("Failed").font(.system(size: 12, weight: .semibold)).foregroundStyle(.red)
+                }
+                BackupFailureNotice(
+                    issue: BackupFailurePresentation(code: failed.errorCode, reason: failed.errorReason),
+                    code: failed.errorCode,
+                    openSettings: {},
+                    openDiagnostics: {}
+                )
+                Divider()
+                Text("History").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                RunLogRow(run: failed)
+                Divider()
+                RunLogRow(run: interrupted)
+            }
+            .padding(24)
+            .frame(width: 880, alignment: .leading)
+            .background(scheme == .dark ? Color(red: 0.16, green: 0.17, blue: 0.19) : Color.white)
+            .environment(\.colorScheme, scheme)
+            .environment(\.locale, Locale(identifier: "en_US"))
+            .environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
+            let renderer = ImageRenderer(content: content)
+            renderer.scale = 2
+            guard let image = renderer.nsImage,
+                  let tiff = image.tiffRepresentation,
+                  let bitmap = NSBitmapImageRep(data: tiff),
+                  let png = bitmap.representation(using: .png, properties: [:])
+            else { exit(1) }
+            try png.write(to: output.appendingPathComponent("backup-failure-\(name).png"))
+        }
+    }
+
+    private static func run(id: String, status: String, code: String, reason: String?) -> RunLogSummary {
+        RunLogSummary(
+            id: id, runId: id, kind: "backup", targetId: "fixture-target", endpointId: "fixture-endpoint",
+            sourcePath: nil, snapshotId: nil, status: status, errorCode: code, durationSeconds: 23,
+            startedAt: Date(timeIntervalSince1970: 1_767_225_600),
+            finishedAt: status == "failed" ? Date(timeIntervalSince1970: 1_767_225_623) : nil,
+            logURL: URL(fileURLWithPath: "/tmp/fixture-run.ndjson"),
+            bytesUploaded: nil, bytesDeduped: nil, bytesWritten: nil, bytesChecked: nil,
+            filesRestored: nil, chunksDownloaded: nil, chunksChecked: nil,
+            ignoreRuleFiles: nil, ignoreInvalidRules: nil, errorReason: reason
+        )
+    }
+}

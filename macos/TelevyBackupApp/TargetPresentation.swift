@@ -298,6 +298,7 @@ enum TargetPresentation {
         return runSummary(
             status: r.status,
             errorCode: r.errorCode,
+            errorReason: r.errorReason,
             finishedAt: r.finishedAt.flatMap(parseIsoDate),
             bytesUploaded: r.bytesUploaded,
             bytesDeduped: r.bytesDeduped,
@@ -310,6 +311,7 @@ enum TargetPresentation {
         runSummary(
             status: run.status,
             errorCode: run.errorCode,
+            errorReason: run.errorReason,
             finishedAt: run.finishedAt,
             bytesUploaded: run.bytesUploaded,
             bytesDeduped: run.bytesDeduped,
@@ -324,6 +326,7 @@ enum TargetPresentation {
         return runCompact(
             status: r.status,
             errorCode: r.errorCode,
+            errorReason: r.errorReason,
             finishedAt: r.finishedAt.flatMap(parseIsoDate),
             bytesUploaded: r.bytesUploaded,
             durationSeconds: r.durationSeconds,
@@ -335,6 +338,7 @@ enum TargetPresentation {
         runCompact(
             status: run.status,
             errorCode: run.errorCode,
+            errorReason: run.errorReason,
             finishedAt: run.finishedAt,
             bytesUploaded: run.bytesUploaded,
             durationSeconds: run.durationSeconds,
@@ -360,6 +364,7 @@ enum TargetPresentation {
     private static func runSummary(
         status: String?,
         errorCode: String?,
+        errorReason: String?,
         finishedAt: Date?,
         bytesUploaded: Int64?,
         bytesDeduped: Int64?,
@@ -372,7 +377,7 @@ enum TargetPresentation {
         var parts: [String] = []
         if status == "failed" {
             if let errorCode, !errorCode.isEmpty {
-                parts.append("Last run: Failed (\(errorCode))")
+                parts.append("Last run: Failed · \(BackupFailurePresentation(code: errorCode, reason: errorReason).title)")
             } else {
                 parts.append("Last run: Failed")
             }
@@ -407,6 +412,7 @@ enum TargetPresentation {
     private static func runCompact(
         status: String?,
         errorCode: String?,
+        errorReason: String?,
         finishedAt: Date?,
         bytesUploaded: Int64?,
         durationSeconds: Double?,
@@ -415,7 +421,7 @@ enum TargetPresentation {
         let status = normalizedStatus(status)
         if status == "failed" {
             if let errorCode, !errorCode.isEmpty {
-                return "Last run: Failed (\(errorCode))"
+                return "Last run: Failed · \(BackupFailurePresentation(code: errorCode, reason: errorReason).title)"
             }
             return "Last run: Failed"
         }

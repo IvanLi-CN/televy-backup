@@ -70,6 +70,10 @@ None
 - 执行记录（摘要）：
   - 从 per-run NDJSON 日志提取每次 run 的元信息（kind/run_id/startedAt/finishedAt/status/duration/error_code/bytes/files…），并按 `target_id` 分组展示；
   - 旧日志若缺少 `target_id`，归类到 `Unknown target`（并不阻断主流程）。
+  - 快照准备失败必须同时结束实时状态和历史记录，写入包含相同 `run_id/target_id`、`failed`、原错误码和耗时的 `run.finish`，不得永久显示 `running`。
+  - 旧日志缺少 `run.finish` 时，仅可用同一 Target、同一运行（若事件带运行身份）的明确快照准备失败事件恢复 `failed`；显式结束事件优先。无结束事件且运行日志写入锁已释放的记录显示 `interrupted`，不得推测成功或准确结束时间。
+  - 运行日志的活跃写入锁未释放时保持 `running`；非阻塞探测无法确认写入者退出时不得推测中断。发现写入者退出后必须再次读取日志末尾，避免遗漏同时发生的结束事件。
+  - 失败提示展示易理解的原因、恢复建议和设置/诊断入口；错误码作为次要排障信息保留。可选 `errorReason` 仅包含固定诊断类别，缺失时使用通用提示，不展示原始错误消息或额外敏感路径。
 - 菜单栏浮窗：
   - 右上角设置按钮替换为“进入主界面”按钮（打开并激活主界面窗口）。
 - Settings：

@@ -34,3 +34,11 @@
 - Terminal navigation rejects run-start-only logs, and external task completion carries the known snapshot identity through status IPC.
 - Daemon lifecycle helpers keep the explicit run and snapshot identity parameters at each terminal transition, including lint-safe wrappers for the longer status-update calls.
 - Deterministic `ui_demo` capture remains the visual evidence source; live application windows are not captured.
+
+## Failure and History Coverage
+
+- Snapshot setup failures use one terminal recorder for the live status and per-run log; the original failure codes remain intact.
+- The parser recognizes target-scoped legacy snapshot setup failures, probes the writer lock without blocking, and re-reads the tail before marking an abandoned log interrupted.
+- Main-window summaries and history rows share plain-language failure descriptions. Target details offer Settings and Diagnostics actions.
+- `BackupFailureHistoryTests` covers legacy recovery, explicit-terminal precedence, active-writer protection, interrupted rows, bounded diagnosis, and old status decoding. The daemon regression verifies one terminal event with matching status identity, code, reason, and duration.
+- GitHub-hosted macOS CI uses SwiftUI `ImageRenderer` to render light and dark production failure-notice and history-row components from synthetic data with `BackupFailureHistoryPreview`; it does not capture an installed app or use backup data, FDA, or a privileged helper.
