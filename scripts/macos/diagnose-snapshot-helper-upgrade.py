@@ -130,10 +130,14 @@ def main():
             old_protocol = old_manifest["components"]["snapshot_mount_helper"]["protocol_version"]
             new_protocol = new_component["mount_helper_protocol_version"]
             assert old_protocol == 1 and new_protocol == 4
+            new_metadata = json.loads(run(str(new_mount / "TelevyBackup.app" / ACCESS_RELATIVE / EXECUTABLE),
+                                          "--component-metadata").stdout)
+            assert new_metadata["mountHelperProtocolVersion"] == new_protocol
             report("published-identities", old_tag=OLD_TAG, new_tag=NEW_TAG,
                    old_mount_protocol=old_protocol, new_mount_protocol=new_protocol,
                    old_access_version=old_component["component_version"],
                    new_access_version=new_component["component_version"],
+                   actual_new_access_mount_protocol=new_metadata["mountHelperProtocolVersion"],
                    access_binary_changed=old_component["sha256"] != new_component["sha256"])
             app = root / "TelevyBackup.app"
             shutil.copytree(old_mount / "TelevyBackup.app", app, symlinks=True)
@@ -141,7 +145,8 @@ def main():
             config.mkdir(mode=0o700)
             data.mkdir(mode=0o700)
             (config / "config.toml").write_text("targets = []\n")
-            access_socket = data / "access.sock"
+            (data / "snapshot-access").mkdir(mode=0o700)
+            access_socket = data / "snapshot-access/access.sock"
             env = os.environ.copy()
             env.update({"TELEVYBACKUP_CONFIG_DIR": str(config),
                         "TELEVYBACKUP_DATA_DIR": str(data),
@@ -179,11 +184,29 @@ def main():
                 state = after["result"]
                 reproduction = state["mount_helper_reachable"] is False and \
                     PROTOCOL_ERROR in (state.get("mount_helper_error") or "")
+                outer_status = json.loads(run(str(cli), "--json", "--config-dir", str(config),
+                                             "--data-dir", str(data), "snapshot-access", "status").stdout)
+                assert outer_status["serviceReachable"] is True
+                assert outer_status["accessAppVersion"] == new_component["component_version"]
+                assert outer_status["accessAppPath"] == str(app / ACCESS_RELATIVE)
+                assert outer_status["mountHelperReachable"] is False
+                assert PROTOCOL_ERROR in outer_status["mountHelperError"]
+                stable_probes = 0
+                for _ in range(3):
+                    mount_state = request(MOUNT_SOCKET, new_protocol)
+                    access_state = request(access_socket, new_component["protocol_version"])["result"]
+                    assert mount_state["ok"] is True and mount_state["version"] == new_protocol
+                    assert access_state["mount_helper_reachable"] is False
+                    assert PROTOCOL_ERROR in access_state["mount_helper_error"]
+                    stable_probes += 1
                 report("after-install", cli_ready=installation["helperReady"],
                        direct_mount_protocol=direct["version"],
                        access_component_version=state["access_app_version"],
                        access_path_matches_current_bundle=state.get("access_app_path") == str(app / ACCESS_RELATIVE),
                        old_access_process_alive=process.poll() is None,
+                       current_cli_accepts_old_access=outer_status["serviceReachable"],
+                       mount_socket_override_present="TELEVYBACKUP_SNAPSHOT_MOUNT_SOCKET" in env,
+                       consecutive_matching_probes=stable_probes,
                        mount_reachable=state["mount_helper_reachable"],
                        exact_protocol_error=reproduction)
                 stop(process)
