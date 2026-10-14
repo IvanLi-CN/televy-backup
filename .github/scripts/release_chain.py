@@ -262,14 +262,27 @@ def find_prepared(commit: str, base: str | None = None) -> dict[str, str]:
     raise ReleaseChainError("no valid preparation commit found in the current PR ancestry")
 
 
-def verify_merged(commit: str) -> dict[str, str]:
+def verify_merged(commit: str, pr_head: str | None = None) -> dict[str, str]:
     merge_sha = git("rev-parse", f"{commit}^{{commit}}")
     if git("rev-parse", "--is-shallow-repository") == "true":
         raise ReleaseChainError("full repository history is required to verify a product merge")
     parents = git("show", "-s", "--format=%P", merge_sha).split()
-    if len(parents) != 2:
+    if len(parents) == 2:
+        merge_parent, merged_head_sha = parents
+        if pr_head:
+            requested_head = canonical_sha(pr_head, "PR head SHA")
+            if requested_head != merged_head_sha:
+                return {"prepared": "false", "reason": "pr_head_mismatch"}
+        pr_head_sha = merged_head_sha
+    elif len(parents) == 1:
+        if not pr_head:
+            return {"prepared": "false", "reason": "squash_merge_head_required"}
+        merge_parent = parents[0]
+        pr_head_sha = canonical_sha(pr_head, "PR head SHA")
+        if not is_ancestor(merge_parent, pr_head_sha):
+            return {"prepared": "false", "reason": "squash_head_not_based_on_merge_parent"}
+    else:
         return {"prepared": "false", "reason": "not_merge_commit"}
-    merge_parent, pr_head_sha = parents
     if subprocess.run(["git", "diff", "--quiet", merge_sha, pr_head_sha], cwd=ROOT).returncode != 0:
         return {"prepared": "false", "reason": "merge_tree_differs_from_preparation"}
     try:
@@ -560,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
     found.add_argument("--base")
     merged = sub.add_parser("verify-merged")
     merged.add_argument("--commit", default="HEAD")
+    merged.add_argument("--pr-head")
     tag = sub.add_parser("verify-tag")
     tag.add_argument("--version", required=True)
     tag.add_argument("--expected-sha")
@@ -594,7 +608,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "find-prepared":
             print(json.dumps(find_prepared(args.commit, args.base), sort_keys=True))
         elif args.command == "verify-merged":
-            print(json.dumps(verify_merged(args.commit), sort_keys=True))
+            print(json.dumps(verify_merged(args.commit, args.pr_head), sort_keys=True))
         elif args.command == "verify-tag":
             print(json.dumps(verify_tag(args.version, args.expected_sha, args.allow_existing), sort_keys=True))
         elif args.command == "verify-release-sequence":

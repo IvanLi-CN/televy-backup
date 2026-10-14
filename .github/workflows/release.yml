@@ -119,7 +119,24 @@ jobs:
           # Keep the trusted main checkout for release policy scripts. TARGET_INPUT
           # is the historical product identity and remains the package ref through
           # the resolved outputs; recovery inputs may predate current policy helpers.
-          prepared_json="$(python3 .github/scripts/release_chain.py verify-merged --commit "${TARGET_INPUT}")"
+          merged_prs_json="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TARGET_INPUT}/pulls?per_page=100")"
+          pull_request="$(printf '%s' "${merged_prs_json}" | python3 -c 'import json,sys; merge=sys.argv[1]; rows=json.load(sys.stdin); matches=[row.get("number") for row in rows if row.get("merge_commit_sha") == merge and row.get("number") is not None]; print(matches[0] if len(matches) == 1 else "")' "${TARGET_INPUT}")"
+          if [[ -z "${pull_request}" ]]; then
+            prepared_json='{"prepared":"false","reason":"merged_pr_not_found"}'
+          else
+            [[ "${pull_request}" =~ ^[0-9]+$ ]]
+            pull_request_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pull_request}")"
+            test "$(printf '%s' "${pull_request_json}" | jq -r '.state // empty')" = closed
+            test "$(printf '%s' "${pull_request_json}" | jq -r '.merged_at // empty')" != ""
+            test "$(printf '%s' "${pull_request_json}" | jq -r '.base.ref // empty')" = main
+            test "$(printf '%s' "${pull_request_json}" | jq -r '.base.repo.full_name // empty')" = "${GITHUB_REPOSITORY}"
+            test "$(printf '%s' "${pull_request_json}" | jq -r '.merge_commit_sha // empty')" = "${TARGET_INPUT}"
+            pull_request_head_sha="$(printf '%s' "${pull_request_json}" | jq -r '.head.sha // empty')"
+            [[ "${pull_request_head_sha}" =~ ^[0-9a-fA-F]{40}$ ]]
+            git fetch --force origin "refs/pull/${pull_request}/head:refs/remotes/origin/release-pr-${pull_request}"
+            test "$(git rev-parse "refs/remotes/origin/release-pr-${pull_request}^{commit}")" = "${pull_request_head_sha}"
+            prepared_json="$(python3 .github/scripts/release_chain.py verify-merged --commit "${TARGET_INPUT}" --pr-head "${pull_request_head_sha}")"
+          fi
           prepared="$(printf '%s' "${prepared_json}" | jq -r .prepared)"
           if [[ "${prepared}" != true ]]; then
             {
@@ -147,11 +164,6 @@ jobs:
           boundary_token="$(printf '%s' "${prepared_json}" | jq -r .boundaryToken)"
           release_type="$(printf '%s' "${prepared_json}" | jq -r .type)"
           covered_merge_sha="$(printf '%s' "${prepared_json}" | jq -r .coveredMergeSha)"
-          pull_request="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${merge_sha}/pulls?per_page=100" | python3 -c 'import json,sys; merge=sys.argv[1]; rows=json.load(sys.stdin); matches=[row.get("number") for row in rows if row.get("merge_commit_sha") == merge and row.get("number") is not None]; print(matches[0] if len(matches) == 1 else "")' "${merge_sha}")"
-          test -n "${pull_request}"
-          pull_request_json="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pull_request}")"
-          test "$(printf '%s' "${pull_request_json}" | jq -r '.merge_commit_sha // empty')" = "${merge_sha}"
-          pull_request_head_sha="$(printf '%s' "${pull_request_json}" | jq -r '.head.sha')"
           git merge-base --is-ancestor "${preparation_sha}" "${pull_request_head_sha}"
           labels_json="$(printf '%s' "${pull_request_json}" | jq -c '[.labels[].name]')"
           components_json="$(printf '%s' "${labels_json}" | jq -c '[.[] | select(startswith("component:"))]')"
