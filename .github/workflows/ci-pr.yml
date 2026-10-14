@@ -204,6 +204,21 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
+      - name: Reproduce published mount helper installation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fixture="${RUNNER_TEMP}/mount-helper-install-release"
+          mkdir -p "${fixture}/download" "${fixture}/mount"
+          gh release download v0.9.9-rc.118 --repo "${GITHUB_REPOSITORY}" \
+            --pattern TelevyBackup-0.9.9-rc.118.dmg --dir "${fixture}/download"
+          hdiutil attach -readonly -nobrowse -mountpoint "${fixture}/mount" \
+            "${fixture}/download/TelevyBackup-0.9.9-rc.118.dmg"
+          trap 'hdiutil detach "${fixture}/mount" >/dev/null' EXIT
+          python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/mount/TelevyBackup.app"
+
       - name: Snapshot Access failure-injection tests
         run: cargo test --locked -p televybackup-snapshot-access
 
