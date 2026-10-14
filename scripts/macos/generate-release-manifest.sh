@@ -146,6 +146,7 @@ helper = {
     'binary': 'Contents/MacOS/televybackup-snapshot-access',
     'component_version': '0.2.0',
     'protocol_version': 2,
+    'mount_helper_protocol_version': 4,
     'source': os.environ.get(
         'TELEVYBACKUP_SNAPSHOT_ACCESS_SOURCE',
         'fresh-rc1-build' if version.endswith('-rc.1') else 'rc1-universal-artifact',
@@ -163,6 +164,7 @@ if os.path.isfile(helper_binary):
     helper['relative_path'] = metadata['relativePath']
     helper['component_version'] = metadata['componentVersion']
     helper['protocol_version'] = metadata['protocolVersion']
+    helper['mount_helper_protocol_version'] = metadata['mountHelperProtocolVersion']
     helper.update(signing_identity(bundle, helper_binary, bundle))
 
 root_helper_binary = os.path.join(

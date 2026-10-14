@@ -25,9 +25,11 @@ being established, so the workflow performs a fresh Universal build. Otherwise t
 reuse the bootstrap release only after its `BUILD-MANIFEST.json` matches the locked component
 metadata. A mismatch fails closed; a stale bootstrap tag can never silently reuse an older helper
 identity after a component change.
-The outer app is signed from the inside out. The helper's component version, IPC protocol version,
-source policy, executable SHA-256, complete artifact digest, CodeDirectory hash, and designated
-requirement are recorded in the release manifest.
+The outer app is signed from the inside out. The helper's component version, Snapshot Access IPC
+protocol version, internal mount-helper protocol version, source policy, executable SHA-256,
+complete artifact digest, CodeDirectory hash, and designated requirement are recorded in the
+release manifest. Snapshot Access and the root mount helper MUST declare the same internal
+mount-helper protocol version; changing it requires a fresh bootstrap helper artifact.
 
 The main app performs a transactional migration from the old external LaunchAgent. It backs up the
 old plist and manifest, refuses to switch while a lease is active, unregisters the old service,

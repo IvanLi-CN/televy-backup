@@ -803,6 +803,23 @@ import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     payload = json.load(handle)
+payload["components"]["snapshot_access"]["mount_helper_protocol_version"] = 1
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
+if bash "$root_dir/scripts/macos/verify-release-assets.sh" \
+  --mode release --asset-dir "$tmp_dir" --expected-source-commit "$fixture_source_commit" --expected-packaging-commit "$fixture_packaging_commit" --skip-bundle-checks >/dev/null 2>&1; then
+  echo "release asset verifier accepted incompatible Snapshot Access and mount helper protocols" >&2
+  exit 1
+fi
+cp "$tmp_dir/BUILD-MANIFEST.original.json" "$tmp_dir/BUILD-MANIFEST.json"
+
+python3 - "$tmp_dir/BUILD-MANIFEST.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
 payload["dmg_layout"]["semantic_layout_digest"] = "0" * 64
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(payload, handle)
@@ -848,6 +865,7 @@ assert lock["bootstrap_release_tag"] == "v0.9.8-rc.1"
 assert access["bundle_id"] == "com.ivan.televybackup.snapshot-access"
 assert access["component_version"] == "0.2.0"
 assert access["protocol_version"] == 2
+assert access["mount_helper_protocol_version"] == 4
 assert access["reuse_policy"] == "byte-identical-no-rebuild-no-lipo-no-resign"
 identity = access["identity"]
 assert identity["sha256"].startswith("BUILD-MANIFEST.json#/")

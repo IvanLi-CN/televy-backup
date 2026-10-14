@@ -331,6 +331,7 @@ require(component["relative_path"] == "Contents/Library/LoginItems/TelevyBackup 
 require(component["binary"] == locked["binary"], "Snapshot Access binary mismatch")
 require(component["component_version"] == locked["component_version"], "Snapshot Access component version mismatch")
 require(component["protocol_version"] == 2, "Snapshot Access protocol version mismatch")
+require(component["mount_helper_protocol_version"] == locked["mount_helper_protocol_version"], "Snapshot Access mount helper protocol version mismatch")
 require(component["reuse_policy"] == locked["reuse_policy"], "Snapshot Access reuse policy mismatch")
 require(locked["identity"]["sha256"] == "BUILD-MANIFEST.json#/components/snapshot_access/sha256", "Snapshot Access SHA-256 lock reference mismatch")
 require(locked["identity"]["artifact_sha256"] == "BUILD-MANIFEST.json#/components/snapshot_access/artifact_sha256", "Snapshot Access artifact lock reference mismatch")
@@ -343,6 +344,7 @@ require(mount_component["install_path"] == locked_mount_component["install_path"
 require(mount_component["component_version"] == locked_mount_component["component_version"], "mount helper component version mismatch")
 require(mount_component["compatible_component_versions"] == locked_mount_component["compatible_component_versions"], "mount helper compatible versions mismatch")
 require(mount_component["protocol_version"] == locked_mount_component["protocol_version"], "mount helper protocol version mismatch")
+require(component["mount_helper_protocol_version"] == mount_component["protocol_version"], "Snapshot Access and mount helper protocol versions mismatch")
 require(mount_component["binary"] == locked_mount_component["binary"], "mount helper binary mismatch")
 require(mount_component["source"] == locked_mount_component["source"], "mount helper source mismatch")
 require(mount_component["identity_source"] == locked_mount_component["identity_source"], "mount helper identity source mismatch")
@@ -505,6 +507,7 @@ require(component["bundle_id"] == metadata["bundleId"], "Snapshot Access bundle 
 require(component["relative_path"] == metadata["relativePath"], "Snapshot Access relative path mismatch")
 require(component["component_version"] == metadata["componentVersion"], "Snapshot Access component version mismatch")
 require(component["protocol_version"] == metadata["protocolVersion"], "Snapshot Access protocol version mismatch")
+require(component["mount_helper_protocol_version"] == metadata["mountHelperProtocolVersion"], "Snapshot Access mount helper protocol version mismatch")
 PY
 fi
 verify_dmg_helper_identity() (
@@ -639,6 +642,7 @@ require(component["bundle_id"] == metadata["bundleId"], "Snapshot Access bundle 
 require(component["relative_path"] == metadata["relativePath"], "Snapshot Access relative path mismatch")
 require(component["component_version"] == metadata["componentVersion"], "Snapshot Access component version mismatch")
 require(component["protocol_version"] == metadata["protocolVersion"], "Snapshot Access protocol version mismatch")
+require(component["mount_helper_protocol_version"] == metadata["mountHelperProtocolVersion"], "Snapshot Access mount helper protocol version mismatch")
 PY
   fi
   diskutil verifyVolume "$attached_device"
