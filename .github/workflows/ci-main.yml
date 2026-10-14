@@ -123,7 +123,18 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       - name: Swift lifecycle and installation regression tests
-        run: bash scripts/macos/swift-unit-tests.sh
+        run: |
+          swiftc -framework Security \
+            macos/TelevyBackupApp/SnapshotAccessLaunchdState.swift \
+            macos/TelevyBackupApp/SnapshotAccessLaunchAgent.swift \
+            macos/TelevyBackupAppTests/SnapshotAccessLaunchAgentTests.swift \
+            -o "${RUNNER_TEMP}/snapshot-access-launch-agent-tests"
+          "${RUNNER_TEMP}/snapshot-access-launch-agent-tests"
+          swiftc \
+            macos/TelevyBackupApp/SnapshotMountHelperInstallation.swift \
+            macos/TelevyBackupAppTests/SnapshotMountHelperInstallationTests.swift \
+            -o "${RUNNER_TEMP}/snapshot-mount-helper-installation-tests"
+          "${RUNNER_TEMP}/snapshot-mount-helper-installation-tests"
 
       - name: Verify published upgrade recovery through candidate registration code
         env:

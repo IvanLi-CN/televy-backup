@@ -378,8 +378,12 @@ def main():
                 run("hdiutil", "detach", str(mount))
     assert reproduction is not None
     assert reproduction is True
-    report("cleanup", access_service_absent=run("/bin/launchctl", "print", ACCESS_SERVICE, check=False).returncode != 0,
-           mount_service_absent=run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False).returncode != 0)
+    access_absent = run("/bin/launchctl", "print", ACCESS_SERVICE, check=False).returncode != 0
+    mount_absent = run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False).returncode != 0
+    state_absent = not any(path.exists() for path in (BINARY, PLIST, MOUNT_SOCKET, JOURNAL))
+    assert access_absent and mount_absent and state_absent, "synthetic fixture cleanup incomplete"
+    report("cleanup", access_service_absent=access_absent,
+           mount_service_absent=mount_absent, fixture_state_absent=state_absent)
 
 
 if __name__ == "__main__":
