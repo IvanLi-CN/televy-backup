@@ -109,6 +109,8 @@ explicit administrator-authorized transactions and are the only privileged setup
 Migration commit and rollback MUST require the transaction id and a short-lived owner token from
 the same prepare operation; missing or mismatched transaction credentials MUST fail closed.
 
+An app update MUST verify the running Access code against the installed embedded artifact; equal paths and component versions alone do not prove that a surviving process is current. Running-code validation MUST precede resolving its on-disk bundle path, since static signing information alone describes a replacement file. Direct registration MUST serialize its inspect, preparation, recheck, and start sequence across application processes with a per-user private lock, inspect the loaded service before bootstrap, retain a healthy current process, and restart an outdated process only after stopping the producer daemon and confirming zero active leases and pending cleanup. Unknown lease state, a foreign executable, or a changed service PID MUST fail without killing the service. The mount-helper install button MUST complete this user-level Access registration check before its final communication check. These lifecycle repairs reuse the approved Access artifact and do not change its FDA identity or IPC protocol.
+
 ## Compatibility
 
 The Access app is started by the main app's per-user embedded launch service and can be used
@@ -133,6 +135,8 @@ Rust/Swift tests, the spec contract checker, package asset verification, and an 
 unique-label `launchctl bootstrap` fixture prove that target IDs, volume UUID preferences,
 additive status fields, the separate app bundle, the minimal mount-helper artifact, and
 user/system service paths are present without a privileged backup reader.
+
+A dispatch-only GitHub-hosted macOS upgrade regression MUST compile the candidate registration code before mutating fixture services, then keep the published rc.114 Access process alive while replacing its on-disk bundle and installing the rc.120 mount helper. Candidate registration code must reject the old running identity, refresh the idle owned LaunchAgent, restore protocol communication, and retain the healthy replacement on a second registration. Fixtures use empty configuration and require no APFS snapshots, protected user files, or TCC changes. Synthetic tests additionally prove that active, unknown, foreign, and changed-process states cannot be restarted. Synthetic tests MUST also prove a concurrent application process cannot inspect or restart the service while another registration holds the lock. Initial service checks MUST require confirmed missing-service responses and abort on permission, I/O, or other inspection failures before fixture setup. Initial and final fixture path-absence checks MUST NOT follow symlinks; a pre-existing dangling link is existing state and MUST block setup. Cleanup MUST verify both fixture services have stopped before deleting any created executable, plist, socket, journal, or temporary source tree; an unverifiable shutdown MUST preserve those targets and fail the fixture. Success requires both fixture services and their created privileged state to be absent after cleanup.
 
 ### VER-APFS-002: Access lifecycle and boundary
 
