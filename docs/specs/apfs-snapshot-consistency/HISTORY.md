@@ -3,6 +3,7 @@
 ## Surviving Access process upgrades
 
 - Published rc.114 and rc.120 Access artifacts both advertised component version `0.2.0` despite expecting mount protocols 1 and 4. On a disposable Actions runner, updating files at the same paths and successfully installing the new root helper left the old Access process alive. Direct LaunchAgents omit parent bundle metadata, and duplicate bootstrap returned error 5 without the text previously required for restart recovery. Running-code validity now distinguishes the old process, registration refreshes only an idle owned service, and the installation coordinator includes Access registration before reporting communication readiness. The approved Access artifact remains unchanged, preserving its FDA identity.
+- [PR #177](https://github.com/IvanLi-CN/televy-backup/pull/177) fixes the surviving-process upgrade. The [hosted regression](https://github.com/IvanLi-CN/televy-backup/actions/runs/38612289981) first reproduces the published protocol failure, then verifies candidate production code rejects the old running identity, replaces the idle process, restores communication, retains the healthy replacement on a repeat registration, and removes every fixture service and created privileged state.
 
 ## Installation feedback
 

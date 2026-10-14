@@ -136,7 +136,7 @@ unique-label `launchctl bootstrap` fixture prove that target IDs, volume UUID pr
 additive status fields, the separate app bundle, the minimal mount-helper artifact, and
 user/system service paths are present without a privileged backup reader.
 
-A dispatch-only GitHub-hosted macOS upgrade regression MUST keep the published rc.114 Access process alive while replacing its on-disk bundle and installing the rc.120 mount helper. Candidate registration code must reject the old running identity, refresh the idle owned LaunchAgent, restore protocol communication, and retain the healthy replacement on a second registration. Fixtures use empty configuration and require no APFS snapshots, protected user files, or TCC changes. Synthetic tests additionally prove that active, unknown, foreign, and changed-process states cannot be restarted.
+A dispatch-only GitHub-hosted macOS upgrade regression MUST compile the candidate registration code before mutating fixture services, then keep the published rc.114 Access process alive while replacing its on-disk bundle and installing the rc.120 mount helper. Candidate registration code must reject the old running identity, refresh the idle owned LaunchAgent, restore protocol communication, and retain the healthy replacement on a second registration. Fixtures use empty configuration and require no APFS snapshots, protected user files, or TCC changes. Synthetic tests additionally prove that active, unknown, foreign, and changed-process states cannot be restarted. Success requires both fixture services and their created privileged state to be absent after cleanup.
 
 ### VER-APFS-002: Access lifecycle and boundary
 
