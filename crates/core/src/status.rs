@@ -78,6 +78,8 @@ pub struct TargetRunSummary {
     pub duration_seconds: Option<f64>,
     pub status: Option<String>,
     pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_reason: Option<String>,
     pub files_indexed: Option<u64>,
     pub bytes_uploaded: Option<u64>,
     pub bytes_deduped: Option<u64>,
@@ -365,6 +367,7 @@ mod tests {
             duration_seconds: None,
             status: Some("succeeded".to_string()),
             error_code: None,
+            error_reason: None,
             files_indexed: None,
             bytes_uploaded: None,
             bytes_deduped: None,

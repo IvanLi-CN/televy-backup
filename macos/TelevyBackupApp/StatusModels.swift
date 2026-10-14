@@ -34,6 +34,7 @@ struct StatusTargetRunSummary: Codable {
     var durationSeconds: Double?
     var status: String?
     var errorCode: String?
+    var errorReason: String? = nil
     var filesIndexed: Int64?
     var bytesUploaded: Int64?
     var bytesDeduped: Int64?

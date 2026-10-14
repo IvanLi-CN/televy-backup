@@ -235,7 +235,16 @@ jobs:
 
       - name: Swift unit/UI layout tests
         if: needs.classify.outputs.kind == 'source'
+        env:
+          BACKUP_FAILURE_PREVIEW_DIR: ${{ runner.temp }}/backup-failure-preview
         run: bash scripts/macos/swift-unit-tests.sh
+      - name: Upload synthetic backup failure views
+        if: needs.classify.outputs.kind == 'source'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: backup-failure-preview
+          path: ${{ runner.temp }}/backup-failure-preview/*.png
+          if-no-files-found: error
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
         run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD

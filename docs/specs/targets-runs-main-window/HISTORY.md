@@ -31,3 +31,7 @@
 ## Compatibility
 
 - Legacy source retained pending delete approval: `docs/plan/kaa5e:targets-runs-main-window/PLAN.md`.
+
+## Failure Reporting
+
+Snapshot setup failures previously updated live status without writing a terminal history event. History recovery now recognizes those explicit legacy failures and distinguishes abandoned logs from active writers; failure guidance uses bounded categories instead of raw diagnostics.

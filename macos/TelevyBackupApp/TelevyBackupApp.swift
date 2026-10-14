@@ -1159,6 +1159,7 @@ final class AppModel {
             let pendingBatchId = "bch_demo_pending"
             let connectingQueued = UIDemo.scene == "main-window-target-connecting-queued"
             let runningNextQueued = UIDemo.scene == "main-window-target-running-next-queued"
+            let snapshotFailure = UIDemo.scene == "main-window-target-snapshot-failure"
 
             statusSnapshot = StatusSnapshot(
                 type: "status.snapshot",
@@ -1181,8 +1182,8 @@ final class AppModel {
                         sourcePath: "/Volumes/Demo/Photos",
                         endpointId: "ep_demo_a",
                         enabled: true,
-                        state: "running",
-                        runningSince: nowMs - 92_000,
+                        state: snapshotFailure ? "failed" : "running",
+                        runningSince: snapshotFailure ? nil : nowMs - 92_000,
                         up: StatusRate(bytesPerSecond: 3_200_000),
                         upTotal: StatusCounter(bytes: 1_234_567_890),
                         progress: StatusProgress(
@@ -1204,14 +1205,15 @@ final class AppModel {
                             snapshotId: "s_demo_001",
                             finishedAt: "2026-02-01T06:12:00Z",
                             durationSeconds: 723.4,
-                            status: "succeeded",
-                            errorCode: nil,
+                            status: snapshotFailure ? "failed" : "succeeded",
+                            errorCode: snapshotFailure ? "snapshot.acquire_failed" : nil,
+                            errorReason: snapshotFailure ? "protocol_mismatch" : nil,
                             filesIndexed: 12_345,
                             bytesUploaded: 1_835_239_424,
                             bytesDeduped: 12_345_678
                         ),
                         backupQueue: StatusBackupQueue(
-                            activeBatchId: activeBatchId,
+                            activeBatchId: snapshotFailure ? nil : activeBatchId,
                             pendingBatchId: runningNextQueued ? pendingBatchId : nil
                         )
                     ),
@@ -1281,8 +1283,8 @@ final class AppModel {
                     endpointId: "ep_demo_a",
                     sourcePath: "/Volumes/Demo/Photos",
                     snapshotId: "s_demo_001",
-                    status: "succeeded",
-                    errorCode: nil,
+                    status: UIDemo.scene == "main-window-target-snapshot-failure" ? "failed" : "succeeded",
+                    errorCode: UIDemo.scene == "main-window-target-snapshot-failure" ? "snapshot.acquire_failed" : nil,
                     durationSeconds: 723.4,
                     startedAt: Date(timeIntervalSince1970: 1_706_000_000),
                     finishedAt: Date(timeIntervalSince1970: 1_706_000_723),
@@ -1295,7 +1297,8 @@ final class AppModel {
                     chunksDownloaded: nil,
                     chunksChecked: nil,
                     ignoreRuleFiles: 1,
-                    ignoreInvalidRules: 0
+                    ignoreInvalidRules: 0,
+                    errorReason: UIDemo.scene == "main-window-target-snapshot-failure" ? "protocol_mismatch" : nil
                 ),
                 RunLogSummary(
                     id: "r_demo_verify",
@@ -3831,6 +3834,7 @@ final class AppModel {
         var sourcePath: String?
         var status: String?
         var errorCode: String?
+        var errorReason: String?
         var durationSeconds: Double?
         var snapshotId: String?
 
@@ -3848,6 +3852,8 @@ final class AppModel {
         var finishedAt: Date?
         var sawStart: Bool = false
         var sawFinish: Bool = false
+        var lastObservedAt: Date?
+        var legacyFailure: (code: String, reason: String?, at: Date?)?
 
         func applyLine(_ line: String) {
             guard let data = line.data(using: .utf8),
@@ -3857,6 +3863,9 @@ final class AppModel {
             let ts = obj["timestamp"] as? String
             let fields = obj["fields"] as? [String: Any]
             let event = fields?["event"] as? String
+            if let ts, let date = Self.parseIso8601(ts) {
+                lastObservedAt = max(lastObservedAt ?? date, date)
+            }
             if event == "run.start" {
                 sawStart = true
                 runId = (fields?["run_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? runId
@@ -3872,6 +3881,8 @@ final class AppModel {
             }
 
             if event == "run.finish" {
+                if let current = runId, let incoming = fields?["run_id"] as? String, incoming != current { return }
+                if let current = targetId, let incoming = fields?["target_id"] as? String, incoming != current { return }
                 sawFinish = true
                 runId = (fields?["run_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? runId
                 kind = fields?["kind"] as? String ?? kind
@@ -3880,6 +3891,7 @@ final class AppModel {
                 sourcePath = (fields?["source_path"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? sourcePath
                 status = fields?["status"] as? String ?? status
                 errorCode = fields?["error_code"] as? String ?? errorCode
+                errorReason = fields?["error_reason"] as? String
                 durationSeconds = (fields?["duration_seconds"] as? NSNumber)?.doubleValue ?? durationSeconds
                 snapshotId = (fields?["snapshot_id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? snapshotId
 
@@ -3896,6 +3908,21 @@ final class AppModel {
                 if let ts, let d = Self.parseIso8601(ts) {
                     finishedAt = d
                 }
+                return
+            }
+
+            // Earlier daemons ended snapshot setup without run.finish. Infer only these
+            // terminal branches, scoped to this run's target (and run ID when present).
+            if sawStart, kind == "backup",
+               let event,
+               ["snapshot.acquire_failed", "snapshot.probe_failed", "snapshot.waiting_for_source_volume"].contains(event),
+               let targetId, fields?["target_id"] as? String == targetId,
+               (fields?["run_id"] as? String).map({ $0 == runId }) ?? true {
+                legacyFailure = (
+                    event == "snapshot.waiting_for_source_volume" ? "snapshot.source_unavailable" : event,
+                    BackupFailurePresentation.legacyReason(message: fields?["error"] as? String),
+                    ts.flatMap(Self.parseIso8601)
+                )
             }
         }
 
@@ -3909,12 +3936,33 @@ final class AppModel {
         guard let kind else { return nil }
         if kind != "backup" && kind != "restore" && kind != "verify" { return nil }
 
-        // A log file can exist while the run is still in progress; show it as "running"
-        // so the UI can surface immediate feedback without waiting for completion.
+        // The core holds LOCK_SH for the lifetime of its run writer. An exclusive,
+        // nonblocking probe distinguishes active work from an abandoned historical log.
+        // Re-read the tail while holding the lock in case run.finish raced the first read.
+        var writerClosed = false
+        if sawStart && !sawFinish, let handle = try? FileHandle(forReadingFrom: url) {
+            if flock(handle.fileDescriptor, LOCK_EX | LOCK_NB) == 0 {
+                writerClosed = true
+                for line in Self.readRunLogSuffixLines(url: url) { applyLine(line) }
+                flock(handle.fileDescriptor, LOCK_UN)
+            }
+            try? handle.close()
+        }
         if sawStart && !sawFinish {
-            if status == nil { status = "running" }
-            if durationSeconds == nil, let startedAt {
-                durationSeconds = Date().timeIntervalSince(startedAt)
+            if let legacyFailure {
+                status = "failed"
+                errorCode = legacyFailure.code
+                errorReason = legacyFailure.reason
+                finishedAt = legacyFailure.at
+            } else if writerClosed {
+                status = "interrupted"
+                errorCode = "task.interrupted"
+            } else {
+                status = "running"
+            }
+            if let startedAt {
+                let end = finishedAt ?? (writerClosed ? lastObservedAt ?? startedAt : Date())
+                durationSeconds = max(0, end.timeIntervalSince(startedAt))
             }
         }
 
@@ -3940,7 +3988,8 @@ final class AppModel {
             chunksDownloaded: chunksDownloaded,
             chunksChecked: chunksChecked,
             ignoreRuleFiles: ignoreRuleFiles,
-            ignoreInvalidRules: ignoreInvalidRules
+            ignoreInvalidRules: ignoreInvalidRules,
+            errorReason: errorReason
         )
     }
 
