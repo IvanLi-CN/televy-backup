@@ -1964,7 +1964,8 @@ struct RunLogRow: View {
                 } label: {
                     Image(systemName: "doc.text")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
                 .help("Reveal log file in Finder")
             }
         }

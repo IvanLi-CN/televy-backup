@@ -104,7 +104,8 @@ struct BackupFailureNotice: View {
                 }
             }
             .font(.system(size: 11))
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
+            .foregroundStyle(.blue)
         }
         .accessibilityElement(children: .contain)
     }
