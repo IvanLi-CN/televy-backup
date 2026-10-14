@@ -226,6 +226,7 @@ def main():
     reproduction = None
     with tempfile.TemporaryDirectory(prefix="televy-upgrade-ci-", dir="/private/tmp") as temp:
         root = Path(temp)
+        candidate = candidate_probe(root)
         os.chmod(root, 0o755)
         try:
             old_mount, old_manifest = download_release(OLD_TAG, root)
