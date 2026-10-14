@@ -1916,7 +1916,7 @@ private struct StatusBadge: View {
     }
 }
 
-private struct RunLogRow: View {
+struct RunLogRow: View {
     let run: RunLogSummary
     var onOpen: ((RunLogSummary) -> Void)? = nil
 

@@ -374,21 +374,7 @@ bin_backup_failure_history="$out_dir/backup-failure-history-tests"
   "$root_dir/macos/TelevyBackupAppTests/BackupFailureHistoryTests.swift"
 "$bin_backup_failure_history"
 
-# Native view bitmaps use only synthetic UI demo data. No installed app, screen capture,
-# backup source, FDA, or privileged helper is touched on the GitHub-hosted runner.
-if [[ -n "${BACKUP_FAILURE_PREVIEW_DIR:-}" ]]; then
-  bin_backup_failure_preview="$out_dir/backup-failure-history-preview"
-  "$swiftc" \
-    -sdk "$sdk_path" \
-    -O \
-    -D TELEVYBACKUP_TESTING \
-    -framework SwiftUI \
-    -framework AppKit \
-    -o "$bin_backup_failure_preview" \
-    "$root_dir/macos/TelevyBackupApp"/*.swift \
-    "$root_dir/macos/TelevyBackupAppTests/BackupFailureHistoryPreview.swift"
-  "$bin_backup_failure_preview" "$BACKUP_FAILURE_PREVIEW_DIR"
-fi
+
 
 bin_diagnostics="$out_dir/diagnostics-settings-tests"
 "$swiftc" \

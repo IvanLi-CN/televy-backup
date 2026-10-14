@@ -2,55 +2,61 @@ import AppKit
 import Foundation
 import SwiftUI
 
-/// Render the real main-window views with synthetic data; no screen capture or product service.
+/// Render the production failure notice and history rows from fixed synthetic data.
 @main
 enum BackupFailureHistoryPreview {
+    @MainActor
     static func main() throws {
         guard CommandLine.arguments.count == 2 else { exit(2) }
         let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
-        let sandbox = FileManager.default.temporaryDirectory
-            .appendingPathComponent("televy-failure-preview-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: sandbox) }
-        setenv("TELEVYBACKUP_UI_DEMO", "1", 1)
-        setenv("TELEVYBACKUP_UI_DEMO_SCENE", "main-window-target-snapshot-failure", 1)
-        setenv("TELEVYBACKUP_DISABLE_KEYCHAIN", "1", 1)
-        setenv("TELEVYBACKUP_CONFIG_DIR", sandbox.path, 1)
-        setenv("TELEVYBACKUP_DATA_DIR", sandbox.path, 1)
-        let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)
-        let model = AppModel()
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        for (name, appearance, scheme) in [
-            ("light", NSAppearance.Name.aqua, ColorScheme.light),
-            ("dark", NSAppearance.Name.darkAqua, ColorScheme.dark),
-        ] {
-            let root = MainWindowRootView()
-                .environment(\.appRuntime, model)
-                .environmentObject(model.statusStore)
-                .environmentObject(model.runHistoryStore)
-                .environmentObject(model.taskPresentationStore)
-                .environmentObject(model.diagnosticsStore)
-                .environmentObject(model.mainWindowNavigationStore)
-                .environment(\.colorScheme, scheme)
-            let host = NSHostingView(rootView: root)
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 1024, height: 640),
-                styleMask: [.titled, .closable],
-                backing: .buffered,
-                defer: false
-            )
-            window.isReleasedWhenClosed = false
-            window.appearance = NSAppearance(named: appearance)
-            window.contentView = host
-            window.orderFront(nil)
-            RunLoop.current.run(until: Date().addingTimeInterval(0.4))
-            host.layoutSubtreeIfNeeded()
-            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { exit(1) }
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-            guard let png = bitmap.representation(using: .png, properties: [:]) else { exit(1) }
+        let failed = run(id: "fixture-failed", status: "failed", code: "snapshot.acquire_failed", reason: "protocol_mismatch")
+        let interrupted = run(id: "fixture-interrupted", status: "interrupted", code: "task.interrupted", reason: nil)
+        for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
+            let content = VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("Photos").font(.system(size: 18, weight: .bold))
+                    Text("Failed").font(.system(size: 12, weight: .semibold)).foregroundStyle(.red)
+                }
+                BackupFailureNotice(
+                    issue: BackupFailurePresentation(code: failed.errorCode, reason: failed.errorReason),
+                    code: failed.errorCode,
+                    openSettings: {},
+                    openDiagnostics: {}
+                )
+                Divider()
+                Text("History").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                RunLogRow(run: failed)
+                Divider()
+                RunLogRow(run: interrupted)
+            }
+            .padding(24)
+            .frame(width: 880, alignment: .leading)
+            .background(scheme == .dark ? Color(red: 0.16, green: 0.17, blue: 0.19) : Color.white)
+            .environment(\.colorScheme, scheme)
+            .environment(\.locale, Locale(identifier: "en_US"))
+            .environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
+            let renderer = ImageRenderer(content: content)
+            renderer.scale = 2
+            guard let image = renderer.nsImage,
+                  let tiff = image.tiffRepresentation,
+                  let bitmap = NSBitmapImageRep(data: tiff),
+                  let png = bitmap.representation(using: .png, properties: [:])
+            else { exit(1) }
             try png.write(to: output.appendingPathComponent("backup-failure-\(name).png"))
-            window.close()
         }
+    }
+
+    private static func run(id: String, status: String, code: String, reason: String?) -> RunLogSummary {
+        RunLogSummary(
+            id: id, runId: id, kind: "backup", targetId: "fixture-target", endpointId: "fixture-endpoint",
+            sourcePath: nil, snapshotId: nil, status: status, errorCode: code, durationSeconds: 23,
+            startedAt: Date(timeIntervalSince1970: 1_767_225_600),
+            finishedAt: status == "failed" ? Date(timeIntervalSince1970: 1_767_225_623) : nil,
+            logURL: URL(fileURLWithPath: "/tmp/fixture-run.ndjson"),
+            bytesUploaded: nil, bytesDeduped: nil, bytesWritten: nil, bytesChecked: nil,
+            filesRestored: nil, chunksDownloaded: nil, chunksChecked: nil,
+            ignoreRuleFiles: nil, ignoreInvalidRules: nil, errorReason: reason
+        )
     }
 }

@@ -233,11 +233,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 2
 
-      - name: Swift unit/UI layout tests
+      - name: Render synthetic backup failure views
         if: needs.classify.outputs.kind == 'source'
-        env:
-          BACKUP_FAILURE_PREVIEW_DIR: ${{ runner.temp }}/backup-failure-preview
-        run: bash scripts/macos/swift-unit-tests.sh
+        run: bash scripts/macos/render-backup-failure-preview.sh "${RUNNER_TEMP}/backup-failure-preview"
       - name: Upload synthetic backup failure views
         if: needs.classify.outputs.kind == 'source'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -245,6 +243,9 @@ jobs:
           name: backup-failure-preview
           path: ${{ runner.temp }}/backup-failure-preview/*.png
           if-no-files-found: error
+      - name: Swift unit/UI layout tests
+        if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/swift-unit-tests.sh
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
         run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
