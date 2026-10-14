@@ -94,8 +94,10 @@ struct BackupFailureNotice: View {
             HStack(spacing: 12) {
                 if issue.opensSettings {
                     Button("Open Settings", action: openSettings)
+                        .foregroundStyle(.blue)
                 }
                 Button("Open Diagnostics", action: openDiagnostics)
+                    .foregroundStyle(.blue)
                 if let code, !code.isEmpty {
                     Text(code)
                         .font(.system(size: 10, design: .monospaced))
@@ -105,7 +107,6 @@ struct BackupFailureNotice: View {
             }
             .font(.system(size: 11))
             .buttonStyle(.plain)
-            .foregroundStyle(.blue)
         }
         .accessibilityElement(children: .contain)
     }
