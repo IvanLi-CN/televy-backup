@@ -1137,7 +1137,7 @@ struct SettingsWindowRootView: View {
                             snapshotError = nil
                             model.installSnapshotMountHelper { success, error, status in
                                 snapshotBusy = false
-                                snapshotStatus = status
+                                self.snapshotStatus = status
                                 snapshotError = success ? nil : (error ?? "The mount helper could not be installed")
                             }
                         }
