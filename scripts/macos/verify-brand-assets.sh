@@ -18,7 +18,7 @@ expected = {
     "televybackup-logo-ui.svg": ("0 0 1254 1254", "none", "#263238", "#1677ff"),
     "televybackup-logo-ui-compact.svg": ("125 125 1000 1000", "none", "#263238", "#1677ff"),
     "televybackup-logo-dark-compact.svg": ("125 125 1000 1000", "none", "#bbc9d8", "#a2ceff"),
-    "televybackup-logo-template.svg": ("0 0 1254 1254", "none", "#000000", "#000000"),
+    "televybackup-logo-template.svg": ("102 102 1050 1050", "none", "#000000", "#000000"),
     "televybackup-logo-compact.svg": ("125 125 1000 1000", "#ffffff", "#263238", "#1677ff"),
 }
 for appearance, colors in {

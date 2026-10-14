@@ -3,14 +3,14 @@ set -euo pipefail
 
 out_dir="${1:-}"
 if [[ -z "$out_dir" ]]; then
-  echo "Usage: $0 <out-dir> [dev|release]" >&2
+  echo "Usage: $0 <out-dir> [dev|release|all]" >&2
   exit 2
 fi
 variant="${2:-dev}"
 case "$variant" in
-  dev|release) ;;
+  dev|release|all) ;;
   *)
-    echo "Variant must be dev or release" >&2
+    echo "Variant must be dev, release, or all" >&2
     exit 2
     ;;
 esac
@@ -20,6 +20,11 @@ sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
 bin_dir="$root_dir/target/menu-bar-preview"
 bin_path="$bin_dir/menu-bar-status-item-icon-preview"
 output="$out_dir/menu-bar-activity-states.png"
+preview_source="$root_dir/macos/TelevyBackupAppTests/MenuBarStatusItemIconPreview.swift"
+if [[ "$variant" == "all" ]]; then
+  output="$out_dir/menu-bar-icon-matrix.png"
+  preview_source="$root_dir/macos/TelevyBackupAppTests/MenuBarStatusItemIconMatrixPreview.swift"
+fi
 
 mkdir -p "$bin_dir" "$out_dir"
 xcrun swiftc \
@@ -35,7 +40,7 @@ xcrun swiftc \
   "$root_dir/macos/TelevyBackupApp/StatusStore.swift" \
   "$root_dir/macos/TelevyBackupApp/MenuBarPresentation.swift" \
   "$root_dir/macos/TelevyBackupApp/MenuBarStatusItemIcon.swift" \
-  "$root_dir/macos/TelevyBackupAppTests/MenuBarStatusItemIconPreview.swift"
+  "$preview_source"
 
 "$bin_path" "$output" "$variant"
 test -s "$output"

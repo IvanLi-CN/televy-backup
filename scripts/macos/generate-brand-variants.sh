@@ -55,7 +55,8 @@ make_variant "$brand_dir/televybackup-logo-dark-compact.svg" \
 make_variant "$brand_dir/televybackup-logo-template.svg" \
   -e 's/\.canvas { fill: #ffffff; }/.canvas { fill: none; }/' \
   -e 's/\.disk { fill: #263238; }/.disk { fill: #000000; }/' \
-  -e 's/\.wing { fill: #1677ff; }/.wing { fill: #000000; }/'
+  -e 's/\.wing { fill: #1677ff; }/.wing { fill: #000000; }/' \
+  -e 's/width="1254" height="1254" viewBox="0 0 1254 1254"/width="1050" height="1050" viewBox="102 102 1050 1050"/'
 
 make_variant "$brand_dir/televybackup-logo-compact.svg" \
   -e 's/width="1254" height="1254" viewBox="0 0 1254 1254"/width="1000" height="1000" viewBox="125 125 1000 1000"/'
