@@ -237,6 +237,23 @@ subprocess.run(["git", "-C", str(topology), "switch", "-q", "-c", "post-preparat
 subprocess.run(["git", "-C", str(topology), "merge", "--no-ff", "-m", "fixture post-preparation merge", post_preparation_head], check=True)
 post_preparation_merge = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
 assert chain.verify_merged(post_preparation_merge)["prepared"] == "true"
+
+# GitHub squash merges have one parent but retain the pull request head tree.
+# The authoritative PR head is supplied by the workflow's merged-PR lookup.
+squash_tree = subprocess.check_output(
+    ["git", "-C", str(topology), "rev-parse", f"{post_preparation_head}^{{tree}}"], text=True
+).strip()
+squash_merge = subprocess.check_output(
+    ["git", "-C", str(topology), "commit-tree", squash_tree, "-p", base_sha],
+    input="fixture squash merge\n",
+    text=True,
+).strip()
+assert len(subprocess.check_output(["git", "-C", str(topology), "show", "-s", "--format=%P", squash_merge], text=True).split()) == 1
+assert chain.verify_merged(squash_merge)["reason"] == "squash_merge_head_required"
+squash_verified = chain.verify_merged(squash_merge, post_preparation_head)
+assert squash_verified["prepared"] == "true"
+assert squash_verified["mergeSha"] == squash_merge
+assert squash_verified["preparationSha"] == topology_preparation
 PY
 
 echo "release chain fixture tests passed"

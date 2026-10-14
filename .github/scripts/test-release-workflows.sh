@@ -64,6 +64,11 @@ assert_contains "label gate merge-group fetch credentials" "$label_gate_text" "p
 assert_not_contains "label gate merge-group echo bridge" "$label_gate_text" "reuses the Release intent label gate"
 assert_contains "label gate non-preemptive concurrency" "$label_gate_text" "cancel-in-progress: false"
 assert_not_contains "label gate unsupported queue key" "$label_gate_text" "queue: max"
+main_text="$(<"$root_dir/.github/workflows/ci-main.yml")"
+assert_contains "main CI pull request permission" "$main_text" "pull-requests: read"
+assert_contains "main CI squash PR head lookup" "$main_text" 'commits/${GITHUB_SHA}/pulls?per_page=100'
+assert_contains "main CI squash PR head fetch" "$main_text" 'refs/pull/${pull_request}/head:refs/remotes/origin/ci-main-pr-${pull_request}'
+assert_contains "main CI squash PR head verification" "$main_text" '--pr-head "${PR_HEAD_SHA}"'
 notify_text="$(<"$root_dir/.github/workflows/notify-release-failure.yml")"
 assert_contains "notifier Release Product trigger" "$notify_text" "- Release Product"
 if [[ "$notify_text" == *"Release exact-tag backfill"* ]]; then
@@ -165,6 +170,10 @@ assert_contains "native helper extraction policy SHA" "$release_text" 'git show 
 assert_contains "native helper extraction policy invocation" "$release_text" 'bash "${policy_extract_snapshot_access_helper}"'
 assert_contains "release PR merge association" "$release_text" "merge_commit_sha // empty"
 assert_contains "release PR association filters merge" "$release_text" 'row.get("merge_commit_sha") == merge'
+assert_contains "release squash PR head lookup" "$release_text" 'commits/${TARGET_INPUT}/pulls?per_page=100'
+assert_contains "release squash PR head proof" "$release_text" '--pr-head "${pull_request_head_sha}"'
+assert_contains "release squash PR head fetch" "$release_text" 'refs/pull/${pull_request}/head:refs/remotes/origin/release-pr-${pull_request}'
+assert_contains "release squash merged state proof" "$release_text" '.merged_at // empty'
 assert_contains "release PR preparation ancestry" "$release_text" 'git merge-base --is-ancestor "${preparation_sha}" "${pull_request_head_sha}"'
 assert_not_contains "release PR association exact preparation head filter" "$release_text" 'row.get("head", {}).get("sha") == preparation'
 assert_not_contains "release PR preparation exact head binding" "$release_text" 'pull_request_head_sha}" = "${preparation_sha}'
@@ -264,7 +273,6 @@ abort "macOS acceptance must be able to upload Finder screenshots" unless permis
 RUBY
 assert_not_contains "source PR release comment step" "$release_text" "Upsert PR release version comment"
 assert_not_contains "source PR release comment marker" "$release_text" "televybackup-release-version-comment"
-assert_not_contains "source PR lookup" "$release_text" "/commits/\${TARGET_INPUT}/pulls"
 assert_not_contains "source PR number output" "$release_text" "pr_number"
 assert_contains "prerelease release behavior" "$release_text" "--prerelease --latest=false"
 assert_contains "label merge-group immutable checkout" "$label_gate_text" "github.event.merge_group.base_sha || github.sha"
