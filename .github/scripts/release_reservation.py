@@ -764,11 +764,20 @@ def verify_receipt_commit(ref_target: str, fields: dict[str, str], cwd: Path = R
 
 def verify_local_merge_identity(
     *, merge_sha: str, source_sha: str, version: str, channel: str,
-    reservation: dict[str, Any], cwd: Path = ROOT
+    reservation: dict[str, Any], pr_head_sha: str | None = None, cwd: Path = ROOT
 ) -> None:
     merge = local_commit_info(merge_sha, cwd)
-    if len(merge["parents"]) != 2:
-        raise ReservationError("bound receipt merge SHA must be a two-parent merge commit")
+    parents = merge["parents"]
+    if len(parents) == 2:
+        head_shas = parents
+    elif len(parents) == 1 and pr_head_sha:
+        candidate = normalize_sha(pr_head_sha, "PR head SHA")
+        head = local_commit_info(candidate, cwd)
+        if head["tree"] != merge["tree"]:
+            raise ReservationError("PR head tree does not match the squash merge tree")
+        head_shas = [candidate]
+    else:
+        raise ReservationError("bound receipt merge SHA requires two parents or an associated PR head")
     expected = {
         "Release-Source-SHA": source_sha,
         "Product-Version": version,
@@ -779,7 +788,7 @@ def verify_local_merge_identity(
         "Release-Claim-Key": reservation["Reservation-Claim-Key"],
         "Release-Boundary-Token": reservation["Reservation-Boundary-Token"],
     }
-    for head_sha in merge["parents"]:
+    for head_sha in head_shas:
         head = local_commit_info(head_sha, cwd)
         if head["tree"] != merge["tree"]:
             continue
@@ -797,12 +806,22 @@ def verify_local_merge_identity(
 
 def verify_github_merge_identity(
     *, client: GitHubRefClient, merge_sha: str, source_sha: str, version: str, channel: str,
-    reservation: dict[str, Any]
+    reservation: dict[str, Any], pr_head_sha: str | None = None
 ) -> None:
     merge = client.commit_info(merge_sha)
     parents = [parent.get("sha") for parent in merge.get("parents", [])]
-    if len(parents) != 2 or any(not isinstance(parent, str) for parent in parents):
-        raise ReservationError("bound receipt merge SHA must be a two-parent merge commit")
+    if any(not isinstance(parent, str) for parent in parents):
+        raise ReservationError("bound receipt merge SHA has incomplete parent metadata")
+    if len(parents) == 2:
+        head_shas = parents
+    elif len(parents) == 1 and pr_head_sha:
+        candidate = normalize_sha(pr_head_sha, "PR head SHA")
+        head = client.commit_info(candidate)
+        if head.get("tree", {}).get("sha") != merge.get("tree", {}).get("sha"):
+            raise ReservationError("PR head tree does not match the squash merge tree")
+        head_shas = [candidate]
+    else:
+        raise ReservationError("bound receipt merge SHA requires two parents or an associated PR head")
     expected = {
         "Release-Source-SHA": source_sha,
         "Product-Version": version,
@@ -814,7 +833,7 @@ def verify_github_merge_identity(
         "Release-Boundary-Token": reservation["Reservation-Boundary-Token"],
     }
     merge_tree = merge.get("tree", {}).get("sha")
-    for head_sha in parents:
+    for head_sha in head_shas:
         head = client.commit_info(head_sha)
         if head.get("tree", {}).get("sha") != merge_tree:
             continue
@@ -833,7 +852,7 @@ def verify_github_merge_identity(
 
 def create_local_receipt(
     *, state: str, version: str, merge_sha: str, reservation_id: str, owner: str, claim_key: str,
-    boundary_token: str, reservation_ref_value: str, cwd: Path = ROOT
+    boundary_token: str, reservation_ref_value: str, pr_head_sha: str | None = None, cwd: Path = ROOT
 ) -> dict[str, str]:
     merge = normalize_sha(merge_sha, "merge SHA")
     ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
@@ -864,13 +883,13 @@ def create_local_receipt(
     if state == "bound":
         verify_local_merge_identity(
             merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
-            channel=reservation["channel"], reservation=reservation, cwd=cwd,
+            channel=reservation["channel"], reservation=reservation, pr_head_sha=pr_head_sha, cwd=cwd,
         )
         create_local_decision(state="bound", merge_sha=merge, reservation=reservation, cwd=cwd)
     elif state == "consumed":
         verify_local_merge_identity(
             merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
-            channel=reservation["channel"], reservation=reservation, cwd=cwd,
+            channel=reservation["channel"], reservation=reservation, pr_head_sha=pr_head_sha, cwd=cwd,
         )
     elif state == "released":
         create_local_decision(state="released", merge_sha=merge, reservation=reservation, cwd=cwd)
@@ -885,7 +904,8 @@ def create_local_receipt(
         if existing:
             return create_local_receipt(
                 state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
-                claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value, cwd=cwd
+                claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+                pr_head_sha=pr_head_sha, cwd=cwd
             )
         raise ReservationError(update.stderr.strip() or "receipt ref creation failed")
     return {"ref": ref, "target": commit, **fields}
@@ -894,7 +914,7 @@ def create_local_receipt(
 def create_github_receipt(
     *, state: str, version: str, merge_sha: str, reservation_id: str, owner: str, claim_key: str,
     boundary_token: str, reservation_ref_value: str, repository: str, token: str,
-    api_root: str = "https://api.github.com"
+    api_root: str = "https://api.github.com", pr_head_sha: str | None = None
 ) -> dict[str, str]:
     merge = normalize_sha(merge_sha, "merge SHA")
     ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
@@ -923,7 +943,7 @@ def create_github_receipt(
         verify_github_receipt(
             state="bound", version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
             claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
-            repository=repository, token=token, api_root=api_root,
+            repository=repository, token=token, api_root=api_root, pr_head_sha=pr_head_sha,
         )
         verify_github_decision_state(state="bound", merge_sha=merge, reservation=reservation, client=client)
     if state == "released" and (bound_target or consumed_target):
@@ -931,13 +951,13 @@ def create_github_receipt(
     if state == "bound":
         verify_github_merge_identity(
             client=client, merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
-            channel=reservation["channel"], reservation=reservation,
+            channel=reservation["channel"], reservation=reservation, pr_head_sha=pr_head_sha,
         )
         create_github_decision(state="bound", merge_sha=merge, reservation=reservation, client=client)
     elif state == "consumed":
         verify_github_merge_identity(
             client=client, merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
-            channel=reservation["channel"], reservation=reservation,
+            channel=reservation["channel"], reservation=reservation, pr_head_sha=pr_head_sha,
         )
     elif state == "released":
         create_github_decision(state="released", merge_sha=merge, reservation=reservation, client=client)
@@ -966,14 +986,14 @@ def create_github_receipt(
         return create_github_receipt(
             state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
             claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
-            repository=repository, token=token, api_root=api_root
+            repository=repository, token=token, api_root=api_root, pr_head_sha=pr_head_sha
         )
     return {"ref": ref, "target": target, **fields}
 
 
 def verify_local_receipt(
     *, state: str, version: str, merge_sha: str, reservation_id: str, owner: str, claim_key: str,
-    boundary_token: str, reservation_ref_value: str, cwd: Path = ROOT
+    boundary_token: str, reservation_ref_value: str, pr_head_sha: str | None = None, cwd: Path = ROOT
 ) -> dict[str, str]:
     merge = normalize_sha(merge_sha, "merge SHA")
     ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
@@ -995,7 +1015,7 @@ def verify_local_receipt(
     if state in {"bound", "consumed"}:
         verify_local_merge_identity(
             merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
-            channel=reservation["channel"], reservation=reservation, cwd=cwd,
+            channel=reservation["channel"], reservation=reservation, pr_head_sha=pr_head_sha, cwd=cwd,
         )
     if state == "bound":
         verify_local_decision_state(state="bound", merge_sha=merge, reservation=reservation, cwd=cwd)
@@ -1014,7 +1034,7 @@ def verify_local_receipt(
 def verify_github_receipt(
     *, state: str, version: str, merge_sha: str, reservation_id: str, owner: str, claim_key: str,
     boundary_token: str, reservation_ref_value: str, repository: str, token: str,
-    api_root: str = "https://api.github.com"
+    api_root: str = "https://api.github.com", pr_head_sha: str | None = None
 ) -> dict[str, str]:
     merge = normalize_sha(merge_sha, "merge SHA")
     ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
@@ -1038,7 +1058,7 @@ def verify_github_receipt(
     if state in {"bound", "consumed"}:
         verify_github_merge_identity(
             client=client, merge_sha=merge, source_sha=reservation["sourceSha"], version=version,
-            channel=reservation["channel"], reservation=reservation,
+            channel=reservation["channel"], reservation=reservation, pr_head_sha=pr_head_sha,
         )
     if state == "bound":
         verify_github_decision_state(state="bound", merge_sha=merge, reservation=reservation, client=client)
@@ -1048,7 +1068,7 @@ def verify_github_receipt(
         verify_github_receipt(
             state="bound", version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
             claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
-            repository=repository, token=token, api_root=api_root,
+            repository=repository, token=token, api_root=api_root, pr_head_sha=pr_head_sha,
         )
         verify_github_decision_state(state="bound", merge_sha=merge, reservation=reservation, client=client)
     elif state == "released":
@@ -1122,6 +1142,7 @@ def main(argv: list[str] | None = None) -> int:
     receipt = sub.add_parser("receipt")
     for option in ("state", "version", "merge-sha", "reservation-id", "owner", "claim-key", "boundary-token", "reservation-ref"):
         receipt.add_argument(f"--{option}", required=True)
+    receipt.add_argument("--pr-head")
     receipt.add_argument("--maintainer-confirmed", action="store_true")
     receipt.add_argument("--local-root", type=Path)
     receipt.add_argument("--repository")
@@ -1157,13 +1178,13 @@ def main(argv: list[str] | None = None) -> int:
                     state=args.state, version=args.version, merge_sha=args.merge_sha, reservation_id=args.reservation_id,
                     owner=args.owner, claim_key=args.claim_key, boundary_token=args.boundary_token,
                     reservation_ref_value=args.reservation_ref, repository=args.repository, token=args.token,
-                    api_root=args.api_root,
+                    api_root=args.api_root, pr_head_sha=args.pr_head,
                 )
             else:
                 result = create_local_receipt(
                     state=args.state, version=args.version, merge_sha=args.merge_sha, reservation_id=args.reservation_id,
                     owner=args.owner, claim_key=args.claim_key, boundary_token=args.boundary_token,
-                    reservation_ref_value=args.reservation_ref, cwd=args.local_root or ROOT
+                    reservation_ref_value=args.reservation_ref, pr_head_sha=args.pr_head, cwd=args.local_root or ROOT
                 )
         else:
             value = json.loads(args.input.read_text(encoding="utf-8"))

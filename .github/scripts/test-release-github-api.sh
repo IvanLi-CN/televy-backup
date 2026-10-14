@@ -93,6 +93,13 @@ FakeGitHubRefClient.commits[merge] = {
     "parents": [{"sha": source}, {"sha": preparation}],
     "message": "Merge pull request #7\n",
 }
+squash_merge = "8" * 40
+FakeGitHubRefClient.commits[squash_merge] = {
+    "sha": squash_merge,
+    "tree": {"sha": tree},
+    "parents": [{"sha": source}],
+    "message": "squash merge pull request #7\n",
+}
 created = module.create_github_reservation(expected, repository="fixture/repo", token="token", api_root="https://fixture.invalid")
 assert created["target"] == fake_reservation
 assert module.create_github_reservation(expected, repository="fixture/repo", token="token", api_root="https://fixture.invalid")["target"] == fake_reservation
@@ -114,6 +121,21 @@ verified = module.verify_github_reservation(
 assert verified["target"] == fake_reservation
 
 module.GitHubRefClient = FakeGitHubRefClient
+module.verify_github_merge_identity(
+    client=FakeGitHubRefClient("fixture/repo", "token", "https://fixture.invalid"),
+    merge_sha=squash_merge, source_sha=source, version="1.0.0-beta.1", channel="beta",
+    reservation=expected, pr_head_sha=preparation,
+)
+try:
+    module.verify_github_merge_identity(
+        client=FakeGitHubRefClient("fixture/repo", "token", "https://fixture.invalid"),
+        merge_sha=squash_merge, source_sha=source, version="1.0.0-beta.1", channel="beta",
+        reservation=expected,
+    )
+except module.ReservationError:
+    pass
+else:
+    raise AssertionError("squash merge identity was accepted without a PR head")
 
 bound = module.create_github_receipt(
     state="bound", version="1.0.0-beta.1", merge_sha=merge,
