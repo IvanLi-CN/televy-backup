@@ -65,12 +65,12 @@ private func testFailureMarkerIsSingleRedColor() {
             if isChromatic && !isRed {
                 hasUnexpectedChromaticColor = true
             }
-            if x < 7, isRed {
+            if x < Int(MenuBarStatusItemIcon.statusSymbolRect.minX), isRed {
                 baseContainsWarningColor = true
             }
         }
     }
-    expectMenuBarIcon(hasRed, "failure marker must retain its red warning triangle")
+    expectMenuBarIcon(hasRed, "failure marker must retain its red exclamation symbol")
     expectMenuBarIcon(!hasYellow, "failure marker must not introduce a second yellow color")
     expectMenuBarIcon(!hasUnexpectedChromaticColor, "failure marker must use one foreground color")
     expectMenuBarIcon(!baseContainsWarningColor, "failure color must not alter the product drive")
@@ -84,7 +84,7 @@ private func testFailureBaseTracksMenuBarAppearance() {
             return false
         }
 
-        for x in 0..<Int(MenuBarStatusItemIcon.statusClearanceRect.minX) {
+        for x in 0..<bitmap.pixelsWide {
             for y in 0..<18 {
                 guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
                       color.alphaComponent > 0.2
@@ -153,16 +153,16 @@ private func testActivityBadgesPreserveProductDriveGeometry() {
         "active drive must retain its 18pt intrinsic size"
     )
     expectMenuBarIcon(
-        MenuBarStatusItemIcon.statusBadgeRect == NSRect(x: 7, y: 0, width: 11, height: 11),
+        MenuBarStatusItemIcon.statusSymbolRect == NSRect(x: 7, y: 0, width: 11, height: 11),
         "status overlay must remain in the original icon's lower-right corner"
     )
     expectMenuBarIcon(
-        MenuBarStatusItemIcon.statusClearanceRect == NSRect(x: 6, y: 0, width: 12, height: 12),
-        "status clearance must remain a one-point separation from the product icon"
+        MenuBarStatusItemIcon.statusSymbolClearance == 1,
+        "status symbols must retain a one-point transparent separation from the product icon"
     )
     expectMenuBarIcon(
-        MenuBarStatusItemIcon.statusBadgeRect.maxX == MenuBarStatusItemIcon.activeSize.width
-            && MenuBarStatusItemIcon.statusBadgeRect.minY == 0,
+        MenuBarStatusItemIcon.statusSymbolRect.maxX == MenuBarStatusItemIcon.activeSize.width
+            && MenuBarStatusItemIcon.statusSymbolRect.minY == 0,
         "status overlay must not reserve space on the right or below"
     )
 }
