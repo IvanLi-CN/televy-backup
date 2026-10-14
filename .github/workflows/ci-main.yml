@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      snapshot_upgrade_diagnosis:
+        description: Diagnose published Snapshot Access upgrade compatibility using disposable fixtures
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -19,6 +25,7 @@ env:
 
 jobs:
   main-quality:
+    if: inputs.snapshot_upgrade_diagnosis != true
     name: Mainline quality
     runs-on: ubuntu-latest
     env:
@@ -96,6 +103,7 @@ jobs:
           cargo test
 
   main-macos-swift:
+    if: inputs.snapshot_upgrade_diagnosis != true
     name: Mainline macOS Swift tests
     runs-on: macos-latest
     steps:
@@ -104,6 +112,20 @@ jobs:
 
       - name: Swift unit/UI layout tests
         run: bash scripts/macos/swift-unit-tests.sh
+
+  snapshot-upgrade-diagnosis:
+    name: Manual published Snapshot Access upgrade diagnosis
+    if: github.event_name == 'workflow_dispatch' && inputs.snapshot_upgrade_diagnosis == true
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Checkout diagnostic source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Reproduce published upgrade and isolate the failing peer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/macos/diagnose-snapshot-helper-upgrade.py
 
   release-preparation-validation:
     name: Release preparation validation
