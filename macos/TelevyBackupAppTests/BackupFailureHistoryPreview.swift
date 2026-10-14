@@ -44,6 +44,31 @@ enum BackupFailureHistoryPreview {
                   let png = bitmap.representation(using: .png, properties: [:])
             else { exit(1) }
             try png.write(to: output.appendingPathComponent("backup-failure-\(name).png"))
+
+            var installationError: String?
+            SnapshotMountHelperInstallation.perform(
+                install: { $0(false, "Mount helper installation failed: bootstrap failed (fixture)") },
+                refresh: { $0(false, nil) },
+                isReady: { $0 },
+                completion: { _, message, _ in installationError = message }
+            )
+            guard let installationError else { exit(1) }
+            let errorContent = VStack(alignment: .leading, spacing: 14) {
+                Text("Settings → Snapshots").font(.system(size: 18, weight: .bold))
+                SnapshotSettingsErrorNotice(message: installationError)
+            }
+            .padding(24)
+            .frame(width: 750, alignment: .leading)
+            .background(scheme == .dark ? Color(red: 0.16, green: 0.17, blue: 0.19) : Color.white)
+            .environment(\.colorScheme, scheme)
+            let errorRenderer = ImageRenderer(content: errorContent)
+            errorRenderer.scale = 2
+            guard let errorImage = errorRenderer.nsImage,
+                  let errorTiff = errorImage.tiffRepresentation,
+                  let errorBitmap = NSBitmapImageRep(data: errorTiff),
+                  let errorPNG = errorBitmap.representation(using: .png, properties: [:])
+            else { exit(1) }
+            try errorPNG.write(to: output.appendingPathComponent("mount-helper-install-error-\(name).png"))
         }
     }
 

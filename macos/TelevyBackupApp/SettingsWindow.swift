@@ -1043,9 +1043,7 @@ struct SettingsWindowRootView: View {
                         .foregroundStyle(.orange)
                 }
                 if let snapshotError {
-                    Label(snapshotError, systemImage: "xmark.octagon")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.red)
+                    SnapshotSettingsErrorNotice(message: snapshotError)
                 }
 
                 snapshotAccessView
