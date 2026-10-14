@@ -190,6 +190,8 @@ assert_contains "helper tag provenance gate" "$release_text" "verify-tag-provena
 assert_contains "RC tag provenance gate" "$release_text" "verify-tag-provenance --tag \"\${rc_tag}\""
 assert_contains "release reservation verification" "$release_text" "verify_github_reservation"
 assert_contains "recovery existing bound verification" "$release_text" "verify_github_receipt"
+assert_contains "release receipt PR head binding" "$release_text" '--pr-head "${pull_request_head_sha}"'
+assert_contains "release publish receipt PR head binding" "$release_text" '--pr-head "${PR_HEAD_SHA}"'
 assert_contains "release bound receipt" "$release_text" "--state bound"
 assert_contains "recovery missing bound repair" "$release_text" "RELEASE_RECOVERY_BOUND_REPAIR"
 assert_contains "recovery repair uses same merge SHA" "$release_text" '--merge-sha "${merge_sha}"'

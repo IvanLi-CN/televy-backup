@@ -207,7 +207,7 @@ jobs:
             fi
             python3 - "${version}" "${merge_sha}" "${reservation_id}" "${reservation_owner}" \
               "${claim_key}" "${boundary_token}" "${reservation_ref}" "${GITHUB_REPOSITORY}" \
-              "${GH_TOKEN}" "${GITHUB_API_URL}" <<'PY'
+              "${GH_TOKEN}" "${GITHUB_API_URL}" "${pull_request_head_sha}" <<'PY'
           import sys
           sys.path.insert(0, '.github/scripts')
           import release_reservation
@@ -215,6 +215,7 @@ jobs:
               state='bound', version=sys.argv[1], merge_sha=sys.argv[2], reservation_id=sys.argv[3],
               owner=sys.argv[4], claim_key=sys.argv[5], boundary_token=sys.argv[6],
               reservation_ref_value=sys.argv[7], repository=sys.argv[8], token=sys.argv[9], api_root=sys.argv[10],
+              pr_head_sha=sys.argv[11],
           )
           PY
             bound_state=present
@@ -293,7 +294,7 @@ jobs:
             fi
             python3 - "${version}" "${merge_sha}" "${reservation_id}" "${reservation_owner}" \
               "${claim_key}" "${boundary_token}" "${reservation_ref}" "${GITHUB_REPOSITORY}" \
-              "${GH_TOKEN}" "${GITHUB_API_URL}" <<'PY'
+              "${GH_TOKEN}" "${GITHUB_API_URL}" "${pull_request_head_sha}" <<'PY'
           import sys
           sys.path.insert(0, '.github/scripts')
           import release_reservation
@@ -301,6 +302,7 @@ jobs:
               state='consumed', version=sys.argv[1], merge_sha=sys.argv[2], reservation_id=sys.argv[3],
               owner=sys.argv[4], claim_key=sys.argv[5], boundary_token=sys.argv[6],
               reservation_ref_value=sys.argv[7], repository=sys.argv[8], token=sys.argv[9], api_root=sys.argv[10],
+              pr_head_sha=sys.argv[11],
           )
           PY
             consumed_state=present
@@ -337,7 +339,7 @@ jobs:
               --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
               --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
               --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
-              --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
+              --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" --pr-head "${pull_request_head_sha}" >/dev/null
             bound_state=present
             if [[ "${release_state}" == published ]]; then
               python3 .github/scripts/release_reservation.py receipt \
@@ -345,7 +347,7 @@ jobs:
                 --reservation-id "${reservation_id}" --owner "${reservation_owner}" \
                 --claim-key "${claim_key}" --boundary-token "${boundary_token}" \
                 --reservation-ref "${reservation_ref}" --repository "${GITHUB_REPOSITORY}" \
-                --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" >/dev/null
+                --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" --pr-head "${pull_request_head_sha}" >/dev/null
               enabled=false
               reason=already_published
             else
@@ -1072,6 +1074,7 @@ jobs:
       PRODUCT_VERSION: ${{ needs.resolve.outputs.version }}
       PRODUCT_CHANNEL: ${{ needs.resolve.outputs.channel }}
       RELEASE_SHA: ${{ needs.resolve.outputs.merge_sha }}
+      PR_HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
       RELEASE_STATE: ${{ needs.resolve.outputs.release_state }}
       RESERVATION_ID: ${{ needs.resolve.outputs.reservation_id }}
       RESERVATION_REF: ${{ needs.resolve.outputs.reservation_ref }}
@@ -1350,7 +1353,7 @@ jobs:
             --reservation-id "${RESERVATION_ID}" --owner "${RESERVATION_OWNER}" \
             --claim-key "${CLAIM_KEY}" --boundary-token "${BOUNDARY_TOKEN}" \
             --reservation-ref "${RESERVATION_REF}" --repository "${GITHUB_REPOSITORY}" \
-            --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}"
+            --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" --pr-head "${PR_HEAD_SHA}"
 
   skipped:
     name: Release skipped
