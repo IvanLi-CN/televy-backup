@@ -9,6 +9,13 @@ mkdir -p "$out_dir"
 sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
 swiftc="$(xcrun --find swiftc)"
 
+bin_mount_helper_installation="$out_dir/snapshot-mount-helper-installation-tests"
+"$swiftc" -sdk "$sdk_path" \
+  "$root_dir/macos/TelevyBackupApp/SnapshotMountHelperInstallation.swift" \
+  "$root_dir/macos/TelevyBackupAppTests/SnapshotMountHelperInstallationTests.swift" \
+  -o "$bin_mount_helper_installation"
+"$bin_mount_helper_installation"
+
 search_file() {
   local pattern="$1"
   local path="$2"

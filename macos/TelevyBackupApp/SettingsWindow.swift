@@ -1136,10 +1136,11 @@ struct SettingsWindowRootView: View {
                     if let snapshotStatus, !snapshotStatus.mountHelperReachable {
                         Button("Install mount helper") {
                             snapshotBusy = true
-                            model.installSnapshotMountHelper { success, error in
+                            snapshotError = nil
+                            model.installSnapshotMountHelper { success, error, status in
                                 snapshotBusy = false
-                                if !success { snapshotError = error ?? "The mount helper could not be installed" }
-                                refreshSnapshotStatus()
+                                snapshotStatus = status
+                                snapshotError = success ? nil : (error ?? "The mount helper could not be installed")
                             }
                         }
                         .buttonStyle(.borderedProminent)

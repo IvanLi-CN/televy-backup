@@ -219,6 +219,13 @@ jobs:
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/mount/TelevyBackup.app"
 
+      - name: Mount helper installation feedback regression
+        run: |
+          swiftc macos/TelevyBackupApp/SnapshotMountHelperInstallation.swift \
+            macos/TelevyBackupAppTests/SnapshotMountHelperInstallationTests.swift \
+            -o "${RUNNER_TEMP}/snapshot-mount-helper-installation-tests"
+          "${RUNNER_TEMP}/snapshot-mount-helper-installation-tests"
+
       - name: Snapshot Access failure-injection tests
         run: cargo test --locked -p televybackup-snapshot-access
 
