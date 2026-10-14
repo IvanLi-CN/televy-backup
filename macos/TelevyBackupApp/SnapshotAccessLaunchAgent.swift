@@ -12,7 +12,9 @@ enum SnapshotAccessRuntimeIdentity {
               // signature. Signing information alone reads the replacement file instead.
               SecCodeCheckValidity(code, [], nil) == errSecSuccess else { return false }
         var path: CFURL?
-        guard SecCodeCopyPath(code, [], &path) == errSecSuccess, let path else { return false }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+              SecCodeCopyPath(staticCode, [], &path) == errSecSuccess, let path else { return false }
         return (path as URL).standardizedFileURL == URL(fileURLWithPath: appPath).standardizedFileURL
     }
 }
