@@ -12,6 +12,8 @@
 - 外部任务终态不是 fire-and-forget：只有匹配应用或精确幂等重放可以确认，避免 CLI 在 daemon 未记录终态时报告成功。
 - 通用恢复和验证必须解析唯一目标后准入；无法归属的 snapshot 不以绕过互斥的方式继续运行。
 - 右键快捷菜单不以任意 `running` 推断 Stop Backup，而是复用明确 backup activity 或 manual queue；退出 GUI 与完全退出继续保持 daemon 所有权边界。
+- 菜单栏专用 template SVG 收紧透明留白，让产品主体在原有 18pt 画布中更易辨认。
+- 五种活动状态改用无背景符号，沿实际符号轮廓扣出透明净空，避免背景底板遮挡主体或符号与主体相连。
 
 ## Key Reasons / Replacements
 
