@@ -373,6 +373,7 @@ identity = {
     "binary": "Contents/MacOS/televybackup-snapshot-access",
     "component_version": "0.2.0",
     "protocol_version": 2,
+    "mount_helper_protocol_version": 4,
     "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign",
 }
 
@@ -380,7 +381,10 @@ def manifest(version, source_commit, dmg_name, dmg_digest):
     return {
         "release_version": version,
         "source_commit": source_commit,
-        "components": {"snapshot_access": identity.copy()},
+        "components": {
+            "snapshot_access": identity.copy(),
+            "snapshot_mount_helper": {"protocol_version": 4},
+        },
         "assets": [{"name": dmg_name, "sha256": dmg_digest, "bytes": 4, "dmg_layout_digest": layout_contract["semantic_layout_digest"]}],
         "dmg_layout": layout_contract,
     }
@@ -602,7 +606,7 @@ fi
                     digest.update(b"other\0")
         return digest.hexdigest()
 
-    helper_binary_bytes = b"#!/bin/sh\nprintf '%s\\n' '{\"bundleId\":\"com.ivan.televybackup.snapshot-access\",\"relativePath\":\"Contents/Library/LoginItems/TelevyBackup Snapshot Access.app\",\"componentVersion\":\"0.2.0\",\"protocolVersion\":2}'\n"
+    helper_binary_bytes = b"#!/bin/sh\nprintf '%s\\n' '{\"bundleId\":\"com.ivan.televybackup.snapshot-access\",\"relativePath\":\"Contents/Library/LoginItems/TelevyBackup Snapshot Access.app\",\"componentVersion\":\"0.2.0\",\"protocolVersion\":2,\"mountHelperProtocolVersion\":4}'\n"
     helper_paths = []
     for number in (1, 2):
         tree = temp / f"TelevyBackup-1.0.0-rc.{number}.dmg.tree"

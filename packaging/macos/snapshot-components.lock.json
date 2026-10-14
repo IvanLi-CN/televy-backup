@@ -10,6 +10,7 @@
       "binary": "Contents/MacOS/televybackup-snapshot-access",
       "component_version": "0.2.0",
       "protocol_version": 2,
+      "mount_helper_protocol_version": 4,
       "source": "rc1-universal-artifact",
       "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign",
       "identity": {

@@ -66,8 +66,11 @@ manifest = {
         "binary": lock["components"]["snapshot_access"]["binary"],
         "component_version": lock["components"]["snapshot_access"]["component_version"],
         "protocol_version": lock["components"]["snapshot_access"]["protocol_version"],
+        "mount_helper_protocol_version": lock["components"]["snapshot_access"]["mount_helper_protocol_version"],
         "reuse_policy": lock["components"]["snapshot_access"]["reuse_policy"],
         **identity,
+    }, "snapshot_mount_helper": {
+        "protocol_version": lock["components"]["snapshot_mount_helper"]["protocol_version"],
     }},
 }
 assert helper.validate_source_manifest(manifest, lock, "v0.9.7-rc.2") == identity
@@ -78,6 +81,16 @@ except helper.HelperResolutionError:
     pass
 else:
     raise AssertionError("invalid helper CodeDirectory identity was accepted")
+
+manifest["components"]["snapshot_access"]["cdhash"] = identity["cdhash"]
+manifest["components"]["snapshot_access"]["mount_helper_protocol_version"] = 1
+try:
+    helper.validate_source_manifest(manifest, lock, "v0.9.7-rc.2")
+except helper.HelperResolutionError as error:
+    assert "mount_helper_protocol_version" in str(error)
+else:
+    raise AssertionError("incompatible Snapshot Access mount helper protocol was accepted")
+manifest["components"]["snapshot_access"]["mount_helper_protocol_version"] = lock["components"]["snapshot_access"]["mount_helper_protocol_version"]
 
 with tempfile.TemporaryDirectory() as directory:
     asset_dir = Path(directory)
@@ -109,8 +122,11 @@ with tempfile.TemporaryDirectory() as directory:
             "binary": lock["components"]["snapshot_access"]["binary"],
             "component_version": lock["components"]["snapshot_access"]["component_version"],
             "protocol_version": lock["components"]["snapshot_access"]["protocol_version"],
+            "mount_helper_protocol_version": lock["components"]["snapshot_access"]["mount_helper_protocol_version"],
             "reuse_policy": lock["components"]["snapshot_access"]["reuse_policy"],
             **identity,
+        }, "snapshot_mount_helper": {
+            "protocol_version": lock["components"]["snapshot_mount_helper"]["protocol_version"],
         }},
         "assets": [
             {"name": dmg_name, "sha256": dmg_digest, "bytes": len(dmg_bytes)},

@@ -580,6 +580,7 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
             "relative_path": required_string(metadata.get("relativePath"), f"{name}.snapshot_access.relative_path"),
             "component_version": required_string(metadata.get("componentVersion"), f"{name}.snapshot_access.component_version"),
             "protocol_version": metadata.get("protocolVersion"),
+            "mount_helper_protocol_version": metadata.get("mountHelperProtocolVersion"),
         }
     finally:
         if not attached_device:
@@ -712,6 +713,9 @@ if root_evidence.get("component_version") != root_manifest.get("component_versio
         fail("root_mount_helper.component_version is not compatible with BUILD-MANIFEST.json")
 if root_evidence.get("protocol_version") != root_manifest.get("protocol_version"):
     fail("root_mount_helper.protocol_version does not match BUILD-MANIFEST.json")
+snapshot_access_manifest = components.get("snapshot_access", {})
+if snapshot_access_manifest.get("mount_helper_protocol_version") != root_manifest.get("protocol_version"):
+    fail("manifest Snapshot Access and mount helper protocols are incompatible")
 root_identity_fields = ("sha256", "artifact_sha256", "cdhash", "designated_requirement")
 for rc_name in ("rc1", "rc2"):
     required_identity(
@@ -796,6 +800,13 @@ def verify_rc_artifact(
             fail(f"{name}. Snapshot Access {field} does not match its BUILD-MANIFEST.json")
     if helper.get("protocol_version") != actual["protocol_version"]:
         fail(f"{name}. Snapshot Access protocol_version does not match its BUILD-MANIFEST.json")
+    if helper.get("mount_helper_protocol_version") != actual["mount_helper_protocol_version"]:
+        fail(f"{name}. Snapshot Access mount_helper_protocol_version does not match its BUILD-MANIFEST.json")
+    mount_helper = components.get("snapshot_mount_helper")
+    if not isinstance(mount_helper, dict):
+        fail(f"{name} manifest snapshot_mount_helper component is missing")
+    if helper.get("mount_helper_protocol_version") != mount_helper.get("protocol_version"):
+        fail(f"{name} Snapshot Access and mount helper protocols are incompatible")
     actual_cdhashes = tuple(sorted(requirement_cdhashes(
         actual["designated_requirement"], f"{name} Snapshot Access"
     )))

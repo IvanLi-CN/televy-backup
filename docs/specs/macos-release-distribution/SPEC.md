@@ -73,7 +73,10 @@ discovered by its verified `BUILD-MANIFEST.json`. Every reused source MUST provi
 DMG, `BUILD-MANIFEST.json`, and `SHA256SUMS`; its component metadata, executable SHA-256, complete
 artifact digest, and complete designated requirement MUST match the lock and downloaded bundle. For
 Universal 2 helpers, the manifest CDHash and the hash selected by the verifying runner MUST both be
-members of the manifest's designated-requirement CDHash set. A native verifying runner MAY observe
+members of the manifest's designated-requirement CDHash set. The Snapshot Access manifest MUST
+record its internal mount-helper protocol version, and that value MUST equal the bundled root
+mount-helper protocol version; a mismatch MUST reject reuse and require an explicit bootstrap. A
+native verifying runner MAY observe
 a projection containing only its architecture's CDHash; the observed requirement CDHash set MUST be
 a subset of the manifest set, while its non-CDHash requirement structure MUST remain identical. A
 historical helper manifest MAY expose a

@@ -23,9 +23,9 @@ use sqlx::{
 use televybackup_snapshot_access::mount_helper;
 use televybackup_snapshot_access::{
     COMPONENT_VERSION, CONFIG_DIR_ENV, DATA_DIR_ENV, DEFAULT_JOURNAL_PATH, LeaseResult,
-    MIN_FREE_BYTES, Method, MountSnapshotRef, PROTOCOL_VERSION, ProbeResult, ReadStreamResult,
-    ReleaseResult, Request, Response, ResponseResult, ScanPageResult, SourceEntry, StatusResult,
-    validate_request,
+    MIN_FREE_BYTES, MOUNT_HELPER_PROTOCOL_VERSION, Method, MountSnapshotRef, PROTOCOL_VERSION,
+    ProbeResult, ReadStreamResult, ReleaseResult, Request, Response, ResponseResult,
+    ScanPageResult, SourceEntry, StatusResult, validate_request,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -117,6 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             serde_json::json!({
                 "componentVersion": COMPONENT_VERSION,
                 "protocolVersion": PROTOCOL_VERSION,
+                "mountHelperProtocolVersion": MOUNT_HELPER_PROTOCOL_VERSION,
                 "bundleId": televybackup_snapshot_access::ACCESS_BUNDLE_ID,
                 "relativePath": televybackup_snapshot_access::ACCESS_BUNDLE_RELATIVE_PATH,
             })

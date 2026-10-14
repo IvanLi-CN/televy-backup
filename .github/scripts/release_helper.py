@@ -26,6 +26,7 @@ COMPONENT_FIELDS = (
     "binary",
     "component_version",
     "protocol_version",
+    "mount_helper_protocol_version",
     "reuse_policy",
 )
 
@@ -142,6 +143,17 @@ def validate_source_manifest(
     for field in COMPONENT_FIELDS:
         if actual.get(field) != expected.get(field):
             raise HelperResolutionError(f"Snapshot Access source component contract mismatch: {field}")
+
+    try:
+        mount_component = manifest["components"]["snapshot_mount_helper"]
+    except (KeyError, TypeError) as error:
+        raise HelperResolutionError("helper source manifest is missing mount helper metadata") from error
+    if not isinstance(mount_component, dict):
+        raise HelperResolutionError("mount helper metadata must be an object")
+    if actual["mount_helper_protocol_version"] != mount_component.get("protocol_version"):
+        raise HelperResolutionError(
+            "Snapshot Access source component is incompatible with the locked mount helper protocol"
+        )
 
     locked_identity = expected.get("identity")
     if not isinstance(locked_identity, dict):

@@ -307,6 +307,10 @@ require(
     component["protocol_version"] == metadata["protocolVersion"],
     "Snapshot Access protocol version does not match the manifest",
 )
+require(
+    component["mount_helper_protocol_version"] == metadata["mountHelperProtocolVersion"],
+    "Snapshot Access mount helper protocol version does not match the manifest",
+)
 PY
 fi
 
