@@ -23,6 +23,25 @@ def immediate(probe, predicate):
 
 
 class UpgradeCleanupTests(unittest.TestCase):
+    def test_preflight_requires_confirmed_service_absence(self):
+        for failed_service in (fixture.SERVICE, fixture.ACCESS_SERVICE):
+            for code, message in ((0, "loaded"), (5, "Input/output error"), (1, "Permission denied")):
+                with self.subTest(service=failed_service, result=code):
+                    calls = []
+
+                    def run(*args, **kwargs):
+                        calls.append(args)
+                        if args[-1] == failed_service:
+                            return subprocess.CompletedProcess(args, code, "", message)
+                        return subprocess.CompletedProcess(args, 113, "", "Could not find service")
+
+                    with patch.object(fixture, "run", run):
+                        with self.assertRaisesRegex(AssertionError, "uninspectable helper service"):
+                            fixture.require_fixture_services_absent()
+                    self.assertTrue(all("print" in args for args in calls))
+        with patch.object(fixture, "run", return_value=subprocess.CompletedProcess((), 113, "", "Could not find service")):
+            fixture.require_fixture_services_absent()
+
     def test_dangling_symlink_is_existing_state(self):
         with tempfile.TemporaryDirectory() as parent:
             link = Path(parent) / "existing-helper"

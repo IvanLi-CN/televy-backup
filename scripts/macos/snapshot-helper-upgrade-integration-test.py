@@ -76,6 +76,12 @@ def fixture_state_absent(paths):
     return not any(os.path.lexists(path) for path in paths)
 
 
+def require_fixture_services_absent():
+    for prefix, service in ((("sudo", "-n"), SERVICE), ((), ACCESS_SERVICE)):
+        result = run(*prefix, "/bin/launchctl", "print", service, check=False)
+        assert service_absent(result), "existing or uninspectable helper service: refusing to replace it"
+
+
 def cleanup_fixture(root, mounts, access_registered, installed):
     # Confirm every owned service is gone before removing anything it can still
     # execute or use. A failed shutdown preserves the fixture for private diagnosis.
@@ -246,9 +252,7 @@ def main():
     assert os.environ.get("GITHUB_REPOSITORY") == REPOSITORY
     assert fixture_state_absent((BINARY, PLIST, MOUNT_SOCKET, JOURNAL)), \
         "existing helper state: refusing to replace it"
-    assert run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False).returncode != 0
-    assert run("/bin/launchctl", "print", ACCESS_SERVICE, check=False).returncode != 0, \
-        "existing Access registration: refusing to replace it"
+    require_fixture_services_absent()
     run("sudo", "-n", "true")
     access_registered = False
     mounts = []
