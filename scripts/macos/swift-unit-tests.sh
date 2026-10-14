@@ -345,6 +345,14 @@ bin_snapshot_access_launchd_state="$out_dir/snapshot-access-launchd-state-tests"
   "$root_dir/macos/TelevyBackupAppTests/SnapshotAccessLaunchdStateTests.swift"
 "$bin_snapshot_access_launchd_state"
 
+bin_snapshot_access_launch_agent="$out_dir/snapshot-access-launch-agent-tests"
+"$swiftc" -sdk "$sdk_path" -framework Security \
+  "$root_dir/macos/TelevyBackupApp/SnapshotAccessLaunchdState.swift" \
+  "$root_dir/macos/TelevyBackupApp/SnapshotAccessLaunchAgent.swift" \
+  "$root_dir/macos/TelevyBackupAppTests/SnapshotAccessLaunchAgentTests.swift" \
+  -o "$bin_snapshot_access_launch_agent"
+"$bin_snapshot_access_launch_agent"
+
 bin_snapshot_inspection="$out_dir/snapshot-inspection-presentation-tests"
 "$swiftc" \
   -sdk "$sdk_path" \

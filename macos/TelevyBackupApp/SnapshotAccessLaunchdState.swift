@@ -1,6 +1,15 @@
 import Foundation
 
 enum SnapshotAccessLaunchdState {
+    static func pid(output: String) -> Int32? {
+        firstValue(after: "pid = ", in: output.components(separatedBy: .newlines))
+            .flatMap(Int32.init).flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    static func program(output: String) -> String? {
+        firstValue(after: "program = ", in: output.components(separatedBy: .newlines))
+    }
+
     static func needsRefresh(
         output: String,
         expectedBundleIdentifier: String,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Diagnose published helper upgrade behavior on a disposable Actions runner only."""
+"""Validate candidate upgrade recovery with published helpers on disposable Actions only."""
 
 import hashlib
 import json
@@ -126,6 +126,89 @@ def refresh_probe(job_output, root, bundle_version):
     return run(str(executable), str(output_file), bundle_version).stdout.strip() == "true"
 
 
+def candidate_probe(root):
+    harness = root / "CandidateProbe.swift"
+    harness.write_text(r'''import Foundation
+@main struct CandidateProbe {
+    static func command(_ executable: String, _ args: [String]) -> SnapshotAccessLaunchAgent.CommandResult {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = args
+        process.standardOutput = output
+        process.standardError = output
+        do { try process.run() } catch { return .init(status: -1, output: "fixture command failed") }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return .init(status: process.terminationStatus, output: String(decoding: data, as: UTF8.self))
+    }
+    static func main() throws {
+        let args = CommandLine.arguments
+        let app = args[2], service = args[3], plist = args[4], executable = args[5]
+        let cli = args[6], config = args[7], data = args[8]
+        let cliArgs = ["--json", "--config-dir", config, "--data-dir", data]
+        func current() -> Bool {
+            let job = command("/bin/launchctl", ["print", service])
+            guard job.status == 0, let pid = SnapshotAccessLaunchdState.pid(output: job.output) else { return false }
+            return SnapshotAccessRuntimeIdentity.isCurrent(pid: pid, appPath: app)
+        }
+        if args[1] == "identity" { print(current() ? "true" : "false"); return }
+        var finished = false
+        SnapshotMountHelperInstallation.perform(
+            install: { $0(true, nil) },
+            registerAccess: { done in
+                do {
+                    try SnapshotAccessLaunchAgent.register(
+                        service: service, domain: "gui/\(getuid())", plistPath: plist, executablePath: executable,
+                        run: { command("/bin/launchctl", $0) },
+                        isCurrent: { SnapshotAccessRuntimeIdentity.isCurrent(pid: $0, appPath: app) },
+                        prepareRestart: {
+                            guard command(cli, cliArgs + ["daemon", "stop"]).status == 0 else {
+                                throw SnapshotAccessLaunchAgent.Failure(message: "fixture daemon stop failed")
+                            }
+                            let result = command(cli, cliArgs + ["snapshot-access", "status"])
+                            guard result.status == 0 else {
+                                throw SnapshotAccessLaunchAgent.Failure(message: "fixture lease probe failed")
+                            }
+                            try JSONDecoder().decode(SnapshotAccessRestartStatus.self, from: Data(result.output.utf8)).requireIdle()
+                        }
+                    )
+                    done(true, nil)
+                } catch { done(false, error.localizedDescription) }
+            },
+            refresh: { done in
+                let deadline = Date().addingTimeInterval(20)
+                while Date() < deadline {
+                    let status = command(cli, cliArgs + ["snapshot-access", "status"])
+                    if status.status == 0,
+                       let payload = try? JSONSerialization.jsonObject(with: Data(status.output.utf8)) as? [String: Any],
+                       payload["mountHelperReachable"] as? Bool == true, current() {
+                        done(true, nil); return
+                    }
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+                done(false, "fixture communication check failed")
+            },
+            isReady: { $0 },
+            completion: { ready, error, _ in
+                if let error { fputs(error + "\n", stderr) }
+                finished = ready
+            }
+        )
+        guard finished else { throw SnapshotAccessLaunchAgent.Failure(message: "candidate failed upgrade recovery") }
+        print("true")
+    }
+}
+''')
+    executable = root / "candidate-probe"
+    run("swiftc", "-framework", "Security",
+        "macos/TelevyBackupApp/SnapshotAccessLaunchdState.swift",
+        "macos/TelevyBackupApp/SnapshotAccessLaunchAgent.swift",
+        "macos/TelevyBackupApp/SnapshotMountHelperInstallation.swift",
+        str(harness), "-o", str(executable))
+    return executable
+
+
 def main():
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions required"
     assert os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "disposable hosted runner required"
@@ -203,7 +286,13 @@ def main():
                 replace_file(new_app / "Contents/MacOS/televybackup-cli", cli)
                 replace_file(new_app / "Contents/MacOS/televybackup-snapshot-mount-helper",
                              app / "Contents/MacOS/televybackup-snapshot-mount-helper")
-                replace_file(new_app / ACCESS_RELATIVE / EXECUTABLE, access)
+                # Replace every sealed Access file, preserving the canonical bundle path
+                # and the old running process, without leaving an invalid mixed bundle.
+                for source in (new_app / ACCESS_RELATIVE).rglob("*"):
+                    if source.is_file():
+                        destination = app / ACCESS_RELATIVE / source.relative_to(new_app / ACCESS_RELATIVE)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        replace_file(source, destination)
                 assert access_job_state()[0] == old_pid, "old Access exited before the upgrade probe"
                 installation = json.loads(run("sudo", "-n", str(cli), "--json", "--config-dir",
                                               str(config), "--data-dir", str(data),
@@ -258,11 +347,25 @@ def main():
                        consecutive_matching_probes=stable_probes,
                        mount_reachable=state["mount_helper_reachable"],
                        exact_protocol_error=reproduction)
-                run("/bin/launchctl", "kickstart", "-k", ACCESS_SERVICE)
+                assert reproduction, "published baseline no longer reproduces the protocol failure"
+                probe_args = (str(app / ACCESS_RELATIVE), ACCESS_SERVICE, str(agent_path),
+                              str(access), str(cli), str(config), str(data))
+                assert run(str(candidate), "identity", *probe_args).stdout.strip() == "false", \
+                    "candidate incorrectly accepts the surviving old Access process"
+                assert run(str(candidate), "repair", *probe_args).stdout.strip() == "true"
                 restarted = wait_for(lambda: request(access_socket, new_component["protocol_version"]),
                                     lambda reply: reply.get("result", {}).get("mount_helper_reachable") is True)
-                report("restart-only", mount_reachable=restarted["result"]["mount_helper_reachable"],
-                       mount_error_absent=restarted["result"].get("mount_helper_error") is None)
+                new_pid, _ = access_job_state()
+                assert new_pid != old_pid
+                assert run(str(candidate), "identity", *probe_args).stdout.strip() == "true"
+                # The exact production registration seam must keep a healthy replacement.
+                assert run(str(candidate), "repair", *probe_args).stdout.strip() == "true"
+                assert access_job_state()[0] == new_pid, "healthy registration unnecessarily restarted Access"
+                report("candidate-recovery", source_commit=os.environ["GITHUB_SHA"],
+                       old_identity_rejected=True, old_process_replaced=True,
+                       mount_reachable=restarted["result"]["mount_helper_reachable"],
+                       mount_error_absent=restarted["result"].get("mount_helper_error") is None,
+                       new_identity_verified=True, healthy_process_retained=True)
         finally:
             if access_registered:
                 run("/bin/launchctl", "bootout", ACCESS_SERVICE, check=False)
@@ -274,8 +377,9 @@ def main():
             for mount in reversed(mounts):
                 run("hdiutil", "detach", str(mount))
     assert reproduction is not None
-    assert not reproduction, \
-        "REPRODUCED: installer is ready but a surviving old Access process rejects mount protocol 4"
+    assert reproduction is True
+    report("cleanup", access_service_absent=run("/bin/launchctl", "print", ACCESS_SERVICE, check=False).returncode != 0,
+           mount_service_absent=run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False).returncode != 0)
 
 
 if __name__ == "__main__":

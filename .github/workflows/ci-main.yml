@@ -5,8 +5,8 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      snapshot_upgrade_diagnosis:
-        description: Diagnose published Snapshot Access upgrade compatibility using disposable fixtures
+      snapshot_upgrade_validation:
+        description: Validate candidate Snapshot Access upgrade recovery using disposable fixtures
         required: false
         type: boolean
         default: false
@@ -25,7 +25,7 @@ env:
 
 jobs:
   main-quality:
-    if: inputs.snapshot_upgrade_diagnosis != true
+    if: inputs.snapshot_upgrade_validation != true
     name: Mainline quality
     runs-on: ubuntu-latest
     env:
@@ -103,7 +103,7 @@ jobs:
           cargo test
 
   main-macos-swift:
-    if: inputs.snapshot_upgrade_diagnosis != true
+    if: inputs.snapshot_upgrade_validation != true
     name: Mainline macOS Swift tests
     runs-on: macos-latest
     steps:
@@ -113,19 +113,22 @@ jobs:
       - name: Swift unit/UI layout tests
         run: bash scripts/macos/swift-unit-tests.sh
 
-  snapshot-upgrade-diagnosis:
-    name: Manual published Snapshot Access upgrade diagnosis
-    if: github.event_name == 'workflow_dispatch' && inputs.snapshot_upgrade_diagnosis == true
+  snapshot-upgrade-validation:
+    name: Manual Snapshot Access upgrade regression
+    if: github.event_name == 'workflow_dispatch' && inputs.snapshot_upgrade_validation == true
     runs-on: macos-15
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
-      - name: Checkout diagnostic source
+      - name: Checkout candidate source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - name: Reproduce published upgrade and isolate the failing peer
+      - name: Swift lifecycle and installation regression tests
+        run: bash scripts/macos/swift-unit-tests.sh
+
+      - name: Verify published upgrade recovery through candidate registration code
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/macos/diagnose-snapshot-helper-upgrade.py
+        run: python3 scripts/macos/snapshot-helper-upgrade-integration-test.py
 
   release-preparation-validation:
     name: Release preparation validation

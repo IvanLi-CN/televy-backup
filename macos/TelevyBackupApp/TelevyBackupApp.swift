@@ -1539,55 +1539,54 @@ final class AppModel {
 
     private func registerEmbeddedSnapshotAccessAgent(completion: @escaping (Bool, String?) -> Void) {
         let plistPath = embeddedSnapshotAccessAgentPlistPath()
-        guard FileManager.default.fileExists(atPath: plistPath) else {
-            completion(false, "Embedded Snapshot Access LaunchAgent plist is unavailable")
+        guard FileManager.default.fileExists(atPath: plistPath),
+              let executable = embeddedSnapshotAccessExecutablePath(), let cli = cliPath() else {
+            completion(false, "Embedded Snapshot Access LaunchAgent is unavailable")
             return
         }
+        let config = effectiveConfigDirURL().path
+        let data = effectiveDataDirURL().path
+        let appPath = embeddedSnapshotAccessAppPath()
         DispatchQueue.global(qos: .userInitiated).async {
-            let domain = "gui/\(getuid())"
-            if self.embeddedSnapshotAccessAgentNeedsRefresh() {
-                let unload = self.runCommandCapture(
-                    exe: "/bin/launchctl",
-                    args: ["bootout", self.embeddedSnapshotAccessLaunchdService],
-                    timeoutSeconds: 5
+            do {
+                try SnapshotAccessLaunchAgent.register(
+                    service: self.embeddedSnapshotAccessLaunchdService,
+                    domain: "gui/\(getuid())",
+                    plistPath: plistPath,
+                    executablePath: executable,
+                    run: { args in
+                        let result = self.runCommandCapture(exe: "/bin/launchctl", args: args, timeoutSeconds: 5)
+                        return .init(status: result.status, output: result.stdout + result.stderr)
+                    },
+                    isCurrent: { SnapshotAccessRuntimeIdentity.isCurrent(pid: $0, appPath: appPath) },
+                    prepareRestart: { try self.prepareSnapshotAccessRestart(cli: cli, config: config, data: data) }
                 )
-                if unload.status != 0 && !self.launchctlFailureIndicatesMissingService(unload) {
-                    DispatchQueue.main.async {
-                        completion(false, self.launchctlFailure(unload))
-                    }
-                    return
-                }
-                self.appendLog("INFO: refreshed stale Snapshot Access LaunchAgent")
-            }
-            let bootstrap = self.runCommandCapture(
-                exe: "/bin/launchctl",
-                args: ["bootstrap", domain, plistPath],
-                timeoutSeconds: 5
-            )
-            if bootstrap.status == 0 {
                 DispatchQueue.main.async { completion(true, nil) }
-                return
-            }
-
-            let bootstrapError = self.launchctlFailure(bootstrap)
-            let lowercased = bootstrapError.lowercased()
-            guard lowercased.contains("already loaded") || lowercased.contains("service exists") else {
-                DispatchQueue.main.async { completion(false, bootstrapError) }
-                return
-            }
-
-            let kickstart = self.runCommandCapture(
-                exe: "/bin/launchctl",
-                args: ["kickstart", "-k", self.embeddedSnapshotAccessLaunchdService],
-                timeoutSeconds: 5
-            )
-            DispatchQueue.main.async {
-                completion(
-                    kickstart.status == 0,
-                    kickstart.status == 0 ? nil : self.launchctlFailure(kickstart)
-                )
+            } catch {
+                DispatchQueue.main.async { completion(false, error.localizedDescription) }
             }
         }
+    }
+
+    private func prepareSnapshotAccessRestart(cli: String, config: String, data: String) throws {
+        let stop = runCommandCapture(
+            exe: cli,
+            args: ["--json", "--config-dir", config, "--data-dir", data, "daemon", "stop"],
+            timeoutSeconds: 20
+        )
+        guard stop.status == 0 else {
+            throw SnapshotAccessLaunchAgent.Failure(message: "The daemon must be stopped before Snapshot Access can be refreshed")
+        }
+        let probe = runCommandCapture(
+            exe: cli,
+            args: ["--json", "--config-dir", config, "--data-dir", data, "snapshot-access", "status"],
+            timeoutSeconds: 8
+        )
+        guard probe.status == 0,
+              let status = try? JSONDecoder().decode(SnapshotAccessRestartStatus.self, from: Data(probe.stdout.utf8)) else {
+            throw SnapshotAccessLaunchAgent.Failure(message: "Snapshot Access lease state could not be verified; it was not restarted")
+        }
+        try status.requireIdle()
     }
 
     private func unregisterEmbeddedSnapshotAccessAgent() -> String? {
@@ -1672,6 +1671,13 @@ final class AppModel {
         }
         guard status.accessAppVersion == expectedVersion else {
             return (false, "Snapshot Access helper version is incompatible")
+        }
+        if usesProductionSnapshotAccessConfiguration && isProductionAppVariant {
+            let job = runCommandCapture(exe: "/bin/launchctl", args: ["print", embeddedSnapshotAccessLaunchdService], timeoutSeconds: 5)
+            guard job.status == 0, let pid = SnapshotAccessLaunchdState.pid(output: job.stdout),
+                  SnapshotAccessRuntimeIdentity.isCurrent(pid: pid, appPath: expectedPath) else {
+                return (false, "Snapshot Access is still running an outdated or unverifiable helper")
+            }
         }
         return (true, nil)
     }
@@ -2571,6 +2577,14 @@ final class AppModel {
     func installSnapshotMountHelper(completion: @escaping (Bool, String?, SnapshotControlStatus?) -> Void) {
         SnapshotMountHelperInstallation.perform(
             install: authorizeSnapshotMountHelperInstallation,
+            registerAccess: { done in
+                // Recheck even if this app instance previously cached registration readiness.
+                self.snapshotAccessRegistrationReady = false
+                self.ensureSnapshotAccessRegistration { success, error in
+                    self.refreshRuntimeAfterSnapshotAccessRegistration()
+                    done(success, error)
+                }
+            },
             refresh: fetchSnapshotStatus,
             isReady: { $0.serviceReachable && $0.mountHelperReachable },
             readinessError: { $0.mountHelperError ?? $0.accessAppError },
@@ -2796,6 +2810,7 @@ final class AppModel {
 
     @discardableResult
     func ensureDaemonRunning() -> Bool {
+        guard !snapshotAccessRegistrationInFlight else { return false }
         let now = Date()
         if let last = lastDaemonStartAttemptAt, now.timeIntervalSince(last) < 3 {
             return waitForDaemonIpcReady(timeoutSeconds: 2.0)

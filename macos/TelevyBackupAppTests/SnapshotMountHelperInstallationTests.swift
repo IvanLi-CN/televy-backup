@@ -79,6 +79,34 @@ private func testUnavailableStatusPreservesTheVerificationError() {
     )
 }
 
+private func testAccessRegistrationPrecedesFinalRefresh() {
+    var steps: [String] = []
+    SnapshotMountHelperInstallation.perform(
+        install: { steps.append("install"); $0(true, nil) },
+        registerAccess: { steps.append("register"); $0(true, nil) },
+        refresh: { steps.append("refresh"); $0(FixtureStatus(reachable: true), nil) },
+        isReady: { $0.reachable },
+        completion: { success, _, _ in precondition(success) }
+    )
+    precondition(steps == ["install", "register", "refresh"])
+    SnapshotMountHelperInstallation.perform(
+        install: { $0(true, nil) },
+        registerAccess: { $0(false, "active lease; not restarted") },
+        refresh: { $0(FixtureStatus(reachable: true), nil) },
+        isReady: { $0.reachable },
+        completion: { success, error, _ in
+            precondition(!success && error?.contains("active lease; not restarted") == true)
+        }
+    )
+    SnapshotMountHelperInstallation.perform(
+        install: { $0(false, "cancelled") },
+        registerAccess: { _ in preconditionFailure("failed installation must not restart Access") },
+        refresh: { $0(FixtureStatus(reachable: false), nil) },
+        isReady: { $0.reachable },
+        completion: { success, error, _ in precondition(!success && error == "cancelled") }
+    )
+}
+
 @main
 enum SnapshotMountHelperInstallationTestsMain {
     static func main() {
@@ -87,6 +115,7 @@ enum SnapshotMountHelperInstallationTestsMain {
         testConfirmedReadinessAndRetry()
         testInstallationFailureWinsOverAnExistingHealthyService()
         testUnavailableStatusPreservesTheVerificationError()
+        testAccessRegistrationPrecedesFinalRefresh()
         print("OK: SnapshotMountHelperInstallationTests")
     }
 }
