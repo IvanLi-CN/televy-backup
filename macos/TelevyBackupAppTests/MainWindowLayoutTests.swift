@@ -9,16 +9,30 @@ enum MainWindowLayoutTests {
     private static var failures: [String] = []
 
     @MainActor
-    static func main() throws {
+    static func main() {
+        _ = NSApplication.shared
+        NSApp.setActivationPolicy(.regular)
+        Task { @MainActor in
+            do {
+                try await exerciseWindow()
+                exit(failures.isEmpty ? 0 : 1)
+            } catch {
+                fputs("FAIL: synthetic window harness: \(error)\n", stderr)
+                exit(1)
+            }
+        }
+        // SwiftUI's display transactions need the AppKit application event loop.
+        // A nested Foundation RunLoop alone measures empty, unrendered hosts.
+        NSApp.run()
+    }
+
+    @MainActor
+    private static func exerciseWindow() async throws {
         guard CommandLine.arguments.count == 2,
               ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1"
         else { exit(2) }
         let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-        _ = NSApplication.shared
-        NSApp.setActivationPolicy(.regular)
-        NSApp.finishLaunching()
-        NSApp.activate(ignoringOtherApps: true)
         let model = AppModel()
         var window: NSWindow?
         model.persistentWindowPresentationHandler = { candidate, _ in
@@ -26,7 +40,7 @@ enum MainWindowLayoutTests {
             candidate.makeKeyAndOrderFront(nil)
         }
         model.openMainWindow()
-        settle()
+        await settle()
         guard let window else { fatalError("Production main window was not created") }
         defer { window.close() }
 
@@ -47,7 +61,7 @@ enum MainWindowLayoutTests {
         model.runHistory = (0..<30).map(run)
         model.statusSnapshot = snapshot
         model.statusStore.ingest(snapshot, receivedAt: Date())
-        settle()
+        await settle()
 
         for (theme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             window.appearance = NSAppearance(named: appearance)
@@ -58,7 +72,7 @@ enum MainWindowLayoutTests {
                 ("restored", NSSize(width: 980, height: 640)),
             ] {
                 window.setContentSize(size)
-                settle()
+                await settle()
                 check(window, scenario: "\(theme)-history-\(sizeName)")
                 if sizeName == "default" || sizeName == "minimum" {
                     try capture(window, to: output.appendingPathComponent("main-window-\(theme)-history-\(sizeName).png"))
@@ -70,7 +84,7 @@ enum MainWindowLayoutTests {
         // interface. This requires no Accessibility permission or external UI agent.
         if let diagnostics = elements(window).first(where: { text($0) == "Diagnostics" }) {
             diagnostics.accessibilityPerformAction(.press)
-            settle()
+            await settle()
             check(window, scenario: "diagnostics")
             try capture(window, to: output.appendingPathComponent("main-window-dark-diagnostics.png"))
         } else {
@@ -78,7 +92,7 @@ enum MainWindowLayoutTests {
         }
         if let history = elements(window).first(where: { text($0) == "History" }) {
             history.accessibilityPerformAction(.press)
-            settle()
+            await settle()
             check(window, scenario: "history-return")
         } else {
             record(false, "History control was not found")
@@ -91,8 +105,8 @@ enum MainWindowLayoutTests {
     }
 
     @MainActor
-    private static func settle() {
-        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    private static func settle() async {
+        try? await Task.sleep(nanoseconds: 500_000_000)
         NSApp.windows.forEach { $0.contentView?.layoutSubtreeIfNeeded(); $0.displayIfNeeded() }
     }
 
