@@ -15,6 +15,11 @@ on:
         required: false
         type: boolean
         default: false
+      snapshot_source_validation:
+        description: Validate source volume reservation on a disposable APFS image
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -30,7 +35,7 @@ env:
 
 jobs:
   main-quality:
-    if: inputs.snapshot_upgrade_validation != true && inputs.main_window_layout_validation != true
+    if: inputs.snapshot_upgrade_validation != true && inputs.main_window_layout_validation != true && inputs.snapshot_source_validation != true
     name: Mainline quality
     runs-on: ubuntu-latest
     env:
@@ -108,7 +113,7 @@ jobs:
           cargo test
 
   main-macos-swift:
-    if: inputs.snapshot_upgrade_validation != true && inputs.main_window_layout_validation != true
+    if: inputs.snapshot_upgrade_validation != true && inputs.main_window_layout_validation != true && inputs.snapshot_source_validation != true
     name: Mainline macOS Swift tests
     runs-on: macos-latest
     steps:
@@ -169,6 +174,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/macos/snapshot-helper-upgrade-integration-test.py
+
+  snapshot-source-validation:
+    name: Manual APFS source reservation regression
+    if: github.event_name == 'workflow_dispatch' && inputs.snapshot_source_validation == true
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build production root helper
+        env:
+          TELEVYBACKUP_BUILD_COMMIT: ${{ github.sha }}
+        run: cargo build --locked -p televybackup-snapshot-access --bin televybackup-snapshot-mount-helper
+      - name: Reproduce nested source reservation failure
+        run: python3 scripts/macos/test-snapshot-source-reservation.py --helper target/debug/televybackup-snapshot-mount-helper --expect legacy
 
   release-preparation-validation:
     name: Release preparation validation
