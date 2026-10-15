@@ -2,6 +2,31 @@ import AppKit
 import Foundation
 import SwiftUI
 
+extension View {
+    @ViewBuilder
+    func mainWindowLayoutAnchor(_ identifier: String) -> some View {
+#if TELEVYBACKUP_TESTING
+        background(MainWindowLayoutAnchor(identifier: identifier))
+#else
+        self
+#endif
+    }
+}
+
+#if TELEVYBACKUP_TESTING
+private struct MainWindowLayoutAnchor: NSViewRepresentable {
+    let identifier: String
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.identifier = NSUserInterfaceItemIdentifier(identifier)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {}
+}
+#endif
+
 private let rateEstimateFreshnessSeconds: TimeInterval = 3.0
 
 struct RunLogSummary: Identifiable {
@@ -320,6 +345,7 @@ struct MainWindowRootView: View {
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("main-window-sidebar-heading")
+                        .mainWindowLayoutAnchor("main-window-sidebar-heading")
                     Spacer()
                     if runHistoryStore.refreshInFlight {
                         ProgressView()
@@ -1113,6 +1139,7 @@ private struct TargetDetailView: View {
             .controlSize(.small)
             .fixedSize()
             .accessibilityIdentifier("main-window-detail-tabs")
+            .mainWindowLayoutAnchor("main-window-detail-tabs")
 
             Spacer(minLength: 0)
 
@@ -1292,6 +1319,7 @@ private struct TargetDetailView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .accessibilityIdentifier("main-window-target-heading")
+                    .mainWindowLayoutAnchor("main-window-target-heading")
 
                 StatusBadge(status: status, style: .pill)
                     .fixedSize(horizontal: true, vertical: false)
@@ -1384,6 +1412,7 @@ private struct TargetDetailView: View {
                             openSettings: { model.openSettingsWindow() },
                             openDiagnostics: { tab = .diagnostics }
                         )
+                        .mainWindowLayoutAnchor("main-window-failure-guidance")
                     }
 
                     if status == .offline {

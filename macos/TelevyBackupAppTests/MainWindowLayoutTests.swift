@@ -43,7 +43,9 @@ enum MainWindowLayoutTests {
         control.makeKeyAndOrderFront(nil)
         await settle()
         try capture(control, to: output.appendingPathComponent("rendering-control.png"))
-        print("[DEBUG-viewport] control-nodes=\(elements(control).count)")
+        control.contentView?.wantsLayer = true
+        await settle()
+        try capture(control, to: output.appendingPathComponent("rendering-control-layer.png"))
         control.close()
         let model = AppModel()
         var window: NSWindow?
@@ -74,6 +76,8 @@ enum MainWindowLayoutTests {
         model.statusSnapshot = snapshot
         model.statusStore.ingest(snapshot, receivedAt: Date())
         await settle()
+        check(window, scenario: "failed-before-resize")
+        try capture(window, to: output.appendingPathComponent("main-window-failed-before-resize.png"))
 
         for (theme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             window.appearance = NSAppearance(named: appearance)
@@ -92,22 +96,20 @@ enum MainWindowLayoutTests {
             }
         }
 
-        // Operate the real segmented control through its in-process accessibility
-        // interface. This requires no Accessibility permission or external UI agent.
-        if let diagnostics = elements(window).first(where: { text($0) == "Diagnostics" }) {
-            diagnostics.accessibilityPerformAction(.press)
+        if let picker = views(window.contentView!).compactMap({ $0 as? NSSegmentedControl }).first {
+            picker.selectedSegment = 1
+            picker.sendAction(picker.action, to: picker.target)
             await settle()
             check(window, scenario: "diagnostics")
+            record(views(window.contentView!).contains { $0.identifier?.rawValue == "main-window-diagnostics" }, "Diagnostics must actually be selected")
             try capture(window, to: output.appendingPathComponent("main-window-dark-diagnostics.png"))
-        } else {
-            record(false, "Diagnostics control was not found")
-        }
-        if let history = elements(window).first(where: { text($0) == "History" }) {
-            history.accessibilityPerformAction(.press)
+            picker.selectedSegment = 0
+            picker.sendAction(picker.action, to: picker.target)
             await settle()
             check(window, scenario: "history-return")
+            record(!views(window.contentView!).contains { $0.identifier?.rawValue == "main-window-diagnostics" }, "History must actually be selected again")
         } else {
-            record(false, "History control was not found")
+            record(false, "Production segmented control was not found")
         }
         if !failures.isEmpty {
             failures.forEach { fputs("FAIL: \($0)\n", stderr) }
@@ -123,65 +125,25 @@ enum MainWindowLayoutTests {
         CATransaction.flush()
     }
 
-    // SwiftUI virtual accessibility nodes do not all declare the complete
-    // NSAccessibilityProtocol. Use AppKit's public attribute bridge for traversal.
-    private static func elements(_ root: Any, depth: Int = 0) -> [NSObject] {
-        guard depth < 40, let element = root as? NSObject else { return [] }
-        let children = attribute(element, "accessibilityChildren", .children) as? [Any] ?? []
-        return [element] + children.flatMap { elements($0, depth: depth + 1) }
-    }
-
-    private static func attribute(_ element: NSObject, _ key: String, _ legacy: NSAccessibility.Attribute) -> Any? {
-        if element.responds(to: NSSelectorFromString(key)), let value = element.value(forKey: key) { return value }
-        return element.accessibilityAttributeValue(legacy)
-    }
-
-    private static func text(_ element: NSObject) -> String {
-        for (key, name) in [("accessibilityLabel", NSAccessibility.Attribute.description), ("accessibilityTitle", .title), ("accessibilityValue", .value)] {
-            if let value = attribute(element, key, name) as? String, !value.isEmpty { return value }
-        }
-        return ""
-    }
-
-    private static func frame(_ element: NSObject) -> NSRect {
-        if element.responds(to: NSSelectorFromString("accessibilityFrame")),
-           let value = element.value(forKey: "accessibilityFrame") as? NSValue { return value.rectValue }
-        let origin = (element.accessibilityAttributeValue(.position) as? NSValue)?.pointValue ?? .zero
-        let size = (element.accessibilityAttributeValue(.size) as? NSValue)?.sizeValue ?? .zero
-        return NSRect(origin: origin, size: size)
+    private static func views(_ root: NSView) -> [NSView] {
+        [root] + root.subviews.flatMap(views)
     }
 
     @MainActor
     private static func check(_ window: NSWindow, scenario: String) {
-        let viewport = window.convertToScreen(window.contentLayoutRect).insetBy(dx: -1, dy: -1)
-        let nodes = elements(window)
-        print("[DEBUG-viewport] nodes=\(nodes.count) host=\(String(describing: window.contentView?.frame)) layout=\(window.contentLayoutRect)")
-        if scenario == "running" {
-            nodes.prefix(25).forEach { print("[DEBUG-viewport] \(type(of: $0)) \(text($0))") }
-            if let view = window.contentView { dumpViews(view) }
-        }
-        for identifier in ["main-window-sidebar-heading", "main-window-target-heading", "main-window-detail-tabs"] {
-            guard let node = nodes.first(where: { (attribute($0, "accessibilityIdentifier", .identifier) as? String) == identifier }) else {
+        let viewport = window.contentLayoutRect.insetBy(dx: -1, dy: -1)
+        let nodes = views(window.contentView!)
+        var identifiers = ["main-window-sidebar-heading", "main-window-target-heading", "main-window-detail-tabs"]
+        if scenario != "running" { identifiers.append("main-window-failure-guidance") }
+        for identifier in identifiers {
+            guard let node = nodes.first(where: { $0.identifier?.rawValue == identifier }) else {
                 record(false, "\(scenario): missing \(identifier)")
                 continue
             }
-            let frame = frame(node)
+            let frame = node.convert(node.bounds, to: nil)
             print("LAYOUT \(scenario) \(identifier): frame=\(frame) viewport=\(viewport)")
             record(!frame.isEmpty && viewport.contains(frame), "\(scenario): \(identifier) is clipped outside the window: \(frame), viewport=\(viewport)")
         }
-        if scenario != "running" {
-            let notice = nodes.first { text($0) == "Could not create the backup snapshot" }
-            record(notice != nil, "\(scenario): failure guidance must be present")
-            if let notice {
-                record(viewport.contains(frame(notice)), "\(scenario): failure guidance is clipped")
-            }
-        }
-    }
-
-    private static func dumpViews(_ view: NSView, depth: Int = 0) {
-        guard depth < 8 else { return }
-        print("[DEBUG-viewport] view[\(depth)] \(type(of: view)) frame=\(view.frame) bounds=\(view.bounds) hidden=\(view.isHidden)")
-        view.subviews.forEach { dumpViews($0, depth: depth + 1) }
     }
 
     private static func record(_ condition: Bool, _ message: String) {
