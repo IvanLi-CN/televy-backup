@@ -286,6 +286,10 @@ jobs:
         run: bash scripts/macos/swift-unit-tests.sh
       - name: Production main window layout regression
         if: needs.classify.outputs.kind == 'source'
+        env:
+          TELEVYBACKUP_CONFIG_DIR: /invalid-layout-env/config
+          TELEVYBACKUP_DATA_DIR: /invalid-layout-env/data
+          TELEVYBACKUP_LOG_DIR: /invalid-layout-env/logs
         run: bash scripts/macos/test-main-window-layout.sh "${RUNNER_TEMP}/main-window-layout"
       - name: Upload synthetic main window evidence
         if: always() && needs.classify.outputs.kind == 'source'

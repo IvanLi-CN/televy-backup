@@ -29,4 +29,9 @@ PY
   "$root_dir/macos/TelevyBackupAppTests/MainWindowLayoutTests.swift"
 TELEVYBACKUP_UI_DEMO=1 \
 TELEVYBACKUP_UI_DEMO_SCENE=main-window-target-detail \
+TELEVYBACKUP_LAYOUT_SANDBOX="$build_dir/runtime" \
+TELEVYBACKUP_CONFIG_DIR="$build_dir/runtime/config" \
+TELEVYBACKUP_DATA_DIR="$build_dir/runtime/data" \
+TELEVYBACKUP_LOG_DIR="$build_dir/runtime/logs" \
+TELEVYBACKUP_DISABLE_KEYCHAIN=1 \
   "$fixture_app/Contents/MacOS/main-window-layout-tests" "$output_dir"

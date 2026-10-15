@@ -41,6 +41,7 @@ Align AppKit's `contentMinSize` with the SwiftUI root's minimum content size. Se
 - Test scrolling to both ends, the native minimum window frame, enlargement/restoration and tab changes. Both columns must remain inside the viewport.
 - Use the normal AppKit application event loop so SwiftUI display transactions run. Keep geometry anchors behind `TELEVYBACKUP_TESTING` and remove throwaway rendering controls.
 - Isolate fixture stores from asynchronous runtime log-refresh callbacks before measuring; otherwise history may disappear and produce a false pass.
+- Pin config/data/log environment overrides to the harness's own temporary directory and disable Keychain. Demo defaults alone do not isolate an inherited explicit directory override; reject mismatched paths before model initialization.
 - Run the native harness on GitHub-hosted macOS with synthetic data. Capture only its exact window ID, without desktop capture, installed apps, backup data, FDA or root helpers.
 
 ## References

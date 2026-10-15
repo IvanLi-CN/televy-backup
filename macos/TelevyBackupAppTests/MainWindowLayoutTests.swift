@@ -29,9 +29,20 @@ enum MainWindowLayoutTests {
 
     @MainActor
     private static func exerciseWindow() async throws {
+        let env = ProcessInfo.processInfo.environment
         guard CommandLine.arguments.count == 2,
-              ProcessInfo.processInfo.environment["TELEVYBACKUP_UI_DEMO"] == "1"
+              env["TELEVYBACKUP_UI_DEMO"] == "1",
+              let sandboxPath = env["TELEVYBACKUP_LAYOUT_SANDBOX"], !sandboxPath.isEmpty,
+              env["TELEVYBACKUP_DISABLE_KEYCHAIN"] == "1"
         else { exit(2) }
+        let sandbox = URL(fileURLWithPath: sandboxPath, isDirectory: true)
+        // Reject an unisolated direct invocation before AppModel's initial
+        // status hook can create or scan a log directory.
+        for (key, directory) in [("TELEVYBACKUP_CONFIG_DIR", "config"), ("TELEVYBACKUP_DATA_DIR", "data"), ("TELEVYBACKUP_LOG_DIR", "logs")] {
+            guard let path = env[key],
+                  URL(fileURLWithPath: path).standardizedFileURL == sandbox.appendingPathComponent(directory).standardizedFileURL
+            else { exit(2) }
+        }
         let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         NSApp.activate(ignoringOtherApps: true)

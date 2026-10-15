@@ -126,6 +126,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Exercise production window with synthetic status transitions
+        env:
+          TELEVYBACKUP_CONFIG_DIR: /invalid-layout-env/config
+          TELEVYBACKUP_DATA_DIR: /invalid-layout-env/data
+          TELEVYBACKUP_LOG_DIR: /invalid-layout-env/logs
         run: bash scripts/macos/test-main-window-layout.sh "${RUNNER_TEMP}/main-window-layout"
       - name: Upload synthetic window evidence
         if: always()
