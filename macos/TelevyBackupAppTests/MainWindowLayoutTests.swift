@@ -58,6 +58,9 @@ enum MainWindowLayoutTests {
         }
         model.openMainWindow()
         await settle(model)
+        // Drain the initial demo status hook scheduled before the harness took
+        // ownership of the stores, before installing assertion fixtures.
+        try await Task.sleep(nanoseconds: 500_000_000)
         guard let window else { fatalError("Production main window was not created") }
         defer { window.close() }
 
@@ -89,6 +92,7 @@ enum MainWindowLayoutTests {
         check(window, scenario: "failed-short-history")
         model.runHistory = (0..<30).map(run)
         await settle(model)
+        record(model.runHistory.count == 30, "failed long-history fixture must remain installed")
         check(window, scenario: "failed-before-resize")
         try capture(window, to: output.appendingPathComponent("main-window-failed-before-resize.png"))
 

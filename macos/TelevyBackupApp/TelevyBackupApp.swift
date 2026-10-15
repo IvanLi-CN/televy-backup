@@ -4255,6 +4255,10 @@ final class AppModel {
                     .environmentObject(self.diagnosticsStore)
                     .appAppearanceOverride(self.appearanceOverride)
                 let controller = NSHostingController(rootView: root)
+                // AppKit owns this resizable window's viewport. Dynamic SwiftUI
+                // content must scroll within it rather than feed back an ideal
+                // size that expands the host beyond the visible content area.
+                controller.sizingOptions = []
                 controller.view.wantsLayer = true
                 controller.view.layer?.backgroundColor = NSColor.clear.cgColor
 	                let w = NSWindow(contentViewController: controller)
