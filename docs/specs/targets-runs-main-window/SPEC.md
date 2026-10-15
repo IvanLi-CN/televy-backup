@@ -117,6 +117,10 @@ None
 
 ## Visual Evidence
 
+- Failed target with independently scrolling history: [assets/main-window-failed-dark-history.png](assets/main-window-failed-dark-history.png)
+- Failed target at minimum content size: [assets/main-window-failed-light-minimum.png](assets/main-window-failed-light-minimum.png)
+- Failed target with Diagnostics selected at minimum size: [assets/main-window-failed-dark-diagnostics.png](assets/main-window-failed-dark-diagnostics.png)
+- Failure viewport evidence source: `scripts/macos/test-main-window-layout.sh`, using the production NSWindow and synthetic status/history in GitHub-hosted macOS CI.
 - Deterministic `ui_demo` target detail: [assets/main-window-target-detail-navigation.png](assets/main-window-target-detail-navigation.png)
 - Deterministic `ui_demo` snapshot detail: [assets/main-window-snapshot-changes-navigation.png](assets/main-window-snapshot-changes-navigation.png)
 - Source: `scripts/macos/capture-main-window.sh`; captures are scoped to the mock main window and do not use a live application run.
