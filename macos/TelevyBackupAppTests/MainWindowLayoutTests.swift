@@ -17,6 +17,8 @@ enum MainWindowLayoutTests {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.regular)
+        NSApp.finishLaunching()
+        NSApp.activate(ignoringOtherApps: true)
         let model = AppModel()
         var window: NSWindow?
         model.persistentWindowPresentationHandler = { candidate, _ in
@@ -67,7 +69,7 @@ enum MainWindowLayoutTests {
         // Operate the real segmented control through its in-process accessibility
         // interface. This requires no Accessibility permission or external UI agent.
         if let diagnostics = elements(window).first(where: { text($0) == "Diagnostics" }) {
-            record(diagnostics.accessibilityPerformPress(), "Diagnostics must be selectable")
+            diagnostics.accessibilityPerformAction(.press)
             settle()
             check(window, scenario: "diagnostics")
             try capture(window, to: output.appendingPathComponent("main-window-dark-diagnostics.png"))
@@ -75,7 +77,7 @@ enum MainWindowLayoutTests {
             record(false, "Diagnostics control was not found")
         }
         if let history = elements(window).first(where: { text($0) == "History" }) {
-            record(history.accessibilityPerformPress(), "History must be selectable again")
+            history.accessibilityPerformAction(.press)
             settle()
             check(window, scenario: "history-return")
         } else {
@@ -94,25 +96,39 @@ enum MainWindowLayoutTests {
         NSApp.windows.forEach { $0.contentView?.layoutSubtreeIfNeeded(); $0.displayIfNeeded() }
     }
 
-    private static func elements(_ root: Any, depth: Int = 0) -> [any NSAccessibilityProtocol] {
-        guard depth < 40, let element = root as? any NSAccessibilityProtocol else { return [] }
-        return [element] + (element.accessibilityChildren() ?? []).flatMap { elements($0, depth: depth + 1) }
+    // SwiftUI virtual accessibility nodes do not all declare the complete
+    // NSAccessibilityProtocol. Use AppKit's public attribute bridge for traversal.
+    private static func elements(_ root: Any, depth: Int = 0) -> [NSObject] {
+        guard depth < 40, let element = root as? NSObject else { return [] }
+        let children = element.accessibilityAttributeValue(.children) as? [Any] ?? []
+        return [element] + children.flatMap { elements($0, depth: depth + 1) }
     }
 
-    private static func text(_ element: any NSAccessibilityProtocol) -> String {
-        element.accessibilityLabel() ?? (element.accessibilityValue() as? String) ?? ""
+    private static func text(_ element: NSObject) -> String {
+        for attribute in [NSAccessibility.Attribute.description, .title, .value] {
+            if let value = element.accessibilityAttributeValue(attribute) as? String, !value.isEmpty { return value }
+        }
+        return ""
+    }
+
+    private static func frame(_ element: NSObject) -> NSRect {
+        let origin = (element.accessibilityAttributeValue(.position) as? NSValue)?.pointValue ?? .zero
+        let size = (element.accessibilityAttributeValue(.size) as? NSValue)?.sizeValue ?? .zero
+        return NSRect(origin: origin, size: size)
     }
 
     @MainActor
     private static func check(_ window: NSWindow, scenario: String) {
         let viewport = window.convertToScreen(window.contentLayoutRect).insetBy(dx: -1, dy: -1)
         let nodes = elements(window)
+        print("[DEBUG-viewport] nodes=\(nodes.count) host=\(String(describing: window.contentView?.frame)) layout=\(window.contentLayoutRect)")
+        if scenario == "running" { nodes.prefix(25).forEach { print("[DEBUG-viewport] \(type(of: $0)) \(text($0))") } }
         for identifier in ["main-window-sidebar-heading", "main-window-target-heading", "main-window-detail-tabs"] {
-            guard let node = nodes.first(where: { $0.accessibilityIdentifier() == identifier }) else {
+            guard let node = nodes.first(where: { ($0.accessibilityAttributeValue(.identifier) as? String) == identifier }) else {
                 record(false, "\(scenario): missing \(identifier)")
                 continue
             }
-            let frame = node.accessibilityFrame()
+            let frame = frame(node)
             print("LAYOUT \(scenario) \(identifier): frame=\(frame) viewport=\(viewport)")
             record(!frame.isEmpty && viewport.contains(frame), "\(scenario): \(identifier) is clipped outside the window: \(frame), viewport=\(viewport)")
         }
@@ -120,7 +136,7 @@ enum MainWindowLayoutTests {
             let notice = nodes.first { text($0) == "Could not create the backup snapshot" }
             record(notice != nil, "\(scenario): failure guidance must be present")
             if let notice {
-                record(viewport.contains(notice.accessibilityFrame()), "\(scenario): failure guidance is clipped")
+                record(viewport.contains(frame(notice)), "\(scenario): failure guidance is clipped")
             }
         }
     }
@@ -131,12 +147,14 @@ enum MainWindowLayoutTests {
 
     @MainActor
     private static func capture(_ window: NSWindow, to url: URL) throws {
-        guard let view = window.contentView,
-              let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)
-        else { fatalError("Cannot capture synthetic window") }
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-        guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("Cannot encode synthetic window") }
-        try png.write(to: url)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-x", "-o", "-l", String(window.windowNumber), url.path]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0, FileManager.default.fileExists(atPath: url.path) else {
+            fatalError("Cannot capture the synthetic window; refusing an unscoped capture")
+        }
     }
 
     private static func run(_ index: Int) -> RunLogSummary {
