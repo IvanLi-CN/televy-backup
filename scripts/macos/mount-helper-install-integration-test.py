@@ -97,13 +97,13 @@ server.bind(path)
 os.chmod(path, 0o666)
 server.listen()
 while True:
-connection, _ = server.accept()
-with connection:
-    request = json.loads(connection.makefile("rb").readline())
-    response = {"version":1,"request_id":request["request_id"],"ok":True,
-                "result":{"kind":"status","helper_version":"0.9.8","active_mounts":0,
-                          "blocked_volume_uuids":[],"recovery_leases":[]}}
-    connection.sendall(json.dumps(response).encode() + b"\\n")
+    connection, _ = server.accept()
+    with connection:
+        request = json.loads(connection.makefile("rb").readline())
+        response = {"version":1,"request_id":request["request_id"],"ok":True,
+                    "result":{"kind":"status","helper_version":"0.9.8","active_mounts":0,
+                              "blocked_volume_uuids":[],"recovery_leases":[]}}
+        connection.sendall(json.dumps(response).encode() + b"\\n")
 ''')
     if args.expect_build_commit:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')

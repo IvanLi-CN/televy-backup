@@ -51,7 +51,7 @@ def main():
     managed_root_existed = os.path.lexists(managed_root)
     try:
         run("hdiutil", "create", "-size", "128m", "-fs", "APFS", "-volname", "SyntheticReserve", str(image))
-        run("hdiutil", "attach", "-nobrowse", "-mountpoint", str(mount), str(image))
+        run("hdiutil", "attach", "-nobrowse", "-owners", "on", "-mountpoint", str(mount), str(image))
         attached = True
         source = mount / "nested" / "source"
         source.mkdir(parents=True)

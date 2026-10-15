@@ -84,13 +84,13 @@ sequenceDiagram
     A->>H: unmount and UUID-scoped cleanup
 ```
 
-## Invariants
-
-### Nested source reservation failures
+## Nested source reservation failures
 
 `diskutil info -plist` accepts a volume or device, not an arbitrary nested directory. Hosted macOS reproduces a nested-directory query exiting 1 with empty stderr, while querying the enclosing device succeeds. In the old Reserve path this became a blank `command_failed` and surfaced as `snapshot.acquire_failed`. Resolve the device with `fstatfs` on a pinned no-follow directory metadata descriptor, then validate APFS type, device and UUID through a device query. Bind the non-root authorization child's opened directory to the same device/inode and recheck pathname identity before recording the reservation. Never treat an identity/query failure as an empty inventory or permit live-source fallback.
 
 System tools may report their useful diagnostic on stdout even when stderr is empty. Preserve the fixed operation stage, command category, exit code and selected diagnostic channel; project output onto known safe error classes before limiting its length. Do not echo command arguments, raw plist parser errors, paths, volume UUIDs or arbitrary tool output. Keep component compatibility versions separate from build identity: additive `build_commit` plus an installed-file hash prevents a surviving older build with the same component version from proving readiness. Use `CI (main)`'s default-off `snapshot_source_validation` to reproduce and validate with disposable storage; it requires no owner files or TCC changes and does not prove a full remote backup.
+
+## Invariants
 
 1. Strict mode is opt-in by APFS Volume UUID. Non-APFS, insufficient free space, unavailable
    service, ambiguity while identifying the newly-created snapshot, nested mounts, read errors, and
