@@ -206,6 +206,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo test --locked -p televybackup-snapshot-access
+          cargo test --locked -p televybackup-snapshot-access source_directory_rejects_real_mount_identity_loss -- --ignored
           cargo test --locked -p televybackup snapshot_mount_service::tests
           cargo test --locked -p televybackupd snapshot_client::tests
           cargo test --locked -p televybackupd snapshot_setup_failures_finish_both_status_and_run_history

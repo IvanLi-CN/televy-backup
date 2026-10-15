@@ -93,7 +93,8 @@ assert_contains "timepoint synthetic fixture guard" "$integration_text" "TELEVYB
 assert_contains "timepoint synthetic target guard" "$integration_text" '[[ "$target_id" == "apfs-ci" ]]'
 assert_not_contains "timepoint transcript persistence in sanitized mode" "$integration_text" 'printf '\''%s\\n'\'' "$last_response" >>"$evidence_path"'
 
-assert_contains "root-owned snapshot creation" "$mount_helper_text" 'run_command("/usr/bin/tmutil", ["localsnapshot"])'
+assert_contains "root-owned snapshot creation" "$mount_helper_text" '"/usr/bin/tmutil"'
+assert_contains "snapshot creation diagnostic stage" "$mount_helper_text" '"snapshot_create"'
 assert_contains "single snapshot ownership result" "$mount_helper_text" 'manifest.len() != 1'
 assert_contains "pre-journal inventory fence" "$mount_helper_text" 'snapshot inventory changed while recording cleanup'
 assert_contains "post-journal inventory fence" "$mount_helper_text" 'snapshot inventory changed after cleanup was recorded'
@@ -106,8 +107,8 @@ assert_contains "deletion requires original baseline" "$mount_helper_text" "A po
 assert_contains "partial deletion retains unconfirmed manifest" "$mount_helper_text" "retain_unconfirmed_manifest_after_delete_failure"
 assert_contains "deletion clears recorded manifest" "$mount_helper_text" "snapshot_manifest = '[]', reservation_manifest = ?"
 assert_contains "stale release remains blocked" "$mount_helper_text" 'if !stale_reserved'
-assert_contains "lease source-path binding" "$mount_helper_text" 'authorize_source_path(uid, source_path)'
-assert_contains "mount source-path reauthorization" "$mount_helper_text" 'authorize_source_path(uid, stored_source_path)'
+assert_contains "lease source-path binding" "$mount_helper_text" 'authorize_source_path(uid, source_path, &source)'
+assert_contains "mount source-path reauthorization" "$mount_helper_text" 'authorize_source_path(uid, stored_source_path, &source)'
 assert_contains "source-path authorization uses exec boundary" "$mount_helper_text" 'Command::new(executable)'
 assert_contains "source-path authorization has pre-runtime entrypoint" "$mount_helper_text" 'maybe_authorize_source_path'
 assert_not_contains "source-path authorization does not fork Tokio helper" "$mount_helper_text" 'libc::fork()'

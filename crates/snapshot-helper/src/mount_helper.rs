@@ -2703,17 +2703,80 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn source_directory_recheck_detects_filesystem_identity_change() {
-        let parent = std::env::temp_dir()
-            .canonicalize()
-            .unwrap()
-            .join(format!("source-device-{}", Uuid::new_v4()));
-        fs::create_dir(&parent).unwrap();
-        let mut pinned = SourceDirectory::open(&parent).unwrap();
-        assert!(pinned.recheck(&parent).is_ok());
-        pinned.device ^= 1;
-        assert!(pinned.recheck(&parent).is_err());
-        fs::remove_dir(parent).unwrap();
+    #[ignore = "requires a disposable GitHub-hosted APFS image"]
+    fn source_directory_rejects_real_mount_identity_loss() {
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        struct Fixture {
+            root: PathBuf,
+            attached: bool,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if self.attached {
+                    let stopped = Command::new("hdiutil")
+                        .args(["detach", "-force"])
+                        .arg(self.root.join("volume"))
+                        .output()
+                        .is_ok_and(|output| output.status.success());
+                    if !stopped {
+                        return;
+                    }
+                }
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+        let mut fixture = Fixture {
+            root: std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("mount-identity-{}", Uuid::new_v4())),
+            attached: false,
+        };
+        fs::create_dir(&fixture.root).unwrap();
+        let mount = fixture.root.join("volume");
+        fs::create_dir(&mount).unwrap();
+        let image = fixture.root.join("fixture.dmg");
+        assert!(
+            Command::new("hdiutil")
+                .args([
+                    "create",
+                    "-size",
+                    "128m",
+                    "-fs",
+                    "APFS",
+                    "-volname",
+                    "SyntheticIdentity"
+                ])
+                .arg(&image)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        assert!(
+            Command::new("hdiutil")
+                .args(["attach", "-nobrowse", "-mountpoint"])
+                .arg(&mount)
+                .arg(&image)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        fixture.attached = true;
+        let pinned = SourceDirectory::open(&mount).unwrap();
+        assert!(pinned.recheck(&mount).is_ok());
+        assert!(
+            Command::new("hdiutil")
+                .args(["detach", "-force"])
+                .arg(&mount)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        fixture.attached = false;
+        assert!(pinned.recheck(&mount).is_err());
     }
 
     #[test]
