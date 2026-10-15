@@ -47,6 +47,8 @@ def main():
     root = fixture / "root"
     image = fixture / "fixture.dmg"
     attached = loaded = False
+    managed_root = Path("/private/var/tmp/televybackup-snapshot-mounts")
+    managed_root_existed = os.path.lexists(managed_root)
     try:
         run("hdiutil", "create", "-size", "128m", "-fs", "APFS", "-volname", "SyntheticReserve", str(image))
         run("hdiutil", "attach", "-nobrowse", "-mountpoint", str(mount), str(image))
@@ -81,8 +83,34 @@ def main():
         while not ipc.exists() and time.monotonic() < deadline:
             time.sleep(0.1)
         assert request(ipc, "status")["ok"], "production helper failed to start"
+        if args.expect == "fixed":
+            assert request(ipc, "status")["result"]["build_commit"] == os.environ["GITHUB_SHA"]
+            link = mount / "link"
+            link.symlink_to(source, target_is_directory=True)
+            denied = mount / "denied"
+            denied.mkdir()
+            run("sudo", "-n", "chown", "root:wheel", str(denied))
+            run("sudo", "-n", "chmod", "700", str(denied))
+            cases = (
+                dict(volume_uuid=str(uuid.uuid4())),
+                dict(device_identifier="disk999999s1"),
+                dict(source_path=str(link)),
+                dict(source_path=str(mount / "missing")),
+                dict(source_path=str(denied)),
+                dict(uid=os.getuid() + 1),
+            )
+            for override in cases:
+                fields = dict(uid=os.getuid(), lease_id=str(uuid.uuid4()), volume_uuid=volume_uuid,
+                              device_identifier=device, source_path=str(source))
+                fields.update(override)
+                reply = request(ipc, "reserve", **fields)
+                assert not reply["ok"], "unsafe Reserve was accepted"
+                assert str(mount) not in reply.get("message", ""), "diagnostic leaked source path"
+            assert request(ipc, "status")["result"]["active_mounts"] == 0
+            print("PASS: wrong UUID/device, symlink, missing source, denied directory and denied peer rejected without a lease", flush=True)
         for attempt in range(2):
-            reply = request(ipc, "reserve", uid=os.getuid(), lease_id=str(uuid.uuid4()),
+            lease_id = str(uuid.uuid4())
+            reply = request(ipc, "reserve", uid=os.getuid(), lease_id=lease_id,
                             volume_uuid=volume_uuid, device_identifier=device, source_path=str(source))
             if args.expect == "legacy":
                 assert direct.returncode == 1, "nested diskutil hypothesis not reproduced"
@@ -92,6 +120,13 @@ def main():
             else:
                 assert reply["ok"], reply.get("message")
                 assert reply["result"]["cleanup_state"] == "reserved"
+                query = "SELECT uid,volume_uuid,device_identifier,source_path,state,reservation_manifest,reservation_manifest_valid FROM mounts WHERE lease_id=?"
+                reader = "import sqlite3,json,sys; print(json.dumps(sqlite3.connect(sys.argv[1]).execute(sys.argv[2],(sys.argv[3],)).fetchone()))"
+                row = json.loads(run("sudo", "-n", "/usr/bin/python3", "-c", reader, str(root / "journal" / "state.sqlite"), query, lease_id).stdout)
+                assert row == [os.getuid(), volume_uuid, device, str(source), "reserved", "[]", 1]
+                after = plistlib.loads(run("/usr/sbin/diskutil", "apfs", "listSnapshots", "-plist", device).stdout)
+                assert after == plistlib.loads(inventory.stdout), "Reserve created or changed snapshots"
+                print("PASS: production Reserve accepted nested source; journal identity and empty baseline match; no snapshot created", flush=True)
                 break
     finally:
         # Never remove executable/journal state until launchd proves shutdown.
@@ -99,6 +134,8 @@ def main():
             run("sudo", "-n", "launchctl", "bootout", service)
             stopped = run("sudo", "-n", "launchctl", "print", service, check=False)
             assert stopped.returncode != 0 and b"Could not find service" in stopped.stderr, "fixture shutdown unverified; preserving state"
+        if not managed_root_existed and managed_root.exists():
+            run("sudo", "-n", "rmdir", str(managed_root))
         if attached:
             run("hdiutil", "detach", str(mount))
         if root.exists():

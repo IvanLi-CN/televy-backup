@@ -182,16 +182,59 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
-      - name: Build production root helper
+      - name: Reproduce baseline production failure
+        run: |
+          legacy="${RUNNER_TEMP}/legacy-source"
+          mkdir -p "${legacy}"
+          git archive 0fb3b0822b765460ff08b9ef231a603661e92180 | tar -x -C "${legacy}"
+          TELEVYBACKUP_BUILD_COMMIT=0fb3b0822b765460ff08b9ef231a603661e92180 \
+            cargo build --locked --manifest-path "${legacy}/Cargo.toml" \
+            --target-dir "${RUNNER_TEMP}/legacy-target" \
+            -p televybackup-snapshot-access --bin televybackup-snapshot-mount-helper
+          python3 scripts/macos/test-snapshot-source-reservation.py \
+            --helper "${RUNNER_TEMP}/legacy-target/debug/televybackup-snapshot-mount-helper" --expect legacy
+      - name: Format and targeted regression tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked -p televybackup-snapshot-access
+          cargo test --locked -p televybackup snapshot_mount_service::tests
+          cargo test --locked -p televybackupd snapshot_client::tests
+          cargo test --locked -p televybackupd snapshot_setup_failures_finish_both_status_and_run_history
+          cargo test --locked -p televy_backup_core strict_snapshot_read_errors_keep_the_snapshot_access_code
+      - name: Build candidate root helper and installer
         env:
           TELEVYBACKUP_BUILD_COMMIT: ${{ github.sha }}
-        run: cargo build --locked -p televybackup-snapshot-access --bin televybackup-snapshot-mount-helper
-      - name: Reproduce nested source reservation failure
-        run: python3 scripts/macos/test-snapshot-source-reservation.py --helper target/debug/televybackup-snapshot-mount-helper --expect legacy
+        run: cargo build --locked -p televybackup-snapshot-access -p televybackup --bin televybackup-snapshot-mount-helper --bin televybackup
+      - name: Verify candidate production reservation and security negatives
+        run: python3 scripts/macos/test-snapshot-source-reservation.py --helper target/debug/televybackup-snapshot-mount-helper --expect fixed
+      - name: Verify candidate installation with unchanged approved Access artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fixture="${RUNNER_TEMP}/install-identity"
+          mkdir -p "${fixture}/download" "${fixture}/mount"
+          gh release download v0.9.9-rc.122 --repo "${GITHUB_REPOSITORY}" \
+            --pattern TelevyBackup-0.9.9-rc.122.dmg --pattern BUILD-MANIFEST.json --pattern SHA256SUMS \
+            --dir "${fixture}/download"
+          (cd "${fixture}/download"; grep 'TelevyBackup-0.9.9-rc.122.dmg$' SHA256SUMS | shasum -a 256 -c -)
+          hdiutil attach -readonly -nobrowse -mountpoint "${fixture}/mount" "${fixture}/download/TelevyBackup-0.9.9-rc.122.dmg"
+          trap 'hdiutil detach "${fixture}/mount" >/dev/null' EXIT
+          cp -R "${fixture}/mount/TelevyBackup.app" "${fixture}/TelevyBackup.app"
+          cp target/debug/televybackup "${fixture}/TelevyBackup.app/Contents/MacOS/televybackup-cli"
+          cp target/debug/televybackup-snapshot-mount-helper "${fixture}/TelevyBackup.app/Contents/MacOS/televybackup-snapshot-mount-helper"
+          bash scripts/macos/verify-component-identity.sh \
+            --reference "${fixture}/mount/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" \
+            --candidate "${fixture}/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app" \
+            --manifest "${fixture}/download/BUILD-MANIFEST.json"
+          python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/TelevyBackup.app" --require-readiness --expect-build-commit "${GITHUB_SHA}"
 
   release-preparation-validation:
     name: Release preparation validation

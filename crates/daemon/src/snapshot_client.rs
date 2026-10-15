@@ -596,6 +596,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reserve_command_diagnostics_survive_access_rejection() {
+        let message = "snapshot mount helper reservation failed: stage=source_volume command=diskutil.info exit=1 channel=stdout summary=could not find disk";
+        let response = Response::error("request-1", "invalid_request", message);
+        let encoded = serde_json::to_string(&response).unwrap();
+        let error = decode_response(&encoded, "request-1").unwrap_err();
+        assert!(
+            matches!(&error, SnapshotClientError::Rejected { code, message: actual } if code == "invalid_request" && actual == message)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("stage=source_volume command=diskutil.info exit=1 channel=stdout")
+        );
+    }
+
+    #[test]
     fn setup_failure_reasons_are_bounded_and_do_not_expose_diagnostics() {
         for (message, reason) in [
             (

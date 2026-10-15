@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{BufRead, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -47,11 +47,13 @@ pub enum MountHelperError {
     Protocol(String),
     #[error("mount helper I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("{program} failed ({status}): {stderr}")]
+    #[error("stage={stage} command={command} exit={status} channel={channel} summary={summary}")]
     Command {
-        program: String,
+        stage: &'static str,
+        command: &'static str,
         status: String,
-        stderr: String,
+        channel: &'static str,
+        summary: String,
     },
     #[error("mount helper JSON error: {0}")]
     Json(#[from] serde_json::Error),
@@ -734,6 +736,7 @@ async fn status_result(
     };
     Ok(MountStatusResult {
         helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
+        build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts,
         blocked_volume_uuids,
         recovery_leases: Vec::new(),
@@ -783,6 +786,7 @@ async fn status_for_volume_result(
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
     Ok(MountStatusResult {
         helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
+        build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts,
         blocked_volume_uuids,
         recovery_leases,
@@ -844,8 +848,9 @@ async fn reserve_request(
     validate_uuid(volume_uuid)?;
     validate_device(device_identifier)?;
     validate_device_volume_binding(device_identifier, volume_uuid)?;
-    validate_source_path(source_path, volume_uuid, device_identifier)?;
-    authorize_source_path(uid, source_path)?;
+    let source = validate_source_path(source_path, volume_uuid, device_identifier)?;
+    authorize_source_path(uid, source_path, &source)?;
+    source.recheck(source_path)?;
     audit_released_tombstones(journal, volume_uuid, device_identifier).await?;
     let blocked: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
@@ -860,6 +865,7 @@ async fn reserve_request(
     }
     let reservation_manifest = snapshot_inventory_manifest(device_identifier)?;
     let reservation_manifest_json = serde_json::to_string(&reservation_manifest)?;
+    source.recheck(source_path)?;
     sqlx::query(
         "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, source_path, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, ?, '', '', '[]', ?, 1, 'reserved', datetime('now'), datetime('now'))",
     )
@@ -871,6 +877,10 @@ async fn reserve_request(
     .bind(&reservation_manifest_json)
     .execute(journal)
     .await?;
+    if let Err(error) = source.recheck(source_path) {
+        update_state(journal, lease_id, "cleanup_pending").await?;
+        return Err(error);
+    }
     Ok(MountReleaseResult {
         lease_id: lease_id.to_string(),
         cleanup_state: "reserved".to_string(),
@@ -987,7 +997,12 @@ async fn record_cleanup_request(
             "cleanup reservation baseline changed before recording".into(),
         ));
     }
-    run_command("/usr/bin/tmutil", ["localsnapshot"])?;
+    run_command(
+        "snapshot_create",
+        "tmutil.localsnapshot",
+        "/usr/bin/tmutil",
+        ["localsnapshot"],
+    )?;
     let current_manifest = snapshot_inventory_manifest(&device_identifier)?;
     let manifest: Vec<_> = current_manifest
         .iter()
@@ -1131,12 +1146,13 @@ async fn mount_request(
         ));
     }
     let stored_source_path = Path::new(&stored_source_path);
-    validate_source_path(
+    let source = validate_source_path(
         stored_source_path,
         &stored_volume_uuid,
         &stored_device_identifier,
     )?;
-    authorize_source_path(uid, stored_source_path)?;
+    authorize_source_path(uid, stored_source_path, &source)?;
+    source.recheck(stored_source_path)?;
     let journal_update = sqlx::query(
         "UPDATE mounts SET snapshot_name = ?, mount_root = ? WHERE lease_id = ? AND state = 'prepared' AND mount_root = ''",
     )
@@ -1205,6 +1221,8 @@ async fn mount_request(
         };
     let source_device = source_device.to_string_lossy().into_owned();
     let mount_result = run_command(
+        "snapshot_mount",
+        "mount_apfs",
         "/sbin/mount_apfs",
         [
             "-s",
@@ -1680,6 +1698,8 @@ async fn cleanup_mount(
             }) =>
         {
             run_command(
+                "snapshot_unmount",
+                "umount",
                 "/sbin/umount",
                 ["-f", mount_root.to_string_lossy().as_ref()],
             )
@@ -1887,6 +1907,8 @@ fn delete_manifest(
             return Err(confirmed_deleted);
         }
         if run_command(
+            "snapshot_delete",
+            "diskutil.apfs.deleteSnapshot",
             "/usr/sbin/diskutil",
             [
                 "apfs",
@@ -2011,46 +2033,124 @@ fn validate_source_path(
     source_path: &Path,
     expected_volume_uuid: &str,
     expected_device: &str,
-) -> Result<(), MountHelperError> {
-    if !source_path.is_absolute() || !source_path.exists() {
-        return Err(MountHelperError::Protocol(
-            "source path is not an absolute existing path".into(),
-        ));
-    }
-    let output = run_command_output(
-        "/usr/sbin/diskutil",
-        ["info", "-plist", source_path.to_string_lossy().as_ref()],
-    )?;
-    let value = Value::from_reader_xml(output.as_slice())
-        .map_err(|error| MountHelperError::Protocol(format!("invalid volume plist: {error}")))?;
-    let dict = value
-        .as_dictionary()
-        .ok_or_else(|| MountHelperError::Protocol("volume plist is not a dictionary".into()))?;
-    let filesystem = dict
-        .get("FilesystemName")
-        .and_then(Value::as_string)
-        .unwrap_or_default();
-    let volume_uuid = dict
-        .get("APFSVolumeUUID")
-        .and_then(Value::as_string)
-        .or_else(|| dict.get("VolumeUUID").and_then(Value::as_string))
-        .unwrap_or_default();
-    let device = dict
-        .get("DeviceIdentifier")
-        .and_then(Value::as_string)
-        .unwrap_or_default();
-    if !filesystem.eq_ignore_ascii_case("APFS")
-        || !volume_uuid.eq_ignore_ascii_case(expected_volume_uuid)
-        || device != expected_device
-    {
+) -> Result<SourceDirectory, MountHelperError> {
+    let source = SourceDirectory::open(source_path)?;
+    if source.device_identifier()? != expected_device {
         return Err(MountHelperError::Protocol(
             "source mount identity does not match the lease".into(),
         ));
     }
-    Ok(())
+    // diskutil accepts a volume/device, not an arbitrary directory. Use only
+    // the kernel's device identity from the pinned directory descriptor.
+    validate_device_volume_binding_at("source_volume", expected_device, expected_volume_uuid)?;
+    source.recheck(source_path)?;
+    Ok(source)
 }
 
-fn authorize_source_path(uid: u32, source_path: &Path) -> Result<(), MountHelperError> {
+struct SourceDirectory {
+    directory: fs::File,
+    device: u64,
+    inode: u64,
+}
+
+impl SourceDirectory {
+    fn open(path: &Path) -> Result<Self, MountHelperError> {
+        if !path.is_absolute() {
+            return Err(MountHelperError::Protocol(
+                "source path must be absolute".into(),
+            ));
+        }
+        // Open each component relative to its predecessor. No user-controlled
+        // symlink (including an ancestor) can redirect root's metadata query.
+        let mut directory = open_directory_at(libc::AT_FDCWD, std::ffi::OsStr::new("/"))?;
+        for component in path.components().skip(1) {
+            let std::path::Component::Normal(name) = component else {
+                return Err(MountHelperError::Protocol(
+                    "invalid source path component".into(),
+                ));
+            };
+            directory = open_directory_at(directory.as_raw_fd(), name)?;
+        }
+        let metadata = directory.metadata()?;
+        Ok(Self {
+            directory,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    fn recheck(&self, path: &Path) -> Result<(), MountHelperError> {
+        let current = Self::open(path)?;
+        if self.device != current.device
+            || self.inode != current.inode
+            || self.device_identifier()? != current.device_identifier()?
+        {
+            return Err(MountHelperError::Protocol(
+                "source directory identity changed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn device_identifier(&self) -> Result<String, MountHelperError> {
+        #[cfg(target_os = "macos")]
+        {
+            let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            if unsafe { libc::fstatfs(self.directory.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+                return Err(MountHelperError::Io(std::io::Error::last_os_error()));
+            }
+            let filesystem = unsafe { filesystem.assume_init() };
+            let bytes: Vec<u8> = filesystem
+                .f_mntfromname
+                .iter()
+                .take_while(|byte| **byte != 0)
+                .map(|byte| *byte as u8)
+                .collect();
+            let name = std::str::from_utf8(&bytes).map_err(|_| {
+                MountHelperError::Protocol("invalid source filesystem device".into())
+            })?;
+            let device = name.strip_prefix("/dev/").ok_or_else(|| {
+                MountHelperError::Protocol("source filesystem is not a disk device".into())
+            })?;
+            validate_device(device)?;
+            Ok(device.to_owned())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // The privileged service is macOS-only; never guess a device elsewhere.
+            let _ = self.directory.as_raw_fd();
+            Err(MountHelperError::Protocol(
+                "source filesystem inspection requires macOS".into(),
+            ))
+        }
+    }
+}
+
+fn open_directory_at(parent: RawFd, name: &std::ffi::OsStr) -> Result<fs::File, MountHelperError> {
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| MountHelperError::Protocol("invalid source path".into()))?;
+    #[cfg(target_os = "macos")]
+    let metadata_only = libc::O_EVTONLY;
+    #[cfg(not(target_os = "macos"))]
+    let metadata_only = libc::O_PATH;
+    let descriptor = unsafe {
+        libc::openat(
+            parent,
+            name.as_ptr(),
+            metadata_only | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if descriptor < 0 {
+        return Err(MountHelperError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(unsafe { fs::File::from_raw_fd(descriptor) })
+}
+
+fn authorize_source_path(
+    uid: u32,
+    source_path: &Path,
+    source: &SourceDirectory,
+) -> Result<(), MountHelperError> {
     if uid == 0 || unsafe { libc::geteuid() } != 0 {
         return Err(MountHelperError::Protocol(
             "source path authorization requires a non-root peer".into(),
@@ -2061,6 +2161,8 @@ fn authorize_source_path(uid: u32, source_path: &Path) -> Result<(), MountHelper
         .arg(AUTHORIZE_SOURCE_PATH_ARG)
         .arg(uid.to_string())
         .arg(source_path)
+        .arg(source.device.to_string())
+        .arg(source.inode.to_string())
         .status()?;
     if status.success() {
         Ok(())
@@ -2079,7 +2181,7 @@ pub fn maybe_authorize_source_path(args: &[String]) -> Option<i32> {
     if args.get(1).map(String::as_str) != Some(AUTHORIZE_SOURCE_PATH_ARG) {
         return None;
     }
-    if args.len() != 4 {
+    if args.len() != 6 {
         return Some(126);
     }
     let Some(uid) = args.get(2).and_then(|value| value.parse::<u32>().ok()) else {
@@ -2088,10 +2190,16 @@ pub fn maybe_authorize_source_path(args: &[String]) -> Option<i32> {
     let Some(path) = args.get(3).map(Path::new).filter(|path| path.is_absolute()) else {
         return Some(126);
     };
-    Some(authorize_source_path_child(uid, path))
+    let Some(device) = args[4].parse::<u64>().ok() else {
+        return Some(126);
+    };
+    let Some(inode) = args[5].parse::<u64>().ok() else {
+        return Some(126);
+    };
+    Some(authorize_source_path_child(uid, path, device, inode))
 }
 
-fn authorize_source_path_child(uid: u32, source_path: &Path) -> i32 {
+fn authorize_source_path_child(uid: u32, source_path: &Path, device: u64, inode: u64) -> i32 {
     if uid == 0 || unsafe { libc::geteuid() } != 0 {
         return 126;
     }
@@ -2113,14 +2221,21 @@ fn authorize_source_path_child(uid: u32, source_path: &Path) -> i32 {
     let fd = unsafe {
         libc::open(
             path.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
         )
     };
     if fd < 0 {
         return 1;
     }
-    unsafe { libc::close(fd) };
-    0
+    let directory = unsafe { fs::File::from_raw_fd(fd) };
+    if directory
+        .metadata()
+        .is_ok_and(|metadata| metadata.dev() == device && metadata.ino() == inode)
+    {
+        0
+    } else {
+        1
+    }
 }
 
 fn initialize_supplementary_groups(user: *const libc::c_char, group: libc::gid_t) -> bool {
@@ -2141,16 +2256,29 @@ fn validate_device_volume_binding(
     device_identifier: &str,
     expected_volume_uuid: &str,
 ) -> Result<(), MountHelperError> {
+    validate_device_volume_binding_at("volume_identity", device_identifier, expected_volume_uuid)
+}
+
+fn validate_device_volume_binding_at(
+    stage: &'static str,
+    device_identifier: &str,
+    expected_volume_uuid: &str,
+) -> Result<(), MountHelperError> {
     let device_path = format!("/dev/{device_identifier}");
     let output = run_command_output(
+        stage,
+        "diskutil.info",
         "/usr/sbin/diskutil",
         ["info", "-plist", device_path.as_str()],
     )?;
-    let value = Value::from_reader_xml(output.as_slice())
-        .map_err(|error| MountHelperError::Protocol(format!("invalid device plist: {error}")))?;
+    let value = Value::from_reader_xml(output.as_slice()).map_err(|_| {
+        MountHelperError::Protocol(format!(
+            "stage={stage} command=diskutil.info exit=0 channel=stdout summary=invalid volume plist"
+        ))
+    })?;
     let dict = value
         .as_dictionary()
-        .ok_or_else(|| MountHelperError::Protocol("device plist is not a dictionary".into()))?;
+        .ok_or_else(|| MountHelperError::Protocol(format!("stage={stage} command=diskutil.info exit=0 channel=stdout summary=volume plist is not a dictionary")))?;
     let filesystem = dict
         .get("FilesystemName")
         .and_then(Value::as_string)
@@ -2181,11 +2309,13 @@ fn validate_snapshot_binding(
     snapshot_name: &str,
 ) -> Result<(), MountHelperError> {
     let output = run_command_output(
+        "snapshot_inventory",
+        "diskutil.apfs.listSnapshots",
         "/usr/sbin/diskutil",
         ["apfs", "listSnapshots", "-plist", device_identifier],
     )?;
     let value = Value::from_reader_xml(output.as_slice())
-        .map_err(|error| MountHelperError::Protocol(format!("invalid snapshot plist: {error}")))?;
+        .map_err(|_| MountHelperError::Protocol("stage=snapshot_inventory command=diskutil.apfs.listSnapshots exit=0 channel=stdout summary=invalid snapshot plist".into()))?;
     if snapshot_binding_matches(&value, snapshot_uuid, snapshot_name) {
         Ok(())
     } else {
@@ -2199,31 +2329,40 @@ fn snapshot_inventory_manifest(
     device_identifier: &str,
 ) -> Result<Vec<MountSnapshotRef>, MountHelperError> {
     let output = run_command_output(
+        "snapshot_inventory",
+        "diskutil.apfs.listSnapshots",
         "/usr/sbin/diskutil",
         ["apfs", "listSnapshots", "-plist", device_identifier],
     )?;
-    let value = Value::from_reader_xml(output.as_slice())
-        .map_err(|error| MountHelperError::Protocol(format!("invalid snapshot plist: {error}")))?;
+    parse_snapshot_inventory(&output, device_identifier)
+}
+
+fn parse_snapshot_inventory(
+    output: &[u8],
+    device_identifier: &str,
+) -> Result<Vec<MountSnapshotRef>, MountHelperError> {
+    let value = Value::from_reader_xml(output)
+        .map_err(|_| MountHelperError::Protocol("stage=snapshot_inventory command=diskutil.apfs.listSnapshots exit=0 channel=stdout summary=invalid snapshot plist".into()))?;
     let Some(snapshots) = value
         .as_dictionary()
         .and_then(|root| root.get("Snapshots"))
         .and_then(Value::as_array)
     else {
         return Err(MountHelperError::Protocol(
-            "snapshot inventory plist is missing an array of snapshots".into(),
+            "stage=snapshot_inventory command=diskutil.apfs.listSnapshots exit=0 channel=stdout summary=snapshot inventory plist is missing an array of snapshots".into(),
         ));
     };
     let mut manifest = Vec::new();
     for snapshot in snapshots {
         let snapshot = snapshot.as_dictionary().ok_or_else(|| {
-            MountHelperError::Protocol("snapshot inventory contains a malformed entry".into())
+            MountHelperError::Protocol("stage=snapshot_inventory command=diskutil.apfs.listSnapshots exit=0 channel=stdout summary=snapshot inventory contains a malformed entry".into())
         })?;
         let uuid = snapshot
             .get("SnapshotUUID")
             .and_then(Value::as_string)
             .ok_or_else(|| {
                 MountHelperError::Protocol(
-                    "snapshot inventory entry is missing SnapshotUUID".into(),
+                    "stage=snapshot_inventory command=diskutil.apfs.listSnapshots exit=0 channel=stdout summary=snapshot inventory entry is missing SnapshotUUID".into(),
                 )
             })?;
         validate_uuid(uuid)?;
@@ -2344,33 +2483,87 @@ fn ensure_root_file(path: &Path) -> Result<(), MountHelperError> {
 }
 
 fn run_command<const N: usize, S: AsRef<std::ffi::OsStr>>(
+    stage: &'static str,
+    command: &'static str,
     program: &str,
     args: [S; N],
 ) -> Result<(), MountHelperError> {
-    let output = Command::new(program).args(args).output()?;
-    if output.status.success() {
-        return Ok(());
-    }
-    Err(MountHelperError::Command {
-        program: program.to_string(),
-        status: output.status.to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-    })
+    run_command_output(stage, command, program, args).map(|_| ())
 }
 
 fn run_command_output<const N: usize, S: AsRef<std::ffi::OsStr>>(
+    stage: &'static str,
+    command: &'static str,
     program: &str,
     args: [S; N],
 ) -> Result<Vec<u8>, MountHelperError> {
-    let output = Command::new(program).args(args).output()?;
+    let output =
+        Command::new(program)
+            .args(args)
+            .output()
+            .map_err(|error| MountHelperError::Command {
+                stage,
+                command,
+                status: "not_started".into(),
+                channel: "errno",
+                summary: format!("errno={}", error.raw_os_error().unwrap_or(0)),
+            })?;
     if output.status.success() {
         return Ok(output.stdout);
     }
-    Err(MountHelperError::Command {
-        program: program.to_string(),
-        status: output.status.to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-    })
+    Err(command_failure(stage, command, &output))
+}
+
+fn command_failure(
+    stage: &'static str,
+    command: &'static str,
+    output: &std::process::Output,
+) -> MountHelperError {
+    let (channel, bytes) = if !output.stderr.iter().all(u8::is_ascii_whitespace) {
+        ("stderr", output.stderr.as_slice())
+    } else if !output.stdout.iter().all(u8::is_ascii_whitespace) {
+        ("stdout", output.stdout.as_slice())
+    } else {
+        ("none", &[][..])
+    };
+    MountHelperError::Command {
+        stage,
+        command,
+        status: output
+            .status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".into()),
+        channel,
+        summary: sanitized_command_summary(bytes),
+    }
+}
+
+fn sanitized_command_summary(bytes: &[u8]) -> String {
+    // OS diagnostics can contain paths, volume labels, UUIDs, URLs, or secrets.
+    // Project known error classes onto fixed text; never echo arbitrary output.
+    // Inspect before truncation so a long private prefix cannot hide the cause.
+    let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    let summary = [
+        ("could not find disk", "could not find disk"),
+        ("permission denied", "permission denied"),
+        ("operation not permitted", "operation not permitted"),
+        ("resource busy", "resource busy"),
+        ("input/output error", "input/output error"),
+        ("no such file", "no such file or directory"),
+        ("not mounted", "volume not mounted"),
+        ("invalid argument", "invalid argument"),
+        ("timed out", "command timed out"),
+        ("read-only", "read-only filesystem"),
+    ]
+    .into_iter()
+    .find_map(|(pattern, safe)| text.contains(pattern).then_some(safe))
+    .unwrap_or(if text.trim().is_empty() {
+        "no diagnostic output"
+    } else {
+        "unrecognized diagnostic redacted"
+    });
+    summary.chars().take(512).collect()
 }
 
 fn peer_uid(fd: RawFd) -> Result<u32, MountHelperError> {
@@ -2415,6 +2608,113 @@ fn peer_uid(fd: RawFd) -> Result<u32, MountHelperError> {
 mod tests {
     use super::*;
     use crate::{MountMethod, MountRequest};
+
+    #[test]
+    fn command_errors_keep_stage_exit_channel_and_only_safe_summary() {
+        use std::os::unix::process::ExitStatusExt;
+        for (stdout, stderr, channel, summary) in [
+            (
+                b"Could not find disk: /private/synthetic-secret?token=SECRET".as_slice(),
+                b"".as_slice(),
+                "stdout",
+                "could not find disk",
+            ),
+            (
+                b"".as_slice(),
+                b"Permission denied: /private/synthetic-secret token=SECRET".as_slice(),
+                "stderr",
+                "permission denied",
+            ),
+            (
+                b"".as_slice(),
+                b"".as_slice(),
+                "none",
+                "no diagnostic output",
+            ),
+            (
+                b"<plist><string>SECRET</string>".as_slice(),
+                b"".as_slice(),
+                "stdout",
+                "unrecognized diagnostic redacted",
+            ),
+        ] {
+            let output = std::process::Output {
+                status: std::process::ExitStatus::from_raw(256),
+                stdout: stdout.to_vec(),
+                stderr: stderr.to_vec(),
+            };
+            let message = command_failure("source_volume", "diskutil.info", &output).to_string();
+            assert!(message.contains("stage=source_volume command=diskutil.info exit=1"));
+            assert!(message.contains(&format!("channel={channel} summary={summary}")));
+            assert!(!message.contains("SECRET") && !message.contains("/private"));
+        }
+        let long = format!(
+            "{} Permission denied /private/SECRET",
+            "sensitive".repeat(200)
+        );
+        assert_eq!(
+            sanitized_command_summary(long.as_bytes()),
+            "permission denied"
+        );
+        assert!(sanitized_command_summary(long.as_bytes()).chars().count() <= 512);
+    }
+
+    #[test]
+    fn snapshot_inventory_accepts_explicit_empty_array_and_rejects_corrupt_data() {
+        let empty = br#"<?xml version="1.0"?><plist version="1.0"><dict><key>Snapshots</key><array/></dict></plist>"#;
+        assert!(
+            parse_snapshot_inventory(empty, "disk5s1")
+                .unwrap()
+                .is_empty()
+        );
+        for corrupt in [
+            b"SECRET /private/source".as_slice(),
+            b"<plist><dict/></plist>".as_slice(),
+            b"<plist><dict><key>Snapshots</key><string>SECRET</string></dict></plist>".as_slice(),
+        ] {
+            let message = parse_snapshot_inventory(corrupt, "disk5s1")
+                .unwrap_err()
+                .to_string();
+            assert!(!message.contains("SECRET") && !message.contains("/private/source"));
+        }
+    }
+
+    #[test]
+    fn source_directory_rejects_symlinks_missing_paths_and_replacement() {
+        let parent = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("source-identity-{}", Uuid::new_v4()));
+        fs::create_dir(&parent).unwrap();
+        let source = parent.join("source");
+        fs::create_dir(&source).unwrap();
+        let pinned = SourceDirectory::open(&source).unwrap();
+        let link = parent.join("link");
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+        assert!(SourceDirectory::open(&link).is_err());
+        assert!(SourceDirectory::open(&link.join("child")).is_err());
+        assert!(SourceDirectory::open(&parent.join("missing")).is_err());
+        assert!(SourceDirectory::open(Path::new("relative")).is_err());
+        fs::rename(&source, parent.join("original")).unwrap();
+        fs::create_dir(&source).unwrap();
+        assert!(pinned.recheck(&source).is_err());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn source_directory_recheck_detects_filesystem_identity_change() {
+        let parent = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("source-device-{}", Uuid::new_v4()));
+        fs::create_dir(&parent).unwrap();
+        let mut pinned = SourceDirectory::open(&parent).unwrap();
+        assert!(pinned.recheck(&parent).is_ok());
+        pinned.device ^= 1;
+        assert!(pinned.recheck(&parent).is_err());
+        fs::remove_dir(parent).unwrap();
+    }
 
     #[test]
     fn mount_request_rejects_arbitrary_device_and_path_inputs() {
@@ -2823,6 +3123,7 @@ mod tests {
     fn mount_status_rejects_an_incompatible_component_version() {
         let result = MountStatusResult {
             helper_version: "0.0.0".into(),
+            build_commit: None,
             active_mounts: 0,
             blocked_volume_uuids: vec![],
             recovery_leases: vec![],
@@ -2834,6 +3135,7 @@ mod tests {
     fn mount_status_accepts_the_unchanged_v098_helper() {
         let result = MountStatusResult {
             helper_version: LEGACY_ROOT_MOUNT_HELPER_VERSION.into(),
+            build_commit: None,
             active_mounts: 0,
             blocked_volume_uuids: vec![],
             recovery_leases: vec![],
@@ -2845,6 +3147,7 @@ mod tests {
     fn mount_status_accepts_the_current_identity_bound_helper() {
         let result = MountStatusResult {
             helper_version: ROOT_MOUNT_HELPER_VERSION.into(),
+            build_commit: None,
             active_mounts: 0,
             blocked_volume_uuids: vec![],
             recovery_leases: vec![],

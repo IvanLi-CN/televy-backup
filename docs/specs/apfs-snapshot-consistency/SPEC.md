@@ -75,6 +75,8 @@ delete only the non-empty manifest already recorded in the matching prepared jou
 material, backup indexes, or network data. Its root-owned journal records lease, mount root,
 volume/device identity, and the exact snapshot UUID manifest.
 
+Source directory validation MUST pin a no-follow directory metadata descriptor, derive its backing device from kernel filesystem information, and query `diskutil info -plist` by that validated device rather than by a nested source pathname. The filesystem type, device identifier and volume UUID MUST match the lease, and descriptor/path identity MUST remain unchanged through authorization and reservation. A successful, structurally valid empty snapshot inventory is a valid baseline; command failures or malformed inventories MUST remain blocking. Command failures MUST retain a fixed stage, command category, exit status and diagnostic channel. Diagnostic summaries MUST be sanitized before a 512-character limit is applied; raw command arguments, source paths, UUIDs, plist bodies and secrets MUST NOT enter IPC errors or logs. Acquire failures retain the external `snapshot.acquire_failed` code.
+
 ### REQ-APFS-004: Brokered strict reads
 
 The core MUST retain the configured logical source path in indexes and manifests while obtaining
@@ -106,6 +108,7 @@ link to System Settings. It MUST identify both paths as FDA requirements for str
 only observable FDA evidence, and never present service reachability as proof of a helper TCC grant.
 The first layout migration is user-level; mount helper install, update, and uninstall remain
 explicit administrator-authorized transactions and are the only privileged setup operation.
+Mount-helper Status MAY add an optional `build_commit` without changing the protocol or journal schema. Legacy Status without that field remains readable, but installation readiness MUST require the running build commit to equal the installing candidate and the installed binary SHA-256 to equal the candidate binary. A matching compatibility component version alone MUST NOT acknowledge installation success. The approved Snapshot Access artifact remains unchanged.
 Migration commit and rollback MUST require the transaction id and a short-lived owner token from
 the same prepare operation; missing or mismatched transaction credentials MUST fail closed.
 

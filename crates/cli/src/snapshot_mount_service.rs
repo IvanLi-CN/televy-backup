@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -8,6 +8,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use televybackup_snapshot_access::{
     MOUNT_HELPER_INSTALL_PATH, MOUNT_HELPER_PROTOCOL_VERSION, MountStatusResult, mount_helper,
 };
@@ -191,6 +192,7 @@ fn reject_if_busy(operation: &str) -> Result<(), CliError> {
 }
 
 fn wait_for_installed_helper(
+    expected_commit: &str,
     mut probe: impl FnMut() -> Result<MountStatusResult, mount_helper::MountHelperError>,
     mut pause: impl FnMut(),
 ) -> Result<MountStatusResult, CliError> {
@@ -199,14 +201,24 @@ fn wait_for_installed_helper(
     // the complete startup check bounded even if a loaded service never replies.
     for attempt in 0..4 {
         match probe() {
-            Ok(status) if status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION => {
+            Ok(status)
+                if status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
+                    && status.build_commit.as_deref() == Some(expected_commit)
+                    && expected_commit.len() == 40
+                    && expected_commit.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+            {
                 return Ok(status);
             }
             Ok(status) => {
                 last_error = format!(
-                    "expected component {}, received {}",
+                    "expected component {} and candidate build; received component {} with {} build identity",
                     mount_helper::ROOT_MOUNT_HELPER_VERSION,
-                    status.helper_version
+                    status.helper_version,
+                    if status.build_commit.is_some() {
+                        "different"
+                    } else {
+                        "missing"
+                    }
                 );
             }
             Err(error) => last_error = error.to_string(),
@@ -223,10 +235,29 @@ fn wait_for_installed_helper(
     ))
 }
 
+fn helper_sha256(path: &Path) -> Result<String, CliError> {
+    let mut file = fs::File::open(path).map_err(|error| {
+        CliError::new("snapshot_mount_helper.identity_failed", error.to_string())
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|error| {
+            CliError::new("snapshot_mount_helper.identity_failed", error.to_string())
+        })?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 pub fn install(json_output: bool) -> Result<(), CliError> {
     require_root()?;
     reject_if_busy("install or update the snapshot mount helper")?;
     let source = current_executable_sibling()?;
+    let candidate_hash = helper_sha256(&source)?;
     atomic_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
     atomic_write(
         Path::new(MOUNT_HELPER_PLIST_PATH),
@@ -235,13 +266,23 @@ pub fn install(json_output: bool) -> Result<(), CliError> {
     let service = system_service_target();
     let _ = launchctl(&["bootout", &service]);
     launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
-    let status = wait_for_installed_helper(mount_helper::status, || {
-        std::thread::sleep(Duration::from_millis(250));
-    })?;
+    let status = wait_for_installed_helper(
+        env!("TELEVYBACKUP_BUILD_COMMIT"),
+        mount_helper::status,
+        || {
+            std::thread::sleep(Duration::from_millis(250));
+        },
+    )?;
+    if helper_sha256(Path::new(MOUNT_HELPER_INSTALL_PATH))? != candidate_hash {
+        return Err(CliError::new(
+            "snapshot_mount_helper.identity_failed",
+            "installed mount helper does not match the candidate binary",
+        ));
+    }
     if json_output {
         println!(
             "{}",
-            json!({"installed": true, "helperReady": true, "helperVersion": status.helper_version, "label": MOUNT_HELPER_LABEL, "binary": MOUNT_HELPER_INSTALL_PATH, "plist": MOUNT_HELPER_PLIST_PATH})
+            json!({"installed": true, "helperReady": true, "helperVersion": status.helper_version, "buildCommit": status.build_commit, "binarySha256": candidate_hash, "label": MOUNT_HELPER_LABEL, "binary": MOUNT_HELPER_INSTALL_PATH, "plist": MOUNT_HELPER_PLIST_PATH})
         );
     } else {
         println!("snapshot mount helper installed");
@@ -288,6 +329,7 @@ pub fn status(json_output: bool) -> Result<(), CliError> {
         "label": MOUNT_HELPER_LABEL,
         "activeMounts": helper.as_ref().map(|status| status.active_mounts),
         "helperVersion": helper.as_ref().map(|status| status.helper_version.clone()),
+        "buildCommit": helper.as_ref().and_then(|status| status.build_commit.clone()),
         "socket": mount_helper::configured_socket_path(),
     });
     if json_output {
@@ -328,6 +370,7 @@ mod tests {
         let mut calls = 0;
         let mut pauses = 0;
         let result = wait_for_installed_helper(
+            "0123456789012345678901234567890123456789",
             || {
                 calls += 1;
                 if calls == 1 {
@@ -337,6 +380,7 @@ mod tests {
                 }
                 Ok(MountStatusResult {
                     helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+                    build_commit: Some("0123456789012345678901234567890123456789".into()),
                     ..Default::default()
                 })
             },
@@ -352,6 +396,7 @@ mod tests {
         for stale in [true, false] {
             let mut calls = 0;
             let error = wait_for_installed_helper(
+                "0123456789012345678901234567890123456789",
                 || {
                     calls += 1;
                     if stale {
@@ -372,5 +417,30 @@ mod tests {
             assert!(error.message.contains("expected protocol 4"));
             assert_eq!(calls, 4);
         }
+    }
+
+    #[test]
+    fn install_rejects_same_component_with_stale_or_missing_build() {
+        for build_commit in [
+            None,
+            Some("fedcba9876543210fedcba9876543210fedcba98".into()),
+        ] {
+            let error = wait_for_installed_helper(
+                "0123456789012345678901234567890123456789",
+                || {
+                    Ok(MountStatusResult {
+                        helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+                        build_commit: build_commit.clone(),
+                        ..Default::default()
+                    })
+                },
+                || {},
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "snapshot_mount_helper.readiness_failed");
+        }
+        let legacy: MountStatusResult =
+            serde_json::from_str(r#"{"helper_version":"0.5.0","active_mounts":0}"#).unwrap();
+        assert!(legacy.build_commit.is_none());
     }
 }

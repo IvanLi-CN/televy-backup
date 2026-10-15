@@ -188,6 +188,8 @@ pub enum MountResponseResult {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MountStatusResult {
     pub helper_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_commit: Option<String>,
     pub active_mounts: u32,
     #[serde(default)]
     pub blocked_volume_uuids: Vec<String>,
