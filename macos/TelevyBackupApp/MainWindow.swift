@@ -1652,7 +1652,7 @@ private struct TargetDetailView: View {
             }
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
-            .frame(maxHeight: .infinity)
+            .frame(minHeight: 0, maxHeight: .infinity)
         }
     }
 
