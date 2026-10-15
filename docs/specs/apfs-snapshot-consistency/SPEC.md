@@ -75,6 +75,8 @@ delete only the non-empty manifest already recorded in the matching prepared jou
 material, backup indexes, or network data. Its root-owned journal records lease, mount root,
 volume/device identity, and the exact snapshot UUID manifest.
 
+Source directory validation MUST pin a no-follow directory metadata descriptor, derive its backing device from kernel filesystem information, and query `diskutil info -plist` by that validated device rather than by a nested source pathname. The filesystem type, device identifier and volume UUID MUST match the lease, and descriptor/path identity MUST remain unchanged through authorization and reservation. A successful, structurally valid empty snapshot inventory is a valid baseline; command failures or malformed inventories MUST remain blocking. Command failures MUST retain a fixed stage, command category, exit status and diagnostic channel. Diagnostic summaries MUST be sanitized before a 512-character limit is applied; raw command arguments, source paths, UUIDs, plist bodies and secrets MUST NOT enter IPC errors or logs. Acquire failures retain the external `snapshot.acquire_failed` code.
+
 ### REQ-APFS-004: Brokered strict reads
 
 The core MUST retain the configured logical source path in indexes and manifests while obtaining
@@ -106,6 +108,7 @@ link to System Settings. It MUST identify both paths as FDA requirements for str
 only observable FDA evidence, and never present service reachability as proof of a helper TCC grant.
 The first layout migration is user-level; mount helper install, update, and uninstall remain
 explicit administrator-authorized transactions and are the only privileged setup operation.
+Mount-helper Status MAY add an optional `build_commit` without changing the protocol or journal schema. Legacy Status without that field remains readable, but installation readiness MUST require the running build commit to equal the installing candidate and the installed binary SHA-256 to equal the candidate binary. A matching compatibility component version alone MUST NOT acknowledge installation success. The approved Snapshot Access artifact remains unchanged.
 Migration commit and rollback MUST require the transaction id and a short-lived owner token from
 the same prepare operation; missing or mismatched transaction credentials MUST fail closed.
 
@@ -139,6 +142,8 @@ user/system service paths are present without a privileged backup reader.
 A dispatch-only GitHub-hosted macOS upgrade regression MUST compile the candidate registration code before mutating fixture services, then keep the published rc.114 Access process alive while replacing its on-disk bundle and installing the rc.120 mount helper. Candidate registration code must reject the old running identity, refresh the idle owned LaunchAgent, restore protocol communication, and retain the healthy replacement on a second registration. Fixtures use empty configuration and require no APFS snapshots, protected user files, or TCC changes. Synthetic tests additionally prove that active, unknown, foreign, and changed-process states cannot be restarted. Synthetic tests MUST also prove a concurrent application process cannot inspect or restart the service while another registration holds the lock. Initial service checks MUST require confirmed missing-service responses and abort on permission, I/O, or other inspection failures before fixture setup. Initial and final fixture path-absence checks MUST NOT follow symlinks; a pre-existing dangling link is existing state and MUST block setup. Cleanup MUST verify both fixture services have stopped before deleting any created executable, plist, socket, journal, or temporary source tree; an unverifiable shutdown MUST preserve those targets and fail the fixture. Success requires both fixture services and their created privileged state to be absent after cleanup.
 
 ### VER-APFS-002: Access lifecycle and boundary
+
+The default-off `snapshot_source_validation` dispatch MUST run on GitHub-hosted macOS with a disposable APFS image and volume ownership enabled. It MUST reproduce the baseline nested-directory command failure through production Reserve, then prove candidate Reserve records the exact non-root UID, source, device, UUID and valid empty baseline without creating snapshots. Negative cases MUST reject wrong identity, symlinks, missing or inaccessible directories and cross-UID requests without a serviceable lease; a pinned source descriptor MUST also reject actual loss of its disposable image mount. Fixture services MUST be confirmed stopped before their owned state is removed. Candidate installation MUST prove IPC build identity and installed file hash while preserving the approved Access bundle byte-for-byte; this validation does not establish FDA readiness or full backup completion.
 
 Covers: REQ-APFS-003.
 Snapshot Access and mount-helper unit tests prove fixed command usage, peer UID enforcement, arbitrary-path

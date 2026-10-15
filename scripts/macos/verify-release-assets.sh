@@ -420,6 +420,11 @@ if [[ -d "$app" ]]; then
     [[ "$info" == *arm64* && "$info" == *x86_64* ]] || { echo "universal binary missing slice: $binary" >&2; exit 1; }
   done
   root_helper_binary="$app/Contents/MacOS/televybackup-snapshot-mount-helper"
+  root_helper_version="$("$root_helper_binary" --version)"
+  [[ "$root_helper_version" == "televybackup-snapshot-mount-helper ${version} (${expected_source_commit})" ]] || {
+    echo "snapshot mount helper build identity does not match candidate source and version" >&2
+    exit 1
+  }
   root_helper_signature="$(codesign -dvvv "$root_helper_binary" 2>&1 || true)"
   [[ "$root_helper_signature" == *"Signature=adhoc"* ]] || { echo "snapshot mount helper must use an ad-hoc signature" >&2; exit 1; }
   root_helper_sha256="$(shasum -a 256 "$root_helper_binary" | awk '{print $1}')"
