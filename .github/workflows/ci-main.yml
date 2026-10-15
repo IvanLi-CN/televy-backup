@@ -187,7 +187,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Reproduce baseline production failure
         run: |
           legacy="${RUNNER_TEMP}/legacy-source"
