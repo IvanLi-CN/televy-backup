@@ -284,6 +284,20 @@ jobs:
       - name: Swift unit/UI layout tests
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/swift-unit-tests.sh
+      - name: Production main window layout regression
+        if: needs.classify.outputs.kind == 'source'
+        env:
+          TELEVYBACKUP_CONFIG_DIR: /invalid-layout-env/config
+          TELEVYBACKUP_DATA_DIR: /invalid-layout-env/data
+          TELEVYBACKUP_LOG_DIR: /invalid-layout-env/logs
+        run: bash scripts/macos/test-main-window-layout.sh "${RUNNER_TEMP}/main-window-layout"
+      - name: Upload synthetic main window evidence
+        if: always() && needs.classify.outputs.kind == 'source'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: main-window-layout
+          path: ${{ runner.temp }}/main-window-layout/*.png
+          if-no-files-found: ignore
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
         run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD

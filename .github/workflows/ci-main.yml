@@ -10,6 +10,11 @@ on:
         required: false
         type: boolean
         default: false
+      main_window_layout_validation:
+        description: Validate production main-window layout with synthetic failure history
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -25,7 +30,7 @@ env:
 
 jobs:
   main-quality:
-    if: inputs.snapshot_upgrade_validation != true
+    if: inputs.snapshot_upgrade_validation != true && inputs.main_window_layout_validation != true
     name: Mainline quality
     runs-on: ubuntu-latest
     env:
@@ -103,7 +108,7 @@ jobs:
           cargo test
 
   main-macos-swift:
-    if: inputs.snapshot_upgrade_validation != true
+    if: inputs.snapshot_upgrade_validation != true && inputs.main_window_layout_validation != true
     name: Mainline macOS Swift tests
     runs-on: macos-latest
     steps:
@@ -112,6 +117,27 @@ jobs:
 
       - name: Swift unit/UI layout tests
         run: bash scripts/macos/swift-unit-tests.sh
+
+  main-window-layout-validation:
+    name: Manual main window layout regression
+    if: github.event_name == 'workflow_dispatch' && inputs.main_window_layout_validation == true
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise production window with synthetic status transitions
+        env:
+          TELEVYBACKUP_CONFIG_DIR: /invalid-layout-env/config
+          TELEVYBACKUP_DATA_DIR: /invalid-layout-env/data
+          TELEVYBACKUP_LOG_DIR: /invalid-layout-env/logs
+        run: bash scripts/macos/test-main-window-layout.sh "${RUNNER_TEMP}/main-window-layout"
+      - name: Upload synthetic window evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: main-window-layout
+          path: ${{ runner.temp }}/main-window-layout/*.png
+          if-no-files-found: ignore
 
   snapshot-upgrade-validation:
     name: Manual Snapshot Access upgrade regression

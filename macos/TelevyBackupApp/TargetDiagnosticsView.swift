@@ -24,6 +24,7 @@ struct TargetDiagnosticsView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .mainWindowLayoutAnchor("main-window-diagnostics")
     }
 
     private var globalCard: some View {
