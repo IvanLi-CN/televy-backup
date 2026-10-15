@@ -48,6 +48,9 @@ enum MainWindowLayoutTests {
         try capture(control, to: output.appendingPathComponent("rendering-control-layer.png"))
         control.close()
         let model = AppModel()
+        // The layout harness supplies the stores. Do not let runtime status hooks
+        // replace synthetic history with a scan of the empty demo log directory.
+        model.statusStore.onPublish = nil
         var window: NSWindow?
         model.persistentWindowPresentationHandler = { candidate, _ in
             window = candidate
@@ -63,9 +66,11 @@ enum MainWindowLayoutTests {
         check(window, scenario: "running", failureExpected: false)
         model.runHistory = (0..<30).map(run)
         await settle(model)
+        record(model.runHistory.count == 30, "long-history fixture must remain installed")
         check(window, scenario: "running-long-history", failureExpected: false)
         model.runHistory = [run(0)]
         await settle(model)
+        record(model.runHistory.count == 1, "short-history fixture must remain installed")
         check(window, scenario: "running-short-history", failureExpected: false)
         var snapshot = model.statusSnapshot!
         snapshot.targets[0].state = "failed"
