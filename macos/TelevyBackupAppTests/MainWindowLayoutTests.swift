@@ -38,6 +38,7 @@ enum MainWindowLayoutTests {
         let control = NSWindow(contentViewController: NSHostingController(rootView:
             VStack { Text("Synthetic rendering control"); Color.red.frame(width: 80, height: 40) }.padding(20)
         ))
+        control.isReleasedWhenClosed = false
         control.setContentSize(NSSize(width: 300, height: 150))
         control.makeKeyAndOrderFront(nil)
         await settle()
