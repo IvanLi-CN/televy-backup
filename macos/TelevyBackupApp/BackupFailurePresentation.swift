@@ -90,7 +90,6 @@ struct BackupFailureNotice: View {
             Text(issue.recovery)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 12) {
                 if issue.opensSettings {
                     Button("Open Settings", action: openSettings)
