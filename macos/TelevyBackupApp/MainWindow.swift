@@ -319,6 +319,7 @@ struct MainWindowRootView: View {
                     Text("Targets")
                         .font(.system(size: 12, weight: .heavy))
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("main-window-sidebar-heading")
                     Spacer()
                     if runHistoryStore.refreshInFlight {
                         ProgressView()
@@ -1111,6 +1112,7 @@ private struct TargetDetailView: View {
             .pickerStyle(.segmented)
             .controlSize(.small)
             .fixedSize()
+            .accessibilityIdentifier("main-window-detail-tabs")
 
             Spacer(minLength: 0)
 
@@ -1289,6 +1291,7 @@ private struct TargetDetailView: View {
                     .font(.system(size: 18, weight: .bold))
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .accessibilityIdentifier("main-window-target-heading")
 
                 StatusBadge(status: status, style: .pill)
                     .fixedSize(horizontal: true, vertical: false)

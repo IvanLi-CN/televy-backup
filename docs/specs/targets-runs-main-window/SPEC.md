@@ -56,6 +56,8 @@ None
 
 ### MUST
 
+- 主窗口内容必须受窗口可用区域约束：运行中切换为失败、增加历史记录、切换 History / Diagnostics 或缩放窗口后，侧栏标题、Target 标题、失败恢复提示和标签切换控件仍可见；历史列表和诊断内容只在各自的剩余区域内滚动，不得把整个分栏布局撑出窗口顶部。
+- 窗口布局回归验证使用合成数据和生产主窗口创建路径，覆盖默认尺寸、最小尺寸、放大后缩回，以及运行中到失败的状态更新；不得依赖用户的实际备份目录或诊断记录。
 - 主界面 Targets 列表：
   - 数据源：以 status snapshot 中的 targets 为准（包含 id/source_path/endpoint_id/enabled/state/lastRun）。
   - 每行按钮：
@@ -95,6 +97,8 @@ None
 
 
 ## 验收标准（Acceptance Criteria）
+
+- Given 主窗口中存在多条历史记录，When 备份从运行中切换为失败且显示恢复提示，Then 侧栏和详情顶部仍位于窗口可见区域；History / Diagnostics 都可访问，缩小窗口不会令外层内容被裁掉。
 
 - Given 已存在至少一个 target，
   When 用户点击浮窗“进入主界面”，
