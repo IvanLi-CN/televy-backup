@@ -94,12 +94,12 @@ enum MainWindowLayoutTests {
         NSApp.windows.forEach { $0.contentView?.layoutSubtreeIfNeeded(); $0.displayIfNeeded() }
     }
 
-    private static func elements(_ root: Any, depth: Int = 0) -> [any NSAccessibility] {
-        guard depth < 40, let element = root as? any NSAccessibility else { return [] }
+    private static func elements(_ root: Any, depth: Int = 0) -> [any NSAccessibilityProtocol] {
+        guard depth < 40, let element = root as? any NSAccessibilityProtocol else { return [] }
         return [element] + (element.accessibilityChildren() ?? []).flatMap { elements($0, depth: depth + 1) }
     }
 
-    private static func text(_ element: any NSAccessibility) -> String {
+    private static func text(_ element: any NSAccessibilityProtocol) -> String {
         element.accessibilityLabel() ?? (element.accessibilityValue() as? String) ?? ""
     }
 
