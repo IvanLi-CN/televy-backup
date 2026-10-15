@@ -54,13 +54,19 @@ enum MainWindowLayoutTests {
             candidate.makeKeyAndOrderFront(nil)
         }
         model.openMainWindow()
-        await settle()
+        await settle(model)
         guard let window else { fatalError("Production main window was not created") }
         defer { window.close() }
 
         // Begin with the running production demo, then deliver a terminal update
         // through the same stores as the real app while retaining the window.
-        check(window, scenario: "running")
+        check(window, scenario: "running", failureExpected: false)
+        model.runHistory = (0..<30).map(run)
+        await settle(model)
+        check(window, scenario: "running-long-history", failureExpected: false)
+        model.runHistory = [run(0)]
+        await settle(model)
+        check(window, scenario: "running-short-history", failureExpected: false)
         var snapshot = model.statusSnapshot!
         snapshot.targets[0].state = "failed"
         snapshot.targets[0].runningSince = nil
@@ -72,10 +78,12 @@ enum MainWindowLayoutTests {
             status: "failed", errorCode: "snapshot.acquire_failed",
             filesIndexed: nil, bytesUploaded: nil, bytesDeduped: nil
         )
-        model.runHistory = (0..<30).map(run)
         model.statusSnapshot = snapshot
         model.statusStore.ingest(snapshot, receivedAt: Date())
-        await settle()
+        await settle(model)
+        check(window, scenario: "failed-short-history")
+        model.runHistory = (0..<30).map(run)
+        await settle(model)
         check(window, scenario: "failed-before-resize")
         try capture(window, to: output.appendingPathComponent("main-window-failed-before-resize.png"))
 
@@ -88,7 +96,7 @@ enum MainWindowLayoutTests {
                 ("restored", NSSize(width: 980, height: 640)),
             ] {
                 window.setContentSize(size)
-                await settle()
+                await settle(model)
                 check(window, scenario: "\(theme)-history-\(sizeName)")
                 if sizeName == "default" || sizeName == "minimum" {
                     try capture(window, to: output.appendingPathComponent("main-window-\(theme)-history-\(sizeName).png"))
@@ -99,13 +107,13 @@ enum MainWindowLayoutTests {
         if let picker = views(window.contentView!).compactMap({ $0 as? NSSegmentedControl }).first {
             picker.selectedSegment = 1
             picker.sendAction(picker.action, to: picker.target)
-            await settle()
+            await settle(model)
             check(window, scenario: "diagnostics")
             record(views(window.contentView!).contains { $0.identifier?.rawValue == "main-window-diagnostics" }, "Diagnostics must actually be selected")
             try capture(window, to: output.appendingPathComponent("main-window-dark-diagnostics.png"))
             picker.selectedSegment = 0
             picker.sendAction(picker.action, to: picker.target)
-            await settle()
+            await settle(model)
             check(window, scenario: "history-return")
             record(!views(window.contentView!).contains { $0.identifier?.rawValue == "main-window-diagnostics" }, "History must actually be selected again")
         } else {
@@ -119,7 +127,11 @@ enum MainWindowLayoutTests {
     }
 
     @MainActor
-    private static func settle() async {
+    private static func settle(_ model: AppModel? = nil) async {
+        if let model, var snapshot = model.statusSnapshot {
+            snapshot.generatedAt = Int64(Date().timeIntervalSince1970 * 1000)
+            model.statusStore.ingest(snapshot, receivedAt: Date())
+        }
         try? await Task.sleep(nanoseconds: 500_000_000)
         NSApp.windows.forEach { $0.contentView?.layoutSubtreeIfNeeded(); $0.displayIfNeeded() }
         CATransaction.flush()
@@ -130,11 +142,11 @@ enum MainWindowLayoutTests {
     }
 
     @MainActor
-    private static func check(_ window: NSWindow, scenario: String) {
+    private static func check(_ window: NSWindow, scenario: String, failureExpected: Bool = true) {
         let viewport = window.contentLayoutRect.insetBy(dx: -1, dy: -1)
         let nodes = views(window.contentView!)
         var identifiers = ["main-window-sidebar-heading", "main-window-target-heading", "main-window-detail-tabs"]
-        if scenario != "running" { identifiers.append("main-window-failure-guidance") }
+        if failureExpected { identifiers.append("main-window-failure-guidance") }
         for identifier in identifiers {
             guard let node = nodes.first(where: { $0.identifier?.rawValue == identifier }) else {
                 record(false, "\(scenario): missing \(identifier)")
