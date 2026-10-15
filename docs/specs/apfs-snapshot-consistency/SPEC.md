@@ -143,6 +143,8 @@ A dispatch-only GitHub-hosted macOS upgrade regression MUST compile the candidat
 
 ### VER-APFS-002: Access lifecycle and boundary
 
+The default-off `snapshot_source_validation` dispatch MUST run on GitHub-hosted macOS with a disposable APFS image and volume ownership enabled. It MUST reproduce the baseline nested-directory command failure through production Reserve, then prove candidate Reserve records the exact non-root UID, source, device, UUID and valid empty baseline without creating snapshots. Negative cases MUST reject wrong identity, symlinks, missing or inaccessible directories and cross-UID requests without a serviceable lease. Fixture services MUST be confirmed stopped before their owned state is removed. Candidate installation MUST prove IPC build identity and installed file hash while preserving the approved Access bundle byte-for-byte; this validation does not establish FDA readiness or full backup completion.
+
 Covers: REQ-APFS-003.
 Snapshot Access and mount-helper unit tests prove fixed command usage, peer UID enforcement, arbitrary-path
 rejection, private journal/mount ownership, unique snapshot ownership, journal-bound cleanup, and
