@@ -46,6 +46,7 @@
 ## Window Viewport Coverage
 
 - Failure recovery text follows the proposed width and height of the production split view. It must not request an unbounded vertical ideal size that displaces the entire sidebar and detail above the window.
+- The native window uses a minimum content size of 860×520 to match the SwiftUI root; title-bar height must not reduce the usable viewport below that boundary.
 - `MainWindowLayoutTests` creates the production `NSWindow` with synthetic status and history stores, transitions from running to failed, and measures actual native view bounds against `contentLayoutRect`. Test-only background anchors expose layout geometry without changing Release rendering.
 - The regression checks short and long history, scrolling to both ends, default and minimum sizes, enlargement/restoration, light/dark appearance, and History/Diagnostics switching. It verifies the heading, recovery actions and tab controls remain visible while history scrolls separately.
 - `scripts/macos/test-main-window-layout.sh` runs on GitHub-hosted macOS in PR CI and through the manual main-window layout validation input of `ci-main.yml`. Captures are restricted to the synthetic test window; installed apps, owner logs, backup sources and privileged services are not used.

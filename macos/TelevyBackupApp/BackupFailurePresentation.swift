@@ -87,11 +87,11 @@ struct BackupFailureNotice: View {
             Label(issue.title, systemImage: "exclamationmark.triangle.fill")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.red)
+            // Honor the split view's proposal. An unbounded ideal height here
+            // can push both columns above the window after failure.
             Text(issue.recovery)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-                // Honor the split view's proposal. An unbounded ideal height
-                // here can push both columns above the window after failure.
             HStack(spacing: 12) {
                 if issue.opensSettings {
                     Button("Open Settings", action: openSettings)

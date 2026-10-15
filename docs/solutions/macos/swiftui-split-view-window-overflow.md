@@ -32,6 +32,8 @@ The recovery Text used `fixedSize(horizontal: false, vertical: true)`. During sp
 
 Let recovery text accept the split view's layout proposal. Preserve the instructions, recovery actions and independent history scrolling. Verify the actual production window rather than replacing the layout with a screenshot-only component wrapper.
 
+Align AppKit's `contentMinSize` with the SwiftUI root's minimum content size. Setting the same values through `minSize` reserves them for the entire window, allowing window chrome to reduce the usable content height and clip headings at the native minimum frame.
+
 ## Guardrails / Reuse notes
 
 - Drive the real NSWindow creation path, a running-to-failed status update and both short and overflowing synthetic history.

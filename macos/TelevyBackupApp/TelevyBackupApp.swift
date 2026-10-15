@@ -4369,7 +4369,9 @@ final class AppModel {
 	                    w.toolbarStyle = .automatic
 	                }
 	                w.setContentSize(NSSize(width: 980, height: 640))
-	                w.minSize = NSSize(width: 860, height: 520)
+	                // Match the SwiftUI root's minimum content size; minSize
+	                // includes window chrome and would leave a shorter viewport.
+	                w.contentMinSize = NSSize(width: 860, height: 520)
 	                w.maxSize = NSSize(width: 1600, height: 1200)
 	                w.styleMask.insert([.titled, .closable, .miniaturizable, .resizable])
 	                w.isReleasedWhenClosed = false
