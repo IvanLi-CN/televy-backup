@@ -35,3 +35,7 @@
 ## Failure Reporting
 
 Snapshot setup failures previously updated live status without writing a terminal history event. History recovery now recognizes those explicit legacy failures and distinguishes abandoned logs from active writers; failure guidance uses bounded categories instead of raw diagnostics.
+
+## Window Viewport
+
+Failure recovery text previously forced its ideal vertical size. In the production NavigationSplitView this could displace both columns above the visible window after a terminal status update, while component-only ImageRenderer previews remained normal. The text now accepts the split view's layout proposal; native-window regression coverage checks the full transition and inner scrolling with synthetic data. This implements the existing desktop layout boundary without a new architecture decision.

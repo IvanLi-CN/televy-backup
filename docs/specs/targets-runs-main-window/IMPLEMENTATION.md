@@ -42,3 +42,10 @@
 - Main-window summaries and history rows share plain-language failure descriptions. Target details offer Settings and Diagnostics actions.
 - `BackupFailureHistoryTests` covers legacy recovery, explicit-terminal precedence, active-writer protection, interrupted rows, bounded diagnosis, and old status decoding. The daemon regression verifies one terminal event with matching status identity, code, reason, and duration.
 - GitHub-hosted macOS CI uses SwiftUI `ImageRenderer` to render light and dark production failure-notice and history-row components from synthetic data with `BackupFailureHistoryPreview`; it does not capture an installed app or use backup data, FDA, or a privileged helper.
+
+## Window Viewport Coverage
+
+- Failure recovery text follows the proposed width and height of the production split view. It must not request an unbounded vertical ideal size that displaces the entire sidebar and detail above the window.
+- `MainWindowLayoutTests` creates the production `NSWindow` with synthetic status and history stores, transitions from running to failed, and measures actual native view bounds against `contentLayoutRect`. Test-only background anchors expose layout geometry without changing Release rendering.
+- The regression checks short and long history, scrolling to both ends, default and minimum sizes, enlargement/restoration, light/dark appearance, and History/Diagnostics switching. It verifies the heading, recovery actions and tab controls remain visible while history scrolls separately.
+- `scripts/macos/test-main-window-layout.sh` runs on GitHub-hosted macOS in PR CI and through the manual main-window layout validation input of `ci-main.yml`. Captures are restricted to the synthetic test window; installed apps, owner logs, backup sources and privileged services are not used.
