@@ -90,6 +90,8 @@ struct BackupFailureNotice: View {
             Text(issue.recovery)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
+                // Honor the split view's proposal. An unbounded ideal height
+                // here can push both columns above the window after failure.
             HStack(spacing: 12) {
                 if issue.opensSettings {
                     Button("Open Settings", action: openSettings)

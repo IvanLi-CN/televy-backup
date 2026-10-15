@@ -35,18 +35,6 @@ enum MainWindowLayoutTests {
         let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         NSApp.activate(ignoringOtherApps: true)
-        let control = NSWindow(contentViewController: NSHostingController(rootView:
-            VStack { Text("Synthetic rendering control"); Color.red.frame(width: 80, height: 40) }.padding(20)
-        ))
-        control.isReleasedWhenClosed = false
-        control.setContentSize(NSSize(width: 300, height: 150))
-        control.makeKeyAndOrderFront(nil)
-        await settle()
-        try capture(control, to: output.appendingPathComponent("rendering-control.png"))
-        control.contentView?.wantsLayer = true
-        await settle()
-        try capture(control, to: output.appendingPathComponent("rendering-control-layer.png"))
-        control.close()
         let model = AppModel()
         // The layout harness supplies the stores. Do not let runtime status hooks
         // replace synthetic history with a scan of the empty demo log directory.
@@ -95,6 +83,7 @@ enum MainWindowLayoutTests {
         record(model.runHistory.count == 30, "failed long-history fixture must remain installed")
         check(window, scenario: "failed-before-resize")
         try capture(window, to: output.appendingPathComponent("main-window-failed-before-resize.png"))
+        await checkHistoryScrolling(window, model: model)
 
         for (theme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             window.appearance = NSAppearance(named: appearance)
@@ -111,6 +100,10 @@ enum MainWindowLayoutTests {
                     try capture(window, to: output.appendingPathComponent("main-window-\(theme)-history-\(sizeName).png"))
                 }
             }
+            window.setFrame(NSRect(origin: window.frame.origin, size: window.minSize), display: true)
+            await settle(model)
+            check(window, scenario: "\(theme)-minimum-window-frame")
+            record(window.contentLayoutRect.height >= 520, "Minimum window must retain the root's 520-point content height")
         }
 
         if let picker = views(window.contentView!).compactMap({ $0 as? NSSegmentedControl }).first {
@@ -133,6 +126,25 @@ enum MainWindowLayoutTests {
             exit(1)
         }
         print("PASS: production main window retains visible sidebar/header/tabs across failure, resize and tab changes")
+    }
+
+    @MainActor
+    private static func checkHistoryScrolling(_ window: NSWindow, model: AppModel) async {
+        guard let table = views(window.contentView!).compactMap({ $0 as? NSTableView })
+            .first(where: { $0.numberOfRows == 30 })
+        else {
+            record(false, "Production history table must contain all 30 synthetic runs")
+            return
+        }
+        record(table.bounds.height > table.visibleRect.height, "History must overflow within its own scroll view")
+        table.scrollRowToVisible(29)
+        await settle(model)
+        record(NSLocationInRange(29, table.rows(in: table.visibleRect)), "Last history run must be reachable by scrolling")
+        check(window, scenario: "history-scrolled-to-end")
+        table.scrollRowToVisible(0)
+        await settle(model)
+        record(NSLocationInRange(0, table.rows(in: table.visibleRect)), "First history run must remain reachable by scrolling back")
+        check(window, scenario: "history-scrolled-to-start")
     }
 
     @MainActor
