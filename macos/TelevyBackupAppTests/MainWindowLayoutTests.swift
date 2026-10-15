@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import QuartzCore
 
 /// Exercise the production NSWindow, not an unconstrained component ImageRenderer.
 /// Every status, path and run is synthetic; no daemon, backup or log file is opened.
@@ -33,6 +34,16 @@ enum MainWindowLayoutTests {
         else { exit(2) }
         let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        NSApp.activate(ignoringOtherApps: true)
+        let control = NSWindow(contentViewController: NSHostingController(rootView:
+            VStack { Text("Synthetic rendering control"); Color.red.frame(width: 80, height: 40) }.padding(20)
+        ))
+        control.setContentSize(NSSize(width: 300, height: 150))
+        control.makeKeyAndOrderFront(nil)
+        await settle()
+        try capture(control, to: output.appendingPathComponent("rendering-control.png"))
+        print("[DEBUG-viewport] control-nodes=\(elements(control).count)")
+        control.close()
         let model = AppModel()
         var window: NSWindow?
         model.persistentWindowPresentationHandler = { candidate, _ in
@@ -108,24 +119,32 @@ enum MainWindowLayoutTests {
     private static func settle() async {
         try? await Task.sleep(nanoseconds: 500_000_000)
         NSApp.windows.forEach { $0.contentView?.layoutSubtreeIfNeeded(); $0.displayIfNeeded() }
+        CATransaction.flush()
     }
 
     // SwiftUI virtual accessibility nodes do not all declare the complete
     // NSAccessibilityProtocol. Use AppKit's public attribute bridge for traversal.
     private static func elements(_ root: Any, depth: Int = 0) -> [NSObject] {
         guard depth < 40, let element = root as? NSObject else { return [] }
-        let children = element.accessibilityAttributeValue(.children) as? [Any] ?? []
+        let children = attribute(element, "accessibilityChildren", .children) as? [Any] ?? []
         return [element] + children.flatMap { elements($0, depth: depth + 1) }
     }
 
+    private static func attribute(_ element: NSObject, _ key: String, _ legacy: NSAccessibility.Attribute) -> Any? {
+        if element.responds(to: NSSelectorFromString(key)), let value = element.value(forKey: key) { return value }
+        return element.accessibilityAttributeValue(legacy)
+    }
+
     private static func text(_ element: NSObject) -> String {
-        for attribute in [NSAccessibility.Attribute.description, .title, .value] {
-            if let value = element.accessibilityAttributeValue(attribute) as? String, !value.isEmpty { return value }
+        for (key, name) in [("accessibilityLabel", NSAccessibility.Attribute.description), ("accessibilityTitle", .title), ("accessibilityValue", .value)] {
+            if let value = attribute(element, key, name) as? String, !value.isEmpty { return value }
         }
         return ""
     }
 
     private static func frame(_ element: NSObject) -> NSRect {
+        if element.responds(to: NSSelectorFromString("accessibilityFrame")),
+           let value = element.value(forKey: "accessibilityFrame") as? NSValue { return value.rectValue }
         let origin = (element.accessibilityAttributeValue(.position) as? NSValue)?.pointValue ?? .zero
         let size = (element.accessibilityAttributeValue(.size) as? NSValue)?.sizeValue ?? .zero
         return NSRect(origin: origin, size: size)
@@ -136,9 +155,12 @@ enum MainWindowLayoutTests {
         let viewport = window.convertToScreen(window.contentLayoutRect).insetBy(dx: -1, dy: -1)
         let nodes = elements(window)
         print("[DEBUG-viewport] nodes=\(nodes.count) host=\(String(describing: window.contentView?.frame)) layout=\(window.contentLayoutRect)")
-        if scenario == "running" { nodes.prefix(25).forEach { print("[DEBUG-viewport] \(type(of: $0)) \(text($0))") } }
+        if scenario == "running" {
+            nodes.prefix(25).forEach { print("[DEBUG-viewport] \(type(of: $0)) \(text($0))") }
+            if let view = window.contentView { dumpViews(view) }
+        }
         for identifier in ["main-window-sidebar-heading", "main-window-target-heading", "main-window-detail-tabs"] {
-            guard let node = nodes.first(where: { ($0.accessibilityAttributeValue(.identifier) as? String) == identifier }) else {
+            guard let node = nodes.first(where: { (attribute($0, "accessibilityIdentifier", .identifier) as? String) == identifier }) else {
                 record(false, "\(scenario): missing \(identifier)")
                 continue
             }
@@ -153,6 +175,12 @@ enum MainWindowLayoutTests {
                 record(viewport.contains(frame(notice)), "\(scenario): failure guidance is clipped")
             }
         }
+    }
+
+    private static func dumpViews(_ view: NSView, depth: Int = 0) {
+        guard depth < 8 else { return }
+        print("[DEBUG-viewport] view[\(depth)] \(type(of: view)) frame=\(view.frame) bounds=\(view.bounds) hidden=\(view.isHidden)")
+        view.subviews.forEach { dumpViews($0, depth: depth + 1) }
     }
 
     private static func record(_ condition: Bool, _ message: String) {
