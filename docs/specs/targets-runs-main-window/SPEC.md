@@ -7,7 +7,7 @@
 
 None
 
-## 背景 / 问题陈述
+## Context and Scope
 
 - 当前 macOS app 只有菜单栏浮窗（popover）与 Settings window，缺少一个可以按 Target 浏览/追溯执行记录（备份/恢复/校验）的主界面。
 - 用户需要：按 Target 展示历史摘要，并能在主界面直接触发恢复与校验。
@@ -52,33 +52,33 @@ None
 - 执行记录持久化索引数据库（优先目录扫描与轻量缓存；如确有性能问题再单独立计划）。
 
 
-## 需求（Requirements）
+## Requirements
 
 ### MUST
 
-- 主窗口内容必须受窗口可用区域约束：运行中切换为失败、增加历史记录、切换 History / Diagnostics 或缩放窗口后，侧栏标题、Target 标题、失败恢复提示和标签切换控件仍可见；历史列表和诊断内容只在各自的剩余区域内滚动，不得把整个分栏布局撑出窗口顶部。
-- 窗口布局回归验证使用合成数据和生产主窗口创建路径，覆盖默认尺寸、最小尺寸、放大后缩回，以及运行中到失败的状态更新；不得依赖用户的实际备份目录或诊断记录。
-- 主界面 Targets 列表：
+- REQ-VIEWPORT: 主窗口内容必须受窗口可用区域约束：运行中切换为失败、增加历史记录、切换 History / Diagnostics 或缩放窗口后，侧栏标题、Target 标题、失败恢复提示和标签切换控件仍可见；历史列表和诊断内容只在各自的剩余区域内滚动，不得把整个分栏布局撑出窗口顶部。
+- REQ-FIXTURE-PRIVACY: 窗口布局回归验证使用合成数据和生产主窗口创建路径，覆盖默认尺寸、最小尺寸、放大后缩回，以及运行中到失败的状态更新；不得依赖用户的实际备份目录或诊断记录。
+- REQ-TARGETS: 主界面 Targets 列表：
   - 数据源：以 status snapshot 中的 targets 为准（包含 id/source_path/endpoint_id/enabled/state/lastRun）。
   - 每行按钮：
     - `Restore…`：弹出目录选择；若目标目录非空则提示并取消；若为空则开始 `restore latest`。
     - `Verify`：直接开始 `verify latest`。
-- Restore latest：
+- REQ-RESTORE: Restore latest：
   - 调用 CLI：`televybackup --events restore latest --target-id <id> --target <dir>`
   - 任务进行中与完成时 UI 有可见反馈（running/phase/progress/ok/error）。
-- Verify latest：
+- REQ-VERIFY: Verify latest：
   - 调用 CLI：`televybackup --events verify latest --target-id <id>`
   - 任务进行中与完成时 UI 有可见反馈（running/phase/progress/ok/error）。
-- 执行记录（摘要）：
+- REQ-HISTORY: 执行记录（摘要）：
   - 从 per-run NDJSON 日志提取每次 run 的元信息（kind/run_id/startedAt/finishedAt/status/duration/error_code/bytes/files…），并按 `target_id` 分组展示；
   - 旧日志若缺少 `target_id`，归类到 `Unknown target`（并不阻断主流程）。
   - 快照准备失败必须同时结束实时状态和历史记录，写入包含相同 `run_id/target_id`、`failed`、原错误码和耗时的 `run.finish`，不得永久显示 `running`。
   - 旧日志缺少 `run.finish` 时，仅可用同一 Target、同一运行（若事件带运行身份）的明确快照准备失败事件恢复 `failed`；显式结束事件优先。无结束事件且运行日志写入锁已释放的记录显示 `interrupted`，不得推测成功或准确结束时间。
   - 运行日志的活跃写入锁未释放时保持 `running`；非阻塞探测无法确认写入者退出时不得推测中断。发现写入者退出后必须再次读取日志末尾，避免遗漏同时发生的结束事件。
   - 失败提示展示易理解的原因、恢复建议和设置/诊断入口；错误码作为次要排障信息保留。可选 `errorReason` 仅包含固定诊断类别，缺失时使用通用提示，不展示原始错误消息或额外敏感路径。
-- 菜单栏浮窗：
+- REQ-POPOVER: 菜单栏浮窗：
   - 右上角设置按钮替换为“进入主界面”按钮（打开并激活主界面窗口）。
-- Settings：
+- REQ-SETTINGS: Settings：
   - 主界面提供 Settings 入口；
   - `⌘,` 打开 Settings window（保持现有行为）。
 
@@ -89,6 +89,7 @@ None
 
 ### 菜单栏直达运行合同
 
+- REQ-NAVIGATION: 菜单栏导航必须遵循以下身份关联和安全兜底规则。
 - status snapshot 的 `lastRun` 可选携带 `runId`、`kind`、`snapshotId`；`activeTask` 可选携带 `taskId`。缺失这些字段的旧 daemon 快照仍必须解码。
 - run log 的 `run.start` / `run.finish` 使用同一个 `run_id`；macOS 仅在 `target_id` 与 `run_id` 同时匹配时选择终态 `RunLogSummary`。不得按时间、日志顺序或“最新一条”替代缺失身份。
 - 菜单栏活动条目先选择对应 Target 并展示现有实时详情；任务完成后，仅当同一 Target 的同一身份终态日志出现时才切换到 `SnapshotRunDetailView`。
@@ -96,37 +97,23 @@ None
 - 缺少运行身份、日志尚未生成、取消发生在建日志之前、Target 已消失或本地没有匹配日志时，保留 Target 概览/空态，不得选中其他历史运行。
 
 
-## 验收标准（Acceptance Criteria）
+## Verification
 
-- Given 主窗口中存在多条历史记录，When 备份从运行中切换为失败且显示恢复提示，Then 侧栏和详情顶部仍位于窗口可见区域；History / Diagnostics 都可访问，缩小窗口不会令外层内容被裁掉。
+- VER-VIEWPORT | covers: REQ-VIEWPORT, REQ-FIXTURE-PRIVACY | Given 合成运行状态和长短历史记录，通过生产创建路径打开主窗口；When 运行转失败、滚动历史首尾、切换 History / Diagnostics，以及在默认、原生最小、放大和恢复尺寸间切换；Then 侧栏、详情标题和恢复操作仍位于窗口可见区域，历史在独立区域内滚动，且验证不读取用户备份或诊断数据。
 
-- Given 已存在至少一个 target，
-  When 用户点击浮窗“进入主界面”，
-  Then 主界面窗口出现并展示 Targets 列表。
+- VER-TARGETS | covers: REQ-TARGETS, REQ-POPOVER | Given 已存在至少一个 target，When 用户点击浮窗“进入主界面”，Then 主界面窗口出现并展示 Targets 列表。
 
-- Given Targets 列表中某个 target，
-  When 用户点击 `Restore…` 并选择一个非空目录，
-  Then 恢复不会开始，UI 明确提示“目录必须为空”。
+- VER-RESTORE-REJECT | covers: REQ-RESTORE | Given Targets 列表中某个 target，When 用户点击 `Restore…` 并选择一个非空目录，Then 恢复不会开始，UI 明确提示“目录必须为空”。
 
-- Given Targets 列表中某个 target，
-  When 用户点击 `Restore…` 并选择一个空目录，
-  Then 开始执行 `restore latest`，UI 显示运行中；任务完成后，执行记录中出现一条 `restore` 摘要，且该记录包含 `target_id` 并被正确归档到该 target。
+- VER-RESTORE-HISTORY | covers: REQ-RESTORE, REQ-HISTORY | Given Targets 列表中某个 target，When 用户点击 `Restore…` 并选择一个空目录，Then 开始执行 `restore latest`，UI 显示运行中；任务完成后，执行记录中出现一条 `restore` 摘要，且该记录包含 `target_id` 并被正确归档到该 target。
 
-- Given Targets 列表中某个 target，
-  When 用户点击 `Verify`，
-  Then 开始执行 `verify latest`；任务完成后，执行记录中出现一条 `verify` 摘要，且该记录包含 `target_id` 并被正确归档到该 target。
+- VER-VERIFY-HISTORY | covers: REQ-VERIFY, REQ-HISTORY | Given Targets 列表中某个 target，When 用户点击 `Verify`，Then 开始执行 `verify latest`；任务完成后，执行记录中出现一条 `verify` 摘要，且该记录包含 `target_id` 并被正确归档到该 target。
 
-- Given 主界面可见，
-  When 用户按下 `⌘,`，
-  Then Settings window 打开（或聚焦到已有 Settings window）。
+- VER-SETTINGS | covers: REQ-SETTINGS | Given 主界面可见，When 用户按下 `⌘,`，Then Settings window 打开（或聚焦到已有 Settings window）。
 
-- Given 菜单栏浮窗展示某个 Target 的终态运行或活动任务，
-  When 用户点击该 Target 卡片，
-  Then Popover 收起并前置唯一主窗口；终态打开同一 `target_id/run_id` 的 Summary，活动任务选择同一 Target 并展示实时详情。
+- VER-NAVIGATION | covers: REQ-NAVIGATION | Given 菜单栏浮窗展示某个 Target 的终态运行或活动任务，When 用户点击该 Target 卡片，Then Popover 收起并前置唯一主窗口；终态打开同一 `target_id/run_id` 的 Summary，活动任务选择同一 Target 并展示实时详情。
 
-- Given status 或本地日志缺少运行身份，
-  When 用户点击菜单栏 Target 卡片，
-  Then 主窗口只展示该 Target 的概览/空态，不跳转到任何其他历史运行。
+- VER-NAVIGATION-FALLBACK | covers: REQ-NAVIGATION | Given status 或本地日志缺少运行身份，When 用户点击菜单栏 Target 卡片，Then 主窗口只展示该 Target 的概览/空态，不跳转到任何其他历史运行。
 
 ## Visual Evidence
 
