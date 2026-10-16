@@ -75,7 +75,10 @@ enum BackupFailureHistoryPreview {
                 Text("Settings → Snapshots").font(.system(size: 18, weight: .bold))
                 Text("Helper update states").font(.system(size: 12)).foregroundStyle(.secondary)
                 ForEach(["outdated", "current", "missing"], id: \.self) { state in
-                    GroupBox {
+                    // Native GroupBox's AppKit backing is omitted by ImageRenderer.
+                    // Keep this source-owned preview container entirely SwiftUI.
+                    VStack(alignment: .leading, spacing: 12) {
+                        Divider()
                         SnapshotMountHelperStatusView(
                             readiness: SnapshotMountHelperReadiness(
                                 reachable: state != "missing", daemonReady: state == "current",
@@ -87,14 +90,13 @@ enum BackupFailureHistoryPreview {
                             error: state == "missing" ? "The mount helper is not installed." : nil,
                             busy: false, install: {}
                         )
-                        .padding(12)
                     }
                 }
                 Text("Installing or updating requires administrator approval.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             .padding(24)
-            .frame(width: 750, alignment: .leading)
+            .frame(width: 430, alignment: .leading)
             .background(scheme == .dark ? Color(red: 0.16, green: 0.17, blue: 0.19) : Color.white)
             .environment(\.colorScheme, scheme)
             let helperRenderer = ImageRenderer(content: helperContent)
