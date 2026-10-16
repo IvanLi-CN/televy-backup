@@ -338,6 +338,8 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let accessAppError: String?
     let mountHelperPath: String?
     let mountHelperReachable: Bool
+    let mountHelperReady: Bool
+    let mountHelperBuildCommit: String?
     let mountHelperVersion: String?
     let mountHelperError: String?
     let activeLeases: UInt32
@@ -346,7 +348,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, registeredAccessAppPath, accessAppRegistrationMismatch, managedBy, migrationState, legacyRegistrationPath, fdaReady, fdaCheckError, accessAppError
-        case mountHelperPath, mountHelperReachable, mountHelperVersion, mountHelperError
+        case mountHelperPath, mountHelperReachable, mountHelperReady, mountHelperBuildCommit, mountHelperVersion, mountHelperError
         case helperAvailable, helperVersion, helperError
         case activeLeases, pendingCleanup, volumes
     }
@@ -366,6 +368,8 @@ struct SnapshotControlStatus: Decodable, Equatable {
         accessAppError: String?,
         mountHelperPath: String? = nil,
         mountHelperReachable: Bool = false,
+        mountHelperReady: Bool = false,
+        mountHelperBuildCommit: String? = nil,
         mountHelperVersion: String? = nil,
         mountHelperError: String? = nil,
         activeLeases: UInt32,
@@ -386,6 +390,8 @@ struct SnapshotControlStatus: Decodable, Equatable {
         self.accessAppError = accessAppError
         self.mountHelperPath = mountHelperPath
         self.mountHelperReachable = mountHelperReachable
+        self.mountHelperReady = mountHelperReady
+        self.mountHelperBuildCommit = mountHelperBuildCommit
         self.mountHelperVersion = mountHelperVersion
         self.mountHelperError = mountHelperError
         self.activeLeases = activeLeases
@@ -413,11 +419,20 @@ struct SnapshotControlStatus: Decodable, Equatable {
             ?? (try values.decodeIfPresent(String.self, forKey: .helperError))
         mountHelperPath = try values.decodeIfPresent(String.self, forKey: .mountHelperPath)
         mountHelperReachable = try values.decodeIfPresent(Bool.self, forKey: .mountHelperReachable) ?? false
+        mountHelperReady = try values.decodeIfPresent(Bool.self, forKey: .mountHelperReady) ?? false
+        mountHelperBuildCommit = try values.decodeIfPresent(String.self, forKey: .mountHelperBuildCommit)
         mountHelperVersion = try values.decodeIfPresent(String.self, forKey: .mountHelperVersion)
         mountHelperError = try values.decodeIfPresent(String.self, forKey: .mountHelperError)
         activeLeases = try values.decodeIfPresent(UInt32.self, forKey: .activeLeases) ?? 0
         pendingCleanup = try values.decodeIfPresent(UInt32.self, forKey: .pendingCleanup) ?? 0
         volumes = try values.decodeIfPresent([SnapshotVolumeStatus].self, forKey: .volumes) ?? []
+    }
+
+    func mountHelperReadiness(expectedBuildCommit: String?) -> SnapshotMountHelperReadiness {
+        SnapshotMountHelperReadiness(
+            reachable: mountHelperReachable, daemonReady: mountHelperReady,
+            buildCommit: mountHelperBuildCommit, expectedBuildCommit: expectedBuildCommit
+        )
     }
 }
 
@@ -1098,29 +1113,14 @@ struct SettingsWindowRootView: View {
 
                         Divider()
 
-                        VStack(alignment: .leading, spacing: 6) {
-                            Label(
-                                snapshotStatus.mountHelperReachable ? "Snapshot mount helper installed" : "Snapshot mount helper required",
-                                systemImage: snapshotStatus.mountHelperReachable ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
-                            )
-                            .foregroundStyle(snapshotStatus.mountHelperReachable ? .green : .orange)
-                            if let path = snapshotStatus.mountHelperPath {
-                                Text(path)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .textSelection(.enabled)
-                            }
-                            if let version = snapshotStatus.mountHelperVersion {
-                                Text("Version \(version)").font(.system(size: 11)).foregroundStyle(.secondary)
-                            }
-                            if let error = snapshotStatus.mountHelperError, !snapshotStatus.mountHelperReachable {
-                                Text(error).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
-                                Text("Install once from Terminal: sudo televybackup snapshot-mount-helper install")
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        SnapshotMountHelperStatusView(
+                            readiness: snapshotStatus.mountHelperReadiness(expectedBuildCommit: expectedSnapshotBuildCommit),
+                            path: snapshotStatus.mountHelperPath,
+                            version: snapshotStatus.mountHelperVersion,
+                            error: snapshotStatus.mountHelperError,
+                            busy: snapshotBusy || SettingsUIDemo.enabled,
+                            install: installSnapshotMountHelper
+                        )
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1131,19 +1131,6 @@ struct SettingsWindowRootView: View {
                     Button("Open Privacy Settings") { openSnapshotPrivacySettings() }
                         .buttonStyle(.bordered)
                     .disabled(snapshotBusy)
-                    if let snapshotStatus, !snapshotStatus.mountHelperReachable {
-                        Button("Install mount helper") {
-                            snapshotBusy = true
-                            snapshotError = nil
-                            model.installSnapshotMountHelper { success, error, status in
-                                snapshotBusy = false
-                                self.snapshotStatus = status
-                                snapshotError = success ? nil : (error ?? "The mount helper could not be installed")
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(snapshotBusy || SettingsUIDemo.enabled)
-                    }
                     Button("Refresh") { refreshSnapshotStatus() }
                         .buttonStyle(.borderless)
                         .disabled(snapshotBusy)
@@ -1157,11 +1144,28 @@ struct SettingsWindowRootView: View {
         }
     }
 
+    private var expectedSnapshotBuildCommit: String? {
+        SettingsUIDemo.enabled
+            ? String(repeating: "a", count: 40)
+            : Bundle.main.object(forInfoDictionaryKey: "TelevyBackupSourceCommit") as? String
+    }
+
+    private func installSnapshotMountHelper() {
+        snapshotBusy = true
+        snapshotError = nil
+        model.installSnapshotMountHelper { success, error, status in
+            snapshotBusy = false
+            self.snapshotStatus = status
+            snapshotError = success ? nil : (error ?? "The mount helper could not be installed")
+        }
+    }
+
     private func refreshSnapshotStatus() {
         if SettingsUIDemo.enabled {
             let strict = SettingsUIDemo.scene != "snapshots-disabled"
             let accessMissing = SettingsUIDemo.scene == "snapshots-helper-missing"
             let mountHelperMissing = SettingsUIDemo.scene == "snapshots-mount-helper-missing"
+            let mountHelperOutdated = SettingsUIDemo.scene == "snapshots-mount-helper-outdated"
             snapshotStatus = SnapshotControlStatus(
                 consistencyMode: strict ? "strict" : "live",
                 serviceReachable: !accessMissing,
@@ -1173,7 +1177,9 @@ struct SettingsWindowRootView: View {
                 accessAppError: accessMissing ? "Snapshot Access is not installed" : (SettingsUIDemo.scene == "snapshots-fda-required" ? "Full Disk Access is required" : nil),
                 mountHelperPath: "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
                 mountHelperReachable: !accessMissing && !mountHelperMissing,
-                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.1.0" : nil,
+                mountHelperReady: !accessMissing && !mountHelperMissing && !mountHelperOutdated,
+                mountHelperBuildCommit: mountHelperOutdated ? nil : expectedSnapshotBuildCommit,
+                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.0" : nil,
                 mountHelperError: mountHelperMissing ? "Snapshot mount helper is not installed" : nil,
                 activeLeases: 0,
                 pendingCleanup: SettingsUIDemo.scene == "snapshots-cleanup-pending" ? 1 : 0,

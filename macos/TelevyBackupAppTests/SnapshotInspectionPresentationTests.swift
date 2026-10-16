@@ -220,6 +220,25 @@ enum SnapshotInspectionPresentationTestsMain {
         testStorageRequestEpochRejectsStaleExpansion()
         testStoragePreparationDoesNotShowPageLoader()
         testSnapshotAccessPathFallsBackToRegisteredPath()
+        testSnapshotMountStatusDecodingAndAppIdentity()
         print("OK: SnapshotInspectionPresentationTests")
     }
+}
+
+private func testSnapshotMountStatusDecodingAndAppIdentity() {
+    let candidate = String(repeating: "a", count: 40)
+    let legacy = try! JSONDecoder().decode(SnapshotControlStatus.self, from: Data(#"{"mountHelperReachable":true,"mountHelperVersion":"0.5.0"}"#.utf8))
+    expect(legacy.mountHelperReachable, "legacy root connectivity remains diagnostic evidence")
+    expect(!legacy.mountHelperReadiness(expectedBuildCommit: candidate).isReady, "old daemon JSON cannot prove current build readiness")
+    expect(legacy.mountHelperReadiness(expectedBuildCommit: candidate).actionTitle == "Update mount helper", "a reachable legacy response must expose the update action")
+    let data = try! JSONSerialization.data(withJSONObject: [
+        "serviceReachable": true,
+        "mountHelperReachable": true,
+        "mountHelperReady": true,
+        "mountHelperVersion": "0.5.0",
+        "mountHelperBuildCommit": candidate,
+    ])
+    let current = try! JSONDecoder().decode(SnapshotControlStatus.self, from: data)
+    expect(current.mountHelperReadiness(expectedBuildCommit: candidate).isReady, "matching daemon and app identity must be ready")
+    expect(!current.mountHelperReadiness(expectedBuildCommit: String(repeating: "b", count: 40)).isReady, "a daemon from a different app build must not prove readiness")
 }

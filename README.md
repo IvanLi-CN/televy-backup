@@ -282,6 +282,8 @@ prompt after setup. Service reachability does not itself prove that the helper h
 mode fails closed if either component cannot complete its operation. See
 [the macOS installation guide](packaging/INSTALL.md) for the exact setup steps.
 
+After an app update, Settings → Snapshots may show **Snapshot mount helper update required** even when the service is reachable and its component version has not changed. Use **Update mount helper** and approve the administrator installation. The ready state requires the running helper build to match the app; refreshing status does not install it automatically.
+
 Release DMGs and native tool archives are built by the macOS package workflow. Verify `SHA256SUMS` before following the ad-hoc Gatekeeper instructions in [`packaging/INSTALL.md`](packaging/INSTALL.md). The legacy Homebrew daemon Formula under `packaging/homebrew/` is not maintained by the release flow.
 
 The Homebrew Cask installs the GUI app from the latest stable Universal 2 release. The source repository is also the tap, so include its GitHub URL when adding it:
