@@ -58,6 +58,12 @@ impl SnapshotClientError {
             || message.contains("incompatible mount helper")
         {
             Some("protocol_mismatch")
+        } else if message.contains("stage=snapshot_mount ")
+            && message.contains("command=mount_apfs ")
+            && (message.contains("operation not permitted")
+                || message.contains("permission denied"))
+        {
+            Some("mount_permission_denied")
         } else if message.contains("permission denied")
             || message.contains("operation not permitted")
             || message.contains("full disk access")
@@ -619,6 +625,14 @@ mod tests {
                 Some("protocol_mismatch"),
             ),
             ("permission denied (os error 13)", Some("permission_denied")),
+            (
+                "mount helper rejected request (command_failed): stage=snapshot_mount command=mount_apfs exit=77 channel=stderr summary=operation not permitted",
+                Some("mount_permission_denied"),
+            ),
+            (
+                "stage=source_volume command=diskutil.info exit=1 channel=stderr summary=operation not permitted",
+                Some("permission_denied"),
+            ),
             (
                 "mount helper unavailable: socket not found",
                 Some("mount_helper_unavailable"),

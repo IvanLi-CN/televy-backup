@@ -1,5 +1,8 @@
 # Implementation
 
+- Installer startup polling uses a monotonic 20-second window with 250ms sleeps clamped to the remaining time. Immediate connection refusal no longer consumes a fixed four-probe budget, slow calls consume the same clock, and a late ready reply is rejected. Existing component/build and installed-file hash checks remain mandatory. Deterministic clock tests and a hosted mutation of the old four-probe loop cover the regression; the macOS installer fixture can hold a disposable SQLite journal lock to delay the real helper.
+- Snapshot failure classification retains the fixed `mount_permission_denied` reason when sanitized diagnostics identify the mount phase and `mount_apfs` permission denial. This distinguishes mounting from generic source access without forwarding paths or arbitrary command output to the UI.
+
 - `crates/snapshot-helper`: user-session Snapshot Access protocol and journal-backed lifecycle,
   including recorded mount-device identities, migratable lease journals, reservation renewal while
   snapshot creation is in flight, unique firmlink resolution, and descriptor-relative no-follow

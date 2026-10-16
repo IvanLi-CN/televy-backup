@@ -5,7 +5,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -18,6 +18,8 @@ use super::CliError;
 pub const MOUNT_HELPER_LABEL: &str = "com.ivan.televybackup.snapshot-mount-helper";
 const MOUNT_HELPER_PLIST_PATH: &str =
     "/Library/LaunchDaemons/com.ivan.televybackup.snapshot-mount-helper.plist";
+const INSTALL_READY_TIMEOUT: Duration = Duration::from_secs(20);
+const INSTALL_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 fn system_service_target() -> String {
     format!("system/{MOUNT_HELPER_LABEL}")
@@ -194,12 +196,14 @@ fn reject_if_busy(operation: &str) -> Result<(), CliError> {
 fn wait_for_installed_helper(
     expected_commit: &str,
     mut probe: impl FnMut() -> Result<MountStatusResult, mount_helper::MountHelperError>,
-    mut pause: impl FnMut(),
+    mut pause: impl FnMut(Duration),
+    mut elapsed: impl FnMut() -> Duration,
 ) -> Result<MountStatusResult, CliError> {
-    let mut last_error = String::new();
-    // A status request already has a five-second read timeout. Four probes keep
-    // the complete startup check bounded even if a loaded service never replies.
-    for attempt in 0..4 {
+    let mut last_error = "no ready status received".to_string();
+    // Connection refusal returns immediately, before the status read timeout.
+    // Bound startup by elapsed time instead of exhausting four fast probes.
+    // An in-flight status request retains its existing five-second I/O timeout.
+    while elapsed() < INSTALL_READY_TIMEOUT {
         match probe() {
             Ok(status)
                 if status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
@@ -207,7 +211,10 @@ fn wait_for_installed_helper(
                     && expected_commit.len() == 40
                     && expected_commit.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
             {
-                return Ok(status);
+                if elapsed() < INSTALL_READY_TIMEOUT {
+                    return Ok(status);
+                }
+                last_error = "candidate status arrived after the startup deadline".to_string();
             }
             Ok(status) => {
                 last_error = format!(
@@ -223,14 +230,16 @@ fn wait_for_installed_helper(
             }
             Err(error) => last_error = error.to_string(),
         }
-        if attempt < 3 {
-            pause();
+        let remaining = INSTALL_READY_TIMEOUT.saturating_sub(elapsed());
+        if !remaining.is_zero() {
+            pause(INSTALL_READY_POLL_INTERVAL.min(remaining));
         }
     }
     Err(CliError::retryable(
         "snapshot_mount_helper.readiness_failed",
         format!(
-            "mount helper was bootstrapped but is not ready (expected protocol {MOUNT_HELPER_PROTOCOL_VERSION}): {last_error}"
+            "mount helper was bootstrapped but did not become ready within the {}s startup window (expected protocol {MOUNT_HELPER_PROTOCOL_VERSION}): {last_error}",
+            INSTALL_READY_TIMEOUT.as_secs()
         ),
     ))
 }
@@ -266,12 +275,12 @@ pub fn install(json_output: bool) -> Result<(), CliError> {
     let service = system_service_target();
     let _ = launchctl(&["bootout", &service]);
     launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
+    let started = Instant::now();
     let status = wait_for_installed_helper(
         env!("TELEVYBACKUP_BUILD_COMMIT"),
         mount_helper::status,
-        || {
-            std::thread::sleep(Duration::from_millis(250));
-        },
+        std::thread::sleep,
+        || started.elapsed(),
     )?;
     if helper_sha256(Path::new(MOUNT_HELPER_INSTALL_PATH))? != candidate_hash {
         return Err(CliError::new(
@@ -346,6 +355,17 @@ pub fn status(json_output: bool) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    const CANDIDATE_COMMIT: &str = "0123456789012345678901234567890123456789";
+
+    fn candidate_status() -> MountStatusResult {
+        MountStatusResult {
+            helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+            build_commit: Some(CANDIDATE_COMMIT.into()),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn plist_is_a_minimal_system_daemon() {
@@ -369,8 +389,9 @@ mod tests {
     fn install_waits_for_the_new_component_before_acknowledging_success() {
         let mut calls = 0;
         let mut pauses = 0;
+        let clock = Cell::new(Duration::ZERO);
         let result = wait_for_installed_helper(
-            "0123456789012345678901234567890123456789",
+            CANDIDATE_COMMIT,
             || {
                 calls += 1;
                 if calls == 1 {
@@ -378,13 +399,13 @@ mod tests {
                         "fixture startup".into(),
                     ));
                 }
-                Ok(MountStatusResult {
-                    helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
-                    build_commit: Some("0123456789012345678901234567890123456789".into()),
-                    ..Default::default()
-                })
+                Ok(candidate_status())
             },
-            || pauses += 1,
+            |duration| {
+                pauses += 1;
+                clock.set(clock.get() + duration);
+            },
+            || clock.get(),
         );
         assert!(result.is_ok());
         assert_eq!(calls, 2);
@@ -395,8 +416,9 @@ mod tests {
     fn install_cannot_acknowledge_a_stale_or_unresponsive_service() {
         for stale in [true, false] {
             let mut calls = 0;
+            let clock = Cell::new(Duration::ZERO);
             let error = wait_for_installed_helper(
-                "0123456789012345678901234567890123456789",
+                CANDIDATE_COMMIT,
                 || {
                     calls += 1;
                     if stale {
@@ -410,12 +432,15 @@ mod tests {
                         ))
                     }
                 },
-                || {},
+                |duration| clock.set(clock.get() + duration),
+                || clock.get(),
             )
             .unwrap_err();
             assert_eq!(error.code, "snapshot_mount_helper.readiness_failed");
             assert!(error.message.contains("expected protocol 4"));
-            assert_eq!(calls, 4);
+            assert!(error.message.contains("20s startup window"));
+            assert!(calls > 4);
+            assert_eq!(clock.get(), INSTALL_READY_TIMEOUT);
         }
     }
 
@@ -425,8 +450,9 @@ mod tests {
             None,
             Some("fedcba9876543210fedcba9876543210fedcba98".into()),
         ] {
+            let clock = Cell::new(Duration::ZERO);
             let error = wait_for_installed_helper(
-                "0123456789012345678901234567890123456789",
+                CANDIDATE_COMMIT,
                 || {
                     Ok(MountStatusResult {
                         helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
@@ -434,7 +460,8 @@ mod tests {
                         ..Default::default()
                     })
                 },
-                || {},
+                |duration| clock.set(clock.get() + duration),
+                || clock.get(),
             )
             .unwrap_err();
             assert_eq!(error.code, "snapshot_mount_helper.readiness_failed");
@@ -442,5 +469,90 @@ mod tests {
         let legacy: MountStatusResult =
             serde_json::from_str(r#"{"helper_version":"0.5.0","active_mounts":0}"#).unwrap();
         assert!(legacy.build_commit.is_none());
+    }
+
+    #[test]
+    fn install_waits_through_connection_refusal_until_slow_startup_is_ready() {
+        let clock = Cell::new(Duration::ZERO);
+        let result = wait_for_installed_helper(
+            CANDIDATE_COMMIT,
+            || {
+                if clock.get() < Duration::from_secs(2) {
+                    Err(mount_helper::MountHelperError::Unavailable(
+                        "Connection refused (os error 61)".into(),
+                    ))
+                } else {
+                    Ok(candidate_status())
+                }
+            },
+            |duration| clock.set(clock.get() + duration),
+            || clock.get(),
+        );
+        assert!(
+            result.is_ok(),
+            "slow-starting helper must not exhaust four immediate refusals: {result:?}"
+        );
+        assert_eq!(clock.get(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn install_bounds_permanent_connection_refusal_and_keeps_the_cause() {
+        let clock = Cell::new(Duration::ZERO);
+        let error = wait_for_installed_helper(
+            CANDIDATE_COMMIT,
+            || {
+                assert!(clock.get() < INSTALL_READY_TIMEOUT);
+                Err(mount_helper::MountHelperError::Unavailable(
+                    "Connection refused (os error 61)".into(),
+                ))
+            },
+            |duration| clock.set(clock.get() + duration),
+            || clock.get(),
+        )
+        .unwrap_err();
+        assert_eq!(clock.get(), INSTALL_READY_TIMEOUT);
+        assert_eq!(error.code, "snapshot_mount_helper.readiness_failed");
+        assert!(error.message.contains("Connection refused (os error 61)"));
+    }
+
+    #[test]
+    fn install_counts_probe_time_and_never_accepts_a_late_ready_response() {
+        let clock = Cell::new(Duration::ZERO);
+        let mut calls = 0;
+        let error = wait_for_installed_helper(
+            CANDIDATE_COMMIT,
+            || {
+                calls += 1;
+                clock.set(INSTALL_READY_TIMEOUT + Duration::from_millis(1));
+                Ok(candidate_status())
+            },
+            |_| panic!("must not sleep after the startup deadline"),
+            || clock.get(),
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(error.code, "snapshot_mount_helper.readiness_failed");
+    }
+
+    #[test]
+    fn install_limits_the_last_pause_to_the_remaining_startup_window() {
+        let clock = Cell::new(Duration::ZERO);
+        let error = wait_for_installed_helper(
+            CANDIDATE_COMMIT,
+            || {
+                clock.set(INSTALL_READY_TIMEOUT - Duration::from_millis(10));
+                Err(mount_helper::MountHelperError::Unavailable(
+                    "not listening yet".into(),
+                ))
+            },
+            |duration| {
+                assert_eq!(duration, Duration::from_millis(10));
+                clock.set(clock.get() + duration);
+            },
+            || clock.get(),
+        )
+        .unwrap_err();
+        assert_eq!(clock.get(), INSTALL_READY_TIMEOUT);
+        assert_eq!(error.code, "snapshot_mount_helper.readiness_failed");
     }
 }

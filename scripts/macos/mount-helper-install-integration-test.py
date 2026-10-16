@@ -57,6 +57,7 @@ def main():
     parser.add_argument("--app", required=True, type=Path)
     parser.add_argument("--require-readiness", action="store_true")
     parser.add_argument("--expect-build-commit")
+    parser.add_argument("--delay-startup", action="store_true")
     args = parser.parse_args()
     # Never run this integration test on an owner's machine.
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
@@ -72,6 +73,7 @@ def main():
     assert absent.returncode != 0 and "could not find service" in (absent.stdout + absent.stderr).lower(), "runner helper absence unverified"
     run("sudo", "-n", "true")
     process = None
+    journal_locker = None
     root = None
     # Preserve all fixture state if process shutdown cannot be verified.
     temp = tempfile.mkdtemp(prefix="televy-helper-install-ci-", dir="/private/tmp")
@@ -141,12 +143,40 @@ while True:
             assert "unsupported mount helper response version" in before["result"]["mount_helper_error"]
             print("REPRODUCED: published Access reports unsupported mount helper response version for the legacy service", flush=True)
         # Same privileged CLI entrypoint as the GUI's password-authorized command.
+        if args.delay_startup:
+            assert args.require_readiness, "delayed startup requires the candidate readiness check"
+            # Delay real helper initialization with a fixture-only SQLite lock.
+            # No production sleep, command override, or TCC changes are needed.
+            locker_script = fixture / "startup_lock.py"
+            locker_ready = fixture / "startup-lock-ready"
+            locker_script.write_text('''import os, pathlib, sqlite3, sys, time
+journal = pathlib.Path(sys.argv[1])
+ready = pathlib.Path(sys.argv[2])
+journal.mkdir(mode=0o700)
+with sqlite3.connect(journal / "journal.sqlite") as connection:
+    os.chmod(journal / "journal.sqlite", 0o600)
+    connection.execute("CREATE TABLE ci_startup_gate (value INTEGER)")
+    connection.commit()
+    connection.execute("BEGIN EXCLUSIVE")
+    ready.touch()
+    time.sleep(2)
+    connection.commit()
+''')
+            journal_locker = subprocess.Popen([
+                "sudo", "-n", "/usr/bin/python3", str(locker_script), str(JOURNAL), str(locker_ready)
+            ])
+            wait_for(lambda: locker_ready.exists(), bool)
+        install_started = time.monotonic()
         installed = run("sudo", "-n", str(cli), "--json", "--config-dir", str(config), "--data-dir", str(data), "snapshot-mount-helper", "install")
         installation = json.loads(installed.stdout)
         assert installation["installed"] is True
         if args.require_readiness:
             assert installation["helperReady"] is True
             assert installation["helperVersion"] == "0.5.0"
+        if journal_locker is not None:
+            assert journal_locker.wait(timeout=10) == 0
+            assert time.monotonic() - install_started >= 1, "startup delay did not cover the old subsecond retry window"
+            print("PASS: real privileged installer waits for delayed journal initialization without a manual refresh", flush=True)
         direct = wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == expected_protocol and reply.get("ok") is True)
         assert direct["result"]["helper_version"] == "0.5.0"
         if args.expect_build_commit:
@@ -162,6 +192,9 @@ while True:
         assert process.poll() is None, "Access unexpectedly exited during installation"
         print("PASS: real bundled install replaces the legacy service and the same Access process becomes reachable", flush=True)
     finally:
+        if journal_locker is not None:
+            # Preserve the journal/tree if its fixture lock owner cannot be reaped.
+            journal_locker.wait(timeout=10)
         if process is not None:
             process.terminate()
             process.wait(timeout=10)

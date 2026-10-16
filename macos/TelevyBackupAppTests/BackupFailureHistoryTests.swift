@@ -85,6 +85,32 @@ private func testCurrentTerminalDiagnosis() {
     expectHistory(legacy.errorReason == nil, "older status snapshots must remain compatible")
 }
 
+private func testServiceFailuresKeepTheirSpecificExplanation() {
+    for (code, reason, title, recovery) in [
+        ("telegram.unavailable", nil, "Telegram is unavailable", "network, proxy"),
+        ("telegram.timeout", nil, "Telegram did not respond in time", "Telegram connection"),
+        ("telegram.unauthorized", nil, "Telegram authentication failed", "credentials"),
+        ("snapshot.acquire_failed", "mount_permission_denied", "Snapshot mounting was denied", "installed mount helper"),
+    ] as [(String, String?, String, String)] {
+        let reasonField = reason.map { ",\"error_reason\":\"\($0)\"" } ?? ""
+        withLog(start + "\n" + """
+        {"timestamp":"2026-01-01T00:00:15Z","fields":{"event":"run.finish","run_id":"run-a","target_id":"target-a","status":"failed","error_code":"\(code)"\(reasonField)}}
+        """) { url in
+            let run = AppModel().parseRunLogSummary(url: url)!
+            let issue = BackupFailurePresentation(code: run.errorCode, reason: run.errorReason)
+            expectHistory(issue.title == title, "known service failure must not become The run failed: \(code)")
+            expectHistory(issue.recovery.contains(recovery), "service failure needs a matching recovery action: \(code)")
+            expectHistory(issue.opensSettings, "service failures should retain a Settings action")
+            expectHistory(run.errorCode == code, "presentation must preserve the original error code")
+        }
+    }
+    let legacy = BackupFailurePresentation.legacyReason(message:
+        "stage=snapshot_mount command=mount_apfs exit=77 channel=stderr summary=operation not permitted")
+    expectHistory(legacy == "mount_permission_denied", "legacy mount diagnostics must retain the mount phase")
+    let access = BackupFailurePresentation.legacyReason(message: "permission denied (os error 13)")
+    expectHistory(access == "permission_denied", "generic permission errors must not invent a mount failure")
+}
+
 @main
 enum BackupFailureHistoryTestsMain {
     static func main() {
@@ -92,6 +118,7 @@ enum BackupFailureHistoryTestsMain {
         testExplicitTerminalWinsOverLegacyFailure()
         testActiveAndInterruptedLogs()
         testCurrentTerminalDiagnosis()
+        testServiceFailuresKeepTheirSpecificExplanation()
         print("OK: BackupFailureHistoryTests")
     }
 }

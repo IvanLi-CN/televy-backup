@@ -7,7 +7,8 @@ struct BackupFailurePresentation {
     let opensSettings: Bool
 
     init(code: String?, reason: String?) {
-        opensSettings = code?.hasPrefix("snapshot.") == true || code == "config.invalid"
+        opensSettings = code?.hasPrefix("snapshot.") == true
+            || code?.hasPrefix("telegram.") == true || code == "config.invalid"
         switch reason {
         case "protocol_mismatch":
             title = "Snapshot components are incompatible"
@@ -15,6 +16,9 @@ struct BackupFailurePresentation {
         case "permission_denied":
             title = "Snapshot access was denied"
             recovery = "Review Full Disk Access for both components in Settings → Snapshots, then retry."
+        case "mount_permission_denied":
+            title = "Snapshot mounting was denied"
+            recovery = "macOS refused the mount operation. Review Full Disk Access for the installed mount helper in Settings → Snapshots. Open Diagnostics if it is already allowed."
         case "service_unavailable":
             title = "Snapshot Access is unavailable"
             recovery = "Restart TelevyBackup and check Snapshot Access in Settings → Snapshots."
@@ -50,6 +54,12 @@ struct BackupFailurePresentation {
             case "telegram.unauthorized", "telegram.mtproto.session_invalid":
                 title = "Telegram authentication failed"
                 recovery = "Review the Telegram credentials in Settings, then retry."
+            case "telegram.unavailable":
+                title = "Telegram is unavailable"
+                recovery = "Check your network, proxy, and Telegram connection in Settings, then retry. Open Diagnostics for the connection error."
+            case "telegram.timeout":
+                title = "Telegram did not respond in time"
+                recovery = "Check your network, proxy, and Telegram connection in Settings, then retry."
             case "config.invalid":
                 title = "Backup configuration needs attention"
                 recovery = "Review the target and storage settings before retrying."
@@ -67,6 +77,10 @@ struct BackupFailurePresentation {
             || message.contains("unsupported access app response version")
             || message.contains("incompatible snapshot access component version")
             || message.contains("incompatible mount helper") { return "protocol_mismatch" }
+        if message.contains("stage=snapshot_mount ") && message.contains("command=mount_apfs ")
+            && (message.contains("operation not permitted") || message.contains("permission denied")) {
+            return "mount_permission_denied"
+        }
         if message.contains("permission denied") || message.contains("operation not permitted")
             || message.contains("full disk access") { return "permission_denied" }
         if message.contains("mount helper unavailable") { return "mount_helper_unavailable" }

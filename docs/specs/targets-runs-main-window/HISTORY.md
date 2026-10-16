@@ -1,5 +1,7 @@
 # History
 
+- Shared failure presentation omitted the common `telegram.unavailable` code and replaced its useful meaning with a generic run failure. Known Telegram availability/timeout and mount-stage permission errors now retain their specific safe explanations in both history and target details.
+
 ## Provenance
 
 - Legacy source: `docs/plan/kaa5e:targets-runs-main-window/PLAN.md`.
