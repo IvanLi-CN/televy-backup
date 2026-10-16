@@ -177,6 +177,10 @@ jobs:
         if: needs.classify.outputs.kind == 'source'
         run: cargo test --all-features
 
+      - name: Prove mount helper slow-start regression and repair
+        if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/test-mount-helper-startup-regression.sh
+
       - name: Cargo test (mtproto-helper)
         if: needs.classify.outputs.kind == 'source'
         run: |
@@ -243,7 +247,7 @@ jobs:
           codesign --force --sign - "${fixture}/TelevyBackup.app/Contents/MacOS/televybackup-cli"
           codesign --force --sign - "${fixture}/TelevyBackup.app/Contents/MacOS/televybackup-snapshot-mount-helper"
           python3 scripts/macos/mount-helper-install-integration-test.py \
-            --app "${fixture}/TelevyBackup.app" --require-readiness
+            --app "${fixture}/TelevyBackup.app" --require-readiness --delay-startup
 
       - name: Preserve strict Snapshot Access error code
         run: cargo test --locked -p televy_backup_core strict_snapshot_read_errors_keep_the_snapshot_access_code
@@ -274,6 +278,9 @@ jobs:
       - name: Prove helper readiness regression and repair
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/test-helper-readiness-regression.sh
+      - name: Prove service failure presentation regression
+        if: needs.classify.outputs.kind == 'source'
+        run: bash scripts/macos/test-backup-failure-presentation-regression.sh
       - name: Render synthetic backup failure views
         if: needs.classify.outputs.kind == 'source'
         run: bash scripts/macos/render-backup-failure-preview.sh "${RUNNER_TEMP}/backup-failure-preview"

@@ -37,6 +37,8 @@
 
 ## Failure and History Coverage
 
+- Telegram unavailable and timeout codes have explicit titles and network/proxy/connection guidance, with a Settings action. The fixed `mount_permission_denied` reason explains that macOS rejected the mount operation, distinguishing it from generic file-access denial. Synthetic terminal-log tests and light/dark production-component previews cover these shared history/detail presentations; a private-copy mutation proves an unmapped Telegram failure is detected.
+
 - Snapshot setup failures use one terminal recorder for the live status and per-run log; the original failure codes remain intact.
 - The parser recognizes target-scoped legacy snapshot setup failures, probes the writer lock without blocking, and re-reads the tail before marking an abandoned log interrupted.
 - Main-window summaries and history rows share plain-language failure descriptions. Target details offer Settings and Diagnostics actions.

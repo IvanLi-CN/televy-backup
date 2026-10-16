@@ -45,6 +45,38 @@ enum BackupFailureHistoryPreview {
             else { exit(1) }
             try png.write(to: output.appendingPathComponent("backup-failure-\(name).png"))
 
+            let serviceFailures = [
+                run(id: "fixture-telegram", status: "failed", code: "telegram.unavailable", reason: nil),
+                run(id: "fixture-mount", status: "failed", code: "snapshot.acquire_failed", reason: "mount_permission_denied"),
+            ]
+            let serviceContent = VStack(alignment: .leading, spacing: 20) {
+                Text("Backup failure details").font(.system(size: 18, weight: .bold))
+                ForEach(serviceFailures, id: \.id) { failure in
+                    VStack(alignment: .leading, spacing: 12) {
+                        Divider()
+                        BackupFailureNotice(
+                            issue: BackupFailurePresentation(code: failure.errorCode, reason: failure.errorReason),
+                            code: failure.errorCode, openSettings: {}, openDiagnostics: {}
+                        )
+                        RunLogRow(run: failure)
+                    }
+                }
+            }
+            .padding(24)
+            .frame(width: 680, alignment: .leading)
+            .background(scheme == .dark ? Color(red: 0.16, green: 0.17, blue: 0.19) : Color.white)
+            .environment(\.colorScheme, scheme)
+            .environment(\.locale, Locale(identifier: "en_US"))
+            .environment(\.timeZone, TimeZone(secondsFromGMT: 0)!)
+            let serviceRenderer = ImageRenderer(content: serviceContent)
+            serviceRenderer.scale = 2
+            guard let serviceImage = serviceRenderer.nsImage,
+                  let serviceTiff = serviceImage.tiffRepresentation,
+                  let serviceBitmap = NSBitmapImageRep(data: serviceTiff),
+                  let servicePNG = serviceBitmap.representation(using: .png, properties: [:])
+            else { exit(1) }
+            try servicePNG.write(to: output.appendingPathComponent("backup-service-errors-\(name).png"))
+
             var installationError: String?
             SnapshotMountHelperInstallation.perform(
                 install: { $0(false, "Mount helper installation failed: bootstrap failed (fixture)") },

@@ -1,5 +1,7 @@
 # History
 
+- Installer startup could be incorrectly reported as failed because four immediately refused connections exhausted the readiness check before initialization completed. Readiness now uses a monotonic startup window, with regression coverage for delayed initialization, permanent refusal, stale identity and late replies. Mount permission failures retain their fixed operation category for presentation.
+
 - Helper update readiness: a reachable root helper with the same compatibility version could remain on an older build while Settings displayed a green installed state and hid its installation action. The daemon now obtains build evidence directly from root Status, and Settings compares it with the current app before declaring readiness. Older daemon responses remain decodable but show an update action. Installation remains explicit and administrator-authorized; neither root protocol nor the approved Access artifact changes.
 
 - Source reservation repair: hosted macOS reproduces the nested-directory `diskutil info -plist` exit 1 through the unchanged production Reserve path. Source validation now queries the pinned directory's kernel device, preserves UID and volume identity checks, and retains privacy-safe command diagnostics. Installation distinguishes source builds through additive Status identity and binary hashes while keeping the existing compatibility version, protocol, journal and approved Access artifact.

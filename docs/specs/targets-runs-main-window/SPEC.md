@@ -76,6 +76,7 @@ None
   - 旧日志缺少 `run.finish` 时，仅可用同一 Target、同一运行（若事件带运行身份）的明确快照准备失败事件恢复 `failed`；显式结束事件优先。无结束事件且运行日志写入锁已释放的记录显示 `interrupted`，不得推测成功或准确结束时间。
   - 运行日志的活跃写入锁未释放时保持 `running`；非阻塞探测无法确认写入者退出时不得推测中断。发现写入者退出后必须再次读取日志末尾，避免遗漏同时发生的结束事件。
   - 失败提示展示易理解的原因、恢复建议和设置/诊断入口；错误码作为次要排障信息保留。可选 `errorReason` 仅包含固定诊断类别，缺失时使用通用提示，不展示原始错误消息或额外敏感路径。
+  - 已知错误必须优先按错误码提供具体原因；`telegram.unavailable` 和 `telegram.timeout` 分别显示 Telegram 不可用或响应超时及网络、代理和连接检查建议，不能退化为 “The run failed”。固定类别 `mount_permission_denied` 必须说明系统拒绝挂载快照，并指向已安装 mount helper 的权限检查；不能仅凭挂载拒绝断言 FDA 未授权。实时详情和历史记录必须复用同一映射，未知错误仍不得展示原始敏感诊断。
 - REQ-POPOVER: 菜单栏浮窗：
   - 右上角设置按钮替换为“进入主界面”按钮（打开并激活主界面窗口）。
 - REQ-SETTINGS: Settings：
@@ -98,6 +99,8 @@ None
 
 
 ## Verification
+
+- VER-HISTORY-ERRORS | covers: REQ-HISTORY, REQ-FIXTURE-PRIVACY | Given 合成 Telegram 不可用、响应超时和快照挂载被拒绝的结束记录；When 解析执行记录并呈现共享错误组件；Then 保留错误码与固定原因，显示对应原因和恢复入口；恢复旧的 Telegram 通用提示映射时回归必须失败，未知错误继续安全降级。使用 GitHub-hosted macOS 渲染浅色、深色生产组件，不读取用户记录。
 
 - VER-VIEWPORT | covers: REQ-VIEWPORT, REQ-FIXTURE-PRIVACY | Given 合成运行状态和长短历史记录，通过生产创建路径打开主窗口；When 运行转失败、滚动历史首尾、切换 History / Diagnostics，以及在默认、原生最小、放大和恢复尺寸间切换；Then 侧栏、详情标题和恢复操作仍位于窗口可见区域，历史在独立区域内滚动，且验证不读取用户备份或诊断数据。
 
