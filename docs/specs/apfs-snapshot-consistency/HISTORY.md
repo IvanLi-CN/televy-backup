@@ -1,6 +1,7 @@
 # History
 
 - Installer startup could be incorrectly reported as failed because four immediately refused connections exhausted the readiness check before initialization completed. Readiness now uses a monotonic startup window, with regression coverage for delayed initialization, permanent refusal, stale identity and late replies. Mount permission failures retain their fixed operation category for presentation.
+- [PR #181](https://github.com/IvanLi-CN/televy-backup/pull/181) includes a [hosted macOS installer fixture](https://github.com/IvanLi-CN/televy-backup/actions/runs/38865387153/job/116856982379) that delays real journal initialization with a disposable SQLite lock and verifies installation reaches the candidate build without a manual refresh. The source candidate's installer and strict error-propagation checks pass; this fixture does not exercise real FDA or establish full backup completion.
 
 - Helper update readiness: a reachable root helper with the same compatibility version could remain on an older build while Settings displayed a green installed state and hid its installation action. The daemon now obtains build evidence directly from root Status, and Settings compares it with the current app before declaring readiness. Older daemon responses remain decodable but show an update action. Installation remains explicit and administrator-authorized; neither root protocol nor the approved Access artifact changes.
 
