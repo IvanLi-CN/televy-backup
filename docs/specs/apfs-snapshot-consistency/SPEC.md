@@ -193,3 +193,8 @@ Administrator installation failures remain visible after the status refresh. The
 
 - [Mount helper installation failure, light](assets/mount-helper-install-error-light.png)
 - [Mount helper installation failure, dark](assets/mount-helper-install-error-dark.png)
+
+Build readiness and its explicit administrator action are rendered from the production status component with synthetic identities. A reachable stale helper retains Update; only the current app-bound build is ready; an unavailable helper retains Install:
+
+- [Mount helper update states, light](assets/mount-helper-update-light.png)
+- [Mount helper update states, dark](assets/mount-helper-update-dark.png)
