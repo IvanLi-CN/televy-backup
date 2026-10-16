@@ -16,6 +16,14 @@ bin_mount_helper_installation="$out_dir/snapshot-mount-helper-installation-tests
   -o "$bin_mount_helper_installation"
 "$bin_mount_helper_installation"
 
+bin_mount_helper_readiness="$out_dir/snapshot-mount-helper-readiness-tests"
+"$swiftc" -sdk "$sdk_path" \
+  "$root_dir/macos/TelevyBackupApp/SnapshotMountHelperReadiness.swift" \
+  "$root_dir/macos/TelevyBackupApp/SnapshotMountHelperInstallation.swift" \
+  "$root_dir/macos/TelevyBackupAppTests/SnapshotMountHelperReadinessTests.swift" \
+  -o "$bin_mount_helper_readiness"
+"$bin_mount_helper_readiness"
+
 search_file() {
   local pattern="$1"
   local path="$2"

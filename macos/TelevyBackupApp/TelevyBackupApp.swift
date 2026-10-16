@@ -2586,7 +2586,11 @@ final class AppModel {
                 }
             },
             refresh: fetchSnapshotStatus,
-            isReady: { $0.serviceReachable && $0.mountHelperReachable },
+            isReady: {
+                $0.serviceReachable && $0.mountHelperReadiness(
+                    expectedBuildCommit: Bundle.main.object(forInfoDictionaryKey: "TelevyBackupSourceCommit") as? String
+                ).isReady
+            },
             readinessError: { $0.mountHelperError ?? $0.accessAppError },
             completion: completion
         )

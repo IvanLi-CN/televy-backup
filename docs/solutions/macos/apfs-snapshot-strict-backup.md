@@ -90,6 +90,10 @@ sequenceDiagram
 
 System tools may report their useful diagnostic on stdout even when stderr is empty. Preserve the fixed operation stage, command category, exit code and selected diagnostic channel; project output onto known safe error classes before limiting its length. Do not echo command arguments, raw plist parser errors, paths, volume UUIDs or arbitrary tool output. Keep component compatibility versions separate from build identity: additive `build_commit` plus an installed-file hash prevents a surviving older build with the same component version from proving readiness. Use `CI (main)`'s default-off `snapshot_source_validation` to reproduce and validate with disposable storage; it requires no owner files or TCC changes and does not prove a full remote backup.
 
+## Helper build readiness after an app update
+
+Updating the app does not replace an administrator-installed root helper. A compatibility version such as `0.5.0` can represent multiple source builds. A green socket/protocol check can therefore hide a stale executable and, if the update action is hidden on reachability, leave no way to apply the repair from Settings. Query root Status directly from the daemon because a byte-identical approved Access artifact may not relay newer identity fields. Keep connectivity separate from readiness, compare the root build with both the daemon and current GUI bundle, and keep an explicit update action for missing or mismatched build evidence. Apply the same predicate after installation; the install transaction additionally verifies the installed file hash. Refreshing status must remain read-only. Synthetic old/current/missing states and a mutation of the old connectivity-only predicate provide a fast hosted regression without owner data or TCC changes.
+
 ## Invariants
 
 1. Strict mode is opt-in by APFS Volume UUID. Non-APFS, insufficient free space, unavailable

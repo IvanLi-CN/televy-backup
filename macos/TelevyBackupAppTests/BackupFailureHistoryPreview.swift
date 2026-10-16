@@ -69,6 +69,44 @@ enum BackupFailureHistoryPreview {
                   let errorPNG = errorBitmap.representation(using: .png, properties: [:])
             else { exit(1) }
             try errorPNG.write(to: output.appendingPathComponent("mount-helper-install-error-\(name).png"))
+
+            let candidate = String(repeating: "a", count: 40)
+            let helperContent = VStack(alignment: .leading, spacing: 18) {
+                Text("Settings → Snapshots").font(.system(size: 18, weight: .bold))
+                Text("Helper update states").font(.system(size: 12)).foregroundStyle(.secondary)
+                ForEach(["outdated", "current", "missing"], id: \.self) { state in
+                    // Native GroupBox's AppKit backing is omitted by ImageRenderer.
+                    // Keep this source-owned preview container entirely SwiftUI.
+                    VStack(alignment: .leading, spacing: 12) {
+                        Divider()
+                        SnapshotMountHelperStatusView(
+                            readiness: SnapshotMountHelperReadiness(
+                                reachable: state != "missing", daemonReady: state == "current",
+                                buildCommit: state == "current" ? candidate : nil,
+                                expectedBuildCommit: candidate
+                            ),
+                            path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
+                            version: state == "missing" ? nil : "0.5.0",
+                            error: state == "missing" ? "The mount helper is not installed." : nil,
+                            busy: false, install: {}
+                        )
+                    }
+                }
+                Text("Installing or updating requires administrator approval.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            .padding(24)
+            .frame(width: 430, alignment: .leading)
+            .background(scheme == .dark ? Color(red: 0.16, green: 0.17, blue: 0.19) : Color.white)
+            .environment(\.colorScheme, scheme)
+            let helperRenderer = ImageRenderer(content: helperContent)
+            helperRenderer.scale = 2
+            guard let helperImage = helperRenderer.nsImage,
+                  let helperTiff = helperImage.tiffRepresentation,
+                  let helperBitmap = NSBitmapImageRep(data: helperTiff),
+                  let helperPNG = helperBitmap.representation(using: .png, properties: [:])
+            else { exit(1) }
+            try helperPNG.write(to: output.appendingPathComponent("mount-helper-update-\(name).png"))
         }
     }
 

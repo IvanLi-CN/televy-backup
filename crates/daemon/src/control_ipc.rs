@@ -23,7 +23,9 @@ use televy_backup_core::control::{
 use televy_backup_core::{
     Storage, TaskProgress, TelegramMtProtoStorage, TelegramMtProtoStorageConfig,
 };
-use televybackup_snapshot_access::{MOUNT_HELPER_INSTALL_PATH, StatusResult};
+use televybackup_snapshot_access::{
+    MOUNT_HELPER_INSTALL_PATH, MountStatusResult, StatusResult, mount_helper,
+};
 
 use crate::snapshot_client::SnapshotClient;
 
@@ -31,6 +33,50 @@ type Settings = televy_backup_core::config::SettingsV2;
 
 static SETTINGS_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static OPERATIONS: OnceLock<Mutex<HashMap<String, OperationStatusResult>>> = OnceLock::new();
+
+struct SnapshotMountHelperState {
+    reachable: bool,
+    ready: bool,
+    version: Option<String>,
+    build_commit: Option<String>,
+    expected_build_commit: Option<String>,
+    error: Option<String>,
+}
+
+fn snapshot_mount_helper_state(
+    result: Result<MountStatusResult, String>,
+    expected_commit: &str,
+) -> SnapshotMountHelperState {
+    let valid_commit =
+        |commit: &str| commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let expected_build_commit = valid_commit(expected_commit).then(|| expected_commit.to_owned());
+    match result {
+        Ok(status) => {
+            let build_commit = status.build_commit.filter(|commit| valid_commit(commit));
+            let ready = status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
+                && expected_build_commit.is_some()
+                && build_commit == expected_build_commit;
+            SnapshotMountHelperState {
+                reachable: true,
+                ready,
+                version: Some(status.helper_version),
+                build_commit,
+                expected_build_commit,
+                error: (!ready).then(|| {
+                    "Update the snapshot mount helper to match this app's build.".to_owned()
+                }),
+            }
+        }
+        Err(error) => SnapshotMountHelperState {
+            reachable: false,
+            ready: false,
+            version: None,
+            build_commit: None,
+            expected_build_commit,
+            error: Some(error),
+        },
+    }
+}
 
 fn operation_store() -> &'static Mutex<HashMap<String, OperationStatusResult>> {
     OPERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -521,9 +567,20 @@ async fn handle_control_ipc_client(
 
     if req.method == "snapshot.status" {
         let settings = context.settings.read().await.clone();
-        let helper = SnapshotClient::for_environment(&context.config_root, &context.data_root)
-            .status()
-            .await;
+        let client = SnapshotClient::for_environment(&context.config_root, &context.data_root);
+        // Approved Access artifacts predate build identity. Probe the root boundary directly,
+        // without rebuilding Access or treating its reachability flag as update readiness.
+        let (helper, mount_probe) = tokio::join!(
+            client.status(),
+            tokio::task::spawn_blocking(
+                || mount_helper::status().map_err(|error| error.to_string())
+            )
+        );
+        let mount_state = snapshot_mount_helper_state(
+            mount_probe
+                .unwrap_or_else(|_| Err("Mount helper status check did not complete".into())),
+            crate::BUILD_COMMIT,
+        );
         let (
             helper_available,
             helper_error,
@@ -532,9 +589,6 @@ async fn handle_control_ipc_client(
             access_app_version,
             fda_ready,
             fda_check_error,
-            mount_helper_reachable,
-            mount_helper_version,
-            mount_helper_error,
         ) = match &helper {
             Ok(status) => (
                 true,
@@ -544,22 +598,8 @@ async fn handle_control_ipc_client(
                 Some(status.access_app_version.clone()),
                 status.fda_ready,
                 status.fda_check_error.clone(),
-                status.mount_helper_reachable,
-                status.mount_helper_version.clone(),
-                status.mount_helper_error.clone(),
             ),
-            Err(error) => (
-                false,
-                Some(error.to_string()),
-                0,
-                0,
-                None,
-                false,
-                None,
-                false,
-                None,
-                None,
-            ),
+            Err(error) => (false, Some(error.to_string()), 0, 0, None, false, None),
         };
         let volumes = settings
             .snapshot_volumes
@@ -630,9 +670,13 @@ async fn handle_control_ipc_client(
                     "fdaCheckError": fda_check_error,
                     "accessAppError": helper_error,
                     "mountHelperPath": MOUNT_HELPER_INSTALL_PATH,
-                    "mountHelperReachable": mount_helper_reachable,
-                    "mountHelperVersion": mount_helper_version,
-                    "mountHelperError": mount_helper_error,
+                    "mountHelperReachable": mount_state.reachable,
+                    "mountHelperReady": mount_state.ready,
+                    "mountHelperUpdateRequired": mount_state.reachable && !mount_state.ready,
+                    "mountHelperVersion": mount_state.version,
+                    "mountHelperBuildCommit": mount_state.build_commit,
+                    "mountHelperExpectedBuildCommit": mount_state.expected_build_commit,
+                    "mountHelperError": mount_state.error,
                     "activeLeases": active_leases,
                     "pendingCleanup": pending_cleanup,
                     "volumes": volumes,
@@ -2979,6 +3023,52 @@ mod tests {
     use tokio::io::AsyncBufReadExt;
 
     use super::*;
+
+    #[test]
+    fn snapshot_mount_readiness_requires_current_build_not_just_a_compatible_service() {
+        let expected = "a".repeat(40);
+        for commit in [None, Some("b".repeat(40)), Some("invalid".into())] {
+            let state = snapshot_mount_helper_state(
+                Ok(MountStatusResult {
+                    helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+                    build_commit: commit,
+                    ..Default::default()
+                }),
+                &expected,
+            );
+            assert!(state.reachable);
+            assert!(!state.ready);
+            assert!(state.error.unwrap().contains("Update"));
+        }
+        let current = MountStatusResult {
+            helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+            build_commit: Some(expected.clone()),
+            ..Default::default()
+        };
+        assert!(snapshot_mount_helper_state(Ok(current.clone()), &expected).ready);
+        assert!(!snapshot_mount_helper_state(Ok(current.clone()), "unknown").ready);
+        let incompatible = MountStatusResult {
+            helper_version: "0.4.0".into(),
+            ..current
+        };
+        assert!(!snapshot_mount_helper_state(Ok(incompatible), &expected).ready);
+        let unavailable = snapshot_mount_helper_state(Err("unavailable".into()), &expected);
+        assert!(!unavailable.reachable && !unavailable.ready);
+        assert!(unavailable.build_commit.is_none());
+    }
+
+    #[test]
+    fn snapshot_mount_legacy_status_is_readable_but_needs_an_update() {
+        let legacy: MountStatusResult = serde_json::from_value(serde_json::json!({
+            "helper_version": mount_helper::ROOT_MOUNT_HELPER_VERSION,
+            "active_mounts": 0,
+        }))
+        .unwrap();
+        let state = snapshot_mount_helper_state(Ok(legacy), &"a".repeat(40));
+        assert!(state.reachable && !state.ready);
+        assert!(state.build_commit.is_none());
+        assert_eq!(state.expected_build_commit, Some("a".repeat(40)));
+    }
 
     fn settings() -> Settings {
         let mut s = Settings::default();
