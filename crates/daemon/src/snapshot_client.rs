@@ -60,7 +60,8 @@ impl SnapshotClientError {
             Some("protocol_mismatch")
         } else if message.contains("stage=snapshot_mount ")
             && message.contains("command=mount_apfs ")
-            && (message.contains("operation not permitted") || message.contains("permission denied"))
+            && (message.contains("operation not permitted")
+                || message.contains("permission denied"))
         {
             Some("mount_permission_denied")
         } else if message.contains("permission denied")

@@ -120,6 +120,10 @@ None
 
 ## Visual Evidence
 
+- Service failure details in light appearance: [assets/backup-service-errors-light.png](assets/backup-service-errors-light.png)
+- Service failure details in dark appearance: [assets/backup-service-errors-dark.png](assets/backup-service-errors-dark.png)
+- Service failure evidence source: `scripts/macos/render-backup-failure-preview.sh`, using production failure notice/history views with synthetic log inputs in GitHub-hosted macOS CI.
+
 - Failed target with independently scrolling history: [assets/main-window-failed-dark-history.png](assets/main-window-failed-dark-history.png)
 - Failed target at minimum content size: [assets/main-window-failed-light-minimum.png](assets/main-window-failed-light-minimum.png)
 - Failed target with Diagnostics selected at minimum size: [assets/main-window-failed-dark-diagnostics.png](assets/main-window-failed-dark-diagnostics.png)
