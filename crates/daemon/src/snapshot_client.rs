@@ -73,7 +73,11 @@ impl SnapshotClientError {
             Some("mount_helper_unavailable")
         } else if message.contains("free space") || message.contains("no space left") {
             Some("insufficient_space")
-        } else if message.contains("cleanup") {
+        } else if message.contains("cleanup")
+            || message.contains("tombstone")
+            || message.contains("inventory changed")
+            || message.contains("snapshot inventory")
+        {
             Some("cleanup_pending")
         } else {
             None
@@ -639,6 +643,10 @@ mod tests {
             ),
             ("insufficient free space", Some("insufficient_space")),
             ("previous lease cleanup is pending", Some("cleanup_pending")),
+            (
+                "snapshot mount helper protocol error: released snapshot tombstone inventory changed",
+                Some("cleanup_pending"),
+            ),
             ("unclassified fixture diagnostic", None),
         ] {
             let error = SnapshotClientError::Rejected {

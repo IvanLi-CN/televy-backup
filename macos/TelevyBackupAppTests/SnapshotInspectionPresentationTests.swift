@@ -241,4 +241,13 @@ private func testSnapshotMountStatusDecodingAndAppIdentity() {
     let current = try! JSONDecoder().decode(SnapshotControlStatus.self, from: data)
     expect(current.mountHelperReadiness(expectedBuildCommit: candidate).isReady, "matching daemon and app identity must be ready")
     expect(!current.mountHelperReadiness(expectedBuildCommit: String(repeating: "b", count: 40)).isReady, "a daemon from a different app build must not prove readiness")
+
+    let pendingData = try! JSONSerialization.data(withJSONObject: [
+        "mountHelperReachable": true,
+        "mountHelperActiveMounts": 1,
+        "mountHelperPendingCleanup": 1,
+    ])
+    let pending = try! JSONDecoder().decode(SnapshotControlStatus.self, from: pendingData)
+    expect(pending.mountHelperActiveMounts == 1, "root helper aggregate mount count must remain visible")
+    expect(pending.mountHelperPendingCleanup == 1, "root helper cleanup blockers must be exposed separately")
 }

@@ -720,6 +720,20 @@ async fn status_result(
         .fetch_one(pool)
         .await?
     }) as u32;
+    let pending_cleanup = (if peer_uid == 0 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM mounts WHERE state = 'cleanup_pending'",
+        )
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM mounts WHERE uid = ? AND state = 'cleanup_pending'",
+        )
+        .bind(i64::from(peer_uid))
+        .fetch_one(pool)
+        .await?
+    }) as u32;
     let blocked_volume_uuids = if peer_uid == 0 {
         sqlx::query_scalar::<_, String>(
             "SELECT DISTINCT volume_uuid FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
@@ -738,6 +752,7 @@ async fn status_result(
         helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts,
+        pending_cleanup,
         blocked_volume_uuids,
         recovery_leases: Vec::new(),
     })
@@ -757,6 +772,12 @@ async fn status_for_volume_result(
     validate_uuid(volume_uuid)?;
     let active_mounts = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+    )
+    .bind(volume_uuid)
+    .fetch_one(pool)
+    .await? as u32;
+    let pending_cleanup = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'cleanup_pending'",
     )
     .bind(volume_uuid)
     .fetch_one(pool)
@@ -788,6 +809,7 @@ async fn status_for_volume_result(
         helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts,
+        pending_cleanup,
         blocked_volume_uuids,
         recovery_leases,
     })
@@ -3123,6 +3145,7 @@ mod tests {
 
         let status = status_result(&journal, 501).await.unwrap();
         assert_eq!(status.active_mounts, 1);
+        assert_eq!(status.pending_cleanup, 1);
         assert_eq!(
             status.blocked_volume_uuids,
             vec!["C8A38394-49AE-42F9-85FB-14DD9EA549FA"]
@@ -3152,6 +3175,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(status.active_mounts, 1);
+        assert_eq!(status.pending_cleanup, 1);
         assert_eq!(
             status.blocked_volume_uuids,
             vec!["C8A38394-49AE-42F9-85FB-14DD9EA549FA"]
@@ -3188,6 +3212,7 @@ mod tests {
             helper_version: "0.0.0".into(),
             build_commit: None,
             active_mounts: 0,
+            pending_cleanup: 0,
             blocked_volume_uuids: vec![],
             recovery_leases: vec![],
         };
@@ -3200,6 +3225,7 @@ mod tests {
             helper_version: LEGACY_ROOT_MOUNT_HELPER_VERSION.into(),
             build_commit: None,
             active_mounts: 0,
+            pending_cleanup: 0,
             blocked_volume_uuids: vec![],
             recovery_leases: vec![],
         };
@@ -3212,6 +3238,7 @@ mod tests {
             helper_version: ROOT_MOUNT_HELPER_VERSION.into(),
             build_commit: None,
             active_mounts: 0,
+            pending_cleanup: 0,
             blocked_volume_uuids: vec![],
             recovery_leases: vec![],
         };

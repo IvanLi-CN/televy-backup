@@ -342,6 +342,8 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let mountHelperBuildCommit: String?
     let mountHelperVersion: String?
     let mountHelperError: String?
+    let mountHelperActiveMounts: UInt32
+    let mountHelperPendingCleanup: UInt32
     let activeLeases: UInt32
     let pendingCleanup: UInt32
     let volumes: [SnapshotVolumeStatus]
@@ -349,6 +351,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, registeredAccessAppPath, accessAppRegistrationMismatch, managedBy, migrationState, legacyRegistrationPath, fdaReady, fdaCheckError, accessAppError
         case mountHelperPath, mountHelperReachable, mountHelperReady, mountHelperBuildCommit, mountHelperVersion, mountHelperError
+        case mountHelperActiveMounts, mountHelperPendingCleanup
         case helperAvailable, helperVersion, helperError
         case activeLeases, pendingCleanup, volumes
     }
@@ -372,6 +375,8 @@ struct SnapshotControlStatus: Decodable, Equatable {
         mountHelperBuildCommit: String? = nil,
         mountHelperVersion: String? = nil,
         mountHelperError: String? = nil,
+        mountHelperActiveMounts: UInt32 = 0,
+        mountHelperPendingCleanup: UInt32 = 0,
         activeLeases: UInt32,
         pendingCleanup: UInt32,
         volumes: [SnapshotVolumeStatus]
@@ -394,6 +399,8 @@ struct SnapshotControlStatus: Decodable, Equatable {
         self.mountHelperBuildCommit = mountHelperBuildCommit
         self.mountHelperVersion = mountHelperVersion
         self.mountHelperError = mountHelperError
+        self.mountHelperActiveMounts = mountHelperActiveMounts
+        self.mountHelperPendingCleanup = mountHelperPendingCleanup
         self.activeLeases = activeLeases
         self.pendingCleanup = pendingCleanup
         self.volumes = volumes
@@ -423,6 +430,8 @@ struct SnapshotControlStatus: Decodable, Equatable {
         mountHelperBuildCommit = try values.decodeIfPresent(String.self, forKey: .mountHelperBuildCommit)
         mountHelperVersion = try values.decodeIfPresent(String.self, forKey: .mountHelperVersion)
         mountHelperError = try values.decodeIfPresent(String.self, forKey: .mountHelperError)
+        mountHelperActiveMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperActiveMounts) ?? 0
+        mountHelperPendingCleanup = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperPendingCleanup) ?? 0
         activeLeases = try values.decodeIfPresent(UInt32.self, forKey: .activeLeases) ?? 0
         pendingCleanup = try values.decodeIfPresent(UInt32.self, forKey: .pendingCleanup) ?? 0
         volumes = try values.decodeIfPresent([SnapshotVolumeStatus].self, forKey: .volumes) ?? []
@@ -1118,6 +1127,8 @@ struct SettingsWindowRootView: View {
                             path: snapshotStatus.mountHelperPath,
                             version: snapshotStatus.mountHelperVersion,
                             error: snapshotStatus.mountHelperError,
+                            activeMounts: snapshotStatus.mountHelperActiveMounts,
+                            pendingCleanup: snapshotStatus.mountHelperPendingCleanup,
                             busy: snapshotBusy || SettingsUIDemo.enabled,
                             install: installSnapshotMountHelper
                         )
@@ -1181,6 +1192,8 @@ struct SettingsWindowRootView: View {
                 mountHelperBuildCommit: mountHelperOutdated ? nil : expectedSnapshotBuildCommit,
                 mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.0" : nil,
                 mountHelperError: mountHelperMissing ? "Snapshot mount helper is not installed" : nil,
+                mountHelperActiveMounts: 0,
+                mountHelperPendingCleanup: 0,
                 activeLeases: 0,
                 pendingCleanup: SettingsUIDemo.scene == "snapshots-cleanup-pending" ? 1 : 0,
                 volumes: (settings?.snapshot_volumes ?? [:]).map { SnapshotVolumeStatus(volumeUuid: $0.key, enabled: $0.value.enabled, mode: $0.value.enabled ? "strict" : "disabled") }
