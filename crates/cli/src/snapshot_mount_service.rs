@@ -396,7 +396,11 @@ mod tests {
         };
         let error = busy_error("update the snapshot mount helper", &pending).unwrap();
         assert_eq!(error.code, "snapshot_mount_helper.cleanup_pending");
-        assert!(error.message.contains("no active snapshot mount is running"));
+        assert!(
+            error
+                .message
+                .contains("no active snapshot mount is running")
+        );
 
         let active = MountStatusResult {
             active_mounts: 1,

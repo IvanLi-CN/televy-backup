@@ -721,11 +721,9 @@ async fn status_result(
         .await?
     }) as u32;
     let pending_cleanup = (if peer_uid == 0 {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM mounts WHERE state = 'cleanup_pending'",
-        )
-        .fetch_one(pool)
-        .await?
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM mounts WHERE state = 'cleanup_pending'")
+            .fetch_one(pool)
+            .await?
     } else {
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM mounts WHERE uid = ? AND state = 'cleanup_pending'",
