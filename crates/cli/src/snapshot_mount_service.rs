@@ -179,16 +179,35 @@ fn safe_root_asset(path: &Path) -> bool {
     })
 }
 
+fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
+    if status.active_mounts == 0 {
+        return None;
+    }
+    let pending_cleanup = status.pending_cleanup.min(status.active_mounts);
+    let in_flight = status.active_mounts.saturating_sub(pending_cleanup);
+    if pending_cleanup > 0 && in_flight == 0 {
+        return Some(CliError::new(
+            "snapshot_mount_helper.cleanup_pending",
+            format!(
+                "cannot {operation}: {pending_cleanup} snapshot cleanup record(s) are pending; no active snapshot mount is running, but the helper remains fail-closed until the recorded inventory is reconciled",
+            ),
+        ));
+    }
+    let detail = match (in_flight, pending_cleanup) {
+        (in_flight, pending_cleanup) if pending_cleanup > 0 => format!(
+            "{in_flight} active snapshot mount(s) and {pending_cleanup} pending cleanup record(s)"
+        ),
+        (in_flight, _) => format!("{in_flight} active snapshot mount(s)"),
+    };
+    Some(CliError::new(
+        "snapshot_mount_helper.busy",
+        format!("cannot {operation} while {detail}"),
+    ))
+}
+
 fn reject_if_busy(operation: &str) -> Result<(), CliError> {
     match mount_helper::status() {
-        Ok(status) if status.active_mounts > 0 => Err(CliError::new(
-            "snapshot_mount_helper.busy",
-            format!(
-                "cannot {operation} while {} snapshot mount(s) are active",
-                status.active_mounts
-            ),
-        )),
-        Ok(_) => Ok(()),
+        Ok(status) => busy_error(operation, &status).map_or(Ok(()), Err),
         Err(_) => Ok(()),
     }
 }
@@ -337,6 +356,7 @@ pub fn status(json_output: bool) -> Result<(), CliError> {
         "launchdLoaded": loaded,
         "label": MOUNT_HELPER_LABEL,
         "activeMounts": helper.as_ref().map(|status| status.active_mounts),
+        "pendingCleanup": helper.as_ref().map(|status| status.pending_cleanup),
         "helperVersion": helper.as_ref().map(|status| status.helper_version.clone()),
         "buildCommit": helper.as_ref().and_then(|status| status.build_commit.clone()),
         "socket": mount_helper::configured_socket_path(),
@@ -365,6 +385,40 @@ mod tests {
             build_commit: Some(CANDIDATE_COMMIT.into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn busy_error_distinguishes_pending_cleanup_from_active_mounts() {
+        let pending = MountStatusResult {
+            active_mounts: 1,
+            pending_cleanup: 1,
+            ..Default::default()
+        };
+        let error = busy_error("update the snapshot mount helper", &pending).unwrap();
+        assert_eq!(error.code, "snapshot_mount_helper.cleanup_pending");
+        assert!(
+            error
+                .message
+                .contains("no active snapshot mount is running")
+        );
+
+        let active = MountStatusResult {
+            active_mounts: 1,
+            ..Default::default()
+        };
+        let error = busy_error("update the snapshot mount helper", &active).unwrap();
+        assert_eq!(error.code, "snapshot_mount_helper.busy");
+        assert!(error.message.contains("1 active snapshot mount(s)"));
+
+        let mixed = MountStatusResult {
+            active_mounts: 2,
+            pending_cleanup: 1,
+            ..Default::default()
+        };
+        let error = busy_error("update the snapshot mount helper", &mixed).unwrap();
+        assert_eq!(error.code, "snapshot_mount_helper.busy");
+        assert!(error.message.contains("1 active snapshot mount(s)"));
+        assert!(error.message.contains("1 pending cleanup record(s)"));
     }
 
     #[test]

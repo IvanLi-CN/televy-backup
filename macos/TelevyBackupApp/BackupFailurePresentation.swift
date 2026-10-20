@@ -85,7 +85,10 @@ struct BackupFailurePresentation {
             || message.contains("full disk access") { return "permission_denied" }
         if message.contains("mount helper unavailable") { return "mount_helper_unavailable" }
         if message.contains("free space") || message.contains("no space left") { return "insufficient_space" }
-        if message.contains("cleanup") { return "cleanup_pending" }
+        if message.contains("cleanup") || message.contains("tombstone")
+            || message.contains("inventory changed") || message.contains("snapshot inventory") {
+            return "cleanup_pending"
+        }
         return nil
     }
 }

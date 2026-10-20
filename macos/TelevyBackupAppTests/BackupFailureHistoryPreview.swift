@@ -106,7 +106,7 @@ enum BackupFailureHistoryPreview {
             let helperContent = VStack(alignment: .leading, spacing: 18) {
                 Text("Settings → Snapshots").font(.system(size: 18, weight: .bold))
                 Text("Helper update states").font(.system(size: 12)).foregroundStyle(.secondary)
-                ForEach(["outdated", "current", "missing"], id: \.self) { state in
+                ForEach(["outdated", "current", "missing", "pending"], id: \.self) { state in
                     // Native GroupBox's AppKit backing is omitted by ImageRenderer.
                     // Keep this source-owned preview container entirely SwiftUI.
                     VStack(alignment: .leading, spacing: 12) {
@@ -120,6 +120,8 @@ enum BackupFailureHistoryPreview {
                             path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
                             version: state == "missing" ? nil : "0.5.0",
                             error: state == "missing" ? "The mount helper is not installed." : nil,
+                            activeMounts: state == "pending" ? 1 : 0,
+                            pendingCleanup: state == "pending" ? 1 : 0,
                             busy: false, install: {}
                         )
                     }

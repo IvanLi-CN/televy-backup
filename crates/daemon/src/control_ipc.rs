@@ -40,6 +40,8 @@ struct SnapshotMountHelperState {
     version: Option<String>,
     build_commit: Option<String>,
     expected_build_commit: Option<String>,
+    active_mounts: Option<u32>,
+    pending_cleanup: Option<u32>,
     error: Option<String>,
 }
 
@@ -62,6 +64,8 @@ fn snapshot_mount_helper_state(
                 version: Some(status.helper_version),
                 build_commit,
                 expected_build_commit,
+                active_mounts: Some(status.active_mounts),
+                pending_cleanup: Some(status.pending_cleanup),
                 error: (!ready).then(|| {
                     "Update the snapshot mount helper to match this app's build.".to_owned()
                 }),
@@ -73,6 +77,8 @@ fn snapshot_mount_helper_state(
             version: None,
             build_commit: None,
             expected_build_commit,
+            active_mounts: None,
+            pending_cleanup: None,
             error: Some(error),
         },
     }
@@ -676,6 +682,8 @@ async fn handle_control_ipc_client(
                     "mountHelperVersion": mount_state.version,
                     "mountHelperBuildCommit": mount_state.build_commit,
                     "mountHelperExpectedBuildCommit": mount_state.expected_build_commit,
+                    "mountHelperActiveMounts": mount_state.active_mounts,
+                    "mountHelperPendingCleanup": mount_state.pending_cleanup,
                     "mountHelperError": mount_state.error,
                     "activeLeases": active_leases,
                     "pendingCleanup": pending_cleanup,

@@ -109,6 +109,10 @@ private func testServiceFailuresKeepTheirSpecificExplanation() {
     expectHistory(legacy == "mount_permission_denied", "legacy mount diagnostics must retain the mount phase")
     let access = BackupFailurePresentation.legacyReason(message: "permission denied (os error 13)")
     expectHistory(access == "permission_denied", "generic permission errors must not invent a mount failure")
+    let tombstone = BackupFailurePresentation.legacyReason(
+        message: "snapshot mount helper protocol error: released snapshot tombstone inventory changed"
+    )
+    expectHistory(tombstone == "cleanup_pending", "inventory drift must explain the cleanup blocker")
 }
 
 @main

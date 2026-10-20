@@ -190,7 +190,13 @@ pub struct MountStatusResult {
     pub helper_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_commit: Option<String>,
+    /// Number of journal rows that still block a source volume. This legacy-compatible
+    /// aggregate includes pending cleanup rows as well as in-flight mounts.
     pub active_mounts: u32,
+    /// Number of blocking rows that are waiting for safe snapshot cleanup. Older helpers omit
+    /// this field; callers must treat a missing value as zero and retain the aggregate guard.
+    #[serde(default)]
+    pub pending_cleanup: u32,
     #[serde(default)]
     pub blocked_volume_uuids: Vec<String>,
     #[serde(default)]
