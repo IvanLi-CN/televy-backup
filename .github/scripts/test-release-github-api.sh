@@ -137,6 +137,57 @@ except module.ReservationError:
 else:
     raise AssertionError("squash merge identity was accepted without a PR head")
 
+# A retry may reuse a reservation created from an older source while the
+# VERSION preparation commit is based on a newer descendant. The product
+# source and reservation source are distinct identities and must both verify.
+retry_reservation_source = "9" * 40
+retry_preparation = "a" * 40
+retry_merge = "b" * 40
+retry_claim = "pr:8:source:" + retry_reservation_source
+retry_identity = module.deterministic_identity("fixture", retry_claim)
+retry_ref = module.reservation_ref("1.0.0-beta.2")
+retry_reservation = module.expected_reservation(
+    source_sha=retry_reservation_source,
+    version="1.0.0-beta.2",
+    channel="beta",
+    owner="fixture",
+    claim_key=retry_claim,
+    reservation_id=retry_identity["reservationId"],
+    boundary_token=retry_identity["boundaryToken"],
+)
+retry_reservation["ref"] = retry_ref
+FakeGitHubRefClient.commits[retry_preparation] = {
+    "sha": retry_preparation,
+    "tree": {"sha": tree},
+    "parents": [{"sha": source}],
+    "message": f"""chore(release): v1.0.0-beta.2
+
+Release-Source-SHA: {source}
+Release-Reservation-Source-SHA: {retry_reservation_source}
+Product-Version: 1.0.0-beta.2
+Release-Intent-Channel: channel:beta
+Release-Reservation-Id: {retry_identity["reservationId"]}
+Release-Reservation-Ref: {retry_ref}
+Release-Reservation-Owner: fixture
+Release-Claim-Key: {retry_claim}
+Release-Boundary-Token: {retry_identity["boundaryToken"]}
+""",
+}
+FakeGitHubRefClient.commits[retry_merge] = {
+    "sha": retry_merge,
+    "tree": {"sha": tree},
+    "parents": [{"sha": source}, {"sha": retry_preparation}],
+    "message": "Merge pull request #8\n",
+}
+module.verify_github_merge_identity(
+    client=FakeGitHubRefClient("fixture/repo", "token", "https://fixture.invalid"),
+    merge_sha=retry_merge,
+    source_sha=retry_reservation_source,
+    version="1.0.0-beta.2",
+    channel="beta",
+    reservation=retry_reservation,
+)
+
 bound = module.create_github_receipt(
     state="bound", version="1.0.0-beta.1", merge_sha=merge,
     reservation_id=identity["reservationId"], owner="fixture", claim_key=claim_key,
