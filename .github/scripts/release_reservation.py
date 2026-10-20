@@ -779,7 +779,6 @@ def verify_local_merge_identity(
     else:
         raise ReservationError("bound receipt merge SHA requires two parents or an associated PR head")
     expected = {
-        "Release-Source-SHA": source_sha,
         "Product-Version": version,
         "Release-Intent-Channel": f"channel:{channel}",
         "Release-Reservation-Id": reservation["reservationId"],
@@ -794,10 +793,19 @@ def verify_local_merge_identity(
             continue
         current = head
         for _ in range(256):
-            if current["parents"] == [source_sha]:
+            parents = current["parents"]
+            if len(parents) == 1:
                 values = trailers_from_message(current["message"])
-                if all(values.get(key) == value for key, value in expected.items()):
-                    return
+                if (
+                    values.get("Release-Source-SHA") == parents[0]
+                    and all(values.get(key) == value for key, value in expected.items())
+                ):
+                    reservation_source = values.get("Release-Reservation-Source-SHA")
+                    if reservation_source:
+                        if normalize_sha(reservation_source, "reservation source SHA") == reservation["sourceSha"]:
+                            return
+                    elif parents[0] == reservation["sourceSha"]:
+                        return
             if not current["parents"]:
                 break
             current = local_commit_info(current["parents"][0], cwd)
@@ -823,7 +831,6 @@ def verify_github_merge_identity(
     else:
         raise ReservationError("bound receipt merge SHA requires two parents or an associated PR head")
     expected = {
-        "Release-Source-SHA": source_sha,
         "Product-Version": version,
         "Release-Intent-Channel": f"channel:{channel}",
         "Release-Reservation-Id": reservation["reservationId"],
@@ -840,10 +847,18 @@ def verify_github_merge_identity(
         current = head
         for _ in range(256):
             current_parents = [parent.get("sha") for parent in current.get("parents", [])]
-            if current_parents == [source_sha]:
+            if len(current_parents) == 1 and isinstance(current_parents[0], str):
                 values = trailers_from_message(str(current.get("message", "")))
-                if all(values.get(key) == value for key, value in expected.items()):
-                    return
+                if (
+                    values.get("Release-Source-SHA") == current_parents[0]
+                    and all(values.get(key) == value for key, value in expected.items())
+                ):
+                    reservation_source = values.get("Release-Reservation-Source-SHA")
+                    if reservation_source:
+                        if normalize_sha(reservation_source, "reservation source SHA") == reservation["sourceSha"]:
+                            return
+                    elif current_parents[0] == reservation["sourceSha"]:
+                        return
             if not current_parents or not isinstance(current_parents[0], str):
                 break
             current = client.commit_info(current_parents[0])
