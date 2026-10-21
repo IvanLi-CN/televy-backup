@@ -362,22 +362,27 @@ fn helper_sha256(path: &Path) -> Result<String, CliError> {
 
 pub fn install(json_output: bool) -> Result<(), CliError> {
     require_root()?;
-    let _mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
-        CliError::retryable(
-            "snapshot_mount_helper.lock_unavailable",
-            format!("cannot install or update the snapshot mount helper safely: {error}"),
-        )
-    })?;
-    reject_if_busy("install or update the snapshot mount helper")?;
-    let source = current_executable_sibling()?;
-    let candidate_hash = helper_sha256(&source)?;
-    atomic_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
-    atomic_write(
-        Path::new(MOUNT_HELPER_PLIST_PATH),
-        plist_contents().as_bytes(),
-    )?;
-    let service = system_service_target();
-    let _ = launchctl(&["bootout", &service]);
+    let candidate_hash;
+    {
+        let _mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+            CliError::retryable(
+                "snapshot_mount_helper.lock_unavailable",
+                format!("cannot install or update the snapshot mount helper safely: {error}"),
+            )
+        })?;
+        reject_if_busy("install or update the snapshot mount helper")?;
+        let source = current_executable_sibling()?;
+        candidate_hash = helper_sha256(&source)?;
+        atomic_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
+        atomic_write(
+            Path::new(MOUNT_HELPER_PLIST_PATH),
+            plist_contents().as_bytes(),
+        )?;
+        let service = system_service_target();
+        let _ = launchctl(&["bootout", &service]);
+        // Release the shared lock before bootstrap: the new root helper must take it during
+        // startup recovery before it can create the ready IPC socket.
+    }
     launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
     let started = Instant::now();
     let status = wait_for_installed_helper(
