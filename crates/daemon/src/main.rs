@@ -11,7 +11,7 @@ use std::time::{Instant, SystemTime};
 
 use base64::Engine;
 use chrono::{Datelike, Timelike};
-use snapshot_client::{BrokeredSnapshotSource, SnapshotClient};
+use snapshot_client::{BrokeredSnapshotSource, SnapshotClient, SnapshotClientError};
 use sqlx::Row;
 use televy_backup_core::status::{
     ActiveTask, BackupQueueMembership, Counter, GlobalStatus, Progress, Rate, StatusSnapshot,
@@ -456,6 +456,54 @@ struct StatusRuntimeState {
 }
 
 const EXTERNAL_TASK_REPORT_TIMEOUT: Duration = Duration::from_secs(120);
+const SNAPSHOT_RELEASE_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+
+async fn retry_snapshot_release<F, Fut>(
+    mut release: F,
+    retry_delays: &[Duration],
+) -> Result<String, SnapshotClientError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<String, SnapshotClientError>>,
+{
+    let mut last_error = None;
+    let mut last_cleanup_state = None;
+    for attempt in 0..=retry_delays.len() {
+        match release().await {
+            Ok(cleanup_state) => {
+                last_cleanup_state = Some(cleanup_state.clone());
+                if cleanup_state != "cleanup_pending" || attempt == retry_delays.len() {
+                    return Ok(cleanup_state);
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+        if let Some(delay) = retry_delays.get(attempt) {
+            sleep(*delay).await;
+        }
+    }
+    if let Some(cleanup_state) = last_cleanup_state {
+        return Ok(cleanup_state);
+    }
+    Err(last_error.unwrap_or_else(|| {
+        SnapshotClientError::Protocol("snapshot lease release retry exhausted".into())
+    }))
+}
+
+async fn release_snapshot_lease_with_retry(
+    client: &SnapshotClient,
+    lease_id: &str,
+) -> Result<String, SnapshotClientError> {
+    retry_snapshot_release(
+        || client.release_lease(lease_id),
+        &SNAPSHOT_RELEASE_RETRY_DELAYS,
+    )
+    .await
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ExternalTaskAdmissionError {
@@ -1963,6 +2011,34 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn snapshot_release_retries_a_transient_service_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempt_counter = Arc::clone(&attempts);
+        let result = retry_snapshot_release(
+            move || {
+                let attempt = attempt_counter.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt == 0 {
+                        Err(SnapshotClientError::Unavailable(
+                            "restart in progress".into(),
+                        ))
+                    } else {
+                        Ok("released".into())
+                    }
+                }
+            },
+            &[Duration::ZERO],
+        )
+        .await
+        .expect("the second release attempt should succeed");
+
+        assert_eq!(result, "released");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn missing_external_reporter_releases_target() {
         let mut st = state_one_target();
@@ -3454,7 +3530,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let client_for_task = client.clone();
                     let handle = tokio::spawn(async move {
-                        match client_for_task.release_lease(&lease.lease_id).await {
+                        match release_snapshot_lease_with_retry(&client_for_task, &lease.lease_id)
+                            .await
+                        {
                             Ok(cleanup_state) => tracing::info!(
                                 event = "snapshot.release",
                                 lease_id = %lease.lease_id,
@@ -3527,7 +3605,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok()
                 .and_then(|mut slot| slot.take())
             {
-                match snapshot_client.release_lease(&lease.lease_id).await {
+                match release_snapshot_lease_with_retry(&snapshot_client, &lease.lease_id).await {
                     Ok(cleanup_state) => tracing::info!(
                         event = "snapshot.release",
                         lease_id = %lease.lease_id,

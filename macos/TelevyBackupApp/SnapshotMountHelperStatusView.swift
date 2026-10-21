@@ -12,8 +12,17 @@ struct SnapshotMountHelperStatusView: View {
     let install: () -> Void
 
     var body: some View {
+        let updateBlockReason = SnapshotMountHelperReadiness.updateBlockReason(
+            activeMounts: activeMounts,
+            pendingCleanup: pendingCleanup
+        )
         VStack(alignment: .leading, spacing: 6) {
-            Label(readiness.title, systemImage: readiness.isReady ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+            Label(
+                updateBlockReason != nil && !readiness.isReady
+                    ? "Snapshot mount helper update waiting"
+                    : readiness.title,
+                systemImage: readiness.isReady ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
+            )
                 .foregroundStyle(readiness.isReady ? .green : .orange)
             if let path {
                 Text(path)
@@ -23,11 +32,8 @@ struct SnapshotMountHelperStatusView: View {
             if let version {
                 Text("Version \(version)").font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            if pendingCleanup > 0 {
-                let mountDescription = activeMounts == pendingCleanup
-                    ? "No active mount is running, but strict mode remains blocked until the recorded snapshot inventory is reconciled."
-                    : "An active snapshot mount is also present; wait for it to finish before updating the helper."
-                Text("\(pendingCleanup) snapshot cleanup record(s) are pending. \(mountDescription)")
+            if let updateBlockReason {
+                Text(updateBlockReason)
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -39,7 +45,10 @@ struct SnapshotMountHelperStatusView: View {
             if let actionTitle = readiness.actionTitle {
                 Button(actionTitle, action: install)
                     .buttonStyle(.borderedProminent)
-                    .disabled(busy)
+                    .disabled(busy || !SnapshotMountHelperReadiness.canUpdate(
+                        activeMounts: activeMounts,
+                        pendingCleanup: pendingCleanup
+                    ))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

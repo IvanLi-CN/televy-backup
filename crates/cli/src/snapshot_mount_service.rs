@@ -179,6 +179,64 @@ fn safe_root_asset(path: &Path) -> bool {
     })
 }
 
+fn helper_assets_are_installed() -> bool {
+    safe_root_asset(Path::new(MOUNT_HELPER_INSTALL_PATH))
+        || safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelperServiceState {
+    Loaded,
+    Absent,
+    Unknown,
+}
+
+fn classify_helper_service_state(success: bool, output: &[u8]) -> HelperServiceState {
+    if success {
+        return HelperServiceState::Loaded;
+    }
+    let output = String::from_utf8_lossy(output);
+    if output.contains("Could not find service") || output.contains("No such process") {
+        HelperServiceState::Absent
+    } else {
+        HelperServiceState::Unknown
+    }
+}
+
+fn helper_service_state() -> HelperServiceState {
+    let output = match Command::new("/bin/launchctl")
+        .args(["print", &system_service_target()])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return HelperServiceState::Unknown,
+    };
+    let mut diagnostic = output.stdout;
+    diagnostic.extend_from_slice(&output.stderr);
+    classify_helper_service_state(output.status.success(), &diagnostic)
+}
+
+fn wait_for_helper_status() -> Result<MountStatusResult, CliError> {
+    let started = Instant::now();
+    let mut last_error = "no ready status received".to_string();
+    while started.elapsed() < INSTALL_READY_TIMEOUT {
+        match mount_helper::status() {
+            Ok(status) => return Ok(status),
+            Err(error) => last_error = error.to_string(),
+        }
+        let remaining = INSTALL_READY_TIMEOUT.saturating_sub(started.elapsed());
+        if !remaining.is_zero() {
+            std::thread::sleep(INSTALL_READY_POLL_INTERVAL.min(remaining));
+        }
+    }
+    Err(CliError::retryable(
+        "snapshot_mount_helper.status_unavailable",
+        format!(
+            "cannot read the installed snapshot mount helper state after bootstrap: {last_error}"
+        ),
+    ))
+}
+
 fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     if status.active_mounts == 0 {
         return None;
@@ -205,11 +263,41 @@ fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     ))
 }
 
-fn reject_if_busy(operation: &str) -> Result<(), CliError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BusyCheck {
+    Clear,
+    RecoveryRequired,
+}
+
+fn check_if_busy(operation: &str) -> Result<BusyCheck, CliError> {
     match mount_helper::status() {
-        Ok(status) => busy_error(operation, &status).map_or(Ok(()), Err),
-        Err(_) => Ok(()),
+        Ok(status) => busy_error(operation, &status).map_or(Ok(BusyCheck::Clear), Err),
+        Err(_error) if !helper_assets_are_installed() => Ok(BusyCheck::Clear),
+        Err(error) => match helper_service_state() {
+            HelperServiceState::Absent if safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH)) => {
+                // An explicitly absent helper may have left journal rows behind. The caller must
+                // release the mutation lock before bootstrapping so the helper can recover.
+                Ok(BusyCheck::RecoveryRequired)
+            }
+            HelperServiceState::Absent => Err(CliError::retryable(
+                "snapshot_mount_helper.status_unavailable",
+                format!(
+                    "cannot {operation}: the installed snapshot mount helper service is absent and its root-owned launchd plist is unavailable ({error})"
+                ),
+            )),
+            HelperServiceState::Loaded | HelperServiceState::Unknown => Err(CliError::retryable(
+                "snapshot_mount_helper.status_unavailable",
+                format!(
+                    "cannot {operation}: the installed snapshot mount helper state could not be verified; refusing to proceed ({error})"
+                ),
+            )),
+        },
     }
+}
+
+fn recover_helper_before_mutation() -> Result<(), CliError> {
+    launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
+    wait_for_helper_status().map(|_| ())
 }
 
 fn wait_for_installed_helper(
@@ -283,16 +371,46 @@ fn helper_sha256(path: &Path) -> Result<String, CliError> {
 
 pub fn install(json_output: bool) -> Result<(), CliError> {
     require_root()?;
-    reject_if_busy("install or update the snapshot mount helper")?;
-    let source = current_executable_sibling()?;
-    let candidate_hash = helper_sha256(&source)?;
-    atomic_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
-    atomic_write(
-        Path::new(MOUNT_HELPER_PLIST_PATH),
-        plist_contents().as_bytes(),
-    )?;
-    let service = system_service_target();
-    let _ = launchctl(&["bootout", &service]);
+    let mut mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.lock_unavailable",
+            format!("cannot install or update the snapshot mount helper safely: {error}"),
+        )
+    })?;
+    if check_if_busy("install or update the snapshot mount helper")? == BusyCheck::RecoveryRequired
+    {
+        drop(mutation_lock);
+        recover_helper_before_mutation()?;
+        mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+            CliError::retryable(
+                "snapshot_mount_helper.lock_unavailable",
+                format!("cannot resume helper installation safely after recovery: {error}"),
+            )
+        })?;
+        if check_if_busy("install or update the snapshot mount helper")?
+            == BusyCheck::RecoveryRequired
+        {
+            return Err(CliError::retryable(
+                "snapshot_mount_helper.status_unavailable",
+                "snapshot mount helper remained absent after recovery bootstrap",
+            ));
+        }
+    }
+    let candidate_hash = {
+        let source = current_executable_sibling()?;
+        let candidate_hash = helper_sha256(&source)?;
+        atomic_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
+        atomic_write(
+            Path::new(MOUNT_HELPER_PLIST_PATH),
+            plist_contents().as_bytes(),
+        )?;
+        let service = system_service_target();
+        let _ = launchctl(&["bootout", &service]);
+        candidate_hash
+        // Release the shared lock before bootstrap: the new root helper must take it during
+        // startup recovery before it can create the ready IPC socket.
+    };
+    drop(mutation_lock);
     launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
     let started = Instant::now();
     let status = wait_for_installed_helper(
@@ -320,7 +438,28 @@ pub fn install(json_output: bool) -> Result<(), CliError> {
 
 pub fn uninstall(json_output: bool) -> Result<(), CliError> {
     require_root()?;
-    reject_if_busy("uninstall the snapshot mount helper")?;
+    let mut mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.lock_unavailable",
+            format!("cannot uninstall the snapshot mount helper safely: {error}"),
+        )
+    })?;
+    if check_if_busy("uninstall the snapshot mount helper")? == BusyCheck::RecoveryRequired {
+        drop(mutation_lock);
+        recover_helper_before_mutation()?;
+        mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+            CliError::retryable(
+                "snapshot_mount_helper.lock_unavailable",
+                format!("cannot resume helper removal safely after recovery: {error}"),
+            )
+        })?;
+        if check_if_busy("uninstall the snapshot mount helper")? == BusyCheck::RecoveryRequired {
+            return Err(CliError::retryable(
+                "snapshot_mount_helper.status_unavailable",
+                "snapshot mount helper remained absent after recovery bootstrap",
+            ));
+        }
+    }
     let service = system_service_target();
     let _ = launchctl(&["bootout", &service]);
     if Path::new(MOUNT_HELPER_PLIST_PATH).exists() {
@@ -333,6 +472,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
             CliError::new("snapshot_mount_helper.uninstall_failed", error.to_string())
         })?;
     }
+    drop(mutation_lock);
     if json_output {
         println!(
             "{}",
@@ -345,10 +485,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
 }
 
 pub fn status(json_output: bool) -> Result<(), CliError> {
-    let loaded = Command::new("/bin/launchctl")
-        .args(["print", &format!("system/{MOUNT_HELPER_LABEL}")])
-        .output()
-        .is_ok_and(|output| output.status.success());
+    let loaded = helper_service_state() == HelperServiceState::Loaded;
     let helper = mount_helper::status().ok();
     let payload = json!({
         "installed": safe_root_asset(Path::new(MOUNT_HELPER_INSTALL_PATH))
@@ -436,6 +573,22 @@ mod tests {
         assert_eq!(
             system_service_target(),
             "system/com.ivan.televybackup.snapshot-mount-helper"
+        );
+    }
+
+    #[test]
+    fn launchctl_state_requires_explicit_service_absence_before_recovery() {
+        assert_eq!(
+            classify_helper_service_state(false, b"Could not find service"),
+            HelperServiceState::Absent
+        );
+        assert_eq!(
+            classify_helper_service_state(false, b"launchctl: unknown error"),
+            HelperServiceState::Unknown
+        );
+        assert_eq!(
+            classify_helper_service_state(true, b"Could not find service"),
+            HelperServiceState::Loaded
         );
     }
 

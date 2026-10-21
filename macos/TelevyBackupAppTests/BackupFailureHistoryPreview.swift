@@ -141,6 +141,35 @@ enum BackupFailureHistoryPreview {
                   let helperPNG = helperBitmap.representation(using: .png, properties: [:])
             else { exit(1) }
             try helperPNG.write(to: output.appendingPathComponent("mount-helper-update-\(name).png"))
+
+            let activeHelperContent = VStack(alignment: .leading, spacing: 12) {
+                Text("Settings → Snapshots").font(.system(size: 18, weight: .bold))
+                SnapshotMountHelperStatusView(
+                    readiness: SnapshotMountHelperReadiness(
+                        reachable: true, daemonReady: false,
+                        buildCommit: nil, expectedBuildCommit: String(repeating: "a", count: 40)
+                    ),
+                    path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
+                    version: "0.5.0",
+                    error: nil,
+                    activeMounts: 1,
+                    pendingCleanup: 0,
+                    busy: false,
+                    install: {}
+                )
+            }
+            .padding(24)
+            .frame(width: 430, alignment: .leading)
+            .background(scheme == .dark ? Color(red: 0.16, green: 0.17, blue: 0.19) : Color.white)
+            .environment(\.colorScheme, scheme)
+            let activeHelperRenderer = ImageRenderer(content: activeHelperContent)
+            activeHelperRenderer.scale = 2
+            guard let activeImage = activeHelperRenderer.nsImage,
+                  let activeTiff = activeImage.tiffRepresentation,
+                  let activeBitmap = NSBitmapImageRep(data: activeTiff),
+                  let activePNG = activeBitmap.representation(using: .png, properties: [:])
+            else { exit(1) }
+            try activePNG.write(to: output.appendingPathComponent("mount-helper-active-\(name).png"))
         }
     }
 

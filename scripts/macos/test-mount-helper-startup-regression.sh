@@ -18,9 +18,17 @@ p = pathlib.Path(sys.argv[1])
 text = p.read_text()
 old = 'while elapsed() < INSTALL_READY_TIMEOUT {'
 assert text.count(old) == 1, 'startup loop changed; update the regression mutation'
-text = text.replace(old, 'for attempt in 0..4 {')
-assert text.count('if !remaining.is_zero() {') == 1
-p.write_text(text.replace('if !remaining.is_zero() {', 'if attempt < 3 && !remaining.is_zero() {'))
+loop_start = text.index(old)
+pause = '        if !remaining.is_zero() {'
+pause_start = text.index(pause, loop_start)
+mutated = text[:loop_start]
+mutated += text[loop_start:pause_start].replace(old, 'for attempt in 0..4 {', 1)
+mutated += text[pause_start:].replace(
+    pause,
+    '        if attempt < 3 && !remaining.is_zero() {',
+    1,
+)
+p.write_text(mutated)
 PY
 diff -u "$source_file" "$fixture_dir/four-probes.rs" || test "$?" -eq 1
 cp "$fixture_dir/four-probes.rs" "$source_file"
