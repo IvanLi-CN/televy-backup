@@ -191,6 +191,27 @@ fn helper_service_is_loaded() -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+fn wait_for_helper_status() -> Result<MountStatusResult, CliError> {
+    let started = Instant::now();
+    let mut last_error = "no ready status received".to_string();
+    while started.elapsed() < INSTALL_READY_TIMEOUT {
+        match mount_helper::status() {
+            Ok(status) => return Ok(status),
+            Err(error) => last_error = error.to_string(),
+        }
+        let remaining = INSTALL_READY_TIMEOUT.saturating_sub(started.elapsed());
+        if !remaining.is_zero() {
+            std::thread::sleep(INSTALL_READY_POLL_INTERVAL.min(remaining));
+        }
+    }
+    Err(CliError::retryable(
+        "snapshot_mount_helper.status_unavailable",
+        format!(
+            "cannot read the installed snapshot mount helper state after bootstrap: {last_error}"
+        ),
+    ))
+}
+
 fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     if status.active_mounts == 0 {
         return None;
@@ -221,7 +242,21 @@ fn reject_if_busy(operation: &str) -> Result<(), CliError> {
     match mount_helper::status() {
         Ok(status) => busy_error(operation, &status).map_or(Ok(()), Err),
         Err(_error) if !helper_assets_are_installed() => Ok(()),
-        Err(_error) if !helper_service_is_loaded() => Ok(()),
+        Err(error) if !helper_service_is_loaded() => {
+            if !safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH)) {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.status_unavailable",
+                    format!(
+                        "cannot {operation}: the installed snapshot mount helper service is not recoverable ({error})"
+                    ),
+                ));
+            }
+            // An unloaded helper may have left journal rows behind. Bootstrap the existing
+            // service so its recovery pass can reconcile them before any replacement occurs.
+            launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
+            let status = wait_for_helper_status()?;
+            busy_error(operation, &status).map_or(Ok(()), Err)
+        }
         Err(error) => Err(CliError::retryable(
             "snapshot_mount_helper.status_unavailable",
             format!(
