@@ -36,8 +36,8 @@ struct SnapshotMountHelperReadiness {
         guard activeMounts > 0 || pendingCleanup > 0 else { return nil }
         if pendingCleanup > 0 {
             let mountDescription = activeMounts == pendingCleanup
-                ? "No active snapshot mount is running, but strict mode remains blocked until the recorded snapshot inventory is reconciled."
-                : "An active snapshot mount is also present; wait for it to finish before updating the helper."
+                ? "All reported snapshot mount records are pending cleanup; strict mode remains blocked until the recorded snapshot inventory is reconciled."
+                : "Additional snapshot mount record(s) are also blocking the update; wait for the backup or cleanup to finish."
             return "\(pendingCleanup) snapshot cleanup record(s) are pending. \(mountDescription)"
         }
         return "\(activeMounts) snapshot mount record(s) are still blocking the update. Finish the backup or wait for cleanup before updating the helper."

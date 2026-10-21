@@ -184,6 +184,13 @@ fn helper_assets_are_installed() -> bool {
         || safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH))
 }
 
+fn helper_service_is_loaded() -> bool {
+    Command::new("/bin/launchctl")
+        .args(["print", &system_service_target()])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     if status.active_mounts == 0 {
         return None;
@@ -214,6 +221,7 @@ fn reject_if_busy(operation: &str) -> Result<(), CliError> {
     match mount_helper::status() {
         Ok(status) => busy_error(operation, &status).map_or(Ok(()), Err),
         Err(_error) if !helper_assets_are_installed() => Ok(()),
+        Err(_error) if !helper_service_is_loaded() => Ok(()),
         Err(error) => Err(CliError::retryable(
             "snapshot_mount_helper.status_unavailable",
             format!(

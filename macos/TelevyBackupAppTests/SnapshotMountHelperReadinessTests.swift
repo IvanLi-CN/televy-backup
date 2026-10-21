@@ -38,6 +38,9 @@ enum SnapshotMountHelperReadinessTests {
         let pendingCleanup = SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 1, pendingCleanup: 1)
         expectReadiness(pendingCleanup?.contains("snapshot cleanup record(s) are pending") == true, "pending cleanup must remain distinct from an active mount")
         expectReadiness(!SnapshotMountHelperReadiness.canUpdate(activeMounts: 1, pendingCleanup: 1), "pending cleanup must disable update")
+        let mixedBlockingState = SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 2, pendingCleanup: 1)
+        expectReadiness(mixedBlockingState?.contains("Additional snapshot mount record(s)") == true, "mixed aggregate state must remain neutral about live mounts")
+        expectReadiness(mixedBlockingState?.contains("active snapshot mount") != true, "aggregate state must not claim a live mount")
         expectReadiness(SnapshotMountHelperReadiness.canUpdate(activeMounts: 0, pendingCleanup: 0), "an idle helper may be updated")
 
         var result: (Bool, String?)?
