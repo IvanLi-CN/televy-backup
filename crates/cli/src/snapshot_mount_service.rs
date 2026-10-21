@@ -472,6 +472,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
             CliError::new("snapshot_mount_helper.uninstall_failed", error.to_string())
         })?;
     }
+    drop(mutation_lock);
     if json_output {
         println!(
             "{}",

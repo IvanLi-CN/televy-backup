@@ -114,6 +114,7 @@ pub fn acquire_mutation_lock() -> Result<MutationFileLock, MountHelperError> {
     }
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)?;
