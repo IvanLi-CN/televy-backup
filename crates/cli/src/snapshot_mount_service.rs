@@ -181,7 +181,7 @@ fn safe_root_asset(path: &Path) -> bool {
 
 fn helper_assets_are_installed() -> bool {
     safe_root_asset(Path::new(MOUNT_HELPER_INSTALL_PATH))
-        && safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH))
+        || safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH))
 }
 
 fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
