@@ -1,5 +1,5 @@
 use std::ffi::CString;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -22,10 +22,10 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::{
-    DEFAULT_MOUNT_HELPER_JOURNAL, DEFAULT_MOUNT_HELPER_SOCKET, MOUNT_HELPER_PROTOCOL_VERSION,
-    MountLeaseResult, MountMethod, MountRecoveryLease, MountReleaseResult, MountRequest,
-    MountResponse, MountResponseResult, MountSnapshotRef, MountStatusResult,
-    validate_mount_request,
+    DEFAULT_MOUNT_HELPER_JOURNAL, DEFAULT_MOUNT_HELPER_MUTATION_LOCK, DEFAULT_MOUNT_HELPER_SOCKET,
+    MOUNT_HELPER_PROTOCOL_VERSION, MountLeaseResult, MountMethod, MountRecoveryLease,
+    MountReleaseResult, MountRequest, MountResponse, MountResponseResult, MountSnapshotRef,
+    MountStatusResult, validate_mount_request,
 };
 
 pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.0";
@@ -71,6 +71,58 @@ pub fn configured_journal_path() -> PathBuf {
     std::env::var_os("TELEVYBACKUP_SNAPSHOT_MOUNT_JOURNAL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MOUNT_HELPER_JOURNAL))
+}
+
+pub fn configured_mutation_lock_path() -> PathBuf {
+    std::env::var_os("TELEVYBACKUP_SNAPSHOT_MOUNT_LOCK")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let journal = configured_journal_path();
+            if journal == Path::new(DEFAULT_MOUNT_HELPER_JOURNAL) {
+                PathBuf::from(DEFAULT_MOUNT_HELPER_MUTATION_LOCK)
+            } else {
+                journal.with_file_name("mutation.lock")
+            }
+        })
+}
+
+pub struct MutationFileLock {
+    file: fs::File,
+}
+
+impl Drop for MutationFileLock {
+    fn drop(&mut self) {
+        // Unlock explicitly so the guard's cross-process lifetime remains obvious.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+pub fn acquire_mutation_lock() -> Result<MutationFileLock, MountHelperError> {
+    let path = configured_mutation_lock_path();
+    let parent = path
+        .parent()
+        .ok_or_else(|| MountHelperError::Protocol("mutation lock has no parent".into()))?;
+    ensure_root_directory(parent)?;
+    if let Ok(metadata) = fs::symlink_metadata(&path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        return Err(MountHelperError::Protocol(
+            "unsafe root-owned snapshot mount mutation lock".into(),
+        ));
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    ensure_root_owned_file(&path, "snapshot mount mutation lock")?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(MountHelperError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(MutationFileLock { file })
 }
 
 fn configured_mount_root_base() -> PathBuf {
@@ -306,7 +358,9 @@ pub async fn run_server() -> Result<(), MountHelperError> {
         .await?;
     ensure_root_file(&journal_path)?;
     init_journal(&journal).await?;
+    let startup_mutation_lock = acquire_mutation_lock()?;
     recover_journal(&journal).await?;
+    drop(startup_mutation_lock);
 
     let socket_path = configured_socket_path();
     let socket_parent = socket_path
@@ -583,8 +637,33 @@ async fn serve_connection(
         let request: Result<MountRequest, _> = serde_json::from_str(line.trim());
         let response = match request {
             Ok(request) => {
-                let _mutation_guard = mutation_lock.lock().await;
-                handle_request(request, peer_uid, &journal).await
+                let needs_file_lock = matches!(
+                    &request.method,
+                    MountMethod::Reserve { .. }
+                        | MountMethod::Renew { .. }
+                        | MountMethod::Mount { .. }
+                        | MountMethod::Release { .. }
+                        | MountMethod::RecordCleanup { .. }
+                        | MountMethod::Cleanup { .. }
+                );
+                if needs_file_lock {
+                    let _mutation_guard = mutation_lock.lock().await;
+                    match tokio::task::spawn_blocking(acquire_mutation_lock).await {
+                        Ok(Ok(_file_lock)) => handle_request(request, peer_uid, &journal).await,
+                        Ok(Err(error)) => MountResponse::error(
+                            request.request_id,
+                            "mutation_lock_unavailable",
+                            error.to_string(),
+                        ),
+                        Err(error) => MountResponse::error(
+                            request.request_id,
+                            "mutation_lock_unavailable",
+                            format!("mutation lock task failed: {error}"),
+                        ),
+                    }
+                } else {
+                    handle_request(request, peer_uid, &journal).await
+                }
             }
             Err(error) => MountResponse::error("unknown", "invalid_request", error.to_string()),
         };
@@ -2491,15 +2570,23 @@ fn ensure_root_socket_directory(path: &Path) -> Result<(), MountHelperError> {
     Ok(())
 }
 
-fn ensure_root_file(path: &Path) -> Result<(), MountHelperError> {
+fn ensure_root_owned_file(path: &Path, description: &str) -> Result<(), MountHelperError> {
     let metadata = fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+    {
         return Err(MountHelperError::Protocol(format!(
-            "unsafe root-owned mount helper journal: {}",
+            "unsafe root-owned {description}: {}",
             path.display()
         )));
     }
     Ok(())
+}
+
+fn ensure_root_file(path: &Path) -> Result<(), MountHelperError> {
+    ensure_root_owned_file(path, "mount helper journal")
 }
 
 fn run_command<const N: usize, S: AsRef<std::ffi::OsStr>>(

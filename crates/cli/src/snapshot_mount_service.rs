@@ -184,11 +184,36 @@ fn helper_assets_are_installed() -> bool {
         || safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH))
 }
 
-fn helper_service_is_loaded() -> bool {
-    Command::new("/bin/launchctl")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelperServiceState {
+    Loaded,
+    Absent,
+    Unknown,
+}
+
+fn classify_helper_service_state(success: bool, output: &[u8]) -> HelperServiceState {
+    if success {
+        return HelperServiceState::Loaded;
+    }
+    let output = String::from_utf8_lossy(output);
+    if output.contains("Could not find service") || output.contains("No such process") {
+        HelperServiceState::Absent
+    } else {
+        HelperServiceState::Unknown
+    }
+}
+
+fn helper_service_state() -> HelperServiceState {
+    let output = match Command::new("/bin/launchctl")
         .args(["print", &system_service_target()])
         .output()
-        .is_ok_and(|output| output.status.success())
+    {
+        Ok(output) => output,
+        Err(_) => return HelperServiceState::Unknown,
+    };
+    let mut diagnostic = output.stdout;
+    diagnostic.extend_from_slice(&output.stderr);
+    classify_helper_service_state(output.status.success(), &diagnostic)
 }
 
 fn wait_for_helper_status() -> Result<MountStatusResult, CliError> {
@@ -242,27 +267,27 @@ fn reject_if_busy(operation: &str) -> Result<(), CliError> {
     match mount_helper::status() {
         Ok(status) => busy_error(operation, &status).map_or(Ok(()), Err),
         Err(_error) if !helper_assets_are_installed() => Ok(()),
-        Err(error) if !helper_service_is_loaded() => {
-            if !safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH)) {
-                return Err(CliError::retryable(
-                    "snapshot_mount_helper.status_unavailable",
-                    format!(
-                        "cannot {operation}: the installed snapshot mount helper service is not recoverable ({error})"
-                    ),
-                ));
+        Err(error) => match helper_service_state() {
+            HelperServiceState::Absent if safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH)) => {
+                // An explicitly absent helper may have left journal rows behind. Bootstrap the
+                // existing service so its recovery pass can reconcile them before replacement.
+                launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
+                let status = wait_for_helper_status()?;
+                busy_error(operation, &status).map_or(Ok(()), Err)
             }
-            // An unloaded helper may have left journal rows behind. Bootstrap the existing
-            // service so its recovery pass can reconcile them before any replacement occurs.
-            launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
-            let status = wait_for_helper_status()?;
-            busy_error(operation, &status).map_or(Ok(()), Err)
-        }
-        Err(error) => Err(CliError::retryable(
-            "snapshot_mount_helper.status_unavailable",
-            format!(
-                "cannot {operation}: the installed snapshot mount helper did not report its mount state; refusing to proceed ({error})"
-            ),
-        )),
+            HelperServiceState::Absent => Err(CliError::retryable(
+                "snapshot_mount_helper.status_unavailable",
+                format!(
+                    "cannot {operation}: the installed snapshot mount helper service is absent and its root-owned launchd plist is unavailable ({error})"
+                ),
+            )),
+            HelperServiceState::Loaded | HelperServiceState::Unknown => Err(CliError::retryable(
+                "snapshot_mount_helper.status_unavailable",
+                format!(
+                    "cannot {operation}: the installed snapshot mount helper state could not be verified; refusing to proceed ({error})"
+                ),
+            )),
+        },
     }
 }
 
@@ -337,6 +362,12 @@ fn helper_sha256(path: &Path) -> Result<String, CliError> {
 
 pub fn install(json_output: bool) -> Result<(), CliError> {
     require_root()?;
+    let _mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.lock_unavailable",
+            format!("cannot install or update the snapshot mount helper safely: {error}"),
+        )
+    })?;
     reject_if_busy("install or update the snapshot mount helper")?;
     let source = current_executable_sibling()?;
     let candidate_hash = helper_sha256(&source)?;
@@ -374,6 +405,12 @@ pub fn install(json_output: bool) -> Result<(), CliError> {
 
 pub fn uninstall(json_output: bool) -> Result<(), CliError> {
     require_root()?;
+    let _mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.lock_unavailable",
+            format!("cannot uninstall the snapshot mount helper safely: {error}"),
+        )
+    })?;
     reject_if_busy("uninstall the snapshot mount helper")?;
     let service = system_service_target();
     let _ = launchctl(&["bootout", &service]);
@@ -399,10 +436,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
 }
 
 pub fn status(json_output: bool) -> Result<(), CliError> {
-    let loaded = Command::new("/bin/launchctl")
-        .args(["print", &format!("system/{MOUNT_HELPER_LABEL}")])
-        .output()
-        .is_ok_and(|output| output.status.success());
+    let loaded = helper_service_state() == HelperServiceState::Loaded;
     let helper = mount_helper::status().ok();
     let payload = json!({
         "installed": safe_root_asset(Path::new(MOUNT_HELPER_INSTALL_PATH))
@@ -490,6 +524,22 @@ mod tests {
         assert_eq!(
             system_service_target(),
             "system/com.ivan.televybackup.snapshot-mount-helper"
+        );
+    }
+
+    #[test]
+    fn launchctl_state_requires_explicit_service_absence_before_recovery() {
+        assert_eq!(
+            classify_helper_service_state(false, b"Could not find service"),
+            HelperServiceState::Absent
+        );
+        assert_eq!(
+            classify_helper_service_state(false, b"launchctl: unknown error"),
+            HelperServiceState::Unknown
+        );
+        assert_eq!(
+            classify_helper_service_state(true, b"Could not find service"),
+            HelperServiceState::Loaded
         );
     }
 
