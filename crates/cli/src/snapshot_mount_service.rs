@@ -179,6 +179,11 @@ fn safe_root_asset(path: &Path) -> bool {
     })
 }
 
+fn helper_assets_are_installed() -> bool {
+    safe_root_asset(Path::new(MOUNT_HELPER_INSTALL_PATH))
+        && safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH))
+}
+
 fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     if status.active_mounts == 0 {
         return None;
@@ -208,7 +213,13 @@ fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
 fn reject_if_busy(operation: &str) -> Result<(), CliError> {
     match mount_helper::status() {
         Ok(status) => busy_error(operation, &status).map_or(Ok(()), Err),
-        Err(_) => Ok(()),
+        Err(_error) if !helper_assets_are_installed() => Ok(()),
+        Err(error) => Err(CliError::retryable(
+            "snapshot_mount_helper.status_unavailable",
+            format!(
+                "cannot {operation}: the installed snapshot mount helper did not report its mount state; refusing to proceed ({error})"
+            ),
+        )),
     }
 }
 

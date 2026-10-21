@@ -31,7 +31,7 @@ enum SnapshotMountHelperReadinessTests {
         }
 
         let activeMount = SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 1, pendingCleanup: 0)
-        expectReadiness(activeMount?.contains("1 active snapshot mount(s)") == true, "an active helper mount must be visible in the update state")
+        expectReadiness(activeMount?.contains("1 snapshot mount record(s)") == true, "a blocking helper record must be visible in the update state")
         expectReadiness(activeMount?.contains("wait for cleanup") == true, "an active helper mount must explain how to recover")
         expectReadiness(!SnapshotMountHelperReadiness.canUpdate(activeMounts: 1, pendingCleanup: 0), "an active helper mount must disable update")
 

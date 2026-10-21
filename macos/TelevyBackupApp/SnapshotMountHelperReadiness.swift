@@ -40,7 +40,7 @@ struct SnapshotMountHelperReadiness {
                 : "An active snapshot mount is also present; wait for it to finish before updating the helper."
             return "\(pendingCleanup) snapshot cleanup record(s) are pending. \(mountDescription)"
         }
-        return "\(activeMounts) active snapshot mount(s) are still in use. Finish the backup or wait for cleanup before updating the helper."
+        return "\(activeMounts) snapshot mount record(s) are still blocking the update. Finish the backup or wait for cleanup before updating the helper."
     }
 
     static func canUpdate(activeMounts: UInt32, pendingCleanup: UInt32) -> Bool {
