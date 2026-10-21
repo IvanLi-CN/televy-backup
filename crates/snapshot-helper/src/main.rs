@@ -30,6 +30,7 @@ use televybackup_snapshot_access::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -99,6 +100,8 @@ struct HelperState {
     volume_acquire_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     fda_ready: Arc<AtomicBool>,
 }
+
+const CLEANUP_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 struct VolumeInfo {
@@ -195,6 +198,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         fda_ready: Arc::new(AtomicBool::new(false)),
     };
     tracing_log_start(&state);
+
+    let cleanup_journal = state.journal.clone();
+    tokio::spawn(async move {
+        loop {
+            sleep(CLEANUP_RETRY_INTERVAL).await;
+            retry_pending_cleanup_all(&cleanup_journal).await;
+        }
+    });
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -359,6 +370,38 @@ async fn retry_pending_cleanup(
     Ok(())
 }
 
+async fn retry_pending_cleanup_all(pool: &SqlitePool) {
+    let rows = match sqlx::query(
+        "SELECT lease_id, uid FROM leases WHERE state = 'cleanup_pending' ORDER BY created_at",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return,
+    };
+    for row in rows {
+        let Ok(lease_id) = row.try_get::<String, _>("lease_id") else {
+            continue;
+        };
+        let Ok(uid) = row.try_get::<i64, _>("uid").and_then(|value| {
+            u32::try_from(value).map_err(|_| sqlx::Error::Protocol("invalid lease owner".into()))
+        }) else {
+            continue;
+        };
+        let Ok(result) = mount_helper::release(uid, &lease_id) else {
+            continue;
+        };
+        let _ = sqlx::query(
+            "UPDATE leases SET state = ? WHERE lease_id = ? AND state = 'cleanup_pending'",
+        )
+        .bind(&result.cleanup_state)
+        .bind(&lease_id)
+        .execute(pool)
+        .await;
+    }
+}
+
 async fn serve_connection(stream: UnixStream, state: HelperState) -> Result<(), HelperError> {
     let uid = peer_uid(stream.as_raw_fd())?;
     let (read_half, mut write_half) = stream.into_split();
@@ -464,6 +507,10 @@ fn error_code(error: &HelperError) -> &'static str {
 }
 
 async fn status_result(state: &HelperState) -> Result<StatusResult, HelperError> {
+    // A release can reach this process while the root helper is restarting. Retry from the
+    // durable journal before reporting the cleanup count so the UI can converge without a
+    // manual Snapshot Access restart.
+    retry_pending_cleanup_all(&state.journal).await;
     let active_leases =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM leases WHERE state = 'active'")
             .fetch_one(&state.journal)
@@ -1399,9 +1446,10 @@ async fn release_lease(
             .leases
             .lock()
             .map_err(|_| HelperError::Message("lease lock poisoned".into()))?;
-        let lease = leases
-            .remove(lease_id)
-            .ok_or_else(|| HelperError::Message("lease not found".into()))?;
+        let Some(lease) = leases.remove(lease_id) else {
+            drop(leases);
+            return retry_recorded_cleanup(uid, lease_id, state).await;
+        };
         if lease.uid != uid {
             leases.insert(lease_id.to_string(), lease);
             return Err(HelperError::Message("lease belongs to another user".into()));
@@ -1422,6 +1470,41 @@ async fn release_lease(
         let _ = fs::remove_dir(&lease.mount_root);
     }
     sqlx::query("UPDATE leases SET state = ? WHERE lease_id = ?")
+        .bind(&cleanup_state)
+        .bind(lease_id)
+        .execute(&state.journal)
+        .await?;
+    Ok(ReleaseResult {
+        lease_id: lease_id.to_string(),
+        cleanup_state,
+    })
+}
+
+async fn retry_recorded_cleanup(
+    uid: u32,
+    lease_id: &str,
+    state: &HelperState,
+) -> Result<ReleaseResult, HelperError> {
+    let row = sqlx::query("SELECT uid, state FROM leases WHERE lease_id = ?")
+        .bind(lease_id)
+        .fetch_optional(&state.journal)
+        .await?
+        .ok_or_else(|| HelperError::Message("lease not found".into()))?;
+    let stored_uid: i64 = row.try_get("uid")?;
+    if stored_uid != i64::from(uid) {
+        return Err(HelperError::Message(
+            "mount lease belongs to another user".into(),
+        ));
+    }
+    let recorded_state: String = row.try_get("state")?;
+    if recorded_state != "cleanup_pending" {
+        return Err(HelperError::Message("lease not found".into()));
+    }
+    let cleanup_state = match mount_helper::release(uid, lease_id) {
+        Ok(result) => result.cleanup_state,
+        Err(_) => "cleanup_pending".to_string(),
+    };
+    sqlx::query("UPDATE leases SET state = ? WHERE lease_id = ? AND state = 'cleanup_pending'")
         .bind(&cleanup_state)
         .bind(lease_id)
         .execute(&state.journal)
