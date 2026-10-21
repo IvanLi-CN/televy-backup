@@ -507,10 +507,8 @@ fn error_code(error: &HelperError) -> &'static str {
 }
 
 async fn status_result(state: &HelperState) -> Result<StatusResult, HelperError> {
-    // A release can reach this process while the root helper is restarting. Retry from the
-    // durable journal before reporting the cleanup count so the UI can converge without a
-    // manual Snapshot Access restart.
-    retry_pending_cleanup_all(&state.journal).await;
+    // Cleanup retries run in the background. Keep status responsive while the root helper is
+    // restarting or a stale cleanup request is waiting on its bounded IPC timeout.
     let active_leases =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM leases WHERE state = 'active'")
             .fetch_one(&state.journal)
