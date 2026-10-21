@@ -2022,7 +2022,9 @@ mod tests {
                 let attempt = attempt_counter.fetch_add(1, Ordering::SeqCst);
                 async move {
                     if attempt == 0 {
-                        Err(SnapshotClientError::Unavailable("restart in progress".into()))
+                        Err(SnapshotClientError::Unavailable(
+                            "restart in progress".into(),
+                        ))
                     } else {
                         Ok("released".into())
                     }

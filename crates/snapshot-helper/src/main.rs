@@ -1444,15 +1444,17 @@ async fn release_lease(
             .leases
             .lock()
             .map_err(|_| HelperError::Message("lease lock poisoned".into()))?;
-        let Some(lease) = leases.remove(lease_id) else {
-            drop(leases);
-            return retry_recorded_cleanup(uid, lease_id, state).await;
-        };
-        if lease.uid != uid {
-            leases.insert(lease_id.to_string(), lease);
-            return Err(HelperError::Message("lease belongs to another user".into()));
+        match leases.remove(lease_id) {
+            Some(lease) if lease.uid == uid => Some(lease),
+            Some(lease) => {
+                leases.insert(lease_id.to_string(), lease);
+                return Err(HelperError::Message("lease belongs to another user".into()));
+            }
+            None => None,
         }
-        lease
+    };
+    let Some(lease) = lease else {
+        return retry_recorded_cleanup(uid, lease_id, state).await;
     };
     if let Ok(mut streams) = state.streams.lock() {
         streams.retain(|_, stream| stream.lease_id != lease_id);
