@@ -28,4 +28,22 @@ struct SnapshotMountHelperReadiness {
             ? "The installed helper has not been verified for this app. Update it to use the latest fixes."
             : nil
     }
+
+    /// The root helper's legacy-compatible aggregate is blocking even when the
+    /// optional cleanup breakdown is unavailable. Never offer an update while
+    /// that aggregate still contains a journal row.
+    static func updateBlockReason(activeMounts: UInt32, pendingCleanup: UInt32) -> String? {
+        guard activeMounts > 0 || pendingCleanup > 0 else { return nil }
+        if pendingCleanup > 0 {
+            let mountDescription = activeMounts == pendingCleanup
+                ? "No active snapshot mount is running, but strict mode remains blocked until the recorded snapshot inventory is reconciled."
+                : "An active snapshot mount is also present; wait for it to finish before updating the helper."
+            return "\(pendingCleanup) snapshot cleanup record(s) are pending. \(mountDescription)"
+        }
+        return "\(activeMounts) active snapshot mount(s) are still in use. Finish the backup or wait for cleanup before updating the helper."
+    }
+
+    static func canUpdate(activeMounts: UInt32, pendingCleanup: UInt32) -> Bool {
+        updateBlockReason(activeMounts: activeMounts, pendingCleanup: pendingCleanup) == nil
+    }
 }
