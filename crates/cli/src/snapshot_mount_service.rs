@@ -239,14 +239,11 @@ fn wait_for_helper_status() -> Result<MountStatusResult, CliError> {
 
 fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     if status.active_mounts == 0 {
-        return status.pending_cleanup.is_none().then(|| {
-            CliError::retryable(
-                "snapshot_mount_helper.status_incomplete",
-                format!(
-                    "cannot {operation}: the installed snapshot mount helper did not report a complete cleanup status"
-                ),
-            )
-        });
+        // The legacy aggregate includes every blocking journal row, including cleanup-pending
+        // rows. A legacy helper that reports zero therefore has no row to protect, even though it
+        // cannot provide the additive classification fields. The replacement transaction still
+        // requires the current component and build identity before acknowledging readiness.
+        return None;
     }
     let pending_cleanup = match status.pending_cleanup {
         Some(value) => value.min(status.active_mounts),
@@ -588,10 +585,26 @@ mod tests {
     fn missing_cleanup_status_remains_blocking() {
         let error = busy_error(
             "update the snapshot mount helper",
-            &MountStatusResult::default(),
+            &MountStatusResult {
+                active_mounts: 1,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+    }
+
+    #[test]
+    fn legacy_zero_aggregate_allows_a_verified_replacement() {
+        assert!(busy_error(
+            "update the snapshot mount helper",
+            &MountStatusResult {
+                active_mounts: 0,
+                pending_cleanup: None,
+                ..Default::default()
+            }
+        )
+        .is_none());
     }
 
     #[test]
