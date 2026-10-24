@@ -912,7 +912,8 @@ async fn classify_status_rows(
             .ok()
             .as_deref()
             .is_some_and(|expected| !mount_root.is_empty() && Path::new(&mount_root) == expected);
-        let recoverable = stale
+        let recoverable = state != "cleanup_pending"
+            && stale
             && volume_scope
                 .map(|(_, owner_uid)| uid == i64::from(owner_uid))
                 .or_else(|| scope_uid.map(|scope_uid| uid == i64::from(scope_uid)))
@@ -921,19 +922,15 @@ async fn classify_status_rows(
             && ((mount_root.is_empty() && (snapshot_manifest == "[]" || manifest_valid))
                 || (!mount_root.is_empty() && manifest_valid && managed_root))
             && validate_device(&device_identifier).is_ok()
-            && matches!(
-                state.as_str(),
-                "reserved" | "prepared" | "active" | "cleanup_pending"
-            );
+            && matches!(state.as_str(), "reserved" | "prepared" | "active");
         if state == "cleanup_pending" {
             classification.pending_cleanup += 1;
-        }
-        if recoverable {
+        } else if recoverable {
             classification.recoverable_stale_mounts += 1;
             classification
                 .recovery_leases
                 .push(MountRecoveryLease { lease_id, state });
-        } else if live && state != "cleanup_pending" {
+        } else if live {
             classification.live_mounts += 1;
         } else {
             classification.unknown_blocking_mounts += 1;
@@ -3330,6 +3327,9 @@ mod tests {
         let status = status_result(&journal, 501).await.unwrap();
         assert_eq!(status.active_mounts, 1);
         assert_eq!(status.pending_cleanup, 1);
+        assert_eq!(status.recoverable_stale_mounts, Some(0));
+        assert_eq!(status.unknown_blocking_mounts, Some(0));
+        assert!(status.recovery_leases.is_empty());
         assert_eq!(
             status.blocked_volume_uuids,
             vec!["C8A38394-49AE-42F9-85FB-14DD9EA549FA"]

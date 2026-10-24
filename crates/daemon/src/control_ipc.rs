@@ -599,7 +599,6 @@ async fn handle_control_ipc_client(
                 return Ok(());
             }
         };
-        let settings = context.settings.read().await.clone();
         let maintenance = context.snapshot_maintenance.clone();
         let data_root = context.data_root.clone();
         let config_root = context.config_root.clone();
@@ -632,15 +631,7 @@ async fn handle_control_ipc_client(
                     details: serde_json::json!({}),
                 });
             }
-            let mut recovered = 0_u32;
-            for (volume_uuid, setting) in settings.snapshot_volumes.iter() {
-                if !setting.enabled {
-                    continue;
-                }
-                let volume_uuid = volume_uuid.clone();
-                let status = tokio::task::spawn_blocking(move || {
-                    mount_helper::status_for_volume(uid, &volume_uuid)
-                })
+            let status = tokio::task::spawn_blocking(mount_helper::status)
                 .await
                 .map_err(|_| {
                     ControlError::unavailable(
@@ -654,61 +645,68 @@ async fn handle_control_ipc_client(
                     retryable: true,
                     details: serde_json::json!({"reason": "helper_status_failed"}),
                 })?;
-                if status.component_version.as_deref()
-                    != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
-                {
-                    return Err(ControlError {
-                        code: "snapshot_mount_helper.update_required".to_string(),
-                        message:
-                            "Update the snapshot mount helper before recovering stale records."
-                                .to_string(),
-                        retryable: true,
-                        details: serde_json::json!({}),
-                    });
-                }
-                if status.live_mounts.unwrap_or(0) > 0 {
-                    return Err(ControlError {
-                        code: "snapshot_mount_helper.active".to_string(),
-                        message: "An active snapshot mount is still running.".to_string(),
-                        retryable: true,
-                        details: serde_json::json!({"liveMounts": status.live_mounts}),
-                    });
-                }
-                if status.unknown_blocking_mounts.unwrap_or(1) > 0 {
-                    return Err(ControlError {
-                        code: "snapshot_mount_helper.unknown_blocker".to_string(),
-                        message: "Some snapshot mount records could not be verified safely."
-                            .to_string(),
-                        retryable: true,
-                        details: serde_json::json!({"unknown": status.unknown_blocking_mounts}),
-                    });
-                }
-                let candidate_ids = status
-                    .recovery_leases
-                    .into_iter()
-                    .map(|lease| lease.lease_id)
-                    .collect::<Vec<_>>();
-                for lease_id in candidate_ids {
-                    let released =
-                        tokio::task::spawn_blocking(move || mount_helper::release(uid, &lease_id))
-                            .await
-                            .map_err(|_| {
-                                ControlError::unavailable(
-                                    "Snapshot mount release task failed.",
-                                    serde_json::json!({}),
-                                )
-                            })?
-                            .map_err(|_| ControlError {
-                                code: "snapshot_mount_helper.reconcile_failed".to_string(),
-                                message:
-                                    "A stale snapshot mount record could not be safely recovered."
-                                        .to_string(),
-                                retryable: true,
-                                details: serde_json::json!({"reason": "release_rejected"}),
-                            })?;
-                    if released.cleanup_state == "released" {
-                        recovered += 1;
-                    }
+            if status.component_version.as_deref()
+                != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+            {
+                return Err(ControlError {
+                    code: "snapshot_mount_helper.update_required".to_string(),
+                    message: "Update the snapshot mount helper before recovering stale records."
+                        .to_string(),
+                    retryable: true,
+                    details: serde_json::json!({}),
+                });
+            }
+            if status.live_mounts.unwrap_or(0) > 0 {
+                return Err(ControlError {
+                    code: "snapshot_mount_helper.active".to_string(),
+                    message: "An active snapshot mount is still running.".to_string(),
+                    retryable: true,
+                    details: serde_json::json!({"liveMounts": status.live_mounts}),
+                });
+            }
+            if status.pending_cleanup > 0 {
+                return Err(ControlError {
+                    code: "snapshot_mount_helper.pending_cleanup".to_string(),
+                    message: "Snapshot cleanup is still pending and cannot be recovered as stale."
+                        .to_string(),
+                    retryable: true,
+                    details: serde_json::json!({"pendingCleanup": status.pending_cleanup}),
+                });
+            }
+            if status.unknown_blocking_mounts.unwrap_or(1) > 0 {
+                return Err(ControlError {
+                    code: "snapshot_mount_helper.unknown_blocker".to_string(),
+                    message: "Some snapshot mount records could not be verified safely."
+                        .to_string(),
+                    retryable: true,
+                    details: serde_json::json!({"unknown": status.unknown_blocking_mounts}),
+                });
+            }
+            let mut recovered = 0_u32;
+            for lease_id in status
+                .recovery_leases
+                .into_iter()
+                .map(|lease| lease.lease_id)
+            {
+                let released = tokio::task::spawn_blocking(move || {
+                    mount_helper::release(uid, &lease_id)
+                })
+                .await
+                .map_err(|_| {
+                    ControlError::unavailable(
+                        "Snapshot mount release task failed.",
+                        serde_json::json!({}),
+                    )
+                })?
+                .map_err(|_| ControlError {
+                    code: "snapshot_mount_helper.reconcile_failed".to_string(),
+                    message: "A stale snapshot mount record could not be safely recovered."
+                        .to_string(),
+                    retryable: true,
+                    details: serde_json::json!({"reason": "release_rejected"}),
+                })?;
+                if released.cleanup_state == "released" {
+                    recovered += 1;
                 }
             }
             let final_status = tokio::task::spawn_blocking(|| {

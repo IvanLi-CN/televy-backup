@@ -40,6 +40,7 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(!current.canUpdate, "missing additive status fields must not become a false zero")
         expectReadiness(!state(reachable: false, daemonReady: true, commit: candidateCommit).isReady, "unreachable helpers cannot be ready")
         expectReadiness(state(reachable: false, daemonReady: false, commit: nil).actionTitle == "Install mount helper", "missing helpers need an installation action")
+        expectReadiness(state(reachable: false, daemonReady: false, commit: nil).canUpdate, "missing helpers must retain an installation action")
         expectReadiness(!state(reachable: true, daemonReady: false, commit: candidateCommit).isReady, "a failed daemon verification cannot be overridden")
         for expected in [nil, "", "unknown", String(repeating: "z", count: 40)] as [String?] {
             expectReadiness(!SnapshotMountHelperReadiness(reachable: true, daemonReady: true, buildCommit: expected, expectedBuildCommit: expected).isReady, "missing or malformed app identity cannot prove readiness")

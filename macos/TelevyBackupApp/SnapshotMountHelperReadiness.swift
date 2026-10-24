@@ -59,7 +59,10 @@ struct SnapshotMountHelperReadiness {
     }
 
     var canUpdate: Bool {
-        guard reachable else { return false }
+        // Install remains actionable when the helper is unreachable. The
+        // privileged install transaction performs its own journal/identity
+        // checks and fails closed if records are active or ambiguous.
+        guard reachable else { return true }
         if classificationKnown {
             return !hasBlockingRecords
         }
