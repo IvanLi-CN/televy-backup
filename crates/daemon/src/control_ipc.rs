@@ -645,7 +645,8 @@ async fn handle_control_ipc_client(
                     retryable: true,
                     details: serde_json::json!({"reason": "helper_status_failed"}),
                 })?;
-            if status.component_version.as_deref() != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION) {
+            if status.component_version.as_deref() != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+            {
                 return Err(ControlError {
                     code: "snapshot_mount_helper.update_required".to_string(),
                     message: "Update the snapshot mount helper before recovering stale records."
