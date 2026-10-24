@@ -64,6 +64,7 @@ struct SnapshotMountHelperReadiness {
         // checks and fails closed if records are active or ambiguous.
         guard reachable else { return true }
         if classificationKnown {
+            guard activeMounts != nil else { return false }
             return !hasBlockingRecords
         }
         // Legacy helpers do not report the additive classification fields. Their
