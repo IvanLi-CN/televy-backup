@@ -103,6 +103,64 @@ fn snapshot_mount_helper_state(
     }
 }
 
+fn snapshot_mount_reconcile_identity(status: &MountStatusResult) -> Result<(), ControlError> {
+    if status.component_version.as_deref() != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+        || status.build_commit.as_deref() != Some(crate::BUILD_COMMIT)
+    {
+        return Err(ControlError {
+            code: "snapshot_mount_helper.update_required".to_string(),
+            message: "Update the snapshot mount helper before recovering stale records."
+                .to_string(),
+            retryable: true,
+            details: serde_json::json!({}),
+        });
+    }
+    Ok(())
+}
+
+fn snapshot_mount_reconcile_counts(
+    status: &MountStatusResult,
+) -> Result<(u32, u32, u32, u32), ControlError> {
+    let (live_mounts, pending_cleanup, recoverable_stale_mounts, unknown_blocking_mounts) = match (
+        status.live_mounts,
+        status.pending_cleanup,
+        status.recoverable_stale_mounts,
+        status.unknown_blocking_mounts,
+    ) {
+        (Some(live), Some(pending), Some(recoverable), Some(unknown)) => {
+            (live, pending, recoverable, unknown)
+        }
+        _ => {
+            return Err(ControlError {
+                code: "snapshot_mount_helper.status_incomplete".to_string(),
+                message: "Snapshot mount status is incomplete; recovery remains blocked until the helper is updated or repaired.".to_string(),
+                retryable: true,
+                details: serde_json::json!({}),
+            });
+        }
+    };
+    let partition_total = live_mounts
+        .checked_add(pending_cleanup)
+        .and_then(|total| total.checked_add(recoverable_stale_mounts))
+        .and_then(|total| total.checked_add(unknown_blocking_mounts));
+    if partition_total != Some(status.active_mounts)
+        || recoverable_stale_mounts as usize != status.recovery_leases.len()
+    {
+        return Err(ControlError {
+            code: "snapshot_mount_helper.status_inconsistent".to_string(),
+            message: "Snapshot mount status is inconsistent; recovery remains blocked until the helper is repaired.".to_string(),
+            retryable: true,
+            details: serde_json::json!({}),
+        });
+    }
+    Ok((
+        live_mounts,
+        pending_cleanup,
+        recoverable_stale_mounts,
+        unknown_blocking_mounts,
+    ))
+}
+
 fn operation_store() -> &'static Mutex<HashMap<String, OperationStatusResult>> {
     OPERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -645,43 +703,9 @@ async fn handle_control_ipc_client(
                     retryable: true,
                     details: serde_json::json!({"reason": "helper_status_failed"}),
                 })?;
-            if status.component_version.as_deref() != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
-            {
-                return Err(ControlError {
-                    code: "snapshot_mount_helper.update_required".to_string(),
-                    message: "Update the snapshot mount helper before recovering stale records."
-                        .to_string(),
-                    retryable: true,
-                    details: serde_json::json!({}),
-                });
-            }
+            snapshot_mount_reconcile_identity(&status)?;
             let (live_mounts, pending_cleanup, recoverable_stale_mounts, unknown_blocking_mounts) =
-                match (
-                    status.live_mounts,
-                    status.pending_cleanup,
-                    status.recoverable_stale_mounts,
-                    status.unknown_blocking_mounts,
-                ) {
-                    (Some(live), Some(pending), Some(recoverable), Some(unknown)) => {
-                        (live, pending, recoverable, unknown)
-                    }
-                    _ => {
-                        return Err(ControlError {
-                            code: "snapshot_mount_helper.status_incomplete".to_string(),
-                            message: "Snapshot mount status is incomplete; recovery remains blocked until the helper is updated or repaired.".to_string(),
-                            retryable: true,
-                            details: serde_json::json!({}),
-                        });
-                    }
-                };
-            if recoverable_stale_mounts as usize != status.recovery_leases.len() {
-                return Err(ControlError {
-                    code: "snapshot_mount_helper.status_inconsistent".to_string(),
-                    message: "Snapshot mount status is inconsistent; recovery remains blocked until the helper is repaired.".to_string(),
-                    retryable: true,
-                    details: serde_json::json!({}),
-                });
-            }
+                snapshot_mount_reconcile_counts(&status)?;
             if live_mounts > 0 {
                 return Err(ControlError {
                     code: "snapshot_mount_helper.active".to_string(),
@@ -750,13 +774,20 @@ async fn handle_control_ipc_client(
                 retryable: true,
                 details: serde_json::json!({"reason": "helper_status_failed"}),
             })?;
+            snapshot_mount_reconcile_identity(&final_status)?;
+            let (
+                final_live_mounts,
+                final_pending_cleanup,
+                final_recoverable_stale_mounts,
+                final_unknown_blocking_mounts,
+            ) = snapshot_mount_reconcile_counts(&final_status)?;
             Ok(serde_json::json!({
                 "recovered": recovered,
                 "remaining": final_status.active_mounts,
-                "live": final_status.live_mounts,
-                "pending": final_status.pending_cleanup,
-                "recoverable": final_status.recoverable_stale_mounts,
-                "unknown": final_status.unknown_blocking_mounts,
+                "live": final_live_mounts,
+                "pending": final_pending_cleanup,
+                "recoverable": final_recoverable_stale_mounts,
+                "unknown": final_unknown_blocking_mounts,
             }))
         });
         write_json_line(
@@ -3281,6 +3312,41 @@ mod tests {
         assert!(state.build_commit.is_none());
         assert_eq!(state.expected_build_commit, Some("a".repeat(40)));
         assert!(legacy.pending_cleanup.is_none());
+    }
+
+    #[test]
+    fn snapshot_mount_reconcile_requires_current_identity_and_consistent_counts() {
+        let mut status = MountStatusResult {
+            helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some(crate::BUILD_COMMIT.into()),
+            active_mounts: 1,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(1),
+            unknown_blocking_mounts: Some(0),
+            recovery_leases: vec![televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: "lease".into(),
+                state: "active".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(snapshot_mount_reconcile_identity(&status).is_ok());
+        assert!(snapshot_mount_reconcile_counts(&status).is_ok());
+
+        status.active_mounts = 0;
+        let error = snapshot_mount_reconcile_counts(&status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.status_inconsistent");
+
+        status.active_mounts = 1;
+        status.build_commit = Some("b".repeat(40));
+        let error = snapshot_mount_reconcile_identity(&status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.update_required");
+
+        status.build_commit = Some(crate::BUILD_COMMIT.into());
+        status.live_mounts = None;
+        let error = snapshot_mount_reconcile_counts(&status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
     }
 
     fn settings() -> Settings {
