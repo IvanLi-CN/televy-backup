@@ -45,6 +45,19 @@ enum SnapshotMountHelperReadinessTests {
             expectReadiness(!SnapshotMountHelperReadiness(reachable: true, daemonReady: true, buildCommit: expected, expectedBuildCommit: expected).isReady, "missing or malformed app identity cannot prove readiness")
         }
 
+        let activeMount = SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 1, pendingCleanup: 0)
+        expectReadiness(activeMount?.contains("1 snapshot mount record(s)") == true, "a blocking helper record must be visible in the update state")
+        expectReadiness(activeMount?.contains("wait for cleanup") == true, "an active helper mount must explain how to recover")
+        expectReadiness(!SnapshotMountHelperReadiness.canUpdate(activeMounts: 1, pendingCleanup: 0), "an active helper mount must disable update")
+
+        let pendingCleanup = SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 1, pendingCleanup: 1)
+        expectReadiness(pendingCleanup?.contains("snapshot cleanup record(s) are pending") == true, "pending cleanup must remain distinct from an active mount")
+        expectReadiness(!SnapshotMountHelperReadiness.canUpdate(activeMounts: 1, pendingCleanup: 1), "pending cleanup must disable update")
+        let mixedBlockingState = SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 2, pendingCleanup: 1)
+        expectReadiness(mixedBlockingState?.contains("Additional snapshot mount record(s)") == true, "mixed aggregate state must remain neutral about live mounts")
+        expectReadiness(mixedBlockingState?.contains("active snapshot mount") != true, "aggregate state must not claim a live mount")
+        expectReadiness(SnapshotMountHelperReadiness.canUpdate(activeMounts: 0, pendingCleanup: 0), "an idle helper may be updated")
+
         var result: (Bool, String?)?
         SnapshotMountHelperInstallation.perform(
             install: { $0(true, nil) },

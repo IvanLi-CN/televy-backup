@@ -16,8 +16,17 @@ struct SnapshotMountHelperStatusView: View {
     let recover: () -> Void
 
     var body: some View {
+        let updateBlockReason = SnapshotMountHelperReadiness.updateBlockReason(
+            activeMounts: activeMounts,
+            pendingCleanup: pendingCleanup
+        )
         VStack(alignment: .leading, spacing: 6) {
-            Label(readiness.title, systemImage: readiness.isReady ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+            Label(
+                updateBlockReason != nil && !readiness.isReady
+                    ? "Snapshot mount helper update waiting"
+                    : readiness.title,
+                systemImage: readiness.isReady ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
+            )
                 .foregroundStyle(readiness.isReady ? .green : .orange)
             if let path {
                 Text(path)
@@ -59,6 +68,11 @@ struct SnapshotMountHelperStatusView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if let updateBlockReason {
+                Text(updateBlockReason)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if let explanation = readiness.updateExplanation {
                 Text(explanation).font(.system(size: 11)).foregroundStyle(.secondary)
             } else if let error, !readiness.isReady {
@@ -67,7 +81,7 @@ struct SnapshotMountHelperStatusView: View {
             if let actionTitle = readiness.actionTitle {
                 Button(actionTitle, action: install)
                     .buttonStyle(.borderedProminent)
-                    .disabled(busy || (actionTitle == "Update mount helper" && !readiness.canUpdate))
+                    .disabled(busy || !readiness.canUpdate)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

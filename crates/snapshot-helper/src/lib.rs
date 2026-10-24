@@ -16,6 +16,8 @@ pub const DEFAULT_MOUNT_HELPER_SOCKET: &str =
     "/private/var/run/televybackup/snapshot-mount-helper.sock";
 pub const DEFAULT_MOUNT_HELPER_JOURNAL: &str =
     "/var/db/televybackup/snapshot-mount-helper/journal.sqlite";
+pub const DEFAULT_MOUNT_HELPER_MUTATION_LOCK: &str =
+    "/var/db/televybackup/snapshot-mount-helper/mutation.lock";
 pub const DEFAULT_SOCKET_PATH: &str =
     "~/Library/Application Support/TelevyBackup/snapshot-access/access.sock";
 pub const DEFAULT_JOURNAL_PATH: &str =
