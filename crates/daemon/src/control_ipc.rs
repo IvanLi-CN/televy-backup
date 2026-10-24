@@ -704,7 +704,7 @@ async fn handle_control_ipc_client(
                     details: serde_json::json!({"reason": "helper_status_failed"}),
                 })?;
             snapshot_mount_reconcile_identity(&status)?;
-            let (live_mounts, pending_cleanup, recoverable_stale_mounts, unknown_blocking_mounts) =
+            let (live_mounts, pending_cleanup, _, unknown_blocking_mounts) =
                 snapshot_mount_reconcile_counts(&status)?;
             if live_mounts > 0 {
                 return Err(ControlError {
@@ -3307,7 +3307,7 @@ mod tests {
             "active_mounts": 0,
         }))
         .unwrap();
-        let state = snapshot_mount_helper_state(Ok(legacy), &"a".repeat(40));
+        let state = snapshot_mount_helper_state(Ok(legacy.clone()), &"a".repeat(40));
         assert!(state.reachable && !state.ready);
         assert!(state.build_commit.is_none());
         assert_eq!(state.expected_build_commit, Some("a".repeat(40)));
