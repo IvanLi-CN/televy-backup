@@ -11,7 +11,11 @@ replace, validates the UUID manifest before invoking `mount_apfs`, and passes th
 identity rather than the caller's source pathname; `Release` unmounts and deletes only the manifest
 recorded for that lease, while `Cleanup` can delete only a manifest already recorded in a prepared
 journal row. Legacy helper status is accepted only for the one-time migration probe; strict lease
-acquisition rejects it before `Reserve`. The current validated strict-mode baseline also
+acquisition rejects it before `Reserve`. Status classification is additive: recent rows, pending
+cleanup, verified age-gated stale rows, and unknown rows remain distinct. An explicit reconcile
+request may reuse only the existing volume-scoped Status and journal-bound Release methods after
+the user-session Access service reports no active lease; it never introduces arbitrary lease or
+path cleanup. The current validated strict-mode baseline also
 grants FDA to this helper's exact installed identity; that additional TCC authority does not expand
 the helper into a file-reading or network boundary.
 

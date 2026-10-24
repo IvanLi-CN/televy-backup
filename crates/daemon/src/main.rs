@@ -24,7 +24,7 @@ use televy_backup_core::{
 };
 use televy_backup_core::{ProgressSink, Storage, TaskProgress};
 use televy_backup_core::{bootstrap, config as settings_config};
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex as AsyncMutex, Notify, RwLock};
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -2270,6 +2270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let status_state = Arc::new(Mutex::new(StatusRuntimeState::from_settings(&settings)));
     let backup_queue = Arc::new(Mutex::new(BackupQueue::default()));
     let backup_queue_notify = Arc::new(Notify::new());
+    let snapshot_maintenance = Arc::new(AsyncMutex::new(()));
     let settings_reload_requested = Arc::new(AtomicBool::new(false));
     let lifecycle = Arc::new(DaemonLifecycle::default());
     let runtime_logging = Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
@@ -2381,6 +2382,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             status_state: status_state.clone(),
             backup_queue: backup_queue.clone(),
             backup_queue_notify: backup_queue_notify.clone(),
+            snapshot_maintenance: snapshot_maintenance.clone(),
             settings_reload_requested: settings_reload_requested.clone(),
             lifecycle: lifecycle.clone(),
             runtime_logging: runtime_logging.clone(),
@@ -3258,6 +3260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if enabled_snapshot_volumes
                             .contains(&probe.volume_uuid.to_ascii_lowercase()) =>
                     {
+                        let _snapshot_maintenance_guard = snapshot_maintenance.lock().await;
                         match snapshot_client
                             .acquire_lease(&target.id, &probe.volume_uuid, &task_id)
                             .await

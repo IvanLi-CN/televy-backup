@@ -23,6 +23,19 @@ enum SnapshotMountHelperReadinessTests {
 
         let current = state(reachable: true, daemonReady: true, commit: candidateCommit)
         expectReadiness(current.isReady && current.actionTitle == nil, "a verified current helper must be ready")
+        let clear = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: true, buildCommit: candidateCommit,
+            expectedBuildCommit: candidateCommit, liveMounts: 0, pendingCleanup: 0,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0
+        )
+        expectReadiness(clear.canUpdate, "a verified helper with a complete clear status can be updated")
+        let recoverable = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: true, buildCommit: candidateCommit,
+            expectedBuildCommit: candidateCommit, liveMounts: 0, pendingCleanup: 1,
+            recoverableStaleMounts: 1, unknownBlockingMounts: 0
+        )
+        expectReadiness(!recoverable.canUpdate, "recoverable stale rows must keep helper mutation blocked")
+        expectReadiness(!current.canUpdate, "missing additive status fields must not become a false zero")
         expectReadiness(!state(reachable: false, daemonReady: true, commit: candidateCommit).isReady, "unreachable helpers cannot be ready")
         expectReadiness(state(reachable: false, daemonReady: false, commit: nil).actionTitle == "Install mount helper", "missing helpers need an installation action")
         expectReadiness(!state(reachable: true, daemonReady: false, commit: candidateCommit).isReady, "a failed daemon verification cannot be overridden")

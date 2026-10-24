@@ -201,6 +201,16 @@ pub struct MountStatusResult {
     pub blocked_volume_uuids: Vec<String>,
     #[serde(default)]
     pub recovery_leases: Vec<MountRecoveryLease>,
+    /// Recent reserved/prepared/active rows that still have a live owner.
+    #[serde(default)]
+    pub live_mounts: Option<u32>,
+    /// Age-gated rows whose journal identity is complete enough for the existing Release path
+    /// to revalidate and clean precisely.
+    #[serde(default)]
+    pub recoverable_stale_mounts: Option<u32>,
+    /// Blocking rows that are neither live nor safely recoverable.
+    #[serde(default)]
+    pub unknown_blocking_mounts: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

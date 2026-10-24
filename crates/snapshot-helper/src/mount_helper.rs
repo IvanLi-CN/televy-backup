@@ -28,7 +28,8 @@ use crate::{
     validate_mount_request,
 };
 
-pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.0";
+pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.1";
+pub const PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.0";
 pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
 const MOUNT_ROOT_BASE: &str = "/private/var/tmp/televybackup-snapshot-mounts";
@@ -146,6 +147,7 @@ pub fn renew(uid: u32, lease_id: &str) -> Result<MountReleaseResult, MountHelper
 
 fn validate_status_result(result: &MountStatusResult) -> Result<(), MountHelperError> {
     if result.helper_version != ROOT_MOUNT_HELPER_VERSION
+        && result.helper_version != PREVIOUS_ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != LEGACY_ROOT_MOUNT_HELPER_VERSION
     {
         return Err(MountHelperError::Protocol(format!(
@@ -706,32 +708,12 @@ async fn status_result(
     pool: &SqlitePool,
     peer_uid: u32,
 ) -> Result<MountStatusResult, MountHelperError> {
-    let active_mounts = (if peer_uid == 0 {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
-        )
-        .fetch_one(pool)
-        .await?
-    } else {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM mounts WHERE uid = ? AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
-        )
-        .bind(i64::from(peer_uid))
-        .fetch_one(pool)
-        .await?
-    }) as u32;
-    let pending_cleanup = (if peer_uid == 0 {
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM mounts WHERE state = 'cleanup_pending'")
-            .fetch_one(pool)
-            .await?
-    } else {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM mounts WHERE uid = ? AND state = 'cleanup_pending'",
-        )
-        .bind(i64::from(peer_uid))
-        .fetch_one(pool)
-        .await?
-    }) as u32;
+    let classification = classify_status_rows(
+        pool,
+        (peer_uid != 0).then_some(peer_uid),
+        None,
+    )
+    .await?;
     let blocked_volume_uuids = if peer_uid == 0 {
         sqlx::query_scalar::<_, String>(
             "SELECT DISTINCT volume_uuid FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
@@ -749,10 +731,13 @@ async fn status_result(
     Ok(MountStatusResult {
         helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
-        active_mounts,
-        pending_cleanup,
+        active_mounts: classification.active_mounts,
+        pending_cleanup: classification.pending_cleanup,
         blocked_volume_uuids,
-        recovery_leases: Vec::new(),
+        recovery_leases: classification.recovery_leases,
+        live_mounts: Some(classification.live_mounts),
+        recoverable_stale_mounts: Some(classification.recoverable_stale_mounts),
+        unknown_blocking_mounts: Some(classification.unknown_blocking_mounts),
     })
 }
 
@@ -768,49 +753,103 @@ async fn status_for_volume_result(
         ));
     }
     validate_uuid(volume_uuid)?;
-    let active_mounts = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
-    )
-    .bind(volume_uuid)
-    .fetch_one(pool)
-    .await? as u32;
-    let pending_cleanup = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'cleanup_pending'",
-    )
-    .bind(volume_uuid)
-    .fetch_one(pool)
-    .await? as u32;
+    let classification = classify_status_rows(pool, None, Some((volume_uuid, uid))).await?;
     let blocked_volume_uuids = sqlx::query_scalar::<_, String>(
         "SELECT DISTINCT volume_uuid FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
     )
     .bind(volume_uuid)
     .fetch_all(pool)
     .await?;
-    let recovery_rows = sqlx::query(
-        "SELECT lease_id, state FROM mounts WHERE lower(volume_uuid) = lower(?) AND last_renewed_at <= datetime('now', ?) AND ((state IN ('reserved', 'cleanup_pending') AND snapshot_manifest = '[]' AND mount_root = '') OR (uid = ? AND state IN ('prepared', 'cleanup_pending') AND mount_root = ''))",
-    )
-    .bind(volume_uuid)
-    .bind(RECOVERY_AGE_SECONDS)
-    .bind(i64::from(uid))
-    .fetch_all(pool)
-    .await?;
-    let recovery_leases = recovery_rows
-        .into_iter()
-        .map(|row| {
-            Ok(MountRecoveryLease {
-                lease_id: row.try_get("lease_id")?,
-                state: row.try_get("state")?,
-            })
-        })
-        .collect::<Result<Vec<_>, sqlx::Error>>()?;
     Ok(MountStatusResult {
         helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
-        active_mounts,
-        pending_cleanup,
+        active_mounts: classification.active_mounts,
+        pending_cleanup: classification.pending_cleanup,
         blocked_volume_uuids,
-        recovery_leases,
+        recovery_leases: classification.recovery_leases,
+        live_mounts: Some(classification.live_mounts),
+        recoverable_stale_mounts: Some(classification.recoverable_stale_mounts),
+        unknown_blocking_mounts: Some(classification.unknown_blocking_mounts),
     })
+}
+
+struct StatusClassification {
+    active_mounts: u32,
+    pending_cleanup: u32,
+    live_mounts: u32,
+    recoverable_stale_mounts: u32,
+    unknown_blocking_mounts: u32,
+    recovery_leases: Vec<MountRecoveryLease>,
+}
+
+async fn classify_status_rows(
+    pool: &SqlitePool,
+    scope_uid: Option<u32>,
+    volume_scope: Option<(&str, u32)>,
+) -> Result<StatusClassification, MountHelperError> {
+    let mut statement = String::from(
+        "SELECT lease_id, uid, device_identifier, state, mount_root, snapshot_manifest, CASE WHEN last_renewed_at <= datetime('now', ?) THEN 1 ELSE 0 END AS stale_row, CASE WHEN last_renewed_at > datetime('now', ?) THEN 1 ELSE 0 END AS live_row FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+    );
+    if scope_uid.is_some() {
+        statement.push_str(" AND uid = ?");
+    }
+    if volume_scope.is_some() {
+        statement.push_str(" AND lower(volume_uuid) = lower(?)");
+    }
+    let mut query = sqlx::query(&statement)
+        .bind(RECOVERY_AGE_SECONDS)
+        .bind(RECOVERY_AGE_SECONDS);
+    if let Some(scope_uid) = scope_uid {
+        query = query.bind(i64::from(scope_uid));
+    }
+    if let Some((volume_uuid, _)) = volume_scope {
+        query = query.bind(volume_uuid);
+    }
+    let rows = query.fetch_all(pool).await?;
+    let mut classification = StatusClassification {
+        active_mounts: rows.len() as u32,
+        pending_cleanup: 0,
+        live_mounts: 0,
+        recoverable_stale_mounts: 0,
+        unknown_blocking_mounts: 0,
+        recovery_leases: Vec::new(),
+    };
+    for row in rows {
+        let lease_id: String = row.try_get("lease_id")?;
+        let uid: i64 = row.try_get("uid")?;
+        let device_identifier: String = row.try_get("device_identifier")?;
+        let state: String = row.try_get("state")?;
+        let mount_root: String = row.try_get("mount_root")?;
+        let snapshot_manifest: String = row.try_get("snapshot_manifest")?;
+        let stale = row.try_get::<i64, _>("stale_row")? == 1;
+        let live = row.try_get::<i64, _>("live_row")? == 1;
+        let expected_root = expected_mount_root(uid, &lease_id).ok();
+        let recoverable = stale
+            && volume_scope
+                .map(|(_, owner_uid)| uid == i64::from(owner_uid))
+                .or_else(|| scope_uid.map(|scope_uid| uid == i64::from(scope_uid)))
+                .unwrap_or(true)
+            && !mount_root.is_empty()
+            && snapshot_manifest != "[]"
+            && parse_journal_manifest(&snapshot_manifest).is_ok()
+            && validate_device(&device_identifier).is_ok()
+            && expected_root.as_deref() == Some(Path::new(&mount_root))
+            && matches!(state.as_str(), "reserved" | "prepared" | "active" | "cleanup_pending");
+        if state == "cleanup_pending" {
+            classification.pending_cleanup += 1;
+        }
+        if recoverable {
+            classification.recoverable_stale_mounts += 1;
+            classification.recovery_leases.push(MountRecoveryLease { lease_id, state });
+        } else if live && state != "cleanup_pending" {
+            classification.live_mounts += 1;
+        } else if state != "cleanup_pending" {
+            classification.unknown_blocking_mounts += 1;
+        } else if !recoverable {
+            classification.unknown_blocking_mounts += 1;
+        }
+    }
+    Ok(classification)
 }
 
 async fn audit_released_tombstones(
@@ -2971,7 +3010,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_exposes_only_age_gated_reserved_recovery_leases() {
+    async fn status_keeps_an_unmaterialized_reserved_lease_unknown() {
         let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
         init_journal(&journal).await.unwrap();
         sqlx::query(
@@ -2989,11 +3028,8 @@ mod tests {
             status_for_volume_result(501, 501, "C8A38394-49AE-42F9-85FB-14DD9EA549FA", &journal)
                 .await
                 .unwrap();
-        assert_eq!(status.recovery_leases.len(), 1);
-        assert_eq!(
-            status.recovery_leases[0].lease_id,
-            "A8A38394-49AE-42F9-85FB-14DD9EA549FA"
-        );
+        assert!(status.recovery_leases.is_empty());
+        assert_eq!(status.unknown_blocking_mounts, Some(1));
     }
 
     #[tokio::test]
@@ -3015,7 +3051,8 @@ mod tests {
             status_for_volume_result(501, 501, "C8A38394-49AE-42F9-85FB-14DD9EA549FA", &journal)
                 .await
                 .unwrap();
-        assert_eq!(status.recovery_leases.len(), 1);
+        assert!(status.recovery_leases.is_empty());
+        assert_eq!(status.unknown_blocking_mounts, Some(1));
     }
 
     #[tokio::test]
@@ -3023,12 +3060,14 @@ mod tests {
         let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
         init_journal(&journal).await.unwrap();
         sqlx::query(
-            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, '', '', '[]', 'active', datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))",
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, '', ?, ?, 'active', datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))",
         )
         .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
         .bind(501_i64)
         .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
         .bind("disk5s1")
+        .bind("/private/var/tmp/televybackup-snapshot-mounts/501/A8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind(r#"[{"device_identifier":"disk5s1","uuid":"B8A38394-49AE-42F9-85FB-14DD9EA549FA"}]"#)
         .execute(&journal)
         .await
         .unwrap();

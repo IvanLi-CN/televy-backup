@@ -118,11 +118,14 @@ enum BackupFailureHistoryPreview {
                                 expectedBuildCommit: candidate
                             ),
                             path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
-                            version: state == "missing" ? nil : "0.5.0",
+                            version: state == "missing" ? nil : "0.5.1",
                             error: state == "missing" ? "The mount helper is not installed." : nil,
                             activeMounts: state == "pending" ? 1 : 0,
                             pendingCleanup: state == "pending" ? 1 : 0,
-                            busy: false, install: {}
+                            liveMounts: state == "pending" ? 0 : 0,
+                            recoverableStaleMounts: state == "pending" ? 1 : 0,
+                            unknownBlockingMounts: 0,
+                            busy: false, install: {}, recover: {}
                         )
                     }
                 }

@@ -342,8 +342,11 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let mountHelperBuildCommit: String?
     let mountHelperVersion: String?
     let mountHelperError: String?
-    let mountHelperActiveMounts: UInt32
-    let mountHelperPendingCleanup: UInt32
+    let mountHelperActiveMounts: UInt32?
+    let mountHelperPendingCleanup: UInt32?
+    let mountHelperLiveMounts: UInt32?
+    let mountHelperRecoverableStaleMounts: UInt32?
+    let mountHelperUnknownBlockingMounts: UInt32?
     let activeLeases: UInt32
     let pendingCleanup: UInt32
     let volumes: [SnapshotVolumeStatus]
@@ -351,7 +354,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, registeredAccessAppPath, accessAppRegistrationMismatch, managedBy, migrationState, legacyRegistrationPath, fdaReady, fdaCheckError, accessAppError
         case mountHelperPath, mountHelperReachable, mountHelperReady, mountHelperBuildCommit, mountHelperVersion, mountHelperError
-        case mountHelperActiveMounts, mountHelperPendingCleanup
+        case mountHelperActiveMounts, mountHelperPendingCleanup, mountHelperLiveMounts, mountHelperRecoverableStaleMounts, mountHelperUnknownBlockingMounts
         case helperAvailable, helperVersion, helperError
         case activeLeases, pendingCleanup, volumes
     }
@@ -375,8 +378,11 @@ struct SnapshotControlStatus: Decodable, Equatable {
         mountHelperBuildCommit: String? = nil,
         mountHelperVersion: String? = nil,
         mountHelperError: String? = nil,
-        mountHelperActiveMounts: UInt32 = 0,
-        mountHelperPendingCleanup: UInt32 = 0,
+        mountHelperActiveMounts: UInt32? = nil,
+        mountHelperPendingCleanup: UInt32? = nil,
+        mountHelperLiveMounts: UInt32? = nil,
+        mountHelperRecoverableStaleMounts: UInt32? = nil,
+        mountHelperUnknownBlockingMounts: UInt32? = nil,
         activeLeases: UInt32,
         pendingCleanup: UInt32,
         volumes: [SnapshotVolumeStatus]
@@ -401,6 +407,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
         self.mountHelperError = mountHelperError
         self.mountHelperActiveMounts = mountHelperActiveMounts
         self.mountHelperPendingCleanup = mountHelperPendingCleanup
+        self.mountHelperLiveMounts = mountHelperLiveMounts
+        self.mountHelperRecoverableStaleMounts = mountHelperRecoverableStaleMounts
+        self.mountHelperUnknownBlockingMounts = mountHelperUnknownBlockingMounts
         self.activeLeases = activeLeases
         self.pendingCleanup = pendingCleanup
         self.volumes = volumes
@@ -430,8 +439,11 @@ struct SnapshotControlStatus: Decodable, Equatable {
         mountHelperBuildCommit = try values.decodeIfPresent(String.self, forKey: .mountHelperBuildCommit)
         mountHelperVersion = try values.decodeIfPresent(String.self, forKey: .mountHelperVersion)
         mountHelperError = try values.decodeIfPresent(String.self, forKey: .mountHelperError)
-        mountHelperActiveMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperActiveMounts) ?? 0
-        mountHelperPendingCleanup = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperPendingCleanup) ?? 0
+        mountHelperActiveMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperActiveMounts)
+        mountHelperPendingCleanup = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperPendingCleanup)
+        mountHelperLiveMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperLiveMounts)
+        mountHelperRecoverableStaleMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperRecoverableStaleMounts)
+        mountHelperUnknownBlockingMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperUnknownBlockingMounts)
         activeLeases = try values.decodeIfPresent(UInt32.self, forKey: .activeLeases) ?? 0
         pendingCleanup = try values.decodeIfPresent(UInt32.self, forKey: .pendingCleanup) ?? 0
         volumes = try values.decodeIfPresent([SnapshotVolumeStatus].self, forKey: .volumes) ?? []
@@ -440,7 +452,11 @@ struct SnapshotControlStatus: Decodable, Equatable {
     func mountHelperReadiness(expectedBuildCommit: String?) -> SnapshotMountHelperReadiness {
         SnapshotMountHelperReadiness(
             reachable: mountHelperReachable, daemonReady: mountHelperReady,
-            buildCommit: mountHelperBuildCommit, expectedBuildCommit: expectedBuildCommit
+            buildCommit: mountHelperBuildCommit, expectedBuildCommit: expectedBuildCommit,
+            liveMounts: mountHelperLiveMounts,
+            pendingCleanup: mountHelperPendingCleanup,
+            recoverableStaleMounts: mountHelperRecoverableStaleMounts,
+            unknownBlockingMounts: mountHelperUnknownBlockingMounts
         )
     }
 }
@@ -1129,8 +1145,12 @@ struct SettingsWindowRootView: View {
                             error: snapshotStatus.mountHelperError,
                             activeMounts: snapshotStatus.mountHelperActiveMounts,
                             pendingCleanup: snapshotStatus.mountHelperPendingCleanup,
+                            liveMounts: snapshotStatus.mountHelperLiveMounts,
+                            recoverableStaleMounts: snapshotStatus.mountHelperRecoverableStaleMounts,
+                            unknownBlockingMounts: snapshotStatus.mountHelperUnknownBlockingMounts,
                             busy: snapshotBusy || SettingsUIDemo.enabled,
-                            install: installSnapshotMountHelper
+                            install: installSnapshotMountHelper,
+                            recover: recoverSnapshotMountRecords
                         )
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1190,10 +1210,13 @@ struct SettingsWindowRootView: View {
                 mountHelperReachable: !accessMissing && !mountHelperMissing,
                 mountHelperReady: !accessMissing && !mountHelperMissing && !mountHelperOutdated,
                 mountHelperBuildCommit: mountHelperOutdated ? nil : expectedSnapshotBuildCommit,
-                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.0" : nil,
+                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.1" : nil,
                 mountHelperError: mountHelperMissing ? "Snapshot mount helper is not installed" : nil,
                 mountHelperActiveMounts: 0,
                 mountHelperPendingCleanup: 0,
+                mountHelperLiveMounts: 0,
+                mountHelperRecoverableStaleMounts: SettingsUIDemo.scene == "snapshots-cleanup-pending" ? 1 : 0,
+                mountHelperUnknownBlockingMounts: 0,
                 activeLeases: 0,
                 pendingCleanup: SettingsUIDemo.scene == "snapshots-cleanup-pending" ? 1 : 0,
                 volumes: (settings?.snapshot_volumes ?? [:]).map { SnapshotVolumeStatus(volumeUuid: $0.key, enabled: $0.value.enabled, mode: $0.value.enabled ? "strict" : "disabled") }
@@ -1205,6 +1228,29 @@ struct SettingsWindowRootView: View {
             snapshotBusy = false
             snapshotStatus = status
             snapshotError = error
+        }
+    }
+
+    private func recoverSnapshotMountRecords() {
+        snapshotBusy = true
+        snapshotError = nil
+        let socketPath = model.controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result: Result<ControlJSONValue, ControlRequestFailure> = ControlIPCClient.requestOperation(
+                socketPath: socketPath,
+                method: "snapshot.mount_helper.reconcile",
+                operationTimeoutSeconds: 30
+            )
+            DispatchQueue.main.async {
+                snapshotBusy = false
+                switch result {
+                case .success:
+                    refreshSnapshotStatus()
+                case let .failure(error):
+                    snapshotError = controlFailureMessage(error)
+                    refreshSnapshotStatus()
+                }
+            }
         }
     }
 

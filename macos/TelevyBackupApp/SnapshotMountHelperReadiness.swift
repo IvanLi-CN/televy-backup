@@ -4,9 +4,26 @@ import Foundation
 struct SnapshotMountHelperReadiness {
     let reachable: Bool
     let isReady: Bool
+    let liveMounts: UInt32?
+    let pendingCleanup: UInt32?
+    let recoverableStaleMounts: UInt32?
+    let unknownBlockingMounts: UInt32?
 
-    init(reachable: Bool, daemonReady: Bool, buildCommit: String?, expectedBuildCommit: String?) {
+    init(
+        reachable: Bool,
+        daemonReady: Bool,
+        buildCommit: String?,
+        expectedBuildCommit: String?,
+        liveMounts: UInt32? = nil,
+        pendingCleanup: UInt32? = nil,
+        recoverableStaleMounts: UInt32? = nil,
+        unknownBlockingMounts: UInt32? = nil
+    ) {
         self.reachable = reachable
+        self.liveMounts = liveMounts
+        self.pendingCleanup = pendingCleanup
+        self.recoverableStaleMounts = recoverableStaleMounts
+        self.unknownBlockingMounts = unknownBlockingMounts
         let validExpected = expectedBuildCommit.map {
             $0.utf8.count == 40 && $0.utf8.allSatisfy { (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }
         } ?? false
@@ -24,8 +41,21 @@ struct SnapshotMountHelperReadiness {
     }
 
     var updateExplanation: String? {
-        reachable && !isReady
-            ? "The installed helper has not been verified for this app. Update it to use the latest fixes."
-            : nil
+        guard reachable && !isReady else { return nil }
+        return "The installed helper has not been verified for this app. Update it to use the latest fixes."
+    }
+
+    var classificationKnown: Bool {
+        liveMounts != nil && pendingCleanup != nil && recoverableStaleMounts != nil && unknownBlockingMounts != nil
+    }
+
+    var hasBlockingRecords: Bool {
+        [liveMounts, pendingCleanup, recoverableStaleMounts, unknownBlockingMounts]
+            .compactMap { $0 }
+            .contains { $0 > 0 }
+    }
+
+    var canUpdate: Bool {
+        isReady && classificationKnown && !hasBlockingRecords
     }
 }

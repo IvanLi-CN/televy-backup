@@ -6,10 +6,14 @@ struct SnapshotMountHelperStatusView: View {
     let path: String?
     let version: String?
     let error: String?
-    let activeMounts: UInt32
-    let pendingCleanup: UInt32
+    let activeMounts: UInt32?
+    let pendingCleanup: UInt32?
+    let liveMounts: UInt32?
+    let recoverableStaleMounts: UInt32?
+    let unknownBlockingMounts: UInt32?
     let busy: Bool
     let install: () -> Void
+    let recover: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -23,11 +27,35 @@ struct SnapshotMountHelperStatusView: View {
             if let version {
                 Text("Version \(version)").font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            if pendingCleanup > 0 {
-                let mountDescription = activeMounts == pendingCleanup
-                    ? "No active mount is running, but strict mode remains blocked until the recorded snapshot inventory is reconciled."
-                    : "An active snapshot mount is also present; wait for it to finish before updating the helper."
-                Text("\(pendingCleanup) snapshot cleanup record(s) are pending. \(mountDescription)")
+            if let liveMounts, liveMounts > 0 {
+                Text("\(liveMounts) active snapshot mount(s) are still running. Finish the backup before updating the helper.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let pendingCleanup, pendingCleanup > 0 {
+                Text("\(pendingCleanup) snapshot cleanup record(s) are pending. Strict mode remains blocked until cleanup is complete.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let recoverableStaleMounts, recoverableStaleMounts > 0 {
+                Text("\(recoverableStaleMounts) stale snapshot mount record(s) can be safely recovered.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Recover stale mount records", action: recover)
+                    .buttonStyle(.bordered)
+                    .disabled(busy || (liveMounts ?? 0) != 0 || (unknownBlockingMounts ?? 0) != 0)
+            }
+            if let unknownBlockingMounts, unknownBlockingMounts > 0 {
+                Text("\(unknownBlockingMounts) snapshot record(s) cannot be verified safely. Open Diagnostics and finish or repair the owning run.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !readiness.classificationKnown && readiness.isReady {
+                Text("The installed helper did not report a complete mount status. Refresh diagnostics before changing it.")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -39,7 +67,7 @@ struct SnapshotMountHelperStatusView: View {
             if let actionTitle = readiness.actionTitle {
                 Button(actionTitle, action: install)
                     .buttonStyle(.borderedProminent)
-                    .disabled(busy)
+                    .disabled(busy || (actionTitle == "Update mount helper" && !readiness.canUpdate))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
