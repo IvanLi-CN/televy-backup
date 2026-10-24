@@ -645,9 +645,7 @@ async fn handle_control_ipc_client(
                     retryable: true,
                     details: serde_json::json!({"reason": "helper_status_failed"}),
                 })?;
-            if status.component_version.as_deref()
-                != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
-            {
+            if status.component_version.as_deref() != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION) {
                 return Err(ControlError {
                     code: "snapshot_mount_helper.update_required".to_string(),
                     message: "Update the snapshot mount helper before recovering stale records."
@@ -688,23 +686,22 @@ async fn handle_control_ipc_client(
                 .into_iter()
                 .map(|lease| lease.lease_id)
             {
-                let released = tokio::task::spawn_blocking(move || {
-                    mount_helper::release(uid, &lease_id)
-                })
-                .await
-                .map_err(|_| {
-                    ControlError::unavailable(
-                        "Snapshot mount release task failed.",
-                        serde_json::json!({}),
-                    )
-                })?
-                .map_err(|_| ControlError {
-                    code: "snapshot_mount_helper.reconcile_failed".to_string(),
-                    message: "A stale snapshot mount record could not be safely recovered."
-                        .to_string(),
-                    retryable: true,
-                    details: serde_json::json!({"reason": "release_rejected"}),
-                })?;
+                let released =
+                    tokio::task::spawn_blocking(move || mount_helper::release(uid, &lease_id))
+                        .await
+                        .map_err(|_| {
+                            ControlError::unavailable(
+                                "Snapshot mount release task failed.",
+                                serde_json::json!({}),
+                            )
+                        })?
+                        .map_err(|_| ControlError {
+                            code: "snapshot_mount_helper.reconcile_failed".to_string(),
+                            message: "A stale snapshot mount record could not be safely recovered."
+                                .to_string(),
+                            retryable: true,
+                            details: serde_json::json!({"reason": "release_rejected"}),
+                        })?;
                 if released.cleanup_state == "released" {
                     recovered += 1;
                 }
