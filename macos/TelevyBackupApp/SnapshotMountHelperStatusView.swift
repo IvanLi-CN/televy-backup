@@ -55,16 +55,7 @@ struct SnapshotMountHelperStatusView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Button("Recover stale mount records", action: recover)
                     .buttonStyle(.bordered)
-                    .disabled(
-                        busy
-                            || !readiness.isReady
-                            || liveMounts == nil
-                            || pendingCleanup == nil
-                            || unknownBlockingMounts == nil
-                            || (liveMounts ?? 0) != 0
-                            || (pendingCleanup ?? 0) != 0
-                            || (unknownBlockingMounts ?? 0) != 0
-                    )
+                    .disabled(busy || !readiness.canRecoverStaleMounts)
             }
             if let unknownBlockingMounts, unknownBlockingMounts > 0 {
                 Text("\(unknownBlockingMounts) snapshot record(s) cannot be verified safely. Open Diagnostics and finish or repair the owning run.")

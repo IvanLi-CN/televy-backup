@@ -71,6 +71,22 @@ struct SnapshotMountHelperReadiness {
         return activeMounts == 0 && pendingCleanup == 0
     }
 
+    var canRecoverStaleMounts: Bool {
+        guard isReady,
+              classificationKnown,
+              let activeMounts,
+              let liveMounts,
+              let pendingCleanup,
+              let recoverableStaleMounts,
+              let unknownBlockingMounts
+        else { return false }
+        return recoverableStaleMounts > 0
+            && liveMounts == 0
+            && pendingCleanup == 0
+            && unknownBlockingMounts == 0
+            && activeMounts == recoverableStaleMounts
+    }
+
     /// The root helper's legacy-compatible aggregate is blocking even when the
     /// optional cleanup breakdown is unavailable. Never offer an update while
     /// that aggregate still contains a journal row.
