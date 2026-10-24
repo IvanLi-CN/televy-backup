@@ -4,6 +4,7 @@ import Foundation
 struct SnapshotMountHelperReadiness {
     let reachable: Bool
     let isReady: Bool
+    let activeMounts: UInt32?
     let liveMounts: UInt32?
     let pendingCleanup: UInt32?
     let recoverableStaleMounts: UInt32?
@@ -14,12 +15,14 @@ struct SnapshotMountHelperReadiness {
         daemonReady: Bool,
         buildCommit: String?,
         expectedBuildCommit: String?,
+        activeMounts: UInt32? = nil,
         liveMounts: UInt32? = nil,
         pendingCleanup: UInt32? = nil,
         recoverableStaleMounts: UInt32? = nil,
         unknownBlockingMounts: UInt32? = nil
     ) {
         self.reachable = reachable
+        self.activeMounts = activeMounts
         self.liveMounts = liveMounts
         self.pendingCleanup = pendingCleanup
         self.recoverableStaleMounts = recoverableStaleMounts
@@ -56,6 +59,12 @@ struct SnapshotMountHelperReadiness {
     }
 
     var canUpdate: Bool {
-        isReady && classificationKnown && !hasBlockingRecords
+        guard reachable else { return false }
+        if classificationKnown {
+            return !hasBlockingRecords
+        }
+        // Legacy helpers do not report the additive classification fields. Their
+        // aggregate counters are still safe to use as a conservative update gate.
+        return activeMounts == 0 && pendingCleanup == 0
     }
 }

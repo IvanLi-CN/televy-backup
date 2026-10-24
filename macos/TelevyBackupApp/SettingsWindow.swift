@@ -453,6 +453,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
         SnapshotMountHelperReadiness(
             reachable: mountHelperReachable, daemonReady: mountHelperReady,
             buildCommit: mountHelperBuildCommit, expectedBuildCommit: expectedBuildCommit,
+            activeMounts: mountHelperActiveMounts,
             liveMounts: mountHelperLiveMounts,
             pendingCleanup: mountHelperPendingCleanup,
             recoverableStaleMounts: mountHelperRecoverableStaleMounts,

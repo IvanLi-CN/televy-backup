@@ -662,6 +662,15 @@ async fn handle_control_ipc_client(
                         details: serde_json::json!({"liveMounts": status.live_mounts}),
                     });
                 }
+                if status.unknown_blocking_mounts.unwrap_or(1) > 0 {
+                    return Err(ControlError {
+                        code: "snapshot_mount_helper.unknown_blocker".to_string(),
+                        message:
+                            "Some snapshot mount records could not be verified safely.".to_string(),
+                        retryable: true,
+                        details: serde_json::json!({"unknown": status.unknown_blocking_mounts}),
+                    });
+                }
                 let candidate_ids = status
                     .recovery_leases
                     .into_iter()

@@ -12,26 +12,28 @@ private func expectReadiness(_ condition: @autoclosure () -> Bool, _ message: St
 @main
 enum SnapshotMountHelperReadinessTests {
     static func main() {
-        let legacy = state(reachable: true, daemonReady: false, commit: nil)
+        let legacy = state(reachable: true, daemonReady: false, commit: nil, activeMounts: 0, pendingCleanup: 0)
         expectReadiness(!legacy.isReady, "a reachable legacy helper must require an update")
         expectReadiness(legacy.actionTitle == "Update mount helper", "the old helper must retain its update action")
         expectReadiness(legacy.updateExplanation != nil, "the update requirement must explain the available action")
+        expectReadiness(legacy.canUpdate, "a legacy helper with no aggregate blockers must remain updateable")
 
-        let stale = state(reachable: true, daemonReady: true, commit: String(repeating: "b", count: 40))
+        let stale = state(reachable: true, daemonReady: true, commit: String(repeating: "b", count: 40), activeMounts: 1, pendingCleanup: 0)
         expectReadiness(!stale.isReady, "a stale daemon's ready flag must not override the current app identity")
         expectReadiness(stale.actionTitle == "Update mount helper", "a same-version stale build needs an update action")
+        expectReadiness(!stale.canUpdate, "legacy aggregate blockers must keep the update action disabled")
 
         let current = state(reachable: true, daemonReady: true, commit: candidateCommit)
         expectReadiness(current.isReady && current.actionTitle == nil, "a verified current helper must be ready")
         let clear = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
-            expectedBuildCommit: candidateCommit, liveMounts: 0, pendingCleanup: 0,
+            expectedBuildCommit: candidateCommit, activeMounts: 0, liveMounts: 0, pendingCleanup: 0,
             recoverableStaleMounts: 0, unknownBlockingMounts: 0
         )
         expectReadiness(clear.canUpdate, "a verified helper with a complete clear status can be updated")
         let recoverable = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
-            expectedBuildCommit: candidateCommit, liveMounts: 0, pendingCleanup: 1,
+            expectedBuildCommit: candidateCommit, activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
             recoverableStaleMounts: 1, unknownBlockingMounts: 0
         )
         expectReadiness(!recoverable.canUpdate, "recoverable stale rows must keep helper mutation blocked")
@@ -62,7 +64,17 @@ enum SnapshotMountHelperReadinessTests {
         print("OK: SnapshotMountHelperReadinessTests")
     }
 
-    private static func state(reachable: Bool, daemonReady: Bool, commit: String?) -> SnapshotMountHelperReadiness {
-        SnapshotMountHelperReadiness(reachable: reachable, daemonReady: daemonReady, buildCommit: commit, expectedBuildCommit: candidateCommit)
+    private static func state(
+        reachable: Bool,
+        daemonReady: Bool,
+        commit: String?,
+        activeMounts: UInt32? = nil,
+        pendingCleanup: UInt32? = nil
+    ) -> SnapshotMountHelperReadiness {
+        SnapshotMountHelperReadiness(
+            reachable: reachable, daemonReady: daemonReady, buildCommit: commit,
+            expectedBuildCommit: candidateCommit, activeMounts: activeMounts,
+            pendingCleanup: pendingCleanup
+        )
     }
 }

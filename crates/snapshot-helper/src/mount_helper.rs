@@ -784,7 +784,7 @@ async fn classify_status_rows(
     volume_scope: Option<(&str, u32)>,
 ) -> Result<StatusClassification, MountHelperError> {
     let mut statement = String::from(
-        "SELECT lease_id, uid, device_identifier, state, mount_root, snapshot_manifest, CASE WHEN last_renewed_at <= datetime('now', ?) THEN 1 ELSE 0 END AS stale_row, CASE WHEN last_renewed_at > datetime('now', ?) THEN 1 ELSE 0 END AS live_row FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+        "SELECT lease_id, uid, device_identifier, state, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, CASE WHEN last_renewed_at <= datetime('now', ?) THEN 1 ELSE 0 END AS stale_row, CASE WHEN last_renewed_at > datetime('now', ?) THEN 1 ELSE 0 END AS live_row FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
     );
     if scope_uid.is_some() {
         statement.push_str(" AND uid = ?");
@@ -817,19 +817,26 @@ async fn classify_status_rows(
         let state: String = row.try_get("state")?;
         let mount_root: String = row.try_get("mount_root")?;
         let snapshot_manifest: String = row.try_get("snapshot_manifest")?;
+        let reservation_manifest: String = row.try_get("reservation_manifest")?;
+        let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
         let stale = row.try_get::<i64, _>("stale_row")? == 1;
         let live = row.try_get::<i64, _>("live_row")? == 1;
-        let expected_root = expected_mount_root(uid, &lease_id).ok();
+        let manifest_valid = parse_journal_manifest(&snapshot_manifest).is_ok();
+        let reservation_valid = reservation_manifest_valid == 1
+            && parse_reservation_manifest(&reservation_manifest).is_ok();
+        let managed_root = expected_mount_root(uid, &lease_id)
+            .ok()
+            .as_deref()
+            .is_some_and(|expected| !mount_root.is_empty() && Path::new(&mount_root) == expected);
         let recoverable = stale
             && volume_scope
                 .map(|(_, owner_uid)| uid == i64::from(owner_uid))
                 .or_else(|| scope_uid.map(|scope_uid| uid == i64::from(scope_uid)))
                 .unwrap_or(true)
-            && !mount_root.is_empty()
-            && snapshot_manifest != "[]"
-            && parse_journal_manifest(&snapshot_manifest).is_ok()
+            && reservation_valid
+            && ((mount_root.is_empty() && (snapshot_manifest == "[]" || manifest_valid))
+                || (!mount_root.is_empty() && manifest_valid && managed_root))
             && validate_device(&device_identifier).is_ok()
-            && expected_root.as_deref() == Some(Path::new(&mount_root))
             && matches!(
                 state.as_str(),
                 "reserved" | "prepared" | "active" | "cleanup_pending"
@@ -3079,6 +3086,31 @@ mod tests {
                 .unwrap();
         assert_eq!(status.recovery_leases.len(), 1);
         assert_eq!(status.recovery_leases[0].state, "active");
+    }
+
+    #[tokio::test]
+    async fn status_exposes_an_age_gated_reserved_lease_with_a_valid_baseline_for_recovery() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, '', '', '[]', ?, 1, 'reserved', datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))",
+        )
+        .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FB")
+        .bind(501_i64)
+        .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind("disk5s1")
+        .bind(r#"[{"device_identifier":"disk5s1","uuid":"B8A38394-49AE-42F9-85FB-14DD9EA549FA"}]"#)
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        let status =
+            status_for_volume_result(501, 501, "C8A38394-49AE-42F9-85FB-14DD9EA549FA", &journal)
+                .await
+                .unwrap();
+        assert_eq!(status.recovery_leases.len(), 1);
+        assert_eq!(status.recovery_leases[0].state, "reserved");
+        assert_eq!(status.recoverable_stale_mounts, Some(1));
     }
 
     #[test]
