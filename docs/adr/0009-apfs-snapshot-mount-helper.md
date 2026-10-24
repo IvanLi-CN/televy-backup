@@ -20,6 +20,10 @@ lease or path cleanup. The current validated strict-mode baseline also
 grants FDA to this helper's exact installed identity; that additional TCC authority does not expand
 the helper into a file-reading or network boundary.
 
+If deletion finishes before a process crash, an exact match to the recorded reservation baseline
+permits an idempotent released-tombstone transition. A mounted journal row without a positive
+recorded mount-device identity remains unknown, and cleanup refuses to unmount it.
+
 ## Rationale
 
 Testing on macOS showed that `tmutil localsnapshot` and FDA-controlled reads work as a regular user,

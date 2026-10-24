@@ -106,20 +106,20 @@ enum BackupFailureHistoryPreview {
             let helperContent = VStack(alignment: .leading, spacing: 18) {
                 Text("Settings → Snapshots").font(.system(size: 18, weight: .bold))
                 Text("Helper update states").font(.system(size: 12)).foregroundStyle(.secondary)
-                ForEach(["outdated", "current", "missing", "pending"], id: \.self) { state in
+                ForEach(["outdated", "current", "missing", "pending", "recoverable"], id: \.self) { state in
                     // Native GroupBox's AppKit backing is omitted by ImageRenderer.
                     // Keep this source-owned preview container entirely SwiftUI.
                     VStack(alignment: .leading, spacing: 12) {
                         Divider()
                         SnapshotMountHelperStatusView(
                             readiness: SnapshotMountHelperReadiness(
-                                reachable: state != "missing", daemonReady: state == "current",
-                                buildCommit: state == "current" ? candidate : nil,
+                                reachable: state != "missing", daemonReady: state == "current" || state == "recoverable",
+                                buildCommit: state == "current" || state == "recoverable" ? candidate : nil,
                                 expectedBuildCommit: candidate,
                                 activeMounts: state == "pending" ? 1 : 0,
                                 liveMounts: 0,
                                 pendingCleanup: state == "pending" ? 1 : 0,
-                                recoverableStaleMounts: state == "pending" ? 1 : 0,
+                                recoverableStaleMounts: state == "recoverable" ? 1 : 0,
                                 unknownBlockingMounts: 0
                             ),
                             path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
@@ -128,7 +128,7 @@ enum BackupFailureHistoryPreview {
                             activeMounts: state == "pending" ? 1 : 0,
                             pendingCleanup: state == "pending" ? 1 : 0,
                             liveMounts: state == "pending" ? 0 : 0,
-                            recoverableStaleMounts: state == "pending" ? 1 : 0,
+                            recoverableStaleMounts: state == "recoverable" ? 1 : 0,
                             unknownBlockingMounts: 0,
                             busy: false, install: {}, recover: {}
                         )

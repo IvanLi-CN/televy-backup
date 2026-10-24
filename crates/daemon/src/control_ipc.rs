@@ -78,7 +78,7 @@ fn snapshot_mount_helper_state(
                 build_commit,
                 expected_build_commit,
                 active_mounts: Some(status.active_mounts),
-                pending_cleanup: Some(status.pending_cleanup),
+                pending_cleanup: status.pending_cleanup,
                 live_mounts: status.live_mounts,
                 recoverable_stale_mounts: status.recoverable_stale_mounts,
                 unknown_blocking_mounts: status.unknown_blocking_mounts,
@@ -663,7 +663,18 @@ async fn handle_control_ipc_client(
                     details: serde_json::json!({"liveMounts": status.live_mounts}),
                 });
             }
-            if status.pending_cleanup > 0 {
+            let pending_cleanup = match status.pending_cleanup {
+                Some(value) => value,
+                None => {
+                    return Err(ControlError {
+                        code: "snapshot_mount_helper.status_incomplete".to_string(),
+                        message: "Snapshot mount status is incomplete; recovery remains blocked until the helper is updated or repaired.".to_string(),
+                        retryable: true,
+                        details: serde_json::json!({}),
+                    });
+                }
+            };
+            if pending_cleanup > 0 {
                 return Err(ControlError {
                     code: "snapshot_mount_helper.pending_cleanup".to_string(),
                     message: "Snapshot cleanup is still pending and cannot be recovered as stale."
@@ -3253,6 +3264,7 @@ mod tests {
         assert!(state.reachable && !state.ready);
         assert!(state.build_commit.is_none());
         assert_eq!(state.expected_build_commit, Some("a".repeat(40)));
+        assert!(legacy.pending_cleanup.is_none());
     }
 
     fn settings() -> Settings {

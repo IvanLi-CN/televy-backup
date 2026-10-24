@@ -75,8 +75,9 @@ struct SnapshotMountHelperReadiness {
     /// optional cleanup breakdown is unavailable. Never offer an update while
     /// that aggregate still contains a journal row.
     static func updateBlockReason(activeMounts: UInt32?, pendingCleanup: UInt32?) -> String? {
-        let activeMounts = activeMounts ?? 0
-        let pendingCleanup = pendingCleanup ?? 0
+        guard let activeMounts, let pendingCleanup else {
+            return "The installed helper did not report a complete cleanup status. Refresh diagnostics before changing it."
+        }
         guard activeMounts > 0 || pendingCleanup > 0 else { return nil }
         if pendingCleanup > 0 {
             let mountDescription = activeMounts == pendingCleanup

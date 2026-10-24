@@ -202,9 +202,9 @@ pub struct MountStatusResult {
     /// aggregate includes pending cleanup rows as well as in-flight mounts.
     pub active_mounts: u32,
     /// Number of blocking rows that are waiting for safe snapshot cleanup. Older helpers omit
-    /// this field; callers must treat a missing value as zero and retain the aggregate guard.
+    /// this field; callers must treat a missing value as unknown rather than false zero.
     #[serde(default)]
-    pub pending_cleanup: u32,
+    pub pending_cleanup: Option<u32>,
     #[serde(default)]
     pub blocked_volume_uuids: Vec<String>,
     #[serde(default)]

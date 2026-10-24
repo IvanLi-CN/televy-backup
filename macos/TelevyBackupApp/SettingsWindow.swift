@@ -834,6 +834,7 @@ struct SettingsWindowRootView: View {
     @State private var snapshotStatus: SnapshotControlStatus?
     @State private var snapshotError: String?
     @State private var snapshotBusy = false
+    @State private var snapshotRecoveryToken = 0
 
     private struct ImportConfigBundleSheetRequest: Identifiable {
         let id = UUID()
@@ -1192,7 +1193,7 @@ struct SettingsWindowRootView: View {
         }
     }
 
-    private func refreshSnapshotStatus() {
+    private func refreshSnapshotStatus(preservingError: String? = nil) {
         if SettingsUIDemo.enabled {
             let strict = SettingsUIDemo.scene != "snapshots-disabled"
             let accessMissing = SettingsUIDemo.scene == "snapshots-helper-missing"
@@ -1216,40 +1217,78 @@ struct SettingsWindowRootView: View {
                 mountHelperActiveMounts: 0,
                 mountHelperPendingCleanup: 0,
                 mountHelperLiveMounts: 0,
-                mountHelperRecoverableStaleMounts: SettingsUIDemo.scene == "snapshots-cleanup-pending" ? 1 : 0,
+                mountHelperRecoverableStaleMounts: SettingsUIDemo.scene == "snapshots-recoverable" ? 1 : 0,
                 mountHelperUnknownBlockingMounts: 0,
                 activeLeases: 0,
                 pendingCleanup: SettingsUIDemo.scene == "snapshots-cleanup-pending" ? 1 : 0,
                 volumes: (settings?.snapshot_volumes ?? [:]).map { SnapshotVolumeStatus(volumeUuid: $0.key, enabled: $0.value.enabled, mode: $0.value.enabled ? "strict" : "disabled") }
             )
+            snapshotBusy = false
+            snapshotError = preservingError
             return
         }
         snapshotBusy = true
         model.fetchSnapshotStatus { status, error in
             snapshotBusy = false
             snapshotStatus = status
-            snapshotError = error
+            snapshotError = preservingError ?? error
         }
     }
 
     private func recoverSnapshotMountRecords() {
+        snapshotRecoveryToken += 1
+        let token = snapshotRecoveryToken
         snapshotBusy = true
         snapshotError = nil
         let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
-            let result: Result<ControlJSONValue, ControlRequestFailure> = ControlIPCClient.requestOperation(
+            let result: Result<ControlOperationAccepted, ControlRequestFailure> = ControlIPCClient.request(
                 socketPath: socketPath,
                 method: "snapshot.mount_helper.reconcile",
-                operationTimeoutSeconds: 30
             )
             DispatchQueue.main.async {
-                snapshotBusy = false
+                guard self.snapshotRecoveryToken == token else { return }
                 switch result {
-                case .success:
-                    refreshSnapshotStatus()
+                case let .success(accepted):
+                    pollSnapshotMountRecovery(operationId: accepted.operationId, token: token)
                 case let .failure(error):
+                    snapshotBusy = false
                     snapshotError = controlFailureMessage(error)
-                    refreshSnapshotStatus()
+                }
+            }
+        }
+    }
+
+    private func pollSnapshotMountRecovery(operationId: String, token: Int) {
+        guard snapshotRecoveryToken == token else { return }
+        let socketPath = model.controlSocketPath()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = ControlIPCClient.operationStatus(socketPath: socketPath, operationId: operationId)
+            DispatchQueue.main.async {
+                guard self.snapshotRecoveryToken == token else { return }
+                switch result {
+                case let .failure(error):
+                    snapshotBusy = false
+                    snapshotError = controlFailureMessage(error)
+                case let .success(status):
+                    switch status.state {
+                    case "pending", "running":
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                            pollSnapshotMountRecovery(operationId: operationId, token: token)
+                        }
+                    case "succeeded":
+                        refreshSnapshotStatus()
+                    case "failed":
+                        let failure = ControlRequestFailure(
+                            code: status.error?.code ?? "operation.failed",
+                            message: status.error?.message ?? "Snapshot mount recovery failed.",
+                            retryable: status.error?.retryable ?? true
+                        )
+                        refreshSnapshotStatus(preservingError: controlFailureMessage(failure))
+                    default:
+                        snapshotBusy = false
+                        snapshotError = "Snapshot mount recovery returned an invalid state."
+                    }
                 }
             }
         }

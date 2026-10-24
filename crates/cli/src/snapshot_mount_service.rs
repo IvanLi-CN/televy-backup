@@ -239,9 +239,26 @@ fn wait_for_helper_status() -> Result<MountStatusResult, CliError> {
 
 fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     if status.active_mounts == 0 {
-        return None;
+        return status.pending_cleanup.is_none().then(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.status_incomplete",
+                format!(
+                    "cannot {operation}: the installed snapshot mount helper did not report a complete cleanup status"
+                ),
+            )
+        });
     }
-    let pending_cleanup = status.pending_cleanup.min(status.active_mounts);
+    let pending_cleanup = match status.pending_cleanup {
+        Some(value) => value.min(status.active_mounts),
+        None => {
+            return Some(CliError::retryable(
+                "snapshot_mount_helper.status_incomplete",
+                format!(
+                    "cannot {operation}: the installed snapshot mount helper did not report a complete cleanup status"
+                ),
+            ));
+        }
+    };
     let in_flight = status.active_mounts.saturating_sub(pending_cleanup);
     if pending_cleanup > 0 && in_flight == 0 {
         return Some(CliError::new(
@@ -497,7 +514,7 @@ pub fn status(json_output: bool) -> Result<(), CliError> {
         "launchdLoaded": loaded,
         "label": MOUNT_HELPER_LABEL,
         "activeMounts": helper.as_ref().map(|status| status.active_mounts),
-        "pendingCleanup": helper.as_ref().map(|status| status.pending_cleanup),
+        "pendingCleanup": helper.as_ref().and_then(|status| status.pending_cleanup),
         "liveMounts": helper.as_ref().and_then(|status| status.live_mounts),
         "recoverableStaleMounts": helper.as_ref().and_then(|status| status.recoverable_stale_mounts),
         "unknownBlockingMounts": helper.as_ref().and_then(|status| status.unknown_blocking_mounts),
@@ -536,7 +553,7 @@ mod tests {
     fn busy_error_distinguishes_pending_cleanup_from_active_mounts() {
         let pending = MountStatusResult {
             active_mounts: 1,
-            pending_cleanup: 1,
+            pending_cleanup: Some(1),
             ..Default::default()
         };
         let error = busy_error("update the snapshot mount helper", &pending).unwrap();
@@ -557,13 +574,23 @@ mod tests {
 
         let mixed = MountStatusResult {
             active_mounts: 2,
-            pending_cleanup: 1,
+            pending_cleanup: Some(1),
             ..Default::default()
         };
         let error = busy_error("update the snapshot mount helper", &mixed).unwrap();
         assert_eq!(error.code, "snapshot_mount_helper.busy");
         assert!(error.message.contains("1 active snapshot mount(s)"));
         assert!(error.message.contains("1 pending cleanup record(s)"));
+    }
+
+    #[test]
+    fn missing_cleanup_status_remains_blocking() {
+        let error = busy_error(
+            "update the snapshot mount helper",
+            &MountStatusResult::default(),
+        )
+        .unwrap();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
     }
 
     #[test]
