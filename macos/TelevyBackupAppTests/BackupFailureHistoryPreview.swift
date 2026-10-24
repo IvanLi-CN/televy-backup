@@ -162,8 +162,12 @@ enum BackupFailureHistoryPreview {
                     error: nil,
                     activeMounts: 1,
                     pendingCleanup: 0,
+                    liveMounts: nil,
+                    recoverableStaleMounts: nil,
+                    unknownBlockingMounts: nil,
                     busy: false,
-                    install: {}
+                    install: {},
+                    recover: {}
                 )
             }
             .padding(24)
