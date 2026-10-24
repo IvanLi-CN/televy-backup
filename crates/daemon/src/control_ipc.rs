@@ -655,41 +655,57 @@ async fn handle_control_ipc_client(
                     details: serde_json::json!({}),
                 });
             }
-            if status.live_mounts.unwrap_or(0) > 0 {
+            let (live_mounts, pending_cleanup, recoverable_stale_mounts, unknown_blocking_mounts) =
+                match (
+                    status.live_mounts,
+                    status.pending_cleanup,
+                    status.recoverable_stale_mounts,
+                    status.unknown_blocking_mounts,
+                ) {
+                    (Some(live), Some(pending), Some(recoverable), Some(unknown)) => {
+                        (live, pending, recoverable, unknown)
+                    }
+                    _ => {
+                        return Err(ControlError {
+                            code: "snapshot_mount_helper.status_incomplete".to_string(),
+                            message: "Snapshot mount status is incomplete; recovery remains blocked until the helper is updated or repaired.".to_string(),
+                            retryable: true,
+                            details: serde_json::json!({}),
+                        });
+                    }
+                };
+            if recoverable_stale_mounts as usize != status.recovery_leases.len() {
+                return Err(ControlError {
+                    code: "snapshot_mount_helper.status_inconsistent".to_string(),
+                    message: "Snapshot mount status is inconsistent; recovery remains blocked until the helper is repaired.".to_string(),
+                    retryable: true,
+                    details: serde_json::json!({}),
+                });
+            }
+            if live_mounts > 0 {
                 return Err(ControlError {
                     code: "snapshot_mount_helper.active".to_string(),
                     message: "An active snapshot mount is still running.".to_string(),
                     retryable: true,
-                    details: serde_json::json!({"liveMounts": status.live_mounts}),
+                    details: serde_json::json!({"liveMounts": live_mounts}),
                 });
             }
-            let pending_cleanup = match status.pending_cleanup {
-                Some(value) => value,
-                None => {
-                    return Err(ControlError {
-                        code: "snapshot_mount_helper.status_incomplete".to_string(),
-                        message: "Snapshot mount status is incomplete; recovery remains blocked until the helper is updated or repaired.".to_string(),
-                        retryable: true,
-                        details: serde_json::json!({}),
-                    });
-                }
-            };
             if pending_cleanup > 0 {
                 return Err(ControlError {
                     code: "snapshot_mount_helper.pending_cleanup".to_string(),
                     message: "Snapshot cleanup is still pending and cannot be recovered as stale."
                         .to_string(),
                     retryable: true,
-                    details: serde_json::json!({"pendingCleanup": status.pending_cleanup}),
+                    details: serde_json::json!({"pendingCleanup": pending_cleanup}),
                 });
             }
-            if status.unknown_blocking_mounts.unwrap_or(1) > 0 {
+            if unknown_blocking_mounts > 0 {
                 return Err(ControlError {
                     code: "snapshot_mount_helper.unknown_blocker".to_string(),
                     message: "Some snapshot mount records could not be verified safely."
                         .to_string(),
                     retryable: true,
-                    details: serde_json::json!({"unknown": status.unknown_blocking_mounts}),
+                    details: serde_json::json!({"unknown": unknown_blocking_mounts}),
                 });
             }
             let mut recovered = 0_u32;

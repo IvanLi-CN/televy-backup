@@ -53,7 +53,7 @@ struct SnapshotMountHelperReadiness {
     }
 
     var hasBlockingRecords: Bool {
-        [liveMounts, pendingCleanup, recoverableStaleMounts, unknownBlockingMounts]
+        [activeMounts, liveMounts, pendingCleanup, recoverableStaleMounts, unknownBlockingMounts]
             .compactMap { $0 }
             .contains { $0 > 0 }
     }

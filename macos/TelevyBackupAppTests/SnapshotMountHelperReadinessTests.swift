@@ -37,6 +37,12 @@ enum SnapshotMountHelperReadinessTests {
             recoverableStaleMounts: 1, unknownBlockingMounts: 0
         )
         expectReadiness(!recoverable.canUpdate, "recoverable stale rows must keep helper mutation blocked")
+        let inconsistentAggregate = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: true, buildCommit: candidateCommit,
+            expectedBuildCommit: candidateCommit, activeMounts: 1, liveMounts: 0, pendingCleanup: 0,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0
+        )
+        expectReadiness(!inconsistentAggregate.canUpdate, "legacy aggregate blockers must remain mutation blockers")
         expectReadiness(!current.canUpdate, "missing additive status fields must not become a false zero")
         expectReadiness(!state(reachable: false, daemonReady: true, commit: candidateCommit).isReady, "unreachable helpers cannot be ready")
         expectReadiness(state(reachable: false, daemonReady: false, commit: nil).actionTitle == "Install mount helper", "missing helpers need an installation action")
