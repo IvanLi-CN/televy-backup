@@ -3066,13 +3066,14 @@ mod tests {
         let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
         init_journal(&journal).await.unwrap();
         sqlx::query(
-            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, '', ?, ?, 'active', datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))",
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, '', ?, ?, ?, 1, 'active', datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))",
         )
         .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
         .bind(501_i64)
         .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
         .bind("disk5s1")
         .bind("/private/var/tmp/televybackup-snapshot-mounts/501/A8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind(r#"[{"device_identifier":"disk5s1","uuid":"B8A38394-49AE-42F9-85FB-14DD9EA549FA"}]"#)
         .bind(r#"[{"device_identifier":"disk5s1","uuid":"B8A38394-49AE-42F9-85FB-14DD9EA549FA"}]"#)
         .execute(&journal)
         .await
