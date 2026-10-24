@@ -189,20 +189,36 @@ pub enum MountResponseResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MountStatusResult {
+    /// Compatibility version used on the v4 wire contract. The approved Snapshot Access
+    /// artifact still validates this field, so a patch component update must not change it.
     pub helper_version: String,
+    /// Concrete root-helper component version. This additive field lets current clients verify
+    /// the installed implementation without breaking an approved older Access artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_commit: Option<String>,
     /// Number of journal rows that still block a source volume. This legacy-compatible
     /// aggregate includes pending cleanup rows as well as in-flight mounts.
     pub active_mounts: u32,
     /// Number of blocking rows that are waiting for safe snapshot cleanup. Older helpers omit
-    /// this field; callers must treat a missing value as zero and retain the aggregate guard.
+    /// this field; callers must treat a missing value as unknown rather than false zero.
     #[serde(default)]
-    pub pending_cleanup: u32,
+    pub pending_cleanup: Option<u32>,
     #[serde(default)]
     pub blocked_volume_uuids: Vec<String>,
     #[serde(default)]
     pub recovery_leases: Vec<MountRecoveryLease>,
+    /// Recent reserved/prepared/active rows that still have a live owner.
+    #[serde(default)]
+    pub live_mounts: Option<u32>,
+    /// Age-gated rows whose journal identity is complete enough for the existing Release path
+    /// to revalidate and clean precisely.
+    #[serde(default)]
+    pub recoverable_stale_mounts: Option<u32>,
+    /// Blocking rows that are neither live nor safely recoverable.
+    #[serde(default)]
+    pub unknown_blocking_mounts: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

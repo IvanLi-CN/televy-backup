@@ -235,8 +235,12 @@ private func testSnapshotMountStatusDecodingAndAppIdentity() {
         "serviceReachable": true,
         "mountHelperReachable": true,
         "mountHelperReady": true,
-        "mountHelperVersion": "0.5.0",
+        "mountHelperVersion": "0.5.1",
         "mountHelperBuildCommit": candidate,
+        "mountHelperLiveMounts": 0,
+        "mountHelperRecoverableStaleMounts": 0,
+        "mountHelperUnknownBlockingMounts": 0,
+        "mountHelperPendingCleanup": 0,
     ])
     let current = try! JSONDecoder().decode(SnapshotControlStatus.self, from: data)
     expect(current.mountHelperReadiness(expectedBuildCommit: candidate).isReady, "matching daemon and app identity must be ready")
@@ -246,8 +250,12 @@ private func testSnapshotMountStatusDecodingAndAppIdentity() {
         "mountHelperReachable": true,
         "mountHelperActiveMounts": 1,
         "mountHelperPendingCleanup": 1,
+        "mountHelperLiveMounts": 0,
+        "mountHelperRecoverableStaleMounts": 1,
+        "mountHelperUnknownBlockingMounts": 0,
     ])
     let pending = try! JSONDecoder().decode(SnapshotControlStatus.self, from: pendingData)
     expect(pending.mountHelperActiveMounts == 1, "root helper aggregate mount count must remain visible")
     expect(pending.mountHelperPendingCleanup == 1, "root helper cleanup blockers must be exposed separately")
+    expect(pending.mountHelperRecoverableStaleMounts == 1, "recoverable stale records must remain visible")
 }

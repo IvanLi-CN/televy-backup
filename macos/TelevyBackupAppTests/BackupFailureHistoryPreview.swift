@@ -106,23 +106,31 @@ enum BackupFailureHistoryPreview {
             let helperContent = VStack(alignment: .leading, spacing: 18) {
                 Text("Settings → Snapshots").font(.system(size: 18, weight: .bold))
                 Text("Helper update states").font(.system(size: 12)).foregroundStyle(.secondary)
-                ForEach(["outdated", "current", "missing", "pending"], id: \.self) { state in
+                ForEach(["outdated", "current", "missing", "pending", "recoverable"], id: \.self) { state in
                     // Native GroupBox's AppKit backing is omitted by ImageRenderer.
                     // Keep this source-owned preview container entirely SwiftUI.
                     VStack(alignment: .leading, spacing: 12) {
                         Divider()
                         SnapshotMountHelperStatusView(
                             readiness: SnapshotMountHelperReadiness(
-                                reachable: state != "missing", daemonReady: state == "current",
-                                buildCommit: state == "current" ? candidate : nil,
-                                expectedBuildCommit: candidate
+                                reachable: state != "missing", daemonReady: state == "current" || state == "recoverable",
+                                buildCommit: state == "current" || state == "recoverable" ? candidate : nil,
+                                expectedBuildCommit: candidate,
+                                activeMounts: state == "pending" || state == "recoverable" ? 1 : 0,
+                                liveMounts: 0,
+                                pendingCleanup: state == "pending" ? 1 : 0,
+                                recoverableStaleMounts: state == "recoverable" ? 1 : 0,
+                                unknownBlockingMounts: 0
                             ),
                             path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
-                            version: state == "missing" ? nil : "0.5.0",
+                            version: state == "missing" ? nil : "0.5.1",
                             error: state == "missing" ? "The mount helper is not installed." : nil,
-                            activeMounts: state == "pending" ? 1 : 0,
+                            activeMounts: state == "pending" || state == "recoverable" ? 1 : 0,
                             pendingCleanup: state == "pending" ? 1 : 0,
-                            busy: false, install: {}
+                            liveMounts: state == "pending" ? 0 : 0,
+                            recoverableStaleMounts: state == "recoverable" ? 1 : 0,
+                            unknownBlockingMounts: 0,
+                            busy: false, install: {}, recover: {}
                         )
                     }
                 }
@@ -154,8 +162,12 @@ enum BackupFailureHistoryPreview {
                     error: nil,
                     activeMounts: 1,
                     pendingCleanup: 0,
+                    liveMounts: nil,
+                    recoverableStaleMounts: nil,
+                    unknownBlockingMounts: nil,
                     busy: false,
-                    install: {}
+                    install: {},
+                    recover: {}
                 )
             }
             .padding(24)

@@ -3,6 +3,7 @@ set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
 pr_workflow="$root_dir/.github/workflows/ci-pr.yml"
+main_workflow="$root_dir/.github/workflows/ci-main.yml"
 ci_script="$root_dir/scripts/macos/verify-apfs-snapshot-ci.sh"
 long_read_script="$root_dir/scripts/macos/verify-apfs-snapshot-long-read.sh"
 integration_script="$root_dir/scripts/macos/verify-apfs-snapshot-integration.sh"
@@ -10,6 +11,7 @@ mount_helper_source="$root_dir/crates/snapshot-helper/src/mount_helper.rs"
 access_source="$root_dir/crates/snapshot-helper/src/main.rs"
 
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$pr_workflow"
+ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$main_workflow"
 
 assert_contains() {
   local label="$1"
@@ -32,6 +34,7 @@ assert_not_contains() {
 }
 
 pr_workflow_text="$(<"$pr_workflow")"
+main_workflow_text="$(<"$main_workflow")"
 ci_text="$(<"$ci_script")"
 long_read_text="$(<"$long_read_script")"
 integration_text="$(<"$integration_script")"
@@ -45,6 +48,7 @@ assert_contains "manual regression core test" "$pr_workflow_text" "strict_snapsh
 assert_contains "manual regression daemon test" "$pr_workflow_text" "brokered_source_reports_snapshot_access_failures_without_invalidating_config"
 assert_contains "manual regression snapshot timepoint fixture" "$pr_workflow_text" "snapshot_timepoint_reads_pre_mutation_after_live_change"
 assert_contains "manual regression mount health fixture" "$pr_workflow_text" "long_read_fails_closed_after_mount_identity_loss"
+assert_contains "manual regression stale mount recovery fixture" "$pr_workflow_text" "test-snapshot-mount-recovery.py"
 assert_contains "manual regression contract test" "$pr_workflow_text" "test-apfs-snapshot-validation.sh"
 assert_contains "manual regression pinned checkout action" "$pr_workflow_text" "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 assert_contains "manual regression pinned toolchain action" "$pr_workflow_text" "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
@@ -76,6 +80,7 @@ assert_not_contains "raw timepoint card copy" "$ci_text" 'cp "$a5_output" "$evid
 assert_not_contains "raw long-read card copy" "$ci_text" 'cp "$a6_output" "$evidence_dir/a6.json"'
 assert_contains "orchestrator artifact schema" "$ci_text" "televybackup.apfs_snapshot_ci.v1"
 assert_contains "orchestrator no published snapshot assertion" "$ci_text" "publishedSnapshot: false"
+assert_contains "hosted stale mount recovery fixture" "$main_workflow_text" "test-snapshot-mount-recovery.py"
 # The single-quoted needle intentionally checks the literal shell source.
 # shellcheck disable=SC2016
 assert_contains "orchestrator narrow root cleanup" "$ci_text" 'sudo -n rm -rf -- "$mount_runtime_root"'

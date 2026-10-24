@@ -1431,6 +1431,7 @@ mod tests {
                 )),
                 backup_queue: Arc::new(std::sync::Mutex::new(crate::BackupQueue::default())),
                 backup_queue_notify: Arc::new(tokio::sync::Notify::new()),
+                snapshot_maintenance: Arc::new(tokio::sync::Mutex::new(())),
                 settings_reload_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 lifecycle: Arc::new(crate::DaemonLifecycle::default()),
                 runtime_logging: Arc::new(RwLock::new(
