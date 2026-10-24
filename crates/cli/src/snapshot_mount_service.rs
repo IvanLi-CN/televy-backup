@@ -596,15 +596,17 @@ mod tests {
 
     #[test]
     fn legacy_zero_aggregate_allows_a_verified_replacement() {
-        assert!(busy_error(
-            "update the snapshot mount helper",
-            &MountStatusResult {
-                active_mounts: 0,
-                pending_cleanup: None,
-                ..Default::default()
-            }
-        )
-        .is_none());
+        assert!(
+            busy_error(
+                "update the snapshot mount helper",
+                &MountStatusResult {
+                    active_mounts: 0,
+                    pending_cleanup: None,
+                    ..Default::default()
+                }
+            )
+            .is_none()
+        );
     }
 
     #[test]
