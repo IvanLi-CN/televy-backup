@@ -632,20 +632,24 @@ async fn handle_control_ipc_client(
                     mount_helper::status_for_volume(uid, &volume_uuid)
                 })
                 .await
-                .map_err(|_| ControlError::unavailable(
-                    "Snapshot mount status task failed.",
-                    serde_json::json!({}),
-                ))?
-                .map_err(|error| ControlError {
+                .map_err(|_| {
+                    ControlError::unavailable(
+                        "Snapshot mount status task failed.",
+                        serde_json::json!({}),
+                    )
+                })?
+                .map_err(|_| ControlError {
                     code: "snapshot_mount_helper.status_failed".to_string(),
                     message: "Snapshot mount records could not be verified.".to_string(),
                     retryable: true,
-                    details: serde_json::json!({"reason": error.to_string()}),
+                    details: serde_json::json!({"reason": "helper_status_failed"}),
                 })?;
                 if status.helper_version != mount_helper::ROOT_MOUNT_HELPER_VERSION {
                     return Err(ControlError {
                         code: "snapshot_mount_helper.update_required".to_string(),
-                        message: "Update the snapshot mount helper before recovering stale records.".to_string(),
+                        message:
+                            "Update the snapshot mount helper before recovering stale records."
+                                .to_string(),
                         retryable: true,
                         details: serde_json::json!({}),
                     });
@@ -664,20 +668,23 @@ async fn handle_control_ipc_client(
                     .map(|lease| lease.lease_id)
                     .collect::<Vec<_>>();
                 for lease_id in candidate_ids {
-                    let released = tokio::task::spawn_blocking(move || {
-                        mount_helper::release(uid, &lease_id)
-                    })
-                    .await
-                    .map_err(|_| ControlError::unavailable(
-                        "Snapshot mount release task failed.",
-                        serde_json::json!({}),
-                    ))?
-                    .map_err(|error| ControlError {
-                        code: "snapshot_mount_helper.reconcile_failed".to_string(),
-                        message: "A stale snapshot mount record could not be safely recovered.".to_string(),
-                        retryable: true,
-                        details: serde_json::json!({"reason": error.to_string()}),
-                    })?;
+                    let released =
+                        tokio::task::spawn_blocking(move || mount_helper::release(uid, &lease_id))
+                            .await
+                            .map_err(|_| {
+                                ControlError::unavailable(
+                                    "Snapshot mount release task failed.",
+                                    serde_json::json!({}),
+                                )
+                            })?
+                            .map_err(|_| ControlError {
+                                code: "snapshot_mount_helper.reconcile_failed".to_string(),
+                                message:
+                                    "A stale snapshot mount record could not be safely recovered."
+                                        .to_string(),
+                                retryable: true,
+                                details: serde_json::json!({"reason": "release_rejected"}),
+                            })?;
                     if released.cleanup_state == "released" {
                         recovered += 1;
                     }
@@ -687,15 +694,17 @@ async fn handle_control_ipc_client(
                 mount_helper::status().map_err(|error| error.to_string())
             })
             .await
-            .map_err(|_| ControlError::unavailable(
-                "Snapshot mount status task failed.",
-                serde_json::json!({}),
-            ))?
-            .map_err(|error| ControlError {
+            .map_err(|_| {
+                ControlError::unavailable(
+                    "Snapshot mount status task failed.",
+                    serde_json::json!({}),
+                )
+            })?
+            .map_err(|_| ControlError {
                 code: "snapshot_mount_helper.status_failed".to_string(),
                 message: "Snapshot mount records could not be verified after recovery.".to_string(),
                 retryable: true,
-                details: serde_json::json!({"reason": error}),
+                details: serde_json::json!({"reason": "helper_status_failed"}),
             })?;
             Ok(serde_json::json!({
                 "recovered": recovered,
@@ -708,7 +717,10 @@ async fn handle_control_ipc_client(
         });
         write_json_line(
             &mut w,
-            &ControlResponse::ok(req.id.clone(), serde_json::json!({"operationId": operation_id})),
+            &ControlResponse::ok(
+                req.id.clone(),
+                serde_json::json!({"operationId": operation_id}),
+            ),
         )
         .await?;
         return Ok(());

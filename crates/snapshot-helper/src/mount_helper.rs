@@ -708,12 +708,8 @@ async fn status_result(
     pool: &SqlitePool,
     peer_uid: u32,
 ) -> Result<MountStatusResult, MountHelperError> {
-    let classification = classify_status_rows(
-        pool,
-        (peer_uid != 0).then_some(peer_uid),
-        None,
-    )
-    .await?;
+    let classification =
+        classify_status_rows(pool, (peer_uid != 0).then_some(peer_uid), None).await?;
     let blocked_volume_uuids = if peer_uid == 0 {
         sqlx::query_scalar::<_, String>(
             "SELECT DISTINCT volume_uuid FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
@@ -834,13 +830,18 @@ async fn classify_status_rows(
             && parse_journal_manifest(&snapshot_manifest).is_ok()
             && validate_device(&device_identifier).is_ok()
             && expected_root.as_deref() == Some(Path::new(&mount_root))
-            && matches!(state.as_str(), "reserved" | "prepared" | "active" | "cleanup_pending");
+            && matches!(
+                state.as_str(),
+                "reserved" | "prepared" | "active" | "cleanup_pending"
+            );
         if state == "cleanup_pending" {
             classification.pending_cleanup += 1;
         }
         if recoverable {
             classification.recoverable_stale_mounts += 1;
-            classification.recovery_leases.push(MountRecoveryLease { lease_id, state });
+            classification
+                .recovery_leases
+                .push(MountRecoveryLease { lease_id, state });
         } else if live && state != "cleanup_pending" {
             classification.live_mounts += 1;
         } else if state != "cleanup_pending" {
