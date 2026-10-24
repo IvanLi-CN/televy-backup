@@ -218,7 +218,7 @@ make a boolean report appear stronger.
 
 ## GitHub Actions Boundary
 
-The repository's hosted required checks run deterministic protocol, path-safety, error-propagation, and workflow-contract checks. The `manual-snapshot-regression` job in `.github/workflows/ci-pr.yml` is dispatch-only and runs the named fixture timepoint, mount-health, broker, and workflow tests against an isolated temporary tree without touching user data. Its published-artifact install phase accepts the legacy status shape, while the candidate phase verifies additive component identity after replacement. The fixture assertions produce only boolean outcomes and bounded error context; they do not read or upload user files.
+The repository's hosted required checks run deterministic protocol, path-safety, error-propagation, and workflow-contract checks. The `manual-snapshot-regression` job in `.github/workflows/ci-pr.yml` is dispatch-only and runs the named fixture timepoint, mount-health, broker, and workflow tests against an isolated temporary tree without touching user data. Its published-artifact install phase accepts the legacy status shape, while the candidate phase verifies additive component identity after replacement; the recovery fixture is invoked as an explicit multiline command so its required arguments are not folded into one shell word. The fixture assertions produce only boolean outcomes and bounded error context; they do not read or upload user files.
 
 ## Residual Risks
 

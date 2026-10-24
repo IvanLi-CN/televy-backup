@@ -250,8 +250,9 @@ jobs:
             --app "${fixture}/TelevyBackup.app" --require-readiness --delay-startup
 
       - name: Stale mount recovery and unknown blocker fixture
-        run: python3 scripts/macos/test-snapshot-mount-recovery.py \
-          --helper target/debug/televybackup-snapshot-mount-helper
+        run: |
+          python3 scripts/macos/test-snapshot-mount-recovery.py \
+            --helper target/debug/televybackup-snapshot-mount-helper
 
       - name: Preserve strict Snapshot Access error code
         run: cargo test --locked -p televy_backup_core strict_snapshot_read_errors_keep_the_snapshot_access_code
