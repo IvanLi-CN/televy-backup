@@ -805,7 +805,10 @@ async fn status_result(
         .await?
     };
     Ok(MountStatusResult {
-        helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
+        // Keep the wire compatibility version stable for the approved Snapshot Access
+        // artifact. The additive component_version carries the implementation bump.
+        helper_version: PREVIOUS_ROOT_MOUNT_HELPER_VERSION.to_string(),
+        component_version: Some(ROOT_MOUNT_HELPER_VERSION.to_string()),
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts: classification.active_mounts,
         pending_cleanup: classification.pending_cleanup,
@@ -837,7 +840,8 @@ async fn status_for_volume_result(
     .fetch_all(pool)
     .await?;
     Ok(MountStatusResult {
-        helper_version: ROOT_MOUNT_HELPER_VERSION.to_string(),
+        helper_version: PREVIOUS_ROOT_MOUNT_HELPER_VERSION.to_string(),
+        component_version: Some(ROOT_MOUNT_HELPER_VERSION.to_string()),
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts: classification.active_mounts,
         pending_cleanup: classification.pending_cleanup,
@@ -3417,7 +3421,8 @@ mod tests {
     #[test]
     fn mount_status_accepts_the_current_identity_bound_helper() {
         let result = MountStatusResult {
-            helper_version: ROOT_MOUNT_HELPER_VERSION.into(),
+            helper_version: PREVIOUS_ROOT_MOUNT_HELPER_VERSION.into(),
+            component_version: Some(ROOT_MOUNT_HELPER_VERSION.into()),
             build_commit: None,
             active_mounts: 0,
             pending_cleanup: 0,

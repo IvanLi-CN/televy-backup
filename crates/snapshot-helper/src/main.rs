@@ -530,7 +530,12 @@ async fn status_result(state: &HelperState) -> Result<StatusResult, HelperError>
         mount_helper_version: mount_helper_status
             .as_ref()
             .ok()
-            .map(|status| status.helper_version.clone()),
+            .and_then(|status| {
+                status
+                    .component_version
+                    .clone()
+                    .or_else(|| Some(status.helper_version.clone()))
+            }),
         mount_helper_error: mount_helper_status.err().map(|error| error.to_string()),
     })
 }
@@ -1125,10 +1130,15 @@ async fn acquire_lease(
     let mount_status = mount_helper::status().map_err(|error| {
         HelperError::Message(format!("snapshot mount helper unavailable: {error}"))
     })?;
-    if mount_status.helper_version != mount_helper::ROOT_MOUNT_HELPER_VERSION {
+    if mount_status.component_version.as_deref()
+        != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+    {
         return Err(HelperError::Message(format!(
             "incompatible snapshot mount helper version: {}",
-            mount_status.helper_version
+            mount_status
+                .component_version
+                .as_deref()
+                .unwrap_or(&mount_status.helper_version)
         )));
     }
     if let Some(nested_mount) = nested_mount_under(source_path, &info.mount_point)? {

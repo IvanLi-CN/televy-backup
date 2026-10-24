@@ -313,7 +313,8 @@ fn wait_for_installed_helper(
     while elapsed() < INSTALL_READY_TIMEOUT {
         match probe() {
             Ok(status)
-                if status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
+                if status.component_version.as_deref()
+                    == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
                     && status.build_commit.as_deref() == Some(expected_commit)
                     && expected_commit.len() == 40
                     && expected_commit.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
@@ -327,7 +328,10 @@ fn wait_for_installed_helper(
                 last_error = format!(
                     "expected component {} and candidate build; received component {} with {} build identity",
                     mount_helper::ROOT_MOUNT_HELPER_VERSION,
-                    status.helper_version,
+                    status
+                        .component_version
+                        .as_deref()
+                        .unwrap_or(&status.helper_version),
                     if status.build_commit.is_some() {
                         "different"
                     } else {
@@ -428,7 +432,7 @@ pub fn install(json_output: bool) -> Result<(), CliError> {
     if json_output {
         println!(
             "{}",
-            json!({"installed": true, "helperReady": true, "helperVersion": status.helper_version, "buildCommit": status.build_commit, "binarySha256": candidate_hash, "label": MOUNT_HELPER_LABEL, "binary": MOUNT_HELPER_INSTALL_PATH, "plist": MOUNT_HELPER_PLIST_PATH})
+            json!({"installed": true, "helperReady": true, "helperVersion": status.component_version.as_deref().unwrap_or(&status.helper_version), "buildCommit": status.build_commit, "binarySha256": candidate_hash, "label": MOUNT_HELPER_LABEL, "binary": MOUNT_HELPER_INSTALL_PATH, "plist": MOUNT_HELPER_PLIST_PATH})
         );
     } else {
         println!("snapshot mount helper installed");
@@ -497,7 +501,7 @@ pub fn status(json_output: bool) -> Result<(), CliError> {
         "liveMounts": helper.as_ref().and_then(|status| status.live_mounts),
         "recoverableStaleMounts": helper.as_ref().and_then(|status| status.recoverable_stale_mounts),
         "unknownBlockingMounts": helper.as_ref().and_then(|status| status.unknown_blocking_mounts),
-        "helperVersion": helper.as_ref().map(|status| status.helper_version.clone()),
+        "helperVersion": helper.as_ref().map(|status| status.component_version.clone().unwrap_or_else(|| status.helper_version.clone())),
         "buildCommit": helper.as_ref().and_then(|status| status.build_commit.clone()),
         "socket": mount_helper::configured_socket_path(),
     });
@@ -522,6 +526,7 @@ mod tests {
     fn candidate_status() -> MountStatusResult {
         MountStatusResult {
             helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
             build_commit: Some(CANDIDATE_COMMIT.into()),
             ..Default::default()
         }
@@ -666,6 +671,7 @@ mod tests {
                 || {
                     Ok(MountStatusResult {
                         helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+                        component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
                         build_commit: build_commit.clone(),
                         ..Default::default()
                     })

@@ -58,13 +58,19 @@ fn snapshot_mount_helper_state(
     match result {
         Ok(status) => {
             let build_commit = status.build_commit.filter(|commit| valid_commit(commit));
-            let ready = status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
+            let ready = status.component_version.as_deref()
+                == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
                 && expected_build_commit.is_some()
                 && build_commit == expected_build_commit;
             SnapshotMountHelperState {
                 reachable: true,
                 ready,
-                version: Some(status.helper_version),
+                version: Some(
+                    status
+                        .component_version
+                        .clone()
+                        .unwrap_or(status.helper_version),
+                ),
                 build_commit,
                 expected_build_commit,
                 active_mounts: Some(status.active_mounts),
@@ -644,7 +650,9 @@ async fn handle_control_ipc_client(
                     retryable: true,
                     details: serde_json::json!({"reason": "helper_status_failed"}),
                 })?;
-                if status.helper_version != mount_helper::ROOT_MOUNT_HELPER_VERSION {
+                if status.component_version.as_deref()
+                    != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+                {
                     return Err(ControlError {
                         code: "snapshot_mount_helper.update_required".to_string(),
                         message:
@@ -3206,6 +3214,7 @@ mod tests {
             let state = snapshot_mount_helper_state(
                 Ok(MountStatusResult {
                     helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+                    component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
                     build_commit: commit,
                     ..Default::default()
                 }),
@@ -3217,6 +3226,7 @@ mod tests {
         }
         let current = MountStatusResult {
             helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
             build_commit: Some(expected.clone()),
             ..Default::default()
         };

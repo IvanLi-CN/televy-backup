@@ -189,7 +189,13 @@ pub enum MountResponseResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MountStatusResult {
+    /// Compatibility version used on the v4 wire contract. The approved Snapshot Access
+    /// artifact still validates this field, so a patch component update must not change it.
     pub helper_version: String,
+    /// Concrete root-helper component version. This additive field lets current clients verify
+    /// the installed implementation without breaking an approved older Access artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_commit: Option<String>,
     /// Number of journal rows that still block a source volume. This legacy-compatible

@@ -178,7 +178,8 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert time.monotonic() - install_started >= 1, "startup delay did not cover the old subsecond retry window"
             print("PASS: real privileged installer waits for delayed journal initialization without a manual refresh", flush=True)
         direct = wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == expected_protocol and reply.get("ok") is True)
-        assert direct["result"]["helper_version"] == "0.5.1"
+        assert direct["result"]["helper_version"] == "0.5.0"
+        assert direct["result"]["component_version"] == "0.5.1"
         if args.expect_build_commit:
             candidate = app / "Contents/MacOS/televybackup-snapshot-mount-helper"
             digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
