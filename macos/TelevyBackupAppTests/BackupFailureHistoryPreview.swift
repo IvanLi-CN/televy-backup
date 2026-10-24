@@ -115,7 +115,12 @@ enum BackupFailureHistoryPreview {
                             readiness: SnapshotMountHelperReadiness(
                                 reachable: state != "missing", daemonReady: state == "current",
                                 buildCommit: state == "current" ? candidate : nil,
-                                expectedBuildCommit: candidate
+                                expectedBuildCommit: candidate,
+                                activeMounts: state == "pending" ? 1 : 0,
+                                liveMounts: 0,
+                                pendingCleanup: state == "pending" ? 1 : 0,
+                                recoverableStaleMounts: state == "pending" ? 1 : 0,
+                                unknownBlockingMounts: 0
                             ),
                             path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
                             version: state == "missing" ? nil : "0.5.1",
