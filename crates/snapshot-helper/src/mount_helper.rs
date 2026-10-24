@@ -851,9 +851,7 @@ async fn classify_status_rows(
                 .push(MountRecoveryLease { lease_id, state });
         } else if live && state != "cleanup_pending" {
             classification.live_mounts += 1;
-        } else if state != "cleanup_pending" {
-            classification.unknown_blocking_mounts += 1;
-        } else if !recoverable {
+        } else {
             classification.unknown_blocking_mounts += 1;
         }
     }
@@ -3308,6 +3306,7 @@ mod tests {
             pending_cleanup: 0,
             blocked_volume_uuids: vec![],
             recovery_leases: vec![],
+            ..Default::default()
         };
         assert!(validate_status_result(&result).is_err());
     }
@@ -3321,6 +3320,7 @@ mod tests {
             pending_cleanup: 0,
             blocked_volume_uuids: vec![],
             recovery_leases: vec![],
+            ..Default::default()
         };
         assert!(validate_status_result(&result).is_ok());
     }
@@ -3334,6 +3334,7 @@ mod tests {
             pending_cleanup: 0,
             blocked_volume_uuids: vec![],
             recovery_leases: vec![],
+            ..Default::default()
         };
         assert!(validate_status_result(&result).is_ok());
     }
