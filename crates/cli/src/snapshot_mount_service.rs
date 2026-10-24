@@ -566,6 +566,7 @@ mod tests {
 
         let active = MountStatusResult {
             active_mounts: 1,
+            pending_cleanup: Some(0),
             ..Default::default()
         };
         let error = busy_error("update the snapshot mount helper", &active).unwrap();
