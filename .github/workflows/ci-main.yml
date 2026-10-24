@@ -217,6 +217,8 @@ jobs:
         run: cargo build --locked -p televybackup-snapshot-access -p televybackup --bin televybackup-snapshot-mount-helper --bin televybackup
       - name: Verify candidate production reservation and security negatives
         run: python3 scripts/macos/test-snapshot-source-reservation.py --helper target/debug/televybackup-snapshot-mount-helper --expect fixed
+      - name: Verify stale mount recovery and unknown blocker preservation
+        run: python3 scripts/macos/test-snapshot-mount-recovery.py --helper target/debug/televybackup-snapshot-mount-helper
       - name: Verify candidate installation with unchanged approved Access artifact
         env:
           GH_TOKEN: ${{ github.token }}
