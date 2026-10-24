@@ -33,11 +33,17 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(clear.canUpdate, "a verified helper with a complete clear status can be updated")
         let recoverable = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
-            expectedBuildCommit: candidateCommit, activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
+            expectedBuildCommit: candidateCommit, activeMounts: 1, liveMounts: 0, pendingCleanup: 0,
             recoverableStaleMounts: 1, unknownBlockingMounts: 0
         )
         expectReadiness(!recoverable.canUpdate, "recoverable stale rows must keep helper mutation blocked")
         expectReadiness(recoverable.canRecoverStaleMounts, "a complete recoverable state must expose the recovery action")
+        let pendingWithCandidate = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: true, buildCommit: candidateCommit,
+            expectedBuildCommit: candidateCommit, activeMounts: 2, liveMounts: 0, pendingCleanup: 1,
+            recoverableStaleMounts: 1, unknownBlockingMounts: 0
+        )
+        expectReadiness(!pendingWithCandidate.canRecoverStaleMounts, "pending cleanup must disable stale recovery")
         let inconsistentAggregate = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, activeMounts: 1, liveMounts: 0, pendingCleanup: 0,

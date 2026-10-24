@@ -835,6 +835,7 @@ struct SettingsWindowRootView: View {
     @State private var snapshotError: String?
     @State private var snapshotBusy = false
     @State private var snapshotRecoveryToken = 0
+    private static let snapshotRecoveryPollLimit = 60
 
     private struct ImportConfigBundleSheetRequest: Identifiable {
         let id = UUID()
@@ -1250,7 +1251,7 @@ struct SettingsWindowRootView: View {
                 guard self.snapshotRecoveryToken == token else { return }
                 switch result {
                 case let .success(accepted):
-                    pollSnapshotMountRecovery(operationId: accepted.operationId, token: token)
+                    pollSnapshotMountRecovery(operationId: accepted.operationId, token: token, attempts: 0)
                 case let .failure(error):
                     snapshotBusy = false
                     snapshotError = controlFailureMessage(error)
@@ -1259,7 +1260,7 @@ struct SettingsWindowRootView: View {
         }
     }
 
-    private func pollSnapshotMountRecovery(operationId: String, token: Int) {
+    private func pollSnapshotMountRecovery(operationId: String, token: Int, attempts: Int) {
         guard snapshotRecoveryToken == token else { return }
         let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1273,8 +1274,13 @@ struct SettingsWindowRootView: View {
                 case let .success(status):
                     switch status.state {
                     case "pending", "running":
+                        guard attempts < Self.snapshotRecoveryPollLimit else {
+                            snapshotBusy = false
+                            snapshotError = "Snapshot mount recovery timed out. Refresh diagnostics before retrying."
+                            return
+                        }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                            pollSnapshotMountRecovery(operationId: operationId, token: token)
+                            pollSnapshotMountRecovery(operationId: operationId, token: token, attempts: attempts + 1)
                         }
                     case "succeeded":
                         refreshSnapshotStatus()
