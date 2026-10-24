@@ -58,8 +58,12 @@ fn snapshot_mount_helper_state(
     match result {
         Ok(status) => {
             let build_commit = status.build_commit.filter(|commit| valid_commit(commit));
-            let ready = status.component_version.as_deref()
-                == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+            let wire_compatible = status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
+                || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
+                || status.helper_version == mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION;
+            let ready = wire_compatible
+                && status.component_version.as_deref()
+                    == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
                 && expected_build_commit.is_some()
                 && build_commit == expected_build_commit;
             SnapshotMountHelperState {
