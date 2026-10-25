@@ -595,6 +595,21 @@ mod tests {
     }
 
     #[test]
+    fn legacy_positive_unknown_status_enters_upgrade_recovery_path() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+            active_mounts: 1,
+            pending_cleanup: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_busy_status("install or update the snapshot mount helper", &status)
+                .unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
     fn legacy_zero_aggregate_allows_a_verified_replacement() {
         assert!(
             busy_error(
