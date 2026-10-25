@@ -38,6 +38,7 @@ main_workflow_text="$(<"$main_workflow")"
 ci_text="$(<"$ci_script")"
 long_read_text="$(<"$long_read_script")"
 integration_text="$(<"$integration_script")"
+mount_helper_integration_text="$(<"$root_dir/scripts/macos/mount-helper-install-integration-test.py")"
 mount_helper_text="$(<"$mount_helper_source")"
 access_text="$(<"$access_source")"
 
@@ -98,6 +99,8 @@ assert_not_contains "long read live fallback" "$long_read_text" "live-source"
 assert_contains "timepoint synthetic fixture guard" "$integration_text" "TELEVYBACKUP_SANITIZED_FIXTURE_ROOT"
 assert_contains "timepoint synthetic target guard" "$integration_text" '[[ "$target_id" == "apfs-ci" ]]'
 assert_not_contains "timepoint transcript persistence in sanitized mode" "$integration_text" 'printf '\''%s\\n'\'' "$last_response" >>"$evidence_path"'
+assert_contains "legacy journal seed" "$mount_helper_integration_text" "seed_legacy_stale_journal"
+assert_contains "legacy journal classification assertion" "$mount_helper_integration_text" "recoverable_stale_mounts"
 
 assert_contains "root-owned snapshot creation" "$mount_helper_text" '"/usr/bin/tmutil"'
 assert_contains "snapshot creation diagnostic stage" "$mount_helper_text" '"snapshot_create"'
