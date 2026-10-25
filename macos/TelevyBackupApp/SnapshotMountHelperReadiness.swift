@@ -93,8 +93,8 @@ struct SnapshotMountHelperReadiness {
         if isLegacyAggregateStatus {
             return true
         }
-        // Legacy helpers do not report the additive classification fields. Their
-        // aggregate counters are still safe to use as a conservative update gate.
+        // An unrecognized helper that omits classification remains conservative:
+        // its aggregate counters cannot prove that replacement is safe.
         return activeMounts == 0 && pendingCleanup == 0
     }
 
@@ -114,9 +114,9 @@ struct SnapshotMountHelperReadiness {
             && activeMounts == recoverableStaleMounts
     }
 
-    /// The root helper's legacy-compatible aggregate is blocking even when the
-    /// optional cleanup breakdown is unavailable. Never offer an update while
-    /// that aggregate still contains a journal row.
+    /// An unrecognized aggregate-only status is blocking even when the optional
+    /// cleanup breakdown is unavailable. Recognized legacy versions are handled
+    /// by the guarded replacement path above.
     static func updateBlockReason(activeMounts: UInt32?, pendingCleanup: UInt32?) -> String? {
         guard let activeMounts, let pendingCleanup else {
             return "The installed helper did not report a complete cleanup status. Refresh diagnostics before changing it."
