@@ -38,6 +38,7 @@ main_workflow_text="$(<"$main_workflow")"
 ci_text="$(<"$ci_script")"
 long_read_text="$(<"$long_read_script")"
 integration_text="$(<"$integration_script")"
+mount_helper_integration_text="$(<"$root_dir/scripts/macos/mount-helper-install-integration-test.py")"
 mount_helper_text="$(<"$mount_helper_source")"
 access_text="$(<"$access_source")"
 
@@ -49,6 +50,7 @@ assert_contains "manual regression daemon test" "$pr_workflow_text" "brokered_so
 assert_contains "manual regression snapshot timepoint fixture" "$pr_workflow_text" "snapshot_timepoint_reads_pre_mutation_after_live_change"
 assert_contains "manual regression mount health fixture" "$pr_workflow_text" "long_read_fails_closed_after_mount_identity_loss"
 assert_contains "manual regression stale mount recovery fixture" "$pr_workflow_text" "test-snapshot-mount-recovery.py"
+assert_contains "legacy helper blocking upgrade fixture" "$pr_workflow_text" "--legacy-blocking"
 assert_contains "manual regression contract test" "$pr_workflow_text" "test-apfs-snapshot-validation.sh"
 assert_contains "manual regression pinned checkout action" "$pr_workflow_text" "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 assert_contains "manual regression pinned toolchain action" "$pr_workflow_text" "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
@@ -97,6 +99,8 @@ assert_not_contains "long read live fallback" "$long_read_text" "live-source"
 assert_contains "timepoint synthetic fixture guard" "$integration_text" "TELEVYBACKUP_SANITIZED_FIXTURE_ROOT"
 assert_contains "timepoint synthetic target guard" "$integration_text" '[[ "$target_id" == "apfs-ci" ]]'
 assert_not_contains "timepoint transcript persistence in sanitized mode" "$integration_text" 'printf '\''%s\\n'\'' "$last_response" >>"$evidence_path"'
+assert_contains "legacy journal seed" "$mount_helper_integration_text" "seed_legacy_stale_journal"
+assert_contains "legacy journal classification assertion" "$mount_helper_integration_text" "recoverable_stale_mounts"
 
 assert_contains "root-owned snapshot creation" "$mount_helper_text" '"/usr/bin/tmutil"'
 assert_contains "snapshot creation diagnostic stage" "$mount_helper_text" '"snapshot_create"'

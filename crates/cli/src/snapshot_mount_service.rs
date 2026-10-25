@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use televybackup_snapshot_access::{
-    MOUNT_HELPER_INSTALL_PATH, MOUNT_HELPER_PROTOCOL_VERSION, MountStatusResult, mount_helper,
+    MOUNT_HELPER_INSTALL_PATH, MOUNT_HELPER_PROTOCOL_VERSION, MountStatusResult, StatusResult,
+    mount_helper,
 };
 
 use super::CliError;
@@ -280,12 +281,58 @@ fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BusyCheck {
     Clear,
+    LegacyUpgrade,
     RecoveryRequired,
+}
+
+fn classify_busy_status(
+    operation: &str,
+    status: &MountStatusResult,
+) -> Result<BusyCheck, CliError> {
+    // Helpers predating the additive status fields cannot distinguish a live mount from a stale
+    // journal row. They are eligible only for the guarded replacement transaction below, never
+    // for direct cleanup or a serviceable lease.
+    if status.active_mounts > 0
+        && status.component_version.is_none()
+        && status.pending_cleanup.is_none()
+        && status.build_commit.is_none()
+    {
+        return Ok(BusyCheck::LegacyUpgrade);
+    }
+    busy_error(operation, status).map_or(Ok(BusyCheck::Clear), Err)
+}
+
+fn ensure_snapshot_access_idle(status: &StatusResult) -> Result<(), CliError> {
+    if status.active_leases > 0 || status.pending_cleanup > 0 {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.active",
+            format!(
+                "cannot replace a legacy snapshot mount helper while Snapshot Access has {} active lease(s) and {} pending cleanup record(s)",
+                status.active_leases, status.pending_cleanup
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_legacy_upgrade(config_dir: &Path, data_dir: &Path) -> Result<(), CliError> {
+    let access_status = super::snapshot_service::status_for_maintenance(config_dir, data_dir)
+        .map_err(|error| {
+            CliError::retryable(
+                "snapshot_mount_helper.access_unavailable",
+                format!(
+                    "cannot verify Snapshot Access before replacing the legacy snapshot mount helper: {}",
+                    error.message
+                ),
+            )
+        })?;
+    ensure_snapshot_access_idle(&access_status)?;
+    launchctl(&["bootout", &system_service_target()])
 }
 
 fn check_if_busy(operation: &str) -> Result<BusyCheck, CliError> {
     match mount_helper::status() {
-        Ok(status) => busy_error(operation, &status).map_or(Ok(BusyCheck::Clear), Err),
+        Ok(status) => classify_busy_status(operation, &status),
         Err(_error) if !helper_assets_are_installed() => Ok(BusyCheck::Clear),
         Err(error) => match helper_service_state() {
             HelperServiceState::Absent if safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH)) => {
@@ -387,7 +434,7 @@ fn helper_sha256(path: &Path) -> Result<String, CliError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-pub fn install(json_output: bool) -> Result<(), CliError> {
+pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
     require_root()?;
     let mut mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
         CliError::retryable(
@@ -395,23 +442,29 @@ pub fn install(json_output: bool) -> Result<(), CliError> {
             format!("cannot install or update the snapshot mount helper safely: {error}"),
         )
     })?;
-    if check_if_busy("install or update the snapshot mount helper")? == BusyCheck::RecoveryRequired
-    {
-        drop(mutation_lock);
-        recover_helper_before_mutation()?;
-        mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
-            CliError::retryable(
-                "snapshot_mount_helper.lock_unavailable",
-                format!("cannot resume helper installation safely after recovery: {error}"),
-            )
-        })?;
-        if check_if_busy("install or update the snapshot mount helper")?
-            == BusyCheck::RecoveryRequired
-        {
-            return Err(CliError::retryable(
-                "snapshot_mount_helper.status_unavailable",
-                "snapshot mount helper remained absent after recovery bootstrap",
-            ));
+    let busy = check_if_busy("install or update the snapshot mount helper")?;
+    match busy {
+        BusyCheck::Clear => {}
+        BusyCheck::LegacyUpgrade => prepare_legacy_upgrade(config_dir, data_dir)?,
+        BusyCheck::RecoveryRequired => {
+            drop(mutation_lock);
+            recover_helper_before_mutation()?;
+            mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+                CliError::retryable(
+                    "snapshot_mount_helper.lock_unavailable",
+                    format!("cannot resume helper installation safely after recovery: {error}"),
+                )
+            })?;
+            match check_if_busy("install or update the snapshot mount helper")? {
+                BusyCheck::Clear => {}
+                BusyCheck::LegacyUpgrade => prepare_legacy_upgrade(config_dir, data_dir)?,
+                BusyCheck::RecoveryRequired => {
+                    return Err(CliError::retryable(
+                        "snapshot_mount_helper.status_unavailable",
+                        "snapshot mount helper remained absent after recovery bootstrap",
+                    ));
+                }
+            }
         }
     }
     let candidate_hash = {
@@ -592,6 +645,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+    }
+
+    #[test]
+    fn legacy_positive_unknown_status_enters_upgrade_recovery_path() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+            active_mounts: 1,
+            pending_cleanup: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_busy_status("install or update the snapshot mount helper", &status).unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
+    fn legacy_upgrade_requires_snapshot_access_to_be_idle() {
+        let mut status = StatusResult::default();
+        assert!(ensure_snapshot_access_idle(&status).is_ok());
+
+        status.active_leases = 1;
+        let error = ensure_snapshot_access_idle(&status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.active");
+
+        status.active_leases = 0;
+        status.pending_cleanup = 1;
+        let error = ensure_snapshot_access_idle(&status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.active");
     }
 
     #[test]

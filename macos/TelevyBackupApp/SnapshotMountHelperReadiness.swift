@@ -4,6 +4,7 @@ import Foundation
 struct SnapshotMountHelperReadiness {
     let reachable: Bool
     let isReady: Bool
+    let helperVersion: String?
     let activeMounts: UInt32?
     let liveMounts: UInt32?
     let pendingCleanup: UInt32?
@@ -15,6 +16,7 @@ struct SnapshotMountHelperReadiness {
         daemonReady: Bool,
         buildCommit: String?,
         expectedBuildCommit: String?,
+        helperVersion: String? = nil,
         activeMounts: UInt32? = nil,
         liveMounts: UInt32? = nil,
         pendingCleanup: UInt32? = nil,
@@ -22,6 +24,7 @@ struct SnapshotMountHelperReadiness {
         unknownBlockingMounts: UInt32? = nil
     ) {
         self.reachable = reachable
+        self.helperVersion = helperVersion
         self.activeMounts = activeMounts
         self.liveMounts = liveMounts
         self.pendingCleanup = pendingCleanup
@@ -45,7 +48,27 @@ struct SnapshotMountHelperReadiness {
 
     var updateExplanation: String? {
         guard reachable && !isReady else { return nil }
+        if isLegacyAggregateStatus {
+            let count = activeMounts.map(String.init) ?? "one or more"
+            return "The installed helper cannot classify \(count) legacy snapshot mount record(s). Update will verify Snapshot Access is idle before replacing it."
+        }
         return "The installed helper has not been verified for this app. Update it to use the latest fixes."
+    }
+
+    /// The 0.5.0 and 0.9.8 helpers expose only the aggregate mount count. Their
+    /// replacement is safe to offer because the CLI rechecks Snapshot Access
+    /// leases before booting out the old helper and fails closed on active work.
+    var isLegacyAggregateStatus: Bool {
+        guard reachable,
+              let helperVersion,
+              helperVersion == "0.5.0" || helperVersion == "0.9.8",
+              activeMounts != nil,
+              pendingCleanup == nil,
+              liveMounts == nil,
+              recoverableStaleMounts == nil,
+              unknownBlockingMounts == nil
+        else { return false }
+        return true
     }
 
     var classificationKnown: Bool {
@@ -67,9 +90,11 @@ struct SnapshotMountHelperReadiness {
             guard activeMounts != nil else { return false }
             return !hasBlockingRecords
         }
-        // Legacy helpers do not report the additive classification fields. Their
-        // aggregate counters are still safe to use as a conservative update gate.
-        // A missing pending-cleanup field is compatible with the legacy wire shape;
+        if isLegacyAggregateStatus {
+            return true
+        }
+        // An unrecognized helper that omits classification remains conservative.
+        // A missing pending-cleanup field is compatible with a zero aggregate;
         // a reported cleanup row remains an explicit blocker even if the legacy
         // aggregate is inconsistent with it.
         return activeMounts == 0 && (pendingCleanup.map { $0 == 0 } ?? true)
@@ -91,9 +116,9 @@ struct SnapshotMountHelperReadiness {
             && activeMounts == recoverableStaleMounts
     }
 
-    /// The root helper's legacy-compatible aggregate is blocking even when the
-    /// optional cleanup breakdown is unavailable. Never offer an update while
-    /// that aggregate still contains a journal row.
+    /// An unrecognized aggregate-only status is blocking even when the optional
+    /// cleanup breakdown is unavailable. Recognized legacy versions are handled
+    /// by the guarded replacement path above.
     static func updateBlockReason(activeMounts: UInt32?, pendingCleanup: UInt32?) -> String? {
         guard let activeMounts else {
             return "The installed helper did not report a complete cleanup status. Refresh diagnostics before changing it."
