@@ -52,6 +52,69 @@ def wait_for(probe, assertion):
     raise AssertionError("helper did not reach the expected IPC state within 20 seconds")
 
 
+def seed_legacy_stale_journal(uid):
+    """Create one age-gated reservation row before the candidate helper starts."""
+    lease_id = str(uuid.uuid4())
+    volume_uuid = "00000000-0000-4000-8000-000000000001"
+    device = "disk999s1"
+    script = r'''
+import os, pathlib, sqlite3, sys
+journal_dir, uid, volume_uuid, device, lease_id = sys.argv[1:]
+journal_dir = pathlib.Path(journal_dir)
+journal_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+db = journal_dir / "journal.sqlite"
+connection = sqlite3.connect(db)
+connection.execute(
+    """
+    CREATE TABLE mounts (
+        lease_id TEXT PRIMARY KEY,
+        uid INTEGER NOT NULL,
+        volume_uuid TEXT NOT NULL,
+        device_identifier TEXT NOT NULL,
+        source_path TEXT NOT NULL DEFAULT '',
+        snapshot_name TEXT NOT NULL,
+        mount_root TEXT NOT NULL,
+        mount_device INTEGER NOT NULL DEFAULT 0,
+        snapshot_manifest TEXT NOT NULL,
+        reservation_manifest TEXT NOT NULL DEFAULT '[]',
+        reservation_manifest_valid INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_renewed_at TEXT NOT NULL DEFAULT ''
+    )
+    """
+)
+connection.execute(
+    """
+    INSERT INTO mounts (
+        lease_id, uid, volume_uuid, device_identifier, source_path,
+        snapshot_name, mount_root, mount_device, snapshot_manifest,
+        reservation_manifest, reservation_manifest_valid, state,
+        created_at, last_renewed_at
+    ) VALUES (?, ?, ?, ?, '', '', '', 0, '[]', '[]', 1, 'reserved',
+              datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))
+    """,
+    (lease_id, int(uid), volume_uuid, device),
+)
+connection.commit()
+connection.close()
+os.chmod(db, 0o600)
+'''
+    run(
+        "sudo",
+        "-n",
+        "/usr/bin/python3",
+        "-c",
+        script,
+        str(JOURNAL),
+        str(uid),
+        volume_uuid,
+        device,
+        lease_id,
+    )
+    return lease_id
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", required=True, type=Path)
@@ -115,6 +178,9 @@ while True:
     if args.expect_build_commit:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0","build_commit":"' + '0' * 40 + '"'))
+    elif args.legacy_blocking:
+        old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
+            .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0"'))
     if args.legacy_blocking:
         old_server.write_text(old_server.read_text().replace('"active_mounts":0', '"active_mounts":1'))
     seed_plist = fixture / "old.plist"
@@ -130,7 +196,7 @@ while True:
     run("sudo", "-n", "chmod", "644", str(root_plist))
     try:
         run("sudo", "-n", "/bin/launchctl", "bootstrap", "system", str(root_plist))
-        wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == (4 if args.expect_build_commit else 1))
+        wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == (4 if (args.expect_build_commit or args.legacy_blocking) else 1))
         env = os.environ.copy()
         env.update({
             "TELEVYBACKUP_CONFIG_DIR": str(config),
@@ -154,6 +220,12 @@ while True:
             assert before["result"]["mount_helper_reachable"] is False
             assert "unsupported mount helper response version" in before["result"]["mount_helper_error"]
             print("REPRODUCED: published Access reports unsupported mount helper response version for the legacy service", flush=True)
+        if args.legacy_blocking:
+            stale_lease = seed_legacy_stale_journal(os.getuid())
+            print(
+                "SEEDED: one age-gated legacy reservation row before candidate helper startup",
+                flush=True,
+            )
         # Same privileged CLI entrypoint as the GUI's password-authorized command.
         if args.delay_startup:
             assert args.require_readiness, "delayed startup requires the candidate readiness check"
@@ -191,6 +263,16 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             print("PASS: real privileged installer waits for delayed journal initialization without a manual refresh", flush=True)
         direct = wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == expected_protocol and reply.get("ok") is True)
         assert direct["result"]["helper_version"] == "0.5.0"
+        if args.legacy_blocking:
+            candidate = direct["result"]
+            assert candidate["active_mounts"] == 1
+            assert candidate["recoverable_stale_mounts"] == 1
+            assert candidate["unknown_blocking_mounts"] == 0
+            assert [row["lease_id"] for row in candidate["recovery_leases"]] == [stale_lease]
+            print(
+                "PASS: CLI replacement starts the candidate helper and classifies the legacy journal row as recoverable",
+                flush=True,
+            )
         if args.expect_build_commit:
             assert direct["result"]["component_version"] == "0.5.1"
             candidate = app / "Contents/MacOS/televybackup-snapshot-mount-helper"
