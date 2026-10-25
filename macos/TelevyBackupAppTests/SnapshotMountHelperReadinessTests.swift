@@ -24,6 +24,12 @@ enum SnapshotMountHelperReadinessTests {
             SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 0, pendingCleanup: nil) == nil,
             "a zero legacy aggregate must not display a cleanup blocker"
         )
+        let inconsistentLegacyStatus = state(reachable: true, daemonReady: false, commit: nil, activeMounts: 0, pendingCleanup: 1)
+        expectReadiness(!inconsistentLegacyStatus.canUpdate, "a reported cleanup row must block an inconsistent legacy aggregate")
+        expectReadiness(
+            SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 0, pendingCleanup: 1)?.contains("snapshot cleanup record(s) are pending") == true,
+            "a reported cleanup row must remain visible even when the legacy aggregate is zero"
+        )
 
         let legacyBlocked = SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 1, pendingCleanup: nil)
         expectReadiness(legacyBlocked?.contains("1 blocking snapshot mount record(s)") == true, "legacy blockers must include the aggregate count")

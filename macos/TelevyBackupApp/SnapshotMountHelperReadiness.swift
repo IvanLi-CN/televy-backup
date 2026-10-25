@@ -70,8 +70,9 @@ struct SnapshotMountHelperReadiness {
         // Legacy helpers do not report the additive classification fields. Their
         // aggregate counters are still safe to use as a conservative update gate.
         // A missing pending-cleanup field is compatible with the legacy wire shape;
-        // the aggregate is authoritative when it explicitly reports zero rows.
-        return activeMounts == 0
+        // a reported cleanup row remains an explicit blocker even if the legacy
+        // aggregate is inconsistent with it.
+        return activeMounts == 0 && (pendingCleanup.map { $0 == 0 } ?? true)
     }
 
     var canRecoverStaleMounts: Bool {
@@ -97,17 +98,17 @@ struct SnapshotMountHelperReadiness {
         guard let activeMounts else {
             return "The installed helper did not report a complete cleanup status. Refresh diagnostics before changing it."
         }
-        if activeMounts == 0 {
-            return nil
-        }
-        guard let pendingCleanup else {
-            return "The installed helper reports \(activeMounts) blocking snapshot mount record(s), but cannot classify cleanup. Finish the backup or wait for cleanup before updating it."
-        }
-        if pendingCleanup > 0 {
+        if let pendingCleanup, pendingCleanup > 0 {
             let mountDescription = activeMounts == pendingCleanup
                 ? "All reported snapshot mount records are pending cleanup; strict mode remains blocked until the recorded snapshot inventory is reconciled."
                 : "Additional snapshot mount record(s) are also blocking the update; wait for the backup or cleanup to finish."
             return "\(pendingCleanup) snapshot cleanup record(s) are pending. \(mountDescription)"
+        }
+        if activeMounts == 0 {
+            return nil
+        }
+        guard pendingCleanup != nil else {
+            return "The installed helper reports \(activeMounts) blocking snapshot mount record(s), but cannot classify cleanup. Finish the backup or wait for cleanup before updating it."
         }
         return "\(activeMounts) snapshot mount record(s) are still blocking the update. Finish the backup or wait for cleanup before updating the helper."
     }
