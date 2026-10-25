@@ -1063,7 +1063,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
         },
         Command::SnapshotMountHelper { cmd } => match cmd {
-            SnapshotMountHelperCmd::Install => snapshot_mount_service::install(cli.json),
+            SnapshotMountHelperCmd::Install => {
+                snapshot_mount_service::install(&config_dir, &data_dir, cli.json)
+            }
             SnapshotMountHelperCmd::Uninstall => snapshot_mount_service::uninstall(cli.json),
             SnapshotMountHelperCmd::Status => snapshot_mount_service::status(cli.json),
         },

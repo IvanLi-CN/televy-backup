@@ -1050,6 +1050,22 @@ pub fn status(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<V
     Ok(payload)
 }
 
+/// Read the live Snapshot Access state for a privileged maintenance transaction.
+///
+/// This is intentionally separate from `status`: maintenance must fail closed when the
+/// user-session service cannot be reached or reports an incompatible component, rather than
+/// treating an unavailable status as an idle service.
+pub fn status_for_maintenance(
+    config_dir: &Path,
+    data_dir: &Path,
+) -> Result<StatusResult, CliError> {
+    let manifest = manifest_json(config_dir);
+    let socket = default_socket(&manifest_data_dir(manifest.as_ref(), data_dir));
+    let status = status_from_socket(&socket)?;
+    validate_component_status(&status)?;
+    Ok(status)
+}
+
 fn status_payload(
     manifest: Option<&Value>,
     helper: Option<&StatusResult>,
