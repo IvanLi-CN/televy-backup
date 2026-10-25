@@ -155,7 +155,7 @@ def main():
     config.mkdir(mode=0o700)
     data.mkdir(mode=0o700)
     (config / "config.toml").write_text("targets = []\n")
-    access_socket = data / "access.sock"
+    access_socket = data / "snapshot-access/access.sock"
     # A pre-upgrade service replies with the historical protocol, not a mock
     # client. The bundled Access executable must surface the exact UI symptom.
     old_server = fixture / "old_server.py"
