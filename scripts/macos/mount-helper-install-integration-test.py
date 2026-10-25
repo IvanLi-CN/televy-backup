@@ -257,6 +257,9 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
         if args.require_readiness:
             assert installation["helperReady"] is True
             assert installation["helperVersion"] == "0.5.1"
+        if args.legacy_blocking:
+            assert installation["helperVersion"] == "0.5.1"
+            print("PASS: privileged CLI reports the replacement helper ready", flush=True)
         if journal_locker is not None:
             assert journal_locker.wait(timeout=10) == 0
             assert time.monotonic() - install_started >= 1, "startup delay did not cover the old subsecond retry window"
