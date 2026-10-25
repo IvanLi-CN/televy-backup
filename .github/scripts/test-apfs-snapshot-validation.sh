@@ -49,6 +49,7 @@ assert_contains "manual regression daemon test" "$pr_workflow_text" "brokered_so
 assert_contains "manual regression snapshot timepoint fixture" "$pr_workflow_text" "snapshot_timepoint_reads_pre_mutation_after_live_change"
 assert_contains "manual regression mount health fixture" "$pr_workflow_text" "long_read_fails_closed_after_mount_identity_loss"
 assert_contains "manual regression stale mount recovery fixture" "$pr_workflow_text" "test-snapshot-mount-recovery.py"
+assert_contains "legacy helper blocking upgrade fixture" "$pr_workflow_text" "--legacy-blocking"
 assert_contains "manual regression contract test" "$pr_workflow_text" "test-apfs-snapshot-validation.sh"
 assert_contains "manual regression pinned checkout action" "$pr_workflow_text" "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 assert_contains "manual regression pinned toolchain action" "$pr_workflow_text" "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"

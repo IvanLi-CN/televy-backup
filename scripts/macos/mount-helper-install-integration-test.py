@@ -58,6 +58,11 @@ def main():
     parser.add_argument("--require-readiness", action="store_true")
     parser.add_argument("--expect-build-commit")
     parser.add_argument("--delay-startup", action="store_true")
+    parser.add_argument(
+        "--legacy-blocking",
+        action="store_true",
+        help="make the legacy wire-compatible helper report one unclassified blocking row",
+    )
     args = parser.parse_args()
     # Never run this integration test on an owner's machine.
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
@@ -110,6 +115,8 @@ while True:
     if args.expect_build_commit:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0","build_commit":"' + '0' * 40 + '"'))
+    if args.legacy_blocking:
+        old_server.write_text(old_server.read_text().replace('"active_mounts":0', '"active_mounts":1'))
     seed_plist = fixture / "old.plist"
     seed_plist.write_bytes(plistlib.dumps({
         "Label": LABEL,
@@ -138,6 +145,11 @@ while True:
             stale = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert stale["helper_version"] == "0.5.0" and stale["build_commit"] != args.expect_build_commit
             print("PROBE: same compatible component version has a stale running build", flush=True)
+        elif args.legacy_blocking:
+            legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
+            assert legacy["active_mounts"] == 1
+            assert "pending_cleanup" not in legacy and "component_version" not in legacy
+            print("REPRODUCED: legacy helper reports an unclassified blocking mount row", flush=True)
         else:
             assert before["result"]["mount_helper_reachable"] is False
             assert "unsupported mount helper response version" in before["result"]["mount_helper_error"]
