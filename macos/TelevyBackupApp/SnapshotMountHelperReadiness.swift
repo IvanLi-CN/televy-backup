@@ -93,9 +93,11 @@ struct SnapshotMountHelperReadiness {
         if isLegacyAggregateStatus {
             return true
         }
-        // An unrecognized helper that omits classification remains conservative:
-        // its aggregate counters cannot prove that replacement is safe.
-        return activeMounts == 0 && pendingCleanup == 0
+        // An unrecognized helper that omits classification remains conservative.
+        // A missing pending-cleanup field is compatible with a zero aggregate;
+        // a reported cleanup row remains an explicit blocker even if the legacy
+        // aggregate is inconsistent with it.
+        return activeMounts == 0 && (pendingCleanup.map { $0 == 0 } ?? true)
     }
 
     var canRecoverStaleMounts: Bool {
@@ -118,15 +120,25 @@ struct SnapshotMountHelperReadiness {
     /// cleanup breakdown is unavailable. Recognized legacy versions are handled
     /// by the guarded replacement path above.
     static func updateBlockReason(activeMounts: UInt32?, pendingCleanup: UInt32?) -> String? {
-        guard let activeMounts, let pendingCleanup else {
+        guard let activeMounts else {
             return "The installed helper did not report a complete cleanup status. Refresh diagnostics before changing it."
         }
-        guard activeMounts > 0 || pendingCleanup > 0 else { return nil }
-        if pendingCleanup > 0 {
-            let mountDescription = activeMounts == pendingCleanup
-                ? "All reported snapshot mount records are pending cleanup; strict mode remains blocked until the recorded snapshot inventory is reconciled."
-                : "Additional snapshot mount record(s) are also blocking the update; wait for the backup or cleanup to finish."
+        if let pendingCleanup, pendingCleanup > 0 {
+            let mountDescription: String
+            if activeMounts == pendingCleanup {
+                mountDescription = "All reported snapshot mount records are pending cleanup; strict mode remains blocked until the recorded snapshot inventory is reconciled."
+            } else if activeMounts == 0 {
+                mountDescription = "The helper reports pending cleanup records while its aggregate is zero; strict mode remains blocked until the recorded snapshot inventory is reconciled."
+            } else {
+                mountDescription = "Additional snapshot mount record(s) are also blocking the update; wait for the backup or cleanup to finish."
+            }
             return "\(pendingCleanup) snapshot cleanup record(s) are pending. \(mountDescription)"
+        }
+        if activeMounts == 0 {
+            return nil
+        }
+        guard pendingCleanup != nil else {
+            return "The installed helper reports \(activeMounts) blocking snapshot mount record(s), but cannot classify cleanup. Finish the backup or wait for cleanup before updating it."
         }
         return "\(activeMounts) snapshot mount record(s) are still blocking the update. Finish the backup or wait for cleanup before updating the helper."
     }
