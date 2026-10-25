@@ -18,6 +18,27 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(legacy.updateExplanation != nil, "the update requirement must explain the available action")
         expectReadiness(legacy.canUpdate, "a legacy helper with no aggregate blockers must remain updateable")
 
+        let legacyWireStatus = state(reachable: true, daemonReady: false, commit: nil, activeMounts: 0)
+        expectReadiness(legacyWireStatus.canUpdate, "a legacy helper may omit the additive cleanup field when its aggregate is zero")
+        expectReadiness(
+            SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 0, pendingCleanup: nil) == nil,
+            "a zero legacy aggregate must not display a cleanup blocker"
+        )
+        let inconsistentLegacyStatus = state(reachable: true, daemonReady: false, commit: nil, activeMounts: 0, pendingCleanup: 1)
+        expectReadiness(!inconsistentLegacyStatus.canUpdate, "a reported cleanup row must block an inconsistent legacy aggregate")
+        expectReadiness(
+            SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 0, pendingCleanup: 1)?.contains("snapshot cleanup record(s) are pending") == true,
+            "a reported cleanup row must remain visible even when the legacy aggregate is zero"
+        )
+        expectReadiness(
+            SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 0, pendingCleanup: 1)?.contains("aggregate is zero") == true,
+            "an inconsistent zero aggregate must explain why the cleanup row still blocks the update"
+        )
+
+        let legacyBlocked = SnapshotMountHelperReadiness.updateBlockReason(activeMounts: 1, pendingCleanup: nil)
+        expectReadiness(legacyBlocked?.contains("1 blocking snapshot mount record(s)") == true, "legacy blockers must include the aggregate count")
+        expectReadiness(legacyBlocked?.contains("cannot classify cleanup") == true, "legacy blockers must explain the missing cleanup classification")
+
         let stale = state(reachable: true, daemonReady: true, commit: String(repeating: "b", count: 40), activeMounts: 1, pendingCleanup: 0)
         expectReadiness(!stale.isReady, "a stale daemon's ready flag must not override the current app identity")
         expectReadiness(stale.actionTitle == "Update mount helper", "a same-version stale build needs an update action")
