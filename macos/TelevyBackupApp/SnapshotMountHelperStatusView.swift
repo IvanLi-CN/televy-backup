@@ -16,10 +16,12 @@ struct SnapshotMountHelperStatusView: View {
     let recover: () -> Void
 
     var body: some View {
-        let updateBlockReason = SnapshotMountHelperReadiness.updateBlockReason(
-            activeMounts: activeMounts,
-            pendingCleanup: pendingCleanup
-        )
+        let updateBlockReason = readiness.isLegacyAggregateStatus
+            ? nil
+            : SnapshotMountHelperReadiness.updateBlockReason(
+                activeMounts: activeMounts,
+                pendingCleanup: pendingCleanup
+            )
         VStack(alignment: .leading, spacing: 6) {
             Label(
                 updateBlockReason != nil && !readiness.isReady

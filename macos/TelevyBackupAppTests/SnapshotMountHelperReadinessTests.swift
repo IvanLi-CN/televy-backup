@@ -18,10 +18,16 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(legacy.updateExplanation != nil, "the update requirement must explain the available action")
         expectReadiness(legacy.canUpdate, "a legacy helper with no aggregate blockers must remain updateable")
 
-        let stale = state(reachable: true, daemonReady: true, commit: String(repeating: "b", count: 40), activeMounts: 1, pendingCleanup: 0)
+        let stale = state(reachable: true, daemonReady: true, commit: String(repeating: "b", count: 40), helperVersion: "0.5.0", activeMounts: 1, pendingCleanup: nil)
         expectReadiness(!stale.isReady, "a stale daemon's ready flag must not override the current app identity")
         expectReadiness(stale.actionTitle == "Update mount helper", "a same-version stale build needs an update action")
-        expectReadiness(!stale.canUpdate, "legacy aggregate blockers must keep the update action disabled")
+        expectReadiness(stale.isLegacyAggregateStatus, "a supported legacy helper must be recognized by its aggregate-only status")
+        expectReadiness(stale.canUpdate, "the CLI must be allowed to verify Snapshot Access before replacing a legacy helper")
+        expectReadiness(stale.updateExplanation?.contains("verify Snapshot Access is idle") == true, "legacy replacement must explain its guarded preflight")
+
+        let unknownLegacyShape = state(reachable: true, daemonReady: true, commit: nil, helperVersion: "0.6.0", activeMounts: 1, pendingCleanup: nil)
+        expectReadiness(!unknownLegacyShape.isLegacyAggregateStatus, "an unrecognized incomplete status must not be treated as a replaceable legacy helper")
+        expectReadiness(!unknownLegacyShape.canUpdate, "an unrecognized incomplete status must keep helper mutation disabled")
 
         let current = state(reachable: true, daemonReady: true, commit: candidateCommit)
         expectReadiness(current.isReady && current.actionTitle == nil, "a verified current helper must be ready")
@@ -102,12 +108,13 @@ enum SnapshotMountHelperReadinessTests {
         reachable: Bool,
         daemonReady: Bool,
         commit: String?,
+        helperVersion: String? = "0.5.0",
         activeMounts: UInt32? = nil,
         pendingCleanup: UInt32? = nil
     ) -> SnapshotMountHelperReadiness {
         SnapshotMountHelperReadiness(
             reachable: reachable, daemonReady: daemonReady, buildCommit: commit,
-            expectedBuildCommit: candidateCommit, activeMounts: activeMounts,
+            expectedBuildCommit: candidateCommit, helperVersion: helperVersion, activeMounts: activeMounts,
             pendingCleanup: pendingCleanup
         )
     }

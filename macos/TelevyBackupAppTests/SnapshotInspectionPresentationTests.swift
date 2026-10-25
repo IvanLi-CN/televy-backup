@@ -231,6 +231,8 @@ private func testSnapshotMountStatusDecodingAndAppIdentity() {
     expect(legacy.mountHelperReachable, "legacy root connectivity remains diagnostic evidence")
     expect(!legacy.mountHelperReadiness(expectedBuildCommit: candidate).isReady, "old daemon JSON cannot prove current build readiness")
     expect(legacy.mountHelperReadiness(expectedBuildCommit: candidate).actionTitle == "Update mount helper", "a reachable legacy response must expose the update action")
+    let legacyWithAggregate = try! JSONDecoder().decode(SnapshotControlStatus.self, from: Data(#"{"mountHelperReachable":true,"mountHelperVersion":"0.5.0","mountHelperActiveMounts":1}"#.utf8))
+    expect(legacyWithAggregate.mountHelperReadiness(expectedBuildCommit: candidate).canUpdate, "a supported legacy response must keep replacement actionable while the CLI verifies Snapshot Access")
     let data = try! JSONSerialization.data(withJSONObject: [
         "serviceReachable": true,
         "mountHelperReachable": true,
