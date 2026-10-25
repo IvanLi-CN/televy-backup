@@ -69,7 +69,9 @@ struct SnapshotMountHelperReadiness {
         }
         // Legacy helpers do not report the additive classification fields. Their
         // aggregate counters are still safe to use as a conservative update gate.
-        return activeMounts == 0 && pendingCleanup == 0
+        // A missing pending-cleanup field is compatible with the legacy wire shape;
+        // the aggregate is authoritative when it explicitly reports zero rows.
+        return activeMounts == 0
     }
 
     var canRecoverStaleMounts: Bool {
@@ -92,10 +94,15 @@ struct SnapshotMountHelperReadiness {
     /// optional cleanup breakdown is unavailable. Never offer an update while
     /// that aggregate still contains a journal row.
     static func updateBlockReason(activeMounts: UInt32?, pendingCleanup: UInt32?) -> String? {
-        guard let activeMounts, let pendingCleanup else {
+        guard let activeMounts else {
             return "The installed helper did not report a complete cleanup status. Refresh diagnostics before changing it."
         }
-        guard activeMounts > 0 || pendingCleanup > 0 else { return nil }
+        if activeMounts == 0 {
+            return nil
+        }
+        guard let pendingCleanup else {
+            return "The installed helper reports \(activeMounts) blocking snapshot mount record(s), but cannot classify cleanup. Finish the backup or wait for cleanup before updating it."
+        }
         if pendingCleanup > 0 {
             let mountDescription = activeMounts == pendingCleanup
                 ? "All reported snapshot mount records are pending cleanup; strict mode remains blocked until the recorded snapshot inventory is reconciled."
