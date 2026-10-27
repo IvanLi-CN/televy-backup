@@ -126,7 +126,14 @@ def main():
         action="store_true",
         help="make the legacy wire-compatible helper report one unclassified blocking row",
     )
+    parser.add_argument(
+        "--legacy-build-only",
+        action="store_true",
+        help="make the intermediate helper report one row with build identity but no classification",
+    )
     args = parser.parse_args()
+    legacy_fixture = args.legacy_blocking or args.legacy_build_only
+    assert not (args.legacy_blocking and args.legacy_build_only), "legacy fixture modes are mutually exclusive"
     # Never run this integration test on an owner's machine.
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
     assert sys.platform == "darwin" and os.geteuid() != 0, "macOS user session required"
@@ -178,10 +185,13 @@ while True:
     if args.expect_build_commit:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0","build_commit":"' + '0' * 40 + '"'))
-    elif args.legacy_blocking:
+    elif legacy_fixture:
+        replacement = '"helper_version":"0.5.0"'
+        if args.legacy_build_only:
+            replacement += ',"build_commit":"' + '0' * 40 + '"'
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
-            .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0"'))
-    if args.legacy_blocking:
+            .replace('"helper_version":"0.9.8"', replacement))
+    if legacy_fixture:
         old_server.write_text(old_server.read_text().replace('"active_mounts":0', '"active_mounts":1'))
     seed_plist = fixture / "old.plist"
     seed_plist.write_bytes(plistlib.dumps({
@@ -196,7 +206,7 @@ while True:
     run("sudo", "-n", "chmod", "644", str(root_plist))
     try:
         run("sudo", "-n", "/bin/launchctl", "bootstrap", "system", str(root_plist))
-        wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == (4 if (args.expect_build_commit or args.legacy_blocking) else 1))
+        wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == (4 if (args.expect_build_commit or legacy_fixture) else 1))
         env = os.environ.copy()
         env.update({
             "TELEVYBACKUP_CONFIG_DIR": str(config),
@@ -211,16 +221,21 @@ while True:
             stale = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert stale["helper_version"] == "0.5.0" and stale["build_commit"] != args.expect_build_commit
             print("PROBE: same compatible component version has a stale running build", flush=True)
-        elif args.legacy_blocking:
+        elif legacy_fixture:
             legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert legacy["active_mounts"] == 1
             assert "pending_cleanup" not in legacy and "component_version" not in legacy
-            print("REPRODUCED: legacy helper reports an unclassified blocking mount row", flush=True)
+            if args.legacy_build_only:
+                assert legacy["build_commit"] == "0" * 40
+                print("REPRODUCED: intermediate helper reports build identity without mount classification", flush=True)
+            else:
+                assert "build_commit" not in legacy
+                print("REPRODUCED: legacy helper reports an unclassified blocking mount row", flush=True)
         else:
             assert before["result"]["mount_helper_reachable"] is False
             assert "unsupported mount helper response version" in before["result"]["mount_helper_error"]
             print("REPRODUCED: published Access reports unsupported mount helper response version for the legacy service", flush=True)
-        if args.legacy_blocking:
+        if legacy_fixture:
             stale_lease = seed_legacy_stale_journal(os.getuid())
             print(
                 "SEEDED: one age-gated legacy reservation row before candidate helper startup",
@@ -257,7 +272,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
         if args.require_readiness:
             assert installation["helperReady"] is True
             assert installation["helperVersion"] == "0.5.1"
-        if args.legacy_blocking:
+        if legacy_fixture:
             assert installation["helperVersion"] == "0.5.1"
             print("PASS: privileged CLI reports the replacement helper ready", flush=True)
         if journal_locker is not None:
@@ -266,7 +281,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             print("PASS: real privileged installer waits for delayed journal initialization without a manual refresh", flush=True)
         direct = wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == expected_protocol and reply.get("ok") is True)
         assert direct["result"]["helper_version"] == "0.5.0"
-        if args.legacy_blocking:
+        if legacy_fixture:
             candidate = direct["result"]
             assert candidate["active_mounts"] == 1
             assert candidate["recoverable_stale_mounts"] == 1

@@ -243,6 +243,8 @@ jobs:
             --app "${fixture}/TelevyBackup.app" --require-readiness --expect-build-commit "${GITHUB_SHA}"
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-blocking
+          python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-build-only
 
   release-preparation-validation:
     name: Release preparation validation

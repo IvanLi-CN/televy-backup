@@ -251,6 +251,8 @@ jobs:
             --expect-build-commit "${GITHUB_SHA}" --delay-startup
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-blocking
+          python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-build-only
 
       - name: Stale mount recovery and unknown blocker fixture
         run: |
