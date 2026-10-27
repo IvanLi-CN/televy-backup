@@ -294,11 +294,11 @@ fn classify_busy_status(
     // known wire version and the complete absence of classification fields are the compatibility
     // signal. These helpers are eligible only for the guarded replacement transaction below,
     // never for direct cleanup or a serviceable lease.
-    let known_legacy_wire = match status.helper_version.as_str() {
+    let known_legacy_wire = matches!(
+        status.helper_version.as_str(),
         mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
-        | mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION => true,
-        _ => false,
-    };
+            | mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION
+    );
     let classification_missing = status.component_version.is_none()
         && status.pending_cleanup.is_none()
         && status.live_mounts.is_none()
