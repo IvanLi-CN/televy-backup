@@ -290,13 +290,21 @@ fn classify_busy_status(
     status: &MountStatusResult,
 ) -> Result<BusyCheck, CliError> {
     // Helpers predating the additive status fields cannot distinguish a live mount from a stale
-    // journal row. They are eligible only for the guarded replacement transaction below, never
-    // for direct cleanup or a serviceable lease.
-    if status.active_mounts > 0
-        && status.component_version.is_none()
+    // journal row. A build identity may be present on an intermediate helper release, so the
+    // known wire version and the complete absence of classification fields are the compatibility
+    // signal. These helpers are eligible only for the guarded replacement transaction below,
+    // never for direct cleanup or a serviceable lease.
+    let known_legacy_wire = matches!(
+        status.helper_version.as_str(),
+        mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
+            | mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION
+    );
+    let classification_missing = status.component_version.is_none()
         && status.pending_cleanup.is_none()
-        && status.build_commit.is_none()
-    {
+        && status.live_mounts.is_none()
+        && status.recoverable_stale_mounts.is_none()
+        && status.unknown_blocking_mounts.is_none();
+    if status.active_mounts > 0 && known_legacy_wire && classification_missing {
         return Ok(BusyCheck::LegacyUpgrade);
     }
     busy_error(operation, status).map_or(Ok(BusyCheck::Clear), Err)
@@ -648,17 +656,36 @@ mod tests {
     }
 
     #[test]
-    fn legacy_positive_unknown_status_enters_upgrade_recovery_path() {
+    fn known_legacy_status_with_build_identity_enters_upgrade_recovery_path() {
+        for helper_version in [
+            mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION,
+        ] {
+            let status = MountStatusResult {
+                helper_version: helper_version.into(),
+                active_mounts: 1,
+                build_commit: Some(CANDIDATE_COMMIT.into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                classify_busy_status("install or update the snapshot mount helper", &status)
+                    .unwrap(),
+                BusyCheck::LegacyUpgrade
+            );
+        }
+    }
+
+    #[test]
+    fn current_helper_without_classification_remains_incomplete() {
         let status = MountStatusResult {
             helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
             active_mounts: 1,
-            pending_cleanup: None,
+            build_commit: Some(CANDIDATE_COMMIT.into()),
             ..Default::default()
         };
-        assert_eq!(
-            classify_busy_status("install or update the snapshot mount helper", &status).unwrap(),
-            BusyCheck::LegacyUpgrade
-        );
+        let error = classify_busy_status("install or update the snapshot mount helper", &status)
+            .unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
     }
 
     #[test]
