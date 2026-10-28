@@ -14,6 +14,7 @@ struct SnapshotMountHelperStatusView: View {
     let busy: Bool
     let install: () -> Void
     let recover: () -> Void
+    let retryCleanup: () -> Void
 
     var body: some View {
         let updateBlockReason = readiness.isLegacyAggregateStatus
@@ -49,6 +50,11 @@ struct SnapshotMountHelperStatusView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                if readiness.canRetryPendingCleanup {
+                    Button("Retry snapshot cleanup", action: retryCleanup)
+                        .buttonStyle(.bordered)
+                        .disabled(busy)
+                }
             }
             if let recoverableStaleMounts, recoverableStaleMounts > 0 {
                 Text("\(recoverableStaleMounts) stale snapshot mount record(s) can be safely recovered.")

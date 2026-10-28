@@ -55,13 +55,13 @@ struct SnapshotMountHelperReadiness {
         return "The installed helper has not been verified for this app. Update it to use the latest fixes."
     }
 
-    /// The 0.5.0 and 0.9.8 helpers expose only the aggregate mount count. Their
+    /// The 0.5.1, 0.5.0 and 0.9.8 helpers expose only the aggregate mount count. Their
     /// replacement is safe to offer because the CLI rechecks Snapshot Access
     /// leases before booting out the old helper and fails closed on active work.
     var isLegacyAggregateStatus: Bool {
         guard reachable,
               let helperVersion,
-              helperVersion == "0.5.0" || helperVersion == "0.9.8",
+              helperVersion == "0.5.1" || helperVersion == "0.5.0" || helperVersion == "0.9.8",
               activeMounts != nil,
               pendingCleanup == nil,
               liveMounts == nil,
@@ -114,6 +114,24 @@ struct SnapshotMountHelperReadiness {
             && pendingCleanup == 0
             && unknownBlockingMounts == 0
             && activeMounts == recoverableStaleMounts
+    }
+
+    /// Pending cleanup is actionable only when the helper has proved that no live, stale, or
+    /// unknown row is mixed into the same inventory. The operation still revalidates every row
+    /// through the root helper before changing the journal.
+    var canRetryPendingCleanup: Bool {
+        guard isReady,
+              classificationKnown,
+              let liveMounts,
+              let pendingCleanup,
+              let recoverableStaleMounts,
+              let unknownBlockingMounts
+        else { return false }
+        return pendingCleanup > 0
+            && liveMounts == 0
+            && recoverableStaleMounts == 0
+            && unknownBlockingMounts == 0
+            && activeMounts == pendingCleanup
     }
 
     /// An unrecognized aggregate-only status is blocking even when the optional

@@ -123,14 +123,14 @@ enum BackupFailureHistoryPreview {
                                 unknownBlockingMounts: 0
                             ),
                             path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
-                            version: state == "missing" ? nil : "0.5.1",
+                            version: state == "missing" ? nil : "0.5.2",
                             error: state == "missing" ? "The mount helper is not installed." : nil,
                             activeMounts: state == "pending" || state == "recoverable" ? 1 : 0,
                             pendingCleanup: state == "pending" ? 1 : 0,
                             liveMounts: state == "pending" ? 0 : 0,
                             recoverableStaleMounts: state == "recoverable" ? 1 : 0,
                             unknownBlockingMounts: 0,
-                            busy: false, install: {}, recover: {}
+                            busy: false, install: {}, recover: {}, retryCleanup: {}
                         )
                     }
                 }
@@ -167,7 +167,8 @@ enum BackupFailureHistoryPreview {
                     unknownBlockingMounts: nil,
                     busy: false,
                     install: {},
-                    recover: {}
+                    recover: {},
+                    retryCleanup: {}
                 )
             }
             .padding(24)

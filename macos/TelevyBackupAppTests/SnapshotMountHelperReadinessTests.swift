@@ -65,12 +65,19 @@ enum SnapshotMountHelperReadinessTests {
         )
         expectReadiness(!recoverable.canUpdate, "recoverable stale rows must keep helper mutation blocked")
         expectReadiness(recoverable.canRecoverStaleMounts, "a complete recoverable state must expose the recovery action")
+        expectReadiness(!recoverable.canRetryPendingCleanup, "recoverable stale rows must not expose cleanup retry")
         let pendingWithCandidate = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, activeMounts: 2, liveMounts: 0, pendingCleanup: 1,
             recoverableStaleMounts: 1, unknownBlockingMounts: 0
         )
         expectReadiness(!pendingWithCandidate.canRecoverStaleMounts, "pending cleanup must disable stale recovery")
+        let pendingOnly = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: true, buildCommit: candidateCommit,
+            expectedBuildCommit: candidateCommit, activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0
+        )
+        expectReadiness(pendingOnly.canRetryPendingCleanup, "a verified pending-only state must expose cleanup retry")
         let inconsistentAggregate = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, activeMounts: 1, liveMounts: 0, pendingCleanup: 0,
@@ -85,6 +92,7 @@ enum SnapshotMountHelperReadinessTests {
         )
         expectReadiness(!missingAggregate.canUpdate, "missing aggregate status must disable helper updates")
         expectReadiness(!current.canUpdate, "missing additive status fields must not become a false zero")
+        expectReadiness(!pendingOnly.canRetryPendingCleanup || pendingOnly.canUpdate == false, "pending cleanup must remain an update blocker")
         expectReadiness(!state(reachable: false, daemonReady: true, commit: candidateCommit).isReady, "unreachable helpers cannot be ready")
         expectReadiness(state(reachable: false, daemonReady: false, commit: nil).actionTitle == "Install mount helper", "missing helpers need an installation action")
         expectReadiness(state(reachable: false, daemonReady: false, commit: nil).canUpdate, "missing helpers must retain an installation action")

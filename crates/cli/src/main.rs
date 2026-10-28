@@ -180,6 +180,7 @@ enum SnapshotMountHelperCmd {
     Install,
     Uninstall,
     Status,
+    Reconcile,
 }
 
 #[derive(Subcommand)]
@@ -1068,6 +1069,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             SnapshotMountHelperCmd::Uninstall => snapshot_mount_service::uninstall(cli.json),
             SnapshotMountHelperCmd::Status => snapshot_mount_service::status(cli.json),
+            SnapshotMountHelperCmd::Reconcile => {
+                snapshot_mount_service::reconcile(&config_dir, &data_dir, cli.json)
+            }
         },
         Command::Gui { cmd } => match cmd {
             GuiCmd::Quit => gui_quit(&gui_data_dir, cli.json),

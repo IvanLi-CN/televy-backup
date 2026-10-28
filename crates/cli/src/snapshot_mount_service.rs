@@ -278,6 +278,31 @@ fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     ))
 }
 
+fn pending_cleanup_leases(status: &MountStatusResult) -> Result<Vec<String>, CliError> {
+    let pending_cleanup = status.pending_cleanup.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot retry snapshot cleanup: the installed snapshot mount helper did not report a complete cleanup status",
+        )
+    })?;
+    if pending_cleanup as usize != status.pending_cleanup_leases.len()
+        || status
+            .pending_cleanup_leases
+            .iter()
+            .any(|lease| lease.state != "cleanup_pending")
+    {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.status_inconsistent",
+            "cannot retry snapshot cleanup: the helper reported an inconsistent cleanup inventory",
+        ));
+    }
+    Ok(status
+        .pending_cleanup_leases
+        .iter()
+        .map(|lease| lease.lease_id.clone())
+        .collect())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BusyCheck {
     Clear,
@@ -298,6 +323,7 @@ fn classify_busy_status(
         status.helper_version.as_str(),
         mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
             | mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION
+            | mount_helper::HISTORICAL_ROOT_MOUNT_HELPER_VERSION
     );
     let classification_missing = status.component_version.is_none()
         && status.pending_cleanup.is_none()
@@ -563,6 +589,101 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Retry only the helper's journal-bound cleanup-pending rows.
+///
+/// This is intentionally a separate explicit command. Status probes and refreshes remain
+/// read-only, while each release still revalidates UID, volume/device identity and inventory in
+/// the root helper before changing the journal.
+pub fn reconcile(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
+    require_root()?;
+    let _mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.lock_unavailable",
+            format!("cannot retry snapshot cleanup safely: {error}"),
+        )
+    })?;
+    let access_status = super::snapshot_service::status_for_maintenance(config_dir, data_dir)
+        .map_err(|error| {
+            CliError::retryable(
+                "snapshot_mount_helper.access_unavailable",
+                format!("cannot verify Snapshot Access before retrying cleanup: {}", error.message),
+            )
+        })?;
+    ensure_snapshot_access_idle(&access_status)?;
+    let status = wait_for_helper_status()?;
+    if status.component_version.as_deref() != Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+        || status.build_commit.as_deref() != Some(env!("TELEVYBACKUP_BUILD_COMMIT"))
+    {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.update_required",
+            "cannot retry snapshot cleanup until the installed helper matches this CLI build",
+        ));
+    }
+    let live_mounts = status.live_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot retry snapshot cleanup: live mount classification is unavailable",
+        )
+    })?;
+    let recoverable = status.recoverable_stale_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot retry snapshot cleanup: stale mount classification is unavailable",
+        )
+    })?;
+    let unknown = status.unknown_blocking_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot retry snapshot cleanup: unknown mount classification is unavailable",
+        )
+    })?;
+    if live_mounts > 0 || recoverable > 0 || unknown > 0 {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.reconcile_required",
+            format!(
+                "cannot retry cleanup while other snapshot records remain (live: {live_mounts}, recoverable: {recoverable}, unknown: {unknown})"
+            ),
+        ));
+    }
+    let leases = pending_cleanup_leases(&status)?;
+    let uid = unsafe { libc::geteuid() };
+    let mut released = 0_u32;
+    for lease_id in leases {
+        let result = mount_helper::release(uid, &lease_id).map_err(|_| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "a pending snapshot cleanup record could not be safely retried",
+            )
+        })?;
+        if result.cleanup_state == "released" {
+            released += 1;
+        }
+    }
+    let final_status = wait_for_helper_status()?;
+    let final_pending = final_status.pending_cleanup.unwrap_or(u32::MAX);
+    if final_pending > 0 {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.pending_cleanup",
+            format!(
+                "snapshot cleanup remains pending because the recorded snapshot inventory is not yet reconciled (released: {released}, remaining: {final_pending})"
+            ),
+        ));
+    }
+    let payload = json!({
+        "reconciled": true,
+        "released": released,
+        "remaining": final_status.active_mounts,
+        "helperVersion": final_status.component_version.as_deref().unwrap_or(&final_status.helper_version),
+        "buildCommit": final_status.build_commit,
+    });
+    if json_output {
+        println!("{payload}");
+    } else {
+        println!("snapshot mount cleanup reconciled ({released} record(s) released)");
+    }
+    Ok(())
+}
+
 pub fn status(json_output: bool) -> Result<(), CliError> {
     let loaded = helper_service_state() == HelperServiceState::Loaded;
     let helper = mount_helper::status().ok();
@@ -660,6 +781,7 @@ mod tests {
         for helper_version in [
             mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
             mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::HISTORICAL_ROOT_MOUNT_HELPER_VERSION,
         ] {
             let status = MountStatusResult {
                 helper_version: helper_version.into(),
