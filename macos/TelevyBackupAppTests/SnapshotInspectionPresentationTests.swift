@@ -237,7 +237,7 @@ private func testSnapshotMountStatusDecodingAndAppIdentity() {
         "serviceReachable": true,
         "mountHelperReachable": true,
         "mountHelperReady": true,
-        "mountHelperVersion": "0.5.1",
+        "mountHelperVersion": "0.5.2",
         "mountHelperBuildCommit": candidate,
         "mountHelperLiveMounts": 0,
         "mountHelperRecoverableStaleMounts": 0,

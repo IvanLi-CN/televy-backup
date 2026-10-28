@@ -28,9 +28,13 @@ use crate::{
     MountStatusResult, validate_mount_request,
 };
 
-pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.1";
-pub const PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.0";
-pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
+/// Stable v4 wire identity retained by the byte-identical Snapshot Access artifact.
+pub const MOUNT_HELPER_WIRE_VERSION: &str = "0.5.0";
+pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.2";
+pub const PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.1";
+/// Compatibility alias for callers that still name the original component release.
+pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = MOUNT_HELPER_WIRE_VERSION;
+pub const HISTORICAL_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
 const MOUNT_ROOT_BASE: &str = "/private/var/tmp/televybackup-snapshot-mounts";
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -199,9 +203,10 @@ pub fn renew(uid: u32, lease_id: &str) -> Result<MountReleaseResult, MountHelper
 }
 
 fn validate_status_result(result: &MountStatusResult) -> Result<(), MountHelperError> {
-    if result.helper_version != ROOT_MOUNT_HELPER_VERSION
+    if result.helper_version != MOUNT_HELPER_WIRE_VERSION
+        && result.helper_version != ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != PREVIOUS_ROOT_MOUNT_HELPER_VERSION
-        && result.helper_version != LEGACY_ROOT_MOUNT_HELPER_VERSION
+        && result.helper_version != HISTORICAL_ROOT_MOUNT_HELPER_VERSION
     {
         return Err(MountHelperError::Protocol(format!(
             "incompatible mount helper version: {}",
@@ -811,13 +816,14 @@ async fn status_result(
     Ok(MountStatusResult {
         // Keep the wire compatibility version stable for the approved Snapshot Access
         // artifact. The additive component_version carries the implementation bump.
-        helper_version: PREVIOUS_ROOT_MOUNT_HELPER_VERSION.to_string(),
+        helper_version: MOUNT_HELPER_WIRE_VERSION.to_string(),
         component_version: Some(ROOT_MOUNT_HELPER_VERSION.to_string()),
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts: classification.active_mounts,
         pending_cleanup: Some(classification.pending_cleanup),
         blocked_volume_uuids,
         recovery_leases: classification.recovery_leases,
+        pending_cleanup_leases: classification.pending_cleanup_leases,
         live_mounts: Some(classification.live_mounts),
         recoverable_stale_mounts: Some(classification.recoverable_stale_mounts),
         unknown_blocking_mounts: Some(classification.unknown_blocking_mounts),
@@ -844,13 +850,14 @@ async fn status_for_volume_result(
     .fetch_all(pool)
     .await?;
     Ok(MountStatusResult {
-        helper_version: PREVIOUS_ROOT_MOUNT_HELPER_VERSION.to_string(),
+        helper_version: MOUNT_HELPER_WIRE_VERSION.to_string(),
         component_version: Some(ROOT_MOUNT_HELPER_VERSION.to_string()),
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts: classification.active_mounts,
         pending_cleanup: Some(classification.pending_cleanup),
         blocked_volume_uuids,
         recovery_leases: classification.recovery_leases,
+        pending_cleanup_leases: classification.pending_cleanup_leases,
         live_mounts: Some(classification.live_mounts),
         recoverable_stale_mounts: Some(classification.recoverable_stale_mounts),
         unknown_blocking_mounts: Some(classification.unknown_blocking_mounts),
@@ -864,6 +871,7 @@ struct StatusClassification {
     recoverable_stale_mounts: u32,
     unknown_blocking_mounts: u32,
     recovery_leases: Vec<MountRecoveryLease>,
+    pending_cleanup_leases: Vec<MountRecoveryLease>,
 }
 
 async fn classify_status_rows(
@@ -897,6 +905,7 @@ async fn classify_status_rows(
         recoverable_stale_mounts: 0,
         unknown_blocking_mounts: 0,
         recovery_leases: Vec::new(),
+        pending_cleanup_leases: Vec::new(),
     };
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
@@ -930,6 +939,9 @@ async fn classify_status_rows(
             && matches!(state.as_str(), "reserved" | "prepared" | "active");
         if state == "cleanup_pending" {
             classification.pending_cleanup += 1;
+            classification
+                .pending_cleanup_leases
+                .push(MountRecoveryLease { lease_id, state });
         } else if recoverable {
             classification.recoverable_stale_mounts += 1;
             classification
@@ -3516,7 +3528,7 @@ mod tests {
     #[test]
     fn mount_status_accepts_the_unchanged_v098_helper() {
         let result = MountStatusResult {
-            helper_version: LEGACY_ROOT_MOUNT_HELPER_VERSION.into(),
+            helper_version: HISTORICAL_ROOT_MOUNT_HELPER_VERSION.into(),
             build_commit: None,
             active_mounts: 0,
             pending_cleanup: Some(0),
@@ -3530,7 +3542,7 @@ mod tests {
     #[test]
     fn mount_status_accepts_the_current_identity_bound_helper() {
         let result = MountStatusResult {
-            helper_version: PREVIOUS_ROOT_MOUNT_HELPER_VERSION.into(),
+            helper_version: MOUNT_HELPER_WIRE_VERSION.into(),
             component_version: Some(ROOT_MOUNT_HELPER_VERSION.into()),
             build_commit: None,
             active_mounts: 0,

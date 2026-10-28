@@ -166,8 +166,8 @@ mount_status="$(
     "$cli_binary" --json --config-dir "$config_root" --data-dir "$data_root" \
     snapshot-mount-helper status 2>/dev/null || true
 )"
-printf '%s' "$mount_status" | jq -e '.helperVersion == "0.5.1" and .activeMounts == 0' >/dev/null || {
-  echo "snapshot mount helper preflight did not report version 0.5.1 with no active mounts" >&2
+printf '%s' "$mount_status" | jq -e '.helperVersion == "0.5.2" and .activeMounts == 0' >/dev/null || {
+  echo "snapshot mount helper preflight did not report version 0.5.2 with no active mounts" >&2
   exit 1
 }
 

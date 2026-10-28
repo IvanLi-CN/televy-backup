@@ -1154,7 +1154,8 @@ struct SettingsWindowRootView: View {
                             unknownBlockingMounts: snapshotStatus.mountHelperUnknownBlockingMounts,
                             busy: snapshotBusy || SettingsUIDemo.enabled,
                             install: installSnapshotMountHelper,
-                            recover: recoverSnapshotMountRecords
+                            recover: recoverSnapshotMountRecords,
+                            retryCleanup: retrySnapshotCleanup
                         )
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1214,7 +1215,7 @@ struct SettingsWindowRootView: View {
                 mountHelperReachable: !accessMissing && !mountHelperMissing,
                 mountHelperReady: !accessMissing && !mountHelperMissing && !mountHelperOutdated,
                 mountHelperBuildCommit: mountHelperOutdated ? nil : expectedSnapshotBuildCommit,
-                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.1" : nil,
+                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.2" : nil,
                 mountHelperError: mountHelperMissing ? "Snapshot mount helper is not installed" : nil,
                 mountHelperActiveMounts: 0,
                 mountHelperPendingCleanup: 0,
@@ -1238,6 +1239,20 @@ struct SettingsWindowRootView: View {
     }
 
     private func recoverSnapshotMountRecords() {
+        performSnapshotMountOperation(
+            method: "snapshot.mount_helper.reconcile",
+            operationLabel: "Snapshot mount recovery"
+        )
+    }
+
+    private func retrySnapshotCleanup() {
+        performSnapshotMountOperation(
+            method: "snapshot.mount_helper.retry_cleanup",
+            operationLabel: "Snapshot cleanup retry"
+        )
+    }
+
+    private func performSnapshotMountOperation(method: String, operationLabel: String) {
         snapshotRecoveryToken += 1
         let token = snapshotRecoveryToken
         snapshotBusy = true
@@ -1246,13 +1261,18 @@ struct SettingsWindowRootView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             let result: Result<ControlOperationAccepted, ControlRequestFailure> = ControlIPCClient.request(
                 socketPath: socketPath,
-                method: "snapshot.mount_helper.reconcile",
+                method: method,
             )
             DispatchQueue.main.async {
                 guard self.snapshotRecoveryToken == token else { return }
                 switch result {
                 case let .success(accepted):
-                    pollSnapshotMountRecovery(operationId: accepted.operationId, token: token, attempts: 0)
+                    pollSnapshotMountRecovery(
+                        operationId: accepted.operationId,
+                        operationLabel: operationLabel,
+                        token: token,
+                        attempts: 0
+                    )
                 case let .failure(error):
                     snapshotBusy = false
                     snapshotError = controlFailureMessage(error)
@@ -1261,7 +1281,7 @@ struct SettingsWindowRootView: View {
         }
     }
 
-    private func pollSnapshotMountRecovery(operationId: String, token: Int, attempts: Int) {
+    private func pollSnapshotMountRecovery(operationId: String, operationLabel: String, token: Int, attempts: Int) {
         guard snapshotRecoveryToken == token else { return }
         let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1277,24 +1297,29 @@ struct SettingsWindowRootView: View {
                     case "pending", "running":
                         guard attempts < Self.snapshotRecoveryPollLimit else {
                             snapshotBusy = false
-                            snapshotError = "Snapshot mount recovery timed out. Refresh diagnostics before retrying."
+                            snapshotError = "\(operationLabel) timed out. Refresh diagnostics before retrying."
                             return
                         }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                            pollSnapshotMountRecovery(operationId: operationId, token: token, attempts: attempts + 1)
+                            pollSnapshotMountRecovery(
+                                operationId: operationId,
+                                operationLabel: operationLabel,
+                                token: token,
+                                attempts: attempts + 1
+                            )
                         }
                     case "succeeded":
                         refreshSnapshotStatus()
                     case "failed":
                         let failure = ControlRequestFailure(
                             code: status.error?.code ?? "operation.failed",
-                            message: status.error?.message ?? "Snapshot mount recovery failed.",
+                            message: status.error?.message ?? "\(operationLabel) failed.",
                             retryable: status.error?.retryable ?? true
                         )
                         refreshSnapshotStatus(preservingError: controlFailureMessage(failure))
                     default:
                         snapshotBusy = false
-                        snapshotError = "Snapshot mount recovery returned an invalid state."
+                        snapshotError = "\(operationLabel) returned an invalid state."
                     }
                 }
             }

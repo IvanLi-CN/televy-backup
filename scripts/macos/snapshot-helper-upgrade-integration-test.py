@@ -332,7 +332,7 @@ def main():
                                           str(config), "--data-dir", str(data),
                                           "snapshot-mount-helper", "install").stdout)
             assert installation["helperReady"] is True
-            assert installation["helperVersion"] == "0.5.1"
+            assert installation["helperVersion"] == "0.5.2"
             direct = request(MOUNT_SOCKET, new_protocol)
             assert direct["version"] == new_protocol and direct["ok"] is True
             after = request(access_socket, new_component["protocol_version"])

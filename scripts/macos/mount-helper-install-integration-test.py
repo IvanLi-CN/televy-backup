@@ -271,9 +271,9 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
         assert installation["installed"] is True
         if args.require_readiness:
             assert installation["helperReady"] is True
-            assert installation["helperVersion"] == "0.5.1"
+            assert installation["helperVersion"] == "0.5.2"
         if legacy_fixture:
-            assert installation["helperVersion"] == "0.5.1"
+            assert installation["helperVersion"] == "0.5.2"
             print("PASS: privileged CLI reports the replacement helper ready", flush=True)
         if journal_locker is not None:
             assert journal_locker.wait(timeout=10) == 0
@@ -292,7 +292,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
                 flush=True,
             )
         if args.expect_build_commit:
-            assert direct["result"]["component_version"] == "0.5.1"
+            assert direct["result"]["component_version"] == "0.5.2"
             candidate = app / "Contents/MacOS/televybackup-snapshot-mount-helper"
             digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
             installed_digest = hashlib.sha256(BINARY.read_bytes()).hexdigest()

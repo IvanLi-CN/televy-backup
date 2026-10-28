@@ -766,7 +766,7 @@ assert payload["release_version"] == sys.argv[2]
 assert payload["signing"] == "ad-hoc"
 assert len(payload["assets"]) == 5
 assert payload["components"]["snapshot_access"]["source"] == "one-time-bootstrap-universal-build"
-assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.5.1", "0.5.0", "0.9.8"]
+assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.5.2", "0.5.1", "0.5.0", "0.9.8"]
 layout = payload["dmg_layout"]
 assert layout["builder"] == {"name": "dmgbuild", "version": "1.6.7"}
 assert layout["format"] == "UDZO"
@@ -878,7 +878,7 @@ assert mount_identity["artifact_sha256"].startswith("BUILD-MANIFEST.json#/")
 assert mount_identity["cdhash"].startswith("BUILD-MANIFEST.json#/")
 assert mount_identity["designated_requirement"].startswith("BUILD-MANIFEST.json#/")
 mount = lock["components"]["snapshot_mount_helper"]
-assert mount["component_version"] == "0.5.1"
+assert mount["component_version"] == "0.5.2"
 assert mount["protocol_version"] == 4
 assert mount["identity_source"] == "bundled-release-artifact"
 assert mount["installed_observation"] == "manual-rc-acceptance-required"
