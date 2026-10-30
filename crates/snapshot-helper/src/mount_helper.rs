@@ -1555,7 +1555,11 @@ async fn release_request(
     let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
     let state: String = row.try_get("state")?;
     let last_renewed_at: String = row.try_get("last_renewed_at")?;
-    let stale_reserved = matches!(state.as_str(), "reserved" | "cleanup_pending")
+    // The age gate protects an in-flight `reserved` lease. Once a row has entered
+    // `cleanup_pending`, the Access process can no longer renew it, so an explicit
+    // retry must be allowed to reconcile it immediately. Keeping the age gate on
+    // this terminal state made the retry action a no-op until an unrelated timeout.
+    let stale_reserved = state == "reserved"
         && mount_root.is_empty()
         && manifest_json == "[]"
         && sqlx::query_scalar::<_, i64>(
@@ -1585,11 +1589,11 @@ async fn release_request(
             cleanup_state: "cleanup_pending".to_string(),
         });
     }
-    if matches!(state.as_str(), "reserved" | "cleanup_pending")
+    if (state == "cleanup_pending" || stale_reserved)
         && mount_root.is_empty()
         && manifest_json == "[]"
     {
-        if !stale_reserved {
+        if state == "reserved" && !stale_reserved {
             return Ok(MountReleaseResult {
                 lease_id: lease_id.to_string(),
                 cleanup_state: "cleanup_pending".to_string(),

@@ -58,6 +58,10 @@ connection.executemany(
     """,
     rows,
 )
+connection.execute(
+    "UPDATE mounts SET created_at = datetime('now'), last_renewed_at = datetime('now') WHERE lease_id = ?",
+    (pending_id,),
+)
 connection.commit()
 connection.close()
 '''
