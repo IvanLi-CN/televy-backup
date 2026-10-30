@@ -269,6 +269,7 @@ def main():
         assert new_manifest["source_commit"] == NEW_SOURCE
         old_component = old_manifest["components"]["snapshot_access"]
         new_component = new_manifest["components"]["snapshot_access"]
+        new_mount_helper = new_manifest["components"]["snapshot_mount_helper"]
         old_protocol = old_manifest["components"]["snapshot_mount_helper"]["protocol_version"]
         new_protocol = new_component["mount_helper_protocol_version"]
         assert old_protocol == 1 and new_protocol == 4
@@ -332,7 +333,7 @@ def main():
                                           str(config), "--data-dir", str(data),
                                           "snapshot-mount-helper", "install").stdout)
             assert installation["helperReady"] is True
-            assert installation["helperVersion"] == "0.5.2"
+            assert installation["helperVersion"] == new_mount_helper["component_version"]
             direct = request(MOUNT_SOCKET, new_protocol)
             assert direct["version"] == new_protocol and direct["ok"] is True
             after = request(access_socket, new_component["protocol_version"])
