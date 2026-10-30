@@ -35,15 +35,18 @@ def request(path, method, **fields):
     return reply
 
 
-def write_fixture_rows(journal, uid, volume_uuid, device, stale_id, pending_id, unknown_id):
+def write_fixture_rows(
+    journal, uid, volume_uuid, device, stale_id, pending_id, unknown_id, malformed_id
+):
     script = '''
 import sqlite3, sys
-journal, uid, volume_uuid, device, stale_id, pending_id, unknown_id = sys.argv[1:]
+journal, uid, volume_uuid, device, stale_id, pending_id, unknown_id, malformed_id = sys.argv[1:]
 connection = sqlite3.connect(journal)
 rows = [
     (stale_id, int(uid), volume_uuid, device, '', '', '', '[]', '[]', 1, 'reserved'),
     (pending_id, int(uid), volume_uuid, device, '', '', '', '[]', '[]', 1, 'cleanup_pending'),
     (unknown_id, int(uid), volume_uuid, device, '', '', '', '[]', 'not-json', 0, 'active'),
+    (malformed_id, int(uid), volume_uuid, device, '', '', '', '[]', 'not-json', 0, 'cleanup_pending'),
 ]
 connection.executemany(
     """
@@ -54,6 +57,10 @@ connection.executemany(
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))
     """,
     rows,
+)
+connection.execute(
+    "UPDATE mounts SET created_at = datetime('now'), last_renewed_at = datetime('now') WHERE lease_id = ?",
+    (pending_id,),
 )
 connection.commit()
 connection.close()
@@ -71,6 +78,7 @@ connection.close()
         stale_id,
         pending_id,
         unknown_id,
+        malformed_id,
     )
 
 
@@ -150,6 +158,7 @@ def main():
         stale_id = str(uuid.uuid4())
         pending_id = str(uuid.uuid4())
         unknown_id = str(uuid.uuid4())
+        malformed_id = str(uuid.uuid4())
         write_fixture_rows(
             journal,
             os.getuid(),
@@ -158,14 +167,15 @@ def main():
             stale_id,
             pending_id,
             unknown_id,
+            malformed_id,
         )
         before = request(ipc, "status")
         assert before["ok"]
         status = before["result"]
-        assert status["active_mounts"] == 3
+        assert status["active_mounts"] == 4
         assert status["pending_cleanup"] == 1
         assert status["recoverable_stale_mounts"] == 1
-        assert status["unknown_blocking_mounts"] == 1
+        assert status["unknown_blocking_mounts"] == 2
         assert [row["lease_id"] for row in status["pending_cleanup_leases"]] == [pending_id]
         assert [row["lease_id"] for row in status["recovery_leases"]] == [stale_id]
         pending = request(ipc, "release", uid=os.getuid(), lease_id=pending_id)
@@ -175,10 +185,10 @@ def main():
         after = request(ipc, "status")
         assert after["ok"]
         status = after["result"]
-        assert status["active_mounts"] == 1
+        assert status["active_mounts"] == 2
         assert status["pending_cleanup"] == 0
         assert status["recoverable_stale_mounts"] == 0
-        assert status["unknown_blocking_mounts"] == 1
+        assert status["unknown_blocking_mounts"] == 2
         assert not status["recovery_leases"]
         print(
             "PASS: stale verified row released through helper IPC; unknown row remained blocking",

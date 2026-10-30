@@ -376,7 +376,7 @@ fn classify_busy_status(
 }
 
 fn ensure_snapshot_access_idle(status: &StatusResult) -> Result<(), CliError> {
-    if status.active_leases > 0 || status.pending_cleanup > 0 {
+    if status.active_leases > 0 {
         return Err(CliError::retryable(
             "snapshot_mount_helper.active",
             format!(
@@ -385,21 +385,51 @@ fn ensure_snapshot_access_idle(status: &StatusResult) -> Result<(), CliError> {
             ),
         ));
     }
+    if status.pending_cleanup > 0 {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.access_cleanup_pending",
+            format!(
+                "cannot continue while Snapshot Access is retrying {} pending cleanup record(s)",
+                status.pending_cleanup
+            ),
+        ));
+    }
     Ok(())
 }
 
+fn wait_for_snapshot_access_idle(
+    config_dir: &Path,
+    data_dir: &Path,
+    operation: &str,
+) -> Result<StatusResult, CliError> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = super::snapshot_service::status_for_maintenance(config_dir, data_dir)
+            .map_err(|error| {
+                CliError::retryable(
+                    "snapshot_mount_helper.access_unavailable",
+                    format!(
+                        "cannot verify Snapshot Access before {operation}: {}",
+                        error.message
+                    ),
+                )
+            })?;
+        if status.active_leases > 0 || Instant::now() >= deadline {
+            ensure_snapshot_access_idle(&status)?;
+        }
+        if status.pending_cleanup == 0 {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn prepare_legacy_upgrade(config_dir: &Path, data_dir: &Path) -> Result<(), CliError> {
-    let access_status = super::snapshot_service::status_for_maintenance(config_dir, data_dir)
-        .map_err(|error| {
-            CliError::retryable(
-                "snapshot_mount_helper.access_unavailable",
-                format!(
-                    "cannot verify Snapshot Access before replacing the legacy snapshot mount helper: {}",
-                    error.message
-                ),
-            )
-        })?;
-    ensure_snapshot_access_idle(&access_status)?;
+    wait_for_snapshot_access_idle(
+        config_dir,
+        data_dir,
+        "replacing the legacy snapshot mount helper",
+    )?;
     launchctl(&["bootout", &system_service_target()])
 }
 
@@ -641,17 +671,7 @@ pub fn reconcile(config_dir: &Path, data_dir: &Path, json_output: bool) -> Resul
             "snapshot cleanup retry must run as the signed-in user so the root helper can verify the peer UID",
         ));
     }
-    let access_status = super::snapshot_service::status_for_maintenance(config_dir, data_dir)
-        .map_err(|error| {
-            CliError::retryable(
-                "snapshot_mount_helper.access_unavailable",
-                format!(
-                    "cannot verify Snapshot Access before retrying cleanup: {}",
-                    error.message
-                ),
-            )
-        })?;
-    ensure_snapshot_access_idle(&access_status)?;
+    wait_for_snapshot_access_idle(config_dir, data_dir, "retrying snapshot cleanup")?;
     let status = wait_for_helper_status()?;
     cleanup_retry_identity(&status)?;
     let live_mounts = status.live_mounts.ok_or_else(|| {
@@ -934,7 +954,7 @@ mod tests {
         status.active_leases = 0;
         status.pending_cleanup = 1;
         let error = ensure_snapshot_access_idle(&status).unwrap_err();
-        assert_eq!(error.code, "snapshot_mount_helper.active");
+        assert_eq!(error.code, "snapshot_mount_helper.access_cleanup_pending");
     }
 
     #[test]

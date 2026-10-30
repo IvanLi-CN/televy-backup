@@ -34,6 +34,8 @@ func controlFailureMessage(_ failure: ControlRequestFailure) -> String {
         return "The backup volume was not visible after mounting. Check the application log for the mount result."
     case "snapshot.browse.recovery_failed":
         return "An earlier backup volume could not be cleaned up. Eject it in Finder and retry."
+    case "snapshot_mount_helper.access_cleanup_pending":
+        return "Snapshot Access is still completing an earlier cleanup. Wait briefly, refresh, then retry."
     default:
         return failure.message
     }

@@ -115,7 +115,8 @@ assert_contains "creation baseline is exact" "$mount_helper_text" 'if !manifests
 assert_contains "deletion requires original baseline" "$mount_helper_text" "A post-deletion inventory change is unowned"
 assert_contains "partial deletion retains unconfirmed manifest" "$mount_helper_text" "retain_unconfirmed_manifest_after_delete_failure"
 assert_contains "deletion clears recorded manifest" "$mount_helper_text" "snapshot_manifest = '[]', reservation_manifest = ?"
-assert_contains "stale release remains blocked" "$mount_helper_text" 'if !stale_reserved'
+assert_contains "fresh reservation release remains blocked" "$mount_helper_text" 'if state == "reserved" && !stale_reserved'
+assert_contains "pending cleanup retry bypasses reservation age gate" "$mount_helper_text" 'if (state == "cleanup_pending" || stale_reserved)'
 assert_contains "lease source-path binding" "$mount_helper_text" 'authorize_source_path(uid, source_path, &source)'
 assert_contains "mount source-path reauthorization" "$mount_helper_text" 'authorize_source_path(uid, stored_source_path, &source)'
 assert_contains "source-path authorization uses exec boundary" "$mount_helper_text" 'Command::new(executable)'

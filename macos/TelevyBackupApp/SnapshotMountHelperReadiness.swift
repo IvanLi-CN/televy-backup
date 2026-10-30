@@ -12,6 +12,8 @@ struct SnapshotMountHelperReadiness {
     let recoverableStaleMounts: UInt32?
     let unknownBlockingMounts: UInt32?
     let pendingCleanupCandidates: UInt32?
+    let snapshotAccessActiveLeases: UInt32
+    let snapshotAccessPendingCleanup: UInt32
 
     init(
         reachable: Bool,
@@ -24,7 +26,9 @@ struct SnapshotMountHelperReadiness {
         pendingCleanup: UInt32? = nil,
         recoverableStaleMounts: UInt32? = nil,
         unknownBlockingMounts: UInt32? = nil,
-        pendingCleanupCandidates: UInt32? = nil
+        pendingCleanupCandidates: UInt32? = nil,
+        snapshotAccessActiveLeases: UInt32 = 0,
+        snapshotAccessPendingCleanup: UInt32 = 0
     ) {
         self.reachable = reachable
         self.buildCommit = buildCommit
@@ -35,6 +39,8 @@ struct SnapshotMountHelperReadiness {
         self.recoverableStaleMounts = recoverableStaleMounts
         self.unknownBlockingMounts = unknownBlockingMounts
         self.pendingCleanupCandidates = pendingCleanupCandidates
+        self.snapshotAccessActiveLeases = snapshotAccessActiveLeases
+        self.snapshotAccessPendingCleanup = snapshotAccessPendingCleanup
         let validExpected = expectedBuildCommit.map {
             $0.utf8.count == 40 && $0.utf8.allSatisfy { (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }
         } ?? false
@@ -42,8 +48,37 @@ struct SnapshotMountHelperReadiness {
     }
 
     var title: String {
+        if isReady && !classificationKnown {
+            return "Snapshot mount helper verification required"
+        }
+        if isReady && snapshotAccessActiveLeases > 0 {
+            return "Snapshot Access busy"
+        }
+        if isReady && snapshotAccessPendingCleanup > 0 {
+            return "Snapshot Access cleanup required"
+        }
+        if isReady && (unknownBlockingMounts ?? 0) > 0 {
+            return "Snapshot mount helper verification required"
+        }
+        if isReady && (recoverableStaleMounts ?? 0) > 0 {
+            return "Snapshot mount helper recovery required"
+        }
+        if isReady && (pendingCleanup ?? 0) > 0 {
+            return "Snapshot mount helper cleanup required"
+        }
         if isReady { return "Snapshot mount helper ready" }
         return reachable ? "Snapshot mount helper update required" : "Snapshot mount helper required"
+    }
+
+    /// Build identity proves that the helper is the installed candidate; blocking journal rows
+    /// still keep strict mode unavailable until their verified cleanup action completes.
+    var isOperational: Bool {
+        isReady
+            && classificationKnown
+            && activeMounts != nil
+            && snapshotAccessActiveLeases == 0
+            && snapshotAccessPendingCleanup == 0
+            && !hasBlockingRecords
     }
 
     var actionTitle: String? {
@@ -150,6 +185,8 @@ struct SnapshotMountHelperReadiness {
             && liveMounts == 0
             && pendingCleanup == 0
             && unknownBlockingMounts == 0
+            && snapshotAccessActiveLeases == 0
+            && snapshotAccessPendingCleanup == 0
             && activeMounts == recoverableStaleMounts
     }
 
@@ -171,6 +208,8 @@ struct SnapshotMountHelperReadiness {
             && liveMounts == 0
             && recoverableStaleMounts == 0
             && unknownBlockingMounts == 0
+            && snapshotAccessActiveLeases == 0
+            && snapshotAccessPendingCleanup == 0
             && activeMounts == pendingCleanup
             && pendingCleanupCandidates == pendingCleanup
     }
