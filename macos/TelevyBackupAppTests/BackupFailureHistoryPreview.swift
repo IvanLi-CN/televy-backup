@@ -113,12 +113,14 @@ enum BackupFailureHistoryPreview {
                         Divider()
                         SnapshotMountHelperStatusView(
                             readiness: SnapshotMountHelperReadiness(
-                                reachable: state != "missing", daemonReady: state == "current" || state == "recoverable",
-                                buildCommit: state == "current" || state == "recoverable" ? candidate : nil,
+                                reachable: state != "missing", daemonReady: state == "current" || state == "recoverable" || state == "pending",
+                                buildCommit: state == "current" || state == "recoverable" || state == "pending" ? candidate : nil,
                                 expectedBuildCommit: candidate,
+                                helperVersion: state == "missing" ? nil : "0.5.2",
                                 activeMounts: state == "pending" || state == "recoverable" ? 1 : 0,
                                 liveMounts: 0,
                                 pendingCleanup: state == "pending" ? 1 : 0,
+                                pendingCleanupCandidates: state == "pending" ? 1 : 0,
                                 recoverableStaleMounts: state == "recoverable" ? 1 : 0,
                                 unknownBlockingMounts: 0
                             ),
@@ -127,6 +129,7 @@ enum BackupFailureHistoryPreview {
                             error: state == "missing" ? "The mount helper is not installed." : nil,
                             activeMounts: state == "pending" || state == "recoverable" ? 1 : 0,
                             pendingCleanup: state == "pending" ? 1 : 0,
+                            pendingCleanupCandidates: state == "pending" ? 1 : 0,
                             liveMounts: state == "pending" ? 0 : 0,
                             recoverableStaleMounts: state == "recoverable" ? 1 : 0,
                             unknownBlockingMounts: 0,
@@ -162,6 +165,7 @@ enum BackupFailureHistoryPreview {
                     error: nil,
                     activeMounts: 1,
                     pendingCleanup: 0,
+                    pendingCleanupCandidates: 0,
                     liveMounts: nil,
                     recoverableStaleMounts: nil,
                     unknownBlockingMounts: nil,

@@ -13,11 +13,12 @@ recorded for that lease, while `Cleanup` can delete only a manifest already reco
 journal row. Legacy helper status is accepted only for the one-time migration probe; strict lease
 acquisition rejects it before `Reserve`. Status classification is additive: recent rows, pending
 cleanup, verified age-gated stale rows, and unknown rows remain distinct. An explicit reconcile
-request requires the current helper component and build identity, verifies the legacy aggregate
+stale-record recovery requires the current helper component and build identity, while a pending-cleanup retry may use the current or immediately previous cleanup-capable component only when the v4 wire identity and complete pending-only classification are verified. Each request verifies the legacy aggregate
 against the complete additive partition and candidate count before and after each release, and
 uses the authenticated-UID-scoped Status and journal-bound Release methods after the user-session
 Access service reports no active or pending lease; it includes disabled or removed volume settings,
-never releases pending-cleanup or unknown rows, and never introduces arbitrary lease or path cleanup.
+never releases pending-cleanup rows outside the explicit pending-only retry, never releases unknown
+rows, and never introduces arbitrary lease or path cleanup.
 The current validated strict-mode baseline also
 grants FDA to this helper's exact installed identity; that additional TCC authority does not expand
 the helper into a file-reading or network boundary.

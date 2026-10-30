@@ -10,6 +10,7 @@ struct SnapshotMountHelperReadiness {
     let pendingCleanup: UInt32?
     let recoverableStaleMounts: UInt32?
     let unknownBlockingMounts: UInt32?
+    let pendingCleanupCandidates: UInt32?
 
     init(
         reachable: Bool,
@@ -21,7 +22,8 @@ struct SnapshotMountHelperReadiness {
         liveMounts: UInt32? = nil,
         pendingCleanup: UInt32? = nil,
         recoverableStaleMounts: UInt32? = nil,
-        unknownBlockingMounts: UInt32? = nil
+        unknownBlockingMounts: UInt32? = nil,
+        pendingCleanupCandidates: UInt32? = nil
     ) {
         self.reachable = reachable
         self.helperVersion = helperVersion
@@ -30,6 +32,7 @@ struct SnapshotMountHelperReadiness {
         self.pendingCleanup = pendingCleanup
         self.recoverableStaleMounts = recoverableStaleMounts
         self.unknownBlockingMounts = unknownBlockingMounts
+        self.pendingCleanupCandidates = pendingCleanupCandidates
         let validExpected = expectedBuildCommit.map {
             $0.utf8.count == 40 && $0.utf8.allSatisfy { (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }
         } ?? false
@@ -52,6 +55,9 @@ struct SnapshotMountHelperReadiness {
             let count = activeMounts.map(String.init) ?? "one or more"
             return "The installed helper cannot classify \(count) legacy snapshot mount record(s). Update will verify Snapshot Access is idle before replacing it."
         }
+        if isLegacyPendingCleanupStatus {
+            return "The installed helper reports pending cleanup without lease candidates. Update it after Snapshot Access is idle to restore the safe cleanup action."
+        }
         return "The installed helper has not been verified for this app. Update it to use the latest fixes."
     }
 
@@ -71,6 +77,34 @@ struct SnapshotMountHelperReadiness {
         return true
     }
 
+    /// The previous helper can identify pending rows but cannot expose their lease IDs. A guarded
+    /// replacement is the only safe way to upgrade it before cleanup can be retried explicitly.
+    var isLegacyPendingCleanupStatus: Bool {
+        guard reachable,
+              helperVersion == "0.5.1",
+              let buildCommit
+        else { return false }
+        let validBuild = buildCommit.utf8.count == 40
+            && buildCommit.utf8.allSatisfy {
+                (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+            }
+        guard validBuild,
+              let activeMounts,
+              let pendingCleanup,
+              let pendingCleanupCandidates,
+              let liveMounts,
+              let recoverableStaleMounts,
+              let unknownBlockingMounts,
+              pendingCleanupCandidates == 0,
+              activeMounts > 0,
+              activeMounts == pendingCleanup,
+              liveMounts == 0,
+              recoverableStaleMounts == 0,
+              unknownBlockingMounts == 0
+        else { return false }
+        return true
+    }
+
     var classificationKnown: Bool {
         liveMounts != nil && pendingCleanup != nil && recoverableStaleMounts != nil && unknownBlockingMounts != nil
     }
@@ -86,6 +120,7 @@ struct SnapshotMountHelperReadiness {
         // privileged install transaction performs its own journal/identity
         // checks and fails closed if records are active or ambiguous.
         guard reachable else { return true }
+        if isLegacyPendingCleanupStatus { return true }
         if classificationKnown {
             guard activeMounts != nil else { return false }
             return !hasBlockingRecords
@@ -120,10 +155,13 @@ struct SnapshotMountHelperReadiness {
     /// unknown row is mixed into the same inventory. The operation still revalidates every row
     /// through the root helper before changing the journal.
     var canRetryPendingCleanup: Bool {
-        guard isReady,
+        guard reachable,
+              cleanupRetryCompatible,
               classificationKnown,
+              let activeMounts,
               let liveMounts,
               let pendingCleanup,
+              let pendingCleanupCandidates,
               let recoverableStaleMounts,
               let unknownBlockingMounts
         else { return false }
@@ -132,6 +170,20 @@ struct SnapshotMountHelperReadiness {
             && recoverableStaleMounts == 0
             && unknownBlockingMounts == 0
             && activeMounts == pendingCleanup
+            && pendingCleanupCandidates == pendingCleanup
+    }
+
+    /// The cleanup request is protocol-compatible with the current and immediately previous
+    /// helper. It intentionally does not require the current build identity: this is the escape
+    /// hatch that clears a safe pending row before the helper update can be enabled.
+    var cleanupRetryCompatible: Bool {
+        guard let helperVersion, let buildCommit else { return false }
+        let validBuild = buildCommit.utf8.count == 40
+            && buildCommit.utf8.allSatisfy {
+                (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+            }
+        return (helperVersion == "0.5.2" && isReady)
+            || (helperVersion == "0.5.1" && validBuild)
     }
 
     /// An unrecognized aggregate-only status is blocking even when the optional
