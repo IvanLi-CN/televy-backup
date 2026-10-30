@@ -88,6 +88,9 @@ struct SnapshotMountHelperReadiness {
 
     var updateExplanation: String? {
         guard reachable && !isReady else { return nil }
+        if isPendingCleanupUpgradeSafe {
+            return "The installed helper build is stale, but Snapshot Access is idle and all blocking records are verified cleanup candidates. Update it to restore the cleanup action."
+        }
         if isLegacyAggregateStatus {
             let count = activeMounts.map(String.init) ?? "one or more"
             return "The installed helper cannot classify \(count) legacy snapshot mount record(s). Update will verify Snapshot Access is idle before replacing it."
@@ -157,7 +160,7 @@ struct SnapshotMountHelperReadiness {
         // privileged install transaction performs its own journal/identity
         // checks and fails closed if records are active or ambiguous.
         guard reachable else { return true }
-        if isLegacyPendingCleanupStatus { return true }
+        if isLegacyPendingCleanupStatus || isPendingCleanupUpgradeSafe { return true }
         if classificationKnown {
             guard activeMounts != nil else { return false }
             return !hasBlockingRecords
@@ -170,6 +173,31 @@ struct SnapshotMountHelperReadiness {
         // a reported cleanup row remains an explicit blocker even if the legacy
         // aggregate is inconsistent with it.
         return activeMounts == 0 && (pendingCleanup.map { $0 == 0 } ?? true)
+    }
+
+    /// A mismatched current helper can be replaced without releasing anything when its complete
+    /// status proves that every blocker is already cleanup-pending and has an exact lease record.
+    /// The replacement is still serialized through the CLI's Snapshot Access idle check.
+    var isPendingCleanupUpgradeSafe: Bool {
+        guard reachable,
+              !isReady,
+              helperVersion == "0.5.2",
+              classificationKnown,
+              let activeMounts,
+              let liveMounts,
+              let pendingCleanup,
+              let recoverableStaleMounts,
+              let unknownBlockingMounts,
+              let pendingCleanupCandidates
+        else { return false }
+        return pendingCleanup > 0
+            && activeMounts == pendingCleanup
+            && liveMounts == 0
+            && recoverableStaleMounts == 0
+            && unknownBlockingMounts == 0
+            && pendingCleanupCandidates == pendingCleanup
+            && snapshotAccessActiveLeases == 0
+            && snapshotAccessPendingCleanup == 0
     }
 
     var canRecoverStaleMounts: Bool {

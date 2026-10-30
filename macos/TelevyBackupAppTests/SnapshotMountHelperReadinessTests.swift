@@ -83,6 +83,27 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(pendingOnly.canRetryPendingCleanup, "a verified pending-only state must expose cleanup retry")
         expectReadiness(!pendingOnly.isOperational, "pending cleanup must keep strict mode unavailable")
         expectReadiness(pendingOnly.title == "Snapshot mount helper cleanup required", "pending cleanup must not present the helper as fully ready")
+
+        let staleCurrentPending = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
+            activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 1
+        )
+        expectReadiness(staleCurrentPending.isPendingCleanupUpgradeSafe, "a stale current helper with an exact pending-only partition must be replaceable")
+        expectReadiness(staleCurrentPending.canUpdate, "a stale current helper must retain a guarded update action")
+        expectReadiness(!staleCurrentPending.canRetryPendingCleanup, "a stale current helper must not expose cleanup retry before replacement")
+        expectReadiness(staleCurrentPending.updateExplanation?.contains("all blocking records are verified cleanup candidates") == true, "the guarded update must explain why it is safe")
+
+        let staleCurrentMixed = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
+            activeMounts: 2, liveMounts: 1, pendingCleanup: 1,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 1
+        )
+        expectReadiness(!staleCurrentMixed.isPendingCleanupUpgradeSafe, "a live mount must keep a stale current helper blocked")
+        expectReadiness(!staleCurrentMixed.canUpdate, "a live mount must disable helper replacement")
+
         let accessPending = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
