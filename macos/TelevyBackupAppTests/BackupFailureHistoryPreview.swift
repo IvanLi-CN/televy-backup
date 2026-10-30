@@ -120,9 +120,9 @@ enum BackupFailureHistoryPreview {
                                 activeMounts: state == "pending" || state == "recoverable" ? 1 : 0,
                                 liveMounts: 0,
                                 pendingCleanup: state == "pending" ? 1 : 0,
-                                pendingCleanupCandidates: state == "pending" ? 1 : 0,
                                 recoverableStaleMounts: state == "recoverable" ? 1 : 0,
-                                unknownBlockingMounts: 0
+                                unknownBlockingMounts: 0,
+                                pendingCleanupCandidates: state == "pending" ? 1 : 0
                             ),
                             path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
                             version: state == "missing" ? nil : "0.5.2",
