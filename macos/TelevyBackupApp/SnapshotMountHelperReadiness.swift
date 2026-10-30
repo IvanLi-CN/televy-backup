@@ -4,6 +4,7 @@ import Foundation
 struct SnapshotMountHelperReadiness {
     let reachable: Bool
     let isReady: Bool
+    let buildCommit: String?
     let helperVersion: String?
     let activeMounts: UInt32?
     let liveMounts: UInt32?
@@ -26,6 +27,7 @@ struct SnapshotMountHelperReadiness {
         pendingCleanupCandidates: UInt32? = nil
     ) {
         self.reachable = reachable
+        self.buildCommit = buildCommit
         self.helperVersion = helperVersion
         self.activeMounts = activeMounts
         self.liveMounts = liveMounts
