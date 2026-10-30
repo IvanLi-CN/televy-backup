@@ -100,6 +100,8 @@ The helper now reports four blocking categories: recent live rows, pending clean
 
 Count startup time with a monotonic deadline rather than multiplying a retry count by the status read timeout: a refused Unix connection returns before any read timeout applies. Four probes with 250ms between them can therefore reject a healthy service in less than a second. Keep polling during a bounded startup window, charge probe duration to the same window, preserve the final error, and reject stale identities and late replies. Test this with a virtual clock and delay real helper initialization with a disposable CI journal lock; never add a production command override or a runtime delay switch.
 
+`cleanup_pending` is terminal for the failed operation: Snapshot Access can no longer renew that row. An explicit cleanup retry therefore evaluates its journal-bound release immediately; it does not reuse the age gate reserved for an in-flight `reserved` lease. The retry still requires a valid reservation baseline and two matching inventory reads. If either identity or inventory check fails, the row remains pending and strict mode stays blocked.
+
 Service reachability does not prove that macOS will permit snapshot mounting. A sanitized `stage=snapshot_mount command=mount_apfs` permission denial should retain a fixed mount-specific UI category instead of being flattened into generic file-access failure. Likewise, known Telegram availability errors should retain a Telegram-specific title even without an optional reason. Preserve raw diagnostics only in local logs and render fixed explanations from synthetic data.
 
 ## Invariants
