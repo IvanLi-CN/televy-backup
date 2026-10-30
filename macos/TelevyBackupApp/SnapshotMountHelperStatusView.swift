@@ -8,6 +8,7 @@ struct SnapshotMountHelperStatusView: View {
     let error: String?
     let activeMounts: UInt32?
     let pendingCleanup: UInt32?
+    let pendingCleanupCandidates: UInt32?
     let liveMounts: UInt32?
     let recoverableStaleMounts: UInt32?
     let unknownBlockingMounts: UInt32?
@@ -17,7 +18,7 @@ struct SnapshotMountHelperStatusView: View {
     let retryCleanup: () -> Void
 
     var body: some View {
-        let updateBlockReason = readiness.isLegacyAggregateStatus
+        let updateBlockReason = readiness.isLegacyAggregateStatus || readiness.isLegacyPendingCleanupStatus
             ? nil
             : SnapshotMountHelperReadiness.updateBlockReason(
                 activeMounts: activeMounts,

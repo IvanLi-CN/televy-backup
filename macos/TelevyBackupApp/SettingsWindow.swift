@@ -344,6 +344,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let mountHelperError: String?
     let mountHelperActiveMounts: UInt32?
     let mountHelperPendingCleanup: UInt32?
+    let mountHelperPendingCleanupCandidates: UInt32?
     let mountHelperLiveMounts: UInt32?
     let mountHelperRecoverableStaleMounts: UInt32?
     let mountHelperUnknownBlockingMounts: UInt32?
@@ -354,7 +355,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, registeredAccessAppPath, accessAppRegistrationMismatch, managedBy, migrationState, legacyRegistrationPath, fdaReady, fdaCheckError, accessAppError
         case mountHelperPath, mountHelperReachable, mountHelperReady, mountHelperBuildCommit, mountHelperVersion, mountHelperError
-        case mountHelperActiveMounts, mountHelperPendingCleanup, mountHelperLiveMounts, mountHelperRecoverableStaleMounts, mountHelperUnknownBlockingMounts
+        case mountHelperActiveMounts, mountHelperPendingCleanup, mountHelperPendingCleanupCandidates, mountHelperLiveMounts, mountHelperRecoverableStaleMounts, mountHelperUnknownBlockingMounts
         case helperAvailable, helperVersion, helperError
         case activeLeases, pendingCleanup, volumes
     }
@@ -380,6 +381,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
         mountHelperError: String? = nil,
         mountHelperActiveMounts: UInt32? = nil,
         mountHelperPendingCleanup: UInt32? = nil,
+        mountHelperPendingCleanupCandidates: UInt32? = nil,
         mountHelperLiveMounts: UInt32? = nil,
         mountHelperRecoverableStaleMounts: UInt32? = nil,
         mountHelperUnknownBlockingMounts: UInt32? = nil,
@@ -407,6 +409,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
         self.mountHelperError = mountHelperError
         self.mountHelperActiveMounts = mountHelperActiveMounts
         self.mountHelperPendingCleanup = mountHelperPendingCleanup
+        self.mountHelperPendingCleanupCandidates = mountHelperPendingCleanupCandidates
         self.mountHelperLiveMounts = mountHelperLiveMounts
         self.mountHelperRecoverableStaleMounts = mountHelperRecoverableStaleMounts
         self.mountHelperUnknownBlockingMounts = mountHelperUnknownBlockingMounts
@@ -441,6 +444,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
         mountHelperError = try values.decodeIfPresent(String.self, forKey: .mountHelperError)
         mountHelperActiveMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperActiveMounts)
         mountHelperPendingCleanup = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperPendingCleanup)
+        mountHelperPendingCleanupCandidates = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperPendingCleanupCandidates)
         mountHelperLiveMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperLiveMounts)
         mountHelperRecoverableStaleMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperRecoverableStaleMounts)
         mountHelperUnknownBlockingMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperUnknownBlockingMounts)
@@ -457,6 +461,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
             activeMounts: mountHelperActiveMounts,
             liveMounts: mountHelperLiveMounts,
             pendingCleanup: mountHelperPendingCleanup,
+            pendingCleanupCandidates: mountHelperPendingCleanupCandidates,
             recoverableStaleMounts: mountHelperRecoverableStaleMounts,
             unknownBlockingMounts: mountHelperUnknownBlockingMounts
         )
@@ -1149,6 +1154,7 @@ struct SettingsWindowRootView: View {
                             error: snapshotStatus.mountHelperError,
                             activeMounts: snapshotStatus.mountHelperActiveMounts,
                             pendingCleanup: snapshotStatus.mountHelperPendingCleanup,
+                            pendingCleanupCandidates: snapshotStatus.mountHelperPendingCleanupCandidates,
                             liveMounts: snapshotStatus.mountHelperLiveMounts,
                             recoverableStaleMounts: snapshotStatus.mountHelperRecoverableStaleMounts,
                             unknownBlockingMounts: snapshotStatus.mountHelperUnknownBlockingMounts,

@@ -45,6 +45,7 @@ struct SnapshotMountHelperState {
     live_mounts: Option<u32>,
     recoverable_stale_mounts: Option<u32>,
     unknown_blocking_mounts: Option<u32>,
+    pending_cleanup_candidates: Option<u32>,
     error: Option<String>,
 }
 
@@ -61,7 +62,6 @@ fn snapshot_mount_helper_state(
             let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
                 || status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
                 || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
-                || status.helper_version == mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION
                 || status.helper_version == mount_helper::HISTORICAL_ROOT_MOUNT_HELPER_VERSION;
             let ready = wire_compatible
                 && status.component_version.as_deref()
@@ -84,6 +84,7 @@ fn snapshot_mount_helper_state(
                 live_mounts: status.live_mounts,
                 recoverable_stale_mounts: status.recoverable_stale_mounts,
                 unknown_blocking_mounts: status.unknown_blocking_mounts,
+                pending_cleanup_candidates: Some(status.pending_cleanup_leases.len() as u32),
                 error: (!ready).then(|| {
                     "Update the snapshot mount helper to match this app's build.".to_owned()
                 }),
@@ -100,6 +101,7 @@ fn snapshot_mount_helper_state(
             live_mounts: None,
             recoverable_stale_mounts: None,
             unknown_blocking_mounts: None,
+            pending_cleanup_candidates: None,
             error: Some(error),
         },
     }
@@ -112,6 +114,32 @@ fn snapshot_mount_reconcile_identity(status: &MountStatusResult) -> Result<(), C
         return Err(ControlError {
             code: "snapshot_mount_helper.update_required".to_string(),
             message: "Update the snapshot mount helper before recovering stale records."
+                .to_string(),
+            retryable: true,
+            details: serde_json::json!({}),
+        });
+    }
+    Ok(())
+}
+
+fn snapshot_mount_cleanup_identity(status: &MountStatusResult) -> Result<(), ControlError> {
+    let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
+        || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
+    let component_compatible = match status.component_version.as_deref() {
+        Some(version) if version == mount_helper::ROOT_MOUNT_HELPER_VERSION => {
+            status.build_commit.as_deref() == Some(crate::BUILD_COMMIT)
+        }
+        Some(version) if version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
+            status.build_commit.as_deref().is_some_and(|commit| {
+                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }
+        _ => false,
+    };
+    if !wire_compatible || !component_compatible {
+        return Err(ControlError {
+            code: "snapshot_mount_helper.update_required".to_string(),
+            message: "Update the snapshot mount helper before retrying pending cleanup."
                 .to_string(),
             retryable: true,
             details: serde_json::json!({}),
@@ -172,7 +200,27 @@ fn snapshot_mount_pending_cleanup_leases(
         retryable: true,
         details: serde_json::json!({}),
     })?;
+    let (live_mounts, recoverable_stale_mounts, unknown_blocking_mounts) = match (
+        status.live_mounts,
+        status.recoverable_stale_mounts,
+        status.unknown_blocking_mounts,
+    ) {
+        (Some(live), Some(recoverable), Some(unknown)) => (live, recoverable, unknown),
+        _ => {
+            return Err(ControlError {
+                code: "snapshot_mount_helper.status_incomplete".to_string(),
+                message: "Snapshot mount status is incomplete; cleanup retry remains blocked until the helper is updated or repaired.".to_string(),
+                retryable: true,
+                details: serde_json::json!({}),
+            });
+        }
+    };
+    let partition_total = live_mounts
+        .checked_add(pending_cleanup)
+        .and_then(|total| total.checked_add(recoverable_stale_mounts))
+        .and_then(|total| total.checked_add(unknown_blocking_mounts));
     if pending_cleanup as usize != status.pending_cleanup_leases.len()
+        || partition_total != Some(status.active_mounts)
         || status
             .pending_cleanup_leases
             .iter()
@@ -730,7 +778,7 @@ async fn handle_control_ipc_client(
                     retryable: true,
                     details: serde_json::json!({"reason": "helper_status_failed"}),
                 })?;
-            snapshot_mount_reconcile_identity(&status)?;
+            snapshot_mount_cleanup_identity(&status)?;
             let (live_mounts, pending_cleanup, recoverable_stale_mounts, unknown_blocking_mounts) =
                 snapshot_mount_reconcile_counts(&status)?;
             if live_mounts > 0 {
@@ -756,22 +804,23 @@ async fn handle_control_ipc_client(
             let mut released = 0_u32;
             for lease in pending_leases {
                 let lease_id = lease.lease_id;
-                let result = tokio::task::spawn_blocking(move || {
-                    mount_helper::release(uid, &lease_id)
-                })
-                .await
-                .map_err(|_| {
-                    ControlError::unavailable(
-                        "Snapshot cleanup release task failed.",
-                        serde_json::json!({}),
-                    )
-                })?
-                .map_err(|_| ControlError {
-                    code: "snapshot_mount_helper.reconcile_failed".to_string(),
-                    message: "A pending snapshot cleanup record could not be safely retried.".to_string(),
-                    retryable: true,
-                    details: serde_json::json!({"reason": "release_rejected"}),
-                })?;
+                let result =
+                    tokio::task::spawn_blocking(move || mount_helper::release(uid, &lease_id))
+                        .await
+                        .map_err(|_| {
+                            ControlError::unavailable(
+                                "Snapshot cleanup release task failed.",
+                                serde_json::json!({}),
+                            )
+                        })?
+                        .map_err(|_| ControlError {
+                            code: "snapshot_mount_helper.reconcile_failed".to_string(),
+                            message:
+                                "A pending snapshot cleanup record could not be safely retried."
+                                    .to_string(),
+                            retryable: true,
+                            details: serde_json::json!({"reason": "release_rejected"}),
+                        })?;
                 if result.cleanup_state == "released" {
                     released += 1;
                 }
@@ -788,17 +837,33 @@ async fn handle_control_ipc_client(
             })?
             .map_err(|_| ControlError {
                 code: "snapshot_mount_helper.status_failed".to_string(),
-                message: "Snapshot mount records could not be verified after cleanup retry.".to_string(),
+                message: "Snapshot mount records could not be verified after cleanup retry."
+                    .to_string(),
                 retryable: true,
                 details: serde_json::json!({"reason": "helper_status_failed"}),
             })?;
-            snapshot_mount_reconcile_identity(&final_status)?;
+            snapshot_mount_cleanup_identity(&final_status)?;
             let (
                 final_live_mounts,
                 final_pending_cleanup,
                 final_recoverable_stale_mounts,
                 final_unknown_blocking_mounts,
             ) = snapshot_mount_reconcile_counts(&final_status)?;
+            if final_live_mounts > 0
+                || final_recoverable_stale_mounts > 0
+                || final_unknown_blocking_mounts > 0
+            {
+                return Err(ControlError {
+                    code: "snapshot_mount_helper.reconcile_required".to_string(),
+                    message: "Snapshot cleanup retry left other snapshot records that require separate recovery.".to_string(),
+                    retryable: true,
+                    details: serde_json::json!({
+                        "live": final_live_mounts,
+                        "recoverable": final_recoverable_stale_mounts,
+                        "unknown": final_unknown_blocking_mounts,
+                    }),
+                });
+            }
             if final_pending_cleanup > 0 {
                 let _ = snapshot_mount_pending_cleanup_leases(&final_status)?;
                 return Err(ControlError {
@@ -808,6 +873,16 @@ async fn handle_control_ipc_client(
                     details: serde_json::json!({
                         "released": released,
                         "remaining": final_pending_cleanup,
+                    }),
+                });
+            }
+            if final_status.active_mounts != 0 {
+                return Err(ControlError {
+                    code: "snapshot_mount_helper.status_inconsistent".to_string(),
+                    message: "Snapshot cleanup retry returned a non-empty aggregate after all classified rows were released.".to_string(),
+                    retryable: true,
+                    details: serde_json::json!({
+                        "active": final_status.active_mounts,
                     }),
                 });
             }
@@ -1099,6 +1174,7 @@ async fn handle_control_ipc_client(
                     "mountHelperLiveMounts": mount_state.live_mounts,
                     "mountHelperRecoverableStaleMounts": mount_state.recoverable_stale_mounts,
                     "mountHelperUnknownBlockingMounts": mount_state.unknown_blocking_mounts,
+                    "mountHelperPendingCleanupCandidates": mount_state.pending_cleanup_candidates,
                     "mountHelperError": mount_state.error,
                     "activeLeases": active_leases,
                     "pendingCleanup": pending_cleanup,
@@ -3529,6 +3605,66 @@ mod tests {
         status.live_mounts = None;
         let error = snapshot_mount_reconcile_counts(&status).unwrap_err();
         assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+    }
+
+    #[test]
+    fn snapshot_mount_cleanup_retry_requires_pending_only_verified_rows() {
+        let status = MountStatusResult {
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            pending_cleanup_leases: vec![televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: "pending".into(),
+                state: "cleanup_pending".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            snapshot_mount_pending_cleanup_leases(&status)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut malformed = status.clone();
+        malformed.pending_cleanup_leases[0].state = "active".into();
+        assert_eq!(
+            snapshot_mount_pending_cleanup_leases(&malformed)
+                .unwrap_err()
+                .code,
+            "snapshot_mount_helper.status_inconsistent"
+        );
+
+        let mut mixed = status;
+        mixed.active_mounts = 2;
+        assert_eq!(
+            snapshot_mount_pending_cleanup_leases(&mixed)
+                .unwrap_err()
+                .code,
+            "snapshot_mount_helper.status_inconsistent"
+        );
+    }
+
+    #[test]
+    fn snapshot_mount_cleanup_retry_accepts_the_previous_cleanup_capable_helper() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            pending_cleanup_leases: vec![televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: "pending".into(),
+                state: "cleanup_pending".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(snapshot_mount_cleanup_identity(&status).is_ok());
     }
 
     fn settings() -> Settings {
