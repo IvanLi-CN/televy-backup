@@ -880,7 +880,7 @@ async fn classify_status_rows(
     volume_scope: Option<(&str, u32)>,
 ) -> Result<StatusClassification, MountHelperError> {
     let mut statement = String::from(
-        "SELECT lease_id, uid, device_identifier, mount_device, state, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, CASE WHEN last_renewed_at <= datetime('now', ?) THEN 1 ELSE 0 END AS stale_row, CASE WHEN last_renewed_at > datetime('now', ?) THEN 1 ELSE 0 END AS live_row FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+        "SELECT lease_id, uid, volume_uuid, device_identifier, mount_device, state, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, CASE WHEN last_renewed_at <= datetime('now', ?) THEN 1 ELSE 0 END AS stale_row, CASE WHEN last_renewed_at > datetime('now', ?) THEN 1 ELSE 0 END AS live_row FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
     );
     if scope_uid.is_some() {
         statement.push_str(" AND uid = ?");
@@ -910,6 +910,7 @@ async fn classify_status_rows(
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
         let uid: i64 = row.try_get("uid")?;
+        let volume_uuid: String = row.try_get("volume_uuid")?;
         let device_identifier: String = row.try_get("device_identifier")?;
         let mount_device: i64 = row.try_get("mount_device").unwrap_or_default();
         let state: String = row.try_get("state")?;
@@ -926,18 +927,23 @@ async fn classify_status_rows(
             .ok()
             .as_deref()
             .is_some_and(|expected| !mount_root.is_empty() && Path::new(&mount_root) == expected);
+        let journal_identity_valid = uid > 0
+            && validate_lease_id(&lease_id).is_ok()
+            && validate_uuid(&volume_uuid).is_ok()
+            && validate_device(&device_identifier).is_ok()
+            && reservation_valid
+            && ((mount_root.is_empty() && (snapshot_manifest == "[]" || manifest_valid))
+                || (!mount_root.is_empty() && mount_device > 0 && manifest_valid && managed_root));
         let recoverable = state != "cleanup_pending"
             && stale
             && volume_scope
                 .map(|(_, owner_uid)| uid == i64::from(owner_uid))
                 .or_else(|| scope_uid.map(|scope_uid| uid == i64::from(scope_uid)))
                 .unwrap_or(true)
-            && reservation_valid
-            && ((mount_root.is_empty() && (snapshot_manifest == "[]" || manifest_valid))
-                || (!mount_root.is_empty() && mount_device > 0 && manifest_valid && managed_root))
-            && validate_device(&device_identifier).is_ok()
+            && journal_identity_valid
             && matches!(state.as_str(), "reserved" | "prepared" | "active");
-        if state == "cleanup_pending" {
+        let pending_cleanup_candidate = state == "cleanup_pending" && journal_identity_valid;
+        if pending_cleanup_candidate {
             classification.pending_cleanup += 1;
             classification
                 .pending_cleanup_leases
@@ -3432,7 +3438,7 @@ mod tests {
         let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
         init_journal(&journal).await.unwrap();
         sqlx::query(
-            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'cleanup_pending', datetime('now'))",
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', 1, 'cleanup_pending', datetime('now'))",
         )
         .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
         .bind(501_i64)
@@ -3462,7 +3468,7 @@ mod tests {
         let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
         init_journal(&journal).await.unwrap();
         sqlx::query(
-            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'cleanup_pending', datetime('now'))",
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', 1, 'cleanup_pending', datetime('now'))",
         )
         .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
         .bind(502_i64)
@@ -3485,6 +3491,32 @@ mod tests {
             status.blocked_volume_uuids,
             vec!["C8A38394-49AE-42F9-85FB-14DD9EA549FA"]
         );
+    }
+
+    #[tokio::test]
+    async fn status_keeps_malformed_pending_cleanup_as_unknown_blocker() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'cleanup_pending', datetime('now'))",
+        )
+        .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind(501_i64)
+        .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind("disk5s1")
+        .bind("snapshot")
+        .bind("")
+        .bind("[]")
+        .bind("not-json")
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        let status = status_result(&journal, 501).await.unwrap();
+        assert_eq!(status.active_mounts, 1);
+        assert_eq!(status.pending_cleanup, Some(0));
+        assert!(status.pending_cleanup_leases.is_empty());
+        assert_eq!(status.unknown_blocking_mounts, Some(1));
     }
 
     #[test]

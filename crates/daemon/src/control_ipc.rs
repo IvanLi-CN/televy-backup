@@ -33,6 +33,7 @@ type Settings = televy_backup_core::config::SettingsV2;
 
 static SETTINGS_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static OPERATIONS: OnceLock<Mutex<HashMap<String, OperationStatusResult>>> = OnceLock::new();
+const SNAPSHOT_ACCESS_IDLE_WAIT: Duration = Duration::from_secs(10);
 
 struct SnapshotMountHelperState {
     reachable: bool,
@@ -234,6 +235,59 @@ fn snapshot_mount_pending_cleanup_leases(
         });
     }
     Ok(&status.pending_cleanup_leases)
+}
+
+fn snapshot_access_busy_error(status: &StatusResult, action: &str) -> Option<ControlError> {
+    if status.active_leases > 0 {
+        return Some(ControlError {
+            code: "snapshot_mount_helper.active".to_string(),
+            message: format!(
+                "Finish the backup and wait for Snapshot Access cleanup before {action}."
+            ),
+            retryable: true,
+            details: serde_json::json!({
+                "activeLeases": status.active_leases,
+                "pendingCleanup": status.pending_cleanup,
+            }),
+        });
+    }
+    if status.pending_cleanup > 0 {
+        return Some(ControlError {
+            code: "snapshot_mount_helper.access_cleanup_pending".to_string(),
+            message: format!(
+                "Snapshot Access is still retrying cleanup; wait for it to become idle before {action}."
+            ),
+            retryable: true,
+            details: serde_json::json!({
+                "activeLeases": status.active_leases,
+                "pendingCleanup": status.pending_cleanup,
+            }),
+        });
+    }
+    None
+}
+
+async fn wait_for_snapshot_access_idle(
+    client: &SnapshotClient,
+    action: &str,
+) -> Result<(), ControlError> {
+    let deadline = tokio::time::Instant::now() + SNAPSHOT_ACCESS_IDLE_WAIT;
+    loop {
+        let status = client.status().await.map_err(|error| ControlError {
+            code: "snapshot_mount_helper.access_unavailable".to_string(),
+            message: "Snapshot Access status could not be verified.".to_string(),
+            retryable: true,
+            details: serde_json::json!({"reason": error.failure_reason()}),
+        })?;
+        if let Some(error) = snapshot_access_busy_error(&status, action) {
+            if status.active_leases > 0 || tokio::time::Instant::now() >= deadline {
+                return Err(error);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+        return Ok(());
+    }
 }
 
 fn operation_store() -> &'static Mutex<HashMap<String, OperationStatusResult>> {
@@ -738,23 +792,7 @@ async fn handle_control_ipc_client(
         spawn_operation(operation_id.clone(), async move {
             let _maintenance_guard = maintenance.lock().await;
             let client = SnapshotClient::for_environment(&config_root, &data_root);
-            let access_status = client.status().await.map_err(|error| ControlError {
-                code: "snapshot_mount_helper.access_unavailable".to_string(),
-                message: "Snapshot Access status could not be verified.".to_string(),
-                retryable: true,
-                details: serde_json::json!({"reason": error.failure_reason()}),
-            })?;
-            if access_status.active_leases > 0 || access_status.pending_cleanup > 0 {
-                return Err(ControlError {
-                    code: "snapshot_mount_helper.active".to_string(),
-                    message: "Finish the backup and wait for Snapshot Access cleanup before retrying snapshot cleanup.".to_string(),
-                    retryable: true,
-                    details: serde_json::json!({
-                        "activeLeases": access_status.active_leases,
-                        "pendingCleanup": access_status.pending_cleanup,
-                    }),
-                });
-            }
+            wait_for_snapshot_access_idle(&client, "retrying snapshot cleanup").await?;
             let uid = unsafe { libc::geteuid() };
             if uid == 0 {
                 return Err(ControlError {
@@ -920,23 +958,7 @@ async fn handle_control_ipc_client(
         spawn_operation(operation_id.clone(), async move {
             let _maintenance_guard = maintenance.lock().await;
             let client = SnapshotClient::for_environment(&config_root, &data_root);
-            let access_status = client.status().await.map_err(|error| ControlError {
-                code: "snapshot_mount_helper.access_unavailable".to_string(),
-                message: "Snapshot Access status could not be verified.".to_string(),
-                retryable: true,
-                details: serde_json::json!({"reason": error.failure_reason()}),
-            })?;
-            if access_status.active_leases > 0 || access_status.pending_cleanup > 0 {
-                return Err(ControlError {
-                    code: "snapshot_mount_helper.active".to_string(),
-                    message: "Finish the backup and wait for snapshot cleanup before recovering stale mount records.".to_string(),
-                    retryable: true,
-                    details: serde_json::json!({
-                        "activeLeases": access_status.active_leases,
-                        "pendingCleanup": access_status.pending_cleanup,
-                    }),
-                });
-            }
+            wait_for_snapshot_access_idle(&client, "recovering stale mount records").await?;
             let uid = unsafe { libc::geteuid() };
             if uid == 0 {
                 return Err(ControlError {
@@ -3665,6 +3687,29 @@ mod tests {
             ..Default::default()
         };
         assert!(snapshot_mount_cleanup_identity(&status).is_ok());
+    }
+
+    #[test]
+    fn snapshot_access_busy_error_distinguishes_active_and_pending_cleanup() {
+        let active = StatusResult {
+            active_leases: 1,
+            pending_cleanup: 0,
+            ..Default::default()
+        };
+        let active_error = snapshot_access_busy_error(&active, "retrying cleanup").unwrap();
+        assert_eq!(active_error.code, "snapshot_mount_helper.active");
+
+        let pending = StatusResult {
+            active_leases: 0,
+            pending_cleanup: 1,
+            ..Default::default()
+        };
+        let pending_error = snapshot_access_busy_error(&pending, "retrying cleanup").unwrap();
+        assert_eq!(
+            pending_error.code,
+            "snapshot_mount_helper.access_cleanup_pending"
+        );
+        assert!(pending_error.message.contains("still retrying cleanup"));
     }
 
     fn settings() -> Settings {

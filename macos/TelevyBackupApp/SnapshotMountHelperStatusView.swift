@@ -24,14 +24,15 @@ struct SnapshotMountHelperStatusView: View {
                 activeMounts: activeMounts,
                 pendingCleanup: pendingCleanup
             )
+        let statusTitle = !readiness.isOperational && !readiness.isReady && updateBlockReason != nil
+            ? "Snapshot mount helper update waiting"
+            : readiness.title
         VStack(alignment: .leading, spacing: 6) {
             Label(
-                updateBlockReason != nil && !readiness.isReady
-                    ? "Snapshot mount helper update waiting"
-                    : readiness.title,
-                systemImage: readiness.isReady ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
+                statusTitle,
+                systemImage: readiness.isOperational ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
             )
-                .foregroundStyle(readiness.isReady ? .green : .orange)
+                .foregroundStyle(readiness.isOperational ? .green : .orange)
             if let path {
                 Text(path)
                     .font(.system(size: 11, design: .monospaced))

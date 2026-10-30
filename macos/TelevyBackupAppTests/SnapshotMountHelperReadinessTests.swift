@@ -58,6 +58,7 @@ enum SnapshotMountHelperReadinessTests {
             recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 0
         )
         expectReadiness(clear.canUpdate, "a verified helper with a complete clear status can be updated")
+        expectReadiness(clear.isOperational, "a verified current helper with no blockers must be operational")
         let recoverable = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, activeMounts: 1, liveMounts: 0, pendingCleanup: 0,
@@ -66,6 +67,7 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(!recoverable.canUpdate, "recoverable stale rows must keep helper mutation blocked")
         expectReadiness(recoverable.canRecoverStaleMounts, "a complete recoverable state must expose the recovery action")
         expectReadiness(!recoverable.canRetryPendingCleanup, "recoverable stale rows must not expose cleanup retry")
+        expectReadiness(recoverable.title == "Snapshot mount helper recovery required", "recoverable rows must not present the helper as fully ready")
         let pendingWithCandidate = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, activeMounts: 2, liveMounts: 0, pendingCleanup: 1,
@@ -79,6 +81,17 @@ enum SnapshotMountHelperReadinessTests {
             recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 1
         )
         expectReadiness(pendingOnly.canRetryPendingCleanup, "a verified pending-only state must expose cleanup retry")
+        expectReadiness(!pendingOnly.isOperational, "pending cleanup must keep strict mode unavailable")
+        expectReadiness(pendingOnly.title == "Snapshot mount helper cleanup required", "pending cleanup must not present the helper as fully ready")
+        let accessPending = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: true, buildCommit: candidateCommit,
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
+            activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 1,
+            snapshotAccessPendingCleanup: 1
+        )
+        expectReadiness(!accessPending.canRetryPendingCleanup, "Snapshot Access cleanup must gate helper cleanup retry")
+        expectReadiness(accessPending.title == "Snapshot Access cleanup required", "Snapshot Access cleanup must be visible as the blocking operation")
         let pendingPrevious = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.1",
@@ -101,6 +114,7 @@ enum SnapshotMountHelperReadinessTests {
         )
         expectReadiness(!missingAggregate.canUpdate, "missing aggregate status must disable helper updates")
         expectReadiness(!current.canUpdate, "missing additive status fields must not become a false zero")
+        expectReadiness(!current.isOperational, "missing additive status fields must not present strict mode as operational")
         expectReadiness(!pendingOnly.canUpdate, "pending cleanup must remain an update blocker")
         expectReadiness(!state(reachable: false, daemonReady: true, commit: candidateCommit).isReady, "unreachable helpers cannot be ready")
         expectReadiness(state(reachable: false, daemonReady: false, commit: nil).actionTitle == "Install mount helper", "missing helpers need an installation action")

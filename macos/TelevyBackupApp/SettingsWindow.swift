@@ -463,7 +463,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
             pendingCleanup: mountHelperPendingCleanup,
             recoverableStaleMounts: mountHelperRecoverableStaleMounts,
             unknownBlockingMounts: mountHelperUnknownBlockingMounts,
-            pendingCleanupCandidates: mountHelperPendingCleanupCandidates
+            pendingCleanupCandidates: mountHelperPendingCleanupCandidates,
+            snapshotAccessActiveLeases: activeLeases,
+            snapshotAccessPendingCleanup: pendingCleanup
         )
     }
 }
@@ -1141,6 +1143,17 @@ struct SettingsWindowRootView: View {
                                     .font(.system(size: 11))
                                     .foregroundStyle(.orange)
                                     .lineLimit(2)
+                            }
+                            if snapshotStatus.activeLeases > 0 {
+                                Text("Snapshot Access has \(snapshotStatus.activeLeases) active lease(s). Finish the backup before cleanup or helper updates.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.orange)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else if snapshotStatus.pendingCleanup > 0 {
+                                Text("Snapshot Access is retrying \(snapshotStatus.pendingCleanup) earlier cleanup record(s). Wait for it to become idle before retrying helper cleanup.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.orange)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
