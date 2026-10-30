@@ -74,14 +74,14 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(!pendingWithCandidate.canRecoverStaleMounts, "pending cleanup must disable stale recovery")
         let pendingOnly = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
-            helperVersion: "0.5.2",
-            expectedBuildCommit: candidateCommit, activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
+            activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
             recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 1
         )
         expectReadiness(pendingOnly.canRetryPendingCleanup, "a verified pending-only state must expose cleanup retry")
         let pendingPrevious = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
-            helperVersion: "0.5.1", expectedBuildCommit: candidateCommit,
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.1",
             activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
             recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 0
         )
