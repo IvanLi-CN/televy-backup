@@ -779,7 +779,7 @@ async fn handle_control_ipc_client(
                     details: serde_json::json!({"reason": "helper_status_failed"}),
                 })?;
             snapshot_mount_cleanup_identity(&status)?;
-            let (live_mounts, pending_cleanup, recoverable_stale_mounts, unknown_blocking_mounts) =
+            let (live_mounts, _pending_cleanup, recoverable_stale_mounts, unknown_blocking_mounts) =
                 snapshot_mount_reconcile_counts(&status)?;
             if live_mounts > 0 {
                 return Err(ControlError {

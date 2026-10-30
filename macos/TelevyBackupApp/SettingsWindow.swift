@@ -461,9 +461,9 @@ struct SnapshotControlStatus: Decodable, Equatable {
             activeMounts: mountHelperActiveMounts,
             liveMounts: mountHelperLiveMounts,
             pendingCleanup: mountHelperPendingCleanup,
-            pendingCleanupCandidates: mountHelperPendingCleanupCandidates,
             recoverableStaleMounts: mountHelperRecoverableStaleMounts,
-            unknownBlockingMounts: mountHelperUnknownBlockingMounts
+            unknownBlockingMounts: mountHelperUnknownBlockingMounts,
+            pendingCleanupCandidates: mountHelperPendingCleanupCandidates
         )
     }
 }
