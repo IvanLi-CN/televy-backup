@@ -278,6 +278,55 @@ fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     ))
 }
 
+fn pending_cleanup_leases(status: &MountStatusResult) -> Result<Vec<String>, CliError> {
+    let pending_cleanup = status.pending_cleanup.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot retry snapshot cleanup: the installed snapshot mount helper did not report a complete cleanup status",
+        )
+    })?;
+    if status.active_mounts != pending_cleanup
+        || pending_cleanup as usize != status.pending_cleanup_leases.len()
+        || status
+            .pending_cleanup_leases
+            .iter()
+            .any(|lease| lease.state != "cleanup_pending")
+    {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.status_inconsistent",
+            "cannot retry snapshot cleanup: the helper reported an inconsistent cleanup inventory",
+        ));
+    }
+    Ok(status
+        .pending_cleanup_leases
+        .iter()
+        .map(|lease| lease.lease_id.clone())
+        .collect())
+}
+
+fn cleanup_retry_identity(status: &MountStatusResult) -> Result<(), CliError> {
+    let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
+        || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
+    let component_compatible = match status.component_version.as_deref() {
+        Some(version) if version == mount_helper::ROOT_MOUNT_HELPER_VERSION => {
+            status.build_commit.as_deref() == Some(env!("TELEVYBACKUP_BUILD_COMMIT"))
+        }
+        Some(version) if version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
+            status.build_commit.as_deref().is_some_and(|commit| {
+                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }
+        _ => false,
+    };
+    if !wire_compatible || !component_compatible {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.update_required",
+            "cannot retry snapshot cleanup until a cleanup-capable helper is installed",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BusyCheck {
     Clear,
@@ -298,12 +347,28 @@ fn classify_busy_status(
         status.helper_version.as_str(),
         mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
             | mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION
+            | mount_helper::HISTORICAL_ROOT_MOUNT_HELPER_VERSION
     );
     let classification_missing = status.component_version.is_none()
         && status.pending_cleanup.is_none()
         && status.live_mounts.is_none()
         && status.recoverable_stale_mounts.is_none()
         && status.unknown_blocking_mounts.is_none();
+    let legacy_pending_only = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
+        && status.component_version.as_deref()
+            == Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+        && status.build_commit.as_deref().is_some_and(|commit| {
+            commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && status.active_mounts > 0
+        && status.pending_cleanup == Some(status.active_mounts)
+        && status.live_mounts == Some(0)
+        && status.recoverable_stale_mounts == Some(0)
+        && status.unknown_blocking_mounts == Some(0)
+        && status.pending_cleanup_leases.is_empty();
+    if legacy_pending_only {
+        return Ok(BusyCheck::LegacyUpgrade);
+    }
     if status.active_mounts > 0 && known_legacy_wire && classification_missing {
         return Ok(BusyCheck::LegacyUpgrade);
     }
@@ -563,6 +628,113 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Retry only the helper's journal-bound cleanup-pending rows.
+///
+/// This is intentionally a separate explicit command. Status probes and refreshes remain
+/// read-only, while each release still revalidates UID, volume/device identity and inventory in
+/// the root helper before changing the journal.
+pub fn reconcile(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
+    let uid = unsafe { libc::geteuid() };
+    if uid == 0 {
+        return Err(CliError::new(
+            "snapshot_mount_helper.invalid_owner",
+            "snapshot cleanup retry must run as the signed-in user so the root helper can verify the peer UID",
+        ));
+    }
+    let access_status = super::snapshot_service::status_for_maintenance(config_dir, data_dir)
+        .map_err(|error| {
+            CliError::retryable(
+                "snapshot_mount_helper.access_unavailable",
+                format!(
+                    "cannot verify Snapshot Access before retrying cleanup: {}",
+                    error.message
+                ),
+            )
+        })?;
+    ensure_snapshot_access_idle(&access_status)?;
+    let status = wait_for_helper_status()?;
+    cleanup_retry_identity(&status)?;
+    let live_mounts = status.live_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot retry snapshot cleanup: live mount classification is unavailable",
+        )
+    })?;
+    let recoverable = status.recoverable_stale_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot retry snapshot cleanup: stale mount classification is unavailable",
+        )
+    })?;
+    let unknown = status.unknown_blocking_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot retry snapshot cleanup: unknown mount classification is unavailable",
+        )
+    })?;
+    if live_mounts > 0 || recoverable > 0 || unknown > 0 {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.reconcile_required",
+            format!(
+                "cannot retry cleanup while other snapshot records remain (live: {live_mounts}, recoverable: {recoverable}, unknown: {unknown})"
+            ),
+        ));
+    }
+    let leases = pending_cleanup_leases(&status)?;
+    let mut released = 0_u32;
+    for lease_id in leases {
+        let result = mount_helper::release(uid, &lease_id).map_err(|_| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "a pending snapshot cleanup record could not be safely retried",
+            )
+        })?;
+        if result.cleanup_state == "released" {
+            released += 1;
+        }
+    }
+    let final_status = wait_for_helper_status()?;
+    let final_pending = final_status.pending_cleanup.unwrap_or(u32::MAX);
+    let final_live = final_status.live_mounts.unwrap_or(u32::MAX);
+    let final_recoverable = final_status.recoverable_stale_mounts.unwrap_or(u32::MAX);
+    let final_unknown = final_status.unknown_blocking_mounts.unwrap_or(u32::MAX);
+    if final_live > 0 || final_recoverable > 0 || final_unknown > 0 {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.reconcile_required",
+            format!(
+                "snapshot cleanup retry left other snapshot records (live: {final_live}, recoverable: {final_recoverable}, unknown: {final_unknown})"
+            ),
+        ));
+    }
+    if final_pending > 0 {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.pending_cleanup",
+            format!(
+                "snapshot cleanup remains pending because the recorded snapshot inventory is not yet reconciled (released: {released}, remaining: {final_pending})"
+            ),
+        ));
+    }
+    if final_status.active_mounts != 0 {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.status_inconsistent",
+            "snapshot cleanup retry returned a non-empty aggregate after all classified rows were released",
+        ));
+    }
+    let payload = json!({
+        "reconciled": true,
+        "released": released,
+        "remaining": final_status.active_mounts,
+        "helperVersion": final_status.component_version.as_deref().unwrap_or(&final_status.helper_version),
+        "buildCommit": final_status.build_commit,
+    });
+    if json_output {
+        println!("{payload}");
+    } else {
+        println!("snapshot mount cleanup reconciled ({released} record(s) released)");
+    }
+    Ok(())
+}
+
 pub fn status(json_output: bool) -> Result<(), CliError> {
     let loaded = helper_service_state() == HelperServiceState::Loaded;
     let helper = mount_helper::status().ok();
@@ -656,10 +828,72 @@ mod tests {
     }
 
     #[test]
+    fn pending_cleanup_candidates_require_a_complete_pending_only_partition() {
+        let status = MountStatusResult {
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            pending_cleanup_leases: vec![televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: "pending".into(),
+                state: "cleanup_pending".into(),
+            }],
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(pending_cleanup_leases(&status).unwrap(), vec!["pending"]);
+
+        let mut wrong_state = status.clone();
+        wrong_state.pending_cleanup_leases[0].state = "active".into();
+        assert_eq!(
+            pending_cleanup_leases(&wrong_state).unwrap_err().code,
+            "snapshot_mount_helper.status_inconsistent"
+        );
+
+        let mut mixed = status;
+        mixed.active_mounts = 2;
+        assert_eq!(
+            pending_cleanup_leases(&mixed).unwrap_err().code,
+            "snapshot_mount_helper.status_inconsistent"
+        );
+    }
+
+    #[test]
+    fn cleanup_retry_accepts_the_previous_cleanup_capable_helper() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            ..Default::default()
+        };
+        assert!(cleanup_retry_identity(&status).is_ok());
+    }
+
+    #[test]
+    fn legacy_pending_only_status_requires_a_guarded_upgrade() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_busy_status("install or update", &status).unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
     fn known_legacy_status_with_build_identity_enters_upgrade_recovery_path() {
         for helper_version in [
             mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
             mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::HISTORICAL_ROOT_MOUNT_HELPER_VERSION,
         ] {
             let status = MountStatusResult {
                 helper_version: helper_version.into(),

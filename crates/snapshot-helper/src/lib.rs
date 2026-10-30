@@ -209,6 +209,11 @@ pub struct MountStatusResult {
     pub blocked_volume_uuids: Vec<String>,
     #[serde(default)]
     pub recovery_leases: Vec<MountRecoveryLease>,
+    /// Cleanup-pending rows that may be retried through the existing journal-bound Release path.
+    /// This additive field is consumed by the daemon only; callers must still validate every
+    /// returned row before attempting cleanup.
+    #[serde(default)]
+    pub pending_cleanup_leases: Vec<MountRecoveryLease>,
     /// Recent reserved/prepared/active rows that still have a live owner.
     #[serde(default)]
     pub live_mounts: Option<u32>,

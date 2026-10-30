@@ -35,13 +35,14 @@ def request(path, method, **fields):
     return reply
 
 
-def write_fixture_rows(journal, uid, volume_uuid, device, stale_id, unknown_id):
+def write_fixture_rows(journal, uid, volume_uuid, device, stale_id, pending_id, unknown_id):
     script = '''
 import sqlite3, sys
-journal, uid, volume_uuid, device, stale_id, unknown_id = sys.argv[1:]
+journal, uid, volume_uuid, device, stale_id, pending_id, unknown_id = sys.argv[1:]
 connection = sqlite3.connect(journal)
 rows = [
     (stale_id, int(uid), volume_uuid, device, '', '', '', '[]', '[]', 1, 'reserved'),
+    (pending_id, int(uid), volume_uuid, device, '', '', '', '[]', '[]', 1, 'cleanup_pending'),
     (unknown_id, int(uid), volume_uuid, device, '', '', '', '[]', 'not-json', 0, 'active'),
 ]
 connection.executemany(
@@ -68,6 +69,7 @@ connection.close()
         volume_uuid,
         device,
         stale_id,
+        pending_id,
         unknown_id,
     )
 
@@ -146,6 +148,7 @@ def main():
         assert request(ipc, "status")["ok"], "production helper failed to start"
         journal = root / "journal" / "state.sqlite"
         stale_id = str(uuid.uuid4())
+        pending_id = str(uuid.uuid4())
         unknown_id = str(uuid.uuid4())
         write_fixture_rows(
             journal,
@@ -153,21 +156,27 @@ def main():
             volume_uuid,
             device,
             stale_id,
+            pending_id,
             unknown_id,
         )
         before = request(ipc, "status")
         assert before["ok"]
         status = before["result"]
-        assert status["active_mounts"] == 2
+        assert status["active_mounts"] == 3
+        assert status["pending_cleanup"] == 1
         assert status["recoverable_stale_mounts"] == 1
         assert status["unknown_blocking_mounts"] == 1
+        assert [row["lease_id"] for row in status["pending_cleanup_leases"]] == [pending_id]
         assert [row["lease_id"] for row in status["recovery_leases"]] == [stale_id]
+        pending = request(ipc, "release", uid=os.getuid(), lease_id=pending_id)
+        assert pending["ok"] and pending["result"]["cleanup_state"] == "released"
         released = request(ipc, "release", uid=os.getuid(), lease_id=stale_id)
         assert released["ok"] and released["result"]["cleanup_state"] == "released"
         after = request(ipc, "status")
         assert after["ok"]
         status = after["result"]
         assert status["active_mounts"] == 1
+        assert status["pending_cleanup"] == 0
         assert status["recoverable_stale_mounts"] == 0
         assert status["unknown_blocking_mounts"] == 1
         assert not status["recovery_leases"]
