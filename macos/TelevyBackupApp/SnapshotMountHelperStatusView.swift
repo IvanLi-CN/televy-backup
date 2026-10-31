@@ -25,6 +25,7 @@ struct SnapshotMountHelperStatusView: View {
                 pendingCleanup: pendingCleanup
             )
         let statusTitle = !readiness.isOperational && !readiness.isReady && updateBlockReason != nil
+            && !readiness.isPendingCleanupUpgradeSafe
             ? "Snapshot mount helper update waiting"
             : readiness.title
         VStack(alignment: .leading, spacing: 6) {
@@ -83,6 +84,12 @@ struct SnapshotMountHelperStatusView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                if let explanation = readiness.updateExplanation {
+                    Text(explanation)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else if let explanation = readiness.updateExplanation {
                 Text(explanation).font(.system(size: 11)).foregroundStyle(.secondary)
             } else if let error, !readiness.isReady {

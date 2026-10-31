@@ -16,7 +16,9 @@ cleanup, verified age-gated stale rows, and unknown rows remain distinct. An exp
 stale-record recovery requires the current helper component and build identity, while a pending-cleanup retry may use the current or immediately previous cleanup-capable component only when the v4 wire identity and complete pending-only classification are verified. Each request verifies the legacy aggregate
 against the complete additive partition and candidate count before and after each release, and
 uses the authenticated-UID-scoped Status and journal-bound Release methods after the user-session
-Access service reports no active or pending lease; it includes disabled or removed volume settings,
+Access service reports no active or pending lease; a current component with a stale or missing build
+identity may use the same guarded replacement only when the complete pending-cleanup candidate
+partition is verified and Snapshot Access is idle. It includes disabled or removed volume settings,
 never releases pending-cleanup rows outside the explicit pending-only retry, never releases unknown
 rows, and never introduces arbitrary lease or path cleanup.
 The current validated strict-mode baseline also

@@ -331,6 +331,7 @@ fn cleanup_retry_identity(status: &MountStatusResult) -> Result<(), CliError> {
 enum BusyCheck {
     Clear,
     LegacyUpgrade,
+    PendingCleanupUpgrade,
     RecoveryRequired,
 }
 
@@ -368,6 +369,26 @@ fn classify_busy_status(
         && status.pending_cleanup_leases.is_empty();
     if legacy_pending_only {
         return Ok(BusyCheck::LegacyUpgrade);
+    }
+    let current_pending_only = (status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
+        || status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION)
+        && status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+        && status.active_mounts > 0
+        && status.pending_cleanup == Some(status.active_mounts)
+        && status.live_mounts == Some(0)
+        && status.recoverable_stale_mounts == Some(0)
+        && status.unknown_blocking_mounts == Some(0)
+        && status.pending_cleanup_leases.len() == status.active_mounts as usize
+        && status
+            .pending_cleanup_leases
+            .iter()
+            .all(|lease| lease.state == "cleanup_pending")
+        && status.build_commit.as_deref() != Some(env!("TELEVYBACKUP_BUILD_COMMIT"));
+    if current_pending_only {
+        // A current component with a different build can be replaced only when the helper has
+        // proved that every blocking row is an exact cleanup candidate and no live/unknown row
+        // remains. The new helper then owns the explicit retry operation.
+        return Ok(BusyCheck::PendingCleanupUpgrade);
     }
     if status.active_mounts > 0 && known_legacy_wire && classification_missing {
         return Ok(BusyCheck::LegacyUpgrade);
@@ -548,7 +569,9 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
     let busy = check_if_busy("install or update the snapshot mount helper")?;
     match busy {
         BusyCheck::Clear => {}
-        BusyCheck::LegacyUpgrade => prepare_legacy_upgrade(config_dir, data_dir)?,
+        BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => {
+            prepare_legacy_upgrade(config_dir, data_dir)?
+        }
         BusyCheck::RecoveryRequired => {
             drop(mutation_lock);
             recover_helper_before_mutation()?;
@@ -560,7 +583,9 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             })?;
             match check_if_busy("install or update the snapshot mount helper")? {
                 BusyCheck::Clear => {}
-                BusyCheck::LegacyUpgrade => prepare_legacy_upgrade(config_dir, data_dir)?,
+                BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => {
+                    prepare_legacy_upgrade(config_dir, data_dir)?
+                }
                 BusyCheck::RecoveryRequired => {
                     return Err(CliError::retryable(
                         "snapshot_mount_helper.status_unavailable",
@@ -906,6 +931,67 @@ mod tests {
             classify_busy_status("install or update", &status).unwrap(),
             BusyCheck::LegacyUpgrade
         );
+    }
+
+    #[test]
+    fn current_helper_pending_only_with_stale_build_enters_guarded_upgrade() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            pending_cleanup_leases: vec![televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: "pending".into(),
+                state: "cleanup_pending".into(),
+            }],
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_busy_status("install or update", &status).unwrap(),
+            BusyCheck::PendingCleanupUpgrade
+        );
+    }
+
+    #[test]
+    fn current_helper_pending_only_with_candidate_build_stays_cleanup_blocked() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some(env!("TELEVYBACKUP_BUILD_COMMIT").into()),
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            pending_cleanup_leases: vec![televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: "pending".into(),
+                state: "cleanup_pending".into(),
+            }],
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            ..Default::default()
+        };
+        let error = classify_busy_status("install or update", &status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.cleanup_pending");
+    }
+
+    #[test]
+    fn current_helper_pending_only_without_exact_candidates_stays_blocked() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            ..Default::default()
+        };
+        let error = classify_busy_status("install or update", &status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.cleanup_pending");
     }
 
     #[test]
