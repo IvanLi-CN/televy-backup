@@ -825,26 +825,36 @@ pub fn reconcile_inventory(
     wait_for_snapshot_access_idle(config_dir, data_dir, "reconciling snapshot inventory")?;
     let status = wait_for_helper_status()?;
     cleanup_retry_identity(&status)?;
-    let live = status.live_mounts.ok_or_else(|| CliError::retryable(
-        "snapshot_mount_helper.status_incomplete",
-        "cannot reconcile snapshot inventory: live mount classification is unavailable",
-    ))?;
-    let pending = status.pending_cleanup.ok_or_else(|| CliError::retryable(
-        "snapshot_mount_helper.status_incomplete",
-        "cannot reconcile snapshot inventory: cleanup classification is unavailable",
-    ))?;
-    let recoverable = status.recoverable_stale_mounts.ok_or_else(|| CliError::retryable(
-        "snapshot_mount_helper.status_incomplete",
-        "cannot reconcile snapshot inventory: stale mount classification is unavailable",
-    ))?;
-    let unknown = status.unknown_blocking_mounts.ok_or_else(|| CliError::retryable(
-        "snapshot_mount_helper.status_incomplete",
-        "cannot reconcile snapshot inventory: unknown mount classification is unavailable",
-    ))?;
-    let drift = status.inventory_drift_mounts.ok_or_else(|| CliError::retryable(
-        "snapshot_mount_helper.status_incomplete",
-        "cannot reconcile snapshot inventory: inventory-drift classification is unavailable",
-    ))?;
+    let live = status.live_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot reconcile snapshot inventory: live mount classification is unavailable",
+        )
+    })?;
+    let pending = status.pending_cleanup.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot reconcile snapshot inventory: cleanup classification is unavailable",
+        )
+    })?;
+    let recoverable = status.recoverable_stale_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot reconcile snapshot inventory: stale mount classification is unavailable",
+        )
+    })?;
+    let unknown = status.unknown_blocking_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot reconcile snapshot inventory: unknown mount classification is unavailable",
+        )
+    })?;
+    let drift = status.inventory_drift_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot reconcile snapshot inventory: inventory-drift classification is unavailable",
+        )
+    })?;
     if live > 0 || pending > 0 || recoverable > 0 || unknown > 0 {
         return Err(CliError::retryable(
             "snapshot_mount_helper.reconcile_required",

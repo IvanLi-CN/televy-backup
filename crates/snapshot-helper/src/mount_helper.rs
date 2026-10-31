@@ -953,8 +953,7 @@ async fn classify_status_rows(
         let owner_matches = volume_scope
             .map(|(_, owner_uid)| uid == i64::from(owner_uid))
             .unwrap_or(true);
-        let pending_cleanup_candidate = state == "cleanup_pending"
-            && journal_identity_valid;
+        let pending_cleanup_candidate = state == "cleanup_pending" && journal_identity_valid;
         if pending_cleanup_candidate {
             classification.pending_cleanup += 1;
             if owner_matches {
@@ -1023,10 +1022,12 @@ async fn classify_status_rows(
             Ok(_) => {
                 classification.active_mounts += 1;
                 classification.inventory_drift_mounts += 1;
-                classification.inventory_drift_leases.push(MountRecoveryLease {
-                    lease_id,
-                    state: "released_inventory_drift".to_string(),
-                });
+                classification
+                    .inventory_drift_leases
+                    .push(MountRecoveryLease {
+                        lease_id,
+                        state: "released_inventory_drift".to_string(),
+                    });
             }
             Err(_) => {
                 classification.active_mounts += 1;
@@ -1062,7 +1063,8 @@ async fn audit_released_tombstones(
                 .is_ok_and(|baseline| manifests_equal(&current_manifest, baseline));
         if !matches {
             return Err(MountHelperError::Protocol(
-                "released snapshot tombstone inventory changed; explicit reconciliation required".into(),
+                "released snapshot tombstone inventory changed; explicit reconciliation required"
+                    .into(),
             ));
         }
     }
