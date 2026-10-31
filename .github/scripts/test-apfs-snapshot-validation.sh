@@ -10,6 +10,7 @@ integration_script="$root_dir/scripts/macos/verify-apfs-snapshot-integration.sh"
 mount_helper_source="$root_dir/crates/snapshot-helper/src/mount_helper.rs"
 access_source="$root_dir/crates/snapshot-helper/src/main.rs"
 control_source="$root_dir/crates/daemon/src/control_ipc.rs"
+recovery_fixture_source="$root_dir/scripts/macos/test-snapshot-mount-recovery.py"
 
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$pr_workflow"
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$main_workflow"
@@ -43,6 +44,7 @@ mount_helper_integration_text="$(<"$root_dir/scripts/macos/mount-helper-install-
 mount_helper_text="$(<"$mount_helper_source")"
 access_text="$(<"$access_source")"
 control_text="$(<"$control_source")"
+recovery_fixture_text="$(<"$recovery_fixture_source")"
 
 assert_contains "manual regression job" "$pr_workflow_text" "manual-snapshot-regression"
 assert_contains "manual regression dispatch gate" "$pr_workflow_text" "github.event_name == 'workflow_dispatch'"
@@ -103,7 +105,7 @@ assert_contains "timepoint synthetic target guard" "$integration_text" '[[ "$tar
 assert_not_contains "timepoint transcript persistence in sanitized mode" "$integration_text" 'printf '\''%s\\n'\'' "$last_response" >>"$evidence_path"'
 assert_contains "legacy journal seed" "$mount_helper_integration_text" "seed_legacy_stale_journal"
 assert_contains "legacy journal classification assertion" "$mount_helper_integration_text" "recoverable_stale_mounts"
-assert_contains "inventory drift fixture" "$mount_helper_integration_text" "inventory_drift_mounts"
+assert_contains "inventory drift fixture" "$recovery_fixture_text" "inventory_drift_mounts"
 assert_contains "daemon inventory reconcile operation" "$control_text" "snapshot.mount_helper.reconcile_inventory"
 
 assert_contains "root-owned snapshot creation" "$mount_helper_text" '"/usr/bin/tmutil"'
