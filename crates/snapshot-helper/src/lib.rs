@@ -224,6 +224,13 @@ pub struct MountStatusResult {
     /// Blocking rows that are neither live nor safely recoverable.
     #[serde(default)]
     pub unknown_blocking_mounts: Option<u32>,
+    /// Released tombstones whose device identity and baseline are valid, but the current
+    /// inventory differs. These rows can be explicitly re-baselined through the journal-bound
+    /// Release path; they never authorize source reads by themselves.
+    #[serde(default)]
+    pub inventory_drift_mounts: Option<u32>,
+    #[serde(default)]
+    pub inventory_drift_leases: Vec<MountRecoveryLease>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

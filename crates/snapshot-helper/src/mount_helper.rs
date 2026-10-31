@@ -827,6 +827,8 @@ async fn status_result(
         live_mounts: Some(classification.live_mounts),
         recoverable_stale_mounts: Some(classification.recoverable_stale_mounts),
         unknown_blocking_mounts: Some(classification.unknown_blocking_mounts),
+        inventory_drift_mounts: Some(classification.inventory_drift_mounts),
+        inventory_drift_leases: classification.inventory_drift_leases,
     })
 }
 
@@ -861,6 +863,8 @@ async fn status_for_volume_result(
         live_mounts: Some(classification.live_mounts),
         recoverable_stale_mounts: Some(classification.recoverable_stale_mounts),
         unknown_blocking_mounts: Some(classification.unknown_blocking_mounts),
+        inventory_drift_mounts: Some(classification.inventory_drift_mounts),
+        inventory_drift_leases: classification.inventory_drift_leases,
     })
 }
 
@@ -870,8 +874,10 @@ struct StatusClassification {
     live_mounts: u32,
     recoverable_stale_mounts: u32,
     unknown_blocking_mounts: u32,
+    inventory_drift_mounts: u32,
     recovery_leases: Vec<MountRecoveryLease>,
     pending_cleanup_leases: Vec<MountRecoveryLease>,
+    inventory_drift_leases: Vec<MountRecoveryLease>,
 }
 
 async fn classify_status_rows(
@@ -904,8 +910,10 @@ async fn classify_status_rows(
         live_mounts: 0,
         recoverable_stale_mounts: 0,
         unknown_blocking_mounts: 0,
+        inventory_drift_mounts: 0,
         recovery_leases: Vec::new(),
         pending_cleanup_leases: Vec::new(),
+        inventory_drift_leases: Vec::new(),
     };
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
@@ -942,12 +950,18 @@ async fn classify_status_rows(
                 .unwrap_or(true)
             && journal_identity_valid
             && matches!(state.as_str(), "reserved" | "prepared" | "active");
-        let pending_cleanup_candidate = state == "cleanup_pending" && journal_identity_valid;
+        let owner_matches = volume_scope
+            .map(|(_, owner_uid)| uid == i64::from(owner_uid))
+            .unwrap_or(true);
+        let pending_cleanup_candidate = state == "cleanup_pending"
+            && journal_identity_valid;
         if pending_cleanup_candidate {
             classification.pending_cleanup += 1;
-            classification
-                .pending_cleanup_leases
-                .push(MountRecoveryLease { lease_id, state });
+            if owner_matches {
+                classification
+                    .pending_cleanup_leases
+                    .push(MountRecoveryLease { lease_id, state });
+            }
         } else if recoverable {
             classification.recoverable_stale_mounts += 1;
             classification
@@ -959,6 +973,67 @@ async fn classify_status_rows(
             classification.unknown_blocking_mounts += 1;
         }
     }
+
+    let mut released_statement = String::from(
+        "SELECT lease_id, uid, volume_uuid, device_identifier, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid FROM mounts WHERE state = 'released'",
+    );
+    if scope_uid.is_some() {
+        released_statement.push_str(" AND uid = ?");
+    }
+    if let Some((volume_uuid, _)) = volume_scope {
+        released_statement.push_str(" AND lower(volume_uuid) = lower(?)");
+    }
+    let mut released_query = sqlx::query(&released_statement);
+    if let Some(scope_uid) = scope_uid {
+        released_query = released_query.bind(i64::from(scope_uid));
+    }
+    if let Some((volume_uuid, _)) = volume_scope {
+        released_query = released_query.bind(volume_uuid);
+    }
+    for row in released_query.fetch_all(pool).await? {
+        let lease_id: String = row.try_get("lease_id")?;
+        let uid: i64 = row.try_get("uid")?;
+        let volume_uuid: String = row.try_get("volume_uuid")?;
+        let device_identifier: String = row.try_get("device_identifier")?;
+        let mount_root: String = row.try_get("mount_root")?;
+        let snapshot_manifest: String = row.try_get("snapshot_manifest")?;
+        let reservation_manifest: String = row.try_get("reservation_manifest")?;
+        let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
+        let baseline = parse_reservation_manifest(&reservation_manifest);
+        let identity_valid = uid > 0
+            && validate_lease_id(&lease_id).is_ok()
+            && validate_uuid(&volume_uuid).is_ok()
+            && validate_device(&device_identifier).is_ok()
+            && mount_root.is_empty()
+            && snapshot_manifest == "[]"
+            && reservation_manifest_valid == 1
+            && baseline.is_ok()
+            && validate_device_volume_binding(&device_identifier, &volume_uuid).is_ok();
+        let owner_matches = volume_scope
+            .map(|(_, owner_uid)| uid == i64::from(owner_uid))
+            .unwrap_or(true);
+        if !identity_valid || !owner_matches {
+            classification.active_mounts += 1;
+            classification.unknown_blocking_mounts += 1;
+            continue;
+        }
+        let baseline = baseline.expect("validated reservation manifest");
+        match snapshot_inventory_manifest(&device_identifier) {
+            Ok(current_manifest) if manifests_equal(&current_manifest, &baseline) => {}
+            Ok(_) => {
+                classification.active_mounts += 1;
+                classification.inventory_drift_mounts += 1;
+                classification.inventory_drift_leases.push(MountRecoveryLease {
+                    lease_id,
+                    state: "released_inventory_drift".to_string(),
+                });
+            }
+            Err(_) => {
+                classification.active_mounts += 1;
+                classification.unknown_blocking_mounts += 1;
+            }
+        }
+    }
     Ok(classification)
 }
 
@@ -968,7 +1043,7 @@ async fn audit_released_tombstones(
     device_identifier: &str,
 ) -> Result<(), MountHelperError> {
     let rows = sqlx::query(
-        "SELECT lease_id, device_identifier, reservation_manifest FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'released' AND reservation_manifest_valid = 1",
+        "SELECT device_identifier, reservation_manifest FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'released' AND reservation_manifest_valid = 1",
     )
     .bind(volume_uuid)
     .fetch_all(journal)
@@ -978,7 +1053,6 @@ async fn audit_released_tombstones(
     }
     let current_manifest = snapshot_inventory_manifest(device_identifier)?;
     for row in rows {
-        let lease_id: String = row.try_get("lease_id")?;
         let stored_device: String = row.try_get("device_identifier")?;
         let reservation_manifest_json: String = row.try_get("reservation_manifest")?;
         let baseline = parse_reservation_manifest(&reservation_manifest_json);
@@ -987,12 +1061,8 @@ async fn audit_released_tombstones(
                 .as_ref()
                 .is_ok_and(|baseline| manifests_equal(&current_manifest, baseline));
         if !matches {
-            sqlx::query("UPDATE mounts SET state = 'cleanup_pending' WHERE lease_id = ? AND state = 'released'")
-                .bind(lease_id)
-                .execute(journal)
-                .await?;
             return Err(MountHelperError::Protocol(
-                "released snapshot tombstone inventory changed".into(),
+                "released snapshot tombstone inventory changed; explicit reconciliation required".into(),
             ));
         }
     }
@@ -1577,10 +1647,18 @@ async fn release_request(
         ));
     }
     if state == "released" {
-        return Ok(MountReleaseResult {
-            lease_id: lease_id.to_string(),
-            cleanup_state: "released".to_string(),
-        });
+        return reconcile_released_tombstone(
+            journal,
+            uid,
+            lease_id,
+            &volume_uuid,
+            &device_identifier,
+            &mount_root,
+            &manifest_json,
+            &reservation_manifest_json,
+            reservation_manifest_valid,
+        )
+        .await;
     }
     if reservation_manifest_valid != 1 {
         update_state(journal, lease_id, "cleanup_pending").await?;
@@ -1692,6 +1770,64 @@ async fn release_request(
     Ok(MountReleaseResult {
         lease_id: lease_id.to_string(),
         cleanup_state: cleanup_state.to_string(),
+    })
+}
+
+/// Re-baseline a released tombstone after an inventory-only change. This is deliberately routed
+/// through Release so the root helper revalidates the journal owner, volume/device binding and
+/// current inventory while holding the mutation lock. It never deletes a snapshot or opens a
+/// source path.
+async fn reconcile_released_tombstone(
+    journal: &SqlitePool,
+    uid: u32,
+    lease_id: &str,
+    volume_uuid: &str,
+    device_identifier: &str,
+    mount_root: &str,
+    snapshot_manifest_json: &str,
+    reservation_manifest_json: &str,
+    reservation_manifest_valid: i64,
+) -> Result<MountReleaseResult, MountHelperError> {
+    if mount_root != "" || snapshot_manifest_json != "[]" || reservation_manifest_valid != 1 {
+        return Err(MountHelperError::Protocol(
+            "released snapshot tombstone is not eligible for inventory reconciliation".into(),
+        ));
+    }
+    validate_uuid(volume_uuid)?;
+    validate_device(device_identifier)?;
+    validate_device_volume_binding(device_identifier, volume_uuid)?;
+    let baseline = parse_reservation_manifest(reservation_manifest_json)?;
+    let current_manifest = snapshot_inventory_manifest(device_identifier)?;
+    if manifests_equal(&current_manifest, &baseline) {
+        return Ok(MountReleaseResult {
+            lease_id: lease_id.to_string(),
+            cleanup_state: "released".to_string(),
+        });
+    }
+    let current_manifest_json = serde_json::to_string(&current_manifest)?;
+    let updated = sqlx::query(
+        "UPDATE mounts SET reservation_manifest = ?, reservation_manifest_valid = 1 WHERE lease_id = ? AND uid = ? AND state = 'released' AND mount_root = '' AND snapshot_manifest = '[]' AND reservation_manifest_valid = 1 AND reservation_manifest = ?",
+    )
+    .bind(&current_manifest_json)
+    .bind(lease_id)
+    .bind(i64::from(uid))
+    .bind(reservation_manifest_json)
+    .execute(journal)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(MountHelperError::Protocol(
+            "released snapshot tombstone changed during reconciliation".into(),
+        ));
+    }
+    let confirmed_manifest = snapshot_inventory_manifest(device_identifier)?;
+    if !manifests_equal(&confirmed_manifest, &current_manifest) {
+        return Err(MountHelperError::Protocol(
+            "released snapshot tombstone inventory changed during reconciliation".into(),
+        ));
+    }
+    Ok(MountReleaseResult {
+        lease_id: lease_id.to_string(),
+        cleanup_state: "released".to_string(),
     })
 }
 

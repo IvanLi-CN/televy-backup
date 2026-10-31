@@ -36,17 +36,26 @@ def request(path, method, **fields):
 
 
 def write_fixture_rows(
-    journal, uid, volume_uuid, device, stale_id, pending_id, unknown_id, malformed_id
+    journal,
+    uid,
+    volume_uuid,
+    device,
+    stale_id,
+    pending_id,
+    unknown_id,
+    malformed_id,
+    released_drift_id,
 ):
     script = '''
 import sqlite3, sys
-journal, uid, volume_uuid, device, stale_id, pending_id, unknown_id, malformed_id = sys.argv[1:]
+journal, uid, volume_uuid, device, stale_id, pending_id, unknown_id, malformed_id, released_drift_id = sys.argv[1:]
 connection = sqlite3.connect(journal)
 rows = [
     (stale_id, int(uid), volume_uuid, device, '', '', '', '[]', '[]', 1, 'reserved'),
     (pending_id, int(uid), volume_uuid, device, '', '', '', '[]', '[]', 1, 'cleanup_pending'),
     (unknown_id, int(uid), volume_uuid, device, '', '', '', '[]', 'not-json', 0, 'active'),
     (malformed_id, int(uid), volume_uuid, device, '', '', '', '[]', 'not-json', 0, 'cleanup_pending'),
+    (released_drift_id, int(uid), volume_uuid, device, '', '', '', '[]', '[{"device_identifier":"%s","uuid":"00000000-0000-0000-0000-000000000001"}]' % device, 1, 'released'),
 ]
 connection.executemany(
     """
@@ -79,6 +88,7 @@ connection.close()
         pending_id,
         unknown_id,
         malformed_id,
+        released_drift_id,
     )
 
 
@@ -159,6 +169,7 @@ def main():
         pending_id = str(uuid.uuid4())
         unknown_id = str(uuid.uuid4())
         malformed_id = str(uuid.uuid4())
+        released_drift_id = str(uuid.uuid4())
         write_fixture_rows(
             journal,
             os.getuid(),
@@ -168,20 +179,25 @@ def main():
             pending_id,
             unknown_id,
             malformed_id,
+            released_drift_id,
         )
         before = request(ipc, "status")
         assert before["ok"]
         status = before["result"]
-        assert status["active_mounts"] == 4
+        assert status["active_mounts"] == 5
         assert status["pending_cleanup"] == 1
         assert status["recoverable_stale_mounts"] == 1
         assert status["unknown_blocking_mounts"] == 2
+        assert status["inventory_drift_mounts"] == 1
         assert [row["lease_id"] for row in status["pending_cleanup_leases"]] == [pending_id]
         assert [row["lease_id"] for row in status["recovery_leases"]] == [stale_id]
+        assert [row["lease_id"] for row in status["inventory_drift_leases"]] == [released_drift_id]
         pending = request(ipc, "release", uid=os.getuid(), lease_id=pending_id)
         assert pending["ok"] and pending["result"]["cleanup_state"] == "released"
         released = request(ipc, "release", uid=os.getuid(), lease_id=stale_id)
         assert released["ok"] and released["result"]["cleanup_state"] == "released"
+        reconciled = request(ipc, "release", uid=os.getuid(), lease_id=released_drift_id)
+        assert reconciled["ok"] and reconciled["result"]["cleanup_state"] == "released"
         after = request(ipc, "status")
         assert after["ok"]
         status = after["result"]
@@ -189,9 +205,11 @@ def main():
         assert status["pending_cleanup"] == 0
         assert status["recoverable_stale_mounts"] == 0
         assert status["unknown_blocking_mounts"] == 2
+        assert status["inventory_drift_mounts"] == 0
         assert not status["recovery_leases"]
+        assert not status["inventory_drift_leases"]
         print(
-            "PASS: stale verified row released through helper IPC; unknown row remained blocking",
+            "PASS: stale row released and released inventory drift reconciled through helper IPC; unknown rows remained blocking",
             flush=True,
         )
     finally:

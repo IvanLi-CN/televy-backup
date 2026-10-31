@@ -348,6 +348,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
     let mountHelperLiveMounts: UInt32?
     let mountHelperRecoverableStaleMounts: UInt32?
     let mountHelperUnknownBlockingMounts: UInt32?
+    let mountHelperInventoryDriftMounts: UInt32?
     let activeLeases: UInt32
     let pendingCleanup: UInt32
     let volumes: [SnapshotVolumeStatus]
@@ -355,7 +356,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case consistencyMode, serviceReachable, accessAppVersion, accessAppPath, registeredAccessAppPath, accessAppRegistrationMismatch, managedBy, migrationState, legacyRegistrationPath, fdaReady, fdaCheckError, accessAppError
         case mountHelperPath, mountHelperReachable, mountHelperReady, mountHelperBuildCommit, mountHelperVersion, mountHelperError
-        case mountHelperActiveMounts, mountHelperPendingCleanup, mountHelperPendingCleanupCandidates, mountHelperLiveMounts, mountHelperRecoverableStaleMounts, mountHelperUnknownBlockingMounts
+        case mountHelperActiveMounts, mountHelperPendingCleanup, mountHelperPendingCleanupCandidates, mountHelperLiveMounts, mountHelperRecoverableStaleMounts, mountHelperUnknownBlockingMounts, mountHelperInventoryDriftMounts
         case helperAvailable, helperVersion, helperError
         case activeLeases, pendingCleanup, volumes
     }
@@ -385,6 +386,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
         mountHelperLiveMounts: UInt32? = nil,
         mountHelperRecoverableStaleMounts: UInt32? = nil,
         mountHelperUnknownBlockingMounts: UInt32? = nil,
+        mountHelperInventoryDriftMounts: UInt32? = nil,
         activeLeases: UInt32,
         pendingCleanup: UInt32,
         volumes: [SnapshotVolumeStatus]
@@ -413,6 +415,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
         self.mountHelperLiveMounts = mountHelperLiveMounts
         self.mountHelperRecoverableStaleMounts = mountHelperRecoverableStaleMounts
         self.mountHelperUnknownBlockingMounts = mountHelperUnknownBlockingMounts
+        self.mountHelperInventoryDriftMounts = mountHelperInventoryDriftMounts
         self.activeLeases = activeLeases
         self.pendingCleanup = pendingCleanup
         self.volumes = volumes
@@ -448,6 +451,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
         mountHelperLiveMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperLiveMounts)
         mountHelperRecoverableStaleMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperRecoverableStaleMounts)
         mountHelperUnknownBlockingMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperUnknownBlockingMounts)
+        mountHelperInventoryDriftMounts = try values.decodeIfPresent(UInt32.self, forKey: .mountHelperInventoryDriftMounts)
         activeLeases = try values.decodeIfPresent(UInt32.self, forKey: .activeLeases) ?? 0
         pendingCleanup = try values.decodeIfPresent(UInt32.self, forKey: .pendingCleanup) ?? 0
         volumes = try values.decodeIfPresent([SnapshotVolumeStatus].self, forKey: .volumes) ?? []
@@ -463,6 +467,7 @@ struct SnapshotControlStatus: Decodable, Equatable {
             pendingCleanup: mountHelperPendingCleanup,
             recoverableStaleMounts: mountHelperRecoverableStaleMounts,
             unknownBlockingMounts: mountHelperUnknownBlockingMounts,
+            inventoryDriftMounts: mountHelperInventoryDriftMounts,
             pendingCleanupCandidates: mountHelperPendingCleanupCandidates,
             snapshotAccessActiveLeases: activeLeases,
             snapshotAccessPendingCleanup: pendingCleanup
@@ -1171,10 +1176,12 @@ struct SettingsWindowRootView: View {
                             liveMounts: snapshotStatus.mountHelperLiveMounts,
                             recoverableStaleMounts: snapshotStatus.mountHelperRecoverableStaleMounts,
                             unknownBlockingMounts: snapshotStatus.mountHelperUnknownBlockingMounts,
+                            inventoryDriftMounts: snapshotStatus.mountHelperInventoryDriftMounts,
                             busy: snapshotBusy || SettingsUIDemo.enabled,
                             install: installSnapshotMountHelper,
                             recover: recoverSnapshotMountRecords,
-                            retryCleanup: retrySnapshotCleanup
+                            retryCleanup: retrySnapshotCleanup,
+                            reconcileInventory: reconcileSnapshotInventory
                         )
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1236,11 +1243,12 @@ struct SettingsWindowRootView: View {
                 mountHelperBuildCommit: mountHelperOutdated ? nil : expectedSnapshotBuildCommit,
                 mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.2" : nil,
                 mountHelperError: mountHelperMissing ? "Snapshot mount helper is not installed" : nil,
-                mountHelperActiveMounts: 0,
+                mountHelperActiveMounts: SettingsUIDemo.scene == "snapshots-inventory-drift" ? 1 : 0,
                 mountHelperPendingCleanup: 0,
                 mountHelperLiveMounts: 0,
                 mountHelperRecoverableStaleMounts: SettingsUIDemo.scene == "snapshots-recoverable" ? 1 : 0,
                 mountHelperUnknownBlockingMounts: 0,
+                mountHelperInventoryDriftMounts: SettingsUIDemo.scene == "snapshots-inventory-drift" ? 1 : 0,
                 activeLeases: 0,
                 pendingCleanup: SettingsUIDemo.scene == "snapshots-cleanup-pending" ? 1 : 0,
                 volumes: (settings?.snapshot_volumes ?? [:]).map { SnapshotVolumeStatus(volumeUuid: $0.key, enabled: $0.value.enabled, mode: $0.value.enabled ? "strict" : "disabled") }
@@ -1268,6 +1276,13 @@ struct SettingsWindowRootView: View {
         performSnapshotMountOperation(
             method: "snapshot.mount_helper.retry_cleanup",
             operationLabel: "Snapshot cleanup retry"
+        )
+    }
+
+    private func reconcileSnapshotInventory() {
+        performSnapshotMountOperation(
+            method: "snapshot.mount_helper.reconcile_inventory",
+            operationLabel: "Snapshot inventory reconciliation"
         )
     }
 

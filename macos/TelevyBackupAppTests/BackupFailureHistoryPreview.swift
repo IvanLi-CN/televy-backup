@@ -106,34 +106,40 @@ enum BackupFailureHistoryPreview {
             let helperContent = VStack(alignment: .leading, spacing: 18) {
                 Text("Settings → Snapshots").font(.system(size: 18, weight: .bold))
                 Text("Helper update states").font(.system(size: 12)).foregroundStyle(.secondary)
-                ForEach(["outdated", "current", "missing", "pending", "recoverable"], id: \.self) { state in
+                ForEach(["outdated", "current", "missing", "pending", "recoverable", "inventory-drift"], id: \.self) { state in
                     // Native GroupBox's AppKit backing is omitted by ImageRenderer.
                     // Keep this source-owned preview container entirely SwiftUI.
                     VStack(alignment: .leading, spacing: 12) {
                         Divider()
                         SnapshotMountHelperStatusView(
                             readiness: SnapshotMountHelperReadiness(
-                                reachable: state != "missing", daemonReady: state == "current" || state == "recoverable" || state == "pending",
-                                buildCommit: state == "current" || state == "recoverable" || state == "pending" ? candidate : nil,
+                                reachable: state != "missing", daemonReady: state == "current" || state == "recoverable" || state == "pending" || state == "inventory-drift",
+                                buildCommit: state == "current" || state == "recoverable" || state == "pending" || state == "inventory-drift" ? candidate : nil,
                                 expectedBuildCommit: candidate,
                                 helperVersion: state == "missing" ? nil : "0.5.2",
-                                activeMounts: state == "pending" || state == "recoverable" ? 1 : 0,
+                                activeMounts: state == "pending" || state == "recoverable" || state == "inventory-drift" ? 1 : 0,
                                 liveMounts: 0,
                                 pendingCleanup: state == "pending" ? 1 : 0,
                                 recoverableStaleMounts: state == "recoverable" ? 1 : 0,
                                 unknownBlockingMounts: 0,
+                                inventoryDriftMounts: state == "inventory-drift" ? 1 : 0,
                                 pendingCleanupCandidates: state == "pending" ? 1 : 0
                             ),
                             path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
                             version: state == "missing" ? nil : "0.5.2",
                             error: state == "missing" ? "The mount helper is not installed." : nil,
-                            activeMounts: state == "pending" || state == "recoverable" ? 1 : 0,
+                            activeMounts: state == "pending" || state == "recoverable" || state == "inventory-drift" ? 1 : 0,
                             pendingCleanup: state == "pending" ? 1 : 0,
                             pendingCleanupCandidates: state == "pending" ? 1 : 0,
                             liveMounts: state == "pending" ? 0 : 0,
                             recoverableStaleMounts: state == "recoverable" ? 1 : 0,
                             unknownBlockingMounts: 0,
-                            busy: false, install: {}, recover: {}, retryCleanup: {}
+                            inventoryDriftMounts: state == "inventory-drift" ? 1 : 0,
+                            busy: false,
+                            install: {},
+                            recover: {},
+                            retryCleanup: {},
+                            reconcileInventory: {}
                         )
                     }
                 }
@@ -169,10 +175,12 @@ enum BackupFailureHistoryPreview {
                     liveMounts: nil,
                     recoverableStaleMounts: nil,
                     unknownBlockingMounts: nil,
+                    inventoryDriftMounts: nil,
                     busy: false,
                     install: {},
                     recover: {},
-                    retryCleanup: {}
+                    retryCleanup: {},
+                    reconcileInventory: {}
                 )
             }
             .padding(24)

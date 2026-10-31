@@ -11,6 +11,7 @@ struct SnapshotMountHelperReadiness {
     let pendingCleanup: UInt32?
     let recoverableStaleMounts: UInt32?
     let unknownBlockingMounts: UInt32?
+    let inventoryDriftMounts: UInt32?
     let pendingCleanupCandidates: UInt32?
     let snapshotAccessActiveLeases: UInt32
     let snapshotAccessPendingCleanup: UInt32
@@ -26,6 +27,7 @@ struct SnapshotMountHelperReadiness {
         pendingCleanup: UInt32? = nil,
         recoverableStaleMounts: UInt32? = nil,
         unknownBlockingMounts: UInt32? = nil,
+        inventoryDriftMounts: UInt32? = nil,
         pendingCleanupCandidates: UInt32? = nil,
         snapshotAccessActiveLeases: UInt32 = 0,
         snapshotAccessPendingCleanup: UInt32 = 0
@@ -38,6 +40,7 @@ struct SnapshotMountHelperReadiness {
         self.pendingCleanup = pendingCleanup
         self.recoverableStaleMounts = recoverableStaleMounts
         self.unknownBlockingMounts = unknownBlockingMounts
+        self.inventoryDriftMounts = inventoryDriftMounts
         self.pendingCleanupCandidates = pendingCleanupCandidates
         self.snapshotAccessActiveLeases = snapshotAccessActiveLeases
         self.snapshotAccessPendingCleanup = snapshotAccessPendingCleanup
@@ -59,6 +62,9 @@ struct SnapshotMountHelperReadiness {
         }
         if isReady && (unknownBlockingMounts ?? 0) > 0 {
             return "Snapshot mount helper verification required"
+        }
+        if isReady && (inventoryDriftMounts ?? 0) > 0 {
+            return "Snapshot inventory reconciliation required"
         }
         if isReady && (recoverableStaleMounts ?? 0) > 0 {
             return "Snapshot mount helper recovery required"
@@ -146,11 +152,11 @@ struct SnapshotMountHelperReadiness {
     }
 
     var classificationKnown: Bool {
-        liveMounts != nil && pendingCleanup != nil && recoverableStaleMounts != nil && unknownBlockingMounts != nil
+        liveMounts != nil && pendingCleanup != nil && recoverableStaleMounts != nil && unknownBlockingMounts != nil && inventoryDriftMounts != nil
     }
 
     var hasBlockingRecords: Bool {
-        [activeMounts, liveMounts, pendingCleanup, recoverableStaleMounts, unknownBlockingMounts]
+        [activeMounts, liveMounts, pendingCleanup, recoverableStaleMounts, unknownBlockingMounts, inventoryDriftMounts]
             .compactMap { $0 }
             .contains { $0 > 0 }
     }
@@ -188,13 +194,15 @@ struct SnapshotMountHelperReadiness {
               let pendingCleanup,
               let recoverableStaleMounts,
               let unknownBlockingMounts,
-              let pendingCleanupCandidates
+              let pendingCleanupCandidates,
+              let inventoryDriftMounts
         else { return false }
         return pendingCleanup > 0
             && activeMounts == pendingCleanup
             && liveMounts == 0
             && recoverableStaleMounts == 0
             && unknownBlockingMounts == 0
+            && inventoryDriftMounts == 0
             && pendingCleanupCandidates == pendingCleanup
             && snapshotAccessActiveLeases == 0
             && snapshotAccessPendingCleanup == 0
@@ -213,9 +221,30 @@ struct SnapshotMountHelperReadiness {
             && liveMounts == 0
             && pendingCleanup == 0
             && unknownBlockingMounts == 0
+            && (inventoryDriftMounts ?? 0) == 0
             && snapshotAccessActiveLeases == 0
             && snapshotAccessPendingCleanup == 0
             && activeMounts == recoverableStaleMounts
+    }
+
+    var canReconcileInventory: Bool {
+        guard isReady,
+              classificationKnown,
+              let activeMounts,
+              let liveMounts,
+              let pendingCleanup,
+              let recoverableStaleMounts,
+              let unknownBlockingMounts,
+              let inventoryDriftMounts
+        else { return false }
+        return inventoryDriftMounts > 0
+            && activeMounts == inventoryDriftMounts
+            && liveMounts == 0
+            && pendingCleanup == 0
+            && recoverableStaleMounts == 0
+            && unknownBlockingMounts == 0
+            && snapshotAccessActiveLeases == 0
+            && snapshotAccessPendingCleanup == 0
     }
 
     /// Pending cleanup is actionable only when the helper has proved that no live, stale, or
@@ -230,12 +259,14 @@ struct SnapshotMountHelperReadiness {
               let pendingCleanup,
               let pendingCleanupCandidates,
               let recoverableStaleMounts,
-              let unknownBlockingMounts
+              let unknownBlockingMounts,
+              let inventoryDriftMounts
         else { return false }
         return pendingCleanup > 0
             && liveMounts == 0
             && recoverableStaleMounts == 0
             && unknownBlockingMounts == 0
+            && inventoryDriftMounts == 0
             && snapshotAccessActiveLeases == 0
             && snapshotAccessPendingCleanup == 0
             && activeMounts == pendingCleanup

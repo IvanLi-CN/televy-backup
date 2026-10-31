@@ -9,6 +9,7 @@ long_read_script="$root_dir/scripts/macos/verify-apfs-snapshot-long-read.sh"
 integration_script="$root_dir/scripts/macos/verify-apfs-snapshot-integration.sh"
 mount_helper_source="$root_dir/crates/snapshot-helper/src/mount_helper.rs"
 access_source="$root_dir/crates/snapshot-helper/src/main.rs"
+control_source="$root_dir/crates/daemon/src/control_ipc.rs"
 
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$pr_workflow"
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$main_workflow"
@@ -41,6 +42,7 @@ integration_text="$(<"$integration_script")"
 mount_helper_integration_text="$(<"$root_dir/scripts/macos/mount-helper-install-integration-test.py")"
 mount_helper_text="$(<"$mount_helper_source")"
 access_text="$(<"$access_source")"
+control_text="$(<"$control_source")"
 
 assert_contains "manual regression job" "$pr_workflow_text" "manual-snapshot-regression"
 assert_contains "manual regression dispatch gate" "$pr_workflow_text" "github.event_name == 'workflow_dispatch'"
@@ -101,6 +103,8 @@ assert_contains "timepoint synthetic target guard" "$integration_text" '[[ "$tar
 assert_not_contains "timepoint transcript persistence in sanitized mode" "$integration_text" 'printf '\''%s\\n'\'' "$last_response" >>"$evidence_path"'
 assert_contains "legacy journal seed" "$mount_helper_integration_text" "seed_legacy_stale_journal"
 assert_contains "legacy journal classification assertion" "$mount_helper_integration_text" "recoverable_stale_mounts"
+assert_contains "inventory drift fixture" "$mount_helper_integration_text" "inventory_drift_mounts"
+assert_contains "daemon inventory reconcile operation" "$control_text" "snapshot.mount_helper.reconcile_inventory"
 
 assert_contains "root-owned snapshot creation" "$mount_helper_text" '"/usr/bin/tmutil"'
 assert_contains "snapshot creation diagnostic stage" "$mount_helper_text" '"snapshot_create"'
@@ -111,6 +115,8 @@ assert_contains "release inventory fence" "$mount_helper_text" 'inventory_matche
 assert_contains "released tombstone audit" "$mount_helper_text" 'audit_released_tombstones(journal, volume_uuid, device_identifier)'
 assert_contains "released tombstone has a valid baseline" "$mount_helper_text" 'reservation_manifest_valid = 1'
 assert_contains "stale inventory change reblocks" "$mount_helper_text" "released snapshot tombstone inventory changed"
+assert_contains "inventory drift classification" "$mount_helper_text" "released_inventory_drift"
+assert_contains "inventory drift reconciliation" "$mount_helper_text" "reconcile_released_tombstone"
 assert_contains "creation baseline is exact" "$mount_helper_text" 'if !manifests_equal(&current_manifest, &reservation_manifest)'
 assert_contains "deletion requires original baseline" "$mount_helper_text" "A post-deletion inventory change is unowned"
 assert_contains "partial deletion retains unconfirmed manifest" "$mount_helper_text" "retain_unconfirmed_manifest_after_delete_failure"
