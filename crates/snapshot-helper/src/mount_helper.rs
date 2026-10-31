@@ -979,7 +979,7 @@ async fn classify_status_rows(
     if scope_uid.is_some() {
         released_statement.push_str(" AND uid = ?");
     }
-    if let Some((volume_uuid, _)) = volume_scope {
+    if let Some((_, _)) = volume_scope {
         released_statement.push_str(" AND lower(volume_uuid) = lower(?)");
     }
     let mut released_query = sqlx::query(&released_statement);
@@ -1779,6 +1779,7 @@ async fn release_request(
 /// through Release so the root helper revalidates the journal owner, volume/device binding and
 /// current inventory while holding the mutation lock. It never deletes a snapshot or opens a
 /// source path.
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_released_tombstone(
     journal: &SqlitePool,
     uid: u32,
@@ -1790,7 +1791,7 @@ async fn reconcile_released_tombstone(
     reservation_manifest_json: &str,
     reservation_manifest_valid: i64,
 ) -> Result<MountReleaseResult, MountHelperError> {
-    if mount_root != "" || snapshot_manifest_json != "[]" || reservation_manifest_valid != 1 {
+    if !mount_root.is_empty() || snapshot_manifest_json != "[]" || reservation_manifest_valid != 1 {
         return Err(MountHelperError::Protocol(
             "released snapshot tombstone is not eligible for inventory reconciliation".into(),
         ));
