@@ -55,8 +55,8 @@ enum SnapshotMountHelperReadinessTests {
         let clear = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, activeMounts: 0, liveMounts: 0, pendingCleanup: 0,
-            recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 0,
-            inventoryDriftMounts: 0
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0, inventoryDriftMounts: 0,
+            pendingCleanupCandidates: 0
         )
         expectReadiness(clear.canUpdate, "a verified helper with a complete clear status can be updated")
         expectReadiness(clear.isOperational, "a verified current helper with no blockers must be operational")
@@ -81,8 +81,8 @@ enum SnapshotMountHelperReadinessTests {
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
             activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
-            recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 1,
-            inventoryDriftMounts: 0
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0, inventoryDriftMounts: 0,
+            pendingCleanupCandidates: 1
         )
         expectReadiness(pendingOnly.canRetryPendingCleanup, "a verified pending-only state must expose cleanup retry")
         expectReadiness(!pendingOnly.isOperational, "pending cleanup must keep strict mode unavailable")
@@ -92,8 +92,8 @@ enum SnapshotMountHelperReadinessTests {
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
             activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
-            recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 1,
-            inventoryDriftMounts: 0
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0, inventoryDriftMounts: 0,
+            pendingCleanupCandidates: 1
         )
         expectReadiness(staleCurrentPending.isPendingCleanupUpgradeSafe, "a stale current helper with an exact pending-only partition must be replaceable")
         expectReadiness(staleCurrentPending.canUpdate, "a stale current helper must retain a guarded update action")
@@ -113,8 +113,8 @@ enum SnapshotMountHelperReadinessTests {
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
             activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
-            recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 1,
-            inventoryDriftMounts: 0,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0, inventoryDriftMounts: 0,
+            pendingCleanupCandidates: 1,
             snapshotAccessPendingCleanup: 1
         )
         expectReadiness(!accessPending.canRetryPendingCleanup, "Snapshot Access cleanup must gate helper cleanup retry")
@@ -123,8 +123,8 @@ enum SnapshotMountHelperReadinessTests {
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.1",
             activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
-            recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 0,
-            inventoryDriftMounts: 0
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0, inventoryDriftMounts: 0,
+            pendingCleanupCandidates: 0
         )
         expectReadiness(pendingPrevious.isLegacyPendingCleanupStatus, "the previous helper must expose its pending-only upgrade state")
         expectReadiness(pendingPrevious.canUpdate, "the previous helper must retain a guarded update action before cleanup retry")
