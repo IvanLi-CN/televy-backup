@@ -107,7 +107,11 @@ fn stage_copy(source: &Path, destination: &Path) -> Result<(PathBuf, String), Cl
         CliError::new("snapshot_mount_helper.install_failed", error.to_string())
     })?;
     let staged = destination.with_extension(format!("tmp-{}", std::process::id()));
-    let mut source_file = fs::File::open(source).map_err(install_asset_error)?;
+    let mut source_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(source)
+        .map_err(install_asset_error)?;
     let mut staged_file = match OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -654,35 +658,35 @@ fn rollback_installed_assets(
                     ),
                 ));
             }
-            let access_status = snapshot_access_status_for_maintenance(
-                config_dir,
-                data_dir,
-                "rolling back the snapshot mount helper",
-            )
-            .map_err(|access_error| {
-                CliError::retryable(
-                    "snapshot_mount_helper.install_rollback_failed",
-                    format!(
-                        "cannot verify Snapshot Access is idle before rollback: {}",
-                        access_error.message
-                    ),
-                )
-            })?;
-            ensure_snapshot_access_idle(&access_status).map_err(|access_error| {
-                CliError::retryable(
-                    "snapshot_mount_helper.install_rollback_failed",
-                    format!(
-                        "cannot rollback while Snapshot Access is not idle: {}",
-                        access_error.message
-                    ),
-                )
-            })?;
             // A failed bootstrap can leave launchd with an absent or loaded-but-unreachable
             // candidate. The mutation lock prevents new journal-changing requests while the
             // service is booted out, and the restored helper will recover any preserved journal
             // rows on startup. An unknown launchd state remains fail-closed above.
         }
     }
+    let access_status = snapshot_access_status_for_maintenance(
+        config_dir,
+        data_dir,
+        "rolling back the snapshot mount helper",
+    )
+    .map_err(|access_error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            format!(
+                "cannot verify Snapshot Access is idle before rollback: {}",
+                access_error.message
+            ),
+        )
+    })?;
+    ensure_snapshot_access_idle(&access_status).map_err(|access_error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            format!(
+                "cannot rollback while Snapshot Access is not idle: {}",
+                access_error.message
+            ),
+        )
+    })?;
     let service = system_service_target();
     if let Err(error) = bootout_for_mutation(
         &service,
@@ -1264,9 +1268,13 @@ fn wait_for_installed_helper(
 }
 
 fn helper_sha256(path: &Path) -> Result<String, CliError> {
-    let mut file = fs::File::open(path).map_err(|error| {
-        CliError::new("snapshot_mount_helper.identity_failed", error.to_string())
-    })?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| {
+            CliError::new("snapshot_mount_helper.identity_failed", error.to_string())
+        })?;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
