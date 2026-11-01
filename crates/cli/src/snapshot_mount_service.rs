@@ -1019,13 +1019,14 @@ fn wait_for_snapshot_access_idle(
     }
 }
 
-fn prepare_legacy_upgrade(config_dir: &Path, data_dir: &Path) -> Result<(), CliError> {
+fn wait_for_legacy_upgrade(config_dir: &Path, data_dir: &Path) -> Result<(), CliError> {
+    // Snapshot Access cleanup retries acquire the same cross-process mutation lock as an
+    // installer. Do not hold that lock while waiting, or the cleanup can never make progress.
     wait_for_snapshot_access_idle(
         config_dir,
         data_dir,
         "replacing the legacy snapshot mount helper",
-    )?;
-    launchctl(&["bootout", &system_service_target()])
+    )
 }
 
 fn check_if_busy(operation: &str) -> Result<BusyCheck, CliError> {
@@ -1194,9 +1195,38 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
         };
         (staged_binary, staged_plist, candidate_hash)
     };
-    if replace_legacy_helper && let Err(error) = prepare_legacy_upgrade(config_dir, data_dir) {
-        discard_staged(&[&staged_binary, &staged_plist]);
-        return Err(error);
+    if replace_legacy_helper {
+        drop(mutation_lock);
+        if let Err(error) = wait_for_legacy_upgrade(config_dir, data_dir) {
+            discard_staged(&[&staged_binary, &staged_plist]);
+            return Err(error);
+        }
+        mutation_lock = match mount_helper::acquire_mutation_lock() {
+            Ok(lock) => lock,
+            Err(error) => {
+                discard_staged(&[&staged_binary, &staged_plist]);
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.lock_unavailable",
+                    format!(
+                        "cannot resume helper installation safely after Snapshot Access cleanup: {error}"
+                    ),
+                ));
+            }
+        };
+        let refreshed_busy = match check_if_busy("install or update the snapshot mount helper") {
+            Ok(busy) => busy,
+            Err(error) => {
+                discard_staged(&[&staged_binary, &staged_plist]);
+                return Err(error);
+            }
+        };
+        if refreshed_busy == BusyCheck::RecoveryRequired {
+            discard_staged(&[&staged_binary, &staged_plist]);
+            return Err(CliError::retryable(
+                "snapshot_mount_helper.status_unavailable",
+                "snapshot mount helper became unavailable while waiting for Snapshot Access cleanup",
+            ));
+        }
     }
     let service = system_service_target();
     if let Err(error) =
