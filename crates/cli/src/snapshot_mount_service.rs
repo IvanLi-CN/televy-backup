@@ -237,7 +237,10 @@ fn quarantine_backup_candidates(path: &Path) -> Result<Vec<PathBuf>, CliError> {
     Ok(candidates)
 }
 
-fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
+fn recover_interrupted_helper_transaction(
+    config_dir: &Path,
+    data_dir: &Path,
+) -> Result<(), CliError> {
     let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
     let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
     let paths = [binary, plist];
@@ -278,28 +281,34 @@ fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
         ));
     }
     if service_state == Some(HelperServiceState::Loaded) && !backups.is_empty() {
-        let status = match mount_helper::status() {
-            Ok(status) => status,
-            Err(_) => {
-                return Err(CliError::retryable(
-                    "snapshot_mount_helper.status_unavailable",
-                    "cannot recover an interrupted helper while its loaded service status is unavailable",
-                ));
+        let candidate_ready = match mount_helper::status() {
+            Ok(status) => {
+                let candidate_ready = status.component_version.as_deref()
+                    == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+                    && status.build_commit.as_deref()
+                        == Some(env!("TELEVYBACKUP_BUILD_COMMIT"));
+                if !candidate_ready
+                    && !matches!(
+                        classify_busy_status("recover interrupted helper transaction", &status),
+                        Ok(BusyCheck::Clear)
+                    )
+                {
+                    return Err(CliError::retryable(
+                        "snapshot_mount_helper.busy",
+                        "cannot recover an interrupted helper while mount records remain active or unclassified",
+                    ));
+                }
+                candidate_ready
             }
+            Err(_) => false,
         };
-        let candidate_ready = status.component_version.as_deref()
-            == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
-            && status.build_commit.as_deref() == Some(env!("TELEVYBACKUP_BUILD_COMMIT"));
         if !candidate_ready {
-            if !matches!(
-                classify_busy_status("recover interrupted helper transaction", &status),
-                Ok(BusyCheck::Clear)
-            ) {
-                return Err(CliError::retryable(
-                    "snapshot_mount_helper.busy",
-                    "cannot recover an interrupted helper while mount records remain active or unclassified",
-                ));
-            }
+            let access_status = snapshot_access_status_for_maintenance(
+                config_dir,
+                data_dir,
+                "recovering an interrupted helper transaction",
+            )?;
+            ensure_snapshot_access_idle(&access_status)?;
             let complete_backup_set = paths.iter().all(|path| {
                 backups
                     .iter()
@@ -1199,7 +1208,7 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             format!("cannot install or update the snapshot mount helper safely: {error}"),
         )
     })?;
-    recover_interrupted_helper_transaction()?;
+    recover_interrupted_helper_transaction(config_dir, data_dir)?;
     let busy = check_if_busy("install or update the snapshot mount helper")?;
     let mut replace_legacy_helper = false;
     match busy {
@@ -1230,7 +1239,7 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             }
         }
     }
-    recover_interrupted_helper_transaction()?;
+    recover_interrupted_helper_transaction(config_dir, data_dir)?;
     let (staged_binary, staged_plist, candidate_hash) = {
         let source = current_executable_sibling()?;
         let candidate_hash = helper_sha256(&source)?;
@@ -1357,7 +1366,7 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
     Ok(())
 }
 
-pub fn uninstall(json_output: bool) -> Result<(), CliError> {
+pub fn uninstall(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
     require_root()?;
     let _install_lock = mount_helper::acquire_install_lock().map_err(|error| {
         CliError::retryable(
@@ -1371,7 +1380,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
             format!("cannot uninstall the snapshot mount helper safely: {error}"),
         )
     })?;
-    recover_interrupted_helper_transaction()?;
+    recover_interrupted_helper_transaction(config_dir, data_dir)?;
     let mut busy = check_if_busy("uninstall the snapshot mount helper")?;
     if busy == BusyCheck::RecoveryRequired {
         drop(mutation_lock);
@@ -1384,7 +1393,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
         })?;
         busy = check_if_busy("uninstall the snapshot mount helper")?;
     }
-    recover_interrupted_helper_transaction()?;
+    recover_interrupted_helper_transaction(config_dir, data_dir)?;
     ensure_uninstall_safe(busy)?;
     let service = system_service_target();
     bootout_for_mutation(
