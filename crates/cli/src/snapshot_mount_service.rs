@@ -338,21 +338,34 @@ fn rollback_installed_assets(
             format!("cannot reacquire the snapshot mount mutation lock: {error}"),
         )
     })?;
-    let status = mount_helper::status().map_err(|error| {
-        CliError::retryable(
-            "snapshot_mount_helper.install_rollback_failed",
-            format!("cannot verify the helper is idle before rollback: {error}"),
-        )
-    })?;
-    if status.active_mounts > 0 || status.pending_cleanup.is_some_and(|count| count > 0) {
-        return Err(CliError::retryable(
-            "snapshot_mount_helper.install_rollback_failed",
-            format!(
-                "cannot rollback while the helper reports {} active mount record(s) and {} pending cleanup record(s)",
-                status.active_mounts,
-                status.pending_cleanup.unwrap_or(0)
-            ),
-        ));
+    match mount_helper::status() {
+        Ok(status) => {
+            if status.active_mounts > 0 || status.pending_cleanup.is_some_and(|count| count > 0) {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.install_rollback_failed",
+                    format!(
+                        "cannot rollback while the helper reports {} active mount record(s) and {} pending cleanup record(s)",
+                        status.active_mounts,
+                        status.pending_cleanup.unwrap_or(0)
+                    ),
+                ));
+            }
+        }
+        Err(error) => {
+            let service_state = helper_service_state();
+            if service_state == HelperServiceState::Unknown {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.install_rollback_failed",
+                    format!(
+                        "cannot verify the helper is idle before rollback: {error}; service state is {service_state:?}"
+                    ),
+                ));
+            }
+            // A failed bootstrap can leave launchd with an absent or loaded-but-unreachable
+            // candidate. The mutation lock prevents new journal-changing requests while the
+            // service is booted out, and the restored helper will recover any preserved journal
+            // rows on startup. An unknown launchd state remains fail-closed above.
+        }
     }
     let service = system_service_target();
     if let Err(error) = bootout_for_mutation(
@@ -491,10 +504,32 @@ fn wait_for_helper_status() -> Result<MountStatusResult, CliError> {
 
 fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     if status.active_mounts == 0 {
+        let current_component = status.component_version.as_deref()
+            == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION);
+        let classification_complete = status.pending_cleanup.is_some()
+            && status.live_mounts.is_some()
+            && status.recoverable_stale_mounts.is_some()
+            && status.unknown_blocking_mounts.is_some()
+            && status.inventory_drift_mounts.is_some();
+        let has_blocking_detail = status.pending_cleanup.is_some_and(|count| count > 0)
+            || status.live_mounts.is_some_and(|count| count > 0)
+            || status.recoverable_stale_mounts.is_some_and(|count| count > 0)
+            || status.unknown_blocking_mounts.is_some_and(|count| count > 0)
+            || status.inventory_drift_mounts.is_some_and(|count| count > 0)
+            || !status.pending_cleanup_leases.is_empty()
+            || !status.recovery_leases.is_empty()
+            || !status.blocked_volume_uuids.is_empty();
+        if (current_component && !classification_complete) || has_blocking_detail {
+            return Some(CliError::retryable(
+                "snapshot_mount_helper.status_incomplete",
+                format!(
+                    "cannot {operation}: the installed snapshot mount helper reported an incomplete or contradictory zero-row status"
+                ),
+            ));
+        }
         // The legacy aggregate includes every blocking journal row, including cleanup-pending
         // rows. A legacy helper that reports zero therefore has no row to protect, even though it
-        // cannot provide the additive classification fields. The replacement transaction still
-        // requires the current component and build identity before acknowledging readiness.
+        // cannot provide the additive classification fields.
         return None;
     }
     let pending_cleanup = match status.pending_cleanup {
@@ -2045,6 +2080,34 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn zero_aggregate_with_blocking_classification_is_not_treated_as_clear() {
+        let status = MountStatusResult {
+            active_mounts: 0,
+            pending_cleanup: Some(1),
+            ..Default::default()
+        };
+        let error = busy_error("update the snapshot mount helper", &status).unwrap();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+    }
+
+    #[test]
+    fn current_helper_zero_aggregate_requires_all_classification_fields() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            active_mounts: 0,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        let error = busy_error("update the snapshot mount helper", &status).unwrap();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
     }
 
     #[test]

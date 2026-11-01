@@ -211,10 +211,12 @@ jobs:
       - name: Reproduce published mount helper installation
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           set -euo pipefail
           fixture="${RUNNER_TEMP}/mount-helper-install-release"
-          trusted_base_sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${{ inputs.pr_number }}" --jq '.base.sha')"
+          [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]]
+          trusted_base_sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.base.sha')"
           git fetch --force --no-tags origin "${trusted_base_sha}"
           trusted_root="${RUNNER_TEMP}/trusted-release-policy"
           git worktree add --detach "${trusted_root}" "${trusted_base_sha}"
@@ -305,6 +307,8 @@ jobs:
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness \
             --expect-build-commit "${GITHUB_SHA}" --delay-startup
+          python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/TelevyBackup.app" --require-readiness --bootstrap-failure-rollback
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-blocking
           python3 scripts/macos/mount-helper-install-integration-test.py \

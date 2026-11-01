@@ -136,9 +136,14 @@ def main():
         action="store_true",
         help="make the previous component report a stale build with inventory classification missing",
     )
+    parser.add_argument(
+        "--bootstrap-failure-rollback",
+        action="store_true",
+        help="replace the candidate helper with a failing executable and verify the previous helper is restored",
+    )
     args = parser.parse_args()
     legacy_fixture = args.legacy_blocking or args.legacy_build_only or args.stale_partial_classification
-    assert sum((args.legacy_blocking, args.legacy_build_only, args.stale_partial_classification)) <= 1, "legacy fixture modes are mutually exclusive"
+    assert sum((args.legacy_blocking, args.legacy_build_only, args.stale_partial_classification, args.bootstrap_failure_rollback)) <= 1, "fixture modes are mutually exclusive"
     # Never run this integration test on an owner's machine.
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
     assert sys.platform == "darwin" and os.geteuid() != 0, "macOS user session required"
@@ -174,6 +179,10 @@ def main():
     old_server.write_text('''import json, os, socket
 path = "/private/var/run/televybackup/snapshot-mount-helper.sock"
 os.makedirs(os.path.dirname(path), mode=0o711, exist_ok=True)
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 server.bind(path)
 os.chmod(path, 0o666)
@@ -190,6 +199,9 @@ while True:
     if args.expect_build_commit:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0","build_commit":"' + '0' * 40 + '"'))
+    elif args.bootstrap_failure_rollback:
+        old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
+            .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0"'))
     elif args.stale_partial_classification:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"',
@@ -212,12 +224,39 @@ while True:
         "KeepAlive": True,
     }))
     root_plist = root / "old.plist"
-    run("sudo", "-n", "cp", str(seed_plist), str(root_plist))
-    run("sudo", "-n", "chown", "root:wheel", str(root_plist))
-    run("sudo", "-n", "chmod", "644", str(root_plist))
+    old_binary_hash = None
+    if args.bootstrap_failure_rollback:
+        old_binary_source = fixture / "old-helper"
+        old_binary_source.write_text("#!/usr/bin/python3\n" + old_server.read_text())
+        old_binary_source.chmod(0o755)
+        old_binary_hash = hashlib.sha256(old_binary_source.read_bytes()).hexdigest()
+        run("sudo", "-n", "cp", str(old_binary_source), str(BINARY))
+        run("sudo", "-n", "chown", "root:wheel", str(BINARY))
+        run("sudo", "-n", "chmod", "755", str(BINARY))
+        canonical_plist = fixture / "canonical-old.plist"
+        canonical_plist.write_bytes(plistlib.dumps({
+            "Label": LABEL,
+            "ProgramArguments": [str(BINARY)],
+            "RunAtLoad": True,
+            "KeepAlive": True,
+        }))
+        run("sudo", "-n", "cp", str(canonical_plist), str(PLIST))
+        run("sudo", "-n", "chown", "root:wheel", str(PLIST))
+        run("sudo", "-n", "chmod", "644", str(PLIST))
+    else:
+        run("sudo", "-n", "cp", str(seed_plist), str(root_plist))
+        run("sudo", "-n", "chown", "root:wheel", str(root_plist))
+        run("sudo", "-n", "chmod", "644", str(root_plist))
     try:
-        run("sudo", "-n", "/bin/launchctl", "bootstrap", "system", str(root_plist))
-        wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == (4 if (args.expect_build_commit or legacy_fixture) else 1))
+        run(
+            "sudo",
+            "-n",
+            "/bin/launchctl",
+            "bootstrap",
+            "system",
+            str(PLIST if args.bootstrap_failure_rollback else root_plist),
+        )
+        wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == (4 if (args.expect_build_commit or legacy_fixture or args.bootstrap_failure_rollback) else 1))
         env = os.environ.copy()
         env.update({
             "TELEVYBACKUP_CONFIG_DIR": str(config),
@@ -232,6 +271,9 @@ while True:
             stale = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert stale["helper_version"] == "0.5.0" and stale["build_commit"] != args.expect_build_commit
             print("PROBE: same compatible component version has a stale running build", flush=True)
+        elif args.bootstrap_failure_rollback:
+            assert before["result"]["mount_helper_reachable"] is True
+            print("SETUP: previous helper is reachable before the failing candidate install", flush=True)
         elif legacy_fixture:
             legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert legacy["active_mounts"] == 1
@@ -263,6 +305,11 @@ while True:
                 flush=True,
             )
         # Same privileged CLI entrypoint as the GUI's password-authorized command.
+        if args.bootstrap_failure_rollback:
+            assert args.require_readiness, "bootstrap failure fixture requires the candidate readiness check"
+            candidate_helper = app / "Contents/MacOS/televybackup-snapshot-mount-helper"
+            candidate_helper.write_text("#!/bin/sh\nexit 78\n")
+            candidate_helper.chmod(0o755)
         if args.delay_startup:
             assert args.require_readiness, "delayed startup requires the candidate readiness check"
             # Delay real helper initialization with a fixture-only SQLite lock.
@@ -288,11 +335,27 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             wait_for(lambda: locker_ready.exists(), bool)
         install_started = time.monotonic()
         installed = run("sudo", "-n", str(cli), "--json", "--config-dir", str(config), "--data-dir", str(data), "snapshot-mount-helper", "install")
-        installation = json.loads(installed.stdout)
-        assert installation["installed"] is True
+        if args.bootstrap_failure_rollback:
+            assert installed.returncode != 0, "failing candidate unexpectedly installed"
+            error = json.loads(installed.stderr)
+            assert error["code"] == "snapshot_mount_helper.readiness_failed"
+            restored = wait_for(
+                lambda: request(MOUNT_SOCKET, expected_protocol),
+                lambda reply: reply.get("ok") is True and reply.get("result", {}).get("active_mounts") == 0,
+            )
+            assert restored["result"]["helper_version"] == "0.5.0"
+            assert hashlib.sha256(BINARY.read_bytes()).hexdigest() == old_binary_hash
+            assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
+            print("PASS: failed candidate bootstrap restores the previous helper and clears quarantine backups", flush=True)
+        else:
+            assert installed.returncode == 0, installed.stderr
+        installation = json.loads(installed.stdout) if not args.bootstrap_failure_rollback else {}
+        if not args.bootstrap_failure_rollback:
+            assert installation["installed"] is True
         if args.require_readiness:
-            assert installation["helperReady"] is True
-            assert installation["helperVersion"] == "0.5.2"
+            if not args.bootstrap_failure_rollback:
+                assert installation["helperReady"] is True
+                assert installation["helperVersion"] == "0.5.2"
         if legacy_fixture:
             assert installation["helperVersion"] == "0.5.2"
             print("PASS: privileged CLI reports the replacement helper ready", flush=True)
