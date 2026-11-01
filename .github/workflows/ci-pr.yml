@@ -255,6 +255,8 @@ jobs:
             --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-blocking
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-build-only
+          python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/TelevyBackup.app" --require-readiness --stale-partial-classification
 
       - name: Stale mount recovery and unknown blocker fixture
         run: |

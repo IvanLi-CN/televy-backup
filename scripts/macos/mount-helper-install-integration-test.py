@@ -131,9 +131,14 @@ def main():
         action="store_true",
         help="make the intermediate helper report one row with build identity but no classification",
     )
+    parser.add_argument(
+        "--stale-partial-classification",
+        action="store_true",
+        help="make the previous component report a stale build with inventory classification missing",
+    )
     args = parser.parse_args()
-    legacy_fixture = args.legacy_blocking or args.legacy_build_only
-    assert not (args.legacy_blocking and args.legacy_build_only), "legacy fixture modes are mutually exclusive"
+    legacy_fixture = args.legacy_blocking or args.legacy_build_only or args.stale_partial_classification
+    assert sum((args.legacy_blocking, args.legacy_build_only, args.stale_partial_classification)) <= 1, "legacy fixture modes are mutually exclusive"
     # Never run this integration test on an owner's machine.
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
     assert sys.platform == "darwin" and os.geteuid() != 0, "macOS user session required"
@@ -185,6 +190,12 @@ while True:
     if args.expect_build_commit:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0","build_commit":"' + '0' * 40 + '"'))
+    elif args.stale_partial_classification:
+        old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
+            .replace('"helper_version":"0.9.8"',
+                     '"helper_version":"0.5.0","component_version":"0.5.2",'
+                     '"build_commit":"' + '0' * 40 + '","pending_cleanup":0,'
+                     '"live_mounts":0,"recoverable_stale_mounts":0,"unknown_blocking_mounts":1'))
     elif legacy_fixture:
         replacement = '"helper_version":"0.5.0"'
         if args.legacy_build_only:
@@ -224,11 +235,21 @@ while True:
         elif legacy_fixture:
             legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert legacy["active_mounts"] == 1
-            assert "pending_cleanup" not in legacy and "component_version" not in legacy
-            if args.legacy_build_only:
+            if args.stale_partial_classification:
+                assert legacy["component_version"] == "0.5.2"
+                assert legacy["build_commit"] == "0" * 40
+                assert legacy["pending_cleanup"] == 0
+                assert legacy["live_mounts"] == 0
+                assert legacy["recoverable_stale_mounts"] == 0
+                assert legacy["unknown_blocking_mounts"] == 1
+                assert "inventory_drift_mounts" not in legacy
+                print("REPRODUCED: stale current helper omits inventory-drift classification", flush=True)
+            elif args.legacy_build_only:
+                assert "pending_cleanup" not in legacy and "component_version" not in legacy
                 assert legacy["build_commit"] == "0" * 40
                 print("REPRODUCED: intermediate helper reports build identity without mount classification", flush=True)
             else:
+                assert "pending_cleanup" not in legacy and "component_version" not in legacy
                 assert "build_commit" not in legacy
                 print("REPRODUCED: legacy helper reports an unclassified blocking mount row", flush=True)
         else:

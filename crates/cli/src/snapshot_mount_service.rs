@@ -372,6 +372,30 @@ fn classify_busy_status(
         && status.recoverable_stale_mounts.is_none()
         && status.unknown_blocking_mounts.is_none()
         && status.inventory_drift_mounts.is_none();
+    let stale_current_partial_classification =
+        status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+            && status
+                .build_commit
+                .as_deref()
+                .is_some_and(|commit| {
+                    commit != env!("TELEVYBACKUP_BUILD_COMMIT")
+                        && commit.len() == 40
+                        && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            && status.active_mounts > 0
+            && status.pending_cleanup.is_some()
+            && status.live_mounts.is_some()
+            && status.recoverable_stale_mounts.is_some()
+            && status.unknown_blocking_mounts.is_some()
+            && status.inventory_drift_mounts.is_none();
+    if stale_current_partial_classification {
+        // The previous helper implementation used the current component version but did not
+        // report inventory-drift rows. Replace that known stale build only after Snapshot Access
+        // proves idle; the candidate must classify the preserved journal before it can serve a
+        // lease. This avoids a permanent update deadlock without treating the unknown row as
+        // safe or clearing it during the upgrade.
+        return Ok(BusyCheck::LegacyUpgrade);
+    }
     if status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
         && status.inventory_drift_mounts.is_none()
         && status.active_mounts > 0
@@ -1472,6 +1496,44 @@ mod tests {
         };
         let error = classify_busy_status("install or update the snapshot mount helper", &status)
             .unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+    }
+
+    #[test]
+    fn stale_current_helper_without_inventory_classification_enters_guarded_upgrade() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_busy_status("install or update", &status).unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
+    fn current_candidate_without_inventory_classification_stays_incomplete() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some(env!("TELEVYBACKUP_BUILD_COMMIT").into()),
+            active_mounts: 1,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        let error = classify_busy_status("install or update", &status).unwrap_err();
         assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
     }
 

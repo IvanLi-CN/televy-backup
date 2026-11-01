@@ -18,7 +18,10 @@ against the complete additive partition and candidate count before and after eac
 uses the authenticated-UID-scoped Status and journal-bound Release methods after the user-session
 Access service reports no active or pending lease; a current component with a stale or missing build
 identity may use the same guarded replacement only when the complete pending-cleanup candidate
-partition is verified and Snapshot Access is idle. It includes disabled or removed volume settings,
+partition is verified and Snapshot Access is idle. A stale current-component build that reports the
+live, pending, recoverable, and unknown partitions but omits only the newer inventory-drift field
+may also use that guarded replacement after Snapshot Access proves idle; the replacement preserves
+the journal and must classify it before readiness. It includes disabled or removed volume settings,
 never releases pending-cleanup rows outside the explicit pending-only retry, never releases unknown
 rows, and never introduces arbitrary lease or path cleanup.
 The current validated strict-mode baseline also
