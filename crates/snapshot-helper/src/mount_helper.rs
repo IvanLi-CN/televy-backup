@@ -27,9 +27,9 @@ use uuid::Uuid;
 use crate::{
     DEFAULT_MOUNT_HELPER_INSTALL_LOCK, DEFAULT_MOUNT_HELPER_JOURNAL,
     DEFAULT_MOUNT_HELPER_MUTATION_LOCK, DEFAULT_MOUNT_HELPER_SOCKET, MOUNT_HELPER_PROTOCOL_VERSION,
-    MountLeaseResult, MountMethod, MountRecoveryLease,
-    MountReleaseResult, MountRequest, MountResponse, MountResponseResult, MountSnapshotRef,
-    MountStatusResult, validate_mount_request,
+    MountLeaseResult, MountMethod, MountRecoveryLease, MountReleaseResult, MountRequest,
+    MountResponse, MountResponseResult, MountSnapshotRef, MountStatusResult,
+    validate_mount_request,
 };
 
 /// Stable v4 wire identity retained by the byte-identical Snapshot Access artifact.
@@ -118,7 +118,10 @@ impl Drop for MutationFileLock {
 }
 
 pub fn acquire_mutation_lock() -> Result<MutationFileLock, MountHelperError> {
-    acquire_file_lock(configured_mutation_lock_path(), "snapshot mount mutation lock")
+    acquire_file_lock(
+        configured_mutation_lock_path(),
+        "snapshot mount mutation lock",
+    )
 }
 
 /// Serialize privileged helper installation and removal across CLI processes. This lock is
@@ -131,7 +134,10 @@ pub fn acquire_install_lock() -> Result<MutationFileLock, MountHelperError> {
     )
 }
 
-fn acquire_file_lock(path: PathBuf, description: &str) -> Result<MutationFileLock, MountHelperError> {
+fn acquire_file_lock(
+    path: PathBuf,
+    description: &str,
+) -> Result<MutationFileLock, MountHelperError> {
     let parent = path
         .parent()
         .ok_or_else(|| MountHelperError::Protocol(format!("{description} has no parent")))?;
@@ -139,9 +145,9 @@ fn acquire_file_lock(path: PathBuf, description: &str) -> Result<MutationFileLoc
     if let Ok(metadata) = fs::symlink_metadata(&path)
         && (metadata.file_type().is_symlink() || !metadata.is_file())
     {
-        return Err(MountHelperError::Protocol(
-            format!("unsafe root-owned {description}"),
-        ));
+        return Err(MountHelperError::Protocol(format!(
+            "unsafe root-owned {description}"
+        )));
     }
     let file = OpenOptions::new()
         .create(true)

@@ -272,9 +272,9 @@ fn restore_committed_assets(
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => failures.push(format!(
-                    "candidate {label} inspection failed: {error}"
-                )),
+                Err(error) => {
+                    failures.push(format!("candidate {label} inspection failed: {error}"))
+                }
             },
         }
     }
@@ -291,7 +291,10 @@ fn restore_committed_assets(
 fn rollback_failure(original: &CliError, rollback: CliError) -> CliError {
     CliError::retryable(
         "snapshot_mount_helper.install_rollback_failed",
-        format!("{}; rollback failed: {}", original.message, rollback.message),
+        format!(
+            "{}; rollback failed: {}",
+            original.message, rollback.message
+        ),
     )
 }
 
@@ -375,7 +378,10 @@ fn rollback_installed_assets(
     ) {
         return Err(CliError::retryable(
             "snapshot_mount_helper.install_rollback_failed",
-            format!("cannot stop the candidate helper before rollback: {}", error.message),
+            format!(
+                "cannot stop the candidate helper before rollback: {}",
+                error.message
+            ),
         ));
     }
     let restore_result = restore_committed_assets(old_binary, old_plist);
@@ -504,8 +510,8 @@ fn wait_for_helper_status() -> Result<MountStatusResult, CliError> {
 
 fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     if status.active_mounts == 0 {
-        let current_component = status.component_version.as_deref()
-            == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION);
+        let current_component =
+            status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION);
         let classification_complete = status.pending_cleanup.is_some()
             && status.live_mounts.is_some()
             && status.recoverable_stale_mounts.is_some()
@@ -513,8 +519,12 @@ fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
             && status.inventory_drift_mounts.is_some();
         let has_blocking_detail = status.pending_cleanup.is_some_and(|count| count > 0)
             || status.live_mounts.is_some_and(|count| count > 0)
-            || status.recoverable_stale_mounts.is_some_and(|count| count > 0)
-            || status.unknown_blocking_mounts.is_some_and(|count| count > 0)
+            || status
+                .recoverable_stale_mounts
+                .is_some_and(|count| count > 0)
+            || status
+                .unknown_blocking_mounts
+                .is_some_and(|count| count > 0)
             || status.inventory_drift_mounts.is_some_and(|count| count > 0)
             || !status.pending_cleanup_leases.is_empty()
             || !status.recovery_leases.is_empty()
@@ -768,8 +778,7 @@ fn ensure_uninstall_safe(check: BusyCheck) -> Result<(), CliError> {
 }
 
 fn launchctl_service_absent(error: &CliError) -> bool {
-    error.message.contains("Could not find service")
-        || error.message.contains("No such process")
+    error.message.contains("Could not find service") || error.message.contains("No such process")
 }
 
 fn bootout_failure(error: CliError, operation: &str, error_code: &'static str) -> CliError {
@@ -1016,11 +1025,9 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
         (staged_binary, staged_plist, candidate_hash)
     };
     let service = system_service_target();
-    if let Err(error) = bootout_for_mutation(
-        &service,
-        "install",
-        "snapshot_mount_helper.install_failed",
-    ) {
+    if let Err(error) =
+        bootout_for_mutation(&service, "install", "snapshot_mount_helper.install_failed")
+    {
         discard_staged(&[&staged_binary, &staged_plist]);
         return Err(error);
     }
@@ -2001,10 +2008,7 @@ mod tests {
     #[test]
     fn uninstall_rejects_any_non_clear_mount_status() {
         assert!(ensure_uninstall_safe(BusyCheck::Clear).is_ok());
-        for check in [
-            BusyCheck::LegacyUpgrade,
-            BusyCheck::PendingCleanupUpgrade,
-        ] {
+        for check in [BusyCheck::LegacyUpgrade, BusyCheck::PendingCleanupUpgrade] {
             assert_eq!(
                 ensure_uninstall_safe(check).unwrap_err().code,
                 "snapshot_mount_helper.busy"
@@ -2020,8 +2024,12 @@ mod tests {
 
     #[test]
     fn uninstall_operation_is_distinct_from_installation() {
-        assert!(is_uninstall_operation("uninstall the snapshot mount helper"));
-        assert!(!is_uninstall_operation("install or update the snapshot mount helper"));
+        assert!(is_uninstall_operation(
+            "uninstall the snapshot mount helper"
+        ));
+        assert!(!is_uninstall_operation(
+            "install or update the snapshot mount helper"
+        ));
     }
 
     #[test]
