@@ -1,8 +1,7 @@
-use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -108,21 +107,36 @@ fn stage_copy(source: &Path, destination: &Path) -> Result<PathBuf, CliError> {
         CliError::new("snapshot_mount_helper.install_failed", error.to_string())
     })?;
     let staged = destination.with_extension(format!("tmp-{}", std::process::id()));
-    if let Err(error) = fs::copy(source, &staged) {
+    let mut source_file = fs::File::open(source).map_err(install_asset_error)?;
+    let mut staged_file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o755)
+        .open(&staged)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(install_asset_error(error));
+        }
+    };
+    if let Err(error) = std::io::copy(&mut source_file, &mut staged_file)
+        .and_then(|_| staged_file.sync_all())
+    {
         let _ = fs::remove_file(&staged);
         return Err(CliError::new(
             "snapshot_mount_helper.install_failed",
             error.to_string(),
         ));
     }
-    if let Err(error) = fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)) {
+    if let Err(error) = staged_file.set_permissions(fs::Permissions::from_mode(0o755)) {
         let _ = fs::remove_file(&staged);
         return Err(CliError::new(
             "snapshot_mount_helper.install_failed",
             error.to_string(),
         ));
     }
-    if let Err(error) = set_root_owner(&staged, "snapshot mount helper") {
+    if let Err(error) = set_root_owner_file(&staged_file, "snapshot mount helper") {
         let _ = fs::remove_file(&staged);
         return Err(error);
     }
@@ -141,14 +155,14 @@ fn stage_write(path: &Path, contents: &[u8]) -> Result<PathBuf, CliError> {
     })?;
     let staged = path.with_extension(format!("tmp-{}", std::process::id()));
     let mut file = match OpenOptions::new()
-        .create(true)
-        .truncate(true)
         .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o644)
         .open(&staged)
     {
         Ok(file) => file,
         Err(error) => {
-            let _ = fs::remove_file(&staged);
             return Err(CliError::new(
                 "snapshot_mount_helper.install_failed",
                 error.to_string(),
@@ -162,14 +176,14 @@ fn stage_write(path: &Path, contents: &[u8]) -> Result<PathBuf, CliError> {
             error.to_string(),
         ));
     }
-    if let Err(error) = fs::set_permissions(&staged, fs::Permissions::from_mode(0o644)) {
+    if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o644)) {
         let _ = fs::remove_file(&staged);
         return Err(CliError::new(
             "snapshot_mount_helper.install_failed",
             error.to_string(),
         ));
     }
-    if let Err(error) = set_root_owner(&staged, "snapshot mount helper plist") {
+    if let Err(error) = set_root_owner_file(&file, "snapshot mount helper plist") {
         let _ = fs::remove_file(&staged);
         return Err(error);
     }
@@ -457,9 +471,14 @@ fn restore_asset(path: &Path, backup: Option<PathBuf>) -> Result<(), CliError> {
 }
 
 fn bootstrap_restored_helper() -> Result<(), CliError> {
-    if Path::new(MOUNT_HELPER_PLIST_PATH).is_file() {
+    let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
+    if safe_root_asset(plist) {
         launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
         wait_for_helper_status().map(|_| ())?;
+    } else if fs::symlink_metadata(plist).is_ok() {
+        return Err(install_asset_error(
+            "unsafe snapshot mount helper plist blocks bootstrap",
+        ));
     }
     Ok(())
 }
@@ -626,14 +645,8 @@ fn quarantine_uninstall_assets() -> Result<(Option<PathBuf>, Option<PathBuf>), C
     Ok((old_binary, old_plist))
 }
 
-fn set_root_owner(path: &Path, description: &str) -> Result<(), CliError> {
-    let encoded = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        CliError::new(
-            "snapshot_mount_helper.install_failed",
-            format!("{description} path contains a NUL byte"),
-        )
-    })?;
-    let result = unsafe { libc::chown(encoded.as_ptr(), 0, 0) };
+fn set_root_owner_file(file: &fs::File, description: &str) -> Result<(), CliError> {
+    let result = unsafe { libc::fchown(file.as_raw_fd(), 0, 0) };
     if result != 0 {
         return Err(CliError::new(
             "snapshot_mount_helper.install_failed",
