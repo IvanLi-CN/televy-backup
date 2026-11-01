@@ -211,14 +211,22 @@ jobs:
           cargo test --locked -p televybackupd snapshot_client::tests
           cargo test --locked -p televybackupd snapshot_setup_failures_finish_both_status_and_run_history
           cargo test --locked -p televy_backup_core strict_snapshot_read_errors_keep_the_snapshot_access_code
-      - name: Build candidate root helper and installer
+      - name: Build candidate root helper, Snapshot Access, and daemon
         env:
           TELEVYBACKUP_BUILD_COMMIT: ${{ github.sha }}
-        run: cargo build --locked -p televybackup-snapshot-access -p televybackup --bin televybackup-snapshot-mount-helper --bin televybackup
+        run: |
+          cargo build --locked -p televybackup --bin televybackup
+          cargo build --locked -p televybackupd --bin televybackupd
+          cargo build --locked -p televybackup-snapshot-access \
+            --bin televybackup-snapshot-access --bin televybackup-snapshot-mount-helper
       - name: Verify candidate production reservation and security negatives
         run: python3 scripts/macos/test-snapshot-source-reservation.py --helper target/debug/televybackup-snapshot-mount-helper --expect fixed
       - name: Verify stale mount recovery and unknown blocker preservation
-        run: python3 scripts/macos/test-snapshot-mount-recovery.py --helper target/debug/televybackup-snapshot-mount-helper
+        run: |
+          python3 scripts/macos/test-snapshot-mount-recovery.py \
+            --access target/debug/televybackup-snapshot-access \
+            --daemon target/debug/televybackupd \
+            --helper target/debug/televybackup-snapshot-mount-helper
       - name: Verify candidate installation with unchanged approved Access artifact
         env:
           GH_TOKEN: ${{ github.token }}

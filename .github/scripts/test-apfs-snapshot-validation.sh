@@ -87,6 +87,10 @@ assert_not_contains "raw long-read card copy" "$ci_text" 'cp "$a6_output" "$evid
 assert_contains "orchestrator artifact schema" "$ci_text" "televybackup.apfs_snapshot_ci.v1"
 assert_contains "orchestrator no published snapshot assertion" "$ci_text" "publishedSnapshot: false"
 assert_contains "hosted stale mount recovery fixture" "$main_workflow_text" "test-snapshot-mount-recovery.py"
+assert_contains "PR recovery fixture daemon binary" "$pr_workflow_text" "--daemon target/debug/televybackupd"
+assert_contains "PR recovery fixture access binary" "$pr_workflow_text" "--access target/debug/televybackup-snapshot-access"
+assert_contains "main recovery fixture daemon binary" "$main_workflow_text" "--daemon target/debug/televybackupd"
+assert_contains "main recovery fixture access binary" "$main_workflow_text" "--access target/debug/televybackup-snapshot-access"
 # The single-quoted needle intentionally checks the literal shell source.
 # shellcheck disable=SC2016
 assert_contains "orchestrator narrow root cleanup" "$ci_text" 'sudo -n rm -rf -- "$mount_runtime_root"'
@@ -107,6 +111,9 @@ assert_contains "legacy journal seed" "$mount_helper_integration_text" "seed_leg
 assert_contains "legacy journal classification assertion" "$mount_helper_integration_text" "recoverable_stale_mounts"
 assert_contains "inventory drift fixture" "$recovery_fixture_text" "inventory_drift_mounts"
 assert_contains "daemon inventory reconcile operation" "$control_text" "snapshot.mount_helper.reconcile_inventory"
+assert_contains "recovery fixture daemon control request" "$recovery_fixture_text" '"snapshot.mount_helper.reconcile_inventory"'
+assert_contains "recovery fixture operation polling" "$recovery_fixture_text" '"operation.get"'
+assert_contains "recovery fixture unknown blocker gate" "$recovery_fixture_text" '"snapshot_mount_helper.reconcile_required"'
 
 assert_contains "root-owned snapshot creation" "$mount_helper_text" '"/usr/bin/tmutil"'
 assert_contains "snapshot creation diagnostic stage" "$mount_helper_text" '"snapshot_create"'

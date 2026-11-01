@@ -207,6 +207,29 @@ fn snapshot_mount_reconcile_counts(
     ))
 }
 
+fn snapshot_mount_reconcile_final_state(
+    status: &MountStatusResult,
+    action: &str,
+) -> Result<(u32, u32, u32, u32, u32), ControlError> {
+    let counts = snapshot_mount_reconcile_counts(status)?;
+    let (live, pending, recoverable, unknown, inventory_drift) = counts;
+    if live > 0 || pending > 0 || recoverable > 0 || unknown > 0 || inventory_drift > 0 {
+        return Err(ControlError {
+            code: "snapshot_mount_helper.reconcile_required".to_string(),
+            message: format!("Snapshot {action} did not clear every verified record."),
+            retryable: true,
+            details: serde_json::json!({
+                "live": live,
+                "pending": pending,
+                "recoverable": recoverable,
+                "unknown": unknown,
+                "inventoryDrift": inventory_drift,
+            }),
+        });
+    }
+    Ok(counts)
+}
+
 fn snapshot_mount_pending_cleanup_leases(
     status: &MountStatusResult,
 ) -> Result<&[televybackup_snapshot_access::MountRecoveryLease], ControlError> {
@@ -1106,7 +1129,7 @@ async fn handle_control_ipc_client(
                 final_recoverable_stale_mounts,
                 final_unknown_blocking_mounts,
                 final_inventory_drift_mounts,
-            ) = snapshot_mount_reconcile_counts(&final_status)?;
+            ) = snapshot_mount_reconcile_final_state(&final_status, "stale recovery")?;
             Ok(serde_json::json!({
                 "recovered": recovered,
                 "remaining": final_status.active_mounts,
@@ -3839,6 +3862,27 @@ mod tests {
         status.live_mounts = None;
         let error = snapshot_mount_reconcile_counts(&status).unwrap_err();
         assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+    }
+
+    #[test]
+    fn snapshot_mount_reconcile_final_state_rejects_inventory_drift() {
+        let status = MountStatusResult {
+            active_mounts: 1,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(1),
+            inventory_drift_leases: vec![televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: "drift".into(),
+                state: "released_inventory_drift".into(),
+            }],
+            ..Default::default()
+        };
+        let error = snapshot_mount_reconcile_final_state(&status, "stale recovery")
+            .expect_err("unresolved inventory drift must keep recovery blocked");
+        assert_eq!(error.code, "snapshot_mount_helper.reconcile_required");
+        assert_eq!(error.details["inventoryDrift"], 1);
     }
 
     #[test]

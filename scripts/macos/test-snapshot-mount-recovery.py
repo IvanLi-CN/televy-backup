@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise stale mount classification and exact Release recovery on hosted macOS."""
+"""Exercise stale mount classification and daemon inventory reconciliation on hosted macOS."""
 
 import argparse
 import json
@@ -33,6 +33,43 @@ def request(path, method, **fields):
         reply = json.loads(stream.makefile("rb").readline())
     assert reply["request_id"] == request_id and reply["version"] == 4
     return reply
+
+
+def control_request(path, method, params=None):
+    request_id = str(uuid.uuid4())
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+        stream.settimeout(15)
+        stream.connect(str(path))
+        stream.sendall(
+            json.dumps(
+                {
+                    "type": "control.request",
+                    "id": request_id,
+                    "method": method,
+                    "params": params or {},
+                }
+            ).encode()
+            + b"\n"
+        )
+        reply = json.loads(stream.makefile("rb").readline())
+    assert reply["id"] == request_id and reply["type"] == "control.response"
+    return reply
+
+
+def wait_for_operation(path, operation_id):
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        reply = control_request(
+            path,
+            "operation.get",
+            {"operationId": operation_id},
+        )
+        assert reply["ok"], reply
+        result = reply["result"]
+        if result["state"] in ("succeeded", "failed"):
+            return result
+        time.sleep(0.1)
+    raise AssertionError("daemon operation did not reach a terminal state")
 
 
 def write_fixture_rows(
@@ -92,13 +129,37 @@ connection.close()
     )
 
 
+def delete_fixture_rows(journal, lease_ids):
+    script = """
+import sqlite3, sys
+journal, *lease_ids = sys.argv[1:]
+connection = sqlite3.connect(journal)
+connection.executemany("DELETE FROM mounts WHERE lease_id = ?", ((lease_id,) for lease_id in lease_ids))
+connection.commit()
+connection.close()
+"""
+    run(
+        "sudo",
+        "-n",
+        "/usr/bin/python3",
+        "-c",
+        script,
+        str(journal),
+        *lease_ids,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--helper", required=True, type=Path)
+    parser.add_argument("--access", required=True, type=Path)
+    parser.add_argument("--daemon", required=True, type=Path)
     args = parser.parse_args()
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions required"
     assert sys.platform == "darwin" and os.geteuid() != 0, "macOS user session required"
     helper = args.helper.resolve(strict=True)
+    access = args.access.resolve(strict=True)
+    daemon = args.daemon.resolve(strict=True)
     fixture = Path(tempfile.mkdtemp(prefix="tbs-reconcile-", dir="/private/tmp"))
     os.chmod(fixture, 0o755)
     label = "com.ivan.televybackup.ci-reconcile-" + uuid.uuid4().hex
@@ -108,6 +169,7 @@ def main():
     root = fixture / "root"
     image = fixture / "fixture.dmg"
     attached = loaded = False
+    access_process = daemon_process = None
     managed_root = Path("/private/var/tmp/televybackup-snapshot-mounts")
     managed_root_existed = os.path.lexists(managed_root)
     try:
@@ -196,23 +258,118 @@ def main():
         assert pending["ok"] and pending["result"]["cleanup_state"] == "released"
         released = request(ipc, "release", uid=os.getuid(), lease_id=stale_id)
         assert released["ok"] and released["result"]["cleanup_state"] == "released"
-        reconciled = request(ipc, "release", uid=os.getuid(), lease_id=released_drift_id)
-        assert reconciled["ok"] and reconciled["result"]["cleanup_state"] == "released"
         after = request(ipc, "status")
         assert after["ok"]
         status = after["result"]
-        assert status["active_mounts"] == 2
+        assert status["active_mounts"] == 3
         assert status["pending_cleanup"] == 0
         assert status["recoverable_stale_mounts"] == 0
         assert status["unknown_blocking_mounts"] == 2
-        assert status["inventory_drift_mounts"] == 0
+        assert status["inventory_drift_mounts"] == 1
         assert not status["recovery_leases"]
-        assert not status["inventory_drift_leases"]
+        assert [row["lease_id"] for row in status["inventory_drift_leases"]] == [released_drift_id]
+
+        config = fixture / "config"
+        data = fixture / "data"
+        config.mkdir()
+        data.mkdir()
+        template = Path(__file__).resolve().parents[2] / "scripts/macos/fixtures/perf-idle/config.toml"
+        config.joinpath("config.toml").write_text(
+            template.read_text(encoding="utf-8")
+            .replace("__FIXTURE_A__", str(mount))
+            .replace("__FIXTURE_B__", str(mount)),
+            encoding="utf-8",
+        )
+        access_socket = data / "snapshot-access" / "access.sock"
+        access_journal = data / "snapshot-access" / "journal.sqlite"
+        access_environment = {
+            **os.environ,
+            "TELEVYBACKUP_CONFIG_DIR": str(config),
+            "TELEVYBACKUP_DATA_DIR": str(data),
+            "TELEVYBACKUP_DISABLE_KEYCHAIN": "1",
+            "TELEVYBACKUP_SNAPSHOT_SOCKET": str(access_socket),
+            "TELEVYBACKUP_SNAPSHOT_JOURNAL": str(access_journal),
+            "TELEVYBACKUP_SNAPSHOT_MOUNT_SOCKET": str(ipc),
+            "TELEVYBACKUP_SNAPSHOT_MOUNT_JOURNAL": str(journal),
+        }
+        access_log = fixture / "snapshot-access.log"
+        access_stream = access_log.open("wb")
+        access_process = subprocess.Popen(
+            [str(access)],
+            env=access_environment,
+            stdout=access_stream,
+            stderr=subprocess.STDOUT,
+        )
+        deadline = time.monotonic() + 15
+        while not access_socket.exists() and time.monotonic() < deadline:
+            if access_process.poll() is not None:
+                raise AssertionError("Snapshot Access exited before its isolated IPC became ready")
+            time.sleep(0.1)
+        assert access_socket.exists(), "Snapshot Access IPC did not become ready"
+        control = data / "ipc" / "control.sock"
+        daemon_environment = {
+            **os.environ,
+            "TELEVYBACKUP_CONFIG_DIR": str(config),
+            "TELEVYBACKUP_DATA_DIR": str(data),
+            "TELEVYBACKUP_DISABLE_KEYCHAIN": "1",
+            "TELEVYBACKUP_SNAPSHOT_MOUNT_SOCKET": str(ipc),
+            "TELEVYBACKUP_SNAPSHOT_MOUNT_JOURNAL": str(journal),
+        }
+        daemon_log = fixture / "daemon.log"
+        daemon_stream = daemon_log.open("wb")
+        daemon_process = subprocess.Popen(
+            [str(daemon)],
+            env=daemon_environment,
+            stdout=daemon_stream,
+            stderr=subprocess.STDOUT,
+        )
+        deadline = time.monotonic() + 15
+        while not control.exists() and time.monotonic() < deadline:
+            if daemon_process.poll() is not None:
+                raise AssertionError("candidate daemon exited before control IPC became ready")
+            time.sleep(0.1)
+        assert control.exists(), "candidate daemon control IPC did not become ready"
+
+        blocked_start = control_request(control, "snapshot.mount_helper.reconcile_inventory")
+        assert blocked_start["ok"]
+        blocked = wait_for_operation(control, blocked_start["result"]["operationId"])
+        assert blocked["state"] == "failed"
+        assert blocked["error"]["code"] == "snapshot_mount_helper.reconcile_required"
+        assert blocked["error"]["details"]["unknown"] == 2
+
+        delete_fixture_rows(journal, [unknown_id, malformed_id])
+        ready = request(ipc, "status")
+        assert ready["ok"]
+        assert ready["result"]["active_mounts"] == 1
+        assert ready["result"]["inventory_drift_mounts"] == 1
+        reconcile_start = control_request(control, "snapshot.mount_helper.reconcile_inventory")
+        assert reconcile_start["ok"]
+        reconciled = wait_for_operation(control, reconcile_start["result"]["operationId"])
+        assert reconciled["state"] == "succeeded", reconciled
+        assert reconciled["result"]["reconciled"] == 1
+        assert reconciled["result"]["remaining"] == 0
+        assert reconciled["result"]["inventoryDrift"] == 0
+        final = request(ipc, "status")
+        assert final["ok"] and final["result"]["active_mounts"] == 0
         print(
-            "PASS: stale row released and released inventory drift reconciled through helper IPC; unknown rows remained blocking",
+            "PASS: helper classification, daemon reconcile gating, and successful inventory reconciliation verified; unknown rows remained blocking until fixture removal",
             flush=True,
         )
     finally:
+        if daemon_process is not None:
+            daemon_process.terminate()
+            try:
+                daemon_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                daemon_process.kill()
+                daemon_process.wait(timeout=10)
+        if access_process is not None:
+            access_process.terminate()
+            try:
+                access_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                access_process.kill()
+                access_process.wait(timeout=10)
         if loaded:
             run("sudo", "-n", "launchctl", "bootout", service)
             stopped = run("sudo", "-n", "launchctl", "print", service, check=False)
