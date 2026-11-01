@@ -467,6 +467,20 @@ fn classify_busy_status(
     busy_error(operation, status).map_or(Ok(BusyCheck::Clear), Err)
 }
 
+fn ensure_uninstall_safe(check: BusyCheck) -> Result<(), CliError> {
+    match check {
+        BusyCheck::Clear => Ok(()),
+        BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => Err(CliError::retryable(
+            "snapshot_mount_helper.busy",
+            "cannot uninstall the snapshot mount helper while snapshot mount records remain; update or reconcile the helper first",
+        )),
+        BusyCheck::RecoveryRequired => Err(CliError::retryable(
+            "snapshot_mount_helper.status_unavailable",
+            "cannot uninstall the snapshot mount helper while its status is unavailable",
+        )),
+    }
+}
+
 fn ensure_snapshot_access_idle(status: &StatusResult) -> Result<(), CliError> {
     if status.active_leases > 0 {
         return Err(CliError::retryable(
@@ -714,7 +728,8 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
             format!("cannot uninstall the snapshot mount helper safely: {error}"),
         )
     })?;
-    if check_if_busy("uninstall the snapshot mount helper")? == BusyCheck::RecoveryRequired {
+    let mut busy = check_if_busy("uninstall the snapshot mount helper")?;
+    if busy == BusyCheck::RecoveryRequired {
         drop(mutation_lock);
         recover_helper_before_mutation()?;
         mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
@@ -723,13 +738,9 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
                 format!("cannot resume helper removal safely after recovery: {error}"),
             )
         })?;
-        if check_if_busy("uninstall the snapshot mount helper")? == BusyCheck::RecoveryRequired {
-            return Err(CliError::retryable(
-                "snapshot_mount_helper.status_unavailable",
-                "snapshot mount helper remained absent after recovery bootstrap",
-            ));
-        }
+        busy = check_if_busy("uninstall the snapshot mount helper")?;
     }
+    ensure_uninstall_safe(busy)?;
     let service = system_service_target();
     let _ = launchctl(&["bootout", &service]);
     if Path::new(MOUNT_HELPER_PLIST_PATH).exists() {
@@ -1606,6 +1617,26 @@ mod tests {
         status.pending_cleanup = 1;
         let error = ensure_snapshot_access_idle(&status).unwrap_err();
         assert_eq!(error.code, "snapshot_mount_helper.access_cleanup_pending");
+    }
+
+    #[test]
+    fn uninstall_rejects_any_non_clear_mount_status() {
+        assert!(ensure_uninstall_safe(BusyCheck::Clear).is_ok());
+        for check in [
+            BusyCheck::LegacyUpgrade,
+            BusyCheck::PendingCleanupUpgrade,
+        ] {
+            assert_eq!(
+                ensure_uninstall_safe(check).unwrap_err().code,
+                "snapshot_mount_helper.busy"
+            );
+        }
+        assert_eq!(
+            ensure_uninstall_safe(BusyCheck::RecoveryRequired)
+                .unwrap_err()
+                .code,
+            "snapshot_mount_helper.status_unavailable"
+        );
     }
 
     #[test]
