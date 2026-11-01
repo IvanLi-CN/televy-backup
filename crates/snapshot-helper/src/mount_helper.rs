@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -42,6 +43,8 @@ const MOUNT_ROOT_BASE: &str = "/private/var/tmp/televybackup-snapshot-mounts";
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const MUTATING_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const MAX_COMMAND_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const RECOVERY_AGE_SECONDS: &str = "-300 seconds";
 const AUTHORIZE_SOURCE_PATH_ARG: &str = "--authorize-source-path";
 
@@ -2943,10 +2946,23 @@ fn run_command_output<const N: usize, S: AsRef<std::ffi::OsStr>>(
     let timeout = matches!(stage, "snapshot_inventory" | "volume_identity")
         .then_some(STATUS_COMMAND_TIMEOUT)
         .unwrap_or(MUTATING_REQUEST_TIMEOUT);
-    let mut child = Command::new(program)
+    let mut command_builder = Command::new(program);
+    command_builder
         .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Keep descendants in a private process group so a timeout cannot leave a child holding
+    // either output pipe open after the direct command is killed.
+    unsafe {
+        command_builder.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut child = command_builder
         .spawn()
         .map_err(|error| MountHelperError::Command {
             stage,
@@ -2955,32 +2971,61 @@ fn run_command_output<const N: usize, S: AsRef<std::ffi::OsStr>>(
             channel: "errno",
             summary: format!("errno={}", error.raw_os_error().unwrap_or(0)),
         })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        terminate_command_group(&mut child);
         MountHelperError::Protocol("snapshot command stdout was unavailable".into())
     })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        terminate_command_group(&mut child);
         MountHelperError::Protocol("snapshot command stderr was unavailable".into())
     })?;
-    let stdout_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout.take(8 * 1024 * 1024).read_to_end(&mut bytes);
-        (result, bytes)
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stderr.take(8 * 1024 * 1024).read_to_end(&mut bytes);
-        (result, bytes)
-    });
+    set_nonblocking(stdout.as_raw_fd()).map_err(|error| {
+        terminate_command_group(&mut child);
+        MountHelperError::Io(error)
+    })?;
+    set_nonblocking(stderr.as_raw_fd()).map_err(|error| {
+        terminate_command_group(&mut child);
+        MountHelperError::Io(error)
+    })?;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut stdout_closed = false;
+    let mut stderr_closed = false;
+    let mut status = None;
     let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+    loop {
+        if !stdout_closed {
+            stdout_closed = match drain_command_pipe(&mut stdout, &mut stdout_bytes) {
+                Ok(closed) => closed,
+                Err(error) => {
+                    terminate_command_group(&mut child);
+                    return Err(MountHelperError::Io(error));
+                }
+            };
+        }
+        if !stderr_closed {
+            stderr_closed = match drain_command_pipe(&mut stderr, &mut stderr_bytes) {
+                Ok(closed) => closed,
+                Err(error) => {
+                    terminate_command_group(&mut child);
+                    return Err(MountHelperError::Io(error));
+                }
+            };
+        }
+        if status.is_none() {
+            status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    terminate_command_group(&mut child);
+                    return Err(MountHelperError::Io(error));
+                }
+            };
+        }
+        if status.is_some() && stdout_closed && stderr_closed {
+            break;
         }
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
+            terminate_command_group(&mut child);
             return Err(MountHelperError::Command {
                 stage,
                 command,
@@ -2989,23 +3034,59 @@ fn run_command_output<const N: usize, S: AsRef<std::ffi::OsStr>>(
                 summary: format!("timeout={}ms", timeout.as_millis()),
             });
         }
-        thread::sleep(Duration::from_millis(25));
-    };
-    let (_, stdout) = stdout_reader
-        .join()
-        .map_err(|_| MountHelperError::Protocol("snapshot command stdout reader failed".into()))?;
-    let (_, stderr) = stderr_reader
-        .join()
-        .map_err(|_| MountHelperError::Protocol("snapshot command stderr reader failed".into()))?;
+        thread::sleep(COMMAND_POLL_INTERVAL);
+    }
+    let status = status.expect("command status is set before output pipes close");
     let output = std::process::Output {
         status,
-        stdout,
-        stderr,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
     };
     if output.status.success() {
         return Ok(output.stdout);
     }
     Err(command_failure(stage, command, &output))
+}
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn drain_command_pipe<R: Read>(reader: &mut R, output: &mut Vec<u8>) -> io::Result<bool> {
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(true),
+            Ok(count) => {
+                let remaining = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(output.len());
+                if remaining > 0 {
+                    output.extend_from_slice(&buffer[..count.min(remaining)]);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn terminate_command_group(child: &mut Child) {
+    let pid = child.id() as libc::pid_t;
+    if pid > 0 {
+        // The child was placed in a private process group in pre_exec. Kill the group first so
+        // descendants cannot keep the nonblocking pipes or root-helper mutation lock alive.
+        unsafe {
+            let _ = libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn command_failure(

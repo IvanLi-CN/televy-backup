@@ -152,6 +152,9 @@ assert_contains "status concurrency gate" "$mount_helper_text" 'status_lock.lock
 assert_contains "explicit inventory reconciliation flag" "$mount_helper_text" 'reconcile_inventory: true'
 assert_contains "reconciliation transaction" "$mount_helper_text" 'let mut transaction = journal.begin().await?'
 assert_contains "status command timeout" "$mount_helper_text" 'STATUS_COMMAND_TIMEOUT'
+assert_contains "command timeout process group" "$mount_helper_text" 'libc::setpgid(0, 0)'
+assert_contains "command timeout kills process group" "$mount_helper_text" 'libc::kill(-pid, libc::SIGKILL)'
+assert_contains "command timeout drains pipes without blocking joins" "$mount_helper_text" 'drain_command_pipe'
 assert_contains "status inventory cache" "$mount_helper_text" 'inventory_cache'
 assert_contains "creation baseline is exact" "$mount_helper_text" 'if !manifests_equal(&current_manifest, &reservation_manifest)'
 assert_contains "deletion requires original baseline" "$mount_helper_text" "A post-deletion inventory change is unowned"
