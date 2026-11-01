@@ -2995,11 +2995,7 @@ fn run_command_output<const N: usize, S: AsRef<std::ffi::OsStr>>(
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if !stdout_closed {
-            stdout_closed = match drain_command_pipe(
-                &mut stdout,
-                &mut stdout_bytes,
-                deadline,
-            ) {
+            stdout_closed = match drain_command_pipe(&mut stdout, &mut stdout_bytes, deadline) {
                 Ok(closed) => closed,
                 Err(error) => {
                     terminate_command_group(&mut child);
@@ -3008,11 +3004,7 @@ fn run_command_output<const N: usize, S: AsRef<std::ffi::OsStr>>(
             };
         }
         if !stderr_closed {
-            stderr_closed = match drain_command_pipe(
-                &mut stderr,
-                &mut stderr_bytes,
-                deadline,
-            ) {
+            stderr_closed = match drain_command_pipe(&mut stderr, &mut stderr_bytes, deadline) {
                 Ok(closed) => closed,
                 Err(error) => {
                     terminate_command_group(&mut child);
